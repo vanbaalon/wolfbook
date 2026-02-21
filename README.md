@@ -1,5 +1,9 @@
 # Wolfbook — Wolfram Language Notebook for VS Code
 
+<p align="center">
+  <img src="images/wolfbook_logo.png" alt="Wolfbook logo" width="320"/>
+</p>
+
 **Wolfbook** is a VS Code extension that turns `.evsnb` / `.vsnb` files into interactive Wolfram Language notebooks, backed by a live kernel connected via native [WSTP](https://github.com/vanbaalon/mathematica-wstp-node).
 
 > Author: Nikolay Gromov — [nikolay.gromov@kcl.ac.uk](mailto:nikolay.gromov@kcl.ac.uk)  
