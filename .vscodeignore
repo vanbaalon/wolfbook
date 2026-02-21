@@ -1,0 +1,45 @@
+# Dev tools & build artifacts
+node_modules/**/.bin/**
+node_modules/**/test/**
+node_modules/**/*.md
+node_modules/**/*.ts
+node_modules/**/tsconfig.json
+node_modules/**/webpack.config.js
+
+# Extension source / dev files
+.vscode/**
+.vscode-test/**
+EditorVariation/**
+Docs/**
+
+# Build scripts (not needed at runtime)
+generate_unicode_allowlist.js
+parse_wolfram_aliases.js
+reorder_notebook.py
+
+# Dev docs
+AUTOCOMPLETE_IMPLEMENTATION.md
+CHANGELOG.md
+DEVELOPMENT_GUIDE.md
+HowToBuild.md
+QUICK_REFERENCE.md
+
+# WSTP build intermediaries — keep only the .node binary
+wstp/binding.gyp
+wstp/src/**
+wstp/build/Release/obj.target/**
+wstp/build/Debug/**
+wstp/build/Release/*.a
+wstp/build/Release/*.o
+wstp/build/**/*.o
+wstp/build/**/*.a
+wstp/build/**/*.mk
+wstp/build/Release/.deps/**
+wstp/node_modules/**
+
+# Keep: wstp/build/Release/wstp.node  (the native addon)
+# Keep: wstp/index.d.ts
+
+# Misc
+*.vsix
+config_defaults.json

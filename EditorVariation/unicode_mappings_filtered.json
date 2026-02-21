@@ -1,0 +1,6441 @@
+[
+  {
+    "hex": "0x0020",
+    "codepoint": 32,
+    "unicode": " ",
+    "mathematica": "\\[RawSpace]",
+    "name": "RawSpace",
+    "aliases": []
+  },
+  {
+    "hex": "0x00AB",
+    "codepoint": 171,
+    "unicode": "«",
+    "mathematica": "\\[LeftGuillemet]",
+    "name": "LeftGuillemet",
+    "aliases": [
+      "$g<<$",
+      "$&laquo;$"
+    ]
+  },
+  {
+    "hex": "0x00AD",
+    "codepoint": 173,
+    "unicode": "­",
+    "mathematica": "\\[DiscretionaryHyphen]",
+    "name": "DiscretionaryHyphen",
+    "aliases": [
+      "$dhy$",
+      "$&shy;$",
+      "$\\-$"
+    ]
+  },
+  {
+    "hex": "0x00BB",
+    "codepoint": 187,
+    "unicode": "»",
+    "mathematica": "\\[RightGuillemet]",
+    "name": "RightGuillemet",
+    "aliases": [
+      "$g>>$",
+      "$&raquo;$"
+    ]
+  },
+  {
+    "hex": "0x00C0",
+    "codepoint": 192,
+    "unicode": "À",
+    "mathematica": "\\[CapitalAGrave]",
+    "name": "CapitalAGrave",
+    "aliases": [
+      "$A`$",
+      "$&Agrave;$"
+    ]
+  },
+  {
+    "hex": "0x00C1",
+    "codepoint": 193,
+    "unicode": "Á",
+    "mathematica": "\\[CapitalAAcute]",
+    "name": "CapitalAAcute",
+    "aliases": [
+      "$A'$",
+      "$&Aacute;$"
+    ]
+  },
+  {
+    "hex": "0x00C2",
+    "codepoint": 194,
+    "unicode": "Â",
+    "mathematica": "\\[CapitalAHat]",
+    "name": "CapitalAHat",
+    "aliases": [
+      "$A^$",
+      "$&Acirc;$"
+    ]
+  },
+  {
+    "hex": "0x00C3",
+    "codepoint": 195,
+    "unicode": "Ã",
+    "mathematica": "\\[CapitalATilde]",
+    "name": "CapitalATilde",
+    "aliases": [
+      "$A~$",
+      "$&Atilde;$"
+    ]
+  },
+  {
+    "hex": "0x00C4",
+    "codepoint": 196,
+    "unicode": "Ä",
+    "mathematica": "\\[CapitalADoubleDot]",
+    "name": "CapitalADoubleDot",
+    "aliases": [
+      "$A\"$",
+      "$&Auml;$"
+    ]
+  },
+  {
+    "hex": "0x00C5",
+    "codepoint": 197,
+    "unicode": "Å",
+    "mathematica": "\\[CapitalARing]",
+    "name": "CapitalARing",
+    "aliases": [
+      "$Ao$",
+      "$&Aring;$"
+    ]
+  },
+  {
+    "hex": "0x00C6",
+    "codepoint": 198,
+    "unicode": "Æ",
+    "mathematica": "\\[CapitalAE]",
+    "name": "CapitalAE",
+    "aliases": [
+      "$AE$",
+      "$&AElig;$",
+      "$\\AE$"
+    ]
+  },
+  {
+    "hex": "0x00C7",
+    "codepoint": 199,
+    "unicode": "Ç",
+    "mathematica": "\\[CapitalCCedilla]",
+    "name": "CapitalCCedilla",
+    "aliases": [
+      "$C,$",
+      "$&Ccedil;$"
+    ]
+  },
+  {
+    "hex": "0x00C8",
+    "codepoint": 200,
+    "unicode": "È",
+    "mathematica": "\\[CapitalEGrave]",
+    "name": "CapitalEGrave",
+    "aliases": [
+      "$E`$",
+      "$&Egrave;$"
+    ]
+  },
+  {
+    "hex": "0x00C9",
+    "codepoint": 201,
+    "unicode": "É",
+    "mathematica": "\\[CapitalEAcute]",
+    "name": "CapitalEAcute",
+    "aliases": [
+      "$E'$",
+      "$&Eacute;$"
+    ]
+  },
+  {
+    "hex": "0x00CA",
+    "codepoint": 202,
+    "unicode": "Ê",
+    "mathematica": "\\[CapitalEHat]",
+    "name": "CapitalEHat",
+    "aliases": [
+      "$E^$",
+      "$&Ecirc;$"
+    ]
+  },
+  {
+    "hex": "0x00CB",
+    "codepoint": 203,
+    "unicode": "Ë",
+    "mathematica": "\\[CapitalEDoubleDot]",
+    "name": "CapitalEDoubleDot",
+    "aliases": [
+      "$E\"$",
+      "$&Euml;$"
+    ]
+  },
+  {
+    "hex": "0x00CC",
+    "codepoint": 204,
+    "unicode": "Ì",
+    "mathematica": "\\[CapitalIGrave]",
+    "name": "CapitalIGrave",
+    "aliases": [
+      "$I`$",
+      "$&Igrave;$"
+    ]
+  },
+  {
+    "hex": "0x00CD",
+    "codepoint": 205,
+    "unicode": "Í",
+    "mathematica": "\\[CapitalIAcute]",
+    "name": "CapitalIAcute",
+    "aliases": [
+      "$I'$",
+      "$&Iacute;$"
+    ]
+  },
+  {
+    "hex": "0x00CE",
+    "codepoint": 206,
+    "unicode": "Î",
+    "mathematica": "\\[CapitalIHat]",
+    "name": "CapitalIHat",
+    "aliases": [
+      "$I^$",
+      "$&Icirc;$"
+    ]
+  },
+  {
+    "hex": "0x00CF",
+    "codepoint": 207,
+    "unicode": "Ï",
+    "mathematica": "\\[CapitalIDoubleDot]",
+    "name": "CapitalIDoubleDot",
+    "aliases": [
+      "$I\"$",
+      "$&Iuml;$"
+    ]
+  },
+  {
+    "hex": "0x00D0",
+    "codepoint": 208,
+    "unicode": "Ð",
+    "mathematica": "\\[CapitalEth]",
+    "name": "CapitalEth",
+    "aliases": [
+      "$D-$",
+      "$&ETH;$"
+    ]
+  },
+  {
+    "hex": "0x00D1",
+    "codepoint": 209,
+    "unicode": "Ñ",
+    "mathematica": "\\[CapitalNTilde]",
+    "name": "CapitalNTilde",
+    "aliases": [
+      "$N~$",
+      "$&Ntilde;$"
+    ]
+  },
+  {
+    "hex": "0x00D2",
+    "codepoint": 210,
+    "unicode": "Ò",
+    "mathematica": "\\[CapitalOGrave]",
+    "name": "CapitalOGrave",
+    "aliases": [
+      "$O`$",
+      "$&Ograve;$"
+    ]
+  },
+  {
+    "hex": "0x00D3",
+    "codepoint": 211,
+    "unicode": "Ó",
+    "mathematica": "\\[CapitalOAcute]",
+    "name": "CapitalOAcute",
+    "aliases": [
+      "$O'$",
+      "$&Oacute;$"
+    ]
+  },
+  {
+    "hex": "0x0152",
+    "codepoint": 338,
+    "unicode": "Œ",
+    "mathematica": "\\[CapitalOE]",
+    "name": "CapitalOE",
+    "aliases": [
+      "$OE$",
+      "$&OElig;$",
+      "$\\OE$"
+    ]
+  },
+  {
+    "hex": "0x00D4",
+    "codepoint": 212,
+    "unicode": "Ô",
+    "mathematica": "\\[CapitalOHat]",
+    "name": "CapitalOHat",
+    "aliases": [
+      "$O^$",
+      "$&Ocirc;$"
+    ]
+  },
+  {
+    "hex": "0x00D5",
+    "codepoint": 213,
+    "unicode": "Õ",
+    "mathematica": "\\[CapitalOTilde]",
+    "name": "CapitalOTilde",
+    "aliases": [
+      "$O~$",
+      "$&Otilde;$"
+    ]
+  },
+  {
+    "hex": "0x00D6",
+    "codepoint": 214,
+    "unicode": "Ö",
+    "mathematica": "\\[CapitalODoubleDot]",
+    "name": "CapitalODoubleDot",
+    "aliases": [
+      "$O\"$",
+      "$&Ouml;$"
+    ]
+  },
+  {
+    "hex": "0x00D8",
+    "codepoint": 216,
+    "unicode": "Ø",
+    "mathematica": "\\[CapitalOSlash]",
+    "name": "CapitalOSlash",
+    "aliases": [
+      "$O/$",
+      "$&Oslash;$",
+      "$\\O$"
+    ]
+  },
+  {
+    "hex": "0x00D9",
+    "codepoint": 217,
+    "unicode": "Ù",
+    "mathematica": "\\[CapitalUGrave]",
+    "name": "CapitalUGrave",
+    "aliases": [
+      "$U`$",
+      "$&Ugrave;$"
+    ]
+  },
+  {
+    "hex": "0x00DA",
+    "codepoint": 218,
+    "unicode": "Ú",
+    "mathematica": "\\[CapitalUAcute]",
+    "name": "CapitalUAcute",
+    "aliases": [
+      "$U'$",
+      "$&Uacute;$"
+    ]
+  },
+  {
+    "hex": "0x00DB",
+    "codepoint": 219,
+    "unicode": "Û",
+    "mathematica": "\\[CapitalUHat]",
+    "name": "CapitalUHat",
+    "aliases": [
+      "$U^$",
+      "$&Ucirc;$"
+    ]
+  },
+  {
+    "hex": "0x00DC",
+    "codepoint": 220,
+    "unicode": "Ü",
+    "mathematica": "\\[CapitalUDoubleDot]",
+    "name": "CapitalUDoubleDot",
+    "aliases": [
+      "$U\"$",
+      "$&Uuml;$"
+    ]
+  },
+  {
+    "hex": "0x00DD",
+    "codepoint": 221,
+    "unicode": "Ý",
+    "mathematica": "\\[CapitalYAcute]",
+    "name": "CapitalYAcute",
+    "aliases": [
+      "$Y'$",
+      "$&Yacute;$"
+    ]
+  },
+  {
+    "hex": "0x00DE",
+    "codepoint": 222,
+    "unicode": "Þ",
+    "mathematica": "\\[CapitalThorn]",
+    "name": "CapitalThorn",
+    "aliases": [
+      "$Thn$",
+      "$&THORN;$"
+    ]
+  },
+  {
+    "hex": "0x00DF",
+    "codepoint": 223,
+    "unicode": "ß",
+    "mathematica": "\\[SZ]",
+    "name": "SZ",
+    "aliases": [
+      "$sz$",
+      "$ss$",
+      "$&szlig;$",
+      "$\\ss$"
+    ]
+  },
+  {
+    "hex": "0x00E0",
+    "codepoint": 224,
+    "unicode": "à",
+    "mathematica": "\\[AGrave]",
+    "name": "AGrave",
+    "aliases": [
+      "$a`$",
+      "$&agrave;$"
+    ]
+  },
+  {
+    "hex": "0x00E1",
+    "codepoint": 225,
+    "unicode": "á",
+    "mathematica": "\\[AAcute]",
+    "name": "AAcute",
+    "aliases": [
+      "$a'$",
+      "$&aacute;$"
+    ]
+  },
+  {
+    "hex": "0x00E2",
+    "codepoint": 226,
+    "unicode": "â",
+    "mathematica": "\\[AHat]",
+    "name": "AHat",
+    "aliases": [
+      "$a^$",
+      "$&acirc;$"
+    ]
+  },
+  {
+    "hex": "0x00E3",
+    "codepoint": 227,
+    "unicode": "ã",
+    "mathematica": "\\[ATilde]",
+    "name": "ATilde",
+    "aliases": [
+      "$a~$",
+      "$&atilde;$"
+    ]
+  },
+  {
+    "hex": "0x00E4",
+    "codepoint": 228,
+    "unicode": "ä",
+    "mathematica": "\\[ADoubleDot]",
+    "name": "ADoubleDot",
+    "aliases": [
+      "$a\"$",
+      "$&auml;$"
+    ]
+  },
+  {
+    "hex": "0x00E5",
+    "codepoint": 229,
+    "unicode": "å",
+    "mathematica": "\\[ARing]",
+    "name": "ARing",
+    "aliases": [
+      "$ao$",
+      "$&aring;$"
+    ]
+  },
+  {
+    "hex": "0x00E6",
+    "codepoint": 230,
+    "unicode": "æ",
+    "mathematica": "\\[AE]",
+    "name": "AE",
+    "aliases": [
+      "$ae$",
+      "$&aelig;$",
+      "$\\ae$"
+    ]
+  },
+  {
+    "hex": "0x00E7",
+    "codepoint": 231,
+    "unicode": "ç",
+    "mathematica": "\\[CCedilla]",
+    "name": "CCedilla",
+    "aliases": [
+      "$c,$",
+      "$&ccedil;$"
+    ]
+  },
+  {
+    "hex": "0x00E8",
+    "codepoint": 232,
+    "unicode": "è",
+    "mathematica": "\\[EGrave]",
+    "name": "EGrave",
+    "aliases": [
+      "$e`$",
+      "$&egrave;$"
+    ]
+  },
+  {
+    "hex": "0x00E9",
+    "codepoint": 233,
+    "unicode": "é",
+    "mathematica": "\\[EAcute]",
+    "name": "EAcute",
+    "aliases": [
+      "$e'$",
+      "$&eacute;$"
+    ]
+  },
+  {
+    "hex": "0x00EA",
+    "codepoint": 234,
+    "unicode": "ê",
+    "mathematica": "\\[EHat]",
+    "name": "EHat",
+    "aliases": [
+      "$e^$",
+      "$&ecirc;$"
+    ]
+  },
+  {
+    "hex": "0x00EB",
+    "codepoint": 235,
+    "unicode": "ë",
+    "mathematica": "\\[EDoubleDot]",
+    "name": "EDoubleDot",
+    "aliases": [
+      "$e\"$",
+      "$&euml;$"
+    ]
+  },
+  {
+    "hex": "0x00EC",
+    "codepoint": 236,
+    "unicode": "ì",
+    "mathematica": "\\[IGrave]",
+    "name": "IGrave",
+    "aliases": [
+      "$i`$",
+      "$&igrave;$"
+    ]
+  },
+  {
+    "hex": "0x00ED",
+    "codepoint": 237,
+    "unicode": "í",
+    "mathematica": "\\[IAcute]",
+    "name": "IAcute",
+    "aliases": [
+      "$i'$",
+      "$&iacute;$"
+    ]
+  },
+  {
+    "hex": "0x00EE",
+    "codepoint": 238,
+    "unicode": "î",
+    "mathematica": "\\[IHat]",
+    "name": "IHat",
+    "aliases": [
+      "$i^$",
+      "$&icirc;$"
+    ]
+  },
+  {
+    "hex": "0x00EF",
+    "codepoint": 239,
+    "unicode": "ï",
+    "mathematica": "\\[IDoubleDot]",
+    "name": "IDoubleDot",
+    "aliases": [
+      "$i\"$",
+      "$&iuml;$"
+    ]
+  },
+  {
+    "hex": "0x00F0",
+    "codepoint": 240,
+    "unicode": "ð",
+    "mathematica": "\\[Eth]",
+    "name": "Eth",
+    "aliases": [
+      "$d-$",
+      "$&eth;$",
+      "$\\eth$"
+    ]
+  },
+  {
+    "hex": "0x00F1",
+    "codepoint": 241,
+    "unicode": "ñ",
+    "mathematica": "\\[NTilde]",
+    "name": "NTilde",
+    "aliases": [
+      "$n~$",
+      "$&ntilde;$"
+    ]
+  },
+  {
+    "hex": "0x00F2",
+    "codepoint": 242,
+    "unicode": "ò",
+    "mathematica": "\\[OGrave]",
+    "name": "OGrave",
+    "aliases": [
+      "$o`$",
+      "$&ograve;$"
+    ]
+  },
+  {
+    "hex": "0x00F3",
+    "codepoint": 243,
+    "unicode": "ó",
+    "mathematica": "\\[OAcute]",
+    "name": "OAcute",
+    "aliases": [
+      "$o'$",
+      "$&oacute;$"
+    ]
+  },
+  {
+    "hex": "0x0153",
+    "codepoint": 339,
+    "unicode": "œ",
+    "mathematica": "\\[OE]",
+    "name": "OE",
+    "aliases": [
+      "$oe$",
+      "$&oelig;$",
+      "$\\oe$"
+    ]
+  },
+  {
+    "hex": "0x00F4",
+    "codepoint": 244,
+    "unicode": "ô",
+    "mathematica": "\\[OHat]",
+    "name": "OHat",
+    "aliases": [
+      "$o^$",
+      "$&ocirc;$"
+    ]
+  },
+  {
+    "hex": "0x00F5",
+    "codepoint": 245,
+    "unicode": "õ",
+    "mathematica": "\\[OTilde]",
+    "name": "OTilde",
+    "aliases": [
+      "$o~$",
+      "$&otilde;$"
+    ]
+  },
+  {
+    "hex": "0x00F6",
+    "codepoint": 246,
+    "unicode": "ö",
+    "mathematica": "\\[ODoubleDot]",
+    "name": "ODoubleDot",
+    "aliases": [
+      "$o\"$",
+      "$&ouml;$"
+    ]
+  },
+  {
+    "hex": "0x00F8",
+    "codepoint": 248,
+    "unicode": "ø",
+    "mathematica": "\\[OSlash]",
+    "name": "OSlash",
+    "aliases": [
+      "$o/$",
+      "$&oslash;$",
+      "$\\o$"
+    ]
+  },
+  {
+    "hex": "0x00F9",
+    "codepoint": 249,
+    "unicode": "ù",
+    "mathematica": "\\[UGrave]",
+    "name": "UGrave",
+    "aliases": [
+      "$u`$",
+      "$&ugrave;$"
+    ]
+  },
+  {
+    "hex": "0x00FA",
+    "codepoint": 250,
+    "unicode": "ú",
+    "mathematica": "\\[UAcute]",
+    "name": "UAcute",
+    "aliases": [
+      "$u'$",
+      "$&uacute;$"
+    ]
+  },
+  {
+    "hex": "0x00FB",
+    "codepoint": 251,
+    "unicode": "û",
+    "mathematica": "\\[UHat]",
+    "name": "UHat",
+    "aliases": [
+      "$u^$",
+      "$&ucirc;$"
+    ]
+  },
+  {
+    "hex": "0x00FC",
+    "codepoint": 252,
+    "unicode": "ü",
+    "mathematica": "\\[UDoubleDot]",
+    "name": "UDoubleDot",
+    "aliases": [
+      "$u\"$",
+      "$&uuml;$"
+    ]
+  },
+  {
+    "hex": "0x00FD",
+    "codepoint": 253,
+    "unicode": "ý",
+    "mathematica": "\\[YAcute]",
+    "name": "YAcute",
+    "aliases": [
+      "$y'$",
+      "$&yacute;$"
+    ]
+  },
+  {
+    "hex": "0x00FE",
+    "codepoint": 254,
+    "unicode": "þ",
+    "mathematica": "\\[Thorn]",
+    "name": "Thorn",
+    "aliases": [
+      "$thn$",
+      "$&thorn;$"
+    ]
+  },
+  {
+    "hex": "0x00FF",
+    "codepoint": 255,
+    "unicode": "ÿ",
+    "mathematica": "\\[YDoubleDot]",
+    "name": "YDoubleDot",
+    "aliases": [
+      "$y\"$",
+      "$&yuml;$"
+    ]
+  },
+  {
+    "hex": "0x0101",
+    "codepoint": 257,
+    "unicode": "ā",
+    "mathematica": "\\[ABar]",
+    "name": "ABar",
+    "aliases": [
+      "$a-$",
+      "$&amacr;$"
+    ]
+  },
+  {
+    "hex": "0x0100",
+    "codepoint": 256,
+    "unicode": "Ā",
+    "mathematica": "\\[CapitalABar]",
+    "name": "CapitalABar",
+    "aliases": [
+      "$A-$",
+      "$&Amacr;$"
+    ]
+  },
+  {
+    "hex": "0x0103",
+    "codepoint": 259,
+    "unicode": "ă",
+    "mathematica": "\\[ACup]",
+    "name": "ACup",
+    "aliases": [
+      "$au$",
+      "$&abreve;$"
+    ]
+  },
+  {
+    "hex": "0x0102",
+    "codepoint": 258,
+    "unicode": "Ă",
+    "mathematica": "\\[CapitalACup]",
+    "name": "CapitalACup",
+    "aliases": [
+      "$Au$",
+      "$&Abreve;$"
+    ]
+  },
+  {
+    "hex": "0x0107",
+    "codepoint": 263,
+    "unicode": "ć",
+    "mathematica": "\\[CAcute]",
+    "name": "CAcute",
+    "aliases": [
+      "$c'$",
+      "$&cacute;$"
+    ]
+  },
+  {
+    "hex": "0x0106",
+    "codepoint": 262,
+    "unicode": "Ć",
+    "mathematica": "\\[CapitalCAcute]",
+    "name": "CapitalCAcute",
+    "aliases": [
+      "$C'$",
+      "$&Cacute;$"
+    ]
+  },
+  {
+    "hex": "0x010D",
+    "codepoint": 269,
+    "unicode": "č",
+    "mathematica": "\\[CHacek]",
+    "name": "CHacek",
+    "aliases": [
+      "$cv$",
+      "$&ccaron;$"
+    ]
+  },
+  {
+    "hex": "0x010C",
+    "codepoint": 268,
+    "unicode": "Č",
+    "mathematica": "\\[CapitalCHacek]",
+    "name": "CapitalCHacek",
+    "aliases": [
+      "$Cv$",
+      "$&Ccaron;$"
+    ]
+  },
+  {
+    "hex": "0x010F",
+    "codepoint": 271,
+    "unicode": "ď",
+    "mathematica": "\\[DHacek]",
+    "name": "DHacek",
+    "aliases": [
+      "$dv$",
+      "$&dcaron;$"
+    ]
+  },
+  {
+    "hex": "0x010E",
+    "codepoint": 270,
+    "unicode": "Ď",
+    "mathematica": "\\[CapitalDHacek]",
+    "name": "CapitalDHacek",
+    "aliases": [
+      "$Dv$",
+      "$&Dcaron;$"
+    ]
+  },
+  {
+    "hex": "0x011B",
+    "codepoint": 283,
+    "unicode": "ě",
+    "mathematica": "\\[EHacek]",
+    "name": "EHacek",
+    "aliases": [
+      "$ev$",
+      "$&ecaron;$"
+    ]
+  },
+  {
+    "hex": "0x011A",
+    "codepoint": 282,
+    "unicode": "Ě",
+    "mathematica": "\\[CapitalEHacek]",
+    "name": "CapitalEHacek",
+    "aliases": [
+      "$Ev$",
+      "$&Ecaron;$"
+    ]
+  },
+  {
+    "hex": "0x0148",
+    "codepoint": 328,
+    "unicode": "ň",
+    "mathematica": "\\[NHacek]",
+    "name": "NHacek",
+    "aliases": [
+      "$nv$",
+      "$&ncaron;$"
+    ]
+  },
+  {
+    "hex": "0x0147",
+    "codepoint": 327,
+    "unicode": "Ň",
+    "mathematica": "\\[CapitalNHacek]",
+    "name": "CapitalNHacek",
+    "aliases": [
+      "$Nv$",
+      "$&Ncaron;$"
+    ]
+  },
+  {
+    "hex": "0x0159",
+    "codepoint": 345,
+    "unicode": "ř",
+    "mathematica": "\\[RHacek]",
+    "name": "RHacek",
+    "aliases": [
+      "$rv$",
+      "$&rcaron;$"
+    ]
+  },
+  {
+    "hex": "0x0158",
+    "codepoint": 344,
+    "unicode": "Ř",
+    "mathematica": "\\[CapitalRHacek]",
+    "name": "CapitalRHacek",
+    "aliases": [
+      "$Rv$",
+      "$&Rcaron;$"
+    ]
+  },
+  {
+    "hex": "0x0165",
+    "codepoint": 357,
+    "unicode": "ť",
+    "mathematica": "\\[THacek]",
+    "name": "THacek",
+    "aliases": [
+      "$tv$",
+      "$&tcaron;$"
+    ]
+  },
+  {
+    "hex": "0x0164",
+    "codepoint": 356,
+    "unicode": "Ť",
+    "mathematica": "\\[CapitalTHacek]",
+    "name": "CapitalTHacek",
+    "aliases": [
+      "$Tv$",
+      "$&Tcaron;$"
+    ]
+  },
+  {
+    "hex": "0x016F",
+    "codepoint": 367,
+    "unicode": "ů",
+    "mathematica": "\\[URing]",
+    "name": "URing",
+    "aliases": [
+      "$uo$",
+      "$&uring;$"
+    ]
+  },
+  {
+    "hex": "0x016E",
+    "codepoint": 366,
+    "unicode": "Ů",
+    "mathematica": "\\[CapitalURing]",
+    "name": "CapitalURing",
+    "aliases": [
+      "$Uo$",
+      "$&Uring;$"
+    ]
+  },
+  {
+    "hex": "0x017E",
+    "codepoint": 382,
+    "unicode": "ž",
+    "mathematica": "\\[ZHacek]",
+    "name": "ZHacek",
+    "aliases": [
+      "$zv$",
+      "$&zcaron;$"
+    ]
+  },
+  {
+    "hex": "0x017D",
+    "codepoint": 381,
+    "unicode": "Ž",
+    "mathematica": "\\[CapitalZHacek]",
+    "name": "CapitalZHacek",
+    "aliases": [
+      "$Zv$",
+      "$&Zcaron;$"
+    ]
+  },
+  {
+    "hex": "0x0113",
+    "codepoint": 275,
+    "unicode": "ē",
+    "mathematica": "\\[EBar]",
+    "name": "EBar",
+    "aliases": [
+      "$e-$",
+      "$&emacr;$"
+    ]
+  },
+  {
+    "hex": "0x0112",
+    "codepoint": 274,
+    "unicode": "Ē",
+    "mathematica": "\\[CapitalEBar]",
+    "name": "CapitalEBar",
+    "aliases": [
+      "$E-$",
+      "$&Emacr;$"
+    ]
+  },
+  {
+    "hex": "0x0115",
+    "codepoint": 277,
+    "unicode": "ĕ",
+    "mathematica": "\\[ECup]",
+    "name": "ECup",
+    "aliases": [
+      "$eu$"
+    ]
+  },
+  {
+    "hex": "0x0114",
+    "codepoint": 276,
+    "unicode": "Ĕ",
+    "mathematica": "\\[CapitalECup]",
+    "name": "CapitalECup",
+    "aliases": [
+      "$Eu$"
+    ]
+  },
+  {
+    "hex": "0x012D",
+    "codepoint": 301,
+    "unicode": "ĭ",
+    "mathematica": "\\[ICup]",
+    "name": "ICup",
+    "aliases": [
+      "$iu$"
+    ]
+  },
+  {
+    "hex": "0x012C",
+    "codepoint": 300,
+    "unicode": "Ĭ",
+    "mathematica": "\\[CapitalICup]",
+    "name": "CapitalICup",
+    "aliases": [
+      "$Iu$"
+    ]
+  },
+  {
+    "hex": "0x0142",
+    "codepoint": 322,
+    "unicode": "ł",
+    "mathematica": "\\[LSlash]",
+    "name": "LSlash",
+    "aliases": [
+      "$l/$",
+      "$&lstrok;$",
+      "$\\l$"
+    ]
+  },
+  {
+    "hex": "0x0141",
+    "codepoint": 321,
+    "unicode": "Ł",
+    "mathematica": "\\[CapitalLSlash]",
+    "name": "CapitalLSlash",
+    "aliases": [
+      "$L/$",
+      "$&Lstrok;$",
+      "$\\L$"
+    ]
+  },
+  {
+    "hex": "0x0151",
+    "codepoint": 337,
+    "unicode": "ő",
+    "mathematica": "\\[ODoubleAcute]",
+    "name": "ODoubleAcute",
+    "aliases": [
+      "$o''$",
+      "$&odblac;$"
+    ]
+  },
+  {
+    "hex": "0x0150",
+    "codepoint": 336,
+    "unicode": "Ő",
+    "mathematica": "\\[CapitalODoubleAcute]",
+    "name": "CapitalODoubleAcute",
+    "aliases": [
+      "$O''$",
+      "$&Odblac;$"
+    ]
+  },
+  {
+    "hex": "0x0161",
+    "codepoint": 353,
+    "unicode": "š",
+    "mathematica": "\\[SHacek]",
+    "name": "SHacek",
+    "aliases": [
+      "$sv$",
+      "$&scaron;$"
+    ]
+  },
+  {
+    "hex": "0x0160",
+    "codepoint": 352,
+    "unicode": "Š",
+    "mathematica": "\\[CapitalSHacek]",
+    "name": "CapitalSHacek",
+    "aliases": [
+      "$Sv$",
+      "$&Scaron;$"
+    ]
+  },
+  {
+    "hex": "0x0171",
+    "codepoint": 369,
+    "unicode": "ű",
+    "mathematica": "\\[UDoubleAcute]",
+    "name": "UDoubleAcute",
+    "aliases": [
+      "$u''$",
+      "$&udblac;$"
+    ]
+  },
+  {
+    "hex": "0x0170",
+    "codepoint": 368,
+    "unicode": "Ű",
+    "mathematica": "\\[CapitalUDoubleAcute]",
+    "name": "CapitalUDoubleAcute",
+    "aliases": [
+      "$U''$",
+      "$&Udblac;$"
+    ]
+  },
+  {
+    "hex": "0x0192",
+    "codepoint": 402,
+    "unicode": "ƒ",
+    "mathematica": "\\[Florin]",
+    "name": "Florin",
+    "aliases": [
+      "$&fnof;$"
+    ]
+  },
+  {
+    "hex": "0x02D8",
+    "codepoint": 728,
+    "unicode": "˘",
+    "mathematica": "\\[Breve]",
+    "name": "Breve",
+    "aliases": [
+      "$bv$",
+      "$&Breve;$"
+    ]
+  },
+  {
+    "hex": "0x00A8",
+    "codepoint": 168,
+    "unicode": "¨",
+    "mathematica": "\\[DoubleDot]",
+    "name": "DoubleDot",
+    "aliases": [
+      "$&DoubleDot;$"
+    ]
+  },
+  {
+    "hex": "0x02C7",
+    "codepoint": 711,
+    "unicode": "ˇ",
+    "mathematica": "\\[Hacek]",
+    "name": "Hacek",
+    "aliases": [
+      "$hck$",
+      "$&Hacek;$"
+    ]
+  },
+  {
+    "hex": "0x00B8",
+    "codepoint": 184,
+    "unicode": "¸",
+    "mathematica": "\\[Cedilla]",
+    "name": "Cedilla",
+    "aliases": [
+      "$cd$",
+      "$&Cedilla;$"
+    ]
+  },
+  {
+    "hex": "0x0391",
+    "codepoint": 913,
+    "unicode": "Α",
+    "mathematica": "\\[CapitalAlpha]",
+    "name": "CapitalAlpha",
+    "aliases": [
+      "$A$",
+      "$Alpha$",
+      "$&Alpha;$"
+    ]
+  },
+  {
+    "hex": "0x0392",
+    "codepoint": 914,
+    "unicode": "Β",
+    "mathematica": "\\[CapitalBeta]",
+    "name": "CapitalBeta",
+    "aliases": [
+      "$B$",
+      "$Beta$",
+      "$&Beta;$"
+    ]
+  },
+  {
+    "hex": "0x0393",
+    "codepoint": 915,
+    "unicode": "Γ",
+    "mathematica": "\\[CapitalGamma]",
+    "name": "CapitalGamma",
+    "aliases": [
+      "$G$",
+      "$Gamma$",
+      "$&Gamma;$",
+      "$\\Gamma$"
+    ]
+  },
+  {
+    "hex": "0x0394",
+    "codepoint": 916,
+    "unicode": "Δ",
+    "mathematica": "\\[CapitalDelta]",
+    "name": "CapitalDelta",
+    "aliases": [
+      "$D$",
+      "$Delta$",
+      "$&Delta;$",
+      "$\\Delta$"
+    ]
+  },
+  {
+    "hex": "0x0395",
+    "codepoint": 917,
+    "unicode": "Ε",
+    "mathematica": "\\[CapitalEpsilon]",
+    "name": "CapitalEpsilon",
+    "aliases": [
+      "$E$",
+      "$Epsilon$",
+      "$&Epsilon;$"
+    ]
+  },
+  {
+    "hex": "0x0396",
+    "codepoint": 918,
+    "unicode": "Ζ",
+    "mathematica": "\\[CapitalZeta]",
+    "name": "CapitalZeta",
+    "aliases": [
+      "$Z$",
+      "$Zeta$",
+      "$&Zeta;$"
+    ]
+  },
+  {
+    "hex": "0x0397",
+    "codepoint": 919,
+    "unicode": "Η",
+    "mathematica": "\\[CapitalEta]",
+    "name": "CapitalEta",
+    "aliases": [
+      "$Et$",
+      "$Eta$",
+      "$H$",
+      "$&Eta;$"
+    ]
+  },
+  {
+    "hex": "0x0398",
+    "codepoint": 920,
+    "unicode": "Θ",
+    "mathematica": "\\[CapitalTheta]",
+    "name": "CapitalTheta",
+    "aliases": [
+      "$Th$",
+      "$Theta$",
+      "$Q$",
+      "$&Theta;$",
+      "$\\Theta$"
+    ]
+  },
+  {
+    "hex": "0x0399",
+    "codepoint": 921,
+    "unicode": "Ι",
+    "mathematica": "\\[CapitalIota]",
+    "name": "CapitalIota",
+    "aliases": [
+      "$I$",
+      "$Iota$",
+      "$&Iota;$"
+    ]
+  },
+  {
+    "hex": "0x039A",
+    "codepoint": 922,
+    "unicode": "Κ",
+    "mathematica": "\\[CapitalKappa]",
+    "name": "CapitalKappa",
+    "aliases": [
+      "$K$",
+      "$Kappa$",
+      "$&Kappa;$"
+    ]
+  },
+  {
+    "hex": "0x039B",
+    "codepoint": 923,
+    "unicode": "Λ",
+    "mathematica": "\\[CapitalLambda]",
+    "name": "CapitalLambda",
+    "aliases": [
+      "$L$",
+      "$Lambda$",
+      "$&Lambda;$",
+      "$\\Lambda$"
+    ]
+  },
+  {
+    "hex": "0x039C",
+    "codepoint": 924,
+    "unicode": "Μ",
+    "mathematica": "\\[CapitalMu]",
+    "name": "CapitalMu",
+    "aliases": [
+      "$M$",
+      "$Mu$",
+      "$&Mu;$"
+    ]
+  },
+  {
+    "hex": "0x039D",
+    "codepoint": 925,
+    "unicode": "Ν",
+    "mathematica": "\\[CapitalNu]",
+    "name": "CapitalNu",
+    "aliases": [
+      "$N$",
+      "$Nu$",
+      "$&Nu;$"
+    ]
+  },
+  {
+    "hex": "0x039E",
+    "codepoint": 926,
+    "unicode": "Ξ",
+    "mathematica": "\\[CapitalXi]",
+    "name": "CapitalXi",
+    "aliases": [
+      "$X$",
+      "$Xi$",
+      "$&Xi;$",
+      "$\\Xi$"
+    ]
+  },
+  {
+    "hex": "0x039F",
+    "codepoint": 927,
+    "unicode": "Ο",
+    "mathematica": "\\[CapitalOmicron]",
+    "name": "CapitalOmicron",
+    "aliases": [
+      "$Om$",
+      "$Omicron$",
+      "$&Omicron;$"
+    ]
+  },
+  {
+    "hex": "0x03A0",
+    "codepoint": 928,
+    "unicode": "Π",
+    "mathematica": "\\[CapitalPi]",
+    "name": "CapitalPi",
+    "aliases": [
+      "$P$",
+      "$Pi$",
+      "$&Pi;$",
+      "$\\Pi$"
+    ]
+  },
+  {
+    "hex": "0x03A1",
+    "codepoint": 929,
+    "unicode": "Ρ",
+    "mathematica": "\\[CapitalRho]",
+    "name": "CapitalRho",
+    "aliases": [
+      "$R$",
+      "$Rho$",
+      "$&Rho;$"
+    ]
+  },
+  {
+    "hex": "0x03A3",
+    "codepoint": 931,
+    "unicode": "Σ",
+    "mathematica": "\\[CapitalSigma]",
+    "name": "CapitalSigma",
+    "aliases": [
+      "$S$",
+      "$Sigma$",
+      "$&Sigma;$",
+      "$\\Sigma$"
+    ]
+  },
+  {
+    "hex": "0x03A4",
+    "codepoint": 932,
+    "unicode": "Τ",
+    "mathematica": "\\[CapitalTau]",
+    "name": "CapitalTau",
+    "aliases": [
+      "$T$",
+      "$Tau$",
+      "$&Tau;$"
+    ]
+  },
+  {
+    "hex": "0x03A5",
+    "codepoint": 933,
+    "unicode": "Υ",
+    "mathematica": "\\[CapitalUpsilon]",
+    "name": "CapitalUpsilon",
+    "aliases": [
+      "$U$",
+      "$Upsilon$",
+      "$&Upsilon;$",
+      "$\\Upsilon$"
+    ]
+  },
+  {
+    "hex": "0x03D2",
+    "codepoint": 978,
+    "unicode": "ϒ",
+    "mathematica": "\\[CurlyCapitalUpsilon]",
+    "name": "CurlyCapitalUpsilon",
+    "aliases": [
+      "$cU$",
+      "$cUpsilon$",
+      "$&Upsi;$"
+    ]
+  },
+  {
+    "hex": "0x03A6",
+    "codepoint": 934,
+    "unicode": "Φ",
+    "mathematica": "\\[CapitalPhi]",
+    "name": "CapitalPhi",
+    "aliases": [
+      "$Ph$",
+      "$Phi$",
+      "$F$",
+      "$&Phi;$",
+      "$\\Phi$"
+    ]
+  },
+  {
+    "hex": "0x03A7",
+    "codepoint": 935,
+    "unicode": "Χ",
+    "mathematica": "\\[CapitalChi]",
+    "name": "CapitalChi",
+    "aliases": [
+      "$Ch$",
+      "$Chi$",
+      "$C$",
+      "$&Chi;$"
+    ]
+  },
+  {
+    "hex": "0x03A8",
+    "codepoint": 936,
+    "unicode": "Ψ",
+    "mathematica": "\\[CapitalPsi]",
+    "name": "CapitalPsi",
+    "aliases": [
+      "$Ps$",
+      "$Psi$",
+      "$Y$",
+      "$&Psi;$",
+      "$\\Psi$"
+    ]
+  },
+  {
+    "hex": "0x03A9",
+    "codepoint": 937,
+    "unicode": "Ω",
+    "mathematica": "\\[CapitalOmega]",
+    "name": "CapitalOmega",
+    "aliases": [
+      "$O$",
+      "$Omega$",
+      "$W$",
+      "$&Omega;$",
+      "$\\Omega$"
+    ]
+  },
+  {
+    "hex": "0x03DC",
+    "codepoint": 988,
+    "unicode": "Ϝ",
+    "mathematica": "\\[CapitalDigamma]",
+    "name": "CapitalDigamma",
+    "aliases": [
+      "$Di$",
+      "$Digamma$",
+      "$&digamma;$"
+    ]
+  },
+  {
+    "hex": "0x03DA",
+    "codepoint": 986,
+    "unicode": "Ϛ",
+    "mathematica": "\\[CapitalStigma]",
+    "name": "CapitalStigma",
+    "aliases": [
+      "$Sti$",
+      "$Stigma$"
+    ]
+  },
+  {
+    "hex": "0x03DE",
+    "codepoint": 990,
+    "unicode": "Ϟ",
+    "mathematica": "\\[CapitalKoppa]",
+    "name": "CapitalKoppa",
+    "aliases": [
+      "$Ko$",
+      "$Koppa$"
+    ]
+  },
+  {
+    "hex": "0x03E0",
+    "codepoint": 992,
+    "unicode": "Ϡ",
+    "mathematica": "\\[CapitalSampi]",
+    "name": "CapitalSampi",
+    "aliases": [
+      "$Sa$",
+      "$Sampi$"
+    ]
+  },
+  {
+    "hex": "0x03B1",
+    "codepoint": 945,
+    "unicode": "α",
+    "mathematica": "\\[Alpha]",
+    "name": "Alpha",
+    "aliases": [
+      "$a$",
+      "$alpha$",
+      "$&alpha;$",
+      "$\\alpha$"
+    ]
+  },
+  {
+    "hex": "0x03B2",
+    "codepoint": 946,
+    "unicode": "β",
+    "mathematica": "\\[Beta]",
+    "name": "Beta",
+    "aliases": [
+      "$b$",
+      "$beta$",
+      "$&beta;$",
+      "$\\beta$"
+    ]
+  },
+  {
+    "hex": "0x03B3",
+    "codepoint": 947,
+    "unicode": "γ",
+    "mathematica": "\\[Gamma]",
+    "name": "Gamma",
+    "aliases": [
+      "$g$",
+      "$gamma$",
+      "$&gamma;$",
+      "$\\gamma$"
+    ]
+  },
+  {
+    "hex": "0x03B4",
+    "codepoint": 948,
+    "unicode": "δ",
+    "mathematica": "\\[Delta]",
+    "name": "Delta",
+    "aliases": [
+      "$d$",
+      "$delta$",
+      "$&delta;$",
+      "$\\delta$"
+    ]
+  },
+  {
+    "hex": "0x03F5",
+    "codepoint": 1013,
+    "unicode": "ϵ",
+    "mathematica": "\\[Epsilon]",
+    "name": "Epsilon",
+    "aliases": [
+      "$e$",
+      "$epsilon$",
+      "$&varepsilon;$",
+      "$\\epsilon$"
+    ]
+  },
+  {
+    "hex": "0x03B5",
+    "codepoint": 949,
+    "unicode": "ε",
+    "mathematica": "\\[CurlyEpsilon]",
+    "name": "CurlyEpsilon",
+    "aliases": [
+      "$ce$",
+      "$cepsilon$",
+      "$&epsiv;$",
+      "$\\varepsilon$"
+    ]
+  },
+  {
+    "hex": "0x03B6",
+    "codepoint": 950,
+    "unicode": "ζ",
+    "mathematica": "\\[Zeta]",
+    "name": "Zeta",
+    "aliases": [
+      "$z$",
+      "$zeta$",
+      "$&zeta;$",
+      "$\\zeta$"
+    ]
+  },
+  {
+    "hex": "0x03B7",
+    "codepoint": 951,
+    "unicode": "η",
+    "mathematica": "\\[Eta]",
+    "name": "Eta",
+    "aliases": [
+      "$et$",
+      "$eta$",
+      "$h$",
+      "$&eta;$",
+      "$\\eta$"
+    ]
+  },
+  {
+    "hex": "0x03B8",
+    "codepoint": 952,
+    "unicode": "θ",
+    "mathematica": "\\[Theta]",
+    "name": "Theta",
+    "aliases": [
+      "$th$",
+      "$theta$",
+      "$q$",
+      "$&theta;$",
+      "$\\theta$"
+    ]
+  },
+  {
+    "hex": "0x03D1",
+    "codepoint": 977,
+    "unicode": "ϑ",
+    "mathematica": "\\[CurlyTheta]",
+    "name": "CurlyTheta",
+    "aliases": [
+      "$cq$",
+      "$cth$",
+      "$ctheta$",
+      "$&vartheta;$",
+      "$\\vartheta$"
+    ]
+  },
+  {
+    "hex": "0x03B9",
+    "codepoint": 953,
+    "unicode": "ι",
+    "mathematica": "\\[Iota]",
+    "name": "Iota",
+    "aliases": [
+      "$i$",
+      "$iota$",
+      "$&iota;$",
+      "$\\iota$"
+    ]
+  },
+  {
+    "hex": "0x03BA",
+    "codepoint": 954,
+    "unicode": "κ",
+    "mathematica": "\\[Kappa]",
+    "name": "Kappa",
+    "aliases": [
+      "$k$",
+      "$kappa$",
+      "$&kappa;$",
+      "$\\kappa$"
+    ]
+  },
+  {
+    "hex": "0x03F0",
+    "codepoint": 1008,
+    "unicode": "ϰ",
+    "mathematica": "\\[CurlyKappa]",
+    "name": "CurlyKappa",
+    "aliases": [
+      "$ck$",
+      "$ckappa$",
+      "$&varkappa;$"
+    ]
+  },
+  {
+    "hex": "0x03BB",
+    "codepoint": 955,
+    "unicode": "λ",
+    "mathematica": "\\[Lambda]",
+    "name": "Lambda",
+    "aliases": [
+      "$l$",
+      "$lambda$",
+      "$&lambda;$",
+      "$\\lambda$"
+    ]
+  },
+  {
+    "hex": "0x03BC",
+    "codepoint": 956,
+    "unicode": "μ",
+    "mathematica": "\\[Mu]",
+    "name": "Mu",
+    "aliases": [
+      "$m$",
+      "$mu$",
+      "$&mu;$",
+      "$\\mu$"
+    ]
+  },
+  {
+    "hex": "0x03BD",
+    "codepoint": 957,
+    "unicode": "ν",
+    "mathematica": "\\[Nu]",
+    "name": "Nu",
+    "aliases": [
+      "$n$",
+      "$nu$",
+      "$&nu;$",
+      "$\\nu$"
+    ]
+  },
+  {
+    "hex": "0x03BE",
+    "codepoint": 958,
+    "unicode": "ξ",
+    "mathematica": "\\[Xi]",
+    "name": "Xi",
+    "aliases": [
+      "$x$",
+      "$xi$",
+      "$&xi;$",
+      "$\\xi$"
+    ]
+  },
+  {
+    "hex": "0x03BF",
+    "codepoint": 959,
+    "unicode": "ο",
+    "mathematica": "\\[Omicron]",
+    "name": "Omicron",
+    "aliases": [
+      "$om$",
+      "$omicron$",
+      "$&omicron;$"
+    ]
+  },
+  {
+    "hex": "0x03C0",
+    "codepoint": 960,
+    "unicode": "π",
+    "mathematica": "\\[Pi]",
+    "name": "Pi",
+    "aliases": [
+      "$p$",
+      "$pi$",
+      "$&pi;$",
+      "$\\pi$"
+    ]
+  },
+  {
+    "hex": "0x03D6",
+    "codepoint": 982,
+    "unicode": "ϖ",
+    "mathematica": "\\[CurlyPi]",
+    "name": "CurlyPi",
+    "aliases": [
+      "$cp$",
+      "$cpi$",
+      "$&varpi;$",
+      "$\\varpi$"
+    ]
+  },
+  {
+    "hex": "0x03C1",
+    "codepoint": 961,
+    "unicode": "ρ",
+    "mathematica": "\\[Rho]",
+    "name": "Rho",
+    "aliases": [
+      "$r$",
+      "$rho$",
+      "$&rho;$",
+      "$\\rho$"
+    ]
+  },
+  {
+    "hex": "0x03F1",
+    "codepoint": 1009,
+    "unicode": "ϱ",
+    "mathematica": "\\[CurlyRho]",
+    "name": "CurlyRho",
+    "aliases": [
+      "$cr$",
+      "$crho$",
+      "$&varrho;$",
+      "$\\varrho$"
+    ]
+  },
+  {
+    "hex": "0x03C3",
+    "codepoint": 963,
+    "unicode": "σ",
+    "mathematica": "\\[Sigma]",
+    "name": "Sigma",
+    "aliases": [
+      "$s$",
+      "$sigma$",
+      "$&sigma;$",
+      "$\\sigma$"
+    ]
+  },
+  {
+    "hex": "0x03C2",
+    "codepoint": 962,
+    "unicode": "ς",
+    "mathematica": "\\[FinalSigma]",
+    "name": "FinalSigma",
+    "aliases": [
+      "$fs$",
+      "$&varsigma;$",
+      "$\\varsigma$"
+    ]
+  },
+  {
+    "hex": "0x03C4",
+    "codepoint": 964,
+    "unicode": "τ",
+    "mathematica": "\\[Tau]",
+    "name": "Tau",
+    "aliases": [
+      "$t$",
+      "$tau$",
+      "$&tau;$",
+      "$\\tau$"
+    ]
+  },
+  {
+    "hex": "0x03C5",
+    "codepoint": 965,
+    "unicode": "υ",
+    "mathematica": "\\[Upsilon]",
+    "name": "Upsilon",
+    "aliases": [
+      "$u$",
+      "$upsilon$",
+      "$&upsilon;$",
+      "$\\upsilon$"
+    ]
+  },
+  {
+    "hex": "0x03D5",
+    "codepoint": 981,
+    "unicode": "ϕ",
+    "mathematica": "\\[Phi]",
+    "name": "Phi",
+    "aliases": [
+      "$ph$",
+      "$phi$",
+      "$f$",
+      "$&straightphi;$",
+      "$\\phi$"
+    ]
+  },
+  {
+    "hex": "0x03C6",
+    "codepoint": 966,
+    "unicode": "φ",
+    "mathematica": "\\[CurlyPhi]",
+    "name": "CurlyPhi",
+    "aliases": [
+      "$j$",
+      "$cph$",
+      "$cphi$",
+      "$&varphi;$",
+      "$\\varphi$"
+    ]
+  },
+  {
+    "hex": "0x03C7",
+    "codepoint": 967,
+    "unicode": "χ",
+    "mathematica": "\\[Chi]",
+    "name": "Chi",
+    "aliases": [
+      "$ch$",
+      "$chi$",
+      "$c$",
+      "$&chi;$",
+      "$\\chi$"
+    ]
+  },
+  {
+    "hex": "0x03C8",
+    "codepoint": 968,
+    "unicode": "ψ",
+    "mathematica": "\\[Psi]",
+    "name": "Psi",
+    "aliases": [
+      "$ps$",
+      "$psi$",
+      "$y$",
+      "$&psi;$",
+      "$\\psi$"
+    ]
+  },
+  {
+    "hex": "0x03C9",
+    "codepoint": 969,
+    "unicode": "ω",
+    "mathematica": "\\[Omega]",
+    "name": "Omega",
+    "aliases": [
+      "$o$",
+      "$omega$",
+      "$w$",
+      "$&omega;$",
+      "$\\omega$"
+    ]
+  },
+  {
+    "hex": "0x03DB",
+    "codepoint": 987,
+    "unicode": "ϛ",
+    "mathematica": "\\[Stigma]",
+    "name": "Stigma",
+    "aliases": [
+      "$sti$",
+      "$stigma$",
+      "$\\stigma$"
+    ]
+  },
+  {
+    "hex": "0x03DD",
+    "codepoint": 989,
+    "unicode": "ϝ",
+    "mathematica": "\\[Digamma]",
+    "name": "Digamma",
+    "aliases": [
+      "$di$",
+      "$digamma$",
+      "$\\digamma$"
+    ]
+  },
+  {
+    "hex": "0x03DF",
+    "codepoint": 991,
+    "unicode": "ϟ",
+    "mathematica": "\\[Koppa]",
+    "name": "Koppa",
+    "aliases": [
+      "$ko$",
+      "$koppa$",
+      "$\\koppa$"
+    ]
+  },
+  {
+    "hex": "0x03E1",
+    "codepoint": 993,
+    "unicode": "ϡ",
+    "mathematica": "\\[Sampi]",
+    "name": "Sampi",
+    "aliases": [
+      "$sa$",
+      "$sampi$",
+      "$\\sampi$"
+    ]
+  },
+  {
+    "hex": "0x221E",
+    "codepoint": 8734,
+    "unicode": "∞",
+    "mathematica": "\\[Infinity]",
+    "name": "Infinity",
+    "aliases": [
+      "$inf$",
+      "$&infin;$",
+      "$\\infty$"
+    ]
+  },
+  {
+    "hex": "0x25B4",
+    "codepoint": 9652,
+    "unicode": "▴",
+    "mathematica": "\\[UpPointer]",
+    "name": "UpPointer",
+    "aliases": []
+  },
+  {
+    "hex": "0x25B8",
+    "codepoint": 9656,
+    "unicode": "▸",
+    "mathematica": "\\[RightPointer]",
+    "name": "RightPointer",
+    "aliases": []
+  },
+  {
+    "hex": "0x25BE",
+    "codepoint": 9662,
+    "unicode": "▾",
+    "mathematica": "\\[DownPointer]",
+    "name": "DownPointer",
+    "aliases": []
+  },
+  {
+    "hex": "0x25C2",
+    "codepoint": 9666,
+    "unicode": "◂",
+    "mathematica": "\\[LeftPointer]",
+    "name": "LeftPointer",
+    "aliases": []
+  },
+  {
+    "hex": "0x2118",
+    "codepoint": 8472,
+    "unicode": "℘",
+    "mathematica": "\\[WeierstrassP]",
+    "name": "WeierstrassP",
+    "aliases": [
+      "$wp$",
+      "$&wp;$",
+      "$\\wp$"
+    ]
+  },
+  {
+    "hex": "0x2135",
+    "codepoint": 8501,
+    "unicode": "ℵ",
+    "mathematica": "\\[Aleph]",
+    "name": "Aleph",
+    "aliases": [
+      "$al$",
+      "$&aleph;$",
+      "$\\aleph$"
+    ]
+  },
+  {
+    "hex": "0x2136",
+    "codepoint": 8502,
+    "unicode": "ℶ",
+    "mathematica": "\\[Bet]",
+    "name": "Bet",
+    "aliases": [
+      "$be$",
+      "$&beth;$",
+      "$\\beth$"
+    ]
+  },
+  {
+    "hex": "0x2137",
+    "codepoint": 8503,
+    "unicode": "ℷ",
+    "mathematica": "\\[Gimel]",
+    "name": "Gimel",
+    "aliases": [
+      "$gi$",
+      "$&gimel;$",
+      "$\\gimel$"
+    ]
+  },
+  {
+    "hex": "0x2138",
+    "codepoint": 8504,
+    "unicode": "ℸ",
+    "mathematica": "\\[Dalet]",
+    "name": "Dalet",
+    "aliases": [
+      "$da$",
+      "$&daleth;$",
+      "$\\daleth$"
+    ]
+  },
+  {
+    "hex": "0x00A1",
+    "codepoint": 161,
+    "unicode": "¡",
+    "mathematica": "\\[DownExclamation]",
+    "name": "DownExclamation",
+    "aliases": [
+      "$d!$",
+      "$&iexcl;$"
+    ]
+  },
+  {
+    "hex": "0x00A2",
+    "codepoint": 162,
+    "unicode": "¢",
+    "mathematica": "\\[Cent]",
+    "name": "Cent",
+    "aliases": [
+      "$cent$",
+      "$&cent;$"
+    ]
+  },
+  {
+    "hex": "0x00A3",
+    "codepoint": 163,
+    "unicode": "£",
+    "mathematica": "\\[Sterling]",
+    "name": "Sterling",
+    "aliases": [
+      "$&pound;$"
+    ]
+  },
+  {
+    "hex": "0x00A4",
+    "codepoint": 164,
+    "unicode": "¤",
+    "mathematica": "\\[Currency]",
+    "name": "Currency",
+    "aliases": [
+      "$&curren;$"
+    ]
+  },
+  {
+    "hex": "0x20AC",
+    "codepoint": 8364,
+    "unicode": "€",
+    "mathematica": "\\[Euro]",
+    "name": "Euro",
+    "aliases": [
+      "$euro$",
+      "$\\euro$"
+    ]
+  },
+  {
+    "hex": "0x20B9",
+    "codepoint": 8377,
+    "unicode": "₹",
+    "mathematica": "\\[Rupee]",
+    "name": "Rupee",
+    "aliases": [
+      "$\\rupee$"
+    ]
+  },
+  {
+    "hex": "0x00A5",
+    "codepoint": 165,
+    "unicode": "¥",
+    "mathematica": "\\[Yen]",
+    "name": "Yen",
+    "aliases": [
+      "$&yen;$",
+      "$\\yen$"
+    ]
+  },
+  {
+    "hex": "0x00A7",
+    "codepoint": 167,
+    "unicode": "§",
+    "mathematica": "\\[Section]",
+    "name": "Section",
+    "aliases": [
+      "$&sect;$",
+      "$\\S$"
+    ]
+  },
+  {
+    "hex": "0x00A9",
+    "codepoint": 169,
+    "unicode": "©",
+    "mathematica": "\\[Copyright]",
+    "name": "Copyright",
+    "aliases": [
+      "$&copy;$",
+      "$\\copyright$"
+    ]
+  },
+  {
+    "hex": "0x00AE",
+    "codepoint": 174,
+    "unicode": "®",
+    "mathematica": "\\[RegisteredTrademark]",
+    "name": "RegisteredTrademark",
+    "aliases": [
+      "$rtm$",
+      "$&reg;$",
+      "$\\circledR$"
+    ]
+  },
+  {
+    "hex": "0x2122",
+    "codepoint": 8482,
+    "unicode": "™",
+    "mathematica": "\\[Trademark]",
+    "name": "Trademark",
+    "aliases": [
+      "$tm$",
+      "$&trade;$"
+    ]
+  },
+  {
+    "hex": "0x00B0",
+    "codepoint": 176,
+    "unicode": "°",
+    "mathematica": "\\[Degree]",
+    "name": "Degree",
+    "aliases": [
+      "$deg$",
+      "$&deg;$"
+    ]
+  },
+  {
+    "hex": "0x00B5",
+    "codepoint": 181,
+    "unicode": "µ",
+    "mathematica": "\\[Micro]",
+    "name": "Micro",
+    "aliases": [
+      "$mi$",
+      "$&micro;$"
+    ]
+  },
+  {
+    "hex": "0x00B6",
+    "codepoint": 182,
+    "unicode": "¶",
+    "mathematica": "\\[Paragraph]",
+    "name": "Paragraph",
+    "aliases": [
+      "$&para;$",
+      "$\\P$"
+    ]
+  },
+  {
+    "hex": "0x00BF",
+    "codepoint": 191,
+    "unicode": "¿",
+    "mathematica": "\\[DownQuestion]",
+    "name": "DownQuestion",
+    "aliases": [
+      "$d?$",
+      "$&iquest;$"
+    ]
+  },
+  {
+    "hex": "0x210F",
+    "codepoint": 8463,
+    "unicode": "ℏ",
+    "mathematica": "\\[HBar]",
+    "name": "HBar",
+    "aliases": [
+      "$hb$",
+      "$&hslash;$",
+      "$\\hslash$"
+    ]
+  },
+  {
+    "hex": "0x2127",
+    "codepoint": 8487,
+    "unicode": "℧",
+    "mathematica": "\\[Mho]",
+    "name": "Mho",
+    "aliases": [
+      "$mho$",
+      "$&mho;$",
+      "$\\mho$"
+    ]
+  },
+  {
+    "hex": "0x212B",
+    "codepoint": 8491,
+    "unicode": "Å",
+    "mathematica": "\\[Angstrom]",
+    "name": "Angstrom",
+    "aliases": [
+      "$Ang$",
+      "$&angst;$",
+      "$\\AA$"
+    ]
+  },
+  {
+    "hex": "0x2205",
+    "codepoint": 8709,
+    "unicode": "∅",
+    "mathematica": "\\[EmptySet]",
+    "name": "EmptySet",
+    "aliases": [
+      "$es$",
+      "$&varnothing;$",
+      "$\\emptyset$"
+    ]
+  },
+  {
+    "hex": "0x2010",
+    "codepoint": 8208,
+    "unicode": "‐",
+    "mathematica": "\\[Hyphen]",
+    "name": "Hyphen",
+    "aliases": [
+      "$hy$"
+    ]
+  },
+  {
+    "hex": "0x2013",
+    "codepoint": 8211,
+    "unicode": "–",
+    "mathematica": "\\[Dash]",
+    "name": "Dash",
+    "aliases": [
+      "$-$",
+      "$&ndash;$"
+    ]
+  },
+  {
+    "hex": "0x2014",
+    "codepoint": 8212,
+    "unicode": "—",
+    "mathematica": "\\[LongDash]",
+    "name": "LongDash",
+    "aliases": [
+      "$--$",
+      "$&mdash;$"
+    ]
+  },
+  {
+    "hex": "0x2020",
+    "codepoint": 8224,
+    "unicode": "†",
+    "mathematica": "\\[Dagger]",
+    "name": "Dagger",
+    "aliases": [
+      "$dg$",
+      "$&dagger;$",
+      "$\\dagger$",
+      "$\\dag$"
+    ]
+  },
+  {
+    "hex": "0x2021",
+    "codepoint": 8225,
+    "unicode": "‡",
+    "mathematica": "\\[DoubleDagger]",
+    "name": "DoubleDagger",
+    "aliases": [
+      "$ddg$",
+      "$&ddagger;$",
+      "$\\ddagger$",
+      "$\\ddag$"
+    ]
+  },
+  {
+    "hex": "0x2022",
+    "codepoint": 8226,
+    "unicode": "•",
+    "mathematica": "\\[Bullet]",
+    "name": "Bullet",
+    "aliases": [
+      "$bu$",
+      "$&bullet;$",
+      "$\\bullet$"
+    ]
+  },
+  {
+    "hex": "0x0131",
+    "codepoint": 305,
+    "unicode": "ı",
+    "mathematica": "\\[DotlessI]",
+    "name": "DotlessI",
+    "aliases": [
+      "$&imath;$",
+      "$\\i$"
+    ]
+  },
+  {
+    "hex": "0xFB01",
+    "codepoint": 64257,
+    "unicode": "ﬁ",
+    "mathematica": "\\[FiLigature]",
+    "name": "FiLigature",
+    "aliases": [
+      "$&filig;$"
+    ]
+  },
+  {
+    "hex": "0xFB02",
+    "codepoint": 64258,
+    "unicode": "ﬂ",
+    "mathematica": "\\[FlLigature]",
+    "name": "FlLigature",
+    "aliases": [
+      "$&fllig;$"
+    ]
+  },
+  {
+    "hex": "0x2220",
+    "codepoint": 8736,
+    "unicode": "∠",
+    "mathematica": "\\[Angle]",
+    "name": "Angle",
+    "aliases": [
+      "$&angle;$",
+      "$\\angle$"
+    ]
+  },
+  {
+    "hex": "0x221F",
+    "codepoint": 8735,
+    "unicode": "∟",
+    "mathematica": "\\[RightAngle]",
+    "name": "RightAngle",
+    "aliases": [
+      "$&angrt;$"
+    ]
+  },
+  {
+    "hex": "0x2221",
+    "codepoint": 8737,
+    "unicode": "∡",
+    "mathematica": "\\[MeasuredAngle]",
+    "name": "MeasuredAngle",
+    "aliases": [
+      "$&measuredangle;$"
+    ]
+  },
+  {
+    "hex": "0x2222",
+    "codepoint": 8738,
+    "unicode": "∢",
+    "mathematica": "\\[SphericalAngle]",
+    "name": "SphericalAngle",
+    "aliases": [
+      "$&angsph;$"
+    ]
+  },
+  {
+    "hex": "0x2300",
+    "codepoint": 8960,
+    "unicode": "⌀",
+    "mathematica": "\\[Diameter]",
+    "name": "Diameter",
+    "aliases": []
+  },
+  {
+    "hex": "0x2026",
+    "codepoint": 8230,
+    "unicode": "…",
+    "mathematica": "\\[Ellipsis]",
+    "name": "Ellipsis",
+    "aliases": [
+      "$...$",
+      "$&hellip;$",
+      "$\\ldots$"
+    ]
+  },
+  {
+    "hex": "0x22EE",
+    "codepoint": 8942,
+    "unicode": "⋮",
+    "mathematica": "\\[VerticalEllipsis]",
+    "name": "VerticalEllipsis",
+    "aliases": [
+      "$&vellip;$",
+      "$\\vdots$"
+    ]
+  },
+  {
+    "hex": "0x22EF",
+    "codepoint": 8943,
+    "unicode": "⋯",
+    "mathematica": "\\[CenterEllipsis]",
+    "name": "CenterEllipsis",
+    "aliases": [
+      "$&ctdot;$",
+      "$\\cdots$"
+    ]
+  },
+  {
+    "hex": "0x22F0",
+    "codepoint": 8944,
+    "unicode": "⋰",
+    "mathematica": "\\[AscendingEllipsis]",
+    "name": "AscendingEllipsis",
+    "aliases": [
+      "$&utdot;$"
+    ]
+  },
+  {
+    "hex": "0x22F1",
+    "codepoint": 8945,
+    "unicode": "⋱",
+    "mathematica": "\\[DescendingEllipsis]",
+    "name": "DescendingEllipsis",
+    "aliases": [
+      "$&dtdot;$",
+      "$\\ddots$"
+    ]
+  },
+  {
+    "hex": "0x2032",
+    "codepoint": 8242,
+    "unicode": "′",
+    "mathematica": "\\[Prime]",
+    "name": "Prime",
+    "aliases": [
+      "$'$",
+      "$&prime;$",
+      "$\\prime$"
+    ]
+  },
+  {
+    "hex": "0x2033",
+    "codepoint": 8243,
+    "unicode": "″",
+    "mathematica": "\\[DoublePrime]",
+    "name": "DoublePrime",
+    "aliases": [
+      "$''$",
+      "$&Prime;$"
+    ]
+  },
+  {
+    "hex": "0x2035",
+    "codepoint": 8245,
+    "unicode": "‵",
+    "mathematica": "\\[ReversePrime]",
+    "name": "ReversePrime",
+    "aliases": [
+      "$`$",
+      "$&backprime;$"
+    ]
+  },
+  {
+    "hex": "0x2036",
+    "codepoint": 8246,
+    "unicode": "‶",
+    "mathematica": "\\[ReverseDoublePrime]",
+    "name": "ReverseDoublePrime",
+    "aliases": [
+      "$``$"
+    ]
+  },
+  {
+    "hex": "0x2200",
+    "codepoint": 8704,
+    "unicode": "∀",
+    "mathematica": "\\[ForAll]",
+    "name": "ForAll",
+    "aliases": [
+      "$fa$",
+      "$&ForAll;$",
+      "$\\forall$"
+    ]
+  },
+  {
+    "hex": "0x2203",
+    "codepoint": 8707,
+    "unicode": "∃",
+    "mathematica": "\\[Exists]",
+    "name": "Exists",
+    "aliases": [
+      "$ex$",
+      "$&Exists;$",
+      "$\\exists$"
+    ]
+  },
+  {
+    "hex": "0x2204",
+    "codepoint": 8708,
+    "unicode": "∄",
+    "mathematica": "\\[NotExists]",
+    "name": "NotExists",
+    "aliases": [
+      "$!ex$",
+      "$&NotExists;$",
+      "$\\nexists$"
+    ]
+  },
+  {
+    "hex": "0x2208",
+    "codepoint": 8712,
+    "unicode": "∈",
+    "mathematica": "\\[Element]",
+    "name": "Element",
+    "aliases": [
+      "$elem$",
+      "$el$",
+      "$&Element;$",
+      "$\\in$"
+    ]
+  },
+  {
+    "hex": "0x2209",
+    "codepoint": 8713,
+    "unicode": "∉",
+    "mathematica": "\\[NotElement]",
+    "name": "NotElement",
+    "aliases": [
+      "$!elem$",
+      "$!el$",
+      "$&NotElement;$",
+      "$\\notin$"
+    ]
+  },
+  {
+    "hex": "0x220B",
+    "codepoint": 8715,
+    "unicode": "∋",
+    "mathematica": "\\[ReverseElement]",
+    "name": "ReverseElement",
+    "aliases": [
+      "$mem$",
+      "$&ReverseElement;$",
+      "$\\ni$",
+      "$\\owns$"
+    ]
+  },
+  {
+    "hex": "0x220C",
+    "codepoint": 8716,
+    "unicode": "∌",
+    "mathematica": "\\[NotReverseElement]",
+    "name": "NotReverseElement",
+    "aliases": [
+      "$!mem$",
+      "$&NotReverseElement;$"
+    ]
+  },
+  {
+    "hex": "0x2235",
+    "codepoint": 8757,
+    "unicode": "∵",
+    "mathematica": "\\[Because]",
+    "name": "Because",
+    "aliases": [
+      "$&Because;$",
+      "$\\because$"
+    ]
+  },
+  {
+    "hex": "0x220D",
+    "codepoint": 8717,
+    "unicode": "∍",
+    "mathematica": "\\[SuchThat]",
+    "name": "SuchThat",
+    "aliases": [
+      "$st$",
+      "$&SuchThat;$"
+    ]
+  },
+  {
+    "hex": "0x2234",
+    "codepoint": 8756,
+    "unicode": "∴",
+    "mathematica": "\\[Therefore]",
+    "name": "Therefore",
+    "aliases": [
+      "$tf$",
+      "$&Therefore;$",
+      "$\\therefore$"
+    ]
+  },
+  {
+    "hex": "0x2970",
+    "codepoint": 10608,
+    "unicode": "⥰",
+    "mathematica": "\\[RoundImplies]",
+    "name": "RoundImplies",
+    "aliases": [
+      "$&RoundImplies;$"
+    ]
+  },
+  {
+    "hex": "0x29E6",
+    "codepoint": 10726,
+    "unicode": "⧦",
+    "mathematica": "\\[Equivalent]",
+    "name": "Equivalent",
+    "aliases": [
+      "$equiv$"
+    ]
+  },
+  {
+    "hex": "0x223C",
+    "codepoint": 8764,
+    "unicode": "∼",
+    "mathematica": "\\[Tilde]",
+    "name": "Tilde",
+    "aliases": [
+      "$~$",
+      "$&Tilde;$",
+      "$\\sim$"
+    ]
+  },
+  {
+    "hex": "0x2241",
+    "codepoint": 8769,
+    "unicode": "≁",
+    "mathematica": "\\[NotTilde]",
+    "name": "NotTilde",
+    "aliases": [
+      "$!~$",
+      "$&NotTilde;$",
+      "$\\nsim$"
+    ]
+  },
+  {
+    "hex": "0x2242",
+    "codepoint": 8770,
+    "unicode": "≂",
+    "mathematica": "\\[EqualTilde]",
+    "name": "EqualTilde",
+    "aliases": [
+      "$=~$",
+      "$&EqualTilde;$"
+    ]
+  },
+  {
+    "hex": "0x2243",
+    "codepoint": 8771,
+    "unicode": "≃",
+    "mathematica": "\\[TildeEqual]",
+    "name": "TildeEqual",
+    "aliases": [
+      "$~=$",
+      "$&TildeEqual;$",
+      "$\\simeq$"
+    ]
+  },
+  {
+    "hex": "0x2244",
+    "codepoint": 8772,
+    "unicode": "≄",
+    "mathematica": "\\[NotTildeEqual]",
+    "name": "NotTildeEqual",
+    "aliases": [
+      "$!~=$",
+      "$&NotTildeEqual;$"
+    ]
+  },
+  {
+    "hex": "0x2245",
+    "codepoint": 8773,
+    "unicode": "≅",
+    "mathematica": "\\[TildeFullEqual]",
+    "name": "TildeFullEqual",
+    "aliases": [
+      "$~==$",
+      "$&TildeFullEqual;$",
+      "$\\cong$"
+    ]
+  },
+  {
+    "hex": "0x2248",
+    "codepoint": 8776,
+    "unicode": "≈",
+    "mathematica": "\\[TildeTilde]",
+    "name": "TildeTilde",
+    "aliases": [
+      "$~~$",
+      "$&TildeTilde;$",
+      "$\\approx$"
+    ]
+  },
+  {
+    "hex": "0x2249",
+    "codepoint": 8777,
+    "unicode": "≉",
+    "mathematica": "\\[NotTildeTilde]",
+    "name": "NotTildeTilde",
+    "aliases": [
+      "$!~~$",
+      "$&NotTildeTilde;$"
+    ]
+  },
+  {
+    "hex": "0x2247",
+    "codepoint": 8775,
+    "unicode": "≇",
+    "mathematica": "\\[NotTildeFullEqual]",
+    "name": "NotTildeFullEqual",
+    "aliases": [
+      "$!~==$",
+      "$&NotTildeFullEqual;$"
+    ]
+  },
+  {
+    "hex": "0x2272",
+    "codepoint": 8818,
+    "unicode": "≲",
+    "mathematica": "\\[LessTilde]",
+    "name": "LessTilde",
+    "aliases": [
+      "$<~$",
+      "$&LessTilde;$",
+      "$\\lesssim$"
+    ]
+  },
+  {
+    "hex": "0x2273",
+    "codepoint": 8819,
+    "unicode": "≳",
+    "mathematica": "\\[GreaterTilde]",
+    "name": "GreaterTilde",
+    "aliases": [
+      "$>~$",
+      "$&GreaterTilde;$",
+      "$\\gtrsim$"
+    ]
+  },
+  {
+    "hex": "0x2274",
+    "codepoint": 8820,
+    "unicode": "≴",
+    "mathematica": "\\[NotLessTilde]",
+    "name": "NotLessTilde",
+    "aliases": [
+      "$!<~$",
+      "$&NotLessTilde;$"
+    ]
+  },
+  {
+    "hex": "0x2275",
+    "codepoint": 8821,
+    "unicode": "≵",
+    "mathematica": "\\[NotGreaterTilde]",
+    "name": "NotGreaterTilde",
+    "aliases": [
+      "$!>~$",
+      "$&NotGreaterTilde;$"
+    ]
+  },
+  {
+    "hex": "0x22B2",
+    "codepoint": 8882,
+    "unicode": "⊲",
+    "mathematica": "\\[LeftTriangle]",
+    "name": "LeftTriangle",
+    "aliases": [
+      "$&LeftTriangle;$",
+      "$\\triangleleft$"
+    ]
+  },
+  {
+    "hex": "0x22B3",
+    "codepoint": 8883,
+    "unicode": "⊳",
+    "mathematica": "\\[RightTriangle]",
+    "name": "RightTriangle",
+    "aliases": [
+      "$&RightTriangle;$",
+      "$\\triangleright$"
+    ]
+  },
+  {
+    "hex": "0x22B4",
+    "codepoint": 8884,
+    "unicode": "⊴",
+    "mathematica": "\\[LeftTriangleEqual]",
+    "name": "LeftTriangleEqual",
+    "aliases": [
+      "$&LeftTriangleEqual;$",
+      "$\\trianglelefteq$"
+    ]
+  },
+  {
+    "hex": "0x22B5",
+    "codepoint": 8885,
+    "unicode": "⊵",
+    "mathematica": "\\[RightTriangleEqual]",
+    "name": "RightTriangleEqual",
+    "aliases": [
+      "$&RightTriangleEqual;$",
+      "$\\trianglerighteq$"
+    ]
+  },
+  {
+    "hex": "0x29CF",
+    "codepoint": 10703,
+    "unicode": "⧏",
+    "mathematica": "\\[LeftTriangleBar]",
+    "name": "LeftTriangleBar",
+    "aliases": [
+      "$&LeftTriangleBar;$"
+    ]
+  },
+  {
+    "hex": "0x29D0",
+    "codepoint": 10704,
+    "unicode": "⧐",
+    "mathematica": "\\[RightTriangleBar]",
+    "name": "RightTriangleBar",
+    "aliases": [
+      "$&RightTriangleBar;$"
+    ]
+  },
+  {
+    "hex": "0x22EA",
+    "codepoint": 8938,
+    "unicode": "⋪",
+    "mathematica": "\\[NotLeftTriangle]",
+    "name": "NotLeftTriangle",
+    "aliases": [
+      "$&NotLeftTriangle;$"
+    ]
+  },
+  {
+    "hex": "0x22EC",
+    "codepoint": 8940,
+    "unicode": "⋬",
+    "mathematica": "\\[NotLeftTriangleEqual]",
+    "name": "NotLeftTriangleEqual",
+    "aliases": [
+      "$&NotLeftTriangleEqual;$"
+    ]
+  },
+  {
+    "hex": "0x22EB",
+    "codepoint": 8939,
+    "unicode": "⋫",
+    "mathematica": "\\[NotRightTriangle]",
+    "name": "NotRightTriangle",
+    "aliases": [
+      "$&NotRightTriangle;$"
+    ]
+  },
+  {
+    "hex": "0x22ED",
+    "codepoint": 8941,
+    "unicode": "⋭",
+    "mathematica": "\\[NotRightTriangleEqual]",
+    "name": "NotRightTriangleEqual",
+    "aliases": [
+      "$&NotRightTriangleEqual;$"
+    ]
+  },
+  {
+    "hex": "0x2260",
+    "codepoint": 8800,
+    "unicode": "≠",
+    "mathematica": "\\[NotEqual]",
+    "name": "NotEqual",
+    "aliases": [
+      "$!=$",
+      "$&NotEqual;$",
+      "$\\neq$",
+      "$\\ne$",
+      "$\\not=$"
+    ]
+  },
+  {
+    "hex": "0x226E",
+    "codepoint": 8814,
+    "unicode": "≮",
+    "mathematica": "\\[NotLess]",
+    "name": "NotLess",
+    "aliases": [
+      "$!<$",
+      "$&NotLess;$",
+      "$\\nless$"
+    ]
+  },
+  {
+    "hex": "0x226F",
+    "codepoint": 8815,
+    "unicode": "≯",
+    "mathematica": "\\[NotGreater]",
+    "name": "NotGreater",
+    "aliases": [
+      "$!>$",
+      "$&NotGreater;$",
+      "$\\ngtr$"
+    ]
+  },
+  {
+    "hex": "0x2264",
+    "codepoint": 8804,
+    "unicode": "≤",
+    "mathematica": "\\[LessEqual]",
+    "name": "LessEqual",
+    "aliases": [
+      "$<=$",
+      "$&leq;$",
+      "$\\leq$",
+      "$\\le$"
+    ]
+  },
+  {
+    "hex": "0x226A",
+    "codepoint": 8810,
+    "unicode": "≪",
+    "mathematica": "\\[LessLess]",
+    "name": "LessLess",
+    "aliases": [
+      "$&LessLess;$",
+      "$\\ll$"
+    ]
+  },
+  {
+    "hex": "0x226B",
+    "codepoint": 8811,
+    "unicode": "≫",
+    "mathematica": "\\[GreaterGreater]",
+    "name": "GreaterGreater",
+    "aliases": [
+      "$&GreaterGreater;$",
+      "$\\gg$"
+    ]
+  },
+  {
+    "hex": "0x2270",
+    "codepoint": 8816,
+    "unicode": "≰",
+    "mathematica": "\\[NotLessEqual]",
+    "name": "NotLessEqual",
+    "aliases": [
+      "$!<=$",
+      "$&NotLessEqual;$",
+      "$\\nleq$"
+    ]
+  },
+  {
+    "hex": "0x2265",
+    "codepoint": 8805,
+    "unicode": "≥",
+    "mathematica": "\\[GreaterEqual]",
+    "name": "GreaterEqual",
+    "aliases": [
+      "$>=$",
+      "$&GreaterEqual;$",
+      "$\\geq$",
+      "$\\ge$"
+    ]
+  },
+  {
+    "hex": "0x2271",
+    "codepoint": 8817,
+    "unicode": "≱",
+    "mathematica": "\\[NotGreaterEqual]",
+    "name": "NotGreaterEqual",
+    "aliases": [
+      "$!>=$",
+      "$&NotGreaterEqual;$",
+      "$\\ngeq$"
+    ]
+  },
+  {
+    "hex": "0x2A7D",
+    "codepoint": 10877,
+    "unicode": "⩽",
+    "mathematica": "\\[LessSlantEqual]",
+    "name": "LessSlantEqual",
+    "aliases": [
+      "$</$",
+      "$&LessSlantEqual;$"
+    ]
+  },
+  {
+    "hex": "0x2266",
+    "codepoint": 8806,
+    "unicode": "≦",
+    "mathematica": "\\[LessFullEqual]",
+    "name": "LessFullEqual",
+    "aliases": [
+      "$&LessFullEqual;$"
+    ]
+  },
+  {
+    "hex": "0x2268",
+    "codepoint": 8808,
+    "unicode": "≨",
+    "mathematica": "\\[NotLessFullEqual]",
+    "name": "NotLessFullEqual",
+    "aliases": [
+      "$&NotLessFullEqual;$"
+    ]
+  },
+  {
+    "hex": "0x2AA1",
+    "codepoint": 10913,
+    "unicode": "⪡",
+    "mathematica": "\\[NestedLessLess]",
+    "name": "NestedLessLess",
+    "aliases": [
+      "$&NestedLessLess;$"
+    ]
+  },
+  {
+    "hex": "0x2AA2",
+    "codepoint": 10914,
+    "unicode": "⪢",
+    "mathematica": "\\[NestedGreaterGreater]",
+    "name": "NestedGreaterGreater",
+    "aliases": [
+      "$&NestedGreaterGreater;$"
+    ]
+  },
+  {
+    "hex": "0x2A7E",
+    "codepoint": 10878,
+    "unicode": "⩾",
+    "mathematica": "\\[GreaterSlantEqual]",
+    "name": "GreaterSlantEqual",
+    "aliases": [
+      "$>/$",
+      "$&GreaterSlantEqual;$"
+    ]
+  },
+  {
+    "hex": "0x2267",
+    "codepoint": 8807,
+    "unicode": "≧",
+    "mathematica": "\\[GreaterFullEqual]",
+    "name": "GreaterFullEqual",
+    "aliases": [
+      "$&GreaterFullEqual;$"
+    ]
+  },
+  {
+    "hex": "0x2269",
+    "codepoint": 8809,
+    "unicode": "≩",
+    "mathematica": "\\[NotGreaterFullEqual]",
+    "name": "NotGreaterFullEqual",
+    "aliases": [
+      "$&NotGreaterFullEqual;$"
+    ]
+  },
+  {
+    "hex": "0x2276",
+    "codepoint": 8822,
+    "unicode": "≶",
+    "mathematica": "\\[LessGreater]",
+    "name": "LessGreater",
+    "aliases": [
+      "$&LessGreater;$"
+    ]
+  },
+  {
+    "hex": "0x2277",
+    "codepoint": 8823,
+    "unicode": "≷",
+    "mathematica": "\\[GreaterLess]",
+    "name": "GreaterLess",
+    "aliases": [
+      "$&GreaterLess;$"
+    ]
+  },
+  {
+    "hex": "0x2278",
+    "codepoint": 8824,
+    "unicode": "≸",
+    "mathematica": "\\[NotLessGreater]",
+    "name": "NotLessGreater",
+    "aliases": [
+      "$&NotLessGreater;$"
+    ]
+  },
+  {
+    "hex": "0x2279",
+    "codepoint": 8825,
+    "unicode": "≹",
+    "mathematica": "\\[NotGreaterLess]",
+    "name": "NotGreaterLess",
+    "aliases": [
+      "$&NotGreaterLess;$"
+    ]
+  },
+  {
+    "hex": "0x22DA",
+    "codepoint": 8922,
+    "unicode": "⋚",
+    "mathematica": "\\[LessEqualGreater]",
+    "name": "LessEqualGreater",
+    "aliases": [
+      "$&LessEqualGreater;$"
+    ]
+  },
+  {
+    "hex": "0x22DB",
+    "codepoint": 8923,
+    "unicode": "⋛",
+    "mathematica": "\\[GreaterEqualLess]",
+    "name": "GreaterEqualLess",
+    "aliases": [
+      "$&GreaterEqualLess;$"
+    ]
+  },
+  {
+    "hex": "0x2282",
+    "codepoint": 8834,
+    "unicode": "⊂",
+    "mathematica": "\\[Subset]",
+    "name": "Subset",
+    "aliases": [
+      "$sub$",
+      "$&subset;$",
+      "$\\subset$"
+    ]
+  },
+  {
+    "hex": "0x2283",
+    "codepoint": 8835,
+    "unicode": "⊃",
+    "mathematica": "\\[Superset]",
+    "name": "Superset",
+    "aliases": [
+      "$sup$",
+      "$&Superset;$",
+      "$\\supset$"
+    ]
+  },
+  {
+    "hex": "0x2284",
+    "codepoint": 8836,
+    "unicode": "⊄",
+    "mathematica": "\\[NotSubset]",
+    "name": "NotSubset",
+    "aliases": [
+      "$!sub$",
+      "$&NotSubset;$"
+    ]
+  },
+  {
+    "hex": "0x2285",
+    "codepoint": 8837,
+    "unicode": "⊅",
+    "mathematica": "\\[NotSuperset]",
+    "name": "NotSuperset",
+    "aliases": [
+      "$!sup$",
+      "$&NotSuperset;$"
+    ]
+  },
+  {
+    "hex": "0x2286",
+    "codepoint": 8838,
+    "unicode": "⊆",
+    "mathematica": "\\[SubsetEqual]",
+    "name": "SubsetEqual",
+    "aliases": [
+      "$sub=$",
+      "$&SubsetEqual;$",
+      "$\\subseteq$"
+    ]
+  },
+  {
+    "hex": "0x2287",
+    "codepoint": 8839,
+    "unicode": "⊇",
+    "mathematica": "\\[SupersetEqual]",
+    "name": "SupersetEqual",
+    "aliases": [
+      "$sup=$",
+      "$&SupersetEqual;$",
+      "$\\supseteq$"
+    ]
+  },
+  {
+    "hex": "0x2288",
+    "codepoint": 8840,
+    "unicode": "⊈",
+    "mathematica": "\\[NotSubsetEqual]",
+    "name": "NotSubsetEqual",
+    "aliases": [
+      "$!sub=$",
+      "$&NotSubsetEqual;$",
+      "$\\nsubseteq$"
+    ]
+  },
+  {
+    "hex": "0x2289",
+    "codepoint": 8841,
+    "unicode": "⊉",
+    "mathematica": "\\[NotSupersetEqual]",
+    "name": "NotSupersetEqual",
+    "aliases": [
+      "$!sup=$",
+      "$&NotSupersetEqual;$",
+      "$\\nsupseteq$"
+    ]
+  },
+  {
+    "hex": "0x228F",
+    "codepoint": 8847,
+    "unicode": "⊏",
+    "mathematica": "\\[SquareSubset]",
+    "name": "SquareSubset",
+    "aliases": [
+      "$&SquareSubset;$",
+      "$\\sqsubset$"
+    ]
+  },
+  {
+    "hex": "0x2290",
+    "codepoint": 8848,
+    "unicode": "⊐",
+    "mathematica": "\\[SquareSuperset]",
+    "name": "SquareSuperset",
+    "aliases": [
+      "$&SquareSuperset;$",
+      "$\\sqsupset$"
+    ]
+  },
+  {
+    "hex": "0x2291",
+    "codepoint": 8849,
+    "unicode": "⊑",
+    "mathematica": "\\[SquareSubsetEqual]",
+    "name": "SquareSubsetEqual",
+    "aliases": [
+      "$&SquareSubsetEqual;$",
+      "$\\sqsubseteq$"
+    ]
+  },
+  {
+    "hex": "0x2292",
+    "codepoint": 8850,
+    "unicode": "⊒",
+    "mathematica": "\\[SquareSupersetEqual]",
+    "name": "SquareSupersetEqual",
+    "aliases": [
+      "$&SquareSupersetEqual;$",
+      "$\\sqsupseteq$"
+    ]
+  },
+  {
+    "hex": "0x22E2",
+    "codepoint": 8930,
+    "unicode": "⋢",
+    "mathematica": "\\[NotSquareSubsetEqual]",
+    "name": "NotSquareSubsetEqual",
+    "aliases": [
+      "$&NotSquareSubsetEqual;$"
+    ]
+  },
+  {
+    "hex": "0x22E3",
+    "codepoint": 8931,
+    "unicode": "⋣",
+    "mathematica": "\\[NotSquareSupersetEqual]",
+    "name": "NotSquareSupersetEqual",
+    "aliases": [
+      "$&NotSquareSupersetEqual;$"
+    ]
+  },
+  {
+    "hex": "0x227A",
+    "codepoint": 8826,
+    "unicode": "≺",
+    "mathematica": "\\[Precedes]",
+    "name": "Precedes",
+    "aliases": [
+      "$&Precedes;$",
+      "$\\prec$"
+    ]
+  },
+  {
+    "hex": "0x227B",
+    "codepoint": 8827,
+    "unicode": "≻",
+    "mathematica": "\\[Succeeds]",
+    "name": "Succeeds",
+    "aliases": [
+      "$&Succeeds;$",
+      "$\\succ$"
+    ]
+  },
+  {
+    "hex": "0x2AAF",
+    "codepoint": 10927,
+    "unicode": "⪯",
+    "mathematica": "\\[PrecedesEqual]",
+    "name": "PrecedesEqual",
+    "aliases": [
+      "$&PrecedesEqual;$",
+      "$\\preceq$"
+    ]
+  },
+  {
+    "hex": "0x2AB0",
+    "codepoint": 10928,
+    "unicode": "⪰",
+    "mathematica": "\\[SucceedsEqual]",
+    "name": "SucceedsEqual",
+    "aliases": [
+      "$&SucceedsEqual;$",
+      "$\\succeq$"
+    ]
+  },
+  {
+    "hex": "0x227E",
+    "codepoint": 8830,
+    "unicode": "≾",
+    "mathematica": "\\[PrecedesTilde]",
+    "name": "PrecedesTilde",
+    "aliases": [
+      "$&PrecedesTilde;$",
+      "$\\precsim$"
+    ]
+  },
+  {
+    "hex": "0x227F",
+    "codepoint": 8831,
+    "unicode": "≿",
+    "mathematica": "\\[SucceedsTilde]",
+    "name": "SucceedsTilde",
+    "aliases": [
+      "$&SucceedsTilde;$",
+      "$\\succsim$"
+    ]
+  },
+  {
+    "hex": "0x2280",
+    "codepoint": 8832,
+    "unicode": "⊀",
+    "mathematica": "\\[NotPrecedes]",
+    "name": "NotPrecedes",
+    "aliases": [
+      "$&NotPrecedes;$",
+      "$\\nprec$"
+    ]
+  },
+  {
+    "hex": "0x2281",
+    "codepoint": 8833,
+    "unicode": "⊁",
+    "mathematica": "\\[NotSucceeds]",
+    "name": "NotSucceeds",
+    "aliases": [
+      "$&NotSucceeds;$",
+      "$\\nsucc$"
+    ]
+  },
+  {
+    "hex": "0x227C",
+    "codepoint": 8828,
+    "unicode": "≼",
+    "mathematica": "\\[PrecedesSlantEqual]",
+    "name": "PrecedesSlantEqual",
+    "aliases": [
+      "$&PrecedesSlantEqual;$"
+    ]
+  },
+  {
+    "hex": "0x22E0",
+    "codepoint": 8928,
+    "unicode": "⋠",
+    "mathematica": "\\[NotPrecedesSlantEqual]",
+    "name": "NotPrecedesSlantEqual",
+    "aliases": [
+      "$&NotPrecedesSlantEqual;$"
+    ]
+  },
+  {
+    "hex": "0x22E8",
+    "codepoint": 8936,
+    "unicode": "⋨",
+    "mathematica": "\\[NotPrecedesTilde]",
+    "name": "NotPrecedesTilde",
+    "aliases": [
+      "$&NotPrecedesTilde;$"
+    ]
+  },
+  {
+    "hex": "0x227D",
+    "codepoint": 8829,
+    "unicode": "≽",
+    "mathematica": "\\[SucceedsSlantEqual]",
+    "name": "SucceedsSlantEqual",
+    "aliases": [
+      "$&SucceedsSlantEqual;$"
+    ]
+  },
+  {
+    "hex": "0x22E1",
+    "codepoint": 8929,
+    "unicode": "⋡",
+    "mathematica": "\\[NotSucceedsSlantEqual]",
+    "name": "NotSucceedsSlantEqual",
+    "aliases": [
+      "$&NotSucceedsSlantEqual;$"
+    ]
+  },
+  {
+    "hex": "0x22E9",
+    "codepoint": 8937,
+    "unicode": "⋩",
+    "mathematica": "\\[NotSucceedsTilde]",
+    "name": "NotSucceedsTilde",
+    "aliases": [
+      "$&NotSucceedsTilde;$"
+    ]
+  },
+  {
+    "hex": "0x22A5",
+    "codepoint": 8869,
+    "unicode": "⊥",
+    "mathematica": "\\[UpTee]",
+    "name": "UpTee",
+    "aliases": [
+      "$uT$",
+      "$&UpTee;$",
+      "$\\bot$"
+    ]
+  },
+  {
+    "hex": "0x27C2",
+    "codepoint": 10178,
+    "unicode": "⟂",
+    "mathematica": "\\[Perpendicular]",
+    "name": "Perpendicular",
+    "aliases": [
+      "$perp$",
+      "$\\perp$"
+    ]
+  },
+  {
+    "hex": "0x221D",
+    "codepoint": 8733,
+    "unicode": "∝",
+    "mathematica": "\\[Proportional]",
+    "name": "Proportional",
+    "aliases": [
+      "$prop$",
+      "$&Proportional;$",
+      "$\\propto$"
+    ]
+  },
+  {
+    "hex": "0x2237",
+    "codepoint": 8759,
+    "unicode": "∷",
+    "mathematica": "\\[Proportion]",
+    "name": "Proportion",
+    "aliases": [
+      "$&Proportion;$"
+    ]
+  },
+  {
+    "hex": "0x2261",
+    "codepoint": 8801,
+    "unicode": "≡",
+    "mathematica": "\\[Congruent]",
+    "name": "Congruent",
+    "aliases": [
+      "$===$",
+      "$&Congruent;$",
+      "$\\equiv$"
+    ]
+  },
+  {
+    "hex": "0x2262",
+    "codepoint": 8802,
+    "unicode": "≢",
+    "mathematica": "\\[NotCongruent]",
+    "name": "NotCongruent",
+    "aliases": [
+      "$!===$",
+      "$&NotCongruent;$"
+    ]
+  },
+  {
+    "hex": "0x224D",
+    "codepoint": 8781,
+    "unicode": "≍",
+    "mathematica": "\\[CupCap]",
+    "name": "CupCap",
+    "aliases": [
+      "$&CupCap;$",
+      "$\\asymp$"
+    ]
+  },
+  {
+    "hex": "0x226D",
+    "codepoint": 8813,
+    "unicode": "≭",
+    "mathematica": "\\[NotCupCap]",
+    "name": "NotCupCap",
+    "aliases": [
+      "$&NotCupCap;$"
+    ]
+  },
+  {
+    "hex": "0x21CC",
+    "codepoint": 8652,
+    "unicode": "⇌",
+    "mathematica": "\\[Equilibrium]",
+    "name": "Equilibrium",
+    "aliases": [
+      "$equi$",
+      "$&Equilibrium;$"
+    ]
+  },
+  {
+    "hex": "0x21CB",
+    "codepoint": 8651,
+    "unicode": "⇋",
+    "mathematica": "\\[ReverseEquilibrium]",
+    "name": "ReverseEquilibrium",
+    "aliases": [
+      "$&ReverseEquilibrium;$"
+    ]
+  },
+  {
+    "hex": "0x296E",
+    "codepoint": 10606,
+    "unicode": "⥮",
+    "mathematica": "\\[UpEquilibrium]",
+    "name": "UpEquilibrium",
+    "aliases": [
+      "$&UpEquilibrium;$"
+    ]
+  },
+  {
+    "hex": "0x296F",
+    "codepoint": 10607,
+    "unicode": "⥯",
+    "mathematica": "\\[ReverseUpEquilibrium]",
+    "name": "ReverseUpEquilibrium",
+    "aliases": [
+      "$&ReverseUpEquilibrium;$"
+    ]
+  },
+  {
+    "hex": "0x22A2",
+    "codepoint": 8866,
+    "unicode": "⊢",
+    "mathematica": "\\[RightTee]",
+    "name": "RightTee",
+    "aliases": [
+      "$rT$",
+      "$&RightTee;$",
+      "$\\vdash$"
+    ]
+  },
+  {
+    "hex": "0x22A3",
+    "codepoint": 8867,
+    "unicode": "⊣",
+    "mathematica": "\\[LeftTee]",
+    "name": "LeftTee",
+    "aliases": [
+      "$lT$",
+      "$&LeftTee;$",
+      "$\\dashv$"
+    ]
+  },
+  {
+    "hex": "0x22A4",
+    "codepoint": 8868,
+    "unicode": "⊤",
+    "mathematica": "\\[DownTee]",
+    "name": "DownTee",
+    "aliases": [
+      "$dT$",
+      "$&DownTee;$"
+    ]
+  },
+  {
+    "hex": "0x22A8",
+    "codepoint": 8872,
+    "unicode": "⊨",
+    "mathematica": "\\[DoubleRightTee]",
+    "name": "DoubleRightTee",
+    "aliases": [
+      "$&DoubleRightTee;$",
+      "$\\models$"
+    ]
+  },
+  {
+    "hex": "0x2AE4",
+    "codepoint": 10980,
+    "unicode": "⫤",
+    "mathematica": "\\[DoubleLeftTee]",
+    "name": "DoubleLeftTee",
+    "aliases": [
+      "$&DoubleLeftTee;$"
+    ]
+  },
+  {
+    "hex": "0x224F",
+    "codepoint": 8783,
+    "unicode": "≏",
+    "mathematica": "\\[HumpEqual]",
+    "name": "HumpEqual",
+    "aliases": [
+      "$h=$",
+      "$&HumpEqual;$",
+      "$\\bumpeq$"
+    ]
+  },
+  {
+    "hex": "0x224E",
+    "codepoint": 8782,
+    "unicode": "≎",
+    "mathematica": "\\[HumpDownHump]",
+    "name": "HumpDownHump",
+    "aliases": [
+      "$&HumpDownHump;$"
+    ]
+  },
+  {
+    "hex": "0x2250",
+    "codepoint": 8784,
+    "unicode": "≐",
+    "mathematica": "\\[DotEqual]",
+    "name": "DotEqual",
+    "aliases": [
+      "$.=$",
+      "$&DotEqual;$",
+      "$\\doteq$"
+    ]
+  },
+  {
+    "hex": "0x2236",
+    "codepoint": 8758,
+    "unicode": "∶",
+    "mathematica": "\\[Colon]",
+    "name": "Colon",
+    "aliases": [
+      "$:$",
+      "$&colon;$"
+    ]
+  },
+  {
+    "hex": "0x221A",
+    "codepoint": 8730,
+    "unicode": "√",
+    "mathematica": "\\[Sqrt]",
+    "name": "Sqrt",
+    "aliases": [
+      "$sqrt$",
+      "$&Sqrt;$",
+      "$\\surd$"
+    ]
+  },
+  {
+    "hex": "0x221B",
+    "codepoint": 8731,
+    "unicode": "∛",
+    "mathematica": "\\[CubeRoot]",
+    "name": "CubeRoot",
+    "aliases": [
+      "$cbrti$"
+    ]
+  },
+  {
+    "hex": "0x2223",
+    "codepoint": 8739,
+    "unicode": "∣",
+    "mathematica": "\\[Divides]",
+    "name": "Divides",
+    "aliases": [
+      "$divides$",
+      "$&Divides;$"
+    ]
+  },
+  {
+    "hex": "0x2225",
+    "codepoint": 8741,
+    "unicode": "∥",
+    "mathematica": "\\[DoubleVerticalBar]",
+    "name": "DoubleVerticalBar",
+    "aliases": [
+      "$ ||$",
+      "$&DoubleVerticalBar;$",
+      "$\\Vert$",
+      "$\\parallel$",
+      "$\\|$"
+    ]
+  },
+  {
+    "hex": "0x2226",
+    "codepoint": 8742,
+    "unicode": "∦",
+    "mathematica": "\\[NotDoubleVerticalBar]",
+    "name": "NotDoubleVerticalBar",
+    "aliases": [
+      "$!||$",
+      "$&NotDoubleVerticalBar;$"
+    ]
+  },
+  {
+    "hex": "0x00AC",
+    "codepoint": 172,
+    "unicode": "¬",
+    "mathematica": "\\[Not]",
+    "name": "Not",
+    "aliases": [
+      "$not$",
+      "$!$",
+      "$&not;$",
+      "$\\neg$",
+      "$\\lnot$"
+    ]
+  },
+  {
+    "hex": "0x2240",
+    "codepoint": 8768,
+    "unicode": "≀",
+    "mathematica": "\\[VerticalTilde]",
+    "name": "VerticalTilde",
+    "aliases": [
+      "$&VerticalTilde;$",
+      "$\\wr$"
+    ]
+  },
+  {
+    "hex": "0x00D7",
+    "codepoint": 215,
+    "unicode": "×",
+    "mathematica": "\\[Times]",
+    "name": "Times",
+    "aliases": [
+      "$*$",
+      "$&times;$"
+    ]
+  },
+  {
+    "hex": "0x2062",
+    "codepoint": 8290,
+    "unicode": "⁢",
+    "mathematica": "\\[InvisibleTimes]",
+    "name": "InvisibleTimes",
+    "aliases": []
+  },
+  {
+    "hex": "0x00B1",
+    "codepoint": 177,
+    "unicode": "±",
+    "mathematica": "\\[PlusMinus]",
+    "name": "PlusMinus",
+    "aliases": [
+      "$+-$",
+      "$&PlusMinus;$",
+      "$\\pm$"
+    ]
+  },
+  {
+    "hex": "0x00B1",
+    "codepoint": 177,
+    "unicode": "±",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0x2213",
+    "codepoint": 8723,
+    "unicode": "∓",
+    "mathematica": "\\[MinusPlus]",
+    "name": "MinusPlus",
+    "aliases": [
+      "$-+$",
+      "$&MinusPlus;$",
+      "$\\mp$"
+    ]
+  },
+  {
+    "hex": "0x2213",
+    "codepoint": 8723,
+    "unicode": "∓",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0x2212",
+    "codepoint": 8722,
+    "unicode": "−",
+    "mathematica": "\\[Minus]",
+    "name": "Minus",
+    "aliases": [
+      "$&minus;$"
+    ]
+  },
+  {
+    "hex": "0x2212",
+    "codepoint": 8722,
+    "unicode": "−",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0x2215",
+    "codepoint": 8725,
+    "unicode": "∕",
+    "mathematica": "\\[DivisionSlash]",
+    "name": "DivisionSlash",
+    "aliases": []
+  },
+  {
+    "hex": "0x00F7",
+    "codepoint": 247,
+    "unicode": "÷",
+    "mathematica": "\\[Divide]",
+    "name": "Divide",
+    "aliases": [
+      "$div$",
+      "$&div;$",
+      "$\\div$"
+    ]
+  },
+  {
+    "hex": "0x00B7",
+    "codepoint": 183,
+    "unicode": "·",
+    "mathematica": "\\[CenterDot]",
+    "name": "CenterDot",
+    "aliases": [
+      "$.$",
+      "$&CenterDot;$",
+      "$\\cdot$",
+      "$\\centerdot$"
+    ]
+  },
+  {
+    "hex": "0x2218",
+    "codepoint": 8728,
+    "unicode": "∘",
+    "mathematica": "\\[SmallCircle]",
+    "name": "SmallCircle",
+    "aliases": [
+      "$sc$",
+      "$&SmallCircle;$"
+    ]
+  },
+  {
+    "hex": "0x2295",
+    "codepoint": 8853,
+    "unicode": "⊕",
+    "mathematica": "\\[CirclePlus]",
+    "name": "CirclePlus",
+    "aliases": [
+      "$c+$",
+      "$&CirclePlus;$",
+      "$\\oplus$"
+    ]
+  },
+  {
+    "hex": "0x2295",
+    "codepoint": 8853,
+    "unicode": "⊕",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0x2296",
+    "codepoint": 8854,
+    "unicode": "⊖",
+    "mathematica": "\\[CircleMinus]",
+    "name": "CircleMinus",
+    "aliases": [
+      "$c-$",
+      "$&CircleMinus;$",
+      "$\\ominus$"
+    ]
+  },
+  {
+    "hex": "0x2296",
+    "codepoint": 8854,
+    "unicode": "⊖",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0x2297",
+    "codepoint": 8855,
+    "unicode": "⊗",
+    "mathematica": "\\[CircleTimes]",
+    "name": "CircleTimes",
+    "aliases": [
+      "$c*$",
+      "$&CircleTimes;$",
+      "$\\otimes$"
+    ]
+  },
+  {
+    "hex": "0x2297",
+    "codepoint": 8855,
+    "unicode": "⊗",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0x2299",
+    "codepoint": 8857,
+    "unicode": "⊙",
+    "mathematica": "\\[CircleDot]",
+    "name": "CircleDot",
+    "aliases": [
+      "$c.$",
+      "$&CircleDot;$",
+      "$\\odot$"
+    ]
+  },
+  {
+    "hex": "0x2299",
+    "codepoint": 8857,
+    "unicode": "⊙",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0x22C6",
+    "codepoint": 8902,
+    "unicode": "⋆",
+    "mathematica": "\\[Star]",
+    "name": "Star",
+    "aliases": [
+      "$star$",
+      "$&Star;$"
+    ]
+  },
+  {
+    "hex": "0x22C4",
+    "codepoint": 8900,
+    "unicode": "⋄",
+    "mathematica": "\\[Diamond]",
+    "name": "Diamond",
+    "aliases": [
+      "$dia$",
+      "$&Diamond;$"
+    ]
+  },
+  {
+    "hex": "0x2207",
+    "codepoint": 8711,
+    "unicode": "∇",
+    "mathematica": "\\[Del]",
+    "name": "Del",
+    "aliases": [
+      "$del$",
+      "$&Del;$",
+      "$\\nabla$"
+    ]
+  },
+  {
+    "hex": "0x2216",
+    "codepoint": 8726,
+    "unicode": "∖",
+    "mathematica": "\\[Backslash]",
+    "name": "Backslash",
+    "aliases": [
+      "$\\$",
+      "$&Backslash;$",
+      "$\\setminus$"
+    ]
+  },
+  {
+    "hex": "0x2322",
+    "codepoint": 8994,
+    "unicode": "⌢",
+    "mathematica": "\\[Cap]",
+    "name": "Cap",
+    "aliases": [
+      "$&frown;$",
+      "$\\frown$"
+    ]
+  },
+  {
+    "hex": "0x2323",
+    "codepoint": 8995,
+    "unicode": "⌣",
+    "mathematica": "\\[Cup]",
+    "name": "Cup",
+    "aliases": [
+      "$&smile;$",
+      "$\\smile$"
+    ]
+  },
+  {
+    "hex": "0x2210",
+    "codepoint": 8720,
+    "unicode": "∐",
+    "mathematica": "\\[Coproduct]",
+    "name": "Coproduct",
+    "aliases": [
+      "$coprod$",
+      "$&Coproduct;$",
+      "$\\amalg$"
+    ]
+  },
+  {
+    "hex": "0x222B",
+    "codepoint": 8747,
+    "unicode": "∫",
+    "mathematica": "\\[Integral]",
+    "name": "Integral",
+    "aliases": [
+      "$int$",
+      "$&Integral;$",
+      "$\\int$",
+      "$\\intop$"
+    ]
+  },
+  {
+    "hex": "0x222E",
+    "codepoint": 8750,
+    "unicode": "∮",
+    "mathematica": "\\[ContourIntegral]",
+    "name": "ContourIntegral",
+    "aliases": [
+      "$cint$",
+      "$&ContourIntegral;$",
+      "$\\oint$"
+    ]
+  },
+  {
+    "hex": "0x222F",
+    "codepoint": 8751,
+    "unicode": "∯",
+    "mathematica": "\\[DoubleContourIntegral]",
+    "name": "DoubleContourIntegral",
+    "aliases": [
+      "$&DoubleContourIntegral;$"
+    ]
+  },
+  {
+    "hex": "0x2233",
+    "codepoint": 8755,
+    "unicode": "∳",
+    "mathematica": "\\[CounterClockwiseContourIntegral]",
+    "name": "CounterClockwiseContourIntegral",
+    "aliases": [
+      "$cccint$",
+      "$&CounterClockwiseContourIntegral;$"
+    ]
+  },
+  {
+    "hex": "0x2232",
+    "codepoint": 8754,
+    "unicode": "∲",
+    "mathematica": "\\[ClockwiseContourIntegral]",
+    "name": "ClockwiseContourIntegral",
+    "aliases": [
+      "$ccint$",
+      "$&ClockwiseContourIntegral;$"
+    ]
+  },
+  {
+    "hex": "0x2211",
+    "codepoint": 8721,
+    "unicode": "∑",
+    "mathematica": "\\[Sum]",
+    "name": "Sum",
+    "aliases": [
+      "$sum$",
+      "$&Sum;$",
+      "$\\sum$"
+    ]
+  },
+  {
+    "hex": "0x220F",
+    "codepoint": 8719,
+    "unicode": "∏",
+    "mathematica": "\\[Product]",
+    "name": "Product",
+    "aliases": [
+      "$prod$",
+      "$&Product;$",
+      "$\\prod$"
+    ]
+  },
+  {
+    "hex": "0x22C2",
+    "codepoint": 8898,
+    "unicode": "⋂",
+    "mathematica": "\\[Intersection]",
+    "name": "Intersection",
+    "aliases": [
+      "$inter$",
+      "$&Intersection;$",
+      "$\\cap$",
+      "$\\bigcap$"
+    ]
+  },
+  {
+    "hex": "0x22C2",
+    "codepoint": 8898,
+    "unicode": "⋂",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0x22C3",
+    "codepoint": 8899,
+    "unicode": "⋃",
+    "mathematica": "\\[Union]",
+    "name": "Union",
+    "aliases": [
+      "$un$",
+      "$&Union;$",
+      "$\\cup$",
+      "$\\bigcup$"
+    ]
+  },
+  {
+    "hex": "0x22C3",
+    "codepoint": 8899,
+    "unicode": "⋃",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0x228E",
+    "codepoint": 8846,
+    "unicode": "⊎",
+    "mathematica": "\\[UnionPlus]",
+    "name": "UnionPlus",
+    "aliases": [
+      "$&UnionPlus;$",
+      "$\\biguplus$",
+      "$\\uplus$"
+    ]
+  },
+  {
+    "hex": "0x228E",
+    "codepoint": 8846,
+    "unicode": "⊎",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0x2293",
+    "codepoint": 8851,
+    "unicode": "⊓",
+    "mathematica": "\\[SquareIntersection]",
+    "name": "SquareIntersection",
+    "aliases": [
+      "$&SquareIntersection;$",
+      "$\\sqcap$"
+    ]
+  },
+  {
+    "hex": "0x2294",
+    "codepoint": 8852,
+    "unicode": "⊔",
+    "mathematica": "\\[SquareUnion]",
+    "name": "SquareUnion",
+    "aliases": [
+      "$&SquareUnion;$",
+      "$\\sqcup$"
+    ]
+  },
+  {
+    "hex": "0x22C0",
+    "codepoint": 8896,
+    "unicode": "⋀",
+    "mathematica": "\\[Wedge]",
+    "name": "Wedge",
+    "aliases": [
+      "$^$",
+      "$&Wedge;$",
+      "$\\wedge$"
+    ]
+  },
+  {
+    "hex": "0x22C0",
+    "codepoint": 8896,
+    "unicode": "⋀",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0x2227",
+    "codepoint": 8743,
+    "unicode": "∧",
+    "mathematica": "\\[And]",
+    "name": "And",
+    "aliases": [
+      "$and$",
+      "$&&$",
+      "$&and;$",
+      "$\\land$"
+    ]
+  },
+  {
+    "hex": "0x22BC",
+    "codepoint": 8892,
+    "unicode": "⊼",
+    "mathematica": "\\[Nand]",
+    "name": "Nand",
+    "aliases": [
+      "$nand$",
+      "$!&&$",
+      "$&barwed;$"
+    ]
+  },
+  {
+    "hex": "0x22C1",
+    "codepoint": 8897,
+    "unicode": "⋁",
+    "mathematica": "\\[Vee]",
+    "name": "Vee",
+    "aliases": [
+      "$v$",
+      "$&Vee;$",
+      "$\\vee$"
+    ]
+  },
+  {
+    "hex": "0x22C1",
+    "codepoint": 8897,
+    "unicode": "⋁",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0x2228",
+    "codepoint": 8744,
+    "unicode": "∨",
+    "mathematica": "\\[Or]",
+    "name": "Or",
+    "aliases": [
+      "$or$",
+      "$||$",
+      "$&or;$",
+      "$\\lor$"
+    ]
+  },
+  {
+    "hex": "0x22BD",
+    "codepoint": 8893,
+    "unicode": "⊽",
+    "mathematica": "\\[Nor]",
+    "name": "Nor",
+    "aliases": [
+      "$nor$",
+      "$&barvee;$"
+    ]
+  },
+  {
+    "hex": "0x22BB",
+    "codepoint": 8891,
+    "unicode": "⊻",
+    "mathematica": "\\[Xor]",
+    "name": "Xor",
+    "aliases": [
+      "$xor$",
+      "$&veebar;$"
+    ]
+  },
+  {
+    "hex": "0x2202",
+    "codepoint": 8706,
+    "unicode": "∂",
+    "mathematica": "\\[PartialD]",
+    "name": "PartialD",
+    "aliases": [
+      "$pd$",
+      "$&PartialD;$",
+      "$\\partial$"
+    ]
+  },
+  {
+    "hex": "0x2192",
+    "codepoint": 8594,
+    "unicode": "→",
+    "mathematica": "\\[RightArrow]",
+    "name": "RightArrow",
+    "aliases": [
+      "$ ->$",
+      "$&RightArrow;$",
+      "$\\rightarrow$",
+      "$\\to$"
+    ]
+  },
+  {
+    "hex": "0x2190",
+    "codepoint": 8592,
+    "unicode": "←",
+    "mathematica": "\\[LeftArrow]",
+    "name": "LeftArrow",
+    "aliases": [
+      "$<-$",
+      "$&LeftArrow;$",
+      "$\\leftarrow$",
+      "$\\gets$"
+    ]
+  },
+  {
+    "hex": "0x2191",
+    "codepoint": 8593,
+    "unicode": "↑",
+    "mathematica": "\\[UpArrow]",
+    "name": "UpArrow",
+    "aliases": [
+      "$&UpArrow;$",
+      "$\\uparrow$"
+    ]
+  },
+  {
+    "hex": "0x2193",
+    "codepoint": 8595,
+    "unicode": "↓",
+    "mathematica": "\\[DownArrow]",
+    "name": "DownArrow",
+    "aliases": [
+      "$&DownArrow;$",
+      "$\\downarrow$"
+    ]
+  },
+  {
+    "hex": "0x2194",
+    "codepoint": 8596,
+    "unicode": "↔",
+    "mathematica": "\\[LeftRightArrow]",
+    "name": "LeftRightArrow",
+    "aliases": [
+      "$<->$",
+      "$&LeftRightArrow;$",
+      "$\\leftrightarrow$"
+    ]
+  },
+  {
+    "hex": "0x2195",
+    "codepoint": 8597,
+    "unicode": "↕",
+    "mathematica": "\\[UpDownArrow]",
+    "name": "UpDownArrow",
+    "aliases": [
+      "$&UpDownArrow;$",
+      "$\\updownarrow$"
+    ]
+  },
+  {
+    "hex": "0x21D2",
+    "codepoint": 8658,
+    "unicode": "⇒",
+    "mathematica": "\\[DoubleRightArrow]",
+    "name": "DoubleRightArrow",
+    "aliases": [
+      "$ =>$",
+      "$&DoubleRightArrow;$",
+      "$\\Rightarrow$"
+    ]
+  },
+  {
+    "hex": "0x21D0",
+    "codepoint": 8656,
+    "unicode": "⇐",
+    "mathematica": "\\[DoubleLeftArrow]",
+    "name": "DoubleLeftArrow",
+    "aliases": [
+      "$ <=$",
+      "$&DoubleLeftArrow;$",
+      "$\\Leftarrow$"
+    ]
+  },
+  {
+    "hex": "0x21D1",
+    "codepoint": 8657,
+    "unicode": "⇑",
+    "mathematica": "\\[DoubleUpArrow]",
+    "name": "DoubleUpArrow",
+    "aliases": [
+      "$&DoubleUpArrow;$",
+      "$\\Uparrow$"
+    ]
+  },
+  {
+    "hex": "0x21D3",
+    "codepoint": 8659,
+    "unicode": "⇓",
+    "mathematica": "\\[DoubleDownArrow]",
+    "name": "DoubleDownArrow",
+    "aliases": [
+      "$&DoubleDownArrow;$",
+      "$\\Downarrow$"
+    ]
+  },
+  {
+    "hex": "0x21D4",
+    "codepoint": 8660,
+    "unicode": "⇔",
+    "mathematica": "\\[DoubleLeftRightArrow]",
+    "name": "DoubleLeftRightArrow",
+    "aliases": [
+      "$<=>$",
+      "$&DoubleLeftRightArrow;$",
+      "$\\Leftrightarrow$"
+    ]
+  },
+  {
+    "hex": "0x21D5",
+    "codepoint": 8661,
+    "unicode": "⇕",
+    "mathematica": "\\[DoubleUpDownArrow]",
+    "name": "DoubleUpDownArrow",
+    "aliases": [
+      "$&DoubleUpDownArrow;$",
+      "$\\Updownarrow$"
+    ]
+  },
+  {
+    "hex": "0x21E5",
+    "codepoint": 8677,
+    "unicode": "⇥",
+    "mathematica": "\\[RightArrowBar]",
+    "name": "RightArrowBar",
+    "aliases": [
+      "$&RightArrowBar;$"
+    ]
+  },
+  {
+    "hex": "0x21E4",
+    "codepoint": 8676,
+    "unicode": "⇤",
+    "mathematica": "\\[LeftArrowBar]",
+    "name": "LeftArrowBar",
+    "aliases": [
+      "$&LeftArrowBar;$"
+    ]
+  },
+  {
+    "hex": "0x2912",
+    "codepoint": 10514,
+    "unicode": "⤒",
+    "mathematica": "\\[UpArrowBar]",
+    "name": "UpArrowBar",
+    "aliases": [
+      "$&UpArrowBar;$"
+    ]
+  },
+  {
+    "hex": "0x2913",
+    "codepoint": 10515,
+    "unicode": "⤓",
+    "mathematica": "\\[DownArrowBar]",
+    "name": "DownArrowBar",
+    "aliases": [
+      "$&DownArrowBar;$"
+    ]
+  },
+  {
+    "hex": "0x21A6",
+    "codepoint": 8614,
+    "unicode": "↦",
+    "mathematica": "\\[RightTeeArrow]",
+    "name": "RightTeeArrow",
+    "aliases": [
+      "$&RightTeeArrow;$",
+      "$\\mapsto$"
+    ]
+  },
+  {
+    "hex": "0x21A4",
+    "codepoint": 8612,
+    "unicode": "↤",
+    "mathematica": "\\[LeftTeeArrow]",
+    "name": "LeftTeeArrow",
+    "aliases": [
+      "$&LeftTeeArrow;$"
+    ]
+  },
+  {
+    "hex": "0x21A5",
+    "codepoint": 8613,
+    "unicode": "↥",
+    "mathematica": "\\[UpTeeArrow]",
+    "name": "UpTeeArrow",
+    "aliases": [
+      "$&UpTeeArrow;$"
+    ]
+  },
+  {
+    "hex": "0x21A7",
+    "codepoint": 8615,
+    "unicode": "↧",
+    "mathematica": "\\[DownTeeArrow]",
+    "name": "DownTeeArrow",
+    "aliases": [
+      "$&DownTeeArrow;$"
+    ]
+  },
+  {
+    "hex": "0x2196",
+    "codepoint": 8598,
+    "unicode": "↖",
+    "mathematica": "\\[UpperLeftArrow]",
+    "name": "UpperLeftArrow",
+    "aliases": [
+      "$&UpperLeftArrow;$",
+      "$\\nwarrow$"
+    ]
+  },
+  {
+    "hex": "0x2197",
+    "codepoint": 8599,
+    "unicode": "↗",
+    "mathematica": "\\[UpperRightArrow]",
+    "name": "UpperRightArrow",
+    "aliases": [
+      "$&UpperRightArrow;$",
+      "$\\nearrow$"
+    ]
+  },
+  {
+    "hex": "0x2198",
+    "codepoint": 8600,
+    "unicode": "↘",
+    "mathematica": "\\[LowerRightArrow]",
+    "name": "LowerRightArrow",
+    "aliases": [
+      "$&LowerRightArrow;$",
+      "$\\searrow$"
+    ]
+  },
+  {
+    "hex": "0x2199",
+    "codepoint": 8601,
+    "unicode": "↙",
+    "mathematica": "\\[LowerLeftArrow]",
+    "name": "LowerLeftArrow",
+    "aliases": [
+      "$&LowerLeftArrow;$",
+      "$\\swarrow$"
+    ]
+  },
+  {
+    "hex": "0x27F6",
+    "codepoint": 10230,
+    "unicode": "⟶",
+    "mathematica": "\\[LongRightArrow]",
+    "name": "LongRightArrow",
+    "aliases": [
+      "$-->$",
+      "$&LongRightArrow;$",
+      "$\\longrightarrow$"
+    ]
+  },
+  {
+    "hex": "0x27F5",
+    "codepoint": 10229,
+    "unicode": "⟵",
+    "mathematica": "\\[LongLeftArrow]",
+    "name": "LongLeftArrow",
+    "aliases": [
+      "$<--$",
+      "$&LongLeftArrow;$",
+      "$\\longleftarrow$"
+    ]
+  },
+  {
+    "hex": "0x27F8",
+    "codepoint": 10232,
+    "unicode": "⟸",
+    "mathematica": "\\[DoubleLongLeftArrow]",
+    "name": "DoubleLongLeftArrow",
+    "aliases": [
+      "$<==$",
+      "$&DoubleLongLeftArrow;$",
+      "$\\Longleftarrow$"
+    ]
+  },
+  {
+    "hex": "0x27F9",
+    "codepoint": 10233,
+    "unicode": "⟹",
+    "mathematica": "\\[DoubleLongRightArrow]",
+    "name": "DoubleLongRightArrow",
+    "aliases": [
+      "$==>$",
+      "$&DoubleLongRightArrow;$",
+      "$\\Longrightarrow$"
+    ]
+  },
+  {
+    "hex": "0x27F7",
+    "codepoint": 10231,
+    "unicode": "⟷",
+    "mathematica": "\\[LongLeftRightArrow]",
+    "name": "LongLeftRightArrow",
+    "aliases": [
+      "$<-->$",
+      "$&LongLeftRightArrow;$",
+      "$\\longleftrightarrow$"
+    ]
+  },
+  {
+    "hex": "0x27FA",
+    "codepoint": 10234,
+    "unicode": "⟺",
+    "mathematica": "\\[DoubleLongLeftRightArrow]",
+    "name": "DoubleLongLeftRightArrow",
+    "aliases": [
+      "$<==>$",
+      "$&DoubleLongLeftRightArrow;$",
+      "$\\Longleftrightarrow$",
+      "$\\iff$"
+    ]
+  },
+  {
+    "hex": "0x21C4",
+    "codepoint": 8644,
+    "unicode": "⇄",
+    "mathematica": "\\[RightArrowLeftArrow]",
+    "name": "RightArrowLeftArrow",
+    "aliases": [
+      "$&RightArrowLeftArrow;$"
+    ]
+  },
+  {
+    "hex": "0x21C6",
+    "codepoint": 8646,
+    "unicode": "⇆",
+    "mathematica": "\\[LeftArrowRightArrow]",
+    "name": "LeftArrowRightArrow",
+    "aliases": [
+      "$&LeftArrowRightArrow;$"
+    ]
+  },
+  {
+    "hex": "0x21C5",
+    "codepoint": 8645,
+    "unicode": "⇅",
+    "mathematica": "\\[UpArrowDownArrow]",
+    "name": "UpArrowDownArrow",
+    "aliases": [
+      "$&UpArrowDownArrow;$"
+    ]
+  },
+  {
+    "hex": "0x21F5",
+    "codepoint": 8693,
+    "unicode": "⇵",
+    "mathematica": "\\[DownArrowUpArrow]",
+    "name": "DownArrowUpArrow",
+    "aliases": [
+      "$&DownArrowUpArrow;$"
+    ]
+  },
+  {
+    "hex": "0x21C0",
+    "codepoint": 8640,
+    "unicode": "⇀",
+    "mathematica": "\\[RightVector]",
+    "name": "RightVector",
+    "aliases": [
+      "$vec$",
+      "$&RightVector;$",
+      "$\\rightharpoonup$"
+    ]
+  },
+  {
+    "hex": "0x21C1",
+    "codepoint": 8641,
+    "unicode": "⇁",
+    "mathematica": "\\[DownRightVector]",
+    "name": "DownRightVector",
+    "aliases": [
+      "$&DownRightVector;$"
+    ]
+  },
+  {
+    "hex": "0x21BC",
+    "codepoint": 8636,
+    "unicode": "↼",
+    "mathematica": "\\[LeftVector]",
+    "name": "LeftVector",
+    "aliases": [
+      "$&LeftVector;$",
+      "$\\leftharpoonup$"
+    ]
+  },
+  {
+    "hex": "0x21BD",
+    "codepoint": 8637,
+    "unicode": "↽",
+    "mathematica": "\\[DownLeftVector]",
+    "name": "DownLeftVector",
+    "aliases": [
+      "$&DownLeftVector;$"
+    ]
+  },
+  {
+    "hex": "0x21BE",
+    "codepoint": 8638,
+    "unicode": "↾",
+    "mathematica": "\\[RightUpVector]",
+    "name": "RightUpVector",
+    "aliases": [
+      "$&RightUpVector;$"
+    ]
+  },
+  {
+    "hex": "0x21BF",
+    "codepoint": 8639,
+    "unicode": "↿",
+    "mathematica": "\\[LeftUpVector]",
+    "name": "LeftUpVector",
+    "aliases": [
+      "$&LeftUpVector;$"
+    ]
+  },
+  {
+    "hex": "0x21C2",
+    "codepoint": 8642,
+    "unicode": "⇂",
+    "mathematica": "\\[RightDownVector]",
+    "name": "RightDownVector",
+    "aliases": [
+      "$&RightDownVector;$"
+    ]
+  },
+  {
+    "hex": "0x21C3",
+    "codepoint": 8643,
+    "unicode": "⇃",
+    "mathematica": "\\[LeftDownVector]",
+    "name": "LeftDownVector",
+    "aliases": [
+      "$&LeftDownVector;$"
+    ]
+  },
+  {
+    "hex": "0x294E",
+    "codepoint": 10574,
+    "unicode": "⥎",
+    "mathematica": "\\[LeftRightVector]",
+    "name": "LeftRightVector",
+    "aliases": [
+      "$&LeftRightVector;$"
+    ]
+  },
+  {
+    "hex": "0x2950",
+    "codepoint": 10576,
+    "unicode": "⥐",
+    "mathematica": "\\[DownLeftRightVector]",
+    "name": "DownLeftRightVector",
+    "aliases": [
+      "$&DownLeftRightVector;$"
+    ]
+  },
+  {
+    "hex": "0x294F",
+    "codepoint": 10575,
+    "unicode": "⥏",
+    "mathematica": "\\[RightUpDownVector]",
+    "name": "RightUpDownVector",
+    "aliases": [
+      "$&RightUpDownVector;$"
+    ]
+  },
+  {
+    "hex": "0x2951",
+    "codepoint": 10577,
+    "unicode": "⥑",
+    "mathematica": "\\[LeftUpDownVector]",
+    "name": "LeftUpDownVector",
+    "aliases": [
+      "$&LeftUpDownVector;$"
+    ]
+  },
+  {
+    "hex": "0x2953",
+    "codepoint": 10579,
+    "unicode": "⥓",
+    "mathematica": "\\[RightVectorBar]",
+    "name": "RightVectorBar",
+    "aliases": [
+      "$&RightVectorBar;$"
+    ]
+  },
+  {
+    "hex": "0x2957",
+    "codepoint": 10583,
+    "unicode": "⥗",
+    "mathematica": "\\[DownRightVectorBar]",
+    "name": "DownRightVectorBar",
+    "aliases": [
+      "$&DownRightVectorBar;$"
+    ]
+  },
+  {
+    "hex": "0x2952",
+    "codepoint": 10578,
+    "unicode": "⥒",
+    "mathematica": "\\[LeftVectorBar]",
+    "name": "LeftVectorBar",
+    "aliases": [
+      "$&LeftVectorBar;$"
+    ]
+  },
+  {
+    "hex": "0x2956",
+    "codepoint": 10582,
+    "unicode": "⥖",
+    "mathematica": "\\[DownLeftVectorBar]",
+    "name": "DownLeftVectorBar",
+    "aliases": [
+      "$&DownLeftVectorBar;$"
+    ]
+  },
+  {
+    "hex": "0x2954",
+    "codepoint": 10580,
+    "unicode": "⥔",
+    "mathematica": "\\[RightUpVectorBar]",
+    "name": "RightUpVectorBar",
+    "aliases": [
+      "$&RightUpVectorBar;$"
+    ]
+  },
+  {
+    "hex": "0x2958",
+    "codepoint": 10584,
+    "unicode": "⥘",
+    "mathematica": "\\[LeftUpVectorBar]",
+    "name": "LeftUpVectorBar",
+    "aliases": [
+      "$&LeftUpVectorBar;$"
+    ]
+  },
+  {
+    "hex": "0x2955",
+    "codepoint": 10581,
+    "unicode": "⥕",
+    "mathematica": "\\[RightDownVectorBar]",
+    "name": "RightDownVectorBar",
+    "aliases": [
+      "$&RightDownVectorBar;$"
+    ]
+  },
+  {
+    "hex": "0x2959",
+    "codepoint": 10585,
+    "unicode": "⥙",
+    "mathematica": "\\[LeftDownVectorBar]",
+    "name": "LeftDownVectorBar",
+    "aliases": [
+      "$&LeftDownVectorBar;$"
+    ]
+  },
+  {
+    "hex": "0x295B",
+    "codepoint": 10587,
+    "unicode": "⥛",
+    "mathematica": "\\[RightTeeVector]",
+    "name": "RightTeeVector",
+    "aliases": [
+      "$&RightTeeVector;$"
+    ]
+  },
+  {
+    "hex": "0x295F",
+    "codepoint": 10591,
+    "unicode": "⥟",
+    "mathematica": "\\[DownRightTeeVector]",
+    "name": "DownRightTeeVector",
+    "aliases": [
+      "$&DownRightTeeVector;$"
+    ]
+  },
+  {
+    "hex": "0x295A",
+    "codepoint": 10586,
+    "unicode": "⥚",
+    "mathematica": "\\[LeftTeeVector]",
+    "name": "LeftTeeVector",
+    "aliases": [
+      "$&LeftTeeVector;$"
+    ]
+  },
+  {
+    "hex": "0x295E",
+    "codepoint": 10590,
+    "unicode": "⥞",
+    "mathematica": "\\[DownLeftTeeVector]",
+    "name": "DownLeftTeeVector",
+    "aliases": [
+      "$&DownLeftTeeVector;$"
+    ]
+  },
+  {
+    "hex": "0x295C",
+    "codepoint": 10588,
+    "unicode": "⥜",
+    "mathematica": "\\[RightUpTeeVector]",
+    "name": "RightUpTeeVector",
+    "aliases": [
+      "$&RightUpTeeVector;$"
+    ]
+  },
+  {
+    "hex": "0x2960",
+    "codepoint": 10592,
+    "unicode": "⥠",
+    "mathematica": "\\[LeftUpTeeVector]",
+    "name": "LeftUpTeeVector",
+    "aliases": [
+      "$&LeftUpTeeVector;$"
+    ]
+  },
+  {
+    "hex": "0x295D",
+    "codepoint": 10589,
+    "unicode": "⥝",
+    "mathematica": "\\[RightDownTeeVector]",
+    "name": "RightDownTeeVector",
+    "aliases": [
+      "$&RightDownTeeVector;$"
+    ]
+  },
+  {
+    "hex": "0x2961",
+    "codepoint": 10593,
+    "unicode": "⥡",
+    "mathematica": "\\[LeftDownTeeVector]",
+    "name": "LeftDownTeeVector",
+    "aliases": [
+      "$&LeftDownTeeVector;$"
+    ]
+  },
+  {
+    "hex": "0x301A",
+    "codepoint": 12314,
+    "unicode": "〚",
+    "mathematica": "\\[LeftDoubleBracket]",
+    "name": "LeftDoubleBracket",
+    "aliases": [
+      "$[[$",
+      "$&LeftDoubleBracket;$"
+    ]
+  },
+  {
+    "hex": "0x301B",
+    "codepoint": 12315,
+    "unicode": "〛",
+    "mathematica": "\\[RightDoubleBracket]",
+    "name": "RightDoubleBracket",
+    "aliases": [
+      "$]]$",
+      "$&RightDoubleBracket;$"
+    ]
+  },
+  {
+    "hex": "0x2329",
+    "codepoint": 9001,
+    "unicode": "〈",
+    "mathematica": "\\[LeftAngleBracket]",
+    "name": "LeftAngleBracket",
+    "aliases": [
+      "$<$",
+      "$&LeftAngleBracket;$",
+      "$\\langle$"
+    ]
+  },
+  {
+    "hex": "0x232A",
+    "codepoint": 9002,
+    "unicode": "〉",
+    "mathematica": "\\[RightAngleBracket]",
+    "name": "RightAngleBracket",
+    "aliases": [
+      "$>$",
+      "$&RightAngleBracket;$",
+      "$\\rangle$"
+    ]
+  },
+  {
+    "hex": "0x230A",
+    "codepoint": 8970,
+    "unicode": "⌊",
+    "mathematica": "\\[LeftFloor]",
+    "name": "LeftFloor",
+    "aliases": [
+      "$lf$",
+      "$&LeftFloor;$",
+      "$\\lfloor$"
+    ]
+  },
+  {
+    "hex": "0x230B",
+    "codepoint": 8971,
+    "unicode": "⌋",
+    "mathematica": "\\[RightFloor]",
+    "name": "RightFloor",
+    "aliases": [
+      "$rf$",
+      "$&RightFloor;$",
+      "$\\rfloor$"
+    ]
+  },
+  {
+    "hex": "0x2308",
+    "codepoint": 8968,
+    "unicode": "⌈",
+    "mathematica": "\\[LeftCeiling]",
+    "name": "LeftCeiling",
+    "aliases": [
+      "$lc$",
+      "$&LeftCeiling;$",
+      "$\\lceil$"
+    ]
+  },
+  {
+    "hex": "0x2309",
+    "codepoint": 8969,
+    "unicode": "⌉",
+    "mathematica": "\\[RightCeiling]",
+    "name": "RightCeiling",
+    "aliases": [
+      "$rc$",
+      "$&RightCeiling;$",
+      "$\\rceil$"
+    ]
+  },
+  {
+    "hex": "0x25E6",
+    "codepoint": 9702,
+    "unicode": "◦",
+    "mathematica": "\\[EmptySmallCircle]",
+    "name": "EmptySmallCircle",
+    "aliases": [
+      "$esci$",
+      "$\\circ$"
+    ]
+  },
+  {
+    "hex": "0x25CB",
+    "codepoint": 9675,
+    "unicode": "○",
+    "mathematica": "\\[EmptyCircle]",
+    "name": "EmptyCircle",
+    "aliases": [
+      "$eci$",
+      "$&bigcirc;$",
+      "$\\bigcirc$"
+    ]
+  },
+  {
+    "hex": "0x25CF",
+    "codepoint": 9679,
+    "unicode": "●",
+    "mathematica": "\\[FilledCircle]",
+    "name": "FilledCircle",
+    "aliases": [
+      "$fci$"
+    ]
+  },
+  {
+    "hex": "0x25C7",
+    "codepoint": 9671,
+    "unicode": "◇",
+    "mathematica": "\\[EmptyDiamond]",
+    "name": "EmptyDiamond",
+    "aliases": []
+  },
+  {
+    "hex": "0x25C6",
+    "codepoint": 9670,
+    "unicode": "◆",
+    "mathematica": "\\[FilledDiamond]",
+    "name": "FilledDiamond",
+    "aliases": [
+      "$\\blacklozenge$"
+    ]
+  },
+  {
+    "hex": "0x25AF",
+    "codepoint": 9647,
+    "unicode": "▯",
+    "mathematica": "\\[EmptyRectangle]",
+    "name": "EmptyRectangle",
+    "aliases": []
+  },
+  {
+    "hex": "0x25AE",
+    "codepoint": 9646,
+    "unicode": "▮",
+    "mathematica": "\\[FilledRectangle]",
+    "name": "FilledRectangle",
+    "aliases": [
+      "$&marker;$",
+      "$\\qed$"
+    ]
+  },
+  {
+    "hex": "0x25A1",
+    "codepoint": 9633,
+    "unicode": "□",
+    "mathematica": "\\[EmptySquare]",
+    "name": "EmptySquare",
+    "aliases": [
+      "$esq$",
+      "$&squ;$"
+    ]
+  },
+  {
+    "hex": "0x25FB",
+    "codepoint": 9723,
+    "unicode": "◻",
+    "mathematica": "\\[EmptySmallSquare]",
+    "name": "EmptySmallSquare",
+    "aliases": [
+      "$essq$"
+    ]
+  },
+  {
+    "hex": "0x25AB",
+    "codepoint": 9643,
+    "unicode": "▫",
+    "mathematica": "\\[EmptyVerySmallSquare]",
+    "name": "EmptyVerySmallSquare",
+    "aliases": [
+      "$evssq$",
+      "$&EmptyVerySmallSquare;$"
+    ]
+  },
+  {
+    "hex": "0x25A0",
+    "codepoint": 9632,
+    "unicode": "■",
+    "mathematica": "\\[FilledSquare]",
+    "name": "FilledSquare",
+    "aliases": [
+      "$fsq$"
+    ]
+  },
+  {
+    "hex": "0x25FC",
+    "codepoint": 9724,
+    "unicode": "◼",
+    "mathematica": "\\[FilledSmallSquare]",
+    "name": "FilledSmallSquare",
+    "aliases": [
+      "$fssq$",
+      "$&squarf;$"
+    ]
+  },
+  {
+    "hex": "0x25AA",
+    "codepoint": 9642,
+    "unicode": "▪",
+    "mathematica": "\\[FilledVerySmallSquare]",
+    "name": "FilledVerySmallSquare",
+    "aliases": [
+      "$fvssq$",
+      "$&FilledVerySmallSquare;$"
+    ]
+  },
+  {
+    "hex": "0x25B3",
+    "codepoint": 9651,
+    "unicode": "△",
+    "mathematica": "\\[EmptyUpTriangle]",
+    "name": "EmptyUpTriangle",
+    "aliases": [
+      "$&bigtriangleup;$",
+      "$\\triangle$"
+    ]
+  },
+  {
+    "hex": "0x25B2",
+    "codepoint": 9650,
+    "unicode": "▲",
+    "mathematica": "\\[FilledUpTriangle]",
+    "name": "FilledUpTriangle",
+    "aliases": []
+  },
+  {
+    "hex": "0x25B6",
+    "codepoint": 9654,
+    "unicode": "▶",
+    "mathematica": "\\[FilledRightTriangle]",
+    "name": "FilledRightTriangle",
+    "aliases": []
+  },
+  {
+    "hex": "0x25BD",
+    "codepoint": 9661,
+    "unicode": "▽",
+    "mathematica": "\\[EmptyDownTriangle]",
+    "name": "EmptyDownTriangle",
+    "aliases": [
+      "$&bigtriangledown;$"
+    ]
+  },
+  {
+    "hex": "0x25BC",
+    "codepoint": 9660,
+    "unicode": "▼",
+    "mathematica": "\\[FilledDownTriangle]",
+    "name": "FilledDownTriangle",
+    "aliases": []
+  },
+  {
+    "hex": "0x25C0",
+    "codepoint": 9664,
+    "unicode": "◀",
+    "mathematica": "\\[FilledLeftTriangle]",
+    "name": "FilledLeftTriangle",
+    "aliases": []
+  },
+  {
+    "hex": "0x2605",
+    "codepoint": 9733,
+    "unicode": "★",
+    "mathematica": "\\[FivePointedStar]",
+    "name": "FivePointedStar",
+    "aliases": [
+      "$*5$",
+      "$&bigstar;$",
+      "$\\star$"
+    ]
+  },
+  {
+    "hex": "0x2736",
+    "codepoint": 10038,
+    "unicode": "✶",
+    "mathematica": "\\[SixPointedStar]",
+    "name": "SixPointedStar",
+    "aliases": [
+      "$*6$",
+      "$&sext;$"
+    ]
+  },
+  {
+    "hex": "0x231A",
+    "codepoint": 8986,
+    "unicode": "⌚",
+    "mathematica": "\\[WatchIcon]",
+    "name": "WatchIcon",
+    "aliases": []
+  },
+  {
+    "hex": "0x2654",
+    "codepoint": 9812,
+    "unicode": "♔",
+    "mathematica": "\\[WhiteKing]",
+    "name": "WhiteKing",
+    "aliases": [
+      "$wking$"
+    ]
+  },
+  {
+    "hex": "0x2655",
+    "codepoint": 9813,
+    "unicode": "♕",
+    "mathematica": "\\[WhiteQueen]",
+    "name": "WhiteQueen",
+    "aliases": [
+      "$wqueen$"
+    ]
+  },
+  {
+    "hex": "0x2656",
+    "codepoint": 9814,
+    "unicode": "♖",
+    "mathematica": "\\[WhiteRook]",
+    "name": "WhiteRook",
+    "aliases": [
+      "$wrook$"
+    ]
+  },
+  {
+    "hex": "0x2657",
+    "codepoint": 9815,
+    "unicode": "♗",
+    "mathematica": "\\[WhiteBishop]",
+    "name": "WhiteBishop",
+    "aliases": [
+      "$wbishop$"
+    ]
+  },
+  {
+    "hex": "0x2658",
+    "codepoint": 9816,
+    "unicode": "♘",
+    "mathematica": "\\[WhiteKnight]",
+    "name": "WhiteKnight",
+    "aliases": [
+      "$wknight$"
+    ]
+  },
+  {
+    "hex": "0x2659",
+    "codepoint": 9817,
+    "unicode": "♙",
+    "mathematica": "\\[WhitePawn]",
+    "name": "WhitePawn",
+    "aliases": [
+      "$wpawn$"
+    ]
+  },
+  {
+    "hex": "0x265A",
+    "codepoint": 9818,
+    "unicode": "♚",
+    "mathematica": "\\[BlackKing]",
+    "name": "BlackKing",
+    "aliases": [
+      "$bking$"
+    ]
+  },
+  {
+    "hex": "0x265B",
+    "codepoint": 9819,
+    "unicode": "♛",
+    "mathematica": "\\[BlackQueen]",
+    "name": "BlackQueen",
+    "aliases": [
+      "$bqueen$"
+    ]
+  },
+  {
+    "hex": "0x265C",
+    "codepoint": 9820,
+    "unicode": "♜",
+    "mathematica": "\\[BlackRook]",
+    "name": "BlackRook",
+    "aliases": [
+      "$brook$"
+    ]
+  },
+  {
+    "hex": "0x265D",
+    "codepoint": 9821,
+    "unicode": "♝",
+    "mathematica": "\\[BlackBishop]",
+    "name": "BlackBishop",
+    "aliases": [
+      "$bbishop$"
+    ]
+  },
+  {
+    "hex": "0x265E",
+    "codepoint": 9822,
+    "unicode": "♞",
+    "mathematica": "\\[BlackKnight]",
+    "name": "BlackKnight",
+    "aliases": [
+      "$bknight$"
+    ]
+  },
+  {
+    "hex": "0x265F",
+    "codepoint": 9823,
+    "unicode": "♟",
+    "mathematica": "\\[BlackPawn]",
+    "name": "BlackPawn",
+    "aliases": [
+      "$bpawn$"
+    ]
+  },
+  {
+    "hex": "0x2660",
+    "codepoint": 9824,
+    "unicode": "♠",
+    "mathematica": "\\[SpadeSuit]",
+    "name": "SpadeSuit",
+    "aliases": [
+      "$&spadesuit;$",
+      "$\\spadesuit$"
+    ]
+  },
+  {
+    "hex": "0x2661",
+    "codepoint": 9825,
+    "unicode": "♡",
+    "mathematica": "\\[HeartSuit]",
+    "name": "HeartSuit",
+    "aliases": [
+      "$&heartsuit;$",
+      "$\\heartsuit$"
+    ]
+  },
+  {
+    "hex": "0x2662",
+    "codepoint": 9826,
+    "unicode": "♢",
+    "mathematica": "\\[DiamondSuit]",
+    "name": "DiamondSuit",
+    "aliases": [
+      "$&diamondsuit;$",
+      "$\\diamondsuit$"
+    ]
+  },
+  {
+    "hex": "0x2663",
+    "codepoint": 9827,
+    "unicode": "♣",
+    "mathematica": "\\[ClubSuit]",
+    "name": "ClubSuit",
+    "aliases": [
+      "$&clubsuit;$",
+      "$\\clubsuit$"
+    ]
+  },
+  {
+    "hex": "0x266D",
+    "codepoint": 9837,
+    "unicode": "♭",
+    "mathematica": "\\[Flat]",
+    "name": "Flat",
+    "aliases": [
+      "$&flat;$",
+      "$\\flat$"
+    ]
+  },
+  {
+    "hex": "0x266E",
+    "codepoint": 9838,
+    "unicode": "♮",
+    "mathematica": "\\[Natural]",
+    "name": "Natural",
+    "aliases": [
+      "$&natural;$",
+      "$\\natural$"
+    ]
+  },
+  {
+    "hex": "0x266F",
+    "codepoint": 9839,
+    "unicode": "♯",
+    "mathematica": "\\[Sharp]",
+    "name": "Sharp",
+    "aliases": [
+      "$&sharp;$",
+      "$\\sharp$"
+    ]
+  },
+  {
+    "hex": "0x263A",
+    "codepoint": 9786,
+    "unicode": "☺",
+    "mathematica": "\\[HappySmiley]",
+    "name": "HappySmiley",
+    "aliases": [
+      "$:-"
+    ]
+  },
+  {
+    "hex": "0x2639",
+    "codepoint": 9785,
+    "unicode": "☹",
+    "mathematica": "\\[SadSmiley]",
+    "name": "SadSmiley",
+    "aliases": [
+      "$:-($"
+    ]
+  },
+  {
+    "hex": "0xFFFD",
+    "codepoint": 65533,
+    "unicode": "�",
+    "mathematica": "\\[UnknownGlyph]",
+    "name": "UnknownGlyph",
+    "aliases": []
+  },
+  {
+    "hex": "0x200A",
+    "codepoint": 8202,
+    "unicode": " ",
+    "mathematica": "\\[VeryThinSpace]",
+    "name": "VeryThinSpace",
+    "aliases": [
+      "$ $",
+      "$&VeryThinSpace;$"
+    ]
+  },
+  {
+    "hex": "0x2009",
+    "codepoint": 8201,
+    "unicode": " ",
+    "mathematica": "\\[ThinSpace]",
+    "name": "ThinSpace",
+    "aliases": [
+      "$",
+      "$",
+      "$&ThinSpace;$",
+      "$\\,$",
+      "$\\thinspace$"
+    ]
+  },
+  {
+    "hex": "0x205F",
+    "codepoint": 8287,
+    "unicode": " ",
+    "mathematica": "\\[MediumSpace]",
+    "name": "MediumSpace",
+    "aliases": [
+      "$",
+      "$",
+      "$\\>$",
+      "$\\:$",
+      "$\\medspace$"
+    ]
+  },
+  {
+    "hex": "0x2005",
+    "codepoint": 8197,
+    "unicode": " ",
+    "mathematica": "\\[ThickSpace]",
+    "name": "ThickSpace",
+    "aliases": [
+      "$",
+      "$",
+      "$&ThickSpace;$",
+      "$\\;$",
+      "$\\thickspace$"
+    ]
+  },
+  {
+    "hex": "0x2018",
+    "codepoint": 8216,
+    "unicode": "‘",
+    "mathematica": "\\[OpenCurlyQuote]",
+    "name": "OpenCurlyQuote",
+    "aliases": [
+      "$['$",
+      "$&OpenCurlyQuote;$"
+    ]
+  },
+  {
+    "hex": "0x2019",
+    "codepoint": 8217,
+    "unicode": "’",
+    "mathematica": "\\[CloseCurlyQuote]",
+    "name": "CloseCurlyQuote",
+    "aliases": [
+      "$]'$",
+      "$&CloseCurlyQuote;$"
+    ]
+  },
+  {
+    "hex": "0x201C",
+    "codepoint": 8220,
+    "unicode": "“",
+    "mathematica": "\\[OpenCurlyDoubleQuote]",
+    "name": "OpenCurlyDoubleQuote",
+    "aliases": [
+      "$[\"$",
+      "$&OpenCurlyDoubleQuote;$"
+    ]
+  },
+  {
+    "hex": "0x201D",
+    "codepoint": 8221,
+    "unicode": "”",
+    "mathematica": "\\[CloseCurlyDoubleQuote]",
+    "name": "CloseCurlyDoubleQuote",
+    "aliases": [
+      "$]\"$",
+      "$&CloseCurlyDoubleQuote;$"
+    ]
+  },
+  {
+    "hex": "0xFE35",
+    "codepoint": 65077,
+    "unicode": "︵",
+    "mathematica": "\\[OverParenthesis]",
+    "name": "OverParenthesis",
+    "aliases": [
+      "$o($",
+      "$&OverParenthesis;$"
+    ]
+  },
+  {
+    "hex": "0xFE36",
+    "codepoint": 65078,
+    "unicode": "︶",
+    "mathematica": "\\[UnderParenthesis]",
+    "name": "UnderParenthesis",
+    "aliases": [
+      "$u($",
+      "$&UnderParenthesis;$"
+    ]
+  },
+  {
+    "hex": "0xFE37",
+    "codepoint": 65079,
+    "unicode": "︷",
+    "mathematica": "\\[OverBrace]",
+    "name": "OverBrace",
+    "aliases": [
+      "$o{$",
+      "$&OverBrace;$",
+      "$\\overbrace$"
+    ]
+  },
+  {
+    "hex": "0xFE38",
+    "codepoint": 65080,
+    "unicode": "︸",
+    "mathematica": "\\[UnderBrace]",
+    "name": "UnderBrace",
+    "aliases": [
+      "$u{$",
+      "$&UnderBrace;$",
+      "$\\underbrace$"
+    ]
+  },
+  {
+    "hex": "0x23B4",
+    "codepoint": 9140,
+    "unicode": "⎴",
+    "mathematica": "\\[OverBracket]",
+    "name": "OverBracket",
+    "aliases": [
+      "$o[$",
+      "$&OverBracket;$"
+    ]
+  },
+  {
+    "hex": "0x23B5",
+    "codepoint": 9141,
+    "unicode": "⎵",
+    "mathematica": "\\[UnderBracket]",
+    "name": "UnderBracket",
+    "aliases": [
+      "$u[$",
+      "$&UnderBracket;$"
+    ]
+  },
+  {
+    "hex": "0x000A",
+    "codepoint": 10,
+    "unicode": "\n",
+    "mathematica": "\\[NewLine]",
+    "name": "NewLine",
+    "aliases": []
+  },
+  {
+    "hex": "0x2060",
+    "codepoint": 8288,
+    "unicode": "⁠",
+    "mathematica": "\\[NoBreak]",
+    "name": "NoBreak",
+    "aliases": [
+      "$nb$",
+      "$&NoBreak;$"
+    ]
+  },
+  {
+    "hex": "0x00A0",
+    "codepoint": 160,
+    "unicode": " ",
+    "mathematica": "\\[NonBreakingSpace]",
+    "name": "NonBreakingSpace",
+    "aliases": [
+      "$nbs$",
+      "$&nbsp;$"
+    ]
+  },
+  {
+    "hex": "0x2423",
+    "codepoint": 9251,
+    "unicode": "␣",
+    "mathematica": "\\[SpaceIndicator]",
+    "name": "SpaceIndicator",
+    "aliases": [
+      "$space$",
+      "$&blank;$"
+    ]
+  },
+  {
+    "hex": "0x2318",
+    "codepoint": 8984,
+    "unicode": "⌘",
+    "mathematica": "\\[CloverLeaf]",
+    "name": "CloverLeaf",
+    "aliases": [
+      "$cl$"
+    ]
+  },
+  {
+    "hex": "0x21B5",
+    "codepoint": 8629,
+    "unicode": "↵",
+    "mathematica": "\\[ReturnIndicator]",
+    "name": "ReturnIndicator",
+    "aliases": [
+      "$ret$",
+      "$&crarr;$"
+    ]
+  },
+  {
+    "hex": "0x2028",
+    "codepoint": 8232,
+    "unicode": " ",
+    "mathematica": "\\[LineSeparator]",
+    "name": "LineSeparator",
+    "aliases": [
+      "$lsep$"
+    ]
+  },
+  {
+    "hex": "0x2029",
+    "codepoint": 8233,
+    "unicode": " ",
+    "mathematica": "\\[ParagraphSeparator]",
+    "name": "ParagraphSeparator",
+    "aliases": [
+      "$psep$"
+    ]
+  },
+  {
+    "hex": "0x2500",
+    "codepoint": 9472,
+    "unicode": "─",
+    "mathematica": "\\[HorizontalLine]",
+    "name": "HorizontalLine",
+    "aliases": [
+      "$hline$",
+      "$&HorizontalLine;$"
+    ]
+  },
+  {
+    "hex": "0x2502",
+    "codepoint": 9474,
+    "unicode": "│",
+    "mathematica": "\\[VerticalLine]",
+    "name": "VerticalLine",
+    "aliases": [
+      "$vline$",
+      "$&VerticalLine;$"
+    ]
+  },
+  {
+    "hex": "0x2043",
+    "codepoint": 8259,
+    "unicode": "⁃",
+    "mathematica": "\\[SkeletonIndicator]",
+    "name": "SkeletonIndicator",
+    "aliases": [
+      "$&hybull;$"
+    ]
+  },
+  {
+    "hex": "0x2609",
+    "codepoint": 9737,
+    "unicode": "☉",
+    "mathematica": "\\[Sun]",
+    "name": "Sun",
+    "aliases": [
+      "$sun$"
+    ]
+  },
+  {
+    "hex": "0x263E",
+    "codepoint": 9790,
+    "unicode": "☾",
+    "mathematica": "\\[Moon]",
+    "name": "Moon",
+    "aliases": []
+  },
+  {
+    "hex": "0x263F",
+    "codepoint": 9791,
+    "unicode": "☿",
+    "mathematica": "\\[Mercury]",
+    "name": "Mercury",
+    "aliases": []
+  },
+  {
+    "hex": "0x2640",
+    "codepoint": 9792,
+    "unicode": "♀",
+    "mathematica": "\\[Venus]",
+    "name": "Venus",
+    "aliases": []
+  },
+  {
+    "hex": "0x2642",
+    "codepoint": 9794,
+    "unicode": "♂",
+    "mathematica": "\\[Mars]",
+    "name": "Mars",
+    "aliases": []
+  },
+  {
+    "hex": "0x2643",
+    "codepoint": 9795,
+    "unicode": "♃",
+    "mathematica": "\\[Jupiter]",
+    "name": "Jupiter",
+    "aliases": []
+  },
+  {
+    "hex": "0x2644",
+    "codepoint": 9796,
+    "unicode": "♄",
+    "mathematica": "\\[Saturn]",
+    "name": "Saturn",
+    "aliases": []
+  },
+  {
+    "hex": "0x26E2",
+    "codepoint": 9954,
+    "unicode": "⛢",
+    "mathematica": "\\[Uranus]",
+    "name": "Uranus",
+    "aliases": []
+  },
+  {
+    "hex": "0x2646",
+    "codepoint": 9798,
+    "unicode": "♆",
+    "mathematica": "\\[Neptune]",
+    "name": "Neptune",
+    "aliases": []
+  },
+  {
+    "hex": "0x2647",
+    "codepoint": 9799,
+    "unicode": "♇",
+    "mathematica": "\\[Pluto]",
+    "name": "Pluto",
+    "aliases": []
+  },
+  {
+    "hex": "0x2648",
+    "codepoint": 9800,
+    "unicode": "♈",
+    "mathematica": "\\[AriesSign]",
+    "name": "AriesSign",
+    "aliases": [
+      "$aries$"
+    ]
+  },
+  {
+    "hex": "0x2649",
+    "codepoint": 9801,
+    "unicode": "♉",
+    "mathematica": "\\[TaurusSign]",
+    "name": "TaurusSign",
+    "aliases": [
+      "$taur$"
+    ]
+  },
+  {
+    "hex": "0x264A",
+    "codepoint": 9802,
+    "unicode": "♊",
+    "mathematica": "\\[GeminiSign]",
+    "name": "GeminiSign",
+    "aliases": [
+      "$gem$"
+    ]
+  },
+  {
+    "hex": "0x264B",
+    "codepoint": 9803,
+    "unicode": "♋",
+    "mathematica": "\\[CancerSign]",
+    "name": "CancerSign",
+    "aliases": [
+      "$cancer$"
+    ]
+  },
+  {
+    "hex": "0x264C",
+    "codepoint": 9804,
+    "unicode": "♌",
+    "mathematica": "\\[LeoSign]",
+    "name": "LeoSign",
+    "aliases": [
+      "$leo$"
+    ]
+  },
+  {
+    "hex": "0x264D",
+    "codepoint": 9805,
+    "unicode": "♍",
+    "mathematica": "\\[VirgoSign]",
+    "name": "VirgoSign",
+    "aliases": [
+      "$virgo$"
+    ]
+  },
+  {
+    "hex": "0x264E",
+    "codepoint": 9806,
+    "unicode": "♎",
+    "mathematica": "\\[LibraSign]",
+    "name": "LibraSign",
+    "aliases": [
+      "$libra$"
+    ]
+  },
+  {
+    "hex": "0x264F",
+    "codepoint": 9807,
+    "unicode": "♏",
+    "mathematica": "\\[ScorpioSign]",
+    "name": "ScorpioSign",
+    "aliases": [
+      "$scorp$"
+    ]
+  },
+  {
+    "hex": "0x2650",
+    "codepoint": 9808,
+    "unicode": "♐",
+    "mathematica": "\\[SagittariusSign]",
+    "name": "SagittariusSign",
+    "aliases": [
+      "$sag$"
+    ]
+  },
+  {
+    "hex": "0x2651",
+    "codepoint": 9809,
+    "unicode": "♑",
+    "mathematica": "\\[CapricornSign]",
+    "name": "CapricornSign",
+    "aliases": [
+      "$capri$"
+    ]
+  },
+  {
+    "hex": "0x2652",
+    "codepoint": 9810,
+    "unicode": "♒",
+    "mathematica": "\\[AquariusSign]",
+    "name": "AquariusSign",
+    "aliases": [
+      "$aqua$"
+    ]
+  },
+  {
+    "hex": "0x2653",
+    "codepoint": 9811,
+    "unicode": "♓",
+    "mathematica": "\\[PiscesSign]",
+    "name": "PiscesSign",
+    "aliases": [
+      "$pisc$"
+    ]
+  },
+  {
+    "hex": "0x2669",
+    "codepoint": 9833,
+    "unicode": "♩",
+    "mathematica": "\\[QuarterNote]",
+    "name": "QuarterNote",
+    "aliases": []
+  },
+  {
+    "hex": "0x266A",
+    "codepoint": 9834,
+    "unicode": "♪",
+    "mathematica": "\\[EighthNote]",
+    "name": "EighthNote",
+    "aliases": []
+  },
+  {
+    "hex": "0x266B",
+    "codepoint": 9835,
+    "unicode": "♫",
+    "mathematica": "\\[BeamedEighthNote]",
+    "name": "BeamedEighthNote",
+    "aliases": []
+  },
+  {
+    "hex": "0x266C",
+    "codepoint": 9836,
+    "unicode": "♬",
+    "mathematica": "\\[BeamedSixteenthNote]",
+    "name": "BeamedSixteenthNote",
+    "aliases": []
+  },
+  {
+    "hex": "0x2713",
+    "codepoint": 10003,
+    "unicode": "✓",
+    "mathematica": "\\[Checkmark]",
+    "name": "Checkmark",
+    "aliases": []
+  },
+  {
+    "hex": "0x2611",
+    "codepoint": 9745,
+    "unicode": "☑",
+    "mathematica": "\\[CheckmarkedBox]",
+    "name": "CheckmarkedBox",
+    "aliases": []
+  },
+  {
+    "hex": "0x2612",
+    "codepoint": 9746,
+    "unicode": "☒",
+    "mathematica": "\\[CheckedBox]",
+    "name": "CheckedBox",
+    "aliases": []
+  },
+  {
+    "hex": "0xFF08",
+    "codepoint": 65288,
+    "unicode": "（",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0xFF09",
+    "codepoint": 65289,
+    "unicode": "）",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0xFF3B",
+    "codepoint": 65339,
+    "unicode": "［",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0xFF3D",
+    "codepoint": 65341,
+    "unicode": "］",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0xFF5B",
+    "codepoint": 65371,
+    "unicode": "｛",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0xFF5D",
+    "codepoint": 65373,
+    "unicode": "｝",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0x3008",
+    "codepoint": 12296,
+    "unicode": "〈",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0x3009",
+    "codepoint": 12297,
+    "unicode": "〉",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0x300A",
+    "codepoint": 12298,
+    "unicode": "《",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0x300B",
+    "codepoint": 12299,
+    "unicode": "》",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0x300C",
+    "codepoint": 12300,
+    "unicode": "「",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0x300D",
+    "codepoint": 12301,
+    "unicode": "」",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0x300E",
+    "codepoint": 12302,
+    "unicode": "『",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0x300F",
+    "codepoint": 12303,
+    "unicode": "』",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0x3010",
+    "codepoint": 12304,
+    "unicode": "【",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0x3011",
+    "codepoint": 12305,
+    "unicode": "】",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0x3014",
+    "codepoint": 12308,
+    "unicode": "〔",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0x3015",
+    "codepoint": 12309,
+    "unicode": "〕",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0xFFE5",
+    "codepoint": 65509,
+    "unicode": "￥",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0xFF20",
+    "codepoint": 65312,
+    "unicode": "＠",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0x3012",
+    "codepoint": 12306,
+    "unicode": "〒",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0x3000",
+    "codepoint": 12288,
+    "unicode": "　",
+    "mathematica": "\\[COMPATIBILITYKanjiSpace]",
+    "name": "COMPATIBILITYKanjiSpace",
+    "aliases": []
+  },
+  {
+    "hex": "0x3001",
+    "codepoint": 12289,
+    "unicode": "、",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0x3002",
+    "codepoint": 12290,
+    "unicode": "。",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0xFF0C",
+    "codepoint": 65292,
+    "unicode": "，",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0xFF0E",
+    "codepoint": 65294,
+    "unicode": "．",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0xFF1A",
+    "codepoint": 65306,
+    "unicode": "：",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0xFF1B",
+    "codepoint": 65307,
+    "unicode": "；",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0xFF1F",
+    "codepoint": 65311,
+    "unicode": "？",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0xFF01",
+    "codepoint": 65281,
+    "unicode": "！",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0x309B",
+    "codepoint": 12443,
+    "unicode": "゛",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0x309C",
+    "codepoint": 12444,
+    "unicode": "゜",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0x30FD",
+    "codepoint": 12541,
+    "unicode": "ヽ",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0x30FE",
+    "codepoint": 12542,
+    "unicode": "ヾ",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0x309D",
+    "codepoint": 12445,
+    "unicode": "ゝ",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0x309E",
+    "codepoint": 12446,
+    "unicode": "ゞ",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  },
+  {
+    "hex": "0x2015",
+    "codepoint": 8213,
+    "unicode": "―",
+    "mathematica": "\\[]",
+    "name": "",
+    "aliases": []
+  }
+]

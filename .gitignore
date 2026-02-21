@@ -1,0 +1,16 @@
+# Node
+node_modules/
+
+# Intermediate build artifacts (keep wstp/build/Release/wstp.node)
+wstp/build/Release/*.o
+wstp/build/Release/*.a
+wstp/build/Release/obj.target/
+
+# VSIX packages (build artifacts)
+*.vsix
+
+# macOS
+.DS_Store
+
+# VS Code local settings
+.vscode/

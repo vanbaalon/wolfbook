@@ -1,0 +1,109 @@
+"use strict";
+/*
+ *  wolfbook
+ *
+ *  Copyright (c) 2026 Nikolay Gromov. All rights reserved.
+ *  Licensed under the Apache License, Version 2.0.
+ *
+ *  Based on vscode-wolfram by Wolfram Research (Apache 2.0).
+ */
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.FindKernel = void 0;
+const vscode = require("vscode");
+const fs = require('fs');
+class FindKernel {
+    constructor() {
+        this.linuxKernelPath = [
+            // ToDo: Add Wolfram app paths
+            "/usr/local/Wolfram/Wolfram/14.2/Executables/WolframKernel",
+            "/usr/local/Wolfram/WolframEngine/14.2/Executables/WolframKernel",
+            "/usr/local/Wolfram/Wolfram/14.1/Executables/WolframKernel",
+            "/usr/local/Wolfram/WolframEngine/14.1/Executables/WolframKernel",
+            "/usr/local/Wolfram/Mathematica/14.0/Executables/WolframKernel",
+            "/usr/local/Wolfram/WolframEngine/14.0/Executables/WolframKernel",
+            "/usr/local/Wolfram/Mathematica/13.3/Executables/WolframKernel",
+            "/usr/local/Wolfram/WolframEngine/13.3/Executables/WolframKernel",
+            "/usr/local/Wolfram/Mathematica/13.2/Executables/WolframKernel",
+            "/usr/local/Wolfram/WolframEngine/13.2/Executables/WolframKernel",
+            "/usr/local/Wolfram/Mathematica/13.1/Executables/WolframKernel",
+            "/usr/local/Wolfram/WolframEngine/13.1/Executables/WolframKernel",
+            "/usr/local/Wolfram/Mathematica/13.0/Executables/WolframKernel",
+            "/usr/local/Wolfram/WolframEngine/13.0/Executables/WolframKernel",
+            "/usr/local/Wolfram/Mathematica/12.3/Executables/WolframKernel",
+            "/usr/local/Wolfram/WolframEngine/12.3/Executables/WolframKernel",
+            "/usr/local/Wolfram/Mathematica/12.2/Executables/WolframKernel",
+            "/usr/local/Wolfram/WolframEngine/12.2/Executables/WolframKernel",
+            "/usr/local/Wolfram/Mathematica/12.1/Executables/WolframKernel",
+            "/usr/local/Wolfram/WolframEngine/12.1/Executables/WolframKernel"
+        ];
+        this.macKernelPath = [
+            "/Applications/Wolfram.app/Contents/MacOS/WolframKernel",
+            "/Applications/Mathematica.app/Contents/MacOS/WolframKernel",
+            "/Applications/Wolfram Engine.app/Contents/MacOS/WolframKernel"
+        ];
+        this.winKernelPath = [
+            "C:\\Program Files\\Wolfram Research\\Wolfram\\14.2\\WolframKernel.exe",
+            "C:\\Program Files\\Wolfram Research\\Wolfram Engine\\14.2\\WolframKernel.exe",
+            "C:\\Program Files\\Wolfram Research\\Wolfram\\14.1\\WolframKernel.exe",
+            "C:\\Program Files\\Wolfram Research\\Wolfram Engine\\14.1\\WolframKernel.exe",
+            "C:\\Program Files\\Wolfram Research\\Mathematica\\14.0\\WolframKernel.exe",
+            "C:\\Program Files\\Wolfram Research\\Wolfram Engine\\14.0\\WolframKernel.exe",
+            "C:\\Program Files\\Wolfram Research\\Mathematica\\13.3\\WolframKernel.exe",
+            "C:\\Program Files\\Wolfram Research\\Wolfram Engine\\13.3\\WolframKernel.exe",
+            "C:\\Program Files\\Wolfram Research\\Mathematica\\13.2\\WolframKernel.exe",
+            "C:\\Program Files\\Wolfram Research\\Wolfram Engine\\13.2\\WolframKernel.exe",
+            "C:\\Program Files\\Wolfram Research\\Mathematica\\13.1\\WolframKernel.exe",
+            "C:\\Program Files\\Wolfram Research\\Wolfram Engine\\13.1\\WolframKernel.exe",
+            "C:\\Program Files\\Wolfram Research\\Mathematica\\13.0\\WolframKernel.exe",
+            "C:\\Program Files\\Wolfram Research\\Wolfram Engine\\13.0\\WolframKernel.exe",
+            "C:\\Program Files\\Wolfram Research\\Mathematica\\12.3\\WolframKernel.exe",
+            "C:\\Program Files\\Wolfram Research\\Wolfram Engine\\12.3\\WolframKernel.exe",
+            "C:\\Program Files\\Wolfram Research\\Mathematica\\12.2\\WolframKernel.exe",
+            "C:\\Program Files\\Wolfram Research\\Wolfram Engine\\12.2\\WolframKernel.exe",
+            "C:\\Program Files\\Wolfram Research\\Mathematica\\12.1\\WolframKernel.exe",
+            "C:\\Program Files\\Wolfram Research\\Wolfram Engine\\12.1\\WolframKernel.exe"
+        ];
+    }
+    resolveKernel() {
+        const config = vscode.workspace.getConfiguration("wolfram", null);
+        let kernel = config.get("systemKernel", "Automatic");
+        // kernel is the default value, so resolve to an actual path
+        if (kernel == "Automatic") {
+            kernel = this.getOSKernelPath();
+        }
+        return kernel;
+    }
+    getOSKernelPath() {
+        let possibleKernelPaths;
+        switch (process.platform) {
+            case "linux":
+                //
+                // generally recommend newer versions over older versions
+                // and recommend pre-13.0 Wolfram Engine last, because usage messages did not work before 13.0
+                //
+                possibleKernelPaths = this.linuxKernelPath;
+                break;
+            case "darwin":
+                possibleKernelPaths = this.macKernelPath;
+                break;
+            case "win32":
+                //
+                // generally recommend newer versions over older versions
+                // and recommend pre-13.0 Wolfram Engine last, because usage messages did not work before 13.0
+                //
+                possibleKernelPaths = this.winKernelPath;
+                break;
+            default:
+                possibleKernelPaths = [];
+                break;
+        }
+        let res = possibleKernelPaths.find(k => fs.existsSync(k));
+        if (res === undefined) {
+            res = "kernel-not-found";
+        }
+        return res;
+    }
+}
+exports.FindKernel = FindKernel;
+;
+//# sourceMappingURL=find-kernel.js.map
