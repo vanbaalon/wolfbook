@@ -41,10 +41,7 @@ Select text containing `\[Name]` patterns and run the command:
 
 ## Source
 
-Mappings extracted from:
-```
-/Applications/Wolfram 3.app/Contents/SystemFiles/FrontEnd/TextResources/UnicodeCharacters.tr
-```
+Mappings were extracted from the Wolfram Language character encoding database included in a local Wolfram installation (`UnicodeCharacters.tr`), using the dev tool `dev/parse_wolfram_aliases.js`.
 
 - Original: 1,160 character mappings
 - Filtered: 596 character mappings (excludes private use area and non-standard variants)

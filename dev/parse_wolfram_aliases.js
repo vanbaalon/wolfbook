@@ -1,8 +1,12 @@
 const fs = require('fs');
 const path = require('path');
 
-// Parse UnicodeCharacters.tr file to extract alias mappings
-const filePath = '/Applications/Wolfram 3.app/Contents/SystemFiles/FrontEnd/TextResources/UnicodeCharacters.tr';
+// Parse UnicodeCharacters.tr file to extract alias mappings.
+// This file is part of a local Wolfram Language installation (not redistributable).
+// Typical location on macOS: /Applications/Wolfram <version>.app/Contents/SystemFiles/FrontEnd/TextResources/UnicodeCharacters.tr
+// On Linux: <wolfram_dir>/SystemFiles/FrontEnd/TextResources/UnicodeCharacters.tr
+// Pass the path as a command-line argument, or set it here:
+const filePath = process.argv[2] || 'UnicodeCharacters.tr';
 const content = fs.readFileSync(filePath, 'utf8');
 
 const aliasMap = {};
