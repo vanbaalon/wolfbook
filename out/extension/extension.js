@@ -216,37 +216,6 @@ function activate(context) {
     (0, notebook_settings_1.registerNotebookSettings)(context);
     console.log('[Extension] Notebook settings registered');
 
-    // Cell status bar: show [N] • timing on the RIGHT side with muted colour.
-    // notebook.showCellStatusBar:"hidden" suppresses VS Code's built-in left and
-    // right items (spinner, elapsed time, native [N]); contributed provider items
-    // are unaffected by that setting and are always shown.
-    function formatDuration(ms) {
-        if (ms < 1000) return `${ms} ms`;
-        return `${(ms / 1000).toFixed(1)} s`;
-    }
-    context.subscriptions.push(
-        vscode.notebooks.registerNotebookCellStatusBarItemProvider(NOTEBOOK_TYPE, {
-            provideCellStatusBarItems(cell) {
-                const exec = cell.executionSummary;
-                if (!exec || exec.executionOrder == null) return [];
-                const timing = exec.timing;
-                const durationStr = (timing && timing.endTime != null)
-                    ? ` \u2022 ${formatDuration(timing.endTime - timing.startTime)}`
-                    : '';
-                const label = `[${exec.executionOrder}]${durationStr}`;
-                const item = new vscode.NotebookCellStatusBarItem(
-                    label,
-                    vscode.NotebookCellStatusBarAlignment.Right
-                );
-                item.color = new vscode.ThemeColor('descriptionForeground');
-                item.tooltip = exec.success === false
-                    ? 'Evaluation failed'
-                    : `Execution order: ${exec.executionOrder}${timing ? ` | Duration: ${formatDuration(timing.endTime - timing.startTime)}` : ''}`;
-                return [item];
-            }
-        })
-    );
-
     // Setup LSP client
     let enabled = config.get("lsp.serverEnabled", true);
     if (!enabled) {

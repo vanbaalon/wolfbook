@@ -1047,7 +1047,7 @@
 					"―": true
 				}
 			},
-			"notebook.showCellStatusBar": "hidden"
+			"notebook.showCellStatusBar": "visibleAfterExecute"
 		}
 	},
 	"scripts": {
