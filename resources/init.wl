@@ -481,6 +481,15 @@ Block[{$InputFileName = $InputFileName},
     Quiet[Get[FileNameJoin[{DirectoryName[$InputFileName], "render-html.wl"}]]]
 ];
 
+(* ===== Print / $PageWidth ===== *)
+(* Set $PageWidth wide enough that Print[] / OutputForm don't wrap inside the
+   VS Code output pane. The default (78) causes ragged line-breaks for any
+   moderately sized list. 156 = 2× the Mathematica default — matches the
+   wolfram.notebook.print.pageWidth config default in package.json.
+   controller.js also sets this after launch, but doing it here is insurance
+   in case the WSTP sub() call is dropped or the config hasn't loaded yet. *)
+$PageWidth = 156;
+
 (* ===== Interrupt → Dialog handler ===== *)
 (* Required for the ⌥⇧↵ "evaluate in dialog" and variable-monitor features.     *)
 (* When JS calls session.interrupt() (WSInterruptMessage), this handler opens    *)
