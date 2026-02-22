@@ -838,7 +838,7 @@ class WolframNotebookKernel {
 
                             // Detect skeleton (Short[] applied kernel-side) OR raw truncation
                             const isSkeleton = html.includes('data-wolfram-is-skeleton');
-                            const headerRow = `<div class="wl-output-header" style="display:flex;align-items:center;gap:6px;" data-session-epoch="${this._sessionEpoch}">${outLabel}</div>`;
+                            const headerRow = `<div class="wl-output-header" style="display:flex;align-items:center;gap:6px;width:100%;" data-session-epoch="${this._sessionEpoch}">${outLabel}</div>`;
                             if (html.length > maxLen || isSkeleton) {
                                 const outputId = currentExecution.id + "-" + i;
                                 // For raw truncation: clip at maxLen
@@ -972,7 +972,7 @@ class WolframNotebookKernel {
         const outLabel = `<span style="font-size:10px;color:#888;margin-right:8px;">Out[${outN}]=</span>`;
         const finalHtml =
             `<div class="wl-output-block">` +
-            `<div class="wl-output-header" style="display:flex;align-items:center;gap:6px;" data-session-epoch="${this._sessionEpoch}">${outLabel}</div>` +
+            `<div class="wl-output-header" style="display:flex;align-items:center;gap:6px;width:100%;" data-session-epoch="${this._sessionEpoch}">${outLabel}</div>` +
             `<div class="wl-output-content">${fullHtml}</div>` +
             `</div>`;
 
