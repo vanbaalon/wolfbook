@@ -482,13 +482,23 @@ Block[{$InputFileName = $InputFileName},
 ];
 
 (* ===== Print / $PageWidth ===== *)
-(* Set $PageWidth wide enough that Print[] / OutputForm don't wrap inside the
-   VS Code output pane. The default (78) causes ragged line-breaks for any
-   moderately sized list. 156 = 2× the Mathematica default — matches the
-   wolfram.notebook.print.pageWidth config default in package.json.
-   controller.js also sets this after launch, but doing it here is insurance
-   in case the WSTP sub() call is dropped or the config hasn't loaded yet. *)
+(* The WSTP $Output stream is a pseudo-stream; setting PageWidth on it via
+   SetOptions has no effect on how Print[] wraps its output.  The only
+   reliable fix is to override Print[] so each argument is formatted with
+   ToString[..., OutputForm, PageWidth -> $PageWidth] explicitly.
+   156 = 2× the standard Mathematica default of 78, matching the
+   wolfram.notebook.print.pageWidth package.json default.
+   controller.js also updates $PageWidth after launch so the user-configured
+   value takes effect without a kernel restart. *)
 $PageWidth = 156;
+Unprotect[Print];
+Print[args___] /; !TrueQ[$inPrintPatch] :=
+    Block[{$inPrintPatch = True},
+        WriteString[$Output,
+            StringJoin[ToString[#, OutputForm, PageWidth -> $PageWidth] & /@ {args}] <> "\n"
+        ]
+    ];
+Protect[Print];
 
 (* ===== Interrupt → Dialog handler ===== *)
 (* Required for the ⌥⇧↵ "evaluate in dialog" and variable-monitor features.     *)

@@ -1315,6 +1315,9 @@ class WolframNotebookKernel {
             // instead of the default 78 characters.  Two times the default (156)
             // avoids most wrapping while keeping ASCII-art power notation readable.
             const printPageWidth = this.config.get("notebook.print.pageWidth") ?? 156;
+            // Update $PageWidth so the Print[] override in init.wl picks up the
+            // user-configured value (init.wl sets the default of 156 at launch;
+            // this call overrides it with whatever the workspace setting says).
             await this.session.sub(`$PageWidth = ${printPageWidth}`).catch(() => {});
 
             // Note: the interrupt → Dialog[] handler is installed by init.wl
