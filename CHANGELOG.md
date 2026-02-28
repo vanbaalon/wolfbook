@@ -4,6 +4,25 @@ All notable changes to **Wolfbook** are documented here.
 
 ---
 
+## [2.0.2] - 2026-02-28
+
+### Fixed
+- **Dialog cleanup — no more hanging promises**: A new `closeAllDialogs()` method on
+  `WstpSession` atomically drains the internal dialog queue, immediately rejecting every
+  pending `dialogEval()` / `exitDialog()` promise. Previously these could hang forever
+  after an abort or when `isDialogOpen` was stale (drain loop exited but flag not cleared).
+- **`abort()` clears dialog state**: `abort()` now calls `closeAllDialogs()` internally,
+  so the JS-side `isDialogOpen` flag and all pending dialog promises are cleaned up
+  atomically with sending `WSAbortMessage`.
+- **`exitDialog()` stale-state guard**: If `isDialogOpen=true` but the evaluation loop
+  has already exited (`busy=false`), `exitDialog()` now resolves immediately and resets
+  the flag instead of enqueuing a request nobody would ever service.
+- **Recovery paths simplified**: All `try { exitDialog() } catch(_) {}` workarounds in
+  the extension's dynamic widget loops replaced with the reliable `closeAllDialogs()`
+  call.
+
+---
+
 ## [2.0.0] - 2026-02-22
 
 ### Highlights (Wolfbook release)
