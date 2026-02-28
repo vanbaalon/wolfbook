@@ -21,16 +21,51 @@ const notebook_config_1 = require("./notebook-config");
 const notebook_kernel_1 = require("./notebook-kernel");
 const find_kernel_1    = require("./find-kernel");
 
-// ---- Scroll debug flag ----
-// Set SCROLL_DEBUG = false to silence [scroll] logs in production.
-const SCROLL_DEBUG = true;
-const scrollLog = (...args) => SCROLL_DEBUG && console.log('[scroll]', ...args);
+// ---- WolfbookLaTeX: C++ box→LaTeX addon + KaTeX pre-renderer (optional) ----
+// Loaded lazily on first WLLatex format request. Gracefully unavailable if not built.
+// Binaries live in <extension-root>/wllatex-addon/ (copied there by deploy-extension.sh).
+const _BTL_ADDON_PATH       = require('path').join(__dirname, '../../wllatex-addon/wolfbook_btl.node');
+const _KATEX_PRERENDER_PATH = require('path').join(__dirname, '../../wllatex-addon/katexPrerender.js');
+let   _btlAddon = null;
+let   _btlPrerenderLatex = null;
+function _loadBtlAddon() {
+    if (_btlAddon) return true;
+    try {
+        _btlAddon = require(_BTL_ADDON_PATH);
+        _btlPrerenderLatex = require(_KATEX_PRERENDER_PATH).prerenderLatex;
+        return true;
+    } catch (_) { return false; }
+}
 
-// Delay (ms) before calling revealRange after first output arrives.
-// Must be long enough for the renderer webview to finish browser layout
-// (innerHTML set → layout pass → stable cell height).  300 ms covers
-// MathML and SVG outputs; reduce if outputs are always fast to render.
-const SCROLL_DELAY_MS = 300;
+// ---- Scroll / focus debug logging ----
+// scrollLog() writes to both the DevTools console AND a dedicated file:
+//   <workspace>/Temporary Docs/wolfram-scroll-debug.log
+// Set SCROLL_DEBUG = false to disable all scroll logging.
+const SCROLL_DEBUG = true;
+let _scrollLogPath = null;  // resolved once on first write
+function _resolveScrollLogPath() {
+    if (_scrollLogPath) return _scrollLogPath;
+    const folders = (typeof vscode !== 'undefined') && vscode.workspace && vscode.workspace.workspaceFolders;
+    if (!folders || folders.length === 0) return null;
+    const extFolder = folders.find(f => f.name === 'VSCodeWolframExtension');
+    const base = extFolder ? extFolder.uri.fsPath : folders[0].uri.fsPath;
+    _scrollLogPath = require('path').join(base, 'Temporary Docs', 'wolfram-scroll-debug.log');
+    return _scrollLogPath;
+}
+function scrollLog(...args) {
+    if (!SCROLL_DEBUG) return;
+    const msg = '[scroll] ' + args.join(' ');
+    console.log(msg);
+    const p = _resolveScrollLogPath();
+    if (p) {
+        try {
+            require('fs').appendFileSync(p, '[' + new Date().toISOString() + '] ' + msg + '\n');
+        } catch (_) {}
+    }
+}
+
+// (SCROLL_DELAY_MS removed — Advance-mode scroll now fires on Shift+Enter,
+// not on first output arrival, so no layout-wait delay is needed.)
 
 // ---- lazy-load the native WSTP addon (requires wstp/build/Release/wstp.node) ----
 let WstpSession;
@@ -41,7 +76,7 @@ try {
 }
 
 class WolframNotebookKernel {
-    constructor() {
+    constructor(extContext) {
         this.notebookConfig = vscode.workspace.getConfiguration("wolfram", null);
         this._id                 = "wolfram-notebook-kernel";
         this._label              = "Wolfram Kernel";
@@ -79,20 +114,90 @@ class WolframNotebookKernel {
 
         this.cellDecorations      = new Map();  // docUri -> ranges[]
         this.truncatedOutputCells = new Map();  // outputId -> {cell, outN}
+        // Per-output registry — maps uniqueOutputId → {cell, outN, outName, format}.
+        // Populated for every rendered result output (truncated or not) so that
+        // the format-switch buttons can trigger a re-render from any output.
+        this._outputRegistry     = new Map();
+        // Per-cell format override — maps cellUri → 'MathML'|'SVG'|'InputForm'.
+        // Set by the user clicking a format button; read at the start of each
+        // evaluation to select the render format for that cell.
+        this._cellOutputFormat   = new Map();
+        // Per-notebook default format — SPLIT by output type so graphics and
+        // expression defaults are independent.  Double-clicking a button on a
+        // graphics output sets _notebookDefaultGfxFormat; on an expression output
+        // sets _notebookDefaultExprFormat.  Both are persisted to globalState.
+        this._notebookDefaultGfxFormat  = new Map();   // notebookUri → format (graphics)
+        this._notebookDefaultExprFormat = new Map();   // notebookUri → format (expressions)
+        this._outputIdCounter    = 0;  // monotonic counter for unique outputIds
         // Session epoch: incremented on every kernel launch so the renderer can
         // remove dynamic elements (Out[N]= labels, expand banners) from old sessions.
-        this._sessionEpoch = 0;
+        // Use a random non-zero initial epoch so that all outputs stored by any
+        // prior VS Code session (which used a different random epoch) are cleaned up
+        // by the renderer's session-changed handler on notebook open/reload.
+        this._sessionEpoch = (Math.random() * 999998 | 0) + 1;
+        // Extension context — used to persist per-notebook settings (globalState).
+        this._extContext = extContext || null;
 
         // Apply offline renderer overlay to any wolfram notebook that becomes visible
         // while the kernel is not running.
+        // Also restores per-notebook default output format from persistent storage.
+        // Also sends session-changed so the renderer can clean up stale session elements
+        // from a previous run (e.g. when the notebook is reopened without restarting VS Code).
         vscode.window.onDidChangeVisibleNotebookEditors(() => {
             if (this.kernelStatusString !== 'resolved') this._applyKernelOfflineUI();
+            // Send current epoch so renderer removes stale Out-headers/banners from old sessions
+            try {
+                this._rendererMessaging.postMessage(
+                    { type: 'session-changed', epoch: this._sessionEpoch }
+                );
+            } catch (_) {}
+            // Restore per-notebook default format for newly visible notebooks
+            if (this._extContext) {
+                for (const ed of vscode.window.visibleNotebookEditors) {
+                    const key = ed.notebook.uri.toString();
+                    if (!this._notebookDefaultGfxFormat.has(key) && !this._notebookDefaultExprFormat.has(key)) {
+                        const savedGfx  = this._extContext.globalState.get('wolfbook.nbDefaultFmtGfx.'  + key);
+                        // Legacy key migration: old single key falls to expr default
+                        const savedExpr = this._extContext.globalState.get('wolfbook.nbDefaultFmtExpr.' + key)
+                                       || this._extContext.globalState.get('wolfbook.nbDefaultFmt.'     + key);
+                        if (savedGfx)  this._notebookDefaultGfxFormat.set(key, savedGfx);
+                        if (savedExpr) this._notebookDefaultExprFormat.set(key, savedExpr);
+                        if (savedGfx || savedExpr) {
+                            try {
+                                this._rendererMessaging.postMessage(
+                                    { type: 'nb-default-format', formatGfx: savedGfx || '', formatExpr: savedExpr || '' }
+                                );
+                            } catch (_) {}
+                        }
+                    }
+                }
+            }
         });
         // Scroll-after-evaluation tracking: stored by cell INDEX (number), not
         // object reference, because VS Code may return different proxy objects
         // from createNotebookCellExecution than were passed in.
         this._pendingScrollCellIndex    = null;  // set by markKeyboardExecution()
         this._pendingScrollCellNotebook = null;  // set by markKeyboardExecution()
+        this._pendingScrollMode         = null;  // 'advance' | 'refine' — set by execute()
+
+        // ---- Eval mode: two-mode scroll/focus behaviour ----
+        // _cellLastSource: maps cellUri → source text of last evaluation.
+        // Used to auto-detect Mode A (unchanged cell) vs Mode B (changed cell).
+        this._cellLastSource   = new Map();
+        // _cellDirty: set of cellUris edited since their last evaluation (or ever,
+        // if never evaluated).  Populated by onDidChangeTextDocument so that editing
+        // a cell before its first evaluation is detected as srcChanged = true → Refine.
+        this._cellDirty        = new Set();
+        this._evalModeOverride = this.notebookConfig.get("evalMode", "auto") || "auto";
+
+        // Status bar item shows the active eval mode; click cycles to next.
+        this._evalModeStatusBar = vscode.window.createStatusBarItem(
+            "wolfram-eval-mode", vscode.StatusBarAlignment.Right, 99
+        );
+        this._evalModeStatusBar.name = "Wolfram Eval Mode";
+        this._evalModeStatusBar.show();
+        vscode.commands.executeCommand("setContext", "wolframEvalMode", this._evalModeOverride);
+        this._updateEvalModeStatusBar();
 
         this.logFile = this.notebookConfig.get("advanced.notebook.logDirectory", "Off");
         if (this.logFile !== "Off") {
@@ -111,13 +216,31 @@ class WolframNotebookKernel {
 
         // ---- Log all notebook selection/focus changes ----
         // This captures VS Code's auto-advance to the next cell after Shift+Enter
-        // as well as any manual navigation — visible in DevTools console.
+        // as well as any manual navigation — visible in DevTools console + scroll log file.
         vscode.window.onDidChangeNotebookEditorSelection(event => {
             const ed  = event.notebookEditor;
             const sel = event.selections;
             const indices = sel.map(r => `${r.start}-${r.end}`).join(', ');
-            scrollLog('[selection-change] notebook editor selection →', indices,
-                      '| editor notebook uri:', ed.notebook.uri.fsPath.split('/').pop());
+            scrollLog('[sel-change] →', indices,
+                      '| nb:', ed.notebook.uri.fsPath.split('/').pop());
+        });
+
+        // ---- Auto-GC when cells are deleted from any wolfram notebook ----
+        // Runs _cleanupImgDir for the affected notebook so pasted/rendered images
+        // whose cells were removed get deleted from img/<nbBase>/ immediately.
+        vscode.workspace.onDidChangeNotebookDocument(event => {
+            const hasCellRemovals = event.cellChanges.some(c =>
+                c.document == null  // cell was removed (no longer has a document)
+            ) || event.contentChanges.some(c => c.removedCells && c.removedCells.length > 0);
+            if (!hasCellRemovals) return;
+            const notebook  = event.notebook;
+            const nbFsPath  = notebook.uri.fsPath;
+            const nbBase    = path.basename(nbFsPath, path.extname(nbFsPath));
+            const imgDir    = path.join(path.dirname(nbFsPath), 'img', nbBase);
+            // Debounce: wait 15 s — GC is non-urgent and we don't want it to
+            // fire on every keystroke-induced cell change while editing.
+            clearTimeout(this._gcDebounce);
+            this._gcDebounce = setTimeout(() => this._cleanupImgDir(notebook, imgDir), 15000);
         });
 
         // ---- Renderer messaging: expand / open-as-text buttons ----
@@ -136,10 +259,13 @@ class WolframNotebookKernel {
                 // MathML for large lists (e.g. Range[500]) is 80-400 KB and freezes
                 // the browser layout engine, so we fall back to plain InputForm text.
                 const RENDER_TIMEOUT_MS = 3000;
-                const MAX_HTML_BYTES     = 100 * 1024;
+                const MAX_HTML_BYTES     = 1024 * 1024;  // 1 MB
                 try {
+                    const regInfo = this._outputRegistry.get(message.uuid);
+                    const _cellUri = info.cell.document.uri.toString();
+                    const fmt = regInfo?.format || this._resolveFormat(info.cell, regInfo?.isGfx);
                     const renderPromise = this.session.evaluate(
-                        `VsCodeRenderFull[${info.outN}, "Auto", 0.8]`,
+                        `VsCodeRenderFull[${info.outN}, "${fmt}", 0.8]`,
                         { interactive: false }
                     );
                     const timeoutPromise = new Promise((_, rej) =>
@@ -151,7 +277,7 @@ class WolframNotebookKernel {
                     try {
                         const renderResult = await Promise.race([renderPromise, timeoutPromise]);
                         if (renderResult?.result?.type === "string" && renderResult.result.value) {
-                            htmlVal = this._fixImageUris(renderResult.result.value);
+                        htmlVal = this._processWLLatexBoxes(this._fixImageUris(renderResult.result.value));
                             if (htmlVal.length > MAX_HTML_BYTES) {
                                 failReason = `output too large (${(htmlVal.length / 1024).toFixed(0)} KB HTML \u2014 would freeze browser)`;
                                 htmlVal = null;
@@ -229,6 +355,31 @@ class WolframNotebookKernel {
                     );
                 }
 
+            } else if (message.type === 'expand-more-output' && message.uuid) {
+                const outputId = message.uuid;
+                const info = this.truncatedOutputCells.get(outputId);
+                const regInfo = this._outputRegistry.get(outputId);
+                if (!info || !regInfo) return;
+                const newShortLines = (info.shortLines || 20) + 20;
+                info.shortLines = newShortLines;
+                this.truncatedOutputCells.set(outputId, info);
+                const fmt2 = regInfo.format || this._resolveFormat(info.cell, regInfo?.isGfx);
+                const scale2 = Number(this.config.get('imageScale') || 0.8);
+                try {
+                    const moreResult = await this.session.evaluate(
+                        `Module[{e=Short[Out[${info.outN}],${newShortLines}]},VsCodeRenderExpr[e,"${fmt2}",${scale2}]]`,
+                        { interactive: false }
+                    );
+                    if (moreResult?.result?.type === 'string' && moreResult.result.value) {
+                        const moreHtml = this._fixImageUris(moreResult.result.value);
+                        const bannerLabel2 = `&#128230; Large output &#8212; Short[&#8230;,${newShortLines}] (click Full for complete)`;
+                        const bannerHtml2 = this.makeTruncationBanner(outputId, bannerLabel2, newShortLines);
+                        await this._replaceOutputById(info.cell, outputId, moreHtml, info.outN, regInfo.outName, fmt2, bannerHtml2);
+                    }
+                } catch (moreErr) {
+                    vscode.window.showWarningMessage(`Expand more failed: ${moreErr.message}`);
+                }
+
             } else if (message.type === "scroll-to-output" && message.outputId) {
                 // Wrap button clicked — scroll to the top of that output's cell.
                 // Find the cell that owns this outputId by scanning all visible cells.
@@ -254,6 +405,83 @@ class WolframNotebookKernel {
                     if (found) break;
                 }
                 if (!found) scrollLog('scroll-to-output — outputId not found in any visible cell');
+
+            } else if (message.type === 'reformat-output' && message.outputId) {
+                // Format-switch button clicked in renderer: re-render Out[N] in the
+                // requested format and replace the existing cell output in place.
+                const { outputId, newFormat } = message;
+                const info = this._outputRegistry.get(outputId);
+                if (!info) {
+                    this.outputPanel.print(`[Reformat] outputId ${outputId} not found in registry`);
+                    return;
+                }
+                // Remember format for next evaluation of this cell
+                this._cellOutputFormat.set(info.cell.document.uri.toString(), newFormat);
+                const _rfScale = Number(this.config.get('imageScale') || 0.8);
+                try {
+                    const rfResult = await this.session.evaluate(
+                        `VsCodeRender[${info.outN}, "${newFormat}", ${_rfScale}]`,
+                        { interactive: false }
+                    );
+                    // Forward render-time messages (e.g. $RecursionLimit::reclim)
+                    for (const rfMsg of (rfResult.messages || [])) {
+                        vscode.window.showWarningMessage(`Render message: ${rfMsg}`);
+                    }
+                    if (rfResult?.result?.type === 'string' && rfResult.result.value) {
+                        const rfHtml = this._processWLLatexBoxes(this._fixImageUris(rfResult.result.value));
+                        // Update registry so subsequent switches see the new format
+                        info.format = newFormat;
+                        this._outputRegistry.set(outputId, info);
+                        // Preserve truncation banner if reformatted output is still a skeleton
+                        const rfIsSkeleton = rfHtml.includes('data-wolfram-is-skeleton');
+                        let rfBannerHtml = '';
+                        if (rfIsSkeleton) {
+                            const existingEntry = this.truncatedOutputCells.get(outputId);
+                            const sl = existingEntry?.shortLines || 20;
+                            this.truncatedOutputCells.set(outputId, {
+                                ...(existingEntry || {}),
+                                cell: info.cell, outN: info.outN, isSkeleton: true, shortLines: sl
+                            });
+                            const mRf = rfHtml.match(/data-wolfram-atom-count="(\d+)"/);
+                            const atomsRf = mRf ? parseInt(mRf[1]).toLocaleString() : '?';
+                            rfBannerHtml = this.makeTruncationBanner(outputId,
+                                `&#128230; Large output &#8212; ${atomsRf} atoms (skeleton shown)`, sl);
+                        }
+                        await this._replaceOutputById(
+                            info.cell, outputId, rfHtml, info.outN, info.outName, newFormat, rfBannerHtml);
+                        // No viewport scroll — user's scroll position is preserved as-is.
+                    } else {
+                        // Render returned non-string (aborted — e.g. recursive Format rule).
+                        // Keep the existing output intact; message already shown above.
+                        this.outputPanel.print(`[Reformat] render returned non-string (aborted?) for Out[${info.outN}] — keeping previous output`);
+                    }
+                } catch (rfErr) {
+                    this.outputPanel.print(`[Reformat] error: ${rfErr.message}`);
+                    vscode.window.showWarningMessage(`Reformat failed: ${rfErr.message}`);
+                }
+            }
+
+            if (message.type === 'set-notebook-default-format' && message.newFormat) {
+                // Store default format for whatever notebook is active in a visible editor.
+                // isGfx distinguishes the graphics default (SVG/TikZ) from the expression
+                // default (WLLatex/MathML/TeX etc.) so they remain fully independent.
+                for (const ed of vscode.window.visibleNotebookEditors) {
+                    if (ed.notebook) {
+                        const nbKey = ed.notebook.uri.toString();
+                        if (message.isGfx) {
+                            this._notebookDefaultGfxFormat.set(nbKey, message.newFormat);
+                            if (this._extContext) {
+                                try { this._extContext.globalState.update('wolfbook.nbDefaultFmtGfx.' + nbKey, message.newFormat); } catch (_) {}
+                            }
+                        } else {
+                            this._notebookDefaultExprFormat.set(nbKey, message.newFormat);
+                            if (this._extContext) {
+                                try { this._extContext.globalState.update('wolfbook.nbDefaultFmtExpr.' + nbKey, message.newFormat); } catch (_) {}
+                            }
+                        }
+                        break;
+                    }
+                }
             }
 
             // ---- Dialog subsession messages ----
@@ -312,6 +540,15 @@ class WolframNotebookKernel {
                 );
                 if (editor) editor.setDecorations(this.syntaxErrorDecoration, []);
                 this.diagnosticCollection.delete(event.document.uri);
+            }
+            // Track cell edits for mode auto-detection.
+            // Notebook cell documents use the 'vscode-notebook-cell' URI scheme.
+            // Any edit marks the cell dirty so that running it for the first time
+            // after editing is correctly detected as Refine (source changed), even
+            // if it has never been evaluated before.
+            if (event.document.uri.scheme === 'vscode-notebook-cell' &&
+                event.contentChanges.length > 0) {
+                this._cellDirty.add(docUri);
             }
         });
     }
@@ -373,85 +610,93 @@ class WolframNotebookKernel {
         });
     }
 
-    // Called by wolfram.executeCell command before invoking execute().
-    // Tags the cell so checkoutExecutionQueue knows to scroll after first output.
+    // Tags the cell so checkoutExecutionQueue knows the scroll mode for this execution.
     // We store the cell INDEX (number) and notebook reference rather than the
     // cell object itself, because VS Code may wrap the cell in a different proxy
     // by the time checkoutExecutionQueue runs.
-    markKeyboardExecution(cell) {
+    // mode: 'advance' (scroll to output, advance focus) | 'refine' (no scroll, stay on cell)
+    markKeyboardExecution(cell, mode = 'advance') {
         this._pendingScrollCellIndex    = cell.index;
         this._pendingScrollCellNotebook = cell.notebook;
-        scrollLog('keyboard execution marked — scroll armed for cell index', cell.index);
+        this._pendingScrollMode         = mode;
+        scrollLog('[mark] cell index', cell.index, '| mode:', mode);
     }
 
-    // Immediately scrolls back to the evaluated cell to cancel VS Code's
-    // auto-advance scroll (which fires before execute() is called).
-    // Called synchronously inside execute() — no deferral.
-    _counterScrollNow(cell) {
-        const cellIndex = cell.index;
-        const notebook  = cell.notebook;
-        scrollLog('_counterScrollNow — immediately scrolling to cell', cellIndex,
-                  'to cancel VS Code auto-advance');
+    // -----------------------------------------------------------------------
+    // setEvalMode: changes the manual override and updates context + status bar.
+    // mode: 'auto' | 'advance' | 'refine'
+    setEvalMode(mode) {
+        this._evalModeOverride = mode;
+        vscode.commands.executeCommand("setContext", "wolframEvalMode", mode);
+        this._updateEvalModeStatusBar();
+        scrollLog('eval mode override changed to:', mode);
+    }
+
+    // Update the status bar text/tooltip/command for the current override mode.
+    _updateEvalModeStatusBar() {
+        const m = this._evalModeOverride;
+        if (m === 'refine') {
+            this._evalModeStatusBar.text    = '$(sync) WL: Refine';
+            this._evalModeStatusBar.tooltip = 'Eval mode: Refine — no scroll, stay on cell for iteration. Click to reset to Auto.';
+            this._evalModeStatusBar.command = 'wolfram.evalMode.auto';
+        } else if (m === 'advance') {
+            this._evalModeStatusBar.text    = '$(arrow-down) WL: Advance';
+            this._evalModeStatusBar.tooltip = 'Eval mode: Advance — scroll to output, move to next cell. Click to force Refine.';
+            this._evalModeStatusBar.command = 'wolfram.evalMode.refine';
+        } else {
+            this._evalModeStatusBar.text    = '$(symbol-misc) WL: Auto';
+            this._evalModeStatusBar.tooltip = 'Eval mode: Auto — changed cell → Refine, unchanged → Advance. Click to force Advance.';
+            this._evalModeStatusBar.command = 'wolfram.evalMode.advance';
+        }
+    }
+
+    // Scrolls the notebook viewport back to the evaluated cell and restores
+    // the selection to that cell.  Must be called via setTimeout(0) so it fires
+    // AFTER VS Code's own post-execute selection advance (which happens when the
+    // executeHandler returns, i.e. after execute() returns).
+    // Used by Refine mode only.  Advance mode scrolls the input cell immediately
+    // via _scrollToInputCellAnimated, called from execute().
+    // Restores the notebook cell SELECTION to cellIndex in place,
+    // with NO viewport movement at all (no revealRange).
+    // Used by Refine mode — the user's current scroll position must be preserved.
+    _restoreSelection(cellIndex, notebook) {
+        scrollLog('[restore-sel] → cell', cellIndex, '(selection only, no scroll)');
         try {
             for (const ed of vscode.window.visibleNotebookEditors) {
                 if (ed.notebook === notebook) {
                     const RangeCtor = vscode.NotebookRange ?? vscode.NotebookCellRange;
-                    ed.revealRange(
-                        new RangeCtor(cellIndex, cellIndex),
-                        vscode.NotebookEditorRevealType.AtTop
-                    );
-                    scrollLog('_counterScrollNow — done');
+                    ed.selections = [new RangeCtor(cellIndex, cellIndex + 1)];
+                    scrollLog('[restore-sel] done — selection set to cell', cellIndex);
                     return;
                 }
             }
+            scrollLog('[restore-sel] no matching editor found');
         } catch (e) {
-            scrollLog('_counterScrollNow error (non-fatal):', e.message);
+            scrollLog('[restore-sel] error (non-fatal):', e.message);
         }
     }
 
-    // Scroll the notebook editor to show the output cell with minimum movement.
-    //
-    // RevealType.AtTop: always aligns the top of the output cell to the top of
-    // the viewport — correct for both short and tall outputs.
-    //
-    // The revealRange call is DEFERRED by SCROLL_DELAY_MS so it fires after:
-    //   (a) VS Code's auto-advance of focus to the next input cell, AND
-    //   (b) the renderer webview finishes browser layout of the new HTML.
-    // setTimeout(0) only wins race (a); the browser needs ~1-2 animation frames
-    // after innerHTML is set before cell heights are stable.
-    _scrollToOutputCell(cell) {
-        // Capture identity before deferring — cell object may be stale by timeout
-        const cellIndex = cell.index;
-        const notebook  = cell.notebook;
-        scrollLog('_scrollToOutputCell — cell index:', cellIndex,
-                  '(deferring', SCROLL_DELAY_MS + 'ms to allow browser layout)');
-        setTimeout(() => {
-            scrollLog('(deferred) revealRange firing — cell index:', cellIndex);
-            try {
-                for (const ed of vscode.window.visibleNotebookEditors) {
-                    if (ed.notebook === notebook) {
-                        // vscode.NotebookCellRange was renamed to vscode.NotebookRange
-                        // in VS Code API ~1.68. Use whichever exists.
-                        const RangeCtor = vscode.NotebookRange ?? vscode.NotebookCellRange;
-                        // AtTop: always aligns the top of the cell to the top of the viewport.
-                        // Default (minimal scroll) scrolls the BOTTOM edge into view for tall
-                        // outputs, landing the user at the end of the output — wrong behaviour.
-                        scrollLog('calling revealRange — using', RangeCtor.name,
-                                  'with NotebookEditorRevealType.AtTop');
-                        ed.revealRange(
-                            new RangeCtor(cellIndex, cellIndex),
-                            vscode.NotebookEditorRevealType.AtTop
-                        );
-                        scrollLog('revealRange dispatched — VS Code applies minimal scroll');
-                        return;
-                    }
+    // Scrolls the evaluated cell's input to the top of the viewport.
+    // Called immediately on Shift+Enter (via setTimeout(0) in execute()), NOT
+    // deferred to first-output arrival.  Because the cell is already at the top
+    // when output arrives, the output fills in below with no viewport jump.
+    _scrollToInputCellAnimated(cellIndex, notebook) {
+        scrollLog('[advance-scroll] scrolling cell', cellIndex, 'to top');
+        try {
+            for (const ed of vscode.window.visibleNotebookEditors) {
+                if (ed.notebook === notebook) {
+                    const RangeCtor = vscode.NotebookRange ?? vscode.NotebookCellRange;
+                    ed.revealRange(new RangeCtor(cellIndex, cellIndex),
+                                  vscode.NotebookEditorRevealType.AtTop);
+                    scrollLog('[advance-scroll] done');
+                    return;
                 }
-                scrollLog('no matching notebook editor found — scroll skipped');
-            } catch (e) {
-                this.writeDebugLog(`[SCROLL] revealRange failed: ${e.message}`);
-                scrollLog('revealRange error:', e.message);
             }
-        }, SCROLL_DELAY_MS);
+            scrollLog('[advance-scroll] no matching editor — skipped');
+        } catch (e) {
+            this.writeDebugLog(`[SCROLL] revealRange failed: ${e.message}`);
+            scrollLog('[advance-scroll] error:', e.message);
+        }
     }
 
     // Relative src= paths (e.g. img/MyNotebook/wl_xxx.svg) resolve correctly
@@ -461,23 +706,115 @@ class WolframNotebookKernel {
         return html;
     }
 
-    makeTruncationBanner(outputId, headerText) {
+    // Resolve the render format for a cell, respecting the type-split notebook defaults.
+    // knownIsGfx: true/false if already known; undefined = scan registry for last output of this cell.
+    _resolveFormat(cell, knownIsGfx) {
+        const cellUri = cell.document.uri.toString();
+        // 1. Per-cell explicit override (set when user clicks a format button)
+        const perCell = this._cellOutputFormat.get(cellUri);
+        if (perCell) return perCell;
+        // 2. Notebook-level default — pick the right one based on output type
+        const nbUri = cell.notebook.uri.toString();
+        let isGfx = knownIsGfx;
+        if (isGfx === undefined) {
+            // Scan registry for the most recent output of this cell
+            for (const [, entry] of this._outputRegistry) {
+                if (entry.cell?.document?.uri?.toString() === cellUri && entry.isGfx !== undefined) {
+                    isGfx = entry.isGfx;
+                }
+            }
+        }
+        if (isGfx === true) {
+            const d = this._notebookDefaultGfxFormat.get(nbUri);
+            if (d) return d;
+        } else if (isGfx === false) {
+            const d = this._notebookDefaultExprFormat.get(nbUri);
+            if (d) return d;
+        }
+        // 3. VS Code settings fallback
+        return String(this.config.get('outputFormat') || 'Auto');
+    }
+
+    // Post-process HTML from the kernel: if it contains a WLLatex box-placeholder
+    // div, decode the boxes, run through the C++ boxToLatex addon, then either
+    // KaTeX-prerender (WLLatex) or emit a raw-latex div for webview rendering (WLLatex2).
+    _processWLLatexBoxes(html) {
+        const hasPrerendered = html.includes('vscode-wolfram-wllatex-boxes"');
+        const hasRaw         = html.includes('vscode-wolfram-wllatex-boxes-raw"');
+        if (!hasPrerendered && !hasRaw) return html;
+        if (!_loadBtlAddon()) {
+            return html
+                .replace(/<div class="vscode-wolfram-wllatex-boxes(-raw)?"[^>]*><\/div>/g,
+                    '<pre class="vscode-wolfram-text-output">WLLatex: addon not available.\n' +
+                    'Build VSCodeWolfbookLaTeX first:\n  cd ~/Dropbox/MY/Programming/VSCodeWolfbookLaTeX && ./build.sh</pre>');
+        }
+        // Helper: run boxToLatex and return { latex, error }
+        const translate = (b64) => {
+            try {
+                const boxStr = Buffer.from(b64, 'base64').toString('utf8');
+                const result = _btlAddon.boxToLatex(boxStr);
+                // boxToLatex returns { latex, error } per README
+                if (result && typeof result === 'object') return { boxStr, latex: result.latex, error: result.error || null };
+                // Older build that returned a plain string
+                return { boxStr, latex: String(result), error: null };
+            } catch (e) {
+                return { boxStr: '(decode failed)', latex: '', error: String(e.message || e) };
+            }
+        };
+        // ---- Mode A: pre-render in extension host (LaTeX button) ----
+        if (hasPrerendered) {
+            html = html.replace(/<div class="vscode-wolfram-wllatex-boxes" data-boxes-b64="([^"]*)">\s*<\/div>/g,
+                (_, b64) => {
+                    const { boxStr, latex, error } = translate(b64);
+                    let rendered;
+                    try {
+                        rendered = _btlPrerenderLatex(latex, true);
+                    } catch (e) {
+                        return '<pre class="vscode-wolfram-text-output">WLLatex KaTeX error: ' +
+                               this.escapeHtml(String(e.message || e)) + '</pre>';
+                    }
+                    const errorNote = error
+                        ? `<div style="color:#e05c4e;font-size:11px;margin:2px 0;">` +
+                          `⚠️ boxToLatex error: ${this.escapeHtml(error)}</div>`
+                        : '';
+                    const debugHtml =
+                        '<details style="margin-top:4px;font-size:11px;opacity:0.65;">' +
+                        '<summary style="cursor:pointer;user-select:none;">WLLatex debug</summary>' +
+                        '<pre style="margin:2px 0;white-space:pre-wrap;word-break:break-all;">' +
+                        '<b>boxes:</b> ' + this.escapeHtml(boxStr) + '\n' +
+                        '<b>latex:</b> ' + this.escapeHtml(latex) +
+                        (error ? '\n<b style="color:#e05c4e;">error:</b> ' + this.escapeHtml(error) : '') +
+                        '</pre></details>';
+                    return '<div class="vscode-wolfram-wllatex-prerendered">' +
+                           errorNote + rendered + debugHtml + '</div>';
+                });
+        }
+        // ---- Mode B: emit raw-latex div, rendered by webview KaTeX (LaTeX2 button) ----
+        if (hasRaw) {
+            html = html.replace(/<div class="vscode-wolfram-wllatex-boxes-raw" data-boxes-b64="([^"]*)">\s*<\/div>/g,
+                (_, b64) => {
+                    const { boxStr, latex, error } = translate(b64);
+                    const latexB64 = Buffer.from(latex).toString('base64');
+                    const errorAttr = error ? ` data-btl-error="${this.escapeHtml(error)}"` : '';
+                    const boxesAttr = ` data-boxes-b64="${b64}"`;
+                    return `<div class="vscode-wolfram-wllatex-raw-latex" data-latex-b64="${latexB64}"${errorAttr}${boxesAttr}></div>`;
+                });
+        }
+        return html;
+    }
+
+    makeTruncationBanner(outputId, headerText, shortLines = null) {
+        const slAttr = shortLines !== null ? ` data-short-lines="${shortLines}"` : '';
+        const btnStyle = 'padding:1px 6px;font-size:12px;cursor:pointer;line-height:1.5;' +
+            'background:transparent;border:1px solid rgba(128,128,128,0.3);' +
+            'border-radius:3px;color:var(--vscode-foreground,inherit);';
         return `
-<div style="margin-top:6px;padding:8px 12px;background:rgba(255,165,0,0.1);border-left:3px solid #FFA500;border-radius:4px"
-     data-truncated-uuid="${outputId}" data-session-epoch="${this._sessionEpoch}">
-  <div style="color:#FF8C00;font-weight:bold;margin-bottom:6px;font-size:12px;">
-    ${headerText}
-  </div>
-  <div style="display:flex;gap:8px;">
-    <button data-action="expand"
-      style="padding:4px 10px;background:rgba(255,165,0,0.12);color:var(--vscode-foreground,#333);border:1px solid rgba(255,140,0,0.5);border-radius:3px;cursor:pointer;font-size:11px;">
-      &#128269; Expand Inline
-    </button>
-    <button data-action="open-text"
-      style="padding:4px 10px;background:rgba(255,165,0,0.12);color:var(--vscode-foreground,#333);border:1px solid rgba(255,140,0,0.5);border-radius:3px;cursor:pointer;font-size:11px;">
-      &#128196; Open as Text File
-    </button>
-  </div>
+<div style="margin-top:3px;padding:2px 8px;display:flex;align-items:center;gap:6px;border-left:2px solid rgba(128,128,128,0.3);"
+     data-truncated-uuid="${outputId}" data-session-epoch="${this._sessionEpoch}"${slAttr}>
+  <span style="font-size:11px;color:var(--vscode-descriptionForeground,#888);flex:1;">${headerText}</span>
+  <button data-action="expand" style="${btnStyle}" title="Show full output">&#9654;</button>
+  <button data-action="expand-more" style="${btnStyle}" title="Show +20 more lines">&#43;&#8230;</button>
+  <button data-action="open-text" style="${btnStyle}" title="Open as text file">&#128196;</button>
 </div>`;
     }
 
@@ -499,16 +836,72 @@ class WolframNotebookKernel {
                 scrollLog('execute() — cell index', cellIdx, '| selection index', selIdx,
                           '| diff', diff);
                 if (diff === 1 || diff === 0) {
-                    // diff=1: normal Shift+Enter — selection already advanced to next cell
-                    // diff=0: Shift+Enter on last cell — no next cell, selection stayed
-                    scrollLog('  → keyboard-triggered (diff=' + diff + ') — arming scroll for cell', cellIdx);
-                    this.markKeyboardExecution(cells[0]);
-                    // VS Code already scrolled to the next cell (selection-change fired
-                    // before execute()).  Counter-scroll back to the evaluated cell
-                    // IMMEDIATELY here (synchronous, no delay) so the user never sees
-                    // the "jump to next input" — this fires in the same event loop tick
-                    // as execute(), before VS Code has a chance to paint the next cell.
-                    this._counterScrollNow(cells[0]);
+                    // ---- Determine eval mode ----
+                    // Auto-detect: if the cell source changed since the last evaluation
+                    // → Refine (stay on cell); otherwise → Advance (scroll output + advance focus).
+                    const currentSrc   = cells[0].document.getText();
+                    const cellUri      = cells[0].document.uri.toString();
+                    const lastSrc      = this._cellLastSource.get(cellUri);
+                    // srcChanged is true when:
+                    //   (a) cell was evaluated before AND source differs from that evaluation, OR
+                    //   (b) cell was edited (via keyboard) before its very first evaluation.
+                    // Case (b) is tracked by _cellDirty so that edit-then-run-first-time
+                    // is correctly detected as Refine rather than Advance.
+                    const srcChanged   = (lastSrc !== undefined && lastSrc !== currentSrc)
+                                     || (lastSrc === undefined  && this._cellDirty.has(cellUri));
+                    const autoDetected = srcChanged ? 'refine' : 'advance';
+                    const effectiveMode = (this._evalModeOverride !== 'auto')
+                        ? this._evalModeOverride : autoDetected;
+
+                    scrollLog('[execute] cell', cellIdx,
+                              '| diff=' + diff,
+                              '| override=' + this._evalModeOverride,
+                              '| autoDetected=' + autoDetected,
+                              '| effective=' + effectiveMode,
+                              '| srcChanged=' + srcChanged,
+                              '| lastSrc:', lastSrc === undefined ? 'NONE(first run)'
+                                          : (lastSrc === currentSrc ? 'SAME' : 'CHANGED'));
+
+                    this.markKeyboardExecution(cells[0], effectiveMode);
+
+                    if (effectiveMode === 'refine') {
+                        // ---- REFINE MODE ----
+                        // Note: cursor position is saved earlier — in the wolfram.executeCell
+                        // command handler in extension.js, BEFORE the Shift+Enter key event
+                        // causes VS Code to exit edit mode and blur the cell text editor.
+                        // By the time execute() runs here, activeTextEditor is already null.
+                        // _refineSavedCursor / _refineSavedCursorUri are set by executeCell.
+
+                        // VS Code advances selection to N+1 when execute() returns.
+                        // Undo that in the next tick — ONLY restore selection, NO scroll.
+                        // Do NOT call cell.edit here: execution.end() will kill it anyway.
+                        const refineNb      = cells[0].notebook;
+                        const refineCellIdx = cellIdx;
+                        scrollLog('[refine] scheduling setTimeout(0) to restore selection to cell', cellIdx);
+                        setTimeout(() => {
+                            scrollLog('[refine t=0] restoring notebook selection to cell', refineCellIdx);
+                            this._restoreSelection(refineCellIdx, refineNb);
+                        }, 0);
+
+                    } else {
+                        // ---- ADVANCE MODE ----
+                        // Let VS Code advance the selection to N+1 freely.
+                        // Scroll the evaluated cell's input to the top of the viewport
+                        // immediately on Shift+Enter — no waiting for first output.
+                        // Because the cell is already at top when output arrives, it
+                        // fills in below with no post-output viewport jump.
+                        const _advIdx = cellIdx;
+                        const _advNb  = cells[0].notebook;
+                        scrollLog('[advance] scheduling immediate input-cell animated scroll for cell', _advIdx);
+                        setTimeout(() => {
+                            // setTimeout(0) lets VS Code's selection advance (N→N+1) happen
+                            // first, then we scroll the EVALUATED cell (not the newly selected one).
+                            scrollLog('[advance t=0] scrolling cell', _advIdx, 'to top (animated)');
+                            this._scrollToInputCellAnimated(_advIdx, _advNb);
+                        }, 0);
+                    }
+
+                    scrollLog('[execute] current sel:', ed.selections.map(r => r.start + '-' + r.end).join(', '));
                 } else {
                     scrollLog('  → programmatic (diff=' + diff + ') — scroll skipped');
                 }
@@ -579,6 +972,17 @@ class WolframNotebookKernel {
         this.clearSyntaxErrorDecorations(currentExecution.execution.cell);
 
         this.executionQueue.start(currentExecution.id);
+
+        // ---- Record source for eval-mode auto-detection on next run ----
+        // Stored at the START of execution so the NEXT Shift+Enter on this cell
+        // can compare against the version that was actually evaluated.
+        const _cellUriForLog = currentExecution.execution.cell.document.uri.toString();
+        scrollLog('[checkout] recording source for cell', currentExecution.execution.cell.index,
+                  '| uri:', _cellUriForLog.split('#')[1] || _cellUriForLog.slice(-20));
+        this._cellLastSource.set(_cellUriForLog, code);
+        // Clear dirty flag — the current source is now the baseline for next comparison.
+        this._cellDirty.delete(_cellUriForLog);
+
         // Zero-height placeholder so VS Code collapses the output area
         await currentExecution.execution.replaceOutput([
             new vscode.NotebookCellOutput([
@@ -662,9 +1066,10 @@ class WolframNotebookKernel {
                 this.writeDebugLog(`[CHECKOUT] Syntax check error (non-fatal): ${syntaxErr.message}`);
             }
 
-            const format = String(this.config.get("outputFormat") || "Auto");
+            // Per-cell format override takes precedence over the global setting.
+            const format = this._resolveFormat(currentExecution.execution.cell);
             const scale  = Number(this.config.get("imageScale")   || 0.8);
-            const maxLen = Number(this.config.get("maxOutputLength") || 100000);
+            const maxLen = Number(this.config.get("maxOutputLength") || 105000);
 
             // ---- Set per-notebook image directory in the kernel ----
             // Each notebook gets its own img/ subfolder so SVG/PNG files from
@@ -709,10 +1114,12 @@ class WolframNotebookKernel {
                 this._pendingScrollCellIndex    = null;
                 this._pendingScrollCellNotebook = null;
             }
-            let hasScrolled = false;
+            const execMode  = this._pendingScrollMode || 'advance';
+            // Scroll in Advance mode is now fired immediately on Shift+Enter (in
+            // execute()), not here on first output — so no shouldScrollOnOutput flag.
             scrollLog(isKeyboardExec
-                ? 'keyboard execution confirmed — cell index ' + execCell.index + ' — scroll armed'
-                : 'programmatic execution — scroll skipped entirely');
+                ? '[checkout-exec] cell ' + execCell.index + ' | mode: ' + execMode
+                : '[checkout-exec] programmatic');
 
             // ---- Evaluate each sub-expression one by one ----
             // Each goes through the interactive kernel main loop → gets its own
@@ -755,12 +1162,6 @@ class WolframNotebookKernel {
                         } else {
                             currentExecution.hasOutput = true;  // set BEFORE await — prevents race with evaluate() resolving
                             await currentExecution.execution.replaceOutput(printOutput);
-                        }
-                        // First real output has landed — scroll into view if keyboard-triggered
-                        if (isKeyboardExec && !hasScrolled) {
-                            hasScrolled = true;
-                            scrollLog('first Print output arrived — triggering scroll check');
-                            this._scrollToOutputCell(currentExecution.execution.cell);
                         }
                     }
                     printFlushPending = false;
@@ -831,16 +1232,43 @@ class WolframNotebookKernel {
                             `VsCodeRender[${lineN}, "${format}", ${scale}]`,
                             { interactive: false }
                         );
+                        // ---- Forward any messages emitted during the render call ----
+                        // e.g. $RecursionLimit::reclim from a recursive Format rule.
+                        // In the non-interactive render path these were previously silently
+                        // discarded because no onMessage callback was wired.  Now they are
+                        // captured in renderResult.messages and shown as amber warning boxes.
+                        for (const renderMsg of (renderResult.messages || [])) {
+                            const msgHtml =
+                                '<div class="vscode-wolfram-message-output" style="color:#cc8800;padding:4px 0">' +
+                                this.escapeHtml(renderMsg) + '</div>';
+                            const msgOut = new vscode.NotebookCellOutput([
+                                vscode.NotebookCellOutputItem.text(msgHtml, "x-application/wolfram-language-html")
+                            ]);
+                            if (currentExecution.hasOutput) {
+                                await currentExecution.execution.appendOutput(msgOut);
+                            } else {
+                                currentExecution.hasOutput = true;
+                                await currentExecution.execution.replaceOutput(msgOut);
+                            }
+                        }
+
                         if (renderResult?.result?.type === "string" && renderResult.result.value) {
-                            let html = this._fixImageUris(renderResult.result.value);
+                            let html = this._processWLLatexBoxes(this._fixImageUris(renderResult.result.value));
                             const outLabel =
                                 `<span style="font-size:10px;color:#888;margin-right:8px;">${r.outputName}</span>`;
 
                             // Detect skeleton (Short[] applied kernel-side) OR raw truncation
                             const isSkeleton = html.includes('data-wolfram-is-skeleton');
-                            const headerRow = `<div class="wl-output-header" style="display:flex;align-items:center;gap:6px;width:100%;" data-session-epoch="${this._sessionEpoch}">${outLabel}</div>`;
-                            if (html.length > maxLen || isSkeleton) {
-                                const outputId = currentExecution.id + "-" + i;
+                            // Always generate a unique outputId — needed by format-switch buttons
+                            // on ALL outputs (not only truncated ones).
+                            const outputId = (this._outputIdCounter++).toString();
+                            // isGfx: read the authoritative marker embedded by VsCodeRender/VsCodeRenderFull,
+                            // NOT from CSS classes — those vary by format (WL/TeX/LaTeX have no image classes).
+                            const _isGfx = html.includes('vscode-wolfram-gfx-marker');
+                            this._outputRegistry.set(outputId,
+                                { cell: execCell, outN: lineN, outName: r.outputName, format, isGfx: _isGfx });
+                            const headerRow = `<div class="wl-output-header" style="display:flex;align-items:center;gap:6px;width:100%;" data-session-epoch="${this._sessionEpoch}" data-output-id="${outputId}" data-out-n="${lineN}" data-output-format="${format}" data-output-is-graphics="${_isGfx ? '1' : '0'}">${outLabel}</div>`;
+                            if (html.length > maxLen || isSkeleton) {                                const _oid = outputId;
                                 // For raw truncation: clip at maxLen
                                 const displayHtml = html.length > maxLen
                                     ? html.substring(0, maxLen)
@@ -859,10 +1287,10 @@ class WolframNotebookKernel {
                                 }
                                 html = `<div class="wl-output-block">${headerRow}<div class="wl-output-content">${displayHtml}</div></div>` +
                                        this.makeTruncationBanner(outputId, bannerLabel);
-                                this.truncatedOutputCells.set(outputId,
-                                    { cell: currentExecution.execution.cell, outN: lineN });
+                                this.truncatedOutputCells.set(_oid,
+                                    { cell: currentExecution.execution.cell, outN: lineN, shortLines: 20, isSkeleton });
                                 this.writeDebugLog(
-                                    `[CHECKOUT] ${isSkeleton ? 'Skeleton' : 'Truncated'} output OutN=${lineN} OutputID=${outputId}`);
+                                    `[CHECKOUT] ${isSkeleton ? 'Skeleton' : 'Truncated'} output OutN=${lineN} OutputID=${_oid}`);
                             } else {
                                 html = `<div class="wl-output-block">${headerRow}<div class="wl-output-content">${html}</div></div>`;
                             }
@@ -876,12 +1304,40 @@ class WolframNotebookKernel {
                                 await currentExecution.execution.replaceOutput(outObj);
                                 currentExecution.hasOutput = true;
                             }
-                            // First real output (or only output) — scroll into view if keyboard-triggered
-                            if (isKeyboardExec && !hasScrolled) {
-                                hasScrolled = true;
-                                scrollLog('first render result arrived — triggering scroll check');
-                                this._scrollToOutputCell(currentExecution.execution.cell);
-                            }
+                        } else {
+                            // Render returned non-string (most likely $Aborted from
+                            // $RecursionLimit::reclim caused by a recursive Format rule,
+                            // e.g. Format[x]=Style[x,Red]).  The message was shown above.
+                            // Fall back to CheckAbort[ToString[Out[N], InputForm], ...].
+                            try {
+                                const fallback = await this.session.evaluate(
+                                    `CheckAbort[ToString[Out[${lineN}], InputForm], "(output unavailable)"]`,
+                                    { interactive: false }
+                                );
+                                const outLabel =
+                                    `<span style="font-size:10px;color:#888;margin-right:8px;">${r.outputName}</span>`;
+                                const fbText = (fallback?.result?.type === "string" && fallback.result.value)
+                                    ? fallback.result.value : '(output unavailable)';
+                                const fbHtml =
+                                    `<div class="wl-output-block">` +
+                                    `<div class="wl-output-header" style="display:flex;align-items:center;gap:6px;width:100%;">${outLabel}</div>` +
+                                    `<div class="wl-output-content">` +
+                                    `<div class="vscode-wolfram-message-output" style="color:#cc8800;padding:4px 0">` +
+                                    `Rendering failed \u2014 if you have a custom Format rule (e.g. <code>Format[x]=Style[x,Red]</code>), ` +
+                                    `clear it with <code>Unset[Format[x]]</code> then re-evaluate.` +
+                                    `</div>` +
+                                    `<pre class="vscode-wolfram-text-output">${this.escapeHtml(fbText)}</pre>` +
+                                    `</div></div>`;
+                                const fbOut = new vscode.NotebookCellOutput([
+                                    vscode.NotebookCellOutputItem.text(fbHtml, "x-application/wolfram-language-html")
+                                ]);
+                                if (currentExecution.hasOutput) {
+                                    await currentExecution.execution.appendOutput(fbOut);
+                                } else {
+                                    await currentExecution.execution.replaceOutput(fbOut);
+                                    currentExecution.hasOutput = true;
+                                }
+                            } catch (_) {}
                         }
                     } catch (renderErr) {
                         this.writeDebugLog(
@@ -919,7 +1375,90 @@ class WolframNotebookKernel {
                 currentExecution.execution.clearOutput();
             }
 
+            // ---- Capture refine-mode state BEFORE execution.end() ----
+            const _wasRefine  = isKeyboardExec && execMode === 'refine';
+            const _refineIdx  = _wasRefine ? execCell.index   : null;
+            const _refineNb   = _wasRefine ? execCell.notebook : null;
+            // Snapshot the saved cursor state for this execution before the
+            // setTimeout closure captures a potentially stale this._refineSavedCursor.
+            const _savedCursor    = _wasRefine ? this._refineSavedCursor    : null;
+            const _savedCursorUri = _wasRefine ? this._refineSavedCursorUri : null;
+
+            scrollLog('[checkout-end] execution.end() about to fire — cell', execCell.index,
+                      '| wasRefine:', _wasRefine);
             this.executionQueue.end(currentExecution.id, !anyAborted);
+            scrollLog('[checkout-end] execution.end() done');
+
+            // ---- Refine mode: restore selection + edit mode + cursor AFTER execution.end() ----
+            // execution.end() may cause VS Code to emit post-execution selection events.
+            // setTimeout(0) runs after those events.
+            if (_wasRefine) {
+                scrollLog('[refine-post-end] scheduling restore for cell', _refineIdx);
+                setTimeout(() => {
+                    // 1. Restore notebook cell selection (no viewport movement)
+                    scrollLog('[refine-post-end t=0] restoring selection to cell', _refineIdx);
+                    this._restoreSelection(_refineIdx, _refineNb);
+
+                    // 2. Enter edit mode via showTextDocument — targets the cell's
+                    //    TextDocument URI directly, bypassing the notebook.cell.edit
+                    //    command which internally calls focusNotebookCell →
+                    //    revealInViewAtTop and unconditionally scrolls the viewport.
+                    //    showTextDocument enters edit mode without the automatic
+                    //    revealRange that `selection` in ShowOptions would trigger.
+                    //    We restore the cursor manually on the returned editor so
+                    //    that setting .selection on an already-focused doc does NOT
+                    //    call revealRange and does NOT scroll the viewport.
+                    setTimeout(() => {
+                        scrollLog('[refine-post-end t=30] entering edit mode via showTextDocument on cell', _refineIdx);
+                        try {
+                            const _editCell = _refineNb.cellAt(_refineIdx);
+                            const _showOpts = {
+                                preview: false,
+                                viewColumn: vscode.ViewColumn.Active,
+                                // NOTE: `selection` is intentionally omitted here.
+                                // Passing `selection` to showTextDocument causes VS Code to call
+                                // revealRange internally, which scrolls the viewport to show the
+                                // cursor — exactly what Refine mode must NOT do.
+                                // Instead we set ed.selection manually after the promise resolves;
+                                // mutating .selection on an already-focused TextEditor does not
+                                // trigger revealRange and therefore does not move the viewport.
+                            };
+                            scrollLog('[refine-post-end t=30] showTextDocument (no selection option) — cursor will be set manually');
+                            vscode.window.showTextDocument(_editCell.document, _showOpts).then(
+                                (ed) => {
+                                    // Restore cursor without scrolling: set .selection directly on
+                                    // the already-open editor (does NOT call revealRange).
+                                    if (_savedCursor && ed) {
+                                        ed.selection = _savedCursor;
+                                        scrollLog('[refine-post-end] cursor restored manually —',
+                                            `anchor(${_savedCursor.anchor.line},${_savedCursor.anchor.character})`,
+                                            `active(${_savedCursor.active.line},${_savedCursor.active.character})`);
+                                    } else {
+                                        scrollLog('[refine-post-end] showTextDocument resolved — edit mode entered (no saved cursor)');
+                                    }
+                                },
+                                e => {
+                                    // Fallback: showTextDocument may fail for some cell URI schemes.
+                                    // Fall back to notebook.cell.edit + manual cursor restore.
+                                    scrollLog('[refine-post-end] showTextDocument error:', e?.message,
+                                              '— falling back to notebook.cell.edit');
+                                    vscode.commands.executeCommand('notebook.cell.edit').then(() => {
+                                        if (_savedCursor && _savedCursorUri) {
+                                            const txtEd = vscode.window.activeTextEditor;
+                                            if (txtEd && txtEd.document.uri.toString() === _savedCursorUri) {
+                                                txtEd.selection = _savedCursor;
+                                                scrollLog('[refine-post-end] fallback cursor restored');
+                                            }
+                                        }
+                                    }, () => {});
+                                }
+                            );
+                        } catch (e) {
+                            scrollLog('[refine-post-end] showTextDocument exception:', e?.message);
+                        }
+                    }, 30);
+                }, 0);
+            }
 
         } catch (err) {
             // "Cannot modify cell output after calling resolve" is a benign race
@@ -969,13 +1508,20 @@ class WolframNotebookKernel {
     // -----------------------------------------------------------------------
     // Replace a truncated output (identified by its data-truncated-uuid) with fullHtml
     async _replaceOutputByUuid(cell, uuid, fullHtml, outN) {
-        const outLabel = `<span style="font-size:10px;color:#888;margin-right:8px;">Out[${outN}]=</span>`;
+        // Look up stored metadata so that after expansion the format buttons are
+        // rebuilt with the correct format, outName, and graphics flag.
+        const regInfo    = this._outputRegistry.get(uuid);
+        const fmt        = regInfo?.format || 'Auto';
+        const outName    = regInfo?.outName || ('Out[' + outN + ']=');
+        const outLabel   = `<span style="font-size:10px;color:#888;margin-right:8px;">${outName}</span>`;
+        const _isGfxUuid = regInfo?.isGfx ?? (fullHtml.includes('vscode-wolfram-svg-output') || fullHtml.includes('vscode-wolfram-png-output'));
         const finalHtml =
             `<div class="wl-output-block">` +
-            `<div class="wl-output-header" style="display:flex;align-items:center;gap:6px;width:100%;" data-session-epoch="${this._sessionEpoch}">${outLabel}</div>` +
+            `<div class="wl-output-header" style="display:flex;align-items:center;gap:6px;width:100%;" ` +
+            `data-session-epoch="${this._sessionEpoch}" data-output-id="${uuid}" ` +
+            `data-out-n="${outN}" data-output-format="${fmt}" data-output-is-graphics="${_isGfxUuid ? '1' : '0'}">${outLabel}</div>` +
             `<div class="wl-output-content">${fullHtml}</div>` +
             `</div>`;
-
         // Snapshot outputs BEFORE start() — start() can clear cell.outputs in some VS Code versions
         let targetIndex = -1;
         const allOutputs = [...cell.outputs];
@@ -1006,16 +1552,59 @@ class WolframNotebookKernel {
     }
 
     // -----------------------------------------------------------------------
-    // GC: scan all cell outputs for data-wl-img paths that are still live,
+    // Replace any output identified by its data-output-id (for format switching).
+    // Rebuilds the header with the new format data attribute so buttons stay correct.
+    async _replaceOutputById(cell, outputId, contentHtml, outN, outName, newFormat, bannerHtml = '') {
+        const outLabel   = `<span style="font-size:10px;color:#888;margin-right:8px;">${outName || ('Out[' + outN + ']=')} </span>`;
+        // Prefer stored isGfx flag (set at initial render) so switching to WL/TeX doesn't
+        // lose the graphics-specific button set.
+        const _regEntry  = this._outputRegistry.get(outputId);
+        const _isGfxById = _regEntry?.isGfx ?? (contentHtml.includes('vscode-wolfram-svg-output') || contentHtml.includes('vscode-wolfram-png-output'));
+        const headerRow  = `<div class="wl-output-header" style="display:flex;align-items:center;gap:6px;width:100%;" ` +
+                           `data-session-epoch="${this._sessionEpoch}" data-output-id="${outputId}" ` +
+                           `data-out-n="${outN}" data-output-format="${newFormat}" data-output-is-graphics="${_isGfxById ? '1' : '0'}">${outLabel}</div>`;
+        const finalHtml  = `<div class="wl-output-block">${headerRow}<div class="wl-output-content">${contentHtml}</div></div>` + bannerHtml;
+
+        let targetIndex = -1;
+        const allOutputs = [...cell.outputs];
+        for (let i = 0; i < allOutputs.length; i++) {
+            const output = allOutputs[i];
+            if (output.items && output.items.length > 0) {
+                try {
+                    const html = new TextDecoder().decode(output.items[0].data);
+                    if (html.includes(`data-output-id="${outputId}"`)) {
+                        targetIndex = i;
+                        break;
+                    }
+                } catch (_) {}
+            }
+        }
+        if (targetIndex === -1) {
+            this.outputPanel.print(`[_replaceOutputById] outputId ${outputId} not found in cell outputs`);
+            return;
+        }
+        allOutputs[targetIndex] = new vscode.NotebookCellOutput([
+            vscode.NotebookCellOutputItem.text(finalHtml, "x-application/wolfram-language-html")
+        ]);
+        const tempExec = this._controller.createNotebookCellExecution(cell);
+        tempExec.start();
+        tempExec.replaceOutput(allOutputs);
+        tempExec.end(true);
+    }
+
+    // -----------------------------------------------------------------------
+    // GC: scan all cell outputs AND markdown source for image paths still live,
     // then delete every .svg/.png in imgDir that is not referenced.
     // Runs synchronously via Node.js fs — no kernel round-trip, no timing issues.
-    // Called at the START of each execution so previous outputs are committed.
+    // Called at the START of each execution, and on notebook cell changes.
     _cleanupImgDir(notebook, imgDir) {
         try {
             if (!imgDir || !fs.existsSync(imgDir)) return;
+            const nbDir  = path.dirname(notebook.uri.fsPath);
             // Collect all currently-referenced absolute image paths
             const live = new Set();
             for (const cell of notebook.getCells()) {
+                // 1) Scan rendered outputs for data-wl-img (Wolfram graphics)
                 for (const output of cell.outputs) {
                     for (const item of output.items) {
                         try {
@@ -1024,6 +1613,24 @@ class WolframNotebookKernel {
                                 live.add(m[1]);
                             }
                         } catch (_) {}
+                    }
+                }
+                // 2) Scan Markdown source text for pasted images: ![...](img/...)
+                if (cell.kind === vscode.NotebookCellKind.Markup) {
+                    const src = cell.document.getText();
+                    for (const m of src.matchAll(/\(!.*?\)\s*\(([^)]+\.(?:png|svg))\)/gi)) {
+                        const rel = m[1];
+                        live.add(path.isAbsolute(rel) ? rel : path.join(nbDir, rel));
+                    }
+                    // Also match bare Markdown image: ![alt](path)
+                    for (const m of src.matchAll(/!\[[^\]]*\]\(([^)]+\.(?:png|svg))\)/gi)) {
+                        const rel = m[1];
+                        live.add(path.isAbsolute(rel) ? rel : path.join(nbDir, rel));
+                    }
+                    // Also match HTML img tag: <img src="path">
+                    for (const m of src.matchAll(/src="([^"]+\.(?:png|svg))"/gi)) {
+                        const rel = m[1];
+                        live.add(path.isAbsolute(rel) ? rel : path.join(nbDir, rel));
                     }
                 }
             }
@@ -1261,6 +1868,211 @@ class WolframNotebookKernel {
     }
 
     // -----------------------------------------------------------------------
+    // ⌘⇧V — Paste clipboard image as a new Markdown cell.
+    //
+    // Flow:
+    //   1. Read clipboard PNG via osascript (macOS) into a temp file.
+    //   2. Show QuickPick: Insert Above / Insert Below current cell.
+    //   3. Copy image to the notebook's img/<nbBase>/ directory.
+    //      If the kernel is running, use Mathematica Export/Import so any
+    //      clipboard format (TIFF, BMP, etc.) is normalised to PNG.
+    //   4. Insert a Markdown cell:  ![pasted image](img/<nbBase>/<name>.png)
+    // args.insertBelow = true  → skip dialog, insert below (used from between-cell toolbar)
+    async pasteImageAsCell(args = {}) {
+        this.outputPanel.print('[PasteImage] triggered, platform=' + process.platform);
+
+        if (process.platform !== 'darwin') {
+            vscode.window.showWarningMessage('Paste Image is currently supported on macOS only.');
+            return;
+        }
+
+        // ---- Locate active notebook + currently selected cell ----
+        const editor = vscode.window.activeNotebookEditor;
+        if (!editor) {
+            this.outputPanel.print('[PasteImage] ERROR: no active notebook editor');
+            vscode.window.showWarningMessage('No active notebook editor.');
+            return;
+        }
+        const sel = editor.selections;
+        if (!sel || sel.length === 0) {
+            this.outputPanel.print('[PasteImage] ERROR: no cell selected');
+            vscode.window.showWarningMessage('No cell selected.');
+            return;
+        }
+        const cell = editor.notebook.cellAt(sel[0].start);
+        this.outputPanel.print(`[PasteImage] active cell index=${cell.index}`);
+
+        // ---- Extract clipboard image to a temp PNG via osascript ----
+        // Tries PNG first; falls back to TIFF (macOS default for screenshots/
+        // images copied from apps), then converts to PNG using sips.
+        const { spawnSync } = require('child_process');
+        const ts        = Date.now();
+        const tmpPng    = path.join(os.tmpdir(), `wl_paste_${ts}.png`);
+        const tmpTiff   = path.join(os.tmpdir(), `wl_paste_${ts}.tiff`);
+        const tmpScript = path.join(os.tmpdir(), `wl_asc_${ts}.scpt`);
+        const ascript = [
+            // Try PNG first
+            'set wroteFile to false',
+            'try',
+            `  set imgData to the clipboard as «class PNGf»`,
+            `  set fRef to open for access POSIX file ${JSON.stringify(tmpPng)} with write permission`,
+            '  write imgData to fRef',
+            '  close access fRef',
+            '  set wroteFile to true',
+            'end try',
+            // Fall back to TIFF if PNG not available
+            'if not wroteFile then',
+            '  try',
+            `    set imgData to the clipboard as «class TIFF»`,
+            `    set fRef to open for access POSIX file ${JSON.stringify(tmpTiff)} with write permission`,
+            '    write imgData to fRef',
+            '    close access fRef',
+            '  on error errMsg',
+            `    set fErr to open for access POSIX file "${tmpPng}.err" with write permission`,
+            '    write errMsg to fErr',
+            '    close access fErr',
+            '  end try',
+            'end if',
+        ].join('\n');
+        this.outputPanel.print(`[PasteImage] running osascript, tmpPng=${tmpPng}`);
+        let spawnResult;
+        try {
+            fs.writeFileSync(tmpScript, ascript, 'utf8');
+            spawnResult = spawnSync('osascript', [tmpScript], { timeout: 6000 });
+        } catch (spawnErr) {
+            this.outputPanel.print('[PasteImage] osascript spawn ERROR: ' + spawnErr.message);
+        } finally {
+            try { fs.unlinkSync(tmpScript); } catch(_) {}
+        }
+        if (spawnResult) {
+            this.outputPanel.print(
+                `[PasteImage] osascript exit=${spawnResult.status}` +
+                (spawnResult.stderr ? ' stderr=' + spawnResult.stderr.toString().trim() : '')
+            );
+        }
+        // Report AppleScript error if any
+        const errFile = tmpPng + '.err';
+        if (fs.existsSync(errFile)) {
+            try {
+                this.outputPanel.print('[PasteImage] AppleScript error: ' + fs.readFileSync(errFile, 'utf8').trim());
+                fs.unlinkSync(errFile);
+            } catch(_) {}
+        }
+        // Convert TIFF → PNG via sips (built into macOS) if we got a TIFF
+        if (!fs.existsSync(tmpPng) && fs.existsSync(tmpTiff)) {
+            this.outputPanel.print('[PasteImage] clipboard was TIFF — converting with sips');
+            const sips = spawnSync('sips', ['--setProperty', 'format', 'png', tmpTiff, '--out', tmpPng], { timeout: 8000 });
+            this.outputPanel.print(`[PasteImage] sips exit=${sips.status}` +
+                (sips.stderr ? ' ' + sips.stderr.toString().trim() : ''));
+            try { fs.unlinkSync(tmpTiff); } catch(_) {}
+        }
+        const pngExists = fs.existsSync(tmpPng);
+        const pngSize   = pngExists ? fs.statSync(tmpPng).size : 0;
+        this.outputPanel.print(`[PasteImage] tmpPng exists=${pngExists} size=${pngSize}`);
+
+        if (!pngExists || pngSize === 0) {
+            try { if (pngExists) fs.unlinkSync(tmpPng); } catch(_) {}
+            this.outputPanel.print('[PasteImage] no PNG on clipboard — aborting');
+            vscode.window.showWarningMessage(
+                'No image found on clipboard — copy an image first, then press ⌘⇧V.'
+            );
+            return;
+        }
+
+        // ---- Ask above or below (skip dialog when called from between-cell toolbar) ----
+        let insertAbove = false;
+        if (!args.insertBelow) {
+            // Brief delay so the cmd+shift+v keypress event settles before the
+            // QuickPick opens — otherwise the residual kepress dismisses/accepts it instantly.
+            await new Promise(resolve => setTimeout(resolve, 150));
+            const choice = await vscode.window.showQuickPick(
+                ['↑  Insert Above current cell', '↓  Insert Below current cell'],
+                { title: 'Paste Image As Cell', placeHolder: 'Where should the image cell go?' }
+            );
+            if (!choice) {
+                try { fs.unlinkSync(tmpPng); } catch(_) {}
+                this.outputPanel.print('[PasteImage] user cancelled position dialog');
+                return;
+            }
+            insertAbove = choice.startsWith('↑');
+        }
+        this.outputPanel.print(`[PasteImage] insertAbove=${insertAbove}`);
+
+        // ---- Compute destination inside the notebook img/ folder ----
+        const notebook  = editor.notebook;
+        const nbFsPath  = notebook.uri.fsPath;
+        const nbBase    = path.basename(nbFsPath, path.extname(nbFsPath));
+        const imgDirAbs = path.join(path.dirname(nbFsPath), 'img', nbBase);
+        const imgRel    = 'img/' + nbBase;
+        const fname     = `paste_${Date.now()}.png`;
+        const dstPath   = path.join(imgDirAbs, fname);
+        this.outputPanel.print(`[PasteImage] dstPath=${dstPath}`);
+
+        try { fs.mkdirSync(imgDirAbs, { recursive: true }); } catch(_) {}
+
+        // ---- Convert / copy (Wolfram normalises format; plain copy as fallback) ----
+        const status = vscode.window.setStatusBarMessage('⏳ Saving clipboard image…');
+        try {
+            if (this.session && this.kernelStatusString === 'resolved') {
+                // Mathematica Import→Export: handles TIFF/BMP/EMF/etc. → PNG
+                this.outputPanel.print('[PasteImage] kernel available — using Wolfram Export/Import');
+                const wlSrc = this.escapeWL(tmpPng);
+                const wlDst = this.escapeWL(dstPath);
+                const exportResult = await this.session.sub(`Export["${wlDst}", Import["${wlSrc}"]]`);
+                this.outputPanel.print('[PasteImage] Wolfram export result: ' + JSON.stringify(exportResult));
+            } else {
+                this.outputPanel.print('[PasteImage] kernel not running — using direct file copy');
+            }
+            if (!fs.existsSync(dstPath)) {
+                this.outputPanel.print('[PasteImage] dst missing after Export — falling back to fs.copy');
+                fs.copyFileSync(tmpPng, dstPath);
+            }
+        } catch (saveErr) {
+            this.outputPanel.print('[PasteImage] save ERROR: ' + saveErr.message + ' — falling back to fs.copy');
+            try { fs.copyFileSync(tmpPng, dstPath); } catch(copyErr) {
+                this.outputPanel.print('[PasteImage] fs.copy also failed: ' + copyErr.message);
+            }
+        } finally {
+            status.dispose();
+            try { fs.unlinkSync(tmpPng); } catch(_) {}
+        }
+
+        if (!fs.existsSync(dstPath)) {
+            this.outputPanel.print('[PasteImage] ERROR: dstPath not created');
+            vscode.window.showErrorMessage('Failed to save pasted image.');
+            return;
+        }
+        this.outputPanel.print(`[PasteImage] image saved OK (${fs.statSync(dstPath).size} bytes)`);
+
+        // ---- Read PNG dimensions from header (bytes 16-23) to set explicit half-width ----
+        let widthAttr = '';
+        try {
+            const hdr = Buffer.alloc(24);
+            const fd  = fs.openSync(dstPath, 'r');
+            fs.readSync(fd, hdr, 0, 24, 0);
+            fs.closeSync(fd);
+            const pxWidth = hdr.readUInt32BE(16);
+            widthAttr = ` width="${Math.round(pxWidth / 2)}"`;
+            this.outputPanel.print(`[PasteImage] PNG width=${pxWidth}px → display ${Math.round(pxWidth / 2)}px`);
+        } catch (e) {
+            this.outputPanel.print('[PasteImage] could not read PNG dimensions: ' + e.message);
+        }
+
+        // ---- Insert a Markdown cell with the image ----
+        const cellData  = new vscode.NotebookCellData(
+            vscode.NotebookCellKind.Markup,
+            `<img src="${imgRel}/${fname}"${widthAttr} alt="pasted image"/>`,
+            'markdown'
+        );
+        const insertIdx = insertAbove ? cell.index : cell.index + 1;
+        this.outputPanel.print(`[PasteImage] inserting Markdown cell at index ${insertIdx}`);
+        const edit      = new vscode.WorkspaceEdit();
+        edit.set(notebook.uri, [vscode.NotebookEdit.insertCells(insertIdx, [cellData])]);
+        await vscode.workspace.applyEdit(edit);
+        this.outputPanel.print('[PasteImage] done ✓');
+    }
+
+    // -----------------------------------------------------------------------
     // Apply / clear the "kernel offline" gray overlay on all visible wolfram
     // notebook editors, and notify the renderer webview.
     _applyKernelOfflineUI() {
@@ -1294,6 +2106,10 @@ class WolframNotebookKernel {
             // Increment epoch so the renderer knows outputs from this point belong
             // to a fresh session.  Broadcast happens after init.wl loads.
             this._sessionEpoch++;
+            // Clear per-output registries — Out[N] values don't survive a kernel restart,
+            // so any format-switch buttons referencing them must become inert.
+            this._outputRegistry.clear();
+            this.truncatedOutputCells.clear();
             this.session = new WstpSession(kernelCommand, { interactive: true });
 
             // Load init.wl via sub() so it runs as a priority batch call and
@@ -1423,4 +2239,5 @@ class WolframNotebookKernel {
 }
 
 exports.WolframNotebookKernel = WolframNotebookKernel;
+exports.scrollLog = scrollLog;
 //# sourceMappingURL=controller.js.map

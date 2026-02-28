@@ -73,7 +73,7 @@ $config = <|
     "useSVG"             -> True,
     "showPrint"          -> True,
     "maxOutputLength"    -> 100000,
-    "outputSizeLimit"    -> 200,   (* KB of ByteCount; expressions larger than this use Short[] for display *)
+    "outputSizeLimit"    -> 1000,  (* KB of ByteCount; expressions larger than this use Short[] for display *)
     "truncatedTooltip"   -> "Output truncated. Click \"Expand Inline\" to render in full.",
     "autoOpenMessages"   -> False
 |>;
@@ -138,15 +138,79 @@ graphicsQ[expr_] := !FreeQ[expr,
     _Graphics | _Graphics3D | _Graph | _GeoGraphics | _Legended | _Image | _Image3D];
 
 VsCodeRenderExpr[expr_, format_String, scale_?NumericQ] := Module[
-    {fmt, svgStr, svgStart, pngData, pngStr, mathmlStr, html, mathStart},
+    {fmt, svgStr, svgStart, pngData, pngStr, mathmlStr, html, mathStart,
+     rasImg, rasData, rasStr, rasFname, rasFpath, texStr},
     fmt = If[format === "Auto",
              If[UseSvgQ[] && graphicsQ[expr], "SVG", "MathML"],
              format];
 
-    (* ---- SVG path: only for expressions containing Graphics ---- *)
+    (* For graphics expressions: MathML/TeX/TeXSrc make no visual sense.
+       Promote those formats to SVG while respecting explicit WL/SVGSrc choices. *)
+    If[graphicsQ[expr] && MemberQ[{"MathML", "TeX", "TeXSrc"}, fmt],
+        fmt = "SVG"];
+
+    (* ---- WLLatex path: TraditionalForm boxes → C++ boxToLatex addon → KaTeX HTML ---- *)
+    If[fmt === "WLLatex",
+        Module[{boxes, boxStr, b64},
+            boxes = CheckAbort[Quiet[Check[MakeBoxes[expr, TraditionalForm], $Failed]], $Failed];
+            If[boxes === $Failed,
+                Return["<pre class=\"vscode-wolfram-text-output\">WLLatex: MakeBoxes failed.</pre>"]
+            ];
+            boxStr = ToString[boxes, InputForm];
+            b64 = StringReplace[Quiet[ExportString[boxStr, "Base64"]], WhitespaceCharacter -> ""];
+            Return["<div class=\"vscode-wolfram-wllatex-boxes\" data-boxes-b64=\"" <> b64 <> "\"></div>"]
+        ]
+    ];
+
+    (* ---- WLLatex2 path: same box extraction, raw LaTeX rendered in webview via KaTeX ---- *)
+    If[fmt === "WLLatex2",
+        Module[{boxes, boxStr, b64},
+            boxes = CheckAbort[Quiet[Check[MakeBoxes[expr, TraditionalForm], $Failed]], $Failed];
+            If[boxes === $Failed,
+                Return["<pre class=\"vscode-wolfram-text-output\">WLLatex2: MakeBoxes failed.</pre>"]
+            ];
+            boxStr = ToString[boxes, InputForm];
+            b64 = StringReplace[Quiet[ExportString[boxStr, "Base64"]], WhitespaceCharacter -> ""];
+            Return["<div class=\"vscode-wolfram-wllatex-boxes-raw\" data-boxes-b64=\"" <> b64 <> "\"></div>"]
+        ]
+    ];
+
+    (* ---- SVGSrc path: convert SVG to TikZ via svg2tikz (pip install svg2tikz) ---- *)
+    If[fmt === "SVGSrc",
+        If[!graphicsQ[expr],
+            Return["<pre class=\"vscode-wolfram-text-output\">TikZ export is only available for graphics expressions.</pre>"]
+        ];
+        svgStr = Quiet[Check[TimeConstrained[ExportString[expr, "SVG", Background -> None], 15, $Failed], $Failed]];
+        If[!StringQ[svgStr],
+            Return["<pre class=\"vscode-wolfram-text-output\">SVG export failed — cannot convert to TikZ.</pre>"]
+        ];
+        Module[{svgTmp, tikzResult, tikzStr, errMsg},
+            svgTmp = FileNameJoin[{$TemporaryDirectory,
+                "wolfbook_" <> StringReplace[CreateUUID[], "-" -> ""] <> ".svg"}];
+            Quiet[Export[svgTmp, svgStr, "String"]];
+            tikzResult = Quiet[Check[RunProcess[{"svg2tikz", "--codeoutput", "codeonly", svgTmp}], $Failed]];
+            Quiet[DeleteFile[svgTmp]];
+            If[!AssociationQ[tikzResult],
+                (* svg2tikz not found on PATH *)
+                Return["<pre class=\"vscode-wolfram-text-output\">svg2tikz not found.\nInstall it with:\n\n    pip install svg2tikz\n\nThen reload the VS Code window.</pre>"]
+            ];
+            If[tikzResult["ExitCode"] =!= 0,
+                errMsg = If[StringQ[tikzResult["StandardError"]] && tikzResult["StandardError"] =!= "",
+                            tikzResult["StandardError"], "(no error details)"];
+                Return["<pre class=\"vscode-wolfram-text-output\">svg2tikz failed (exit " <>
+                    ToString[tikzResult["ExitCode"]] <> "):\n" <> errMsg <> "</pre>"]
+            ];
+            tikzStr = "% \\usepackage{tikz}\n\n" <> tikzResult["StandardOutput"];
+            Module[{b64 = StringReplace[Quiet[ExportString[tikzStr, "Base64"]], WhitespaceCharacter -> ""]},
+                Return["<pre class=\"vscode-wolfram-tex-source\" data-tex-b64=\"" <> b64 <> "\" data-hljs-lang=\"latex\"></pre>"]
+            ]
+        ]
+    ];
+
+    (* ---- SVG path: Graphics → SVG/PNG vector; non-graphics → Rasterize → PNG ---- *)
     If[fmt === "SVG",
         If[graphicsQ[expr],
-            svgStr = Quiet[Check[TimeConstrained[ExportString[expr, "SVG"], 15, $Failed], $Failed]];
+            svgStr = Quiet[Check[TimeConstrained[ExportString[expr, "SVG", Background -> None], 15, $Failed], $Failed]];
             (* ExportString prepends <?xml...> and <!DOCTYPE...> before <svg.
                Strip everything before the first <svg so the browser gets clean SVG.
                Also strip newlines: WSTP transmits them as literal \012 escape sequences
@@ -178,29 +242,81 @@ VsCodeRenderExpr[expr_, format_String, scale_?NumericQ] := Module[
                 Module[{fname, fpath},
                     fname = "wl_" <> StringReplace[CreateUUID[], "-" -> ""] <> ".png";
                     fpath = FileNameJoin[{$wolframImgDir, fname}];
-                    Quiet[Export[fpath, expr, "PNG"]];
+                    Quiet[Export[fpath, expr, "PNG", Background -> None]];
                     If[FileExistsQ[fpath],
                         Return["<img class=\"vscode-wolfram-png-output\" data-wl-img=\"" <>
                                fpath <> "\" src=\"" <>
                                $wolframImgRelPrefix <> "/" <> fname <> "\"/>"]]]
             ];
             (* Inline PNG base64 fallback (no $wolframImgDir) *)
-            pngData = Quiet[Check[TimeConstrained[ExportString[expr, "PNG"], 15, $Failed], $Failed]];
+            pngData = Quiet[Check[TimeConstrained[ExportString[expr, "PNG", Background -> None], 15, $Failed], $Failed]];
             If[StringQ[pngData],
                 pngStr = StringReplace[Quiet[ExportString[pngData, "Base64"]], WhitespaceCharacter -> ""];
                 If[StringQ[pngStr] && StringLength[pngStr] > 20,
                     Return["<img class=\"vscode-wolfram-png-output\" src=\"data:image/png;base64," <>
                            pngStr <> "\"/>"]]]
+        ,
+            (* Non-Graphics SVG: Rasterize the typeset expression to PNG *)
+            rasImg = Quiet[Check[TimeConstrained[Rasterize[expr, ImageResolution -> 144, Background -> None], 15, $Failed], $Failed]];
+            If[ImageQ[rasImg],
+                If[$wolframImgDir =!= "" && StringLength[$wolframImgDir] > 0,
+                    rasFname = "wl_" <> StringReplace[CreateUUID[], "-" -> ""] <> ".png";
+                    rasFpath = FileNameJoin[{$wolframImgDir, rasFname}];
+                    Quiet[Export[rasFpath, rasImg, "PNG"]];
+                    If[FileExistsQ[rasFpath],
+                        Return["<img class=\"vscode-wolfram-png-output\" data-wl-img=\"" <>
+                               rasFpath <> "\" src=\"" <>
+                               $wolframImgRelPrefix <> "/" <> rasFname <> "\"/>"]]];
+                rasData = Quiet[Check[ExportString[rasImg, "PNG"], $Failed]];
+                If[StringQ[rasData],
+                    rasStr = StringReplace[Quiet[ExportString[rasData, "Base64"]], WhitespaceCharacter -> ""];
+                    If[StringQ[rasStr] && StringLength[rasStr] > 20,
+                        Return["<img class=\"vscode-wolfram-png-output\" src=\"data:image/png;base64," <>
+                               rasStr <> "\"/>"]]]
+            ]
         ];
-        (* Not graphics or both exports failed — fall through to MathML *)
+        (* All SVG/PNG/Rasterize attempts failed — fall through to MathML *)
         fmt = "MathML"
     ];
 
+    (* ---- TeX rendered: TeXForm → KaTeX div (renderer injects KaTeX) ---- *)
+    (* ---- TeX source:   TeXForm → highlighted code block              ---- *)
+    If[fmt === "TeX" || fmt === "TeXSrc",
+        texStr = Quiet[Check[ToString[expr, TeXForm], $Failed]];
+        If[StringQ[texStr],
+            Module[{b64 = StringReplace[ExportString[texStr, "Base64"], WhitespaceCharacter -> ""]},
+                If[fmt === "TeXSrc",
+                    Return["<pre class=\"vscode-wolfram-tex-source\" data-tex-b64=\"" <> b64 <> "\"></pre>"],
+                    (* TeX rendered: base64-encode LaTeX so backslashes survive WSTP escaping *)
+                    Return["<div class=\"vscode-wolfram-tex-output\" data-tex-b64=\"" <> b64 <> "\"></div>"]
+                ]
+            ]
+        ];
+        fmt = "MathML"  (* fallback if TeXForm fails *)
+    ];
+
+    (* ---- InputForm / plain text path ---- *)
+    If[fmt === "InputForm",
+        Module[{s},
+            s = ToString[expr, InputForm];
+            (* Decode WL \:XXXX unicode escape sequences produced by InputForm *)
+            s = StringReplace[s, "\\:" ~~ h:RegularExpression["[0-9a-fA-F]{4}"] :>
+                    FromCharacterCode[FromDigits[h, 16]]];
+            Return["<pre class=\"vscode-wolfram-text-output\" style=\"white-space:pre-wrap;overflow-wrap:break-word;\">" <>
+                   StringReplace[s, {"<" -> "&lt;", ">" -> "&gt;", "&" -> "&amp;"}] <>
+                   "</pre>"]
+        ]
+    ];
+
     (* ---- MathML path: for all algebraic / symbolic expressions ---- *)
+    (* CheckAbort wraps ExportString so that a $RecursionLimit abort caused by
+       user Format rules (e.g. Format[x]=Style[x,Red]) does not silently abort
+       the entire rendering call and produce no output. *)
     If[fmt === "MathML",
-        mathmlStr = Quiet[Check[TimeConstrained[ExportString[expr, "MathML"], 15, $Failed], $Failed]];
-        (* Strip any <?xml...>/<!DOCTYPE...> preamble before <math
-           (same logic as SVG stripping before <svg). *)
+        mathmlStr = CheckAbort[
+            Quiet[Check[TimeConstrained[ExportString[expr, "MathML"], 15, $Failed], $Failed]],
+            $Failed];
+        (* Strip any <?xml...>/<!DOCTYPE...> preamble before <math *)
         If[StringQ[mathmlStr],
             mathStart = First[Flatten[StringPosition[mathmlStr, "<math"]], 0];
             If[mathStart > 1, mathmlStr = StringDrop[mathmlStr, mathStart - 1]]];
@@ -210,20 +326,44 @@ VsCodeRenderExpr[expr_, format_String, scale_?NumericQ] := Module[
                 "<div class=\"mathml-output\" style=\"overflow-x:auto;\">" <>
                 cleanMathML[mathmlStr] <> "</div>"
             ]];
-        fmt = "Text"
+        (* MathML export failed: recursion limit from a Format rule, timeout, or
+           export error.  Return an amber warning + InputForm text so the user
+           understands why no formatted output is shown. *)
+        Return[
+            "<div class=\"vscode-wolfram-message-output\" style=\"color:#cc8800;padding:4px 0\">" <>
+            "Rendering failed \[LongDash] MathML export returned $Failed. " <>
+            "If you have a custom Format rule (e.g. <code>Format[x]=Style[x,Red]</code>), " <>
+            "clear it with <code>Unset[Format[x]]</code> then re-evaluate." <>
+            "</div>" <>
+            "<pre class=\"vscode-wolfram-text-output\">" <>
+            CheckAbort[
+                StringReplace[ToString[expr, InputForm],
+                    {"<" -> "&lt;", ">" -> "&gt;", "&" -> "&amp;"}],
+                StringReplace[ToString[expr, FullForm],
+                    {"<" -> "&lt;", ">" -> "&gt;", "&" -> "&amp;"}]
+            ] <>
+            "</pre>"
+        ]
     ];
 
     (* ---- HTML path (explicit) ---- *)
     If[fmt === "HTML",
-        html = Quiet[renderHTML[Quiet[MakeBoxes[expr, StandardForm]]]];
+        html = CheckAbort[Quiet[renderHTML[Quiet[MakeBoxes[expr, StandardForm]]]], $Failed];
         If[StringQ[html], Return[html]];
         fmt = "Text"
     ];
 
     (* ---- Text / InputForm fallback ---- *)
-    "<pre class=\"vscode-wolfram-text-output\">" <>
-    StringReplace[ToString[expr, InputForm], {"<" -> "&lt;", ">" -> "&gt;", "&" -> "&amp;"}] <>
-    "</pre>"
+    (* Use CheckAbort so a recursive Format rule on any sub-symbol doesn't abort
+       the fallback too.  If InputForm also fails, show the FullForm (always safe). *)
+    CheckAbort[
+        "<pre class=\"vscode-wolfram-text-output\">" <>
+        StringReplace[ToString[expr, InputForm], {"<" -> "&lt;", ">" -> "&gt;", "&" -> "&amp;"}] <>
+        "</pre>",
+        (* Abort in InputForm (unusual but possible with all-forms Format rule): fall to FullForm *)
+        "<pre class=\"vscode-wolfram-text-output\">" <>
+        StringReplace[ToString[expr, FullForm], {"<" -> "&lt;", ">" -> "&gt;", "&" -> "&amp;"}] <>
+        "</pre>"]
 ];
 
 (* ===== VsCodeRender: called by JS via session.sub() ===== *)
@@ -245,10 +385,10 @@ VsCodeRender[outN_Integer, format_String, scale_?NumericQ] := Module[
        Range[500] has LeafCount=501 but ByteCount~4KB — ByteCount alone misses it.
        Graphics/SVG outputs are always passed through fully (no skeleton). *)
     If[!graphicsQ[expr],
-        limitBytes = $getKernelConfig["outputSizeLimit", 200] * 1024;
+        limitBytes = $getKernelConfig["outputSizeLimit", 1000] * 1024;
         bc  = ByteCount[expr];
         lc  = LeafCount[expr];
-        If[bc > limitBytes || lc > 200,
+        If[bc > limitBytes || lc > 1000,
             shortLines  = Max[3, Min[20, Round[lc / 50] + 3]];
             displayExpr = Short[expr, shortLines];
             isSkeleton  = True,
@@ -258,20 +398,70 @@ VsCodeRender[outN_Integer, format_String, scale_?NumericQ] := Module[
         displayExpr = expr
     ];
 
-    html = Quiet[VsCodeRenderExpr[displayExpr, format, scale]];
+    (* CheckAbort: if rendering aborts (e.g. $RecursionLimit from a recursive
+       Format rule like Format[x]=Style[x,Red]), produce visible output:
+       an amber warning message + the InputForm text.  Do NOT return a bare
+       $Aborted symbol or empty string — that would silently produce no output.
+       We embed the warning DIRECTLY in the HTML so the user sees it even
+       though the MESSAGEPKT from $RecursionLimit::reclim is suppressed by
+       the inner Quiet[] wrappers in VsCodeRenderExpr. *)
+    html = CheckAbort[
+        Quiet[VsCodeRenderExpr[displayExpr, format, scale]],
+        (* Abort caught — build: (1) amber warning box + (2) plain-text fallback *)
+        Module[{warnHtml, fbText},
+            warnHtml =
+                "<div class=\"vscode-wolfram-message-output\" style=\"color:#cc8800;padding:4px 0\">" <>
+                "$RecursionLimit::reclim: Recursion depth of " <> ToString[$RecursionLimit] <>
+                " exceeded during rendering \[LongDash] likely caused by a recursive Format rule " <>
+                "(e.g. <code>Format[x]=Style[x,Red]</code>). " <>
+                "Tip: evaluate <code>Unset[Format[x]]</code> then re-run." <>
+                "</div>";
+            fbText = CheckAbort[
+                StringReplace[ToString[displayExpr, InputForm],
+                    {"<" -> "&lt;", ">" -> "&gt;", "&" -> "&amp;"}],
+                "[InputForm also aborted]"];
+            warnHtml <>
+            "<pre class=\"vscode-wolfram-text-output\">" <> fbText <> "</pre>"
+        ]
+    ];
     If[!StringQ[html] || html === "",
-        html = "<pre class=\"vscode-wolfram-text-output\">" <>
-               StringReplace[ToString[displayExpr, InputForm],
-                   {"<" -> "&lt;", ">" -> "&gt;", "&" -> "&amp;"}] <>
-               "</pre>"];
+        (* Render returned non-string (most likely $Failed from Check inside
+           VsCodeRenderExpr which caught $RecursionLimit::reclim from a
+           recursive Format rule, e.g. Format[x]=Style[x,Red,Bold,20]).
+           Do a quick cheap probe to detect the recursion case. *)
+        Module[{isRecursive, warnPart, fbText},
+            isRecursive = Block[{$RecursionLimit = 50},
+                Quiet[Check[MakeBoxes[displayExpr, StandardForm], $Failed]] === $Failed
+            ];
+            warnPart = If[isRecursive,
+                "<div class=\"vscode-wolfram-message-output\" style=\"color:#cc8800;padding:4px 0\">" <>
+                "Rendering failed \[LongDash] recursive Format rule detected " <>
+                "(e.g. <code>Format[x]=Style[x,Red]</code>). " <>
+                "Tip: evaluate <code>Unset[Format[x]]</code> then re-run." <>
+                "</div>",
+                ""
+            ];
+            fbText = CheckAbort[
+                StringReplace[ToString[displayExpr, InputForm],
+                    {"<" -> "&lt;", ">" -> "&gt;", "&" -> "&amp;"}],
+                "[InputForm also aborted]"
+            ];
+            html = warnPart <>
+                   "<pre class=\"vscode-wolfram-text-output\">" <> fbText <> "</pre>"
+        ]
+    ];
 
-    (* Skeleton outputs: wrap with data attributes only — no visible text.
-       The JS layer reads data-wolfram-atom-count and builds the banner + buttons. *)
-    If[isSkeleton,
-        "<div data-wolfram-is-skeleton=\"1\" data-wolfram-atom-count=\"" <>
-        ToString[LeafCount[expr]] <> "\">" <> html <> "</div>",
-    (* else *)
-        html
+    (* Prepend an invisible graphics marker so the JS layer can detect the output
+       type from the WL expression itself, not from the rendered HTML format. *)
+    Module[{gfxMarker = If[graphicsQ[expr],
+        "<span class=\"vscode-wolfram-gfx-marker\" style=\"display:none;\"></span>", ""]},
+        If[isSkeleton,
+            gfxMarker <>
+            "<div data-wolfram-is-skeleton=\"1\" data-wolfram-atom-count=\"" <>
+            ToString[LeafCount[expr]] <> "\">" <> html <> "</div>",
+        (* else *)
+            gfxMarker <> html
+        ]
     ]
 ];
 
@@ -284,16 +474,50 @@ VsCodeRenderFull[outN_Integer, format_String, scale_?NumericQ] := Module[
         Return["<pre class=\"vscode-wolfram-text-output\">No output at Out[" <>
                ToString[outN] <> "]</pre>"]];
     If[expr === Null, Return[""]];
-    html = Quiet[VsCodeRenderExpr[expr, format, scale]];
+    html = CheckAbort[
+        Quiet[VsCodeRenderExpr[expr, format, scale]],
+        Module[{warnHtml, fbText},
+            warnHtml =
+                "<div class=\"vscode-wolfram-message-output\" style=\"color:#cc8800;padding:4px 0\">" <>
+                "$RecursionLimit::reclim: Recursion depth of " <> ToString[$RecursionLimit] <>
+                " exceeded during rendering \[LongDash] likely caused by a recursive Format rule. " <>
+                "Tip: evaluate <code>Unset[Format[x]]</code> then re-run." <>
+                "</div>";
+            fbText = CheckAbort[
+                StringReplace[ToString[expr, InputForm],
+                    {"<" -> "&lt;", ">" -> "&gt;", "&" -> "&amp;"}],
+                "[InputForm also aborted]"];
+            warnHtml <>
+            "<pre class=\"vscode-wolfram-text-output\">" <> fbText <> "</pre>"
+        ]
+    ];
     If[!StringQ[html] || html === "",
-        html = "<pre class=\"vscode-wolfram-text-output\">" <>
-               StringReplace[ToString[expr, InputForm],
-                   {"<" -> "&lt;", ">" -> "&gt;", "&" -> "&amp;"}] <>
-               "</pre>"];
-    html
+        Module[{isRecursive, warnPart, fbText},
+            isRecursive = Block[{$RecursionLimit = 50},
+                Quiet[Check[MakeBoxes[expr, StandardForm], $Failed]] === $Failed
+            ];
+            warnPart = If[isRecursive,
+                "<div class=\"vscode-wolfram-message-output\" style=\"color:#cc8800;padding:4px 0\">" <>
+                "Rendering failed \[LongDash] recursive Format rule detected " <>
+                "(e.g. <code>Format[x]=Style[x,Red]</code>). " <>
+                "Tip: evaluate <code>Unset[Format[x]]</code> then re-run." <>
+                "</div>",
+                ""
+            ];
+            fbText = CheckAbort[
+                StringReplace[ToString[expr, InputForm],
+                    {"<" -> "&lt;", ">" -> "&gt;", "&" -> "&amp;"}],
+                "[InputForm also aborted]"
+            ];
+            html = warnPart <>
+                   "<pre class=\"vscode-wolfram-text-output\">" <> fbText <> "</pre>"
+        ]
+    ];
+    (* Same gfx marker as VsCodeRender so expand restores the correct button set *)
+    If[graphicsQ[expr],
+        "<span class=\"vscode-wolfram-gfx-marker\" style=\"display:none;\"></span>" <> html,
+        html]
 ];
-
-VsCodeRenderFull[outN_Integer, format_String] := VsCodeRenderFull[outN, format, 0.8];
 VsCodeRenderFull[outN_Integer]               := VsCodeRenderFull[outN, "Auto", 0.8];
 
 (* Overload: direct expression (for non-standard results) *)

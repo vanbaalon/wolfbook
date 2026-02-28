@@ -50,8 +50,93 @@ wsub > :last-child { font-size:var(--script-font-size);vertical-align:-0.7ex; }
 pre { font-family: Consolas, Courier, monospace; }
 pre > .wl-message { color: var(--vscode-editorError-foreground); }
 pre.vscode-wolfram-print-output { font-size:0.85em; margin:0; padding:0; line-height:1.3; }
+pre.vscode-wolfram-text-output, pre.vscode-wolfram-tex-source {
+  font-family: var(--vscode-editor-font-family, var(--vscode-font-family, Consolas, monospace));
+  font-size: var(--vscode-editor-font-size, 13px);
+  background: #1e1e1e;
+  color: #d4d4d4;
+  border: 1px solid rgba(80,80,80,0.5);
+  border-radius: 3px; padding: 6px 10px 6px 3.2em;
+  white-space: pre-wrap; overflow-wrap: break-word; line-height: 1.5; margin: 2px 0; }
+.wl-line-gutter { position:absolute;left:0;top:0;bottom:0;width:2.5em;padding:6px 3px 6px 0;
+  text-align:right;color:rgba(180,180,180,0.5);font-size:0.82em;line-height:1.5;
+  user-select:none;pointer-events:none;overflow:hidden;background:#1e1e1e;
+  font-family:var(--vscode-editor-font-family,Consolas,monospace); }
+button.wl-nb-default-fmt { outline:2px solid rgba(218,165,32,0.7);outline-offset:1px; }
+img.vscode-wolfram-svg-output, img.vscode-wolfram-png-output { background: transparent; }
+.vscode-wolfram-svg-output > svg > rect:first-child { fill: none !important; }
 div.mathml-output { overflow-x:auto; }
+div.vscode-wolfram-tex-output { overflow-x:auto; padding: 4px 0; }
+/* Inline syntax highlight tokens */
+.wl-hl-str  { color: #ce9178; }
+.wl-hl-cmt  { color: #6a9955; font-style: italic; }
+.wl-hl-num  { color: #b5cea8; }
+.wl-hl-sym  { color: #4ec9b0; }
+.wl-hl-cmd  { color: #569cd6; }
+.wl-hl-math { color: #c586c0; }
+.wl-hl-brk  { color: #ffd700; }
 `;
+
+// ---- Inline syntax highlighter — no CDN required ----
+function applyInlineHighlight(pre, lang) {
+    const raw = pre.textContent;
+    if (!raw) return;
+    const esc = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+    // Returns sorted, non-overlapping token list from blockRules
+    function collectTokens(text, blockRules) {
+        const toks = [];
+        for (const {re, cls} of blockRules) {
+            const r = new RegExp(re.source, (re.flags.replace('g','') + 'g'));
+            let m;
+            while ((m = r.exec(text)) !== null)
+                toks.push({ start: m.index, end: m.index + m[0].length, cls });
+        }
+        toks.sort((a, b) => a.start - b.start);
+        const clean = []; let last = 0;
+        for (const t of toks) { if (t.start >= last) { clean.push(t); last = t.end; } }
+        return clean;
+    }
+
+    function buildHtml(text, blockRules, leafRules) {
+        const toks = collectTokens(text, blockRules);
+        let html = '', pos = 0;
+        for (const t of toks) {
+            if (t.start > pos) {
+                let plain = esc(text.slice(pos, t.start));
+                for (const {re, cls} of leafRules)
+                    plain = plain.replace(re, `<span class="wl-hl-${cls}">$1</span>`);
+                html += plain;
+            }
+            html += `<span class="wl-hl-${t.cls}">${esc(text.slice(t.start, t.end))}</span>`;
+            pos = t.end;
+        }
+        if (pos < text.length) {
+            let plain = esc(text.slice(pos));
+            for (const {re, cls} of leafRules)
+                plain = plain.replace(re, `<span class="wl-hl-${cls}">$1</span>`);
+            html += plain;
+        }
+        return html;
+    }
+
+    let html;
+    if (lang === 'mathematica') {
+        html = buildHtml(raw,
+            [ { re: /"(?:[^"\\]|\\.)*"/g, cls: 'str' },
+              { re: /\(\*[\s\S]*?\*\)/g,    cls: 'cmt' } ],
+            [ { re: /\b(\d[\d.]*(?:`\d+)?(?:\*\^[+-]?\d+)?)\b/g, cls: 'num' },
+              { re: /\b([A-Z][a-zA-Z0-9$`]*)\b/g,                 cls: 'sym' } ]);
+    } else if (lang === 'latex') {
+        html = buildHtml(raw,
+            [ { re: /%[^\n]*/g,               cls: 'cmt' },
+              { re: /\$\$[\s\S]*?\$\$|\$[^$\n]*\$/g, cls: 'math' } ],
+            [ { re: /(\\[a-zA-Z]+\*?)/g, cls: 'cmd' },
+              { re: /(\{|\})/g,           cls: 'brk' },
+              { re: /\b(\d[\d.]*)\b/g,    cls: 'num' } ]);
+    } else { return; }
+    pre.innerHTML = html;
+}
 
 function injectRendererCSS(doc) {
     if (doc.querySelector('style[data-wolfram-renderer]')) return;
@@ -60,6 +145,21 @@ function injectRendererCSS(doc) {
     s.textContent = WL_CSS;
     (doc.head || doc.body || doc.documentElement).appendChild(s);
     console.log('[WolframRenderer] CSS injected into document');
+}
+
+// Add a line-number gutter to a pre element that has been wrapped by wrapWithCopy
+// (which gives it a position:relative parent div).
+function addLineNumberGutter(pre) {
+    const lines = pre.textContent.split('\n');
+    if (lines.length < 2) return;
+    const gutter = document.createElement('div');
+    gutter.className = 'wl-line-gutter';
+    gutter.setAttribute('aria-hidden', 'true');
+    for (let i = 1; i <= lines.length; i++) {
+        const ln = document.createElement('div'); ln.textContent = String(i);
+        gutter.appendChild(ln);
+    }
+    if (pre.parentNode) pre.parentNode.appendChild(gutter);
 }
 
 export function activate(context) {
@@ -72,6 +172,18 @@ export function activate(context) {
     // Dynamic elements (Out[N]= headers, expand banners) are tagged with the epoch at
     // render time; when the session changes we remove all stale-epoch elements.
     let sessionEpoch = 0;
+
+    // MathML zoom level — shared across all MathML outputs in the session.
+    // Controlled by ⊕/⊖ buttons; applied as fontSize on div.mathml-output.
+    let wolframMathmlZoom = 1.0;
+
+    // TXT output font-size scale — shared across all TXT pre blocks.
+    let wolframTxtFontSize = 1.0;
+
+    // Notebook-level default output format — split by output type so graphics and
+    // expression defaults are independent. Set by double-clicking a format button.
+    let wolframNbDefaultGfxFormat  = '';   // graphics outputs (SVG, TikZ)
+    let wolframNbDefaultExprFormat = '';   // expression outputs (WLLatex, MathML, etc.)
 
     // Map of uuid -> { button, origHTML } for open-text buttons awaiting reply
     const openTextPending = new Map();
@@ -124,6 +236,25 @@ export function activate(context) {
                     entry.button.style.opacity = '';
                     openTextPending.delete(msg.uuid);
                 }
+            }
+            if (msg.type === 'reformat-done') {
+                // scroll handled by controller revealRange — nothing to do in renderer
+            }
+            if (msg.type === 'nb-default-format') {
+                // Controller restored the saved defaults for this notebook on reopen.
+                // formatGfx and formatExpr are independent — either may be empty.
+                if (msg.formatGfx)  wolframNbDefaultGfxFormat  = msg.formatGfx;
+                if (msg.formatExpr) wolframNbDefaultExprFormat = msg.formatExpr;
+                // Refresh gold highlights on all visible buttons based on their output type
+                document.querySelectorAll('button[data-fmt-key]').forEach(btn => {
+                    const hdr = btn.closest('.wl-output-block')?.querySelector('.wl-output-header');
+                    const btnIsGfx = hdr ? hdr.getAttribute('data-output-is-graphics') === '1' : false;
+                    const target = btnIsGfx ? wolframNbDefaultGfxFormat : wolframNbDefaultExprFormat;
+                    if (target && btn.getAttribute('data-fmt-key') === target)
+                        btn.classList.add('wl-nb-default-fmt');
+                    else
+                        btn.classList.remove('wl-nb-default-fmt');
+                });
             }
 
             // ---- Dialog[] subsession widget ----
@@ -489,78 +620,433 @@ export function activate(context) {
                         }
                     });
                 }
-            });
-            
-            // ---- Wrap-toggle buttons for MathML divs ----
-            // Append each button to .wl-output-header (same flex row as Out[N]= label)
-            const mathmlDivs = element.querySelectorAll('div.mathml-output');
-            console.log('[WolframRenderer] Found', mathmlDivs.length, 'div.mathml-output elements');
-            mathmlDivs.forEach((div, index) => {
-                let isWrapped = false;
-                const btn = document.createElement('button');
-                btn.innerHTML = '&#8659; Wrap';
-                btn.title = 'Toggle line-wrap / scroll for this expression';
-                btn.style.cssText = 'padding:1px 7px;font-size:11px;cursor:pointer;' +
-                                    'background:rgba(100,100,100,0.1);border:1px solid rgba(128,128,128,0.4);' +
-                                    'border-radius:3px;flex-shrink:0;margin-left:auto;';
-                btn.addEventListener('click', (e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    isWrapped = !isWrapped;
-                    console.log('[WolframRenderer] Wrap toggle', index, isWrapped ? '→ wrap' : '→ scroll');
-                    if (isWrapped) {
-                        div.style.overflowX = 'hidden';
-                        div.style.overflowWrap = 'break-word';
-                        div.style.wordBreak = 'break-all';
-                        div.style.whiteSpace = 'normal';
-                        div.style.display = 'block';
-                        div.style.width = '100%';
-                        div.querySelectorAll('math,mrow,mo,mi,mn,mfrac,msup,msub').forEach(el => {
-                            el.style.maxWidth = '100%';
-                            el.style.overflowWrap = 'break-word';
-                            el.style.wordBreak = 'break-all';
-                            el.style.display = 'inline-block';
-                        });
-                        btn.innerHTML = '&#8596; Scroll';
-                    } else {
-                        div.style.overflowX = 'auto';
-                        div.style.overflowWrap = '';
-                        div.style.wordBreak = '';
-                        div.style.whiteSpace = '';
-                        div.style.display = '';
-                        div.style.width = '';
-                        div.querySelectorAll('math,mrow,mo,mi,mn,mfrac,msup,msub').forEach(el => {
-                            el.style.maxWidth = '';
-                            el.style.overflowWrap = '';
-                            el.style.wordBreak = '';
-                            el.style.display = '';
-                        });
-                        btn.innerHTML = '&#8659; Wrap';
-                    }
-                    // After toggling, scroll back to the top of this output so the
-                    // user sees the beginning (the output may have grown/shrunk).
-                    if (context && context.postMessage) {
-                        try {
-                            context.postMessage({ type: 'scroll-to-output', outputId: currentOutputId });
-                            console.log('[WolframRenderer] scroll-to-output sent for outputId:', currentOutputId);
-                        } catch (err) {
-                            console.warn('[WolframRenderer] scroll-to-output postMessage failed:', err);
-                        }
-                    }
-                });
-                // Append button into the flex header row (.wl-output-header) so it appears
-                // inline next to the Out[N]= label, not below the output content.
-                const block = div.closest('.wl-output-block');
-                const header = block && block.querySelector('.wl-output-header');
-                if (header) {
-                    header.appendChild(btn);
-                    console.log('[WolframRenderer] Appended wrap button to .wl-output-header[' + index + ']');
-                } else {
-                    // Fallback for outputs without the block structure
-                    div.insertAdjacentElement('afterend', btn);
-                    console.log('[WolframRenderer] Fallback: inserted wrap button after div.mathml-output[' + index + ']');
+
+                const expandMoreButton = container.querySelector('button[data-action="expand-more"]');
+                if (expandMoreButton) {
+                    expandMoreButton.addEventListener('click', (e) => {
+                        e.preventDefault(); e.stopPropagation();
+                        const origHTML = expandMoreButton.innerHTML;
+                        expandMoreButton.innerHTML = '&#9203; Expanding…';
+                        expandMoreButton.disabled = true;
+                        expandMoreButton.style.cssText += ';cursor:wait;opacity:0.7;';
+                        if (context && context.postMessage) {
+                            try { context.postMessage({ type: 'expand-more-output', uuid }); }
+                            catch (err) { expandMoreButton.innerHTML = origHTML; expandMoreButton.disabled = false; }
+                        } else { expandMoreButton.innerHTML = origHTML; expandMoreButton.disabled = false; }
+                    });
                 }
             });
+            
+            // ---- Format + zoom buttons for each output header ----
+            // Each .wl-output-header[data-out-n] gets a button group:
+            //   TXT | SVG | ∑  (format selectors)
+            //   ⊕ ⊖ (MathML zoom, only when MathML)
+            //   ↓ Wrap / ↔ Scroll toggle (MathML only)
+            const BTN_BASE = 'padding:1px 6px;font-size:11px;cursor:pointer;' +
+                             'background:transparent;border:1px solid rgba(128,128,128,0.25);' +
+                             'border-radius:3px;flex-shrink:0;color:var(--vscode-descriptionForeground,#888);';
+            const BTN_ACTIVE = 'color:var(--vscode-foreground,inherit);border-color:rgba(128,128,128,0.5);';
+
+            const outputHeaders = element.querySelectorAll('.wl-output-header[data-out-n]');
+            console.log('[WolframRenderer] Found', outputHeaders.length, 'output headers for format buttons');
+
+            outputHeaders.forEach(header => {
+                const outputId   = header.getAttribute('data-output-id')   || '';
+                const outFmt     = header.getAttribute('data-output-format') || 'MathML';
+                const block      = header.closest('.wl-output-block');
+                const mathmlDiv  = block && block.querySelector('div.mathml-output');
+
+                const group = document.createElement('div');
+                group.style.cssText = 'display:inline-flex;gap:3px;align-items:center;margin-left:auto;flex-shrink:0;';
+
+                // -- Format buttons --
+                // Graphics outputs (SVG/PNG image): WL | SVG | src (raw SVG XML)
+                // Symbolic outputs: WL | SVG | TeX | src (TeXSrc) | ∑ (MathML)
+                const isGraphics = header.getAttribute('data-output-is-graphics') === '1';
+                const formats = isGraphics
+                    ? [['WL', 'InputForm'], ['SVG', 'SVG'], ['TikZ', 'SVGSrc']]
+                    : [['WL', 'InputForm'], ['SVG', 'SVG'], ['TeX', 'TeX'], ['src', 'TeXSrc'], ['LaTeX', 'WLLatex'], ['LaTeX2', 'WLLatex2'], ['\u2211', 'MathML']];
+                formats.forEach(([label, fmtKey]) => {
+                    const b = document.createElement('button');
+                    b.textContent = label;
+                    b.title = (fmtKey === 'InputForm' ? 'Wolfram Language text (InputForm)'
+                            : fmtKey === 'SVG'       ? 'Rasterized image (SVG/PNG)'
+                            : fmtKey === 'TeX'       ? 'LaTeX rendered with KaTeX'
+                            : fmtKey === 'TeXSrc'    ? 'LaTeX source (TeXForm)'
+                            : fmtKey === 'SVGSrc'    ? 'TikZ (via svg2tikz)'
+                            : fmtKey === 'WLLatex'   ? 'TraditionalForm \u2192 KaTeX (pre-rendered in extension host)'
+                            : fmtKey === 'WLLatex2'  ? 'TraditionalForm \u2192 KaTeX (rendered in webview, faster for simple exprs)'
+                                                     : 'Symbolic math (MathML)')
+                            + '\n· double-click to set as default for this notebook';
+                    b.style.cssText = BTN_BASE + (outFmt === fmtKey ? BTN_ACTIVE : '');
+                    b.setAttribute('data-fmt-key', fmtKey);
+                    // Gold outline only for buttons of the matching output type
+                    const nbDef = isGraphics ? wolframNbDefaultGfxFormat : wolframNbDefaultExprFormat;
+                    if (fmtKey === nbDef) b.classList.add('wl-nb-default-fmt');
+                    b.addEventListener('click', (e) => {
+                        e.preventDefault(); e.stopPropagation();
+                        if (!outputId) return;
+                        const scrollY = window.scrollY || document.documentElement.scrollTop || 0;
+                        if (context && context.postMessage) {
+                            try { context.postMessage({ type: 'reformat-output', outputId, newFormat: fmtKey, scrollY }); }
+                            catch (err) { console.error('[WolframRenderer] postMessage error:', err); }
+                        }
+                    });
+                    b.addEventListener('dblclick', (e) => {
+                        e.preventDefault(); e.stopPropagation();
+                        // Update the appropriate default variable based on output type
+                        if (isGraphics) wolframNbDefaultGfxFormat  = fmtKey;
+                        else            wolframNbDefaultExprFormat = fmtKey;
+                        // Refresh gold highlights only on buttons of the same type
+                        document.querySelectorAll('button[data-fmt-key]').forEach(btn => {
+                            const hdr = btn.closest('.wl-output-block')?.querySelector('.wl-output-header');
+                            const btnIsGfx = hdr ? hdr.getAttribute('data-output-is-graphics') === '1' : isGraphics;
+                            if (btnIsGfx !== isGraphics) return;  // leave other type alone
+                            if (btn.getAttribute('data-fmt-key') === fmtKey)
+                                btn.classList.add('wl-nb-default-fmt');
+                            else btn.classList.remove('wl-nb-default-fmt');
+                        });
+                        if (context && context.postMessage) {
+                            try { context.postMessage({ type: 'set-notebook-default-format', newFormat: fmtKey, isGfx: isGraphics }); }
+                            catch (_) {}
+                        }
+                    });
+                    group.appendChild(b);
+                });
+
+                // -- Size controls sub-group (MathML zoom -or- TXT A±), separated visually --
+                const sizeControls = [];
+                if (outFmt === 'MathML') {
+                    const applyZoom = () => {
+                        document.querySelectorAll('div.mathml-output').forEach(d => {
+                            d.style.fontSize = wolframMathmlZoom + 'em';
+                        });
+                    };
+                    const zoomOut = document.createElement('button');
+                    zoomOut.textContent = '\u2296'; zoomOut.title = 'Zoom out (MathML)';
+                    zoomOut.style.cssText = BTN_BASE;
+                    zoomOut.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation();
+                        wolframMathmlZoom = Math.max(0.4, Math.round((wolframMathmlZoom - 0.15) * 100) / 100);
+                        applyZoom(); });
+                    const zoomIn = document.createElement('button');
+                    zoomIn.textContent = '\u2295'; zoomIn.title = 'Zoom in (MathML)';
+                    zoomIn.style.cssText = BTN_BASE;
+                    zoomIn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation();
+                        wolframMathmlZoom = Math.min(2.5, Math.round((wolframMathmlZoom + 0.15) * 100) / 100);
+                        applyZoom(); });
+                    sizeControls.push(zoomOut, zoomIn);
+                } else if (outFmt === 'InputForm') {
+                    const applyTxtSize = () => {
+                        document.querySelectorAll('pre.vscode-wolfram-text-output').forEach(p => {
+                            p.style.fontSize = wolframTxtFontSize + 'em';
+                        });
+                    };
+                    const txtOut = document.createElement('button');
+                    txtOut.textContent = 'A\u207b'; txtOut.title = 'Decrease TXT font size';
+                    txtOut.style.cssText = BTN_BASE;
+                    txtOut.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation();
+                        wolframTxtFontSize = Math.max(0.5, Math.round((wolframTxtFontSize - 0.1) * 10) / 10);
+                        applyTxtSize(); });
+                    const txtIn = document.createElement('button');
+                    txtIn.textContent = 'A\u207a'; txtIn.title = 'Increase TXT font size';
+                    txtIn.style.cssText = BTN_BASE;
+                    txtIn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation();
+                        wolframTxtFontSize = Math.min(2.0, Math.round((wolframTxtFontSize + 0.1) * 10) / 10);
+                        applyTxtSize(); });
+                    sizeControls.push(txtOut, txtIn);
+                }
+                if (sizeControls.length > 0) {
+                    const sizeGroup = document.createElement('div');
+                    sizeGroup.style.cssText = 'display:inline-flex;gap:2px;align-items:center;' +
+                        'margin-left:4px;padding-left:5px;border-left:1px solid rgba(128,128,128,0.3);';
+                    sizeControls.forEach(b => sizeGroup.appendChild(b));
+                    group.appendChild(sizeGroup);
+                }
+
+                // -- Wrap toggle (MathML only) --
+                if (outFmt === 'MathML' && mathmlDiv) {
+                        let isWrapped = false;
+                        const wrapBtn = document.createElement('button');
+                        wrapBtn.innerHTML = '&#8659; Wrap';
+                        wrapBtn.title = 'Toggle line-wrap / scroll for this expression';
+                        wrapBtn.style.cssText = BTN_BASE;
+                        wrapBtn.addEventListener('click', (e) => {
+                            e.preventDefault(); e.stopPropagation();
+                            isWrapped = !isWrapped;
+                            if (isWrapped) {
+                                mathmlDiv.style.overflowX = 'hidden';
+                                mathmlDiv.style.overflowWrap = 'break-word';
+                                mathmlDiv.style.wordBreak = 'break-all';
+                                mathmlDiv.style.whiteSpace = 'normal';
+                                mathmlDiv.style.display = 'block';
+                                mathmlDiv.style.width = '100%';
+                                mathmlDiv.querySelectorAll('math,mrow,mo,mi,mn,mfrac,msup,msub').forEach(el => {
+                                    el.style.maxWidth = '100%';
+                                    el.style.overflowWrap = 'break-word';
+                                    el.style.wordBreak = 'break-all';
+                                    el.style.display = 'inline-block';
+                                });
+                                wrapBtn.innerHTML = '&#8596; Scroll';
+                            } else {
+                                mathmlDiv.style.overflowX = 'auto';
+                                mathmlDiv.style.overflowWrap = '';
+                                mathmlDiv.style.wordBreak = '';
+                                mathmlDiv.style.whiteSpace = '';
+                                mathmlDiv.style.display = '';
+                                mathmlDiv.style.width = '';
+                                mathmlDiv.querySelectorAll('math,mrow,mo,mi,mn,mfrac,msup,msub').forEach(el => {
+                                    el.style.maxWidth = '';
+                                    el.style.overflowWrap = '';
+                                    el.style.wordBreak = '';
+                                    el.style.display = '';
+                                });
+                                wrapBtn.innerHTML = '&#8659; Wrap';
+                            }
+                            if (context && context.postMessage) {
+                                try { context.postMessage({ type: 'scroll-to-output', outputId: currentOutputId }); }
+                                catch (err) { console.warn('[WolframRenderer] scroll-to-output postMessage failed:', err); }
+                            }
+                        });
+                        group.appendChild(wrapBtn);
+                }
+
+                header.appendChild(group);
+            });
+
+            // ---- TeXSrc: decode base64 → populate <pre> textContent ----
+            element.querySelectorAll('pre.vscode-wolfram-tex-source[data-tex-b64]').forEach(pre => {
+                try { pre.textContent = atob(pre.getAttribute('data-tex-b64') || ''); }
+                catch(e) { pre.textContent = '(base64 decode error)'; }
+                pre.removeAttribute('data-tex-b64');
+            });
+
+            // ---- Copy-to-clipboard overlay buttons for TXT, TeXSrc, SVG/PNG ----
+            const COPY_BTN_CSS = 'position:absolute;top:4px;right:4px;padding:1px 5px;font-size:11px;' +
+                'cursor:pointer;background:rgba(80,80,80,0.82);border:1px solid rgba(160,160,160,0.55);' +
+                'color:#cccccc;border-radius:3px;opacity:0;transition:opacity 0.15s;z-index:2;line-height:1.4;';
+            const WRAP_CSS = 'position:relative;display:block;';
+            const makeCopyBtn = (getText) => {
+                const btn = document.createElement('button');
+                btn.textContent = '\u29c9'; // ⧉ copy symbol
+                btn.title = 'Copy to clipboard';
+                btn.style.cssText = COPY_BTN_CSS;
+                btn.addEventListener('click', (e) => {
+                    e.preventDefault(); e.stopPropagation();
+                    const text = getText();
+                    if (text != null && navigator.clipboard) {
+                        navigator.clipboard.writeText(text).then(() => {
+                            const prev = btn.textContent;
+                            btn.textContent = '\u2713'; // ✓
+                            setTimeout(() => { btn.textContent = prev; }, 1300);
+                        }).catch(() => {});
+                    }
+                });
+                return btn;
+            };
+            const wrapWithCopy = (el, getText) => {
+                const wrapper = document.createElement('div');
+                wrapper.style.cssText = WRAP_CSS;
+                wrapper.addEventListener('mouseenter', () => { wrapper.querySelector('button').style.opacity = '0.65'; });
+                wrapper.addEventListener('mouseleave', () => { wrapper.querySelector('button').style.opacity = '0'; });
+                el.parentNode.insertBefore(wrapper, el);
+                wrapper.appendChild(el);
+                wrapper.appendChild(makeCopyBtn(getText));
+            };
+
+            // TXT — InputForm source; mark for hljs (Mathematica)
+            element.querySelectorAll('pre.vscode-wolfram-text-output').forEach(pre => {
+                // Decode WL \:XXXX unicode escape sequences (InputForm uses these for non-ASCII)
+                pre.textContent = pre.textContent.replace(/\\:([0-9A-Fa-f]{4})/g,
+                    (_, h) => String.fromCharCode(parseInt(h, 16)));
+                wrapWithCopy(pre, () => pre.textContent);
+                pre.setAttribute('data-hljs-lang', 'mathematica');
+            });
+            // TeXSrc — LaTeX source; mark for hljs (latex)
+            element.querySelectorAll('pre.vscode-wolfram-tex-source').forEach(pre => {
+                wrapWithCopy(pre, () => pre.textContent);
+                pre.setAttribute('data-hljs-lang', 'latex');
+            });
+            // SVG/PNG images — copy actual image data to clipboard
+            element.querySelectorAll('img.vscode-wolfram-svg-output, img.vscode-wolfram-png-output').forEach(img => {
+                const src = img.getAttribute('src') || '';
+                if (!src || src.startsWith('data:')) return;
+                const isPng = img.classList.contains('vscode-wolfram-png-output');
+                const btn = document.createElement('button');
+                btn.textContent = '\u29c9'; btn.title = 'Copy image to clipboard';
+                btn.style.cssText = COPY_BTN_CSS;
+                btn.addEventListener('click', async (e) => {
+                    e.preventDefault(); e.stopPropagation();
+                    try {
+                        if (isPng) {
+                            const blob = await (await fetch(src)).blob();
+                            await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+                        } else {
+                            const text = await (await fetch(src)).text();
+                            await navigator.clipboard.writeText(text);
+                        }
+                        const prev = btn.textContent; btn.textContent = '\u2713';
+                        setTimeout(() => { btn.textContent = prev; }, 1300);
+                    } catch (err) {
+                        // fallback: copy path
+                        try { await navigator.clipboard.writeText(img.getAttribute('data-wl-img') || src); } catch(e2) {}
+                        const prev = btn.textContent; btn.textContent = '\u2713';
+                        setTimeout(() => { btn.textContent = prev; }, 1300);
+                    }
+                });
+                const wrapper = document.createElement('div');
+                wrapper.style.cssText = 'position:relative;display:inline-block;';
+                wrapper.addEventListener('mouseenter', () => { btn.style.opacity = '0.65'; });
+                wrapper.addEventListener('mouseleave', () => { btn.style.opacity = '0'; });
+                img.parentNode.insertBefore(wrapper, img);
+                wrapper.appendChild(img); wrapper.appendChild(btn);
+            });
+            // Inline SVG divs — copy SVG source
+            element.querySelectorAll('div.vscode-wolfram-svg-output').forEach(div => {
+                const svgEl = div.querySelector('svg');
+                if (svgEl) wrapWithCopy(div, () => svgEl.outerHTML);
+            });
+
+            // ---- KaTeX rendering for TeX output divs ----
+            const texDivs = element.querySelectorAll('div.vscode-wolfram-tex-output[data-tex-b64]');
+            if (texDivs.length > 0) {
+                const renderWithKatex = (katex) => {
+                    texDivs.forEach(div => {
+                        let raw = '';
+                        try { raw = atob(div.getAttribute('data-tex-b64') || ''); } catch(e) {}
+                        try {
+                            div.innerHTML = katex.renderToString(raw, {
+                                displayMode: true, throwOnError: false,
+                                output: 'html', trust: false
+                            });
+                        } catch(e) {
+                            div.textContent = raw;
+                        }
+                    });
+                };
+                if (typeof window !== 'undefined' && window.katex) {
+                    renderWithKatex(window.katex);
+                } else {
+                    const KATEX_VER = '0.16.9';
+                    const KATEX_BASE = `https://cdn.jsdelivr.net/npm/katex@${KATEX_VER}/dist/`;
+                    const injectKatexCSS = () => {
+                        if (document.querySelector('link[data-katex-css]')) return;
+                        const link = document.createElement('link');
+                        link.rel = 'stylesheet'; link.href = KATEX_BASE + 'katex.min.css';
+                        link.setAttribute('data-katex-css', '1');
+                        document.head.appendChild(link);
+                    };
+                    const loadKatexJS = (cb) => {
+                        if (document.querySelector('script[data-katex-js]')) {
+                            let tries = 0;
+                            const poll = setInterval(() => {
+                                if (window.katex || ++tries > 50) {
+                                    clearInterval(poll);
+                                    if (window.katex) cb(window.katex);
+                                    else texDivs.forEach(d => {
+                                        try { d.textContent = atob(d.getAttribute('data-tex-b64') || ''); } catch(e) {}
+                                    });
+                                }
+                            }, 100);
+                            return;
+                        }
+                        const script = document.createElement('script');
+                        script.src = KATEX_BASE + 'katex.min.js'; script.setAttribute('data-katex-js', '1');
+                        script.onload = () => cb(window.katex);
+                        script.onerror = () => texDivs.forEach(d => {
+                            try { d.textContent = atob(d.getAttribute('data-tex-b64') || ''); } catch(e) {}
+                        });
+                        document.head.appendChild(script);
+                    };
+                    injectKatexCSS();
+                    loadKatexJS(renderWithKatex);
+                }
+            }
+
+            // ---- KaTeX CSS for WLLatex pre-rendered outputs ----
+            if (element.querySelector('.vscode-wolfram-wllatex-prerendered')) {
+                if (!document.querySelector('link[data-katex-css]')) {
+                    const _klnk = document.createElement('link');
+                    _klnk.rel = 'stylesheet';
+                    _klnk.href = 'https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css';
+                    _klnk.setAttribute('data-katex-css', '1');
+                    document.head.appendChild(_klnk);
+                }
+            }
+
+            // ---- WLLatex2: render raw-latex divs in the webview via KaTeX ----
+            const rawLatexDivs = element.querySelectorAll('div.vscode-wolfram-wllatex-raw-latex[data-latex-b64]');
+            if (rawLatexDivs.length > 0) {
+                const renderRawWithKatex = (katex) => {
+                    rawLatexDivs.forEach(div => {
+                        const btlError = div.getAttribute('data-btl-error');
+                        const rawBoxes = (() => { try { return atob(div.getAttribute('data-boxes-b64') || ''); } catch(e) { return ''; } })();
+                        let latex = '';
+                        try { latex = atob(div.getAttribute('data-latex-b64') || ''); } catch(e) {}
+                        // Error banner from boxToLatex (parse error etc.)
+                        const errBanner = btlError
+                            ? `<div style="color:#e05c4e;font-size:11px;margin:0 0 3px;">⚠️ boxToLatex error: ${btlError.replace(/&/g,'&amp;').replace(/</g,'&lt;')}</div>`
+                            : '';
+                        // Debug disclosure widget
+                        const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+                        const debugHtml =
+                            '<details style="margin-top:4px;font-size:11px;opacity:0.65;">' +
+                            '<summary style="cursor:pointer;user-select:none;">WLLatex2 debug</summary>' +
+                            '<pre style="margin:2px 0;white-space:pre-wrap;word-break:break-all;">' +
+                            '<b>boxes:</b> ' + esc(rawBoxes) + '\n' +
+                            '<b>latex:</b> ' + esc(latex) +
+                            (btlError ? '\n<b style="color:#e05c4e;">error:</b> ' + esc(btlError) : '') +
+                            '</pre></details>';
+                        let rendered = '';
+                        try {
+                            rendered = katex.renderToString(latex, {
+                                displayMode: true, throwOnError: false,
+                                output: 'html', trust: false
+                            });
+                        } catch(e) {
+                            rendered = '<pre style="color:#e05c4e;">KaTeX error: ' + esc(String(e.message||e)) + '</pre>';
+                        }
+                        div.innerHTML = errBanner + rendered + debugHtml;
+                    });
+                };
+                if (typeof window !== 'undefined' && window.katex) {
+                    renderRawWithKatex(window.katex);
+                } else {
+                    // Reuse the same KaTeX CDN loading path as the TeX block
+                    const KATEX_VER2 = '0.16.9';
+                    const KATEX_BASE2 = `https://cdn.jsdelivr.net/npm/katex@${KATEX_VER2}/dist/`;
+                    if (!document.querySelector('link[data-katex-css]')) {
+                        const lnk = document.createElement('link');
+                        lnk.rel = 'stylesheet'; lnk.href = KATEX_BASE2 + 'katex.min.css';
+                        lnk.setAttribute('data-katex-css', '1');
+                        document.head.appendChild(lnk);
+                    }
+                    if (document.querySelector('script[data-katex-js]')) {
+                        let tries2 = 0;
+                        const poll2 = setInterval(() => {
+                            if (window.katex || ++tries2 > 50) {
+                                clearInterval(poll2);
+                                if (window.katex) renderRawWithKatex(window.katex);
+                            }
+                        }, 100);
+                    } else {
+                        const scr2 = document.createElement('script');
+                        scr2.src = KATEX_BASE2 + 'katex.min.js'; scr2.setAttribute('data-katex-js', '1');
+                        scr2.onload = () => renderRawWithKatex(window.katex);
+                        document.head.appendChild(scr2);
+                    }
+                }
+            }
+
+            // ---- Inline syntax highlighting (no CDN) ----
+            element.querySelectorAll('[data-hljs-lang]').forEach(el => {
+                const lang = el.getAttribute('data-hljs-lang');
+                el.removeAttribute('data-hljs-lang');
+                if (lang) applyInlineHighlight(el, lang);
+                // Add line-number gutter for code pre blocks
+                if (el.tagName === 'PRE') addLineNumberGutter(el);
+            });
+
+            // (scroll-to-top button removed — not achievable from inside per-cell iframe)
         },
         
         disposeOutputItem(outputId) {

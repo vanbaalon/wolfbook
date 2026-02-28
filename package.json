@@ -3,7 +3,7 @@
 	"displayName": "Wolfbook — Wolfram Language Notebook",
 	"description": "Interactive Wolfram Language notebook for VS Code. WSTP-backed kernel, MathML/SVG/PNG rendering, Unicode input, LSP diagnostics, and output expansion controls.",
 	"publisher": "wolfbook",
-	"version": "2.0.0",
+	"version": "2.0.2",
 	"engines": {
 		"vscode": "^1.95.0"
 	},
@@ -12,11 +12,22 @@
 		"url": "https://github.com/vanbaalon/wolfbook.git"
 	},
 	"keywords": [
+		"wolfram",
+		"mathematica",
+		"notebook",
+		"wstp",
+		"wolframscript",
 		"notebookRenderer"
 	],
 	"categories": [
+		"Programming Languages",
+		"Notebooks",
 		"Other"
 	],
+	"galleryBanner": {
+		"color": "#CC3333",
+		"theme": "dark"
+	},
 	"activationEvents": [
 		"onLanguage:wolfram",
 		"onCommand:wolfram.OpenNotebook",
@@ -42,7 +53,8 @@
 					".wls",
 					".wlt",
 					".mt",
-					".vsnb"
+					".vsnb",
+					".evsnb"
 				],
 				"configuration": "./wolfram.language-configuration.json"
 			}
@@ -58,6 +70,19 @@
 			"type": "object",
 			"title": "Wolfram",
 			"properties": {
+				"wolfram.evalMode": {
+					"scope": "workspace",
+					"type": "string",
+					"enum": ["auto", "advance", "refine"],
+					"default": "auto",
+					"enumDescriptions": [
+						"Auto-detect: changed cells use Refine mode, unchanged cells use Advance mode",
+						"Always advance: scroll to output and move focus to next cell after every evaluation",
+						"Always refine: no scroll, no focus change — stay on the same cell in edit mode"
+					],
+					"description": "Post-evaluation scroll and focus behaviour. Auto detects whether the cell changed since last run.",
+					"order": 0
+				},
 				"wolfram.lsp.serverEnabled": {
 					"scope": "resource",
 					"type": "boolean",
@@ -321,6 +346,31 @@
 			{
 				"command": "wolfram.executeCell",
 				"title": "Wolfram: Execute Cell"
+			},
+			{
+				"command": "wolfram.pasteImageCell",
+				"title": "Wolfram: Paste Image as Cell (with prompt)",
+				"icon": "$(file-media)"
+			},
+			{
+				"command": "wolfram.pasteImageCellBelow",
+				"title": "Paste Image as Cell",
+				"icon": "$(file-media)"
+			},
+			{
+				"command": "wolfram.evalMode.auto",
+				"title": "Eval: Auto",
+				"icon": "$(symbol-misc)"
+			},
+			{
+				"command": "wolfram.evalMode.advance",
+				"title": "Eval: Advance",
+				"icon": "$(arrow-down)"
+			},
+			{
+				"command": "wolfram.evalMode.refine",
+				"title": "Eval: Refine",
+				"icon": "$(sync)"
 			}
 		],
 		"menus": {
@@ -358,6 +408,21 @@
 				}
 			],
 			"notebook/toolbar": [
+				{
+					"command": "wolfram.evalMode.auto",
+					"when": "notebookType == extended-wolfram-notebook && wolframEvalMode == 'auto'",
+					"group": "wolframMode@1"
+				},
+				{
+					"command": "wolfram.evalMode.advance",
+					"when": "notebookType == extended-wolfram-notebook && wolframEvalMode == 'advance'",
+					"group": "wolframMode@1"
+				},
+				{
+					"command": "wolfram.evalMode.refine",
+					"when": "notebookType == extended-wolfram-notebook && wolframEvalMode == 'refine'",
+					"group": "wolframMode@1"
+				},
 				{
 					"command": "wolfram.abortEvaluation",
 					"when": "(notebookType == wolfram-notebook || notebookType == extended-wolfram-notebook) && wolframKernelActive",
@@ -405,9 +470,28 @@
 					"when": "notebookType == extended-wolfram-notebook && notebookCellHasOutputs",
 					"group": "inline@2"
 				}
+			],
+			"notebook/cell/between": [
+				{
+					"command": "wolfram.pasteImageCellBelow",
+					"when": "notebookType == extended-wolfram-notebook",
+					"group": "navigation"
+				}
 			]
 		},
 		"keybindings": [
+			{
+				"command": "wolfram.pasteImageCellBelow",
+				"key": "ctrl+v",
+				"mac": "cmd+v",
+				"when": "notebookEditorFocused && !editorTextFocus && notebookType == 'extended-wolfram-notebook'"
+			},
+			{
+				"command": "wolfram.pasteImageCell",
+				"key": "ctrl+shift+v",
+				"mac": "cmd+shift+v",
+				"when": "notebookEditorFocused && notebookType == 'extended-wolfram-notebook'"
+			},
 			{
 				"command": "wolfram.abortEvaluation",
 				"key": "cmd+.",
