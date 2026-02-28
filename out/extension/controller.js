@@ -43,6 +43,7 @@ function _loadBtlAddon() {
 // Set SCROLL_DEBUG = false to disable all scroll logging.
 const SCROLL_DEBUG = true;
 let _scrollLogPath = null;  // resolved once on first write
+let _dynLogPath    = null;
 function _resolveScrollLogPath() {
     if (_scrollLogPath) return _scrollLogPath;
     const folders = (typeof vscode !== 'undefined') && vscode.workspace && vscode.workspace.workspaceFolders;
@@ -50,6 +51,7 @@ function _resolveScrollLogPath() {
     const extFolder = folders.find(f => f.name === 'VSCodeWolframExtension');
     const base = extFolder ? extFolder.uri.fsPath : folders[0].uri.fsPath;
     _scrollLogPath = require('path').join(base, 'Temporary Docs', 'wolfram-scroll-debug.log');
+    _dynLogPath    = require('path').join(base, 'Temporary Docs', 'wolfram-dyn-debug.log');
     return _scrollLogPath;
 }
 function scrollLog(...args) {
@@ -62,6 +64,22 @@ function scrollLog(...args) {
             require('fs').appendFileSync(p, '[' + new Date().toISOString() + '] ' + msg + '\n');
         } catch (_) {}
     }
+}
+// dynLog() — dedicated diagnostic log for Dynamic rendering, truncated on each kernel start.
+function dynLog(...args) {
+    const msg = args.join(' ');
+    console.log('[dyn-dbg] ' + msg);
+    _resolveScrollLogPath();  // ensure _dynLogPath is set
+    if (_dynLogPath) {
+        try {
+            require('fs').appendFileSync(_dynLogPath, '[' + new Date().toISOString() + '] ' + msg + '\n');
+        } catch (_) {}
+    }
+}
+// Hex-dump helper: show first N bytes of a string as 'XX XX ...' for encoding diagnosis.
+function _hexDump(str, n) {
+    const buf = Buffer.from(String(str).slice(0, n * 4), 'utf8').slice(0, n);
+    return Array.from(buf).map(b => b.toString(16).padStart(2,'0')).join(' ');
 }
 
 // (SCROLL_DELAY_MS removed — Advance-mode scroll now fires on Shift+Enter,
@@ -89,6 +107,27 @@ class WolframNotebookKernel {
         // Collects Print[] lines emitted inside a Dialog[] subsession.
         // Set by openDialogSubsession(), cleared when done.
         this._dialogPrintCollector = null;
+        // Cell URIs queued for subsession-tagged execution (⌥⇧↵ on idle kernel).
+        // checkoutExecutionQueue() reads + clears this to add the "subsession" badge.
+        this._subsessionCellUris = new Set();
+
+        // Sub-kernel: a second WstpSession used exclusively to render results
+        // obtained via dialogEval() on the main kernel. Initialized lazily on
+        // first ⌥⇧↵ with a busy kernel. Reuses init.wl so VsCodeRenderExpr is
+        // available exactly as in normal evaluations.
+        /** @type {import("../../wstp").WstpSession | null} */
+        this._subKernel = null;
+        this._subKernelReady = false;
+        this._subKernelInitPromise = null;
+        // Promise-chain mutex: only one Dynamic widget may hold the dialog at a time.
+        this._dynDialogMutex = Promise.resolve();
+        this._abortPending   = false;
+        // True while VsCodeRender[N] (ExportString SVG) is executing in the main kernel.
+        // Dynamic widget loops skip their interrupt cycle during this window so they
+        // cannot abort an in-flight ExportString/Rasterize call.
+        this._renderingActive = false;
+        // Per-cell shared outputs array for mixed Dynamic+static cells.
+        this._dynCells = new Map();
 
         /** @type {import("../../wstp").WstpSession | undefined} */
         this.session = undefined;
@@ -179,6 +218,7 @@ class WolframNotebookKernel {
         this._pendingScrollCellIndex    = null;  // set by markKeyboardExecution()
         this._pendingScrollCellNotebook = null;  // set by markKeyboardExecution()
         this._pendingScrollMode         = null;  // 'advance' | 'refine' — set by execute()
+        this._pendingViewportAtExecute  = null;  // cell-index of viewport top at Shift+Enter time
 
         // ---- Eval mode: two-mode scroll/focus behaviour ----
         // _cellLastSource: maps cellUri → source text of last evaluation.
@@ -484,7 +524,16 @@ class WolframNotebookKernel {
                 }
             }
 
-            // ---- Dialog subsession messages ----
+            // ---- Renderer-side timing log (scroll jerk diagnosis) ----
+            if (message.type === 'render-timing') {
+                scrollLog('[renderer]', '[' + message.phase + ']',
+                          'id:', message.id,
+                          '| t_renderer:', message.t,
+                          '| lag:', Date.now() - message.t, 'ms',
+                          message.h !== undefined ? ('| scrollH:' + message.h) : '');
+            }
+
+            // ---- Dialog subsystem messages ----
             if (message.type === 'dialog-eval-request' && message.expr !== undefined) {
                 const rid = message.requestId;
                 if (this.session && this.session.isDialogOpen) {
@@ -727,7 +776,9 @@ class WolframNotebookKernel {
         if (isGfx === true) {
             const d = this._notebookDefaultGfxFormat.get(nbUri);
             if (d) return d;
-        } else if (isGfx === false) {
+        } else {
+            // isGfx === false (known expression) or undefined (first eval, unknown type)
+            // → apply expression default; if explicit graphics later, it re-resolves correctly
             const d = this._notebookDefaultExprFormat.get(nbUri);
             if (d) return d;
         }
@@ -864,6 +915,16 @@ class WolframNotebookKernel {
 
                     this.markKeyboardExecution(cells[0], effectiveMode);
 
+                    // Snapshot viewport top at the moment Shift+Enter is pressed.
+                    // Used later by checkoutExecutionQueue to decide whether to
+                    // freeze the viewport (cell visible) or let VS Code scroll
+                    // (cell was already above the viewport).
+                    try {
+                        const _vr = ed.visibleRanges;
+                        this._pendingViewportAtExecute = (_vr && _vr.length > 0) ? _vr[0].start : cellIdx;
+                    } catch (_) { this._pendingViewportAtExecute = cellIdx; }
+                    scrollLog('[execute] viewportAtExecute:', this._pendingViewportAtExecute);
+
                     if (effectiveMode === 'refine') {
                         // ---- REFINE MODE ----
                         // Note: cursor position is saved earlier — in the wolfram.executeCell
@@ -892,11 +953,12 @@ class WolframNotebookKernel {
                         // fills in below with no post-output viewport jump.
                         const _advIdx = cellIdx;
                         const _advNb  = cells[0].notebook;
+                        const _advT0  = Date.now();
                         scrollLog('[advance] scheduling immediate input-cell animated scroll for cell', _advIdx);
                         setTimeout(() => {
                             // setTimeout(0) lets VS Code's selection advance (N→N+1) happen
                             // first, then we scroll the EVALUATED cell (not the newly selected one).
-                            scrollLog('[advance t=0] scrolling cell', _advIdx, 'to top (animated)');
+                            scrollLog('[advance t=0] scrolling cell', _advIdx, 'to top (animated) | dt=', Date.now() - _advT0, 'ms since execute()');
                             this._scrollToInputCellAnimated(_advIdx, _advNb);
                         }, 0);
                     }
@@ -959,7 +1021,22 @@ class WolframNotebookKernel {
         const currentExecution = this.executionQueue.getNextPendingExecution();
         if (!currentExecution) return;
 
+        // Was this cell queued via openDialogSubsession() on an idle kernel?
+        // If so, add the "subsession" badge to every Out[...] label this run.
+        const _isSubsession = this._subsessionCellUris.delete(
+            currentExecution.execution.cell.document.uri.toString()
+        );
+
         const code = currentExecution.execution.cell.document.getText();
+
+        // Cancel the Dynamic loop for this cell before starting a new execution.
+        if (this._dynamicWidgets) {
+            const _cUri = currentExecution.execution.cell.document.uri.toString();
+            const _prev = this._dynamicWidgets.get(_cUri);
+            if (_prev) { _prev.active = false; scrollLog('[dyn] cancelled cell loop for re-execution'); }
+        }
+        if (this._dynCells) this._dynCells.delete(
+            currentExecution.execution.cell.document.uri.toString());
 
         if (!code.trim()) {
             this.executionQueue.start(currentExecution.id);
@@ -971,7 +1048,92 @@ class WolframNotebookKernel {
         this.diagnosticCollection.delete(currentExecution.execution.cell.document.uri);
         this.clearSyntaxErrorDecorations(currentExecution.execution.cell);
 
+        // Capture previous outputs BEFORE start() — VS Code clears them internally
+        // when execution starts, causing a height-0 flash. We deep-snapshot the raw
+        // item data so the objects remain valid after start() invalidates cell.outputs.
+        const prevOutputsSnap = currentExecution.execution.cell.outputs.map(o => ({
+            items: (o.items || []).map(it => ({ mime: it.mime, data: it.data }))
+        }));
+        const _t0 = Date.now();
+        scrollLog('[start] cell', currentExecution.execution.cell.index,
+                  '| prevOutputs:', prevOutputsSnap.length,
+                  '| t=', _t0);
+
         this.executionQueue.start(currentExecution.id);
+        scrollLog('[start] after executionQueue.start() | dt=', Date.now() - _t0, 'ms');
+
+        // ---- Counter-scroll at execution START ----
+        // executionQueue.start() triggers VS Code's internal revealRange showing the executing
+        // cell. For long-running evaluations this means the viewport jumps at start and stays
+        // wrong for the entire duration. Fire the same freeze/pin logic that we use at end-time,
+        // so the viewport is correct from the very first frame of evaluation.
+        {
+            const _startCell = currentExecution.execution.cell;
+            const _startNb   = _startCell.notebook;
+            const _startIdx  = _startCell.index;
+            const _startMode = this._pendingScrollMode || 'advance';
+            const _startVae  = this._pendingViewportAtExecute;
+            const _vaeS      = _startVae !== null ? _startVae : _startIdx;
+            const _visibleAtStart = _startMode !== 'refine' || (_vaeS <= _startIdx + 1);
+            scrollLog('[start-reveal] mode:', _startMode, '| vae:', _vaeS, '| cell:', _startIdx, '| visibleAtStart:', _visibleAtStart);
+
+            if (_visibleAtStart) {
+                const _doStartReveal = (label) => {
+                    try {
+                        for (const _sed of vscode.window.visibleNotebookEditors) {
+                            if (_sed.notebook === _startNb) {
+                                const RC = vscode.NotebookRange ?? vscode.NotebookCellRange;
+                                if (_startMode === 'refine') {
+                                    // Refine: freeze — do nothing if cell is still visible.
+                                    // Only snap back with AtTop if VS Code scrolled it fully off-screen.
+                                    // visibleRanges[0].start > cellIdx+1 means cell is fully above viewport.
+                                    try {
+                                        const _vrNow = _sed.visibleRanges;
+                                        const _topNow = (_vrNow && _vrNow.length > 0) ? _vrNow[0].start : -1;
+                                        if (_topNow > _startIdx + 1) {
+                                            _sed.revealRange(new RC(_startIdx, _startIdx + 1),
+                                                             vscode.NotebookEditorRevealType.AtTop);
+                                            scrollLog('[start-reveal]', label, 'refine: cell scrolled off, AtTop cell', _startIdx, '(topNow=' + _topNow + ')');
+                                        } else {
+                                            scrollLog('[start-reveal]', label, 'refine: cell still visible, no-op (topNow=' + _topNow + ')');
+                                        }
+                                    } catch (_) {
+                                        _sed.revealRange(new RC(_startIdx, _startIdx + 1),
+                                                         vscode.NotebookEditorRevealType.AtTop);
+                                    }
+                                } else {
+                                    // Advance: always AtTop — deterministic pin.
+                                    _sed.revealRange(new RC(_startIdx, _startIdx + 1),
+                                                     vscode.NotebookEditorRevealType.AtTop);
+                                    scrollLog('[start-reveal]', label, 'advance: AtTop cell', _startIdx);
+                                }
+                                break;
+                            }
+                        }
+                    } catch (e) { scrollLog('[start-reveal] error:', e.message); }
+                };
+                // Fire at t=0, t=16, t=32, t=50ms — covers every rAF frame in the
+                // first 3 animation frames during which VS Code fires its internal scrolls.
+                setTimeout(() => _doStartReveal('t=0'),  0);
+                setTimeout(() => _doStartReveal('t=16'), 16);
+                setTimeout(() => _doStartReveal('t=32'), 32);
+                setTimeout(() => _doStartReveal('t=50'), 50);
+            }
+        }
+
+        // Restore previous outputs WITHOUT await so start()+replaceOutput are sent
+        // in the same synchronous JS turn. VS Code's extension host batches API calls
+        // made in the same tick into a single IPC message, meaning clear+restore can
+        // arrive at the renderer together — avoiding the one-frame blank-output flash.
+        if (prevOutputsSnap.length > 0) {
+            const restoredOutputs = prevOutputsSnap.map(o =>
+                new vscode.NotebookCellOutput(
+                    o.items.map(it => new vscode.NotebookCellOutputItem(it.data, it.mime))
+                )
+            );
+            currentExecution.execution.replaceOutput(restoredOutputs);  // no await
+            scrollLog('[start] replaceOutput(prevOutputs) fired (no-await) | dt=', Date.now() - _t0, 'ms');
+        }
 
         // ---- Record source for eval-mode auto-detection on next run ----
         // Stored at the START of execution so the NEXT Shift+Enter on this cell
@@ -982,16 +1144,6 @@ class WolframNotebookKernel {
         this._cellLastSource.set(_cellUriForLog, code);
         // Clear dirty flag — the current source is now the baseline for next comparison.
         this._cellDirty.delete(_cellUriForLog);
-
-        // Zero-height placeholder so VS Code collapses the output area
-        await currentExecution.execution.replaceOutput([
-            new vscode.NotebookCellOutput([
-                vscode.NotebookCellOutputItem.text(
-                    '<div style="height:0;overflow:hidden;margin:0;padding:0;"></div>',
-                    "text/html"
-                )
-            ])
-        ]);
 
         if (this.logFile !== "Off") {
             this.appendFileWrite(this.logFile, this.logString("Input: " + code));
@@ -1130,6 +1282,27 @@ class WolframNotebookKernel {
 
                 const subExpr = subExprs[i];
 
+                // ---- Skip Dynamic[...] — bypass kernel entirely ----
+                // The widget loop (started after execution.end()) handles these slots.
+                // Sending Dynamic[...] to the kernel while a widget is already running
+                // interrupts on the same session causes races and nested Dialog[].
+                if (subExpr.startsWith('Dynamic[') && subExpr.endsWith(']')) {
+                    const _dynPlaceholder = new vscode.NotebookCellOutput([
+                        vscode.NotebookCellOutputItem.text(
+                            '<div style="color:#888;font-style:italic;font-size:12px;padding:4px 0;">' +
+                            '⏳ Dynamic — start a computation to see live updates</div>',
+                            'x-application/wolfram-language-html'
+                        )
+                    ]);
+                    if (currentExecution.hasOutput) {
+                        await currentExecution.execution.appendOutput(_dynPlaceholder);
+                    } else {
+                        currentExecution.hasOutput = true;
+                        await currentExecution.execution.replaceOutput(_dynPlaceholder);
+                    }
+                    continue;
+                }
+
                 // Per-sub-expression print accumulator
                 let printOutput       = null;
                 let printHtml         = "";
@@ -1226,7 +1399,9 @@ class WolframNotebookKernel {
                 // ---- Render the result if non-Null (outputName non-empty) ----
                 // VsCodeRender[N] reads Out[N] from the kernel's history via a
                 // non-interactive evaluate() (EvaluatePacket) on the main kernel queue.
+                // _renderingActive blocks Dynamic widget interrupts for the duration.
                 if (r.outputName && lineN > 0) {
+                    this._renderingActive = true;
                     try {
                         const renderResult = await this.session.evaluate(
                             `VsCodeRender[${lineN}, "${format}", ${scale}]`,
@@ -1254,8 +1429,11 @@ class WolframNotebookKernel {
 
                         if (renderResult?.result?.type === "string" && renderResult.result.value) {
                             let html = this._processWLLatexBoxes(this._fixImageUris(renderResult.result.value));
+                            const _subsBadge = _isSubsession
+                                ? '<span style="font-size:9px;color:#e8a020;background:rgba(232,160,32,0.12);border:1px solid rgba(232,160,32,0.35);border-radius:3px;padding:1px 5px;margin-right:6px;font-style:italic;">subsession</span>'
+                                : '';
                             const outLabel =
-                                `<span style="font-size:10px;color:#888;margin-right:8px;">${r.outputName}</span>`;
+                                `${_subsBadge}<span style="font-size:10px;color:#888;margin-right:8px;">${r.outputName}</span>`;
 
                             // Detect skeleton (Short[] applied kernel-side) OR raw truncation
                             const isSkeleton = html.includes('data-wolfram-is-skeleton');
@@ -1301,6 +1479,7 @@ class WolframNotebookKernel {
                             if (currentExecution.hasOutput) {
                                 await currentExecution.execution.appendOutput(outObj);
                             } else {
+                                scrollLog('[first-output] replaceOutput with real content | dt=', Date.now() - _t0, 'ms | cell', currentExecution.execution.cell.index);
                                 await currentExecution.execution.replaceOutput(outObj);
                                 currentExecution.hasOutput = true;
                             }
@@ -1365,6 +1544,8 @@ class WolframNotebookKernel {
                                 }
                             }
                         } catch (_) {}
+                    } finally {
+                        this._renderingActive = false;
                     }
                 }
             }
@@ -1384,10 +1565,175 @@ class WolframNotebookKernel {
             const _savedCursor    = _wasRefine ? this._refineSavedCursor    : null;
             const _savedCursorUri = _wasRefine ? this._refineSavedCursorUri : null;
 
+            // ---- Read viewport-at-execute (captured at Shift+Enter time), then clear it ----
+            const _viewportAtExecute = this._pendingViewportAtExecute;
+            this._pendingViewportAtExecute = null;
+
+            // ---- Temporarily collapse cell n+1 to suppress VS Code's [n,n+2) reveal ----
+            // execution.end() internally calls revealRange([n, n+2), Default) — it tries to show
+            // both the executed cell AND the next cell including its output. If cell n+1 has a
+            // large output this scrolls the viewport far down.
+            // Fix: collapse cell n+1 (input+output) BEFORE execution.end() so VS Code sees only
+            // its tiny collapsed header bar (~28px) → minimal scroll.
+            // Restore the original collapse state at t=20ms via updateCellMetadata.
+            // updateCellMetadata does NOT move the viewport.
+            let _nextCellCollapsed = false;
+            let _nextCellCollapseIdx = -1;
+            let _nextCellPrevMeta = null;
+            if (isKeyboardExec) {
+                try {
+                    const _nextCell = execCell.notebook.cellAt(execCell.index + 1);
+                    if (_nextCell) {
+                        _nextCellCollapseIdx = _nextCell.index;
+                        _nextCellPrevMeta = _nextCell.metadata || {};
+                        // Only collapse if the cell has output (otherwise there's nothing to hide)
+                        const _hasOutput = _nextCell.outputs && _nextCell.outputs.length > 0;
+                        if (_hasOutput) {
+                            const _collapseEdit = new vscode.WorkspaceEdit();
+                            _collapseEdit.set(execCell.notebook.uri, [
+                                vscode.NotebookEdit.updateCellMetadata(_nextCellCollapseIdx, {
+                                    ..._nextCellPrevMeta,
+                                    inputCollapsed: true,
+                                    outputCollapsed: true
+                                })
+                            ]);
+                            await vscode.workspace.applyEdit(_collapseEdit);
+                            _nextCellCollapsed = true;
+                            scrollLog('[pre-end-collapse-next] collapsed cell', _nextCellCollapseIdx,
+                                      'to suppress [n,n+2) scroll');
+                        }
+                    }
+                } catch (_e) {
+                    scrollLog('[pre-end-collapse-next] error (non-fatal):', _e.message);
+                    _nextCellCollapsed = false;
+                    _nextCellCollapseIdx = -1;
+                }
+            }
+
             scrollLog('[checkout-end] execution.end() about to fire — cell', execCell.index,
-                      '| wasRefine:', _wasRefine);
+                      '| wasRefine:', _wasRefine, '| viewportAtExecute:', _viewportAtExecute);
             this.executionQueue.end(currentExecution.id, !anyAborted);
             scrollLog('[checkout-end] execution.end() done');
+
+            // Force-close any Dialog[] that a Dynamic widget cycle may have left open
+            // when the main evaluation finished mid-cycle. isDialogOpen can be stale,
+            // so call unconditionally whenever dynamic widgets are running.
+            if (this._dynamicWidgets && this._dynamicWidgets.size > 0) {
+                this.session.closeAllDialogs?.();
+                // Also drain the idle-sub mutex so blocked loops unblock immediately.
+                this._dynIdleMutex = Promise.resolve();
+            }
+
+            // ---- Dynamic widgets: scan all top-level expressions in the cell ----
+            // Supports mixed cells: Dynamic[e1]\n1+1\nDynamic[e2] → 2 widgets + 1 static.
+            // Non-Dynamic expressions are already rendered by the kernel; their outputs
+            // are preserved in the shared per-cell outputs array and left untouched.
+            {
+                const _topExprs = this._splitTopLevelExprs(code);
+                const _dynExprs = _topExprs.filter(e => e.isDynamic);
+                scrollLog('[dyn] splitTopLevel | total exprs:', _topExprs.length,
+                    '| dynExprs:', _dynExprs.length,
+                    '| cell.outputs.length:', execCell.outputs.length,
+                    '| exprs:', _topExprs.map(e => (e.isDynamic ? 'DYN' : 'static') + '[' + e.slotIndex + ']').join(', '));
+                if (_dynExprs.length > 0) {
+                    scrollLog('[dyn] found', _dynExprs.length, 'Dynamic expr(s) — starting cell loop | slots:',
+                        _dynExprs.map(d => d.slotIndex + '=' + d.dynInner.slice(0, 20)).join(', '));
+                    if (!this._dynCells) this._dynCells = new Map();
+                    this._dynCells.set(execCell.document.uri.toString(),
+                        { cell: execCell, outputs: Array.from(execCell.outputs) });
+                    this._startDynamicCell(execCell, _dynExprs, imgDir, imgRel, null);
+                }
+            }
+
+            // ---- Restore cell n+1 collapse state at t=20ms (after VS Code's rAF scroll has fired) ----
+            if (_nextCellCollapsed && _nextCellCollapseIdx >= 0) {
+                const _restNb2  = execCell.notebook;
+                const _restIdx2 = _nextCellCollapseIdx;
+                const _restMeta = _nextCellPrevMeta;
+                setTimeout(async () => {
+                    try {
+                        const _restEdit = new vscode.WorkspaceEdit();
+                        _restEdit.set(_restNb2.uri, [
+                            vscode.NotebookEdit.updateCellMetadata(_restIdx2, {
+                                ..._restMeta,
+                                inputCollapsed:  _restMeta.inputCollapsed  || false,
+                                outputCollapsed: _restMeta.outputCollapsed || false
+                            })
+                        ]);
+                        await vscode.workspace.applyEdit(_restEdit);
+                        scrollLog('[post-end-restore-next] t=20ms: uncollapsed cell', _restIdx2);
+                    } catch (_e) {
+                        scrollLog('[post-end-restore-next] error:', _e.message);
+                    }
+                }, 20);
+            }
+
+            // ---- Override VS Code's post-execution auto-scroll ----
+            // VS Code's execution.end() internally reveals range [n, n+2) — both the
+            // executed cell AND the next cell — to ensure output is visible. If cell n+1
+            // is large, this scrolls far down. We override with AtTop(n) at t=0/16/32/50ms.
+            //
+            // AtTop is used for BOTH refine and advance:
+            //   - It is deterministic: VS Code's Default([n,n+2)) cannot scroll the cell
+            //     above the top of the viewport, so AtTop always wins.
+            //   - InCenterIfOutsideViewport was wrong for refine: if VS Code moved the cell
+            //     off-screen first, InCenter re-centers it — a large visible jump.
+            //
+            //   Refine + cell was clearly ABOVE viewport (_vae > cell+1): don't override.
+            if (isKeyboardExec) {
+                const _peNb   = execCell.notebook;
+                const _peIdx  = execCell.index;
+                const _vae    = _viewportAtExecute !== null ? _viewportAtExecute : _peIdx;
+                // +1 margin: visibleRanges[0].start returns first FULLY visible cell;
+                // partially-visible top cell gives start = cellIndex+1.
+                const _cellWasVisible = !_wasRefine || (_vae <= _peIdx + 1);
+                scrollLog('[post-end-reveal] cellWasVisible:', _cellWasVisible, '| _vae:', _vae, '| cell:', _peIdx);
+
+                if (_cellWasVisible) {
+                    const _doReveal = (label) => {
+                        try {
+                            for (const ed of vscode.window.visibleNotebookEditors) {
+                                if (ed.notebook === _peNb) {
+                                    const RangeCtor = vscode.NotebookRange ?? vscode.NotebookCellRange;
+                                    if (_wasRefine) {
+                                        // Refine: freeze — only act if VS Code scrolled cell fully off-screen.
+                                        // visibleRanges[0].start > cellIdx+1 ⇒ cell is fully above viewport.
+                                        try {
+                                            const _vrNow = ed.visibleRanges;
+                                            const _topNow = (_vrNow && _vrNow.length > 0) ? _vrNow[0].start : -1;
+                                            if (_topNow > _peIdx + 1) {
+                                                ed.revealRange(new RangeCtor(_peIdx, _peIdx + 1),
+                                                               vscode.NotebookEditorRevealType.AtTop);
+                                                scrollLog('[post-end-reveal]', label, 'refine: cell scrolled off, AtTop cell', _peIdx, '(topNow=' + _topNow + ')');
+                                            } else {
+                                                scrollLog('[post-end-reveal]', label, 'refine: cell still visible, no-op (topNow=' + _topNow + ')');
+                                            }
+                                        } catch (_) {
+                                            ed.revealRange(new RangeCtor(_peIdx, _peIdx + 1),
+                                                           vscode.NotebookEditorRevealType.AtTop);
+                                        }
+                                    } else {
+                                        // Advance: always AtTop — deterministic pin.
+                                        ed.revealRange(new RangeCtor(_peIdx, _peIdx + 1),
+                                                       vscode.NotebookEditorRevealType.AtTop);
+                                        scrollLog('[post-end-reveal]', label, 'advance: AtTop cell', _peIdx);
+                                    }
+                                    break;
+                                }
+                            }
+                        } catch (e) {
+                            scrollLog('[post-end-reveal] error (non-fatal):', e.message);
+                        }
+                    };
+                    // t=0/16/32/50ms: cover every rAF frame during which VS Code fires its scroll.
+                    setTimeout(() => _doReveal('t=0'),  0);
+                    setTimeout(() => _doReveal('t=16'), 16);
+                    setTimeout(() => _doReveal('t=32'), 32);
+                    setTimeout(() => _doReveal('t=50'), 50);
+                } else {
+                    scrollLog('[post-end-reveal] cell', _peIdx, 'clearly above viewport at execute (_vae=' + _vae + ') — not overriding VS Code scroll');
+                }
+            }
 
             // ---- Refine mode: restore selection + edit mode + cursor AFTER execution.end() ----
             // execution.end() may cause VS Code to emit post-execution selection events.
@@ -1412,6 +1758,30 @@ class WolframNotebookKernel {
                         scrollLog('[refine-post-end t=30] entering edit mode via showTextDocument on cell', _refineIdx);
                         try {
                             const _editCell = _refineNb.cellAt(_refineIdx);
+
+                            // If no cursor was saved, the user was in command mode when
+                            // Shift+Enter was pressed (activeTextEditor was null at that time).
+                            // In that case, stay in command mode after execution — do NOT call
+                            // showTextDocument, which would scroll the viewport via revealRange.
+                            if (!_savedCursor) {
+                                scrollLog('[refine-post-end t=30] _savedCursor is null (command mode) — skipping showTextDocument, staying in command mode');
+                                return;
+                            }
+
+                            // If the active text editor is already this cell's document,
+                            // don't call showTextDocument at all — it would call revealRange
+                            // internally even without a `selection` option, scrolling the viewport.
+                            // Just restore the cursor directly on the active editor.
+                            const _activeEd = vscode.window.activeTextEditor;
+                            if (_activeEd && _activeEd.document.uri.toString() === _editCell.document.uri.toString()) {
+                                scrollLog('[refine-post-end t=30] cell already active editor — skipping showTextDocument, restoring cursor only');
+                                if (_savedCursor && _activeEd) {
+                                    _activeEd.selection = _savedCursor;
+                                    scrollLog('[refine-post-end] cursor restored on already-active editor');
+                                }
+                                return;
+                            }
+
                             const _showOpts = {
                                 preview: false,
                                 viewColumn: vscode.ViewColumn.Active,
@@ -1741,25 +2111,34 @@ class WolframNotebookKernel {
             vscode.window.showWarningMessage('A dialog subsession is already open.');
             return;
         }
-        const busy = this.executionQueue.queue.length > 0 && this.executionQueue.queue[0].started;
-        if (!busy) {
-            vscode.window.showInformationMessage(
-                'Kernel is idle — run a long evaluation first, then press ⌥⇧↵ to inspect it.'
-            );
-            return;
-        }
+        // Resolve the active cell first — needed for both idle and busy paths.
         const editor = vscode.window.activeNotebookEditor;
         if (!editor) { vscode.window.showWarningMessage('No active notebook editor.'); return; }
         const sel = editor.selections;
         if (!sel || sel.length === 0) { vscode.window.showWarningMessage('No cell selected.'); return; }
         const cell = editor.notebook.cellAt(sel[0].start);
         if (!cell || cell.kind !== vscode.NotebookCellKind.Code) {
-            vscode.window.showWarningMessage('Select a code cell to evaluate in the dialog.');
+            vscode.window.showWarningMessage('Select a code cell to evaluate in the dialog (select a code cell first).');
             return;
         }
         const cellCode = cell.document.getText().trim();
         if (!cellCode) { vscode.window.showWarningMessage('Cell is empty.'); return; }
 
+        const busy = this.executionQueue.queue.length > 0 && this.executionQueue.queue[0].started;
+
+        // ---- Idle kernel: queue cell through the normal execution pipeline ----
+        // The full rendering machinery (SVG graphics, LaTeX, format buttons, etc.)
+        // applies exactly as with Shift+Enter.  The only visible difference is the
+        // amber "subsession" badge placed next to each Out[...]=  label.
+        if (!busy) {
+            this._subsessionCellUris.add(cell.document.uri.toString());
+            const execution = this._controller.createNotebookCellExecution(cell);
+            this.executionQueue.push(execution);
+            this.checkoutExecutionQueue();
+            return;
+        }
+
+        // ---- Busy kernel: interrupt and open Dialog[] subsession ----
         // Collect Print[] lines from inside the dialog via onDialogPrint
         const dialogPrintLines = [];
         this._dialogPrintCollector = line => dialogPrintLines.push(line);
@@ -1787,68 +2166,642 @@ class WolframNotebookKernel {
             );
             return;
         }
-        // Create a VS Code execution for this cell so it shows the running spinner
+        // Notebook image directory so the subkernel can save SVG files there.
+        const _subNbPath = cell.notebook.uri.fsPath;
+        const _subNbBase = path.basename(_subNbPath, path.extname(_subNbPath));
+        const _subImgDir = path.join(path.dirname(_subNbPath), 'img', _subNbBase);
+        const _subImgRel = 'img/' + _subNbBase;
+        try { fs.mkdirSync(_subImgDir, { recursive: true }); } catch (_) {}
+
+        const _dlgFormat = this._resolveFormat(cell);
+        const _dlgScale  = Number(this.config.get('imageScale') || 0.8);
+
+        // Create a VS Code execution for this cell so it shows the running spinner.
         const execution = this._controller.createNotebookCellExecution(cell);
         execution.start(Date.now());
         await execution.replaceOutput([new vscode.NotebookCellOutput([
             vscode.NotebookCellOutputItem.text(
-                '<div style="color:#e8a020;font-size:11px;font-style:italic;">⏳ Dialog: evaluating…</div>',
+                '<div style="color:#e8a020;font-size:11px;font-style:italic;">⏳ Subsession: evaluating…</div>',
                 'x-application/wolfram-language-html'
             )
         ])]);
 
-        let wexpr = null;
-        let evalError = null;
+        // Step 1: Evaluate cellCode inside the Dialog[], Export to a fixed .mx file,
+        // then return the path. No intermediate variables — avoids Module/With issues.
+        const _tmpFile = _subImgDir.replace(/\\/g, '/') + '/_subsession_transfer.mx';
+        const _dlgSentExpr = '(Export["' + _tmpFile + '", ToExpression["' +
+            this.escapeWL(cellCode) + '"]]; "' + _tmpFile + '")';
+        scrollLog('[subsession-dlg] cellCode:', cellCode);
+        scrollLog('[subsession-dlg] tmp file:', _tmpFile);
+        scrollLog('[subsession-dlg] sent to dialogEval:', _dlgSentExpr);
+        let _dlgTmpFile = null;
+        let _dlgEvalError = null;
         try {
-            wexpr = await this.session.dialogEval(cellCode);
-        } catch (err) {
-            evalError = err.message;
+            const _dlgWexpr = await this.session.dialogEval(_dlgSentExpr);
+            scrollLog('[subsession-dlg] raw WExpr back:', JSON.stringify(_dlgWexpr));
+            // We already know _tmpFile in JS — just check Export didn't return $Failed.
+            // Don't use _dlgWexpr.value as path: TEXTPKT wrapping breaks paths with spaces.
+            const _rawVal = (_dlgWexpr && _dlgWexpr.value) ? String(_dlgWexpr.value) : '';
+            if (_dlgWexpr && (_dlgWexpr.type === 'string' || _dlgWexpr.type === 'symbol') &&
+                    !_rawVal.includes('Failed') && !_rawVal.includes('$Failed')) {
+                _dlgTmpFile = _tmpFile;  // use our JS-computed path directly
+                scrollLog('[subsession-dlg] Export succeeded, using JS path:', _dlgTmpFile);
+            } else if (_dlgWexpr && _dlgWexpr.error) {
+                _dlgEvalError = _dlgWexpr.error;
+                scrollLog('[subsession-dlg] WExpr error:', _dlgEvalError);
+            } else {
+                _dlgEvalError = 'Export returned: ' + JSON.stringify(_dlgWexpr);
+                scrollLog('[subsession-dlg] Export failed:', _dlgEvalError);
+            }
+        } catch (_err) {
+            _dlgEvalError = _err.message;
+            scrollLog('[subsession-dlg] dialogEval threw:', _dlgEvalError);
         }
 
-        const printLines = [...dialogPrintLines];
+        const _dlgPrintLines = [...dialogPrintLines];
         this._dialogPrintCollector = null;
 
-        // Exit dialog → main eval resumes
+        // Step 2: Exit dialog immediately — main kernel resumes.
+        // Subkernel render runs independently after this.
         try { await this.session.exitDialog(); } catch (_) {}
+        scrollLog('[subsession-dlg] exitDialog() done');
 
-        // Build output HTML
-        const labelHtml =
-            '<span style="font-size:10px;color:#e8a020;margin-right:8px;font-weight:bold;">Dialog: Out</span>';
+        // Step 3: Render via the subkernel — full VsCodeRenderExpr pipeline
+        // (SVG/PNG graphics, WLLatex, MathML, etc.) identical to normal evaluation.
+        const _subsBadge =
+            '<span style="font-size:9px;color:#e8a020;background:rgba(232,160,32,0.12);' +
+            'border:1px solid rgba(232,160,32,0.35);border-radius:3px;padding:1px 5px;' +
+            'margin-right:6px;font-style:italic;">subsession</span>';
+
         const parts = [];
 
-        if (printLines.length > 0) {
-            const printHtml = printLines.map(line => {
+        if (_dlgPrintLines.length > 0) {
+            const printHtml = _dlgPrintLines.map(line => {
                 const text = this.decodeWolframOctal(line.replace(/\\012/g, '\n'));
                 return '<pre class="vscode-wolfram-print-output">' + this.escapeHtml(text) + '</pre>';
             }).join('');
             parts.push(printHtml);
         }
 
-        if (evalError) {
+        if (_dlgEvalError || _dlgTmpFile === null) {
+            const _errMsg = _dlgEvalError || 'dialog eval returned no result';
             parts.push(
                 '<div style="display:flex;align-items:baseline;gap:4px;padding:3px 0">' +
-                labelHtml +
+                _subsBadge +
+                '<span style="font-size:10px;color:#e8a020;margin-right:8px;">Out=</span>' +
                 '<span style="color:#f44747;font-family:Consolas,monospace;font-size:13px;">' +
-                this.escapeHtml(evalError) + '</span></div>'
+                this.escapeHtml(_errMsg) + '</span></div>'
             );
         } else {
-            const resultText = this._wexprToInputForm(wexpr);
-            parts.push(
-                '<div style="display:flex;align-items:baseline;gap:4px;padding:3px 0">' +
-                labelHtml +
-                '<span style="color:#9cdcfe;white-space:pre-wrap;word-break:break-all;' +
-                'font-family:Consolas,monospace;font-size:13px;">' +
-                this.escapeHtml(resultText) + '</span></div>'
-            );
+            let _renderHtml  = null;
+            let _renderError = null;
+            try {
+                const _subKern = await this._ensureSubKernel(_subImgDir, _subImgRel);
+                // Import the .mx file — binary WL expression, no encoding issues.
+                const _subExpr = 'VsCodeRenderExpr[Import["' + _dlgTmpFile +
+                    '"], "' + _dlgFormat + '", ' + _dlgScale + ']';
+                scrollLog('[subsession-render] tmp file:', _dlgTmpFile);
+                scrollLog('[subsession-render] VsCodeRenderExpr call:', _subExpr);
+                const _renderResult = await _subKern.evaluate(_subExpr, { interactive: false });
+                scrollLog('[subsession-render] result type:', _renderResult?.result?.type,
+                          '| value length:', _renderResult?.result?.value?.length ?? 'n/a',
+                          '| messages:', JSON.stringify(_renderResult?.messages ?? []));
+                // Clean up temp file regardless of render result.
+                try { require('fs').unlinkSync(_dlgTmpFile); } catch (_) {}
+                if (_renderResult && _renderResult.result &&
+                        _renderResult.result.type === 'string' && _renderResult.result.value) {
+                    _renderHtml = this._processWLLatexBoxes(
+                        this._fixImageUris(_renderResult.result.value)
+                    );
+                } else {
+                    _renderError = 'subkernel render returned no HTML — result: ' +
+                        JSON.stringify(_renderResult?.result);
+                    scrollLog('[subsession-render] NO HTML:', _renderError);
+                }
+            } catch (_re) {
+                _renderError = _re.message;
+                scrollLog('[subsession-render] threw:', _renderError);
+            }
+
+            const _headerLabel =
+                _subsBadge +
+                '<span style="font-size:10px;color:#888;margin-right:8px;">Out=</span>';
+
+            if (_renderHtml) {
+                const _headerRow =
+                    '<div class="wl-output-header" style="display:flex;align-items:center;' +
+                    'gap:6px;width:100%;" data-session-epoch="' + this._sessionEpoch + '">' +
+                    _headerLabel + '</div>';
+                parts.push(
+                    '<div class="wl-output-block">' + _headerRow +
+                    '<div class="wl-output-content">' + _renderHtml + '</div></div>'
+                );
+            } else {
+                // Subkernel render failed — InputForm text fallback.
+                const _errNote = _renderError
+                    ? '<div style="color:#FFA500;font-size:11px;margin:0 0 2px;">Render failed (' +
+                      this.escapeHtml(_renderError) + ') — showing InputForm</div>'
+                    : '';
+                parts.push(
+                    '<div style="padding:3px 0">' +
+                    '<div style="display:flex;align-items:baseline;gap:4px;margin-bottom:2px;">' +
+                    _headerLabel + '</div>' +
+                    _errNote +
+                    '<pre class="vscode-wolfram-text-output" style="white-space:pre-wrap;' +
+                    'overflow-wrap:break-word;margin:0;">' +
+                    this.escapeHtml('(tmp file: ' + (_dlgTmpFile || 'none') + ')') + '</pre></div>'
+                );
+            }
         }
 
         await execution.replaceOutput([new vscode.NotebookCellOutput([
             vscode.NotebookCellOutputItem.text(
-                `<div data-session-epoch="${this._sessionEpoch}">${parts.join('')}</div>`,
+                '<div data-session-epoch="' + this._sessionEpoch + '">' + parts.join('') + '</div>',
                 'x-application/wolfram-language-html'
             )
         ])]);
         execution.end(true, Date.now());
+    }
+
+    // -----------------------------------------------------------------------
+    // Split cell code into top-level WL expressions, bracket-depth aware.
+    // Returns [{text, slotIndex, isDynamic, dynInner}].
+    _splitTopLevelExprs(code) {
+        const exprs = [];
+        let depth = 0, inStr = false, start = 0;
+        for (let i = 0; i < code.length; i++) {
+            const ch = code[i];
+            if (inStr) {
+                if (ch === '\\') i++;
+                else if (ch === '"') inStr = false;
+            } else if (ch === '"') {
+                inStr = true;
+            } else if ('[({'.includes(ch)) {
+                depth++;
+            } else if ('])}'.includes(ch)) {
+                depth--;
+            } else if (ch === '\n' && depth === 0) {
+                const text = code.slice(start, i).trim();
+                if (text) exprs.push(text);
+                start = i + 1;
+            }
+        }
+        const last = code.slice(start).trim();
+        if (last) exprs.push(last);
+        return exprs.map((text, idx) => {
+            const isDynamic = text.startsWith('Dynamic[') && text.endsWith(']');
+            return { text, slotIndex: idx, isDynamic,
+                     dynInner: isDynamic ? text.slice('Dynamic['.length, -1) : null };
+        });
+    }
+
+    // Dynamic cell loop:
+    //   ONE loop per cell. Each cycle mirrors exactly ⌥⇧↵:
+    //     1. Wait until kernel is busy.
+    //     2. Interrupt once → wait for Dialog[].
+    //     3. dialogEval each Dynamic slot sequentially (same dialog session).
+    //     4. exitDialog() → kernel resumes.
+    //     5. Render each exported slot via subkernel → update all outputs at once.
+    //     6. Wait 500ms, repeat.
+    _startDynamicCell(cell, dynExprs, imgDir, imgRel, ownedExec) {
+        const epoch   = this._sessionEpoch;
+        const cellUri = cell.document.uri.toString();
+
+        if (!this._dynamicWidgets) this._dynamicWidgets = new Map();
+        const prev = this._dynamicWidgets.get(cellUri);
+        if (prev) prev.active = false;
+        const state = { active: true };
+        this._dynamicWidgets.set(cellUri, state);
+
+        // Snapshot of all cell outputs (preserves static-slot outputs across updates).
+        if (!this._dynCells) this._dynCells = new Map();
+        const snapOutputs = Array.from(cell.outputs);
+        this._dynCells.set(cellUri, { cell, outputs: snapOutputs });
+
+        scrollLog('[dyn] cell loop start | slots:', dynExprs.map(d => d.slotIndex).join(','), '| epoch:', epoch);
+
+        const _badge = (status) => {
+            const color = status === 'live' ? '#c678dd' : status === 'paused' ? '#888' : '#e8a020';
+            const bg    = status === 'live' ? 'rgba(198,120,221,0.12)' : status === 'paused' ? 'rgba(128,128,128,0.10)' : 'rgba(232,160,32,0.12)';
+            const bd    = status === 'live' ? 'rgba(198,120,221,0.35)' : status === 'paused' ? 'rgba(128,128,128,0.25)' : 'rgba(232,160,32,0.35)';
+            const label = status === 'live' ? '⟳ Dynamic' : status === 'paused' ? '⏸ Dynamic' : '⏳ Dynamic — start a computation to see live updates';
+            return '<span style="font-size:9px;color:' + color + ';background:' + bg + ';' +
+                   'border:1px solid ' + bd + ';border-radius:3px;padding:1px 6px;' +
+                   'margin-right:6px;font-style:italic;">' + label + '</span>';
+        };
+
+        // Update all Dynamic slot outputs in a single createNotebookCellExecution call.
+        // htmlBySlot: { slotIndex: htmlString } — slots absent from the map keep their current output.
+        const _putAllOutputs = async (htmlBySlot, status) => {
+            // Guard: if the session epoch changed (kernel restarted), do not write
+            // stale output over the cleared cells.
+            if (this._sessionEpoch !== epoch) return;
+            try {
+                const t   = Date.now();
+                const exe = this._controller.createNotebookCellExecution(cell);
+                exe.start(t);
+                const snap = snapOutputs.slice();
+                for (let i = 0; i < dynExprs.length; i++) {
+                    const de   = dynExprs[i];
+                    const html = htmlBySlot[de.slotIndex] || null;
+                    const body = html
+                        ? '<div class="wl-output-content">' + html + '</div>'
+                        : '<div style="color:#888;font-style:italic;font-size:12px;padding:4px 0;">Waiting for computation…</div>';
+                    const out = new vscode.NotebookCellOutput([
+                        vscode.NotebookCellOutputItem.text(
+                            '<div data-dynamic="1" data-epoch="' + epoch + '">'
+                            + '<div style="display:flex;align-items:center;padding:2px 0 4px;">'
+                            + _badge(status) + '</div>' + body + '</div>',
+                            'x-application/wolfram-language-html'
+                        )
+                    ]);
+                    if (de.slotIndex < snap.length) snap[de.slotIndex] = out;
+                    else { while (snap.length < de.slotIndex) snap.push(new vscode.NotebookCellOutput([])); snap.push(out); }
+                }
+                for (let i = 0; i < snap.length; i++) snapOutputs[i] = snap[i];
+                if (this._dynCells && this._dynCells.has(cellUri))
+                    this._dynCells.get(cellUri).outputs = snap;
+                await exe.replaceOutput(snap);
+                exe.end(true, t);
+            } catch (e) { scrollLog('[dyn] _putAllOutputs error:', e.message); }
+        };
+
+        // Show initial waiting badge.
+        _putAllOutputs({}, 'waiting');
+
+        const runLoop = async () => {
+            let cycle = 0;
+            const htmlBySlot = {}; // last rendered html per slot — shown with 'paused' badge when idle
+            let lastBusy = false; // track busy→idle transition to avoid repeated executions
+            while (true) {
+                cycle++;
+                if (!state.active || this._sessionEpoch !== epoch) {
+                    scrollLog('[dyn] cell loop exit | cycle:', cycle);
+                    this._dynamicWidgets.delete(cellUri);
+                    // Clear cell output immediately so stale Dynamic content doesn't
+                    // linger after kernel restart — don't rely on launchKernel timing.
+                    try {
+                        const _exitExe = this._controller.createNotebookCellExecution(cell);
+                        _exitExe.start(Date.now());
+                        await _exitExe.replaceOutput([]);
+                        _exitExe.end(true, Date.now());
+                    } catch (_) {}
+                    return;
+                }
+
+                // Busy = any evaluation is running in the queue AND we are not in abort.
+                // The _abortPending flag + _dynDialogMutex already prevent re-abort loops.
+                const busy = !this._abortPending &&
+                    this.executionQueue.queue.length > 0 && this.executionQueue.queue[0].started;
+                scrollLog('[dyn] cycle', cycle, '| busy:', busy, '| dlgOpen:', this.session?.isDialogOpen);
+
+                if (!busy) {
+                    // Recovery: if a dialog was left open after evaluation ended
+                    // (e.g. exitDialog failed mid-cycle), kernel is frozen — close it.
+                    if (this.session?.isDialogOpen) {
+                        scrollLog('[dyn] idle but dlgOpen=true — acquiring mutex for recovery exitDialog');
+                        let _releaseRec;
+                        const _prevRec = this._dynDialogMutex;
+                        this._dynDialogMutex = new Promise(r => _releaseRec = r);
+                        await _prevRec;
+                        try {
+                            if (this.session?.isDialogOpen) {
+                                scrollLog('[dyn] idle recovery: calling closeAllDialogs');
+                                this.session.closeAllDialogs?.();
+                                await new Promise(r => setTimeout(r, 300));
+                            }
+                        } finally {
+                            _releaseRec();
+                        }
+                        continue;
+                    }
+
+                    // ---- Idle-eval path ----
+                    // When nothing is running, evaluate Dynamic slots directly via sub().
+                    // Serialized via _dynIdleMutex — only ONE cell loop calls sub() at a
+                    // time: concurrent sub() calls stack on the WSTP link and all time out.
+                    // Skip if dialog is open (recovery block above handles that).
+                    const _queueEmpty = this.executionQueue.queue.length === 0;
+                    if (_queueEmpty && !this._abortPending && !this.session.isDialogOpen
+                            && (Date.now() - (this._dynLastIdleRender || 0)) > 1000) {
+                        // Acquire global idle mutex.
+                        if (!this._dynIdleMutex) this._dynIdleMutex = Promise.resolve();
+                        let _releaseIdle;
+                        const _prevIdle = this._dynIdleMutex;
+                        this._dynIdleMutex = new Promise(r => _releaseIdle = r);
+                        await _prevIdle;
+                        // Re-check after acquiring — another loop may have just fired.
+                        if (!state.active || this._sessionEpoch !== epoch
+                                || this.executionQueue.queue.length > 0
+                                || this._abortPending || this.session.isDialogOpen
+                                || (Date.now() - (this._dynLastIdleRender || 0)) < 800) {
+                            _releaseIdle();
+                            await new Promise(r => setTimeout(r, 300));
+                            continue;
+                        }
+                        // Pre-flight: always close any stale dialog before sub().
+                        this.session.closeAllDialogs?.();
+                        this._dynLastIdleRender = Date.now();
+                        const scale = Number(this.config?.get?.('imageScale') ?? 0.8) || 0.8;
+                        const idlePending = {};
+                        try {
+                            for (const de of dynExprs) {
+                                if (!state.active || this._sessionEpoch !== epoch) break;
+                                const escaped = de.dynInner.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+                                const expr = 'VsCodeDynExportValue["' + escaped + '"]';
+                                dynLog('IDLE-SEND | cycle', cycle, '| slot', de.slotIndex);
+                                try {
+                                    const res = await Promise.race([
+                                        this.session.sub(expr),
+                                        new Promise((_, rej) => setTimeout(() => rej(new Error('idle-sub timeout 3s')), 3000))
+                                    ]);
+                                    const _rv = res?.value;
+                                    if (typeof _rv === 'string' && _rv.startsWith('WLVAL:FILE:')) {
+                                        const tmpFile = _rv.slice('WLVAL:FILE:'.length)
+                                            .replace(/\\012/g, '').replace(/\\015/g, '')
+                                            .replace(/[^a-zA-Z0-9/_.-]/g, '');
+                                        idlePending[de.slotIndex] = tmpFile;
+                                    }
+                                } catch(_idleErr) {
+                                    dynLog('IDLE-SEND-ERR | cycle', cycle, '| slot', de.slotIndex, '|', _idleErr.message);
+                                }
+                            }
+                        } finally { _releaseIdle(); }
+                        if (Object.keys(idlePending).length > 0) {
+                            try {
+                                const _subKern = await this._ensureSubKernel(imgDir, imgRel);
+                                for (const [slotIdxStr, tmpFile] of Object.entries(idlePending)) {
+                                    const slotIdx = Number(slotIdxStr);
+                                    const fileEsc = tmpFile.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+                                    const renderExpr = 'Module[{dynVal=Import["' + fileEsc + '"]},VsCodeRenderExpr[dynVal,"Auto",' + scale + ']]';
+                                    try {
+                                        const renderRes = await _subKern.sub(renderExpr);
+                                        const htmlStr = renderRes?.value;
+                                        if (typeof htmlStr === 'string' && htmlStr.length > 0) {
+                                            dynLog('IDLE-RENDER-OK | cycle', cycle, '| slot', slotIdx, '| htmlLen:', htmlStr.length);
+                                            htmlBySlot[slotIdx] = this._processWLLatexBoxes(this._fixImageUris(htmlStr));
+                                        }
+                                    } catch(_) {
+                                    } finally {
+                                        try { require('fs').unlinkSync(tmpFile); } catch(_) {}
+                                    }
+                                }
+                            } catch(_subErr) {
+                                dynLog('IDLE-SUBKERN-ERR | cycle', cycle, '|', _subErr.message);
+                            }
+                            await _putAllOutputs(htmlBySlot, 'live');
+                        }
+                        lastBusy = false;
+                        await new Promise(r => setTimeout(r, 800));
+                        continue;
+                    }
+
+                    // Only update output once on the busy→idle transition.
+                    // Do NOT call createNotebookCellExecution every 300ms — VS Code
+                    // treats each call as a cell execution and spams the output area.
+                    if (lastBusy) {
+                        // Evaluation finished — clear cached values and show "waiting".
+                        // Do NOT show last-rendered values with a "paused" badge:
+                        // those values belonged to the now-finished computation.
+                        for (const k of Object.keys(htmlBySlot)) delete htmlBySlot[k];
+                        await _putAllOutputs({}, 'waiting');
+                    }
+                    lastBusy = false;
+                    await new Promise(r => setTimeout(r, 300));
+                    continue;
+                }
+                lastBusy = true;
+
+                // Skip this cycle if the kernel is actively rendering (ExportString/SVG).
+                // Sending an interrupt now would abort ExportString mid-call and corrupt
+                // the SVG pipeline state. Just wait and retry next cycle.
+                if (this._renderingActive) {
+                    await new Promise(r => setTimeout(r, 150));
+                    continue;
+                }
+
+                // Skip if dialog is already open — don't interrupt, just wait.
+                if (this.session.isDialogOpen) {
+                    await new Promise(r => setTimeout(r, 200));
+                    continue;
+                }
+
+                // ---- Global dialog mutex: serialises interrupt+dialogEval+exitDialog ----
+                // across ALL concurrent Dynamic cell loops so two loops never send competing
+                // interrupts and open nested Dialog[] sessions simultaneously.
+                let _releaseDlg;
+                const _prevDlg = this._dynDialogMutex;
+                this._dynDialogMutex = new Promise(r => _releaseDlg = r);
+                await _prevDlg;
+
+                // Re-check after acquiring lock (another loop may have just used the dialog).
+                if (!state.active || this._sessionEpoch !== epoch) { _releaseDlg(); continue; }
+                // Abort is pending — release immediately so abort can proceed cleanly.
+                if (this._abortPending) { scrollLog('[dyn] cycle', cycle, '| abort pending — skip'); _releaseDlg(); continue; }
+                // Rendering started while we were waiting on the mutex — release and retry.
+                if (this._renderingActive) { _releaseDlg(); await new Promise(r => setTimeout(r, 150)); continue; }
+                if (this.session.isDialogOpen) { _releaseDlg(); await new Promise(r => setTimeout(r, 200)); continue; }
+
+                let gotIdxs = [];
+                let pendingValues = {}; // slotIndex → FullForm string (populated inside Dialog[])
+                const scale = Number(this.config?.get?.('imageScale') ?? 0.8) || 0.8;
+                // Busy-gone watcher: rejects dialogEval immediately when main evaluation
+                // finishes mid-cycle so we never hang for the full 8s timeout.
+                let _busyWatcher = null;
+                let _busyGoneReject = null;
+                const _busyGoneProm = new Promise((_, rej) => { _busyGoneReject = rej; });
+                try {
+                // ---- Single interrupt. Wait up to 2500ms — NO retry interrupt. ----
+                // Pre-flight closeAllDialogs: isDialogOpen is often stale. Reset
+                // any stale dialog state before the interrupt so the C++ state is clean.
+                this.session.closeAllDialogs?.();
+                const sent = this.session.interrupt();
+                scrollLog('[dyn] cycle', cycle, '| interrupt sent:', sent);
+                if (!sent) { await new Promise(r => setTimeout(r, 500)); continue; }
+
+                const t1 = Date.now();
+                while (!this.session.isDialogOpen && Date.now() - t1 < 2500)
+                    await new Promise(r => setTimeout(r, 25));
+                const dlgOpen = this.session.isDialogOpen;
+                scrollLog('[dyn] cycle', cycle, '| dlgOpen:', dlgOpen, '| waited:', Date.now() - t1, 'ms');
+                if (!dlgOpen) {
+                    // Dialog never opened — kernel may be stuck. Force-close and give up cycle.
+                    this.session.closeAllDialogs?.();
+                    await new Promise(r => setTimeout(r, 300)); continue;
+                }
+
+                // Start watcher now (dialog is confirmed open).
+                _busyWatcher = setInterval(() => {
+                    const _stillBusy = !this._abortPending &&
+                        this.executionQueue.queue.length > 0 && this.executionQueue.queue[0].started;
+                    if (!_stillBusy) { clearInterval(_busyWatcher); _busyWatcher = null; _busyGoneReject(new Error('busy-lost')); }
+                }, 150);
+
+                // ---- Evaluate each Dynamic slot: export evaluated value to .mx temp file ----
+                // VsCodeDynExportValue["exprString"] evaluates the expression inside Dialog[]
+                // (where Do-loop variables like n are visible) and exports the CONCRETE result
+                // (e.g. a fully-built Graphics[...]) to a temp .mx file.
+                // IMPORTANT: NO CheckAbort wrapper — inside Dialog[] after an interrupt,
+                // CheckAbort traps the active abort flag and returns $Failed immediately
+                // before any expression is evaluated. The subsession (⌥⇧↵) uses the same
+                // approach and is proven correct.
+                // After exitDialog(), the file is imported on _subKernel (separate process)
+                // and rendered via VsCodeRenderExpr — full SVG/MathML, no context needed.
+                for (let i = 0; i < dynExprs.length; i++) {
+                    const de      = dynExprs[i];
+                    const escaped = de.dynInner.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+                    const expr    = 'VsCodeDynExportValue["' + escaped + '"]';
+                    dynLog('SEND | cycle', cycle, '| slot', de.slotIndex, '| expr:', de.dynInner.slice(0, 60));
+                    try {
+                        const res = await Promise.race([
+                            this.session.dialogEval(expr),
+                            new Promise((_, rej) => setTimeout(() => rej(new Error('timeout 8s')), 8000)),
+                            _busyGoneProm,
+                        ]);
+                        const _rv = res?.value;
+                        dynLog('RECV | cycle', cycle, '| slot', de.slotIndex,
+                               '| type:', res?.type, '| len:', String(_rv).length,
+                               '| starts:', String(_rv).slice(0, 80));
+                        if (res && !res.error && typeof _rv === 'string' && _rv.startsWith('WLVAL:FILE:')) {
+                            // WSTP text-mode inserts ' \012>   ' line-continuation into long strings.
+                            // Step 1: strip the 4-char WSTP escape literals \012 \015 (else their
+                            //         digits '012' survive the path-char filter below).
+                            // Step 2: strip all non-path characters (space, >, \, etc.)
+                            const tmpFile = _rv.slice('WLVAL:FILE:'.length)
+                                .replace(/\\012/g, '').replace(/\\015/g, '')
+                                .replace(/[^a-zA-Z0-9/_.-]/g, '');
+                            dynLog('WLVAL-FILE | cycle', cycle, '| slot', de.slotIndex,
+                                   '| cleanPath:', tmpFile);
+                            pendingValues[de.slotIndex] = tmpFile;
+                            gotIdxs.push(i);
+                        } else if (res && !res.error && typeof _rv === 'string' && _rv === 'WLVAL:FAILED') {
+                            dynLog('WLVAL-FAILED | cycle', cycle, '| slot', de.slotIndex);
+                            // Keep previous output — expression returned $Failed (e.g. n not yet set).
+                        } else if (res && !res.error && typeof _rv === 'string' && _rv.length > 0) {
+                            dynLog('RAW-FALLBACK | cycle', cycle, '| slot', de.slotIndex,
+                                   '| raw[0..120]:', _rv.slice(0, 120));
+                            const _esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+                            htmlBySlot[de.slotIndex] =
+                                '<pre style="margin:0;padding:4px 0;font-size:12px;color:#c00;' +
+                                'font-family:monospace;white-space:pre-wrap;">'
+                                + '⚠ restart kernel to load VsCodeDynExportValue\n\n'
+                                + _esc(_rv.slice(0, 500)) + '</pre>';
+                            gotIdxs.push(i);
+                        } else {
+                            dynLog('NULL/ERR | cycle', cycle, '| slot', de.slotIndex,
+                                   '| res:', JSON.stringify(res)?.slice(0, 120));
+                        }
+                    } catch (e) {
+                        if (e.message === 'busy-lost') {
+                            dynLog('BUSY-LOST | cycle', cycle, '| slot', de.slotIndex, '— eval ended mid-dialog, closing dialog');
+                        } else {
+                            dynLog('THROW | cycle', cycle, '| slot', de.slotIndex, '| err:', e.message);
+                            scrollLog('[dyn] cycle', cycle, '| slot', de.slotIndex, '| dialogEval error:', e.message);
+                        }
+                        break;  // don't try remaining slots
+                    }
+                }
+
+                // ---- Exit dialog — retry up to 3 times if it hangs. ----
+                let exited = false;
+                for (let attempt = 0; attempt < 3 && !exited; attempt++) {
+                    try {
+                        await Promise.race([
+                            this.session.exitDialog(),
+                            new Promise((_, rej) => setTimeout(() => rej(new Error('exitDialog timeout')), 2000))
+                        ]);
+                        exited = true;
+                    } catch (e) {
+                        scrollLog('[dyn] cycle', cycle, '| exitDialog attempt', attempt + 1, 'failed:', e.message);
+                    }
+                }
+                // All exitDialog attempts failed — the kernel is stuck inside Dialog[]
+                // (e.g. ExportString/Rasterize is still running). Abort the kernel to
+                // forcibly terminate the stuck computation and release the WSTP link.
+                if (!exited) {
+                    dynLog('ABORT | cycle', cycle, '| exitDialog failed 3 times — aborting kernel');
+                    try { this.session.abort(); } catch(_) {}
+                    // Wait up to 3s for the dialog to close post-abort.
+                    const _ta = Date.now();
+                    while (this.session.isDialogOpen && Date.now() - _ta < 3000)
+                        await new Promise(r => setTimeout(r, 50));
+                    dynLog('ABORT-WAIT | cycle', cycle, '| dlgOpen after abort:', this.session.isDialogOpen, '| waited:', Date.now()-_ta, 'ms');
+                    // If the kernel is still stuck in Dialog[] after abort, we cannot
+                    // recover without a kernel restart.  Suspend the widget loop until
+                    // the session epoch changes (i.e. user restarts the kernel).
+                    if (this.session.isDialogOpen) {
+                        dynLog('STUCK | cycle', cycle, '| kernel stuck — suspending widget loop until kernel restart');
+                        await _putAllOutputs(htmlBySlot, 'paused');
+                        // Spin until epoch changes (kernel restarted) then exit loop.
+                        while (this._sessionEpoch === epoch && state.active)
+                            await new Promise(r => setTimeout(r, 500));
+                        return;  // exit runLoop
+                    }
+                }
+
+                const t2 = Date.now();
+                while (this.session.isDialogOpen && Date.now() - t2 < 2000)
+                    await new Promise(r => setTimeout(r, 30));
+                scrollLog('[dyn] cycle', cycle, '| dialog closed after', Date.now() - t2, 'ms | slots:', gotIdxs.length);
+
+                // Brief pause so kernel resumes Do loop before next interrupt.
+                await new Promise(r => setTimeout(r, 150));
+                } finally {
+                    if (_busyWatcher) { clearInterval(_busyWatcher); _busyWatcher = null; }
+                    _releaseDlg();
+                }
+
+                if (!state.active || this._sessionEpoch !== epoch) continue;
+
+                // ---- Render pending slot values on _subKernel ----
+                // Dialog[] is now closed. pendingValues holds .mx temp file paths.
+                // The _subKernel is a separate process — SVG export cannot block the main kernel.
+                // This mirrors the subsession (⌥⇧↵) render path exactly.
+                if (Object.keys(pendingValues).length > 0) {
+                    try {
+                        const _subKern = await this._ensureSubKernel(imgDir, imgRel);
+                        for (const [slotIdxStr, tmpFile] of Object.entries(pendingValues)) {
+                            const slotIdx  = Number(slotIdxStr);
+                            const fileEsc  = tmpFile.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+                            const renderExpr = 'Module[{dynVal=Import["' + fileEsc + '"]},VsCodeRenderExpr[dynVal,"Auto",' + scale + ']]';
+                            dynLog('RENDER | cycle', cycle, '| slot', slotIdx,
+                                   '| tmpFile:', tmpFile,
+                                   '| renderExpr[0..80]:', renderExpr.slice(0, 80));
+                            try {
+                                const renderRes = await _subKern.sub(renderExpr);
+                                const htmlStr   = renderRes?.value;
+                                if (typeof htmlStr === 'string' && htmlStr.length > 0) {
+                                    dynLog('RENDER-OK | cycle', cycle, '| slot', slotIdx,
+                                           '| htmlLen:', htmlStr.length,
+                                           '| html[0..200]:', htmlStr.slice(0, 200));
+                                    htmlBySlot[slotIdx] = this._processWLLatexBoxes(
+                                        this._fixImageUris(htmlStr)
+                                    );
+                                    dynLog('RENDER-OK | cycle', cycle, '| slot', slotIdx,
+                                           '| htmlLen:', htmlStr.length);
+                                } else {
+                                    dynLog('RENDER-EMPTY | cycle', cycle, '| slot', slotIdx,
+                                           '| res:', JSON.stringify(renderRes)?.slice(0, 80));
+                                }
+                            } catch (renderErr) {
+                                dynLog('RENDER-ERR | cycle', cycle, '| slot', slotIdx, '|', renderErr.message);
+                            } finally {
+                                // Clean up temp file.
+                                try { require('fs').unlinkSync(tmpFile); } catch (_) {}
+                            }
+                        }
+                    } catch (subKernErr) {
+                        dynLog('SUBKERN-ERR | cycle', cycle, '|', subKernErr.message);
+                    }
+                }
+
+                if (gotIdxs.length > 0) await _putAllOutputs(htmlBySlot, 'live');
+                scrollLog('[dyn] cycle', cycle, '| done | sleeping 500ms');
+                await new Promise(r => setTimeout(r, 500));
+            }
+        };
+
+        setTimeout(() => runLoop().catch(e => scrollLog('[dyn] runLoop error:', e.message)), 250);
     }
 
     // Render a WExpr as a plain InputForm string (for Dialog: Out display)
@@ -2106,10 +3059,37 @@ class WolframNotebookKernel {
             // Increment epoch so the renderer knows outputs from this point belong
             // to a fresh session.  Broadcast happens after init.wl loads.
             this._sessionEpoch++;
+            // Stop all running Dynamic widgets — they belong to the old session.
+            if (this._dynamicWidgets) {
+                for (const state of this._dynamicWidgets.values()) state.active = false;
+                this._dynamicWidgets.clear();
+            }
+            // Clear Dynamic widget outputs from all cells so stale content disappears.
+            if (this._dynCells) {
+                for (const { cell: _dc } of this._dynCells.values()) {
+                    try {
+                        const _clrExec = this._controller.createNotebookCellExecution(_dc);
+                        _clrExec.start(Date.now());
+                        await _clrExec.replaceOutput([]);
+                        _clrExec.end(true, Date.now());
+                    } catch (_e) { /* cell may already be gone */ }
+                }
+                this._dynCells.clear();
+            }
+            // Reset dialog mutex so new widgets start on a clean chain.
+            this._dynDialogMutex = Promise.resolve();
+            this._dynIdleMutex   = Promise.resolve();
+            this._abortPending   = false;
+            this._renderingActive = false;
             // Clear per-output registries — Out[N] values don't survive a kernel restart,
             // so any format-switch buttons referencing them must become inert.
             this._outputRegistry.clear();
             this.truncatedOutputCells.clear();
+            // Truncate both debug logs on every kernel start so only fresh data is visible.
+            _resolveScrollLogPath();
+            if (_dynLogPath)    try { require('fs').writeFileSync(_dynLogPath,    ''); } catch(_){}
+            if (_scrollLogPath) try { require('fs').writeFileSync(_scrollLogPath, ''); } catch(_){}
+            dynLog('=== KERNEL START ===', new Date().toISOString());
             this.session = new WstpSession(kernelCommand, { interactive: true });
 
             // Load init.wl via sub() so it runs as a priority batch call and
@@ -2161,8 +3141,50 @@ class WolframNotebookKernel {
     }
 
     // -----------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // _ensureSubKernel — lazily boot a second kernel for subsession rendering.
+    // - Loads the same init.wl so VsCodeRenderExpr is available.
+    // - Updates VsCodeSetImgDir on every call so SVG files land in the right place.
+    async _ensureSubKernel(imgDir, imgRel) {
+        const _setImgDir = 'VsCodeSetImgDir["' + this.escapeWL(imgDir) + '", "' + this.escapeWL(imgRel) + '"]';
+        if (this._subKernel && this._subKernelReady) {
+            try { await this._subKernel.sub(_setImgDir); } catch (_) {}
+            return this._subKernel;
+        }
+        if (this._subKernelInitPromise) {
+            await this._subKernelInitPromise;
+            if (this._subKernel && this._subKernelReady) {
+                try { await this._subKernel.sub(_setImgDir); } catch (_) {}
+                return this._subKernel;
+            }
+        }
+        this._subKernelInitPromise = (async () => {
+            if (!WstpSession) throw new Error('wstp.node addon not available — cannot start subkernel');
+            const kernelCommand = this.findKernel.resolveKernel();
+            let kernelInitPath = path.join(this.extensionPath, 'resources', 'init.wl');
+            if (process.platform === 'win32') kernelInitPath = kernelInitPath.replace(/\\/g, '/');
+            const _initEscaped = kernelInitPath.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+            console.log('[subKernel] launching…');
+            this._subKernel = new WstpSession(kernelCommand, { interactive: false });
+            await this._subKernel.sub('Get["' + _initEscaped + '"]');
+            await this._subKernel.sub(_setImgDir);
+            this._subKernelReady = true;
+            console.log('[subKernel] ready');
+        })();
+        await this._subKernelInitPromise;
+        return this._subKernel;
+    }
+
+    // -----------------------------------------------------------------------
     quitKernel() {
         console.log('[quitKernel] closing session');
+        // Close subkernel first (it has no queue to drain).
+        if (this._subKernel) {
+            try { this._subKernel.close(); } catch (_) {}
+            this._subKernel = null;
+            this._subKernelReady = false;
+            this._subKernelInitPromise = null;
+        }
         if (this.session) {
             try { this.session.close(); } catch (_) {}
             this.session = undefined;
@@ -2174,28 +3196,69 @@ class WolframNotebookKernel {
 
     // -----------------------------------------------------------------------
     abortEvaluation() {
-        if (this.isAborting) {
-            return;
-        }
-        if (!this.session) {
+        // Dynamic cell loops are NOT killed on abort — they stay alive and naturally
+        // transition to "paused" state once busy becomes false after the abort.
+
+        if (this.isAborting || this._abortPending) return;
+        if (!this.session) { this.executionQueue.clear(); return; }
+
+        // Signal widget loops to skip their current dialog cycle immediately.
+        this._abortPending = true;
+
+        // Queue the actual kernel abort AFTER the current dialog mutex is released.
+        // This ensures we never call session.abort() mid-dialogEval, which confuses
+        // the WSTP link and prevents the aborted packet from ever arriving.
+        // Hard 2s fallback: if the dialog cycle takes longer, abort fires anyway.
+        const prevMutex = this._dynDialogMutex;
+        let _releaseMutexAbort;
+        this._dynDialogMutex = new Promise(r => _releaseMutexAbort = r);
+
+        const doAbort = () => {
+            this._abortPending = false;
+            _releaseMutexAbort(); // restore the mutex chain for future widget cycles
+
+            // Always close any stale dialog state before abort — closeAllDialogs()
+            // rejects all pending dialogEval/exitDialog promises immediately,
+            // so they don't hang while the kernel processes the abort.
+            this.session.closeAllDialogs?.();
+
+            const didAbort = this.session.abort();
+            scrollLog('[abort] session.abort() =>', didAbort);
+
+            if (!didAbort) {
+                this.executionQueue.clear();
+                return;
+            }
+
+            // Only set isAborting if the checkout loop is still alive to receive
+            // the aborted packet. If execution already finished (queue empty or
+            // not started), skip it — there's nothing to clear it, and isAborting
+            // would block all future evaluations.
+            const hasActiveCheckout = this.executionQueue.queue.length > 0 &&
+                                      this.executionQueue.queue[0].started;
             this.executionQueue.clear();
-            return;
-        }
 
-        // abort() is synchronous — returns true if an eval was in flight, false if idle.
-        // Only set isAborting when something is actually being aborted.
-        // If false (idle), it's a pure no-op: the queue is untouched and evaluations proceed normally.
-        const didAbort = this.session.abort();
+            if (!hasActiveCheckout) {
+                scrollLog('[abort] no active checkout — not setting isAborting');
+                return;
+            }
 
-        if (!didAbort) {
-            // Nothing was running — no-op. Don't block the queue.
-            return;
-        }
+            this.isAborting = true;
+            // Safety net: force-clear after 1s in case the aborted packet
+            // arrives but no handler processes it (timing edge case).
+            setTimeout(() => {
+                if (this.isAborting) {
+                    scrollLog('[abort] safety timeout: forcing isAborting = false after 1s');
+                    this.isAborting = false;
+                }
+            }, 1000);
+        };
 
-        // An evaluation was in flight — flag it so the checkout loop shows the indicator.
-        // isAborting is cleared in checkoutExecutionQueue when wrapStatus === "aborted".
-        this.isAborting = true;
-        this.executionQueue.clear();
+        // Wait for widget loop to release the mutex (max 2s), then abort.
+        Promise.race([
+            prevMutex,
+            new Promise(r => setTimeout(r, 2000))
+        ]).then(doAbort);
     }
 
     // -----------------------------------------------------------------------

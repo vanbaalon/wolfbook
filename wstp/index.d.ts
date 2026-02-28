@@ -172,6 +172,23 @@ export class WstpSession {
     abort(): boolean;
 
     /**
+     * Unconditionally reset all dialog state on the JS/Node side.
+     *
+     * Drains the internal `dialogQueue_`, immediately rejecting every pending
+     * `dialogEval()` / `exitDialog()` promise with an error message — so no
+     * caller is left waiting forever.  Clears `isDialogOpen` to `false`.
+     *
+     * This does **not** send any packet to the kernel; it only fixes Node-side
+     * bookkeeping.  Use it in error-recovery paths, before calling `abort()`,
+     * or whenever you need to guarantee clean dialog state without knowing
+     * whether a dialog is actually still running.
+     *
+     * @returns `true` if `isDialogOpen` was `true` before the call (something
+     *          was cleaned up), `false` if it was already clear.
+     */
+    closeAllDialogs(): boolean;
+
+    /**
      * Evaluate an expression, returning just the result expression
      * (not a full EvalResult).
      *
