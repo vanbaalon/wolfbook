@@ -4,6 +4,97 @@ All notable changes to **Wolfbook** are documented here.
 
 ---
 
+## [2.0.3] - 2026-03-01
+
+### Added
+- **Dynamic widget** — a new `Dynamic[expr]` cell type that displays live-updating output
+  while a computation is running.  Place `Dynamic[expr]` on its own line (or mixed with
+  static expressions in the same cell); a placeholder badge appears immediately and the
+  slot re-renders every ~500 ms by interrupting the kernel into a `Dialog[]` subsession
+  and evaluating `expr` there, or via a direct `sub()` call when the kernel is idle.
+  - **Busy-path** (kernel computing): sends one `interrupt()`, opens `Dialog[]`, evaluates
+    all Dynamic slots sequentially, closes the dialog, renders each result image via the
+    render subkernel, then waits 500 ms and repeats.
+  - **Idle-path** (nothing queued): evaluates each slot directly via `session.sub()` at
+    most once per second, serialised with a per-cell mutex to prevent concurrent `sub()`
+    calls on the same WSTP link.
+  - Multiple `Dynamic[...]` expressions in one cell all update in the same dialog cycle.
+  - Mixed cells (`Dynamic[n]\n1+1\nDynamic[m]`) — static sub-expressions evaluate
+    normally; Dynamic slots update live alongside them.
+
+- **`LiveTime -> t` expiry option** — widget loop exits and cell output is cleared after
+  `t` wall-clock seconds.  Fires immediately (mid-computation if necessary).
+
+- **`LiveEvaluations -> n` expiry option** — widget loop exits after `n`
+  *sub-expression dispatches* to the kernel since the widget started (one Shift+Enter on
+  a multi-line cell can count as multiple dispatches).  Expiry fires once the Nth
+  sub-expression *finishes* (queue drains), so the computation is never interrupted at
+  exactly the limit boundary.
+
+- **`LiveCells -> n` expiry option** — like `LiveEvaluations` but counts *cell-level*
+  dispatches (one per Shift+Enter, regardless of how many sub-expressions the cell
+  contains).  A separate `_cellEpoch` counter increments once per cell execution.
+
+- **Dynamic early-start** — when `Dynamic[expr]` appears before other sub-expressions in
+  the same cell (e.g. `Dynamic[n]\nDo[...]`), the widget loop starts *inline*, before
+  the remaining sub-expressions run.  Output slot is updated in-place via the owned
+  `NotebookCellExecution`'s `replaceOutputItems()` while the cell is still executing,
+  then switches to `createNotebookCellExecution` after `execution.end()`.  Enables
+  fully live updates during a long computation started in the same cell.
+
+- **Render subkernel prewarm** — when the first `Dynamic[...]` cell is registered, a
+  second kernel process is launched in the background immediately (`_prewarmSubKernel`).
+  By the time the first Dialog render is needed, `init.wl` is already loaded and the
+  subkernel responds instantly instead of paying a ~1–2 s cold-start penalty.
+
+- **`NotebookDirectory[]` auto-set on kernel start** — at the end of `launchKernel`,
+  the extension locates the active wolfram notebook editor, extracts its directory, and
+  evaluates:
+  ```mathematica
+  Unprotect[NotebookDirectory];
+  NotebookDirectory[] = "/path/to/notebook/dir";
+  Protect[NotebookDirectory];
+  ```
+  This makes `Get["data.m"]`, `Import["results.csv"]`, etc. resolve relative to the
+  notebook file automatically, matching the behaviour of the Wolfram Desktop.
+
+### Fixed
+- **`LiveEvaluations` WSTP corruption bug** — when `LiveEvaluations->N` was set and the
+  Nth sub-expression was still running (`busy=true`), the widget loop entered the
+  interrupt path and sent `interrupt()` mid-`Dialog[]`.  This caused `dialogEval` to
+  time out after 8 s, `exitDialog` to fail three times, and the WSTP link to corrupt —
+  the cell would hang forever.  **Fix:** the busy-path interrupt is now skipped entirely
+  when `_evalsSinceStart >= liveEvalLimit`; the `!busy` expiry check fires cleanly once
+  the computation completes.
+
+- **`LiveEvaluations` epoch semantics** — `_dispatchEpoch` now increments per
+  *sub-expression* (just before each `session.evaluate(subExpr)`) rather than once per
+  cell.  The previous per-cell increment meant a multi-line cell counted as 1 dispatch
+  regardless of how many sub-expressions it contained.
+
+- **Input cell height truncation** — the scroll-suppression code briefly set
+  `inputCollapsed: true` on the next cell before `execution.end()`, then restored `{}`
+  20 ms later.  VS Code used the collapsed state to measure the Monaco editor height and
+  cached the wrong 2-line value — the cell appeared permanently truncated until manually
+  collapsed and uncollapsed.  **Fix:** only `outputCollapsed: true` is set; the Monaco
+  editor is never touched.
+
+- **Output cell height after font load** — on first open of a saved notebook, MathML
+  web-fonts are not yet cached; VS Code measures output iframe height with fallback
+  metrics and caches a too-short value.  **Fix:** a sentinel `<div>` is appended and
+  immediately removed inside `fonts.ready.then(...)` (or a 300 ms fallback) to trigger
+  a height re-measurement after fonts are available.
+
+- **Cell background colours preserved when kernel goes offline** — the `_applyKernelOfflineUI`
+  / `_clearKernelOfflineUI` methods now also desaturate / restore the
+  `workbench.colorCustomizations` notebook keys (`notebook.cellEditorBackground`,
+  `notebook.editorBackground`, etc.).  Previously the output webview turned grayscale but
+  the cell editor backgrounds kept their original colours (e.g. light green), creating a
+  visual mismatch.  The conversion uses luminance weighting
+  ($0.299R + 0.587G + 0.114B$) so perceived brightness is preserved.
+
+---
+
 ## [2.0.2] - 2026-02-28
 
 ### Fixed

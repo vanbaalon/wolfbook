@@ -2640,7 +2640,12 @@ class WolframNotebookKernel {
         // _badgeExtra: small counter appended to the live/paused badge text.
         // e.g. ' · 3 evals' or ' · 2 cells · 8s'. Updated before each _putAllOutputs call.
         let _badgeExtra = '';
+        // Latest dispatch counts — kept in outer scope so _badge(status, de) can build
+        // per-slot badge extras without needing them passed through call chains.
+        let _latestEvalsSince = 0, _latestCellsSince = 0;
         const _updateBadgeExtra = (evalsSince, cellsSince) => {
+            _latestEvalsSince = evalsSince;
+            _latestCellsSince = cellsSince;
             const _evLeft   = isFinite(liveEvalLimit) ? Math.max(0, liveEvalLimit - evalsSince) : null;
             const _cellLeft = isFinite(liveCellLimit) ? Math.max(0, liveCellLimit - cellsSince)  : null;
             const _secLeft  = isFinite(liveTimeSec)   ? Math.max(0, Math.round(liveTimeSec - (Date.now() - _liveStartTime) / 1000)) : null;
@@ -2659,7 +2664,28 @@ class WolframNotebookKernel {
         // Call once when any LiveXxx quota is first hit — flags expiry and (re-)renders badge.
         const _markExpired = () => { _isExpired = true; };
 
-        const _badge = (status) => {
+        // _badge(status, de): build the badge HTML for one Dynamic slot.
+        // When `de` is provided its own LiveXxx limits are shown (per-slot badge).
+        // Falls back to the shared _badgeExtra when de is null/undefined.
+        const _badge = (status, de) => {
+            let badgeExtra = _badgeExtra; // shared fallback
+            if (de) {
+                // Compute badge extra using only the limits that belong to this specific slot.
+                const _parts = [];
+                if (de.dynLiveEvals != null) {
+                    const left = Math.max(0, de.dynLiveEvals - _latestEvalsSince);
+                    _parts.push(left + ' eval' + (left === 1 ? '' : 's'));
+                }
+                if (de.dynLiveCells != null) {
+                    const left = Math.max(0, de.dynLiveCells - _latestCellsSince);
+                    _parts.push(left + ' cell' + (left === 1 ? '' : 's'));
+                }
+                if (de.dynLiveTime != null) {
+                    const left = Math.max(0, Math.round(de.dynLiveTime - (Date.now() - _liveStartTime) / 1000));
+                    _parts.push(left + 's');
+                }
+                badgeExtra = _parts.length ? ' · ' + _parts.join(' · ') : '';
+            }
             const color = status === 'live'    ? '#c678dd'
                         : status === 'paused'  ? '#888'
                         : status === 'expired' ? '#e06c75'
@@ -2672,10 +2698,10 @@ class WolframNotebookKernel {
                         : status === 'paused'  ? 'rgba(128,128,128,0.25)'
                         : status === 'expired' ? 'rgba(224,108,117,0.35)'
                         : 'rgba(232,160,32,0.35)';
-            const label = status === 'live'    ? '⟳ Dynamic' + _badgeExtra
-                        : status === 'paused'  ? '⏸ Dynamic' + _badgeExtra
-                        : status === 'expired' ? '⊘ Dynamic' + _badgeExtra
-                        : '⏳ Dynamic' + _badgeExtra + ' — start a computation to see live updates';
+            const label = status === 'live'    ? '⟳ Dynamic' + badgeExtra
+                        : status === 'paused'  ? '⏸ Dynamic' + badgeExtra
+                        : status === 'expired' ? '⊘ Dynamic' + badgeExtra
+                        : '⏳ Dynamic' + badgeExtra + ' — start a computation to see live updates';
             return '<span style="font-size:9px;color:' + color + ';background:' + bg + ';' +
                    'border:1px solid ' + bd + ';border-radius:3px;padding:1px 6px;' +
                    'margin-right:6px;font-style:italic;">' + label + '</span>';
@@ -2702,7 +2728,7 @@ class WolframNotebookKernel {
                         const newItem = vscode.NotebookCellOutputItem.text(
                             '<div data-dynamic="1" data-epoch="' + epoch + '">'
                             + '<div style="display:flex;align-items:center;padding:2px 0 4px;">'
-                            + _badge(status) + '</div>' + body + '</div>',
+                            + _badge(status, de) + '</div>' + body + '</div>',
                             'x-application/wolfram-language-html'
                         );
                         try {
@@ -2724,7 +2750,7 @@ class WolframNotebookKernel {
                         vscode.NotebookCellOutputItem.text(
                             '<div data-dynamic="1" data-epoch="' + epoch + '">'
                             + '<div style="display:flex;align-items:center;padding:2px 0 4px;">'
-                            + _badge(status) + '</div>' + body + '</div>',
+                            + _badge(status, de) + '</div>' + body + '</div>',
                             'x-application/wolfram-language-html'
                         )
                     ]);

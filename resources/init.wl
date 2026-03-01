@@ -118,7 +118,7 @@ mathematicaformatResult[expr_] := Module[{boxes, svgStr, mathmlStr},
     (* SVG path — post-process to strip SVG 1.1 <font> elements (Chrome/Electron
        dropped support for them; they cause intermittent label corruption). *)
     If[UseSvgQ[],
-        svgStr = Quiet[ExportString[expr, "SVG", ImageSize -> Automatic]];
+        svgStr = Quiet[CheckAbort[ExportString[expr, "SVG", ImageSize -> Automatic], $Failed]];
         If[StringQ[svgStr] && StringLength[svgStr] > 10,
             svgStr = vscodeStripSVGFonts[svgStr];
             Return[<|"type" -> "svg", "data" -> svgStr|>]]];
@@ -180,7 +180,7 @@ VsCodeRenderExpr[expr_, format_String, scale_?NumericQ] := Module[
         If[!graphicsQ[expr],
             Return["<pre class=\"vscode-wolfram-text-output\">TikZ export is only available for graphics expressions.</pre>"]
         ];
-        svgStr = Quiet[Check[TimeConstrained[ExportString[expr, "SVG", Background -> None], 15, $Failed], $Failed]];
+        svgStr = Quiet[CheckAbort[Check[TimeConstrained[ExportString[expr, "SVG", Background -> None], 15, $Failed], $Failed], $Failed]];
         If[!StringQ[svgStr],
             Return["<pre class=\"vscode-wolfram-text-output\">SVG export failed — cannot convert to TikZ.</pre>"]
         ];
@@ -210,7 +210,7 @@ VsCodeRenderExpr[expr_, format_String, scale_?NumericQ] := Module[
     (* ---- SVG path: Graphics → SVG/PNG vector; non-graphics → Rasterize → PNG ---- *)
     If[fmt === "SVG",
         If[graphicsQ[expr],
-            svgStr = Quiet[Check[TimeConstrained[ExportString[expr, "SVG", Background -> None], 15, $Failed], $Failed]];
+            svgStr = Quiet[CheckAbort[Check[TimeConstrained[ExportString[expr, "SVG", Background -> None], 15, $Failed], $Failed], $Failed]];
             (* ExportString prepends <?xml...> and <!DOCTYPE...> before <svg.
                Strip everything before the first <svg so the browser gets clean SVG.
                Also strip newlines: WSTP transmits them as literal \012 escape sequences
@@ -224,11 +224,14 @@ VsCodeRenderExpr[expr_, format_String, scale_?NumericQ] := Module[
             ];
             If[StringQ[svgStr] && StringContainsQ[svgStr, "<svg"],
                 If[$wolframImgDir =!= "" && StringLength[$wolframImgDir] > 0,
-                    (* File-based: save SVG, embed via relative src path *)
-                    Module[{fname, fpath},
-                        fname = "wl_" <> StringReplace[CreateUUID[], "-" -> ""] <> ".svg";
+                    (* File-based: save SVG, embed via relative src path.
+                       Use a content-hash filename so that identical renders
+                       reuse the same file instead of creating a new UUID copy. *)
+                    Module[{fname, fpath, hashStr},
+                        hashStr = IntegerString[Hash[svgStr], 36];
+                        fname = "wl_" <> hashStr <> ".svg";
                         fpath = FileNameJoin[{$wolframImgDir, fname}];
-                        Quiet[Export[fpath, svgStr, "String"]];
+                        If[!FileExistsQ[fpath], Quiet[Export[fpath, svgStr, "String"]]];
                         Return["<img class=\"vscode-wolfram-svg-output\" data-wl-img=\"" <>
                                fpath <> "\" src=\"" <>
                                $wolframImgRelPrefix <> "/" <> fname <> "\"/>"]],
@@ -236,20 +239,22 @@ VsCodeRenderExpr[expr_, format_String, scale_?NumericQ] := Module[
                     Return["<div class=\"vscode-wolfram-svg-output\">" <> svgStr <> "</div>"]
                 ]
             ];
-            (* SVG failed — PNG fallback *)
+            (* SVG failed — PNG fallback.
+               Use a hash of the expression as filename to deduplicate renders. *)
             If[$wolframImgDir =!= "" && StringLength[$wolframImgDir] > 0,
-                (* File-based PNG via relative src path *)
-                Module[{fname, fpath},
-                    fname = "wl_" <> StringReplace[CreateUUID[], "-" -> ""] <> ".png";
+                Module[{fname, fpath, hashStr},
+                    hashStr = IntegerString[Hash[expr], 36];
+                    fname = "wl_" <> hashStr <> ".png";
                     fpath = FileNameJoin[{$wolframImgDir, fname}];
-                    Quiet[Export[fpath, expr, "PNG", Background -> None]];
+                    If[!FileExistsQ[fpath],
+                        Quiet[CheckAbort[Export[fpath, expr, "PNG", Background -> None], $Failed]]];
                     If[FileExistsQ[fpath],
                         Return["<img class=\"vscode-wolfram-png-output\" data-wl-img=\"" <>
                                fpath <> "\" src=\"" <>
                                $wolframImgRelPrefix <> "/" <> fname <> "\"/>"]]]
             ];
             (* Inline PNG base64 fallback (no $wolframImgDir) *)
-            pngData = Quiet[Check[TimeConstrained[ExportString[expr, "PNG", Background -> None], 15, $Failed], $Failed]];
+            pngData = Quiet[CheckAbort[Check[TimeConstrained[ExportString[expr, "PNG", Background -> None], 15, $Failed], $Failed], $Failed]];
             If[StringQ[pngData],
                 pngStr = StringReplace[Quiet[ExportString[pngData, "Base64"]], WhitespaceCharacter -> ""];
                 If[StringQ[pngStr] && StringLength[pngStr] > 20,
@@ -257,12 +262,13 @@ VsCodeRenderExpr[expr_, format_String, scale_?NumericQ] := Module[
                            pngStr <> "\"/>"]]]
         ,
             (* Non-Graphics SVG: Rasterize the typeset expression to PNG *)
-            rasImg = Quiet[Check[TimeConstrained[Rasterize[expr, ImageResolution -> 144, Background -> None], 15, $Failed], $Failed]];
+            rasImg = Quiet[CheckAbort[Check[TimeConstrained[Rasterize[expr, ImageResolution -> 144, Background -> None], 15, $Failed], $Failed], $Failed]];
             If[ImageQ[rasImg],
                 If[$wolframImgDir =!= "" && StringLength[$wolframImgDir] > 0,
-                    rasFname = "wl_" <> StringReplace[CreateUUID[], "-" -> ""] <> ".png";
+                    (* Hash-based filename: same rasterized image → same file, no duplicate writes. *)
+                    rasFname = "wl_" <> IntegerString[Hash[rasImg], 36] <> ".png";
                     rasFpath = FileNameJoin[{$wolframImgDir, rasFname}];
-                    Quiet[Export[rasFpath, rasImg, "PNG"]];
+                    If[!FileExistsQ[rasFpath], Quiet[Export[rasFpath, rasImg, "PNG"]]];
                     If[FileExistsQ[rasFpath],
                         Return["<img class=\"vscode-wolfram-png-output\" data-wl-img=\"" <>
                                rasFpath <> "\" src=\"" <>
@@ -364,6 +370,30 @@ VsCodeRenderExpr[expr_, format_String, scale_?NumericQ] := Module[
         "<pre class=\"vscode-wolfram-text-output\">" <>
         StringReplace[ToString[expr, FullForm], {"<" -> "&lt;", ">" -> "&gt;", "&" -> "&amp;"}] <>
         "</pre>"]
+];
+
+(* ===== VsCodeDynExportValue: evaluate Dynamic slot inside Dialog[] ===== *)
+(* Takes the WL expression as a STRING, evaluates it inside Module (so abort/    *)
+(* timeout are self-contained), exports the result to a temp .mx file, and       *)
+(* returns "WLVAL:FILE:<path>" for the JS side.                                  *)
+(* NO CheckAbort wrapper: inside Dialog[], an active abort would trap CheckAbort  *)
+(* immediately and return $Failed before the expression is evaluated.             *)
+(* After exitDialog() the JS side passes the .mx path to the _subKernel for full  *)
+(* VsCodeRenderExpr rendering (SVG/MathML) — subkernel needs no context for n.   *)
+VsCodeDynExportValue[exprStr_String] := Module[
+    {val, tmpFile},
+    (* TimeConstrained guards slow expressions; Check converts $Failed-like returns. *)
+    val = TimeConstrained[
+        Quiet[Check[ToExpression[exprStr], $Failed]],
+        4, $Failed
+    ];
+    If[!MatchQ[val, Except[$Failed | $Aborted | HoldComplete[___]]],
+        Return["WLVAL:FAILED"]];
+    tmpFile = FileNameJoin[{$TemporaryDirectory,
+        "wl_dyn_" <> StringReplace[CreateUUID[], "-" -> ""] <> ".mx"}];
+    Quiet[Export[tmpFile, val]];
+    If[!FileExistsQ[tmpFile], Return["WLVAL:FAILED"]];
+    "WLVAL:FILE:" <> tmpFile
 ];
 
 (* ===== VsCodeRender: called by JS via session.sub() ===== *)
@@ -734,5 +764,13 @@ Protect[Print];
 (* sufficient because the kernel prints these before the Quiet context applies.  *)
 Off[Interrupt::dgbgn]; Off[Interrupt::dgend];
 Quiet[Internal`AddHandler["Interrupt", Function[{}, Dialog[]]]];
+
+(* ===== Pre-warm SVG/typesetting pipeline ===== *)
+(* Running a tiny ExportString here initializes Wolfram's SVG/typesetting      *)
+(* subsystem once at kernel launch, before any user cells or Dynamic widgets   *)
+(* are active. This eliminates the 2-4s lag on the first Plot/Graphics output  *)
+(* and prevents mid-initialization interrupts from leaving the pipeline in a   *)
+(* broken state when a Dynamic widget is already running.                      *)
+Quiet[CheckAbort[ExportString[Graphics[{}], "SVG"], Null]];
 
 logWrite["init.wl loaded (WSTP mode, no ZMQ)"];

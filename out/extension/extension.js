@@ -109,11 +109,9 @@ function activate(context) {
     // console.log('[scroll] notebook.cell.execute auto-scroll') ← original built-in, bypassed here
     context.subscriptions.push(vscode_1.commands.registerCommand("wolfram.executeCell", () => {
         console.log('[scroll] Shift+Enter detected — evaluation triggered, waiting for first output');
+
         // ---- Save cursor position NOW — before VS Code's Shift+Enter processing
         // exits edit mode and blurs the cell's text editor.
-        // By the time controller.execute() runs the selection event has already
-        // been processed, making activeTextEditor null or pointing to a different
-        // document.  We capture it here while the cell is still focused.
         const _preSaveTxtEd = vscode.window.activeTextEditor;
         if (_preSaveTxtEd) {
             controller._refineSavedCursor    = _preSaveTxtEd.selection;
@@ -126,16 +124,52 @@ function activate(context) {
             controller._refineSavedCursorUri = null;
             scrollLog('[executeCell] no activeTextEditor at Shift+Enter time — cursor not saved');
         }
+
         const editor = vscode.window.activeNotebookEditor;
         if (!editor) return;
         const sel = editor.selections;
         if (!sel || sel.length === 0) return;
         const cell = editor.notebook.cellAt(sel[0].start);
         if (!cell || cell.kind !== vscode.NotebookCellKind.Code) return;
+
+        // ---- PRE-EMPT VS Code's async internal scroll ----
+        // execution.start() and execution.end() internally fire revealRange via rAF
+        // (~16ms after our synchronous code). By calling revealRange HERE first —
+        // synchronously, before controller.execute() queues anything — we establish
+        // the correct viewport position. VS Code's subsequent internal scroll is then
+        // either a no-op (InCenterIfOutsideViewport on an already-visible cell) or
+        // aligns with our intent (AtTop for advance). The async counter-scrolls in
+        // checkoutExecutionQueue remain as belt-and-suspenders backup.
+        //
+        // Mode detection mirrors controller.execute() logic exactly so both agree.
+        {
+            const _cellUri    = cell.document.uri.toString();
+            const _curSrc     = cell.document.getText();
+            const _lastSrc    = controller._cellLastSource.get(_cellUri);
+            const _srcChanged = (_lastSrc !== undefined && _lastSrc !== _curSrc)
+                             || (_lastSrc === undefined  && controller._cellDirty.has(_cellUri));
+            const _autoMode   = _srcChanged ? 'refine' : 'advance';
+            const _preMode    = (controller._evalModeOverride !== 'auto')
+                              ? controller._evalModeOverride : _autoMode;
+            // Advance: AtTop — pin cell at top immediately, VS Code's Default([n,n+2]) can't override.
+            // Refine: InCenterIfOutsideViewport — no-op since cell is definitely visible right now
+            // (we're still in the synchronous Shift+Enter handler). Just ensures it stays visible.
+            // The real freeze logic is in the dynamic checks at t=0/16/32/50ms in controller.js.
+            const RC = vscode.NotebookRange ?? vscode.NotebookCellRange;
+            const _preRange = new RC(cell.index, cell.index + 1);
+            if (_preMode === 'refine') {
+                editor.revealRange(_preRange, vscode.NotebookEditorRevealType.InCenterIfOutsideViewport);
+                scrollLog('[executeCell-preempt] refine: InCenterIfOutsideViewport (no-op, cell visible) cell', cell.index);
+            } else {
+                editor.revealRange(_preRange, vscode.NotebookEditorRevealType.AtTop);
+                scrollLog('[executeCell-preempt] advance: AtTop cell', cell.index);
+            }
+        }
+
         // Note: markKeyboardExecution is intentionally NOT called here.
         // execute() determines the eval mode (Advance vs Refine) from cell
         // source history and calls markKeyboardExecution internally with the
-        // correct mode.
+        // correct mode. Mode detection above is read-only (no side-effects).
         controller.execute([cell], editor.notebook, controller._controller);
     }));
 
@@ -246,6 +280,44 @@ function activate(context) {
     const extensionPath = context.extensionPath;
     (0, unicode_replacer_1.registerUnicodeReplacer)(context, extensionPath);
     
+    // Completion provider for Dynamic[...] lifetime options.
+    // Triggers after a comma inside Dynamic[...] and offers LiveTime/LiveEvaluations.
+    const _dynOptionCompletions = [
+        {
+            label: 'LiveTime',
+            detail: 'LiveTime -> t',
+            doc:    'Stop the Dynamic widget and remove its output after t seconds (wall-clock).\nExample: Dynamic[n, LiveTime -> 10]',
+            insert: 'LiveTime -> '
+        },
+        {
+            label: 'LiveEvaluations',
+            detail: 'LiveEvaluations -> n',
+            doc:    'Stop the Dynamic widget and remove its output after n cell-level dispatches\nhave been sent to the main kernel since the widget started.\nExample: Dynamic[n, LiveEvaluations -> 2]',
+            insert: 'LiveEvaluations -> '
+        }
+    ];
+    context.subscriptions.push(
+        vscode.languages.registerCompletionItemProvider(
+            [{ language: 'wolfram' }, { pattern: '**/*.evsnb' }, { pattern: '**/*.vsnb' }],
+            {
+                provideCompletionItems(document, position) {
+                    const linePrefix = document.lineAt(position).text.slice(0, position.character);
+                    // Only suggest inside Dynamic[..., <here>]
+                    if (!linePrefix.includes('Dynamic[') || !linePrefix.includes(',')) return undefined;
+                    return _dynOptionCompletions.map(opt => {
+                        const item = new vscode.CompletionItem(opt.label, vscode.CompletionItemKind.Property);
+                        item.insertText = opt.insert;
+                        item.detail     = opt.detail;
+                        item.documentation = new vscode.MarkdownString(opt.doc);
+                        item.sortText   = '0' + opt.label; // float to top
+                        return item;
+                    });
+                }
+            },
+            ',', ' ', 'L'  // trigger on comma, space, or 'L' (LiveTime/LiveEvaluations)
+        )
+    );
+
     // Setup Escape Mode (` key for Mathematica-style aliases)
     (0, escape_mode_1.registerEscapeMode)(context, extensionPath);
     console.log('[Extension] Escape mode registered');

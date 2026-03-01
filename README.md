@@ -25,6 +25,42 @@
 
 ---
 
+### Dynamic Widgets
+
+Place `Dynamic[expr]` on its own line (or alongside static expressions in the same cell) to get a live-updating output slot:
+
+```wolfram
+Dynamic[n]                          (* shows current value of n, updates live *)
+Dynamic[ListPlot[Range[n]]]         (* plot re-renders every ~500 ms *)
+```
+
+The widget fires on two paths:
+- **Busy kernel** — sends one interrupt, opens `Dialog[]`, evaluates the expression in the dialog subsession, renders via a dedicated render subkernel, closes the dialog, repeats every ~500 ms.
+- **Idle kernel** — evaluates directly via a priority `sub()` call at most once per second.
+
+**Expiry options** control when the widget stops and its output is cleared:
+
+| Option | Counts | Fires when… |
+|---|---|---|
+| `LiveTime -> t` | wall-clock seconds | `t` seconds have elapsed (fires immediately, mid-computation) |
+| `LiveEvaluations -> n` | sub-expression dispatches | the `n`-th sub-expr *finishes* (one Shift+Enter on a 3-line cell = 3 dispatches) |
+| `LiveCells -> n` | cell-level dispatches | the `n`-th Shift+Enter *finishes* (regardless of line count) |
+
+Options can be combined; the first condition to fire wins:
+```wolfram
+Dynamic[Pi, LiveTime -> 60, LiveEvaluations -> 2]
+```
+
+**Same-cell early-start** — if `Dynamic[expr]` comes before other sub-expressions in the same cell, the widget loop starts *immediately* when the placeholder is placed, before the remaining sub-expressions run:
+```wolfram
+Dynamic[n, LiveEvaluations -> 2]    (* slot 0: live n during the loop *)
+Do[n = k; Pause[0.5], {k, 1, 20}]  (* slot 1: loop output *)
+```
+
+The render subkernel is prewarmed as soon as the first `Dynamic` is registered, so the first render has no cold-start delay.
+
+---
+
 ### Interactive Notebook
 - **WSTP kernel backend** — connects directly to a local Wolfram/Mathematica kernel via the native [mathematica-wstp-node](https://github.com/vanbaalon/mathematica-wstp-node) addon (no ZeroMQ, no subprocess piping)
 - **MathML, SVG, PNG, HTML and InputForm** output rendering — switchable per session
