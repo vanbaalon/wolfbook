@@ -2725,7 +2725,7 @@ class WolframNotebookKernel {
                 }
                 // LiveEvaluations expiry is handled inside the !busy block below —
                 // we wait until the Nth evaluation has FINISHED (queue drained) before clearing.
-                scrollLog('[dyn] cycle', cycle, '| busy:', busy, '| dlgOpen:', this.session?.isDialogOpen, '| dispatched:', this._evalDispatched);
+                scrollLog('[dyn] cycle', cycle, '| busy:', busy, '| dlgOpen:', this.session?.isDialogOpen, '| dispatched:', this._evalDispatched, '| cND:', _consecutiveNoDialog, '| stale:', _staleDialogCycles, '| evalsSince:', _evalsSinceStart);
 
                 if (!busy) {
                     // LiveEvaluations expiry: the Nth evaluation has now FINISHED (queue just
@@ -2881,7 +2881,10 @@ class WolframNotebookKernel {
                     continue;
                 }
                 // Reset the no-dialog backoff counter when a fresh busy period begins.
-                if (!lastBusy) _consecutiveNoDialog = 0;
+                if (!lastBusy) {
+                    if (_consecutiveNoDialog > 0) scrollLog('[dyn] cycle', cycle, '| fresh busy period — resetting cND:', _consecutiveNoDialog, '→ 0');
+                    _consecutiveNoDialog = 0;
+                }
                 lastBusy = true;
                 // If the LiveEvaluations or LiveCells limit has already been reached,
                 // do NOT interrupt — let the computation finish undisturbed.
@@ -2922,15 +2925,38 @@ class WolframNotebookKernel {
                 }
 
                 // Skip if dialog is already open — don't interrupt, just wait.
+                // Fast path: if consecutiveNoDialog >= 1 and a dialog opens, this is
+                // the DEFERRED interrupt (sent earlier, fired late after Pause[N] ended).
+                // Exit it immediately to let the cell continue — do NOT abort.
                 // Watchdog: if this has been true for >= 10 consecutive 200 ms cycles
                 // (~2 s) the dialog is stale (exitDialog closed level-2→1 but level-1
                 // was never closed, or abort() left residual state).  Force-abort to
                 // break the deadlock rather than spinning forever.
                 if (this.session.isDialogOpen) {
+                    if (_consecutiveNoDialog >= 1) {
+                        // Deferred-interrupt dialog: we sent an interrupt earlier that
+                        // Pause[] didn't open right away — it fired after Pause ended.
+                        // Close it cleanly so the cell's next expression can complete.
+                        scrollLog('[dyn] cycle', cycle, '| deferred-dialog detected (cND:', _consecutiveNoDialog, ') — calling exitDialog to unblock cell');
+                        const _t_dd = Date.now();
+                        try {
+                            await Promise.race([
+                                this.session.exitDialog(),
+                                new Promise((_, rej) => setTimeout(() => rej(new Error('deferred-dlg-timeout')), 2000))
+                            ]);
+                            scrollLog('[dyn] cycle', cycle, '| deferred-dialog exitDialog done | dlgOpen after:', this.session.isDialogOpen, '| dt:', Date.now() - _t_dd, 'ms');
+                            if (!this.session.isDialogOpen) _consecutiveNoDialog = 0;
+                        } catch (e) {
+                            scrollLog('[dyn] cycle', cycle, '| deferred-dialog exitDialog failed:', e.message, '| dlgOpen after:', this.session.isDialogOpen);
+                        }
+                        await new Promise(r => setTimeout(r, 200));
+                        continue;
+                    }
+                    scrollLog('[dyn] cycle', cycle, '| pre-mutex dlgOpen=true | staleCount now:', _staleDialogCycles + 1, '| cND:', _consecutiveNoDialog);
                     _staleDialogCycles++;
                     if (_staleDialogCycles >= 10) {
                         _staleDialogCycles = 0;
-                        scrollLog('[dyn] cycle', cycle, '| stale dialog (10 cycles) — force-abort to recover');
+                        scrollLog('[dyn] cycle', cycle, '| stale dialog (10 cycles) — force-abort to recover | cND was:', _consecutiveNoDialog);
                         try { this.session.abort(); } catch(_) {}
                         _handlerNeedsReinstall = true;
                         _reinstallPromise = this.session.sub?.(
@@ -2998,7 +3024,7 @@ class WolframNotebookKernel {
                 // Instead, wait for the eval to finish naturally (the !busy path).
                 if (_consecutiveNoDialog >= 1) {
                     scrollLog('[dyn] cycle', cycle, '| consecutiveNoDialog:', _consecutiveNoDialog,
-                              '— skipping interrupt, waiting for eval to end naturally');
+                              '— skipping interrupt | epoch:', this._dispatchEpoch, '| evalsSince:', _evalsSinceStart);
                     _releaseDlg();
                     await new Promise(r => setTimeout(r, 1000));
                     continue;
@@ -3030,7 +3056,7 @@ class WolframNotebookKernel {
                 // any stale dialog state before the interrupt so the C++ state is clean.
                 this.session.closeAllDialogs?.();
                 const sent = this.session.interrupt();
-                scrollLog('[dyn] cycle', cycle, '| interrupt sent:', sent);
+                scrollLog('[dyn] cycle', cycle, '| interrupt sent:', sent, '| epoch:', this._dispatchEpoch, '| evalsSince:', _evalsSinceStart);
                 if (!sent) { await new Promise(r => setTimeout(r, 500)); continue; }
 
                 const t1 = Date.now();
@@ -3130,7 +3156,9 @@ class WolframNotebookKernel {
                 // isDialogOpen is still true.  We must check isDialogOpen after each call
                 // and keep retrying until the dialog is genuinely closed.
                 let exited = false;
+                scrollLog('[dyn] cycle', cycle, '| exitDialog loop start (up to 5 attempts) | dlgOpen:', this.session.isDialogOpen);
                 for (let attempt = 0; attempt < 5 && !exited; attempt++) {
+                    const _t_ed = Date.now();
                     try {
                         await Promise.race([
                             this.session.exitDialog(),
@@ -3141,19 +3169,20 @@ class WolframNotebookKernel {
                         await new Promise(r => setTimeout(r, 30));
                         if (!this.session.isDialogOpen) {
                             exited = true;
+                            scrollLog('[dyn] cycle', cycle, '| exitDialog attempt', attempt + 1, 'succeeded | dt:', Date.now() - _t_ed, 'ms');
                         } else {
                             scrollLog('[dyn] cycle', cycle, '| exitDialog attempt', attempt + 1,
-                                      '— resolved but dialog still open (nested level), retrying');
+                                      '— resolved but dialog still open (nested level), retrying | dt:', Date.now() - _t_ed, 'ms');
                         }
                     } catch (e) {
-                        scrollLog('[dyn] cycle', cycle, '| exitDialog attempt', attempt + 1, 'failed:', e.message);
+                        scrollLog('[dyn] cycle', cycle, '| exitDialog attempt', attempt + 1, 'failed:', e.message, '| dt:', Date.now() - _t_ed, 'ms');
                     }
                 }
                 // All exitDialog attempts failed — the kernel is stuck inside Dialog[]
                 // (e.g. ExportString/Rasterize is still running). Abort the kernel to
                 // forcibly terminate the stuck computation and release the WSTP link.
                 if (!exited) {
-                    dynLog('ABORT | cycle', cycle, '| exitDialog failed 3 times — aborting kernel');
+                    dynLog('ABORT | cycle', cycle, '| exitDialog failed 5 times — aborting kernel');
                     try { this.session.abort(); } catch(_) {}
                     // abort() clears Internal`AddHandler["Interrupt",...] on the kernel.
                     // Schedule handler reinstall via sub() — runs after the aborted eval
