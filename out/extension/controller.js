@@ -187,6 +187,26 @@ class WolframNotebookKernel {
         // Extension context — used to persist per-notebook settings (globalState).
         this._extContext = extContext || null;
 
+        // If the extension was reloaded while the kernel was offline, workspace
+        // colorCustomizations may still have the grayscale values written by the
+        // previous session.  Keep the saved cache in memory so that
+        // _clearKernelOfflineUI() can restore the original colours once the kernel
+        // is ready.  Do NOT call _setNotebookCellColorsOffline(false) here:
+        // that issues an async config.update(green) whose completion races with
+        // the onDidChangeVisibleNotebookEditors handler that fires immediately
+        // after registration — that handler reads the workspace value before the
+        // async write commits, sees the old gray values, and stores them as the
+        // "originals", so the subsequent kernel-online restore ends up writing
+        // gray instead of green.  Keeping the cache in memory and letting the
+        // kernel-resolved path do the restore avoids the race entirely.
+        if (this._extContext) {
+            const _savedColorCache = this._extContext.globalState.get('wolfbook.notebookColorCache');
+            if (_savedColorCache) {
+                this._notebookColorCache = _savedColorCache;
+                // colours stay gray in workspace until kernel resolves
+            }
+        }
+
         // Apply offline renderer overlay to any wolfram notebook that becomes visible
         // while the kernel is not running.
         // Also restores per-notebook default output format from persistent storage.
@@ -194,6 +214,31 @@ class WolframNotebookKernel {
         // from a previous run (e.g. when the notebook is reopened without restarting VS Code).
         vscode.window.onDidChangeVisibleNotebookEditors(() => {
             if (this.kernelStatusString !== 'resolved') this._applyKernelOfflineUI();
+            // Auto-launch kernel when a wolfram notebook becomes visible and kernel has
+            // never been started (unresolved) in this session window.
+            if (this.kernelStatusString === 'unresolved') {
+                const _hasWolframNb = vscode.window.visibleNotebookEditors.some(
+                    ed => ed.notebook.notebookType === 'extended-wolfram-notebook'
+                );
+                if (_hasWolframNb) {
+                    scrollLog('[auto-launch] wolfram nb visible + kernel unresolved — scheduling launch in 800ms');
+                    setTimeout(() => {
+                        if (this.kernelStatusString === 'unresolved') {
+                            scrollLog('[auto-launch] 800ms fired — launching kernel | queue:', this.executionQueue.queueLength());
+                            this.launchKernel().then(() => {
+                                scrollLog('[auto-launch] launchKernel resolved | status:', this.kernelStatusString, '| queue:', this.executionQueue.queueLength());
+                                if (this.kernelStatusString === 'resolved') this.checkoutExecutionQueue();
+                            }).catch(err => {
+                                scrollLog('[auto-launch] launchKernel FAILED:', err.message);
+                                vscode.window.showErrorMessage(`Auto-launch failed: ${err.message}`);
+                                this.executionQueue.clear();
+                            });
+                        } else {
+                            scrollLog('[auto-launch] 800ms fired but status is', this.kernelStatusString, '— skipping duplicate launch');
+                        }
+                    }, 800);
+                }
+            }
             // Send current epoch so renderer removes stale Out-headers/banners from old sessions
             try {
                 this._rendererMessaging.postMessage(
@@ -298,6 +343,18 @@ class WolframNotebookKernel {
         this._rendererMessaging.onDidReceiveMessage(async event => {
             const message = event.message;
             this.outputPanel.print(`[Renderer] message: ${JSON.stringify(message)}`);
+
+            // Renderer webview just registered its message listener — re-broadcast
+            // current kernel status so it applies the correct offline/online CSS
+            // immediately (the initial kernel-offline sent during activate() may have
+            // been dropped if the webview wasn't loaded yet).
+            if (message.type === 'renderer-ready') {
+                const _kState = this.kernelStatusString === 'resolved' ? 'kernel-online' : 'kernel-offline';
+                scrollLog('[renderer-ready] re-broadcasting', _kState, '| epoch:', this._sessionEpoch);
+                try { this._rendererMessaging.postMessage({ type: _kState }); } catch (_) {}
+                try { this._rendererMessaging.postMessage({ type: 'session-changed', epoch: this._sessionEpoch }); } catch (_) {}
+                return;
+            }
 
             if (message.type === "expand-truncated-output" && message.uuid) {
                 const info = this.truncatedOutputCells.get(message.uuid);
@@ -990,6 +1047,8 @@ class WolframNotebookKernel {
         }
         if (this.kernelStatusString === "resolved") {
             for (const cell of cells) {
+                // Don't double-queue a cell that already has a pending execution.
+                if (this.executionQueue.hasPendingForCell(cell)) { scrollLog('[execute] cell', cell.index, 'already pending — skipping double-queue'); continue; }
                 const execution = this._controller.createNotebookCellExecution(cell);
                 const queueId   = this.executionQueue.push(execution);
                 execution.token.onCancellationRequested(() => {
@@ -997,26 +1056,56 @@ class WolframNotebookKernel {
                     this.abortEvaluation();
                 });
             }
+            scrollLog('[execute] kernel resolved — calling checkoutExecutionQueue | queue:', this.executionQueue.queueLength());
             this.checkoutExecutionQueue();
         } else {
             // Kernel not running: queue the cells and auto-launch.
             // checkoutExecutionQueue() is called after launch succeeds so the
             // queued cells execute immediately without user re-running them.
+            scrollLog('[execute] kernel status:', this.kernelStatusString, '— queuing', cells.length, 'cell(s)');
+            // Ensure the offline overlay is applied — in case the renderer loaded
+            // after the initial kernel-offline message was sent (or was never sent).
+            this._applyKernelOfflineUI();
             for (const cell of cells) {
+                // Don't double-queue a cell that already has a pending execution
+                // (guards against rapid Shift+Enter before kernel is ready).
+                if (this.executionQueue.hasPendingForCell(cell)) { scrollLog('[execute] cell', cell.index, 'already pending — skipping'); continue; }
                 const execution = this._controller.createNotebookCellExecution(cell);
                 const queueId   = this.executionQueue.push(execution);
+                scrollLog('[execute] queued cell', cell.index, 'as', queueId, '| queue size now:', this.executionQueue.queueLength());
+                // Show the running spinner immediately — don't wait for launchKernel to finish.
+                this.executionQueue.preVisualStart(queueId);
+                // Write a "Kernel is starting…" placeholder so the user sees progress
+                // in the output area while the kernel boots.  checkoutExecutionQueue will
+                // discard this and replace it with real output once evaluation begins.
+                execution.replaceOutput([new vscode.NotebookCellOutput([
+                    vscode.NotebookCellOutputItem.text(
+                        '<div style="color:#aaa;font-style:italic;font-size:12px;padding:4px 0">' +
+                        '⏳ Kernel is starting\u2026</div>',
+                        'x-application/wolfram-language-html'
+                    )
+                ])]).catch(() => {});
+                this.executionQueue.markLaunchingPlaceholder(queueId);
                 execution.token.onCancellationRequested(() => {
                     this.outputPanel.print("Cell execution cancelled by user");
                     this.abortEvaluation();
                 });
             }
             if (this.kernelStatusString !== 'launching') {
+                scrollLog('[execute] status is', this.kernelStatusString, '— calling launchKernel');
                 vscode.window.showInformationMessage('Kernel not running — launching kernel and queuing evaluation…');
                 this.launchKernel().then(() => {
+                    scrollLog('[execute] launchKernel resolved | status:', this.kernelStatusString, '| queue:', this.executionQueue.queueLength());
                     if (this.kernelStatusString === 'resolved') this.checkoutExecutionQueue();
-                }).catch(() => { this.executionQueue.clear(); });
+                }).catch(err => {
+                    scrollLog('[execute] launchKernel FAILED:', err?.message);
+                    this.executionQueue.clear();
+                });
+            } else {
+                // Already launching (e.g. auto-launch in progress) — cells are queued,
+                // checkoutExecutionQueue() will be called when launchKernel() resolves.
+                scrollLog('[execute] status is launching — cells queued, waiting for launchKernel to resolve | queue:', this.executionQueue.queueLength());
             }
-            // else: already launching — cells are queued, will run once launch completes
         }
     }
 
@@ -1136,13 +1225,21 @@ class WolframNotebookKernel {
         // made in the same tick into a single IPC message, meaning clear+restore can
         // arrive at the renderer together — avoiding the one-frame blank-output flash.
         if (prevOutputsSnap.length > 0) {
-            const restoredOutputs = prevOutputsSnap.map(o =>
-                new vscode.NotebookCellOutput(
-                    o.items.map(it => new vscode.NotebookCellOutputItem(it.data, it.mime))
-                )
-            );
-            currentExecution.execution.replaceOutput(restoredOutputs);  // no await
-            scrollLog('[start] replaceOutput(prevOutputs) fired (no-await) | dt=', Date.now() - _t0, 'ms');
+            if (currentExecution.hasLaunchingPlaceholder) {
+                // The only "previous" output is the "⏳ Kernel is starting…" placeholder
+                // we wrote in execute().  Clear it so the real evaluation output starts fresh.
+                currentExecution.execution.replaceOutput([]);  // no await
+                scrollLog('[start] cleared launching placeholder | dt=', Date.now() - _t0, 'ms');
+                currentExecution.hasLaunchingPlaceholder = false;
+            } else {
+                const restoredOutputs = prevOutputsSnap.map(o =>
+                    new vscode.NotebookCellOutput(
+                        o.items.map(it => new vscode.NotebookCellOutputItem(it.data, it.mime))
+                    )
+                );
+                currentExecution.execution.replaceOutput(restoredOutputs);  // no await
+                scrollLog('[start] replaceOutput(prevOutputs) fired (no-await) | dt=', Date.now() - _t0, 'ms');
+            }
         }
 
         // ---- Record source for eval-mode auto-detection on next run ----
@@ -3591,8 +3688,24 @@ class WolframNotebookKernel {
             const hasAny = KEYS.some(k => currentColors[k]);
             if (!hasAny) return;
             if (offline) {
-                // Cache originals and write grayscale equivalents
-                if (this._notebookColorCache) return; // already offline
+                if (this._notebookColorCache) {
+                    // Cache was loaded from globalState on reload (constructor path).
+                    // The workspace may still show original colours if the previous
+                    // session crashed before quitKernel() wrote the gray values.
+                    // Derive gray from the cached originals and force-write to workspace.
+                    const updatedColors = { ...currentColors };
+                    let anyDirty = false;
+                    for (const k of KEYS) {
+                        const orig = this._notebookColorCache[k];
+                        if (orig) {
+                            const gray = this._toGrayscaleHex(orig);
+                            if (currentColors[k] !== gray) { updatedColors[k] = gray; anyDirty = true; }
+                        }
+                    }
+                    if (anyDirty) config.update('colorCustomizations', updatedColors, vscode.ConfigurationTarget.Workspace).catch(() => {});
+                    return;
+                }
+                // First time going offline this session — build cache from current colours.
                 this._notebookColorCache = {};
                 const updatedColors = { ...currentColors };
                 for (const k of KEYS) {
@@ -3600,6 +3713,11 @@ class WolframNotebookKernel {
                         this._notebookColorCache[k] = currentColors[k];
                         updatedColors[k] = this._toGrayscaleHex(currentColors[k]);
                     }
+                }
+                // Persist cache to globalState so it survives a VS Code window reload
+                // while the kernel is offline (otherwise original colors are lost on reload).
+                if (this._extContext) {
+                    this._extContext.globalState.update('wolfbook.notebookColorCache', this._notebookColorCache).catch(() => {});
                 }
                 config.update('colorCustomizations', updatedColors, vscode.ConfigurationTarget.Workspace).catch(() => {});
             } else {
@@ -3610,6 +3728,10 @@ class WolframNotebookKernel {
                     if (this._notebookColorCache[k]) updatedColors[k] = this._notebookColorCache[k];
                 }
                 this._notebookColorCache = null;
+                // Clear the persisted cache now that colors are restored.
+                if (this._extContext) {
+                    this._extContext.globalState.update('wolfbook.notebookColorCache', null).catch(() => {});
+                }
                 config.update('colorCustomizations', updatedColors, vscode.ConfigurationTarget.Workspace).catch(() => {});
             }
         } catch (_) {}
@@ -3736,6 +3858,14 @@ class WolframNotebookKernel {
             try {
                 this._rendererMessaging.postMessage({ type: 'session-changed', epoch: this._sessionEpoch });
             } catch (_) {}
+            // Process any cells that were queued while the kernel was launching
+            // (e.g. via preVisualStart before the kernel was ready).
+            // .then() callers also invoke checkoutExecutionQueue, but calling it
+            // here as well ensures no cell is missed if the caller forgets,
+            // and the extra call is always safe (returns immediately if queue[0]
+            // is already 'started').
+            scrollLog('[launchKernel] resolved — calling checkoutExecutionQueue | queue:', this.executionQueue.queueLength());
+            this.checkoutExecutionQueue();
         } catch (err) {
             console.error(`[launchKernel] error: ${err.message}`);
             vscode.window.showErrorMessage(`Failed to launch Wolfram kernel: ${err.message}`);

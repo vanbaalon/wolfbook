@@ -22,6 +22,9 @@ class ExecutionQueue {
     empty() {
         return this.queue.length === 0;
     }
+    queueLength() {
+        return this.queue.length;
+    }
     clear() {
         console.log(`ExecutionQueue.clear() called with ${this.queue.length} items in queue`);
         const itemsToProcess = [...this.queue]; // Make a copy to avoid modification during iteration
@@ -39,8 +42,37 @@ class ExecutionQueue {
     }
     push(execution) {
         const id = uuid.v4();
-        this.queue.push({ id, execution, hasOutput: false });
+        this.queue.push({ id, execution, hasOutput: false, started: false, preVisualStarted: false, hasLaunchingPlaceholder: false });
         return id;
+    }
+    // Mark that a "Kernel is starting…" placeholder output was written to this cell.
+    // checkoutExecutionQueue reads this flag to skip restoring the placeholder as
+    // a prev-output before real evaluation begins.
+    markLaunchingPlaceholder(id) {
+        const item = this.find(id);
+        if (item) item.hasLaunchingPlaceholder = true;
+    }
+    // Show the running spinner immediately without marking the item as 'started'
+    // (so checkoutExecutionQueue still picks it up via getNextPendingExecution).
+    preVisualStart(id) {
+        const item = this.find(id);
+        if (!item) { console.warn('[preVisualStart] id not found:', id); return; }
+        const cellIdx = item.execution.cell.index;
+        if (!item.preVisualStarted && !item.started) {
+            try {
+                item.execution.start(Date.now());
+                console.log(`[preVisualStart] cell ${cellIdx} — spinner started OK`);
+            } catch (e) {
+                console.error(`[preVisualStart] cell ${cellIdx} — start() threw: ${e.message}`);
+            }
+            item.preVisualStarted = true;
+        } else {
+            console.log(`[preVisualStart] cell ${cellIdx} — skipped (started=${item.started} preVisual=${item.preVisualStarted})`);
+        }
+    }
+    // True if this cell already has a not-yet-started pending item in the queue.
+    hasPendingForCell(cell) {
+        return this.queue.some(item => !item.started && item.execution.cell === cell);
     }
     findIndex(id) {
         return this.queue.findIndex(item => (item.id === id));
@@ -60,14 +92,24 @@ class ExecutionQueue {
     start(id) {
         const execution = this.find(id);
         if (execution) {
-            execution.execution.start(Date.now());
+            const cellIdx = execution.execution.cell.index;
+            // Guard: don't call .start() again if preVisualStart already triggered it
+            if (!execution.preVisualStarted) {
+                console.log(`[queue.start] cell ${cellIdx} — calling .start() (no preVisual)`);
+                execution.execution.start(Date.now());
+            } else {
+                console.log(`[queue.start] cell ${cellIdx} — skipping .start() (preVisual already did it)`);
+            }
             execution.started = true;
+        } else {
+            console.warn('[queue.start] id not found:', id);
         }
     }
     end(id, succeed) {
         const execution = this.find(id);
         if (execution) {
-            if (!(execution?.started)) {
+            // Only call .start() if neither started nor preVisualStarted has already done so.
+            if (!execution.started && !execution.preVisualStarted) {
                 execution.execution.start(Date.now());
             }
             execution.execution.end(succeed, Date.now());

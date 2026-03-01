@@ -284,6 +284,11 @@ export function activate(context) {
                 removeDialogWidget();
             }
         });
+        // Announce to the extension that this renderer instance is ready to receive
+        // kernel-offline / kernel-online messages. The extension will respond with
+        // the current kernel status immediately, correcting the case where the
+        // extension sent kernel-offline before this webview's listener was live.
+        try { context.postMessage({ type: 'renderer-ready' }); } catch (_) {}
     }
     
     // -----------------------------------------------------------------------
