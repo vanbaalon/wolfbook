@@ -2655,6 +2655,13 @@ class WolframNotebookKernel {
             // Non-null: skip idle render unless _dispatchEpoch has advanced (meaning a new
             // evaluation has been dispatched — completed OR currently running — since last render).
             let _lastIdleRenderEpoch = null;
+            // Safety counter: tracks how many consecutive interrupt cycles got no dialog.
+            // When >= 1 we know the kernel is inside Pause[N] or a C++ compute-bound
+            // section that ignores WSInterruptMessage.  Sending another interrupt while
+            // Pause is about to end causes a WSTP-level deadlock where dialogEval AND
+            // exitDialog both hang indefinitely (confirmed in test_pause_interrupt.js P6).
+            // We back off and wait for the evaluation to end naturally instead.
+            let _consecutiveNoDialog = 0;
             while (true) {
                 cycle++;
                 if (!state.active || this._sessionEpoch !== epoch) {
@@ -2861,6 +2868,8 @@ class WolframNotebookKernel {
                     await new Promise(r => setTimeout(r, 300));
                     continue;
                 }
+                // Reset the no-dialog backoff counter when a fresh busy period begins.
+                if (!lastBusy) _consecutiveNoDialog = 0;
                 lastBusy = true;
                 // If the LiveEvaluations or LiveCells limit has already been reached,
                 // do NOT interrupt — let the computation finish undisturbed.
@@ -2946,6 +2955,19 @@ class WolframNotebookKernel {
                     continue;
                 }
 
+                // SAFETY guard: if the previous interrupt was silently swallowed (no
+                // dialog opened within 2500ms), do NOT immediately retry.  Retrying while
+                // the kernel is inside Pause[N]→completion transition triggers an
+                // irrecoverable WSTP deadlock (test_pause_interrupt.js P3/P6).
+                // Instead, wait for the eval to finish naturally (the !busy path).
+                if (_consecutiveNoDialog >= 1) {
+                    scrollLog('[dyn] cycle', cycle, '| consecutiveNoDialog:', _consecutiveNoDialog,
+                              '— skipping interrupt, waiting for eval to end naturally');
+                    _releaseDlg();
+                    await new Promise(r => setTimeout(r, 1000));
+                    continue;
+                }
+
                 let gotIdxs = [];
                 let pendingValues = {}; // slotIndex → FullForm string (populated inside Dialog[])
                 const scale = Number(this.config?.get?.('imageScale') ?? 0.8) || 0.8;
@@ -2969,10 +2991,17 @@ class WolframNotebookKernel {
                 const dlgOpen = this.session.isDialogOpen;
                 scrollLog('[dyn] cycle', cycle, '| dlgOpen:', dlgOpen, '| waited:', Date.now() - t1, 'ms');
                 if (!dlgOpen) {
-                    // Dialog never opened — kernel may be stuck. Force-close and give up cycle.
+                    // Dialog never opened — kernel is inside Pause[N] or a compute-bound
+                    // section that ignores WSInterruptMessage.  Increment backoff counter
+                    // so the next cycle skips the interrupt entirely and just waits.
+                    _consecutiveNoDialog++;
+                    scrollLog('[dyn] cycle', cycle, '| no dialog — consecutiveNoDialog:', _consecutiveNoDialog,
+                              '(will skip interrupt next cycle until eval ends)');
                     this.session.closeAllDialogs?.();
                     await new Promise(r => setTimeout(r, 300)); continue;
                 }
+                // Dialog opened — reset backoff counter.
+                _consecutiveNoDialog = 0;
 
                 // Start watcher now (dialog is confirmed open).
                 _busyWatcher = setInterval(() => {
