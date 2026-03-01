@@ -2757,9 +2757,13 @@ class WolframNotebookKernel {
                 for (let i = 0; i < dynExprs.length; i++) {
                     const de = dynExprs[i];
                     if (_slotExpired[i]) {
-                        // Slot already cleared — write an explicit empty output so the
-                        // stale snapOutputs content is not re-shown via replaceOutput.
-                        if (de.slotIndex < snap.length) snap[de.slotIndex] = new vscode.NotebookCellOutput([]);
+                        // Slot already cleared — write an explicit empty-string item so
+                        // renderOutputItem fires and sets innerHTML='' on the stale container.
+                        // (NotebookCellOutput([]) has zero items → renderOutputItem is never
+                        // called → old HTML stays visible until the file is re-opened.)
+                        if (de.slotIndex < snap.length) snap[de.slotIndex] = new vscode.NotebookCellOutput([
+                            vscode.NotebookCellOutputItem.text('', 'x-application/wolfram-language-html')
+                        ]);
                         continue;
                     }
                     const _slotStatus = _slotTimeExpiredPending[i] ? 'expired' : status;
@@ -2797,7 +2801,11 @@ class WolframNotebookKernel {
                 while (snapOutputs.length > _live.length) snapOutputs.pop();
                 for (let _ii = 0; _ii < _live.length; _ii++) snapOutputs[_ii] = _live[_ii];
                 const snap = snapOutputs.slice();
-                if (slotIdx < snap.length) snap[slotIdx] = new vscode.NotebookCellOutput([]);
+                // Use an empty-string item (not zero-item output) so renderOutputItem fires
+                // and clears innerHTML on the stale container immediately.
+                if (slotIdx < snap.length) snap[slotIdx] = new vscode.NotebookCellOutput([
+                    vscode.NotebookCellOutputItem.text('', 'x-application/wolfram-language-html')
+                ]);
                 for (let _ii = 0; _ii < snap.length; _ii++) snapOutputs[_ii] = snap[_ii];
                 if (this._dynCells?.has(cellUri)) this._dynCells.get(cellUri).outputs = snap;
                 const _cExe = this._controller.createNotebookCellExecution(cell);
