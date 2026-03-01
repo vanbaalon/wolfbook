@@ -1131,7 +1131,7 @@
 					"―": true
 				}
 			},
-			"notebook.showCellStatusBar": "visibleAfterExecute"
+			"notebook.showCellStatusBar": "visible"
 		}
 	},
 	"scripts": {

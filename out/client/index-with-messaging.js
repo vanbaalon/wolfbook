@@ -1101,6 +1101,27 @@ export function activate(context) {
                 if (el.tagName === 'PRE') addLineNumberGutter(el);
             });
 
+            // ---- Multi-stage height sentinel ----
+            // VS Code measures output height right after renderOutputItem returns
+            // (synchronously). Async content (fonts, KaTeX CDN, format buttons
+            // growing the header) can change the height afterwards.  Firing the
+            // sentinel at 0 ms, 250 ms and 800 ms ensures VS Code re-measures at
+            // each stage and the displayed cell height stays correct when scrolling.
+            // The fonts.ready sentinel above already handles the web-font case;
+            // these timeouts add belt-and-suspenders coverage for all other paths.
+            {
+                const _triggerNow = () => {
+                    try {
+                        const _d = element.ownerDocument || document;
+                        const s = _d.createElement('div');
+                        s.style.cssText = 'height:0;width:0;overflow:hidden;position:absolute;pointer-events:none;';
+                        element.appendChild(s);
+                        requestAnimationFrame(() => { try { s.remove(); } catch(_){} });
+                    } catch(_) {}
+                };
+                [0, 250, 800].forEach(delay => setTimeout(_triggerNow, delay));
+            }
+
             // (scroll-to-top button removed — not achievable from inside per-cell iframe)
         },
         

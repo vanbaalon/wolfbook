@@ -1606,7 +1606,7 @@ class WolframNotebookKernel {
                             const _isGfx = html.includes('vscode-wolfram-gfx-marker');
                             this._outputRegistry.set(outputId,
                                 { cell: execCell, outN: lineN, outName: r.outputName, format, isGfx: _isGfx });
-                            const headerRow = `<div class="wl-output-header" style="display:flex;align-items:center;gap:6px;width:100%;" data-session-epoch="${this._sessionEpoch}" data-output-id="${outputId}" data-out-n="${lineN}" data-output-format="${format}" data-output-is-graphics="${_isGfx ? '1' : '0'}">${outLabel}</div>`;
+                            const headerRow = `<div class="wl-output-header" style="display:flex;align-items:center;gap:6px;width:100%;min-height:22px;" data-session-epoch="${this._sessionEpoch}" data-output-id="${outputId}" data-out-n="${lineN}" data-output-format="${format}" data-output-is-graphics="${_isGfx ? '1' : '0'}">${outLabel}</div>`;
                             if (html.length > maxLen || isSkeleton) {                                const _oid = outputId;
                                 // For raw truncation: clip at maxLen
                                 const displayHtml = html.length > maxLen
@@ -1660,7 +1660,7 @@ class WolframNotebookKernel {
                                     ? fallback.result.value : '(output unavailable)';
                                 const fbHtml =
                                     `<div class="wl-output-block">` +
-                                    `<div class="wl-output-header" style="display:flex;align-items:center;gap:6px;width:100%;">${outLabel}</div>` +
+                                    `<div class="wl-output-header" style="display:flex;align-items:center;gap:6px;width:100%;min-height:22px;">${outLabel}</div>` +
                                     `<div class="wl-output-content">` +
                                     `<div class="vscode-wolfram-message-output" style="color:#cc8800;padding:4px 0">` +
                                     `Rendering failed \u2014 if you have a custom Format rule (e.g. <code>Format[x]=Style[x,Red]</code>), ` +
@@ -2073,7 +2073,7 @@ class WolframNotebookKernel {
         const _isGfxUuid = regInfo?.isGfx ?? (fullHtml.includes('vscode-wolfram-svg-output') || fullHtml.includes('vscode-wolfram-png-output'));
         const finalHtml =
             `<div class="wl-output-block">` +
-            `<div class="wl-output-header" style="display:flex;align-items:center;gap:6px;width:100%;" ` +
+            `<div class="wl-output-header" style="display:flex;align-items:center;gap:6px;width:100%;min-height:22px;" ` +
             `data-session-epoch="${this._sessionEpoch}" data-output-id="${uuid}" ` +
             `data-out-n="${outN}" data-output-format="${fmt}" data-output-is-graphics="${_isGfxUuid ? '1' : '0'}">${outLabel}</div>` +
             `<div class="wl-output-content">${fullHtml}</div>` +
@@ -2116,7 +2116,7 @@ class WolframNotebookKernel {
         // lose the graphics-specific button set.
         const _regEntry  = this._outputRegistry.get(outputId);
         const _isGfxById = _regEntry?.isGfx ?? (contentHtml.includes('vscode-wolfram-svg-output') || contentHtml.includes('vscode-wolfram-png-output'));
-        const headerRow  = `<div class="wl-output-header" style="display:flex;align-items:center;gap:6px;width:100%;" ` +
+        const headerRow  = `<div class="wl-output-header" style="display:flex;align-items:center;gap:6px;width:100%;min-height:22px;" ` +
                            `data-session-epoch="${this._sessionEpoch}" data-output-id="${outputId}" ` +
                            `data-out-n="${outN}" data-output-format="${newFormat}" data-output-is-graphics="${_isGfxById ? '1' : '0'}">${outLabel}</div>`;
         const finalHtml  = `<div class="wl-output-block">${headerRow}<div class="wl-output-content">${contentHtml}</div></div>` + bannerHtml;
@@ -2476,7 +2476,7 @@ class WolframNotebookKernel {
             if (_renderHtml) {
                 const _headerRow =
                     '<div class="wl-output-header" style="display:flex;align-items:center;' +
-                    'gap:6px;width:100%;" data-session-epoch="' + this._sessionEpoch + '">' +
+                    'gap:6px;width:100%;min-height:22px;" data-session-epoch="' + this._sessionEpoch + '">' +
                     _headerLabel + '</div>';
                 parts.push(
                     '<div class="wl-output-block">' + _headerRow +
