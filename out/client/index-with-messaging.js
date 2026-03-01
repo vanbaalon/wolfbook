@@ -62,7 +62,12 @@ pre.vscode-wolfram-text-output, pre.vscode-wolfram-tex-source {
   text-align:right;color:rgba(180,180,180,0.5);font-size:0.82em;line-height:1.5;
   user-select:none;pointer-events:none;overflow:hidden;background:#1e1e1e;
   font-family:var(--vscode-editor-font-family,Consolas,monospace); }
-button.wl-nb-default-fmt { outline:2px solid rgba(218,165,32,0.7);outline-offset:1px; }
+@keyframes wl-fmt-flash {
+  0%   { outline:2px solid rgba(218,165,32,0.85);outline-offset:1px; }
+  70%  { outline:2px solid rgba(218,165,32,0.5);outline-offset:1px; }
+  100% { outline:2px solid rgba(218,165,32,0);outline-offset:1px; }
+}
+button.wl-nb-default-fmt { animation:wl-fmt-flash 1.5s ease-out forwards; }
 img.vscode-wolfram-svg-output, img.vscode-wolfram-png-output { background: transparent; }
 .vscode-wolfram-svg-output > svg > rect:first-child { fill: none !important; }
 div.mathml-output { overflow-x:auto; }
@@ -202,8 +207,8 @@ export function activate(context) {
                     (document.head || document.body || document.documentElement).appendChild(ks);
                 }
                 ks.textContent = offline
-                    ? 'body { filter: grayscale(0.75) opacity(0.55); transition: filter 0.4s, opacity 0.4s; }'
-                    : 'body { filter: none; opacity: 1; transition: filter 0.4s, opacity 0.4s; }';
+                    ? 'body { filter: grayscale(0.75) opacity(0.55); background-color: var(--vscode-notebook-outputBackground, var(--vscode-editor-background, #1e1e1e)); transition: filter 0.4s, opacity 0.4s; }'
+                    : 'body { filter: none; opacity: 1; background-color: transparent; transition: filter 0.4s, opacity 0.4s; }';
                 console.log('[WolframRenderer] kernel state →', msg.type);
                 return;
             }
@@ -245,16 +250,7 @@ export function activate(context) {
                 // formatGfx and formatExpr are independent — either may be empty.
                 if (msg.formatGfx)  wolframNbDefaultGfxFormat  = msg.formatGfx;
                 if (msg.formatExpr) wolframNbDefaultExprFormat = msg.formatExpr;
-                // Refresh gold highlights on all visible buttons based on their output type
-                document.querySelectorAll('button[data-fmt-key]').forEach(btn => {
-                    const hdr = btn.closest('.wl-output-block')?.querySelector('.wl-output-header');
-                    const btnIsGfx = hdr ? hdr.getAttribute('data-output-is-graphics') === '1' : false;
-                    const target = btnIsGfx ? wolframNbDefaultGfxFormat : wolframNbDefaultExprFormat;
-                    if (target && btn.getAttribute('data-fmt-key') === target)
-                        btn.classList.add('wl-nb-default-fmt');
-                    else
-                        btn.classList.remove('wl-nb-default-fmt');
-                });
+                // No persistent highlight — default is remembered internally only.
             }
 
             // ---- Dialog[] subsession widget ----
@@ -506,6 +502,11 @@ export function activate(context) {
             // Inject CSS once per document
             injectRendererCSS(element.ownerDocument || document);
 
+            // SCROLL-TIMING: notify extension of renderer-side render start
+            if (context && context.postMessage) {
+                try { context.postMessage({ type: 'render-timing', phase: 'render-start', id: outputItem.id, t: Date.now() }); } catch(_){}
+            }
+
             const rawHtml = outputItem.text();
             console.log('[WolframRenderer] renderOutputItem — outputItem id:', outputItem.id,
                         '| HTML length:', rawHtml.length,
@@ -528,6 +529,11 @@ export function activate(context) {
             element.innerHTML = cleanHtml;
             console.log('[WolframRenderer] innerHTML assigned — browser layout starting');
 
+            // SCROLL-TIMING: notify extension that DOM has been updated
+            if (context && context.postMessage) {
+                try { context.postMessage({ type: 'render-timing', phase: 'dom-updated', id: outputItem.id, t: Date.now(), h: element.scrollHeight }); } catch(_){}
+            }
+
             // Double requestAnimationFrame: first rAF fires at the start of the next
             // paint frame (layout not yet complete), second rAF fires after the browser
             // has finished layout and the cell has its final rendered height.
@@ -536,6 +542,34 @@ export function activate(context) {
                     console.log('[WolframRenderer] render layout COMPLETE — cell height is stable (double-rAF)');
                 });
             });
+
+            // ---- Fix: VS Code output-height truncation after loading from file ----
+            // VS Code measures the output cell height immediately after renderOutputItem
+            // returns. When outputs are loaded from a saved notebook, MathML web-fonts may
+            // not be cached yet. Unmeasured fonts cause the browser to use fallback metrics
+            // (wrong, smaller size) → VS Code caches a too-small height → the output
+            // appears truncated to 2-3 lines until the user collapses/uncollapses the cell.
+            //
+            // Fix: after all document fonts have loaded (fonts.ready), append and immediately
+            // remove a zero-height sentinel element. This DOM mutation re-triggers VS Code's
+            // internal ResizeObserver with the now-correct, font-loaded scrollHeight, causing
+            // VS Code to update the displayed cell height without any visible flicker.
+            {
+                const _ownerDoc = element.ownerDocument || document;
+                const _triggerHeightFix = () => {
+                    try {
+                        const sentinel = _ownerDoc.createElement('div');
+                        sentinel.style.cssText = 'height:0;width:0;overflow:hidden;position:absolute;pointer-events:none;';
+                        element.appendChild(sentinel);
+                        requestAnimationFrame(() => { try { sentinel.remove(); } catch(_) {} });
+                    } catch(_) {}
+                };
+                if (_ownerDoc.fonts && typeof _ownerDoc.fonts.ready === 'object') {
+                    _ownerDoc.fonts.ready.then(_triggerHeightFix);
+                } else {
+                    setTimeout(_triggerHeightFix, 300);
+                }
+            }
             // DEBUG: global click spy on the whole element
             element.addEventListener('click', (e) => {
                 console.log('[WolframRenderer] CLICK on element — target:', e.target.tagName,
@@ -642,10 +676,10 @@ export function activate(context) {
             //   TXT | SVG | ∑  (format selectors)
             //   ⊕ ⊖ (MathML zoom, only when MathML)
             //   ↓ Wrap / ↔ Scroll toggle (MathML only)
-            const BTN_BASE = 'padding:1px 6px;font-size:11px;cursor:pointer;' +
-                             'background:transparent;border:1px solid rgba(128,128,128,0.25);' +
-                             'border-radius:3px;flex-shrink:0;color:var(--vscode-descriptionForeground,#888);';
-            const BTN_ACTIVE = 'color:var(--vscode-foreground,inherit);border-color:rgba(128,128,128,0.5);';
+            const BTN_BASE = 'padding:1px 6px;font-size:12px;cursor:pointer;line-height:1.5;' +
+                             'background:transparent;border:1px solid rgba(128,128,128,0.3);' +
+                             'border-radius:3px;flex-shrink:0;color:var(--vscode-foreground,inherit);';
+            const BTN_ACTIVE = 'border-color:rgba(128,128,128,0.7);';
 
             const outputHeaders = element.querySelectorAll('.wl-output-header[data-out-n]');
             console.log('[WolframRenderer] Found', outputHeaders.length, 'output headers for format buttons');
@@ -680,9 +714,6 @@ export function activate(context) {
                             + '\n· double-click to set as default for this notebook';
                     b.style.cssText = BTN_BASE + (outFmt === fmtKey ? BTN_ACTIVE : '');
                     b.setAttribute('data-fmt-key', fmtKey);
-                    // Gold outline only for buttons of the matching output type
-                    const nbDef = isGraphics ? wolframNbDefaultGfxFormat : wolframNbDefaultExprFormat;
-                    if (fmtKey === nbDef) b.classList.add('wl-nb-default-fmt');
                     b.addEventListener('click', (e) => {
                         e.preventDefault(); e.stopPropagation();
                         if (!outputId) return;
@@ -697,14 +728,17 @@ export function activate(context) {
                         // Update the appropriate default variable based on output type
                         if (isGraphics) wolframNbDefaultGfxFormat  = fmtKey;
                         else            wolframNbDefaultExprFormat = fmtKey;
-                        // Refresh gold highlights only on buttons of the same type
+                        // Flash all buttons of the same type that match the new default
                         document.querySelectorAll('button[data-fmt-key]').forEach(btn => {
                             const hdr = btn.closest('.wl-output-block')?.querySelector('.wl-output-header');
                             const btnIsGfx = hdr ? hdr.getAttribute('data-output-is-graphics') === '1' : isGraphics;
-                            if (btnIsGfx !== isGraphics) return;  // leave other type alone
-                            if (btn.getAttribute('data-fmt-key') === fmtKey)
+                            if (btnIsGfx !== isGraphics) return;
+                            btn.classList.remove('wl-nb-default-fmt');
+                            if (btn.getAttribute('data-fmt-key') === fmtKey) {
+                                void btn.offsetWidth; // restart animation
                                 btn.classList.add('wl-nb-default-fmt');
-                            else btn.classList.remove('wl-nb-default-fmt');
+                                setTimeout(() => btn.classList.remove('wl-nb-default-fmt'), 1600);
+                            }
                         });
                         if (context && context.postMessage) {
                             try { context.postMessage({ type: 'set-notebook-default-format', newFormat: fmtKey, isGfx: isGraphics }); }
@@ -1007,6 +1041,22 @@ export function activate(context) {
                         }
                         div.innerHTML = errBanner + rendered + debugHtml;
                     });
+                    // ---- Height fix: KaTeX renders async (CDN load), so VS Code may have
+                    // already measured this cell's height as 0 (empty latex divs). Trigger
+                    // a sentinel DOM mutation so VS Code's ResizeObserver re-measures the
+                    // cell with the now-populated KaTeX content, preventing cells from
+                    // stacking on top of each other. ----
+                    requestAnimationFrame(() => {
+                        requestAnimationFrame(() => {
+                            try {
+                                const _d = element.ownerDocument || document;
+                                const sentinel = _d.createElement('div');
+                                sentinel.style.cssText = 'height:0;width:0;overflow:hidden;position:absolute;pointer-events:none;';
+                                element.appendChild(sentinel);
+                                requestAnimationFrame(() => { try { sentinel.remove(); } catch(_) {} });
+                            } catch(_) {}
+                        });
+                    });
                 };
                 if (typeof window !== 'undefined' && window.katex) {
                     renderRawWithKatex(window.katex);
@@ -1050,6 +1100,10 @@ export function activate(context) {
         },
         
         disposeOutputItem(outputId) {
+            // SCROLL-TIMING: notify extension that output is being destroyed
+            if (context && context.postMessage) {
+                try { context.postMessage({ type: 'render-timing', phase: 'dispose', id: typeof outputId === 'string' ? outputId : 'all', t: Date.now() }); } catch(_){}
+            }
             if (typeof outputId === 'string') {
                 const disposable = disposables[outputId];
                 disposable?.disconnect();
