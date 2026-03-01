@@ -42,6 +42,24 @@ if [ "$MODE" == "quick" ]; then
     cp -R "$BTL_SRC/node_modules/katex"           "$BTL_DEST/node_modules/katex"
     echo "   WolfbookLaTeX addon copied to: $BTL_DEST"
 
+    # ---- Patch VS Code extensions.json so it points to the new version ----
+    # Without this, VS Code keeps the old version path and fails to activate.
+    EXT_JSON="$HOME/.vscode/extensions/extensions.json"
+    if [ -f "$EXT_JSON" ]; then
+        python3 -c "
+import json, sys
+ext_id, ver, rel, loc, path = '$PUBLISHER.$NAME', '$VERSION', '$EXTENSION_ID', '$TARGET_DIR', '$EXT_JSON'
+f = open(path); data = json.load(f); f.close()
+for e in data:
+    if isinstance(e, dict) and e.get('identifier', {}).get('id') == ext_id:
+        e['version'] = ver
+        if 'location' in e: e['location']['path'] = loc
+        e['relativeLocation'] = rel
+open(path, 'w').write(json.dumps(data, indent=2))
+"
+        echo "   ✓  extensions.json updated to $EXTENSION_ID"
+    fi
+
     echo "✅ Quick deploy complete!"
     echo "   Extension installed at: $TARGET_DIR"
     echo "   Reload VS Code window to apply changes"
