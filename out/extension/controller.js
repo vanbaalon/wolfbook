@@ -2669,6 +2669,11 @@ class WolframNotebookKernel {
             // _reinstallPromise tracks the in-flight sub() reinstall so we can await it.
             let _handlerNeedsReinstall = false;
             let _reinstallPromise = Promise.resolve();
+            // Counts consecutive cycles where isDialogOpen=true in the pre-mutex guard.
+            // If a stale dialog is stuck open (e.g. exitDialog resolved for level-2→1 but
+            // level 1 was never closed), every cycle spins here forever.  After 10 cycles
+            // (~2 s) we force-abort to break the deadlock.
+            let _staleDialogCycles = 0;
             while (true) {
                 cycle++;
                 if (!state.active || this._sessionEpoch !== epoch) {
@@ -2917,10 +2922,34 @@ class WolframNotebookKernel {
                 }
 
                 // Skip if dialog is already open — don't interrupt, just wait.
+                // Watchdog: if this has been true for >= 10 consecutive 200 ms cycles
+                // (~2 s) the dialog is stale (exitDialog closed level-2→1 but level-1
+                // was never closed, or abort() left residual state).  Force-abort to
+                // break the deadlock rather than spinning forever.
                 if (this.session.isDialogOpen) {
+                    _staleDialogCycles++;
+                    if (_staleDialogCycles >= 10) {
+                        _staleDialogCycles = 0;
+                        scrollLog('[dyn] cycle', cycle, '| stale dialog (10 cycles) — force-abort to recover');
+                        try { this.session.abort(); } catch(_) {}
+                        _handlerNeedsReinstall = true;
+                        _reinstallPromise = this.session.sub?.(
+                            'Quiet[Internal`AddHandler["Interrupt", Function[Null, Dialog[]]]]'
+                        ).then(() => {
+                            _handlerNeedsReinstall = false;
+                            scrollLog('[dyn] interrupt handler reinstalled after stale-dialog abort');
+                        }).catch(e => {
+                            _handlerNeedsReinstall = false;
+                            scrollLog('[dyn] stale-dialog reinstall failed:', e.message);
+                        }) ?? Promise.resolve();
+                        const _tsd = Date.now();
+                        while (this.session.isDialogOpen && Date.now() - _tsd < 3000)
+                            await new Promise(r => setTimeout(r, 50));
+                    }
                     await new Promise(r => setTimeout(r, 200));
                     continue;
                 }
+                _staleDialogCycles = 0;
 
                 // ---- Global dialog mutex: serialises interrupt+dialogEval+exitDialog ----
                 // across ALL concurrent Dynamic cell loops so two loops never send competing
@@ -3094,15 +3123,28 @@ class WolframNotebookKernel {
                     }
                 }
 
-                // ---- Exit dialog — retry up to 3 times if it hangs. ----
+                // ---- Exit dialog — retry up to 5 times if it hangs or only partially closes. ----
+                // IMPORTANT: exitDialog() can resolve without timeout AND yet the dialog is
+                // still open when the kernel is at Dialog level 2 (nested after a previous
+                // abort): exitDialog closes level 2 → level 1, returning successfully, but
+                // isDialogOpen is still true.  We must check isDialogOpen after each call
+                // and keep retrying until the dialog is genuinely closed.
                 let exited = false;
-                for (let attempt = 0; attempt < 3 && !exited; attempt++) {
+                for (let attempt = 0; attempt < 5 && !exited; attempt++) {
                     try {
                         await Promise.race([
                             this.session.exitDialog(),
                             new Promise((_, rej) => setTimeout(() => rej(new Error('exitDialog timeout')), 2000))
                         ]);
-                        exited = true;
+                        // exitDialog resolved — but it may have only closed one level.
+                        // Check whether the dialog is genuinely closed now.
+                        await new Promise(r => setTimeout(r, 30));
+                        if (!this.session.isDialogOpen) {
+                            exited = true;
+                        } else {
+                            scrollLog('[dyn] cycle', cycle, '| exitDialog attempt', attempt + 1,
+                                      '— resolved but dialog still open (nested level), retrying');
+                        }
                     } catch (e) {
                         scrollLog('[dyn] cycle', cycle, '| exitDialog attempt', attempt + 1, 'failed:', e.message);
                     }
@@ -3148,6 +3190,25 @@ class WolframNotebookKernel {
                 while (this.session.isDialogOpen && Date.now() - t2 < 2000)
                     await new Promise(r => setTimeout(r, 30));
                 scrollLog('[dyn] cycle', cycle, '| dialog closed after', Date.now() - t2, 'ms | slots:', gotIdxs.length);
+                // Last-resort: dialog still open after all exits + 2s wait — abort to prevent
+                // the pre-mutex isDialogOpen guard from spinning forever on next cycles.
+                if (this.session.isDialogOpen) {
+                    scrollLog('[dyn] cycle', cycle, '| dialog still open after t2 wait — aborting to prevent spin');
+                    try { this.session.abort(); } catch(_) {}
+                    _handlerNeedsReinstall = true;
+                    _reinstallPromise = this.session.sub?.(
+                        'Quiet[Internal`AddHandler["Interrupt", Function[Null, Dialog[]]]]'
+                    ).then(() => {
+                        _handlerNeedsReinstall = false;
+                        scrollLog('[dyn] interrupt handler reinstalled after t2-abort');
+                    }).catch(e => {
+                        _handlerNeedsReinstall = false;
+                        scrollLog('[dyn] t2-abort reinstall failed:', e.message);
+                    }) ?? Promise.resolve();
+                    const _t2a = Date.now();
+                    while (this.session.isDialogOpen && Date.now() - _t2a < 3000)
+                        await new Promise(r => setTimeout(r, 50));
+                }
 
                 // Brief pause so kernel resumes Do loop before next interrupt.
                 await new Promise(r => setTimeout(r, 150));
