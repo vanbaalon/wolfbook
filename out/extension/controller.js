@@ -824,11 +824,15 @@ class WolframNotebookKernel {
 
     // Resolve the render format for a cell, respecting the type-split notebook defaults.
     // knownIsGfx: true/false if already known; undefined = scan registry for last output of this cell.
+    // Guarantees: never returns an expression-only format (WLLatex/WLLatex2/MathML/TeX/TeXSrc) for a
+    // known-graphics output, and never returns a graphics-only format (SVGSrc) for a known-expression
+    // output.  Falls back to 'Auto' (→ SVG for gfx, MathML for expr in the kernel) in those cases.
+    static get _EXPR_ONLY_FMTS() { return new Set(['WLLatex','WLLatex2','MathML','TeX','TeXSrc']); }
+    static get _GFX_ONLY_FMTS()  { return new Set(['SVGSrc']); }
     _resolveFormat(cell, knownIsGfx) {
         const cellUri = cell.document.uri.toString();
         // 1. Per-cell explicit override (set when user clicks a format button)
         const perCell = this._cellOutputFormat.get(cellUri);
-        if (perCell) return perCell;
         // 2. Notebook-level default — pick the right one based on output type
         const nbUri = cell.notebook.uri.toString();
         let isGfx = knownIsGfx;
@@ -840,17 +844,20 @@ class WolframNotebookKernel {
                 }
             }
         }
-        if (isGfx === true) {
-            const d = this._notebookDefaultGfxFormat.get(nbUri);
-            if (d) return d;
+        let fmt;
+        if (perCell) {
+            fmt = perCell;
+        } else if (isGfx === true) {
+            fmt = this._notebookDefaultGfxFormat.get(nbUri) || '';
         } else {
             // isGfx === false (known expression) or undefined (first eval, unknown type)
-            // → apply expression default; if explicit graphics later, it re-resolves correctly
-            const d = this._notebookDefaultExprFormat.get(nbUri);
-            if (d) return d;
+            fmt = this._notebookDefaultExprFormat.get(nbUri) || '';
         }
-        // 3. VS Code settings fallback
-        return String(this.config.get('outputFormat') || 'Auto');
+        if (!fmt) fmt = String(this.config.get('outputFormat') || 'Auto');
+        // Sanitise: if type is known, never return a format incompatible with it.
+        if (isGfx === true  && WolframNotebookKernel._EXPR_ONLY_FMTS.has(fmt)) return 'Auto';
+        if (isGfx === false && WolframNotebookKernel._GFX_ONLY_FMTS.has(fmt))  return 'Auto';
+        return fmt;
     }
 
     // Post-process HTML from the kernel: if it contains a WLLatex box-placeholder
@@ -1608,16 +1615,10 @@ class WolframNotebookKernel {
                             // isGfx: read the authoritative marker embedded by VsCodeRender/VsCodeRenderFull,
                             // NOT from CSS classes — those vary by format (WL/TeX/LaTeX have no image classes).
                             const _isGfx = html.includes('vscode-wolfram-gfx-marker');
-                            // If the format was resolved pre-render as an expression-only format
-                            // but the output turned out to be a graphics type, override the stored
-                            // format to the graphics default so the header and format-switch buttons
-                            // reflect the actual render.  The kernel already promoted the render to
-                            // SVG (VsCodeRenderExpr promotion list), so the HTML is correct; this
-                            // only fixes the metadata shown in the output header.
-                            const _EXPR_ONLY_FMTS = new Set(['WLLatex', 'WLLatex2', 'MathML', 'TeX', 'TeXSrc']);
-                            const _effectiveFmt = (_isGfx && _EXPR_ONLY_FMTS.has(format))
-                                ? (() => { const _gf = this._resolveFormat(execCell, true); return _EXPR_ONLY_FMTS.has(_gf) ? 'Auto' : _gf; })()
-                                : format;
+                            // Re-resolve format now that isGfx is known: _resolveFormat sanitises
+                            // incompatible format/type combos (e.g. WLLatex for a graphics output)
+                            // so the header and format-switch buttons always reflect the right set.
+                            const _effectiveFmt = this._resolveFormat(execCell, _isGfx);
                             this._outputRegistry.set(outputId,
                                 { cell: execCell, outN: lineN, outName: r.outputName, format: _effectiveFmt, isGfx: _isGfx });
                             const headerRow = `<div class="wl-output-header" style="display:flex;align-items:center;gap:6px;width:100%;min-height:22px;" data-session-epoch="${this._sessionEpoch}" data-output-id="${outputId}" data-out-n="${lineN}" data-output-format="${_effectiveFmt}" data-output-is-graphics="${_isGfx ? '1' : '0'}">${outLabel}</div>`;
