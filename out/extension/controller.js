@@ -2556,12 +2556,28 @@ class WolframNotebookKernel {
         // Set initial counter for the pre-loop 'waiting' display (0 dispatches consumed yet).
         _updateBadgeExtra(0, 0);
 
+        // _isExpired: set true on first expiry detection. Prevents repeated _putAllOutputs
+        // calls during the busy-wait phase and lets _badge show the red ⊘ state.
+        let _isExpired = false;
+        // Call once when any LiveXxx quota is first hit — flags expiry and (re-)renders badge.
+        const _markExpired = () => { _isExpired = true; };
+
         const _badge = (status) => {
-            const color = status === 'live' ? '#c678dd' : status === 'paused' ? '#888' : '#e8a020';
-            const bg    = status === 'live' ? 'rgba(198,120,221,0.12)' : status === 'paused' ? 'rgba(128,128,128,0.10)' : 'rgba(232,160,32,0.12)';
-            const bd    = status === 'live' ? 'rgba(198,120,221,0.35)' : status === 'paused' ? 'rgba(128,128,128,0.25)' : 'rgba(232,160,32,0.35)';
-            const label = status === 'live'   ? '⟳ Dynamic' + _badgeExtra
-                        : status === 'paused' ? '⏸ Dynamic' + _badgeExtra
+            const color = status === 'live'    ? '#c678dd'
+                        : status === 'paused'  ? '#888'
+                        : status === 'expired' ? '#e06c75'
+                        : '#e8a020';
+            const bg    = status === 'live'    ? 'rgba(198,120,221,0.12)'
+                        : status === 'paused'  ? 'rgba(128,128,128,0.10)'
+                        : status === 'expired' ? 'rgba(224,108,117,0.12)'
+                        : 'rgba(232,160,32,0.12)';
+            const bd    = status === 'live'    ? 'rgba(198,120,221,0.35)'
+                        : status === 'paused'  ? 'rgba(128,128,128,0.25)'
+                        : status === 'expired' ? 'rgba(224,108,117,0.35)'
+                        : 'rgba(232,160,32,0.35)';
+            const label = status === 'live'    ? '⟳ Dynamic' + _badgeExtra
+                        : status === 'paused'  ? '⏸ Dynamic' + _badgeExtra
+                        : status === 'expired' ? '⊘ Dynamic' + _badgeExtra
                         : '⏳ Dynamic' + _badgeExtra + ' — start a computation to see live updates';
             return '<span style="font-size:9px;color:' + color + ';background:' + bg + ';' +
                    'border:1px solid ' + bd + ';border-radius:3px;padding:1px 6px;' +
@@ -2662,9 +2678,25 @@ class WolframNotebookKernel {
                 const _cellsSinceStart = ((this._cellEpoch || 0) - _cellEpochAtStart + 0x1000000) & 0xFFFFFF;
                 // Update badge counter so next _putAllOutputs reflects current remaining counts.
                 _updateBadgeExtra(_evalsSinceStart, _cellsSinceStart);
-                // LiveTime fires immediately when the wall-clock deadline passes.
+
+                // Busy = any evaluation is queued (started or pending) AND we are not in abort.
+                // Check queue.length only (not queue[0].started) so sub() calls stop as soon
+                // as a new cell is queued — before executionQueue.start() is called — preventing
+                // concurrent sub()+evaluate() collisions on the WSTP link.
+                // NOTE: computed BEFORE the LiveTime check so we can wait for !busy before clearing.
+                const busy = !this._abortPending && this.executionQueue.queue.length > 0;
+
+                // LiveTime expiry: once the wall-clock deadline passes, mark expired and show
+                // the red ⊘ badge (once). If the kernel is still busy, wait for it to finish
+                // before clearing the output — so the user sees the expiry state, not a void.
                 if (isFinite(liveTimeSec) && (Date.now() - _liveStartTime) / 1000 >= liveTimeSec) {
-                    scrollLog('[dyn] cell loop expired (LiveTime) | liveTimeSec:', liveTimeSec);
+                    if (!_isExpired) {
+                        scrollLog('[dyn] cell loop expired (LiveTime) | liveTimeSec:', liveTimeSec);
+                        _markExpired();
+                        await _putAllOutputs(htmlBySlot, 'expired');
+                    }
+                    if (busy) { await new Promise(r => setTimeout(r, 300)); continue; }
+                    // Kernel is idle — safe to clear output and exit.
                     this._dynamicWidgets.delete(cellUri);
                     try {
                         const _expExe = this._controller.createNotebookCellExecution(cell);
@@ -2674,12 +2706,6 @@ class WolframNotebookKernel {
                 }
                 // LiveEvaluations expiry is handled inside the !busy block below —
                 // we wait until the Nth evaluation has FINISHED (queue drained) before clearing.
-
-                // Busy = any evaluation is queued (started or pending) AND we are not in abort.
-                // Check queue.length only (not queue[0].started) so sub() calls stop as soon
-                // as a new cell is queued — before executionQueue.start() is called — preventing
-                // concurrent sub()+evaluate() collisions on the WSTP link.
-                const busy = !this._abortPending && this.executionQueue.queue.length > 0;
                 scrollLog('[dyn] cycle', cycle, '| busy:', busy, '| dlgOpen:', this.session?.isDialogOpen, '| dispatched:', this._evalDispatched);
 
                 if (!busy) {
@@ -2839,10 +2865,22 @@ class WolframNotebookKernel {
                 // If the LiveEvaluations or LiveCells limit has already been reached,
                 // do NOT interrupt — let the computation finish undisturbed.
                 // The expiry check in the !busy block fires once the queue drains.
+                // Show the red ⊘ expired badge once on first entry so the user knows
+                // the limit was hit and no more updates are coming.
                 if (isFinite(liveEvalLimit) && _evalsSinceStart >= liveEvalLimit) {
+                    if (!_isExpired) {
+                        scrollLog('[dyn] busy-path: LiveEvaluations limit reached, showing expired badge');
+                        _markExpired();
+                        await _putAllOutputs(htmlBySlot, 'expired');
+                    }
                     await new Promise(r => setTimeout(r, 300)); continue;
                 }
                 if (isFinite(liveCellLimit) && _cellsSinceStart >= liveCellLimit) {
+                    if (!_isExpired) {
+                        scrollLog('[dyn] busy-path: LiveCells limit reached, showing expired badge');
+                        _markExpired();
+                        await _putAllOutputs(htmlBySlot, 'expired');
+                    }
                     await new Promise(r => setTimeout(r, 300)); continue;
                 }
                 // Gate: only send interrupt() once the kernel is actually computing.
