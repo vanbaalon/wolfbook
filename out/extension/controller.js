@@ -2655,6 +2655,9 @@ class WolframNotebookKernel {
             // Non-null: skip idle render unless _dispatchEpoch has advanced (meaning a new
             // evaluation has been dispatched — completed OR currently running — since last render).
             let _lastIdleRenderEpoch = null;
+            // _lastBadgeTickTime: timestamp of last badge-only refresh (for LiveTime countdown).
+            // Used to tick the timer display once per second even when slot content hasn't changed.
+            let _lastBadgeTickTime = 0;
             // Safety counter: tracks how many consecutive interrupt cycles got no dialog.
             // When >= 1 we know the kernel is inside Pause[N] or a C++ compute-bound
             // section that ignores WSInterruptMessage.  Sending another interrupt while
@@ -2854,9 +2857,12 @@ class WolframNotebookKernel {
                             } catch(_subErr) {
                                 dynLog('IDLE-SUBKERN-ERR | cycle', cycle, '|', _subErr.message);
                             }
-                            // Only redraw if something actually changed this idle cycle.
-                            if (_anyIdleChanged)
+                            // Redraw if value changed, OR if LiveTime is set (need to refresh
+                            // the countdown even when the slot value is the same).
+                            if (_anyIdleChanged || (isFinite(liveTimeSec) && !_isExpired)) {
+                                _lastBadgeTickTime = Date.now();
                                 await _putAllOutputs(htmlBySlot, 'live');
+                            }
                         }
                         // Record the epoch we just rendered at — suppress further idle
                         // renders until a new evaluation is dispatched.
@@ -2877,6 +2883,14 @@ class WolframNotebookKernel {
                         await _putAllOutputs({}, 'waiting');
                     }
                     lastBusy = false;
+                    // LiveTime countdown tick: refresh badge every ~1 s on the idle path
+                    // so the displayed countdown decreases monotonically even when the
+                    // slot value hasn't changed (i.e. _anyIdleChanged was false).
+                    if (isFinite(liveTimeSec) && !_isExpired
+                            && (Date.now() - _lastBadgeTickTime) >= 950) {
+                        _lastBadgeTickTime = Date.now();
+                        await _putAllOutputs(htmlBySlot, 'live');
+                    }
                     await new Promise(r => setTimeout(r, 300));
                     continue;
                 }
