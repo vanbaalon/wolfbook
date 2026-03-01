@@ -37,11 +37,18 @@ function _loadBtlAddon() {
     } catch (_) { return false; }
 }
 
+// ---- Developer mode flag ----
+// All debug logging (scrollLog, dynLog, writeDebugLog, output-panel diagnostics)
+// is suppressed unless this is the developer machine.  Detection is by OS username
+// so no configuration is needed: the same code ships to all users.
+const DEV_MODE = (() => {
+    try { return require('os').userInfo().username === 'k0959535'; } catch (_) { return false; }
+})();
+
 // ---- Scroll / focus debug logging ----
 // scrollLog() writes to both the DevTools console AND a dedicated file:
 //   <workspace>/Temporary Docs/wolfram-scroll-debug.log
-// Set SCROLL_DEBUG = false to disable all scroll logging.
-const SCROLL_DEBUG = true;
+const SCROLL_DEBUG = DEV_MODE;
 let _scrollLogPath = null;  // resolved once on first write
 let _dynLogPath    = null;
 function _resolveScrollLogPath() {
@@ -66,7 +73,9 @@ function scrollLog(...args) {
     }
 }
 // dynLog() — dedicated diagnostic log for Dynamic rendering, truncated on each kernel start.
+// Only active in DEV_MODE so no log noise reaches end-user installs.
 function dynLog(...args) {
+    if (!DEV_MODE) return;
     const msg = args.join(' ');
     console.log('[dyn-dbg] ' + msg);
     _resolveScrollLogPath();  // ensure _dynLogPath is set
@@ -342,7 +351,7 @@ class WolframNotebookKernel {
         this._rendererMessaging = vscode.notebooks.createRendererMessaging("wolfram-notebook-renderer");
         this._rendererMessaging.onDidReceiveMessage(async event => {
             const message = event.message;
-            this.outputPanel.print(`[Renderer] message: ${JSON.stringify(message)}`);
+            if (DEV_MODE) this.outputPanel.print(`[Renderer] message: ${JSON.stringify(message)}`);
 
             // Renderer webview just registered its message listener — re-broadcast
             // current kernel status so it applies the correct offline/online CSS
@@ -519,7 +528,7 @@ class WolframNotebookKernel {
                 const { outputId, newFormat } = message;
                 const info = this._outputRegistry.get(outputId);
                 if (!info) {
-                    this.outputPanel.print(`[Reformat] outputId ${outputId} not found in registry`);
+                    if (DEV_MODE) this.outputPanel.print(`[Reformat] outputId ${outputId} not found in registry`);
                     return;
                 }
                 // Remember format for next evaluation of this cell
@@ -560,10 +569,10 @@ class WolframNotebookKernel {
                     } else {
                         // Render returned non-string (aborted — e.g. recursive Format rule).
                         // Keep the existing output intact; message already shown above.
-                        this.outputPanel.print(`[Reformat] render returned non-string (aborted?) for Out[${info.outN}] — keeping previous output`);
+                        if (DEV_MODE) this.outputPanel.print(`[Reformat] render returned non-string (aborted?) for Out[${info.outN}] — keeping previous output`);
                     }
                 } catch (rfErr) {
-                    this.outputPanel.print(`[Reformat] error: ${rfErr.message}`);
+                    if (DEV_MODE) this.outputPanel.print(`[Reformat] error: ${rfErr.message}`);
                     vscode.window.showWarningMessage(`Reformat failed: ${rfErr.message}`);
                 }
             }
@@ -637,7 +646,7 @@ class WolframNotebookKernel {
         this._controller.onDidChangeSelectedNotebooks(({ notebook, selected }) => {
             if (selected) {
                 this.selectedNotebooks.add(notebook);
-                this.outputPanel.print(`Controller selected for: ${notebook.uri.fsPath}`);
+                if (DEV_MODE) this.outputPanel.print(`Controller selected for: ${notebook.uri.fsPath}`);
             } else {
                 this.selectedNotebooks.delete(notebook);
             }
@@ -677,6 +686,7 @@ class WolframNotebookKernel {
 
     // -----------------------------------------------------------------------
     writeDebugLog(message) {
+        if (!DEV_MODE) return;
         const timestamp = new Date().toISOString();
         this.outputPanel.print(message);
         const workspaceFolders = vscode.workspace.workspaceFolders;
@@ -2154,7 +2164,7 @@ class WolframNotebookKernel {
             }
         }
         if (targetIndex === -1) {
-            this.outputPanel.print(`[_replaceOutputById] outputId ${outputId} not found in cell outputs`);
+            if (DEV_MODE) this.outputPanel.print(`[_replaceOutputById] outputId ${outputId} not found in cell outputs`);
             return;
         }
         allOutputs[targetIndex] = new vscode.NotebookCellOutput([

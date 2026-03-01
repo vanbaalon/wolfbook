@@ -23,6 +23,14 @@
  * limitations under the License.
  */
 
+// ---- Developer mode flag ----
+// Gate all diagnostic console.log / console.warn behind this flag so end-user
+// installs produce no renderer noise.  Set to true manually on the dev machine.
+// (Webviews run in a sandboxed browser context with no Node.js access, so
+// auto-detection via os.userInfo() is not available here.)
+const DEV_MODE = false;
+if (!DEV_MODE) { const _noop = () => {}; console.log = _noop; console.warn = _noop; }
+
 // Module-level marker — confirms this file (index-with-messaging.js) was loaded
 console.log('[WolframRenderer] *** index-with-messaging.js MODULE LOADED ***');
 
