@@ -2662,6 +2662,13 @@ class WolframNotebookKernel {
             // exitDialog both hang indefinitely (confirmed in test_pause_interrupt.js P6).
             // We back off and wait for the evaluation to end naturally instead.
             let _consecutiveNoDialog = 0;
+            // abort() clears Internal`AddHandler["Interrupt",...] on the kernel side
+            // (confirmed by WSTP regression test P5).  After any abort(), we must
+            // reinstall the handler before the next interrupt attempt, otherwise
+            // interrupt() fires but no Dialog[] opens and all subsequent cycles are dead.
+            // _reinstallPromise tracks the in-flight sub() reinstall so we can await it.
+            let _handlerNeedsReinstall = false;
+            let _reinstallPromise = Promise.resolve();
             while (true) {
                 cycle++;
                 if (!state.active || this._sessionEpoch !== epoch) {
@@ -2967,6 +2974,18 @@ class WolframNotebookKernel {
                     await new Promise(r => setTimeout(r, 1000));
                     continue;
                 }
+                // Handler reinstall may be in flight after a previous abort().
+                // Wait for it to complete before attempting the next interrupt —
+                // otherwise we interrupt with no handler and the dialog never opens.
+                if (_handlerNeedsReinstall) {
+                    _releaseDlg();
+                    scrollLog('[dyn] cycle', cycle, '| handler reinstall pending — awaiting before next interrupt');
+                    await _reinstallPromise;
+                    if (!state.active || this._sessionEpoch !== epoch) continue;
+                    // One-cycle pause so the kernel can register the new handler.
+                    await new Promise(r => setTimeout(r, 300));
+                    continue;
+                }
 
                 let gotIdxs = [];
                 let pendingValues = {}; // slotIndex → FullForm string (populated inside Dialog[])
@@ -3094,6 +3113,19 @@ class WolframNotebookKernel {
                 if (!exited) {
                     dynLog('ABORT | cycle', cycle, '| exitDialog failed 3 times — aborting kernel');
                     try { this.session.abort(); } catch(_) {}
+                    // abort() clears Internal`AddHandler["Interrupt",...] on the kernel.
+                    // Schedule handler reinstall via sub() — runs after the aborted eval
+                    // finishes ($Aborted response) and before any queued evaluate() calls.
+                    _handlerNeedsReinstall = true;
+                    _reinstallPromise = this.session.sub?.(
+                        'Quiet[Internal`AddHandler["Interrupt", Function[Null, Dialog[]]]]'
+                    ).then(() => {
+                        _handlerNeedsReinstall = false;
+                        scrollLog('[dyn] interrupt handler reinstalled after abort');
+                    }).catch(e => {
+                        _handlerNeedsReinstall = false;
+                        scrollLog('[dyn] handler reinstall failed:', e.message);
+                    }) ?? Promise.resolve();
                     // Wait up to 3s for the dialog to close post-abort.
                     const _ta = Date.now();
                     while (this.session.isDialogOpen && Date.now() - _ta < 3000)
