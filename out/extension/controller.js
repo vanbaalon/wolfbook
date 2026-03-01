@@ -122,6 +122,16 @@ class WolframNotebookKernel {
         // Promise-chain mutex: only one Dynamic widget may hold the dialog at a time.
         this._dynDialogMutex = Promise.resolve();
         this._abortPending   = false;
+        // True only between (await _dynIdleMutex resolves) and executionQueue.end().
+        // The Dialog busy-path guards on this so interrupt() is never sent while the
+        // kernel is queued-but-idle (between executionQueue.start and session.evaluate).
+        this._evalDispatched = false;
+        // Incremented every time a new cell begins executing (when _evalDispatched → true).
+        // The Dialog busy path captures this before awaiting the mutex and re-checks after;
+        // if the epoch changed the loop ended and a NEW cell started while we waited —
+        // sending interrupt() now would interrupt the wrong (innocent) cell.
+        this._dispatchEpoch = 0;
+        this._cellEpoch     = 0;  // increments once per cell; used by LiveCells expiry
         // True while VsCodeRender[N] (ExportString SVG) is executing in the main kernel.
         // Dynamic widget loops skip their interrupt cycle during this window so they
         // cannot abort an in-flight ExportString/Rasterize call.
@@ -1203,21 +1213,6 @@ class WolframNotebookKernel {
                 if (t.length > 0) parts.push(t);
                 return parts.length > 0 ? parts : [code];
             })();
-            // ---- Syntax check on full cell text (non-blocking, non-fatal) ----
-            try {
-                const syntaxResult = await this.session.sub(
-                    "VsCodeSyntaxCheck[" + JSON.stringify(code) + "]"
-                );
-                if (syntaxResult && syntaxResult.type === "string" && syntaxResult.value) {
-                    const syntaxJson = JSON.parse(syntaxResult.value);
-                    if (syntaxJson.errors && syntaxJson.errors.length > 0) {
-                        this.handleSyntaxErrors(currentExecution.execution.cell, syntaxJson.errors);
-                    }
-                }
-            } catch (syntaxErr) {
-                this.writeDebugLog(`[CHECKOUT] Syntax check error (non-fatal): ${syntaxErr.message}`);
-            }
-
             // Per-cell format override takes precedence over the global setting.
             const format = this._resolveFormat(currentExecution.execution.cell);
             const scale  = Number(this.config.get("imageScale")   || 0.8);
@@ -1237,6 +1232,36 @@ class WolframNotebookKernel {
             // any .svg/.png in imgDir that are no longer referenced.  Pure Node.js
             // fs — no kernel round-trip, no timing dependency.
             this._cleanupImgDir(currentExecution.execution.cell.notebook, imgDir);
+
+            // Wait for any ongoing idle sub() call to finish before starting evaluate().
+            // Concurrent sub() + evaluate() on the same WSTP link causes
+            // "WSGet out of sequence" / connection-lost errors.
+            if (this._dynIdleMutex) await this._dynIdleMutex;
+
+            // NOTE: _evalDispatched and _dispatchEpoch are set AFTER the setup phase
+            // (syntax check + VsCodeSetImgDir) so the Dynamic widget does not interrupt
+            // these sub()/evaluate() calls. Interrupting the syntax-check sub() while it
+            // is in flight desynchronises the WSTP packet stream and causes the subsequent
+            // cell evaluate() to hang forever. The flag is set just before the subExpr
+            // loop, which is the earliest point the kernel is processing real cell code.
+
+            // ---- Syntax check on full cell text (non-blocking, non-fatal) ----
+            // IMPORTANT: must run AFTER await _dynIdleMutex so it does NOT race
+            // with idle-path sub() calls from Dynamic widget loops. Concurrent
+            // sub() calls on the same WSTP link cause "WSGet out of sequence".
+            try {
+                const syntaxResult = await this.session.sub(
+                    "VsCodeSyntaxCheck[" + JSON.stringify(code) + "]"
+                );
+                if (syntaxResult && syntaxResult.type === "string" && syntaxResult.value) {
+                    const syntaxJson = JSON.parse(syntaxResult.value);
+                    if (syntaxJson.errors && syntaxJson.errors.length > 0) {
+                        this.handleSyntaxErrors(currentExecution.execution.cell, syntaxJson.errors);
+                    }
+                }
+            } catch (syntaxErr) {
+                this.writeDebugLog(`[CHECKOUT] Syntax check error (non-fatal): ${syntaxErr.message}`);
+            }
 
             try {
                 await this.session.evaluate(
@@ -1273,19 +1298,38 @@ class WolframNotebookKernel {
                 ? '[checkout-exec] cell ' + execCell.index + ' | mode: ' + execMode
                 : '[checkout-exec] programmatic');
 
+            // Mark that the interactive evaluation loop is about to start.
+            // Dynamic widget loops gate interrupt() on this flag — before it is set,
+            // queue[0].started is true but the kernel is still doing setup work
+            // (syntax check sub() / VsCodeSetImgDir), and sending interrupt() on
+            // those calls desynchronises the WSTP packet stream.
+            this._evalDispatched = true;
+            // _cellEpoch increments once per cell (for LiveCells expiry).
+            // _dispatchEpoch increments per sub-expression (inside the for loop) so that
+            // LiveEvaluations counts individual sub-expression dispatches, not cell-level.
+            this._cellEpoch = (this._cellEpoch + 1) & 0xFFFFFF;
+            scrollLog('[checkout] _evalDispatched = true | cell', currentExecution.execution.cell.index, '| cellEpoch', this._cellEpoch);
+
             // ---- Evaluate each sub-expression one by one ----
             // Each goes through the interactive kernel main loop → gets its own
             // Out[N]= label and increments $Line.  Rendering is a separate batch
             // sub() call that reads Out[N] without polluting In/Out.
+            //
+            // _dynEarlyRef: set when a Dynamic widget is started inline (before the
+            // cell's remaining sub-expressions run).  Deactivated after execution.end()
+            // so the widget switches from replaceOutputItems to createNotebookCellExecution.
+            let _dynEarlyRef = null;
             for (let i = 0; i < subExprs.length; i++) {
                 if (this.isAborting) { anyAborted = true; break; }
 
                 const subExpr = subExprs[i];
 
                 // ---- Skip Dynamic[...] — bypass kernel entirely ----
-                // The widget loop (started after execution.end()) handles these slots.
-                // Sending Dynamic[...] to the kernel while a widget is already running
-                // interrupts on the same session causes races and nested Dialog[].
+                // Dynamic slots are rendered by the widget loop; we never send
+                // Dynamic[...] to session.evaluate() (it would stall for a FrontEnd).
+                // Place a placeholder, and if there are subsequent executable
+                // sub-expressions in this same cell, start the widget loop NOW
+                // (early-start) so it renders live while those sub-exprs run.
                 if (subExpr.startsWith('Dynamic[') && subExpr.endsWith(']')) {
                     const _dynPlaceholder = new vscode.NotebookCellOutput([
                         vscode.NotebookCellOutputItem.text(
@@ -1300,8 +1344,28 @@ class WolframNotebookKernel {
                         currentExecution.hasOutput = true;
                         await currentExecution.execution.replaceOutput(_dynPlaceholder);
                     }
+                    // Early-start: trigger when this is the last Dynamic[...] placeholder
+                    // placed AND there are still executable sub-expressions to follow.
+                    // All Dynamic placeholders are now in cell.outputs, so snapOutputs in
+                    // the widget is initialised with the full set of Dynamic slot objects.
+                    if (!_dynEarlyRef) {
+                        const _moreDyn   = subExprs.slice(i + 1).some(s => { const t = s.trim(); return t.startsWith('Dynamic[') && t.endsWith(']'); });
+                        const _hasSubseq = subExprs.slice(i + 1).some(s => { const t = s.trim(); return t && !(t.startsWith('(*') && t.endsWith('*)')); });
+                        if (!_moreDyn && _hasSubseq) {
+                            const _dynExprsEarly = this._splitTopLevelExprs(code).filter(e => e.isDynamic);
+                            if (_dynExprsEarly.length > 0) {
+                                _dynEarlyRef = { exec: currentExecution.execution, active: true };
+                                this._startDynamicCell(execCell, _dynExprsEarly, imgDir, imgRel, _dynEarlyRef);
+                            }
+                        }
+                    }
                     continue;
                 }
+
+                // Increment per-sub-expression dispatch epoch.
+                // LiveEvaluations tracks individual sub-expression dispatches after the
+                // widget started.  Dynamic[...] slots are skipped and do not count.
+                this._dispatchEpoch = (this._dispatchEpoch + 1) & 0xFFFFFF;
 
                 // Per-sub-expression print accumulator
                 let printOutput       = null;
@@ -1573,8 +1637,12 @@ class WolframNotebookKernel {
             // execution.end() internally calls revealRange([n, n+2), Default) — it tries to show
             // both the executed cell AND the next cell including its output. If cell n+1 has a
             // large output this scrolls the viewport far down.
-            // Fix: collapse cell n+1 (input+output) BEFORE execution.end() so VS Code sees only
-            // its tiny collapsed header bar (~28px) → minimal scroll.
+            // Fix: collapse only the OUTPUT of cell n+1 BEFORE execution.end() so VS Code measures
+            // it as a small stub (~28px) → minimal scroll.
+            // IMPORTANT: do NOT set inputCollapsed:true — collapsing the Monaco editor and then
+            // restoring it causes VS Code to lose the editor's line-count height measurement,
+            // resulting in the cell showing only 2 lines even if it has 5+ lines of code.
+            // outputCollapsed alone is sufficient to suppress the scroll jump.
             // Restore the original collapse state at t=20ms via updateCellMetadata.
             // updateCellMetadata does NOT move the viewport.
             let _nextCellCollapsed = false;
@@ -1593,13 +1661,12 @@ class WolframNotebookKernel {
                             _collapseEdit.set(execCell.notebook.uri, [
                                 vscode.NotebookEdit.updateCellMetadata(_nextCellCollapseIdx, {
                                     ..._nextCellPrevMeta,
-                                    inputCollapsed: true,
                                     outputCollapsed: true
                                 })
                             ]);
                             await vscode.workspace.applyEdit(_collapseEdit);
                             _nextCellCollapsed = true;
-                            scrollLog('[pre-end-collapse-next] collapsed cell', _nextCellCollapseIdx,
+                            scrollLog('[pre-end-collapse-next] collapsed output of cell', _nextCellCollapseIdx,
                                       'to suppress [n,n+2) scroll');
                         }
                     }
@@ -1613,15 +1680,27 @@ class WolframNotebookKernel {
             scrollLog('[checkout-end] execution.end() about to fire — cell', execCell.index,
                       '| wasRefine:', _wasRefine, '| viewportAtExecute:', _viewportAtExecute);
             this.executionQueue.end(currentExecution.id, !anyAborted);
-            scrollLog('[checkout-end] execution.end() done');
+            this._evalDispatched = false;
+            // Deactivate early-start ref — execution is now closed; subsequent
+            // _putAllOutputs calls in the widget switch to createNotebookCellExecution.
+            if (_dynEarlyRef) { _dynEarlyRef.active = false; _dynEarlyRef = null; }
+            scrollLog('[checkout-end] _evalDispatched = false | execution.end() done');
 
             // Force-close any Dialog[] that a Dynamic widget cycle may have left open
             // when the main evaluation finished mid-cycle. isDialogOpen can be stale,
             // so call unconditionally whenever dynamic widgets are running.
             if (this._dynamicWidgets && this._dynamicWidgets.size > 0) {
                 this.session.closeAllDialogs?.();
-                // Also drain the idle-sub mutex so blocked loops unblock immediately.
-                this._dynIdleMutex = Promise.resolve();
+                // NOTE: do NOT reset _dynIdleMutex here. The idle path sets
+                // _dynIdleMutex = new Promise(...) and calls session.sub() under that
+                // mutex. Overriding it with Promise.resolve() lets checkoutExecutionQueue
+                // bypass the lock — causing two concurrent session.sub() calls on the
+                // same WSTP link, which desynchronises the packet stream and makes the
+                // next session.evaluate() hang forever.  The idle sub() has a 3-second
+                // Promise.race timeout and always calls _releaseIdle() in its finally
+                // block, so checkoutExecutionQueue will unblock naturally within 3s max.
+                // (The _dynIdleMutex reset IS kept in doAbort() where the kernel is
+                //  explicitly killed and WSTP safety is not a concern.)
             }
 
             // ---- Dynamic widgets: scan all top-level expressions in the cell ----
@@ -1639,9 +1718,20 @@ class WolframNotebookKernel {
                     scrollLog('[dyn] found', _dynExprs.length, 'Dynamic expr(s) — starting cell loop | slots:',
                         _dynExprs.map(d => d.slotIndex + '=' + d.dynInner.slice(0, 20)).join(', '));
                     if (!this._dynCells) this._dynCells = new Map();
-                    this._dynCells.set(execCell.document.uri.toString(),
-                        { cell: execCell, outputs: Array.from(execCell.outputs) });
-                    this._startDynamicCell(execCell, _dynExprs, imgDir, imgRel, null);
+                    // If the widget was early-started (inline, before execution.end()),
+                    // DON'T restart it — just refresh snapOutputs so it includes all
+                    // outputs appended by the subsequent sub-expressions (Print/results).
+                    const _cUri = execCell.document.uri.toString();
+                    const _earlyState = this._dynamicWidgets && this._dynamicWidgets.get(_cUri);
+                    if (_earlyState && _earlyState.earlyStart) {
+                        const _fullOuts = Array.from(execCell.outputs);
+                        this._dynCells.set(_cUri, { cell: execCell, outputs: _fullOuts });
+                        _earlyState.refreshSnapshots(_fullOuts);
+                    } else {
+                        this._dynCells.set(execCell.document.uri.toString(),
+                            { cell: execCell, outputs: Array.from(execCell.outputs) });
+                        this._startDynamicCell(execCell, _dynExprs, imgDir, imgRel, null);
+                    }
                 }
             }
 
@@ -1653,12 +1743,11 @@ class WolframNotebookKernel {
                 setTimeout(async () => {
                     try {
                         const _restEdit = new vscode.WorkspaceEdit();
+                        // Restore original metadata exactly — do NOT add
+                        // inputCollapsed/outputCollapsed:false when they were
+                        // absent, as that creates spurious diff noise in the notebook.
                         _restEdit.set(_restNb2.uri, [
-                            vscode.NotebookEdit.updateCellMetadata(_restIdx2, {
-                                ..._restMeta,
-                                inputCollapsed:  _restMeta.inputCollapsed  || false,
-                                outputCollapsed: _restMeta.outputCollapsed || false
-                            })
+                            vscode.NotebookEdit.updateCellMetadata(_restIdx2, { ..._restMeta })
                         ]);
                         await vscode.workspace.applyEdit(_restEdit);
                         scrollLog('[post-end-restore-next] t=20ms: uncollapsed cell', _restIdx2);
@@ -2348,11 +2437,50 @@ class WolframNotebookKernel {
         }
         const last = code.slice(start).trim();
         if (last) exprs.push(last);
+        let outputIdx = 0;
         return exprs.map((text, idx) => {
             const isDynamic = text.startsWith('Dynamic[') && text.endsWith(']');
-            return { text, slotIndex: idx, isDynamic,
-                     dynInner: isDynamic ? text.slice('Dynamic['.length, -1) : null };
+            // Pure comments ( (* ... *) on their own line ) produce no kernel output
+            // and must NOT advance the output-slot counter. If they did, the slotIndex
+            // assigned to a following Dynamic[...] would be 1 instead of 0, causing
+            // _putAllOutputs to write the rendered value to a phantom second output
+            // while the placeholder at index 0 stays forever.
+            const isComment = text.startsWith('(*') && text.endsWith('*)');
+            const slotIndex = outputIdx;
+            if (!isComment) outputIdx++;
+            let dynInner = null, dynLiveTime = null, dynLiveEvals = null, dynLiveCells = null;
+            if (isDynamic) {
+                const fullInner = text.slice('Dynamic['.length, -1);
+                const parts = this._splitAtTopLevelCommas(fullInner);
+                dynInner = parts[0];
+                for (let k = 1; k < parts.length; k++) {
+                    const ltm = parts[k].match(/^LiveTime\s*->\s*([0-9]*\.?[0-9]+)/);
+                    const lev = parts[k].match(/^LiveEvaluations\s*->\s*([0-9]+)/);
+                    const lce = parts[k].match(/^LiveCells\s*->\s*([0-9]+)/);
+                    if (ltm) dynLiveTime  = parseFloat(ltm[1]);
+                    if (lev) dynLiveEvals = parseInt(lev[1], 10);
+                    if (lce) dynLiveCells = parseInt(lce[1], 10);
+                }
+            }
+            return { text, slotIndex, isDynamic, dynInner, dynLiveTime, dynLiveEvals, dynLiveCells };
         });
+    }
+
+    // Split string s at top-level commas (depth-0), respecting nested brackets and strings.
+    // Used to separate Dynamic[expr, LiveTime->t, LiveEvaluations->n] arguments.
+    _splitAtTopLevelCommas(s) {
+        const parts = [];
+        let depth = 0, inStr = false, start = 0;
+        for (let i = 0; i < s.length; i++) {
+            const ch = s[i];
+            if (inStr) { if (ch === '\\') i++; else if (ch === '"') inStr = false; }
+            else if (ch === '"') { inStr = true; }
+            else if ('[({'.includes(ch)) depth++;
+            else if ('])}'.includes(ch)) depth--;
+            else if (ch === ',' && depth === 0) { parts.push(s.slice(start, i).trim()); start = i + 1; }
+        }
+        parts.push(s.slice(start).trim());
+        return parts;
     }
 
     // Dynamic cell loop:
@@ -2373,6 +2501,21 @@ class WolframNotebookKernel {
         const state = { active: true };
         this._dynamicWidgets.set(cellUri, state);
 
+        // earlyStart: true when started inline (before execution.end() of the owner cell).
+        // refreshSnapshots: called after execution.end() to update snapOutputs with the
+        // full set of cell outputs (Print[] results + static sub-expression outputs).
+        state.earlyStart = !!(ownedExec);
+        state.refreshSnapshots = (newOutputs) => {
+            // Replace contents of snapOutputs array in-place (keeps same reference).
+            const src = newOutputs || Array.from(cell.outputs);
+            snapOutputs.length = 0;
+            for (const o of src) snapOutputs.push(o);
+        };
+
+        // Prewarm the render subkernel as soon as the first Dynamic widget is registered
+        // so init.wl is already loaded by the time the first Dialog render happens.
+        this._prewarmSubKernel();
+
         // Snapshot of all cell outputs (preserves static-slot outputs across updates).
         if (!this._dynCells) this._dynCells = new Map();
         const snapOutputs = Array.from(cell.outputs);
@@ -2380,11 +2523,46 @@ class WolframNotebookKernel {
 
         scrollLog('[dyn] cell loop start | slots:', dynExprs.map(d => d.slotIndex).join(','), '| epoch:', epoch);
 
+        // Expiry limits: take the most restrictive value across all Dynamic slots.
+        const liveTimeSec   = dynExprs.reduce((m, d) => (d.dynLiveTime  != null && d.dynLiveTime  < m) ? d.dynLiveTime  : m, Infinity);
+        // LiveEvaluations: counts individual sub-expression dispatches (not cell-level).
+        const liveEvalLimit = dynExprs.reduce((m, d) => (d.dynLiveEvals != null && d.dynLiveEvals < m) ? d.dynLiveEvals : m, Infinity);
+        // LiveCells: counts cell-level dispatches (one per Shift+Enter).
+        const liveCellLimit = dynExprs.reduce((m, d) => (d.dynLiveCells != null && d.dynLiveCells < m) ? d.dynLiveCells : m, Infinity);
+        const _liveStartTime    = Date.now();
+        const _epochAtStart     = this._dispatchEpoch;
+        // For early-start widgets (ownedExec != null) the Dynamic's own cell has already
+        // incremented _cellEpoch — offset by -1 so LiveCells->1 counts the own cell as
+        // dispatch #1 and expires at the end of that cell.
+        // For normal (non-early-start) widgets the own cell is not counted; dispatches
+        // start from the NEXT cell (matching LiveCells->2 in test S).
+        const _cellEpochAtStart = ownedExec
+            ? ((this._cellEpoch - 1 + 0x1000000) & 0xFFFFFF)
+            : (this._cellEpoch || 0);
+
+        // _badgeExtra: small counter appended to the live/paused badge text.
+        // e.g. ' · 3 evals' or ' · 2 cells · 8s'. Updated before each _putAllOutputs call.
+        let _badgeExtra = '';
+        const _updateBadgeExtra = (evalsSince, cellsSince) => {
+            const _evLeft   = isFinite(liveEvalLimit) ? Math.max(0, liveEvalLimit - evalsSince) : null;
+            const _cellLeft = isFinite(liveCellLimit) ? Math.max(0, liveCellLimit - cellsSince)  : null;
+            const _secLeft  = isFinite(liveTimeSec)   ? Math.max(0, Math.round(liveTimeSec - (Date.now() - _liveStartTime) / 1000)) : null;
+            const _parts = [];
+            if (_evLeft   !== null) _parts.push(_evLeft   + ' eval'  + (_evLeft   === 1 ? '' : 's'));
+            if (_cellLeft !== null) _parts.push(_cellLeft + ' cell'  + (_cellLeft === 1 ? '' : 's'));
+            if (_secLeft  !== null) _parts.push(_secLeft  + 's');
+            _badgeExtra = _parts.length ? ' · ' + _parts.join(' · ') : '';
+        };
+        // Set initial counter for the pre-loop 'waiting' display (0 dispatches consumed yet).
+        _updateBadgeExtra(0, 0);
+
         const _badge = (status) => {
             const color = status === 'live' ? '#c678dd' : status === 'paused' ? '#888' : '#e8a020';
             const bg    = status === 'live' ? 'rgba(198,120,221,0.12)' : status === 'paused' ? 'rgba(128,128,128,0.10)' : 'rgba(232,160,32,0.12)';
             const bd    = status === 'live' ? 'rgba(198,120,221,0.35)' : status === 'paused' ? 'rgba(128,128,128,0.25)' : 'rgba(232,160,32,0.35)';
-            const label = status === 'live' ? '⟳ Dynamic' : status === 'paused' ? '⏸ Dynamic' : '⏳ Dynamic — start a computation to see live updates';
+            const label = status === 'live'   ? '⟳ Dynamic' + _badgeExtra
+                        : status === 'paused' ? '⏸ Dynamic' + _badgeExtra
+                        : '⏳ Dynamic' + _badgeExtra + ' — start a computation to see live updates';
             return '<span style="font-size:9px;color:' + color + ';background:' + bg + ';' +
                    'border:1px solid ' + bd + ';border-radius:3px;padding:1px 6px;' +
                    'margin-right:6px;font-style:italic;">' + label + '</span>';
@@ -2397,7 +2575,29 @@ class WolframNotebookKernel {
             // stale output over the cleared cells.
             if (this._sessionEpoch !== epoch) return;
             try {
-                const t   = Date.now();
+                const t = Date.now();
+                // Early-start mode: the main execution is still open so
+                // createNotebookCellExecution would fail.  Instead, update just the
+                // Dynamic slot in-place via the owned execution's replaceOutputItems.
+                if (ownedExec && ownedExec.active) {
+                    for (const de of dynExprs) {
+                        if (de.slotIndex >= snapOutputs.length) continue;
+                        const html = htmlBySlot[de.slotIndex] || null;
+                        const body = html
+                            ? '<div class="wl-output-content">' + html + '</div>'
+                            : '<div style="color:#888;font-style:italic;font-size:12px;padding:4px 0;">Waiting for computation…</div>';
+                        const newItem = vscode.NotebookCellOutputItem.text(
+                            '<div data-dynamic="1" data-epoch="' + epoch + '">'
+                            + '<div style="display:flex;align-items:center;padding:2px 0 4px;">'
+                            + _badge(status) + '</div>' + body + '</div>',
+                            'x-application/wolfram-language-html'
+                        );
+                        try {
+                            await ownedExec.exec.replaceOutputItems([newItem], snapOutputs[de.slotIndex]);
+                        } catch (_roe) { /* execution may have ended — silently ignore */ }
+                    }
+                    return;
+                }
                 const exe = this._controller.createNotebookCellExecution(cell);
                 exe.start(t);
                 const snap = snapOutputs.slice();
@@ -2431,8 +2631,14 @@ class WolframNotebookKernel {
 
         const runLoop = async () => {
             let cycle = 0;
-            const htmlBySlot = {}; // last rendered html per slot — shown with 'paused' badge when idle
+            const htmlBySlot     = {}; // last rendered html per slot — shown with 'paused' badge when idle
+            const lastHtmlBySlot = {}; // raw htmlStr from subkernel — used to skip unchanged renders
             let lastBusy = false; // track busy→idle transition to avoid repeated executions
+            // _lastIdleRenderEpoch: the _dispatchEpoch value at the time of the last idle render.
+            // null = never rendered yet (always do the first render).
+            // Non-null: skip idle render unless _dispatchEpoch has advanced (meaning a new
+            // evaluation has been dispatched — completed OR currently running — since last render).
+            let _lastIdleRenderEpoch = null;
             while (true) {
                 cycle++;
                 if (!state.active || this._sessionEpoch !== epoch) {
@@ -2449,13 +2655,56 @@ class WolframNotebookKernel {
                     return;
                 }
 
-                // Busy = any evaluation is running in the queue AND we are not in abort.
-                // The _abortPending flag + _dynDialogMutex already prevent re-abort loops.
-                const busy = !this._abortPending &&
-                    this.executionQueue.queue.length > 0 && this.executionQueue.queue[0].started;
-                scrollLog('[dyn] cycle', cycle, '| busy:', busy, '| dlgOpen:', this.session?.isDialogOpen);
+                // LiveTime / LiveEvaluations / LiveCells expiry checks.
+                // LiveEvaluations: sub-expression dispatch count since widget start.
+                // LiveCells: cell-level dispatch count since widget start.
+                const _evalsSinceStart = (this._dispatchEpoch - _epochAtStart + 0x1000000) & 0xFFFFFF;
+                const _cellsSinceStart = ((this._cellEpoch || 0) - _cellEpochAtStart + 0x1000000) & 0xFFFFFF;
+                // Update badge counter so next _putAllOutputs reflects current remaining counts.
+                _updateBadgeExtra(_evalsSinceStart, _cellsSinceStart);
+                // LiveTime fires immediately when the wall-clock deadline passes.
+                if (isFinite(liveTimeSec) && (Date.now() - _liveStartTime) / 1000 >= liveTimeSec) {
+                    scrollLog('[dyn] cell loop expired (LiveTime) | liveTimeSec:', liveTimeSec);
+                    this._dynamicWidgets.delete(cellUri);
+                    try {
+                        const _expExe = this._controller.createNotebookCellExecution(cell);
+                        _expExe.start(Date.now()); await _expExe.replaceOutput([]); _expExe.end(true, Date.now());
+                    } catch (_) {}
+                    return;
+                }
+                // LiveEvaluations expiry is handled inside the !busy block below —
+                // we wait until the Nth evaluation has FINISHED (queue drained) before clearing.
+
+                // Busy = any evaluation is queued (started or pending) AND we are not in abort.
+                // Check queue.length only (not queue[0].started) so sub() calls stop as soon
+                // as a new cell is queued — before executionQueue.start() is called — preventing
+                // concurrent sub()+evaluate() collisions on the WSTP link.
+                const busy = !this._abortPending && this.executionQueue.queue.length > 0;
+                scrollLog('[dyn] cycle', cycle, '| busy:', busy, '| dlgOpen:', this.session?.isDialogOpen, '| dispatched:', this._evalDispatched);
 
                 if (!busy) {
+                    // LiveEvaluations expiry: the Nth evaluation has now FINISHED (queue just
+                    // drained). Fire here so the widget stays alive for the full duration of
+                    // the last evaluation and disappears only once it completes.
+                    if (isFinite(liveEvalLimit) && _evalsSinceStart >= liveEvalLimit) {
+                        scrollLog('[dyn] cell loop expired (LiveEvaluations) | liveEvalLimit:', liveEvalLimit, '| evalsSinceStart:', _evalsSinceStart);
+                        this._dynamicWidgets.delete(cellUri);
+                        try {
+                            const _expExe = this._controller.createNotebookCellExecution(cell);
+                            _expExe.start(Date.now()); await _expExe.replaceOutput([]); _expExe.end(true, Date.now());
+                        } catch (_) {}
+                        return;
+                    }
+                    if (isFinite(liveCellLimit) && _cellsSinceStart >= liveCellLimit) {
+                        scrollLog('[dyn] cell loop expired (LiveCells) | liveCellLimit:', liveCellLimit, '| cellsSinceStart:', _cellsSinceStart);
+                        this._dynamicWidgets.delete(cellUri);
+                        try {
+                            const _expExe2 = this._controller.createNotebookCellExecution(cell);
+                            _expExe2.start(Date.now()); await _expExe2.replaceOutput([]); _expExe2.end(true, Date.now());
+                        } catch (_) {}
+                        return;
+                    }
+
                     // Recovery: if a dialog was left open after evaluation ended
                     // (e.g. exitDialog failed mid-cycle), kernel is frozen — close it.
                     if (this.session?.isDialogOpen) {
@@ -2481,8 +2730,13 @@ class WolframNotebookKernel {
                     // Serialized via _dynIdleMutex — only ONE cell loop calls sub() at a
                     // time: concurrent sub() calls stack on the WSTP link and all time out.
                     // Skip if dialog is open (recovery block above handles that).
+                    // Also skip if no new evaluation has been dispatched since the last
+                    // idle render — nothing could have changed in the kernel state.
                     const _queueEmpty = this.executionQueue.queue.length === 0;
+                    const _epochUnchanged = _lastIdleRenderEpoch !== null
+                        && this._dispatchEpoch === _lastIdleRenderEpoch;
                     if (_queueEmpty && !this._abortPending && !this.session.isDialogOpen
+                            && !_epochUnchanged
                             && (Date.now() - (this._dynLastIdleRender || 0)) > 1000) {
                         // Acquire global idle mutex.
                         if (!this._dynIdleMutex) this._dynIdleMutex = Promise.resolve();
@@ -2528,6 +2782,7 @@ class WolframNotebookKernel {
                             }
                         } finally { _releaseIdle(); }
                         if (Object.keys(idlePending).length > 0) {
+                            let _anyIdleChanged = false;
                             try {
                                 const _subKern = await this._ensureSubKernel(imgDir, imgRel);
                                 for (const [slotIdxStr, tmpFile] of Object.entries(idlePending)) {
@@ -2538,8 +2793,13 @@ class WolframNotebookKernel {
                                         const renderRes = await _subKern.sub(renderExpr);
                                         const htmlStr = renderRes?.value;
                                         if (typeof htmlStr === 'string' && htmlStr.length > 0) {
-                                            dynLog('IDLE-RENDER-OK | cycle', cycle, '| slot', slotIdx, '| htmlLen:', htmlStr.length);
-                                            htmlBySlot[slotIdx] = this._processWLLatexBoxes(this._fixImageUris(htmlStr));
+                                            dynLog('IDLE-RENDER-OK | cycle', cycle, '| slot', slotIdx, '| htmlLen:', htmlStr.length,
+                                                   '| changed:', htmlStr !== lastHtmlBySlot[slotIdx]);
+                                            if (htmlStr !== lastHtmlBySlot[slotIdx]) {
+                                                lastHtmlBySlot[slotIdx] = htmlStr;
+                                                htmlBySlot[slotIdx] = this._processWLLatexBoxes(this._fixImageUris(htmlStr));
+                                                _anyIdleChanged = true;
+                                            }
                                         }
                                     } catch(_) {
                                     } finally {
@@ -2549,8 +2809,13 @@ class WolframNotebookKernel {
                             } catch(_subErr) {
                                 dynLog('IDLE-SUBKERN-ERR | cycle', cycle, '|', _subErr.message);
                             }
-                            await _putAllOutputs(htmlBySlot, 'live');
+                            // Only redraw if something actually changed this idle cycle.
+                            if (_anyIdleChanged)
+                                await _putAllOutputs(htmlBySlot, 'live');
                         }
+                        // Record the epoch we just rendered at — suppress further idle
+                        // renders until a new evaluation is dispatched.
+                        _lastIdleRenderEpoch = this._dispatchEpoch;
                         lastBusy = false;
                         await new Promise(r => setTimeout(r, 800));
                         continue;
@@ -2571,6 +2836,23 @@ class WolframNotebookKernel {
                     continue;
                 }
                 lastBusy = true;
+                // If the LiveEvaluations or LiveCells limit has already been reached,
+                // do NOT interrupt — let the computation finish undisturbed.
+                // The expiry check in the !busy block fires once the queue drains.
+                if (isFinite(liveEvalLimit) && _evalsSinceStart >= liveEvalLimit) {
+                    await new Promise(r => setTimeout(r, 300)); continue;
+                }
+                if (isFinite(liveCellLimit) && _cellsSinceStart >= liveCellLimit) {
+                    await new Promise(r => setTimeout(r, 300)); continue;
+                }
+                // Gate: only send interrupt() once the kernel is actually computing.
+                // _evalDispatched is set true after _dynIdleMutex resolves (just before
+                // the first session.evaluate() call). Before that, queue[0].started is
+                // already true but the kernel is still idle — interrupt() on an idle
+                // kernel corrupts the WSTP link ("WSGet out of sequence").
+                if (!this._evalDispatched) {
+                    await new Promise(r => setTimeout(r, 100)); continue;
+                }
 
                 // Skip this cycle if the kernel is actively rendering (ExportString/SVG).
                 // Sending an interrupt now would abort ExportString mid-call and corrupt
@@ -2592,6 +2874,10 @@ class WolframNotebookKernel {
                 let _releaseDlg;
                 const _prevDlg = this._dynDialogMutex;
                 this._dynDialogMutex = new Promise(r => _releaseDlg = r);
+                // Snapshot the dispatch epoch BEFORE yielding — if the epoch changes while
+                // we await the mutex the current evaluation ended (and possibly a new one
+                // started) so we must NOT send interrupt() to whoever is running now.
+                const _epochBeforeMutex = this._dispatchEpoch;
                 await _prevDlg;
 
                 // Re-check after acquiring lock (another loop may have just used the dialog).
@@ -2601,6 +2887,26 @@ class WolframNotebookKernel {
                 // Rendering started while we were waiting on the mutex — release and retry.
                 if (this._renderingActive) { _releaseDlg(); await new Promise(r => setTimeout(r, 150)); continue; }
                 if (this.session.isDialogOpen) { _releaseDlg(); await new Promise(r => setTimeout(r, 200)); continue; }
+                // KEY RACE FIX: the evaluation that was running when we queued for the mutex
+                // may have finished and a NEW cell may have started while we were waiting.
+                // Re-check _evalDispatched: if it is false, no cell is executing right now —
+                // sending interrupt() would hit the idle kernel and corrupt the WSTP link.
+                if (!this._evalDispatched) {
+                    scrollLog('[dyn] cycle', cycle, '| evalDispatched=false after mutex — skip interrupt');
+                    _releaseDlg();
+                    await new Promise(r => setTimeout(r, 200));
+                    continue;
+                }
+                // Also check epoch: even if dispatched=true, it may belong to a NEW cell
+                // (old cell ended, new cell started, epoch bumped). Interrupting the new
+                // cell's first expression would be equally wrong.
+                if (this._dispatchEpoch !== _epochBeforeMutex) {
+                    scrollLog('[dyn] cycle', cycle, '| epoch changed while awaiting mutex (',
+                              _epochBeforeMutex, '->', this._dispatchEpoch, ') — skip interrupt');
+                    _releaseDlg();
+                    await new Promise(r => setTimeout(r, 200));
+                    continue;
+                }
 
                 let gotIdxs = [];
                 let pendingValues = {}; // slotIndex → FullForm string (populated inside Dialog[])
@@ -2757,28 +3063,33 @@ class WolframNotebookKernel {
                 // Dialog[] is now closed. pendingValues holds .mx temp file paths.
                 // The _subKernel is a separate process — SVG export cannot block the main kernel.
                 // This mirrors the subsession (⌥⇧↵) render path exactly.
+                let _anyChanged = false;
                 if (Object.keys(pendingValues).length > 0) {
                     try {
                         const _subKern = await this._ensureSubKernel(imgDir, imgRel);
-                        for (const [slotIdxStr, tmpFile] of Object.entries(pendingValues)) {
-                            const slotIdx  = Number(slotIdxStr);
-                            const fileEsc  = tmpFile.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-                            const renderExpr = 'Module[{dynVal=Import["' + fileEsc + '"]},VsCodeRenderExpr[dynVal,"Auto",' + scale + ']]';
-                            dynLog('RENDER | cycle', cycle, '| slot', slotIdx,
-                                   '| tmpFile:', tmpFile,
-                                   '| renderExpr[0..80]:', renderExpr.slice(0, 80));
-                            try {
-                                const renderRes = await _subKern.sub(renderExpr);
-                                const htmlStr   = renderRes?.value;
-                                if (typeof htmlStr === 'string' && htmlStr.length > 0) {
-                                    dynLog('RENDER-OK | cycle', cycle, '| slot', slotIdx,
-                                           '| htmlLen:', htmlStr.length,
-                                           '| html[0..200]:', htmlStr.slice(0, 200));
-                                    htmlBySlot[slotIdx] = this._processWLLatexBoxes(
-                                        this._fixImageUris(htmlStr)
-                                    );
-                                    dynLog('RENDER-OK | cycle', cycle, '| slot', slotIdx,
-                                           '| htmlLen:', htmlStr.length);
+                for (const [slotIdxStr, tmpFile] of Object.entries(pendingValues)) {
+                    const slotIdx  = Number(slotIdxStr);
+                    const fileEsc  = tmpFile.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+                    const renderExpr = 'Module[{dynVal=Import["' + fileEsc + '"]},VsCodeRenderExpr[dynVal,"Auto",' + scale + ']]';
+                    dynLog('RENDER | cycle', cycle, '| slot', slotIdx,
+                           '| tmpFile:', tmpFile,
+                           '| renderExpr[0..80]:', renderExpr.slice(0, 80));
+                    try {
+                        const renderRes = await _subKern.sub(renderExpr);
+                        const htmlStr   = renderRes?.value;
+                        if (typeof htmlStr === 'string' && htmlStr.length > 0) {
+                            const _changed = htmlStr !== lastHtmlBySlot[slotIdx];
+                            dynLog('RENDER-OK | cycle', cycle, '| slot', slotIdx,
+                                   '| htmlLen:', htmlStr.length,
+                                   '| changed:', _changed,
+                                   '| html[0..200]:', _changed ? htmlStr.slice(0, 200) : '(skipped)');
+                            if (_changed) {
+                                lastHtmlBySlot[slotIdx] = htmlStr;
+                                htmlBySlot[slotIdx] = this._processWLLatexBoxes(
+                                    this._fixImageUris(htmlStr)
+                                );
+                                _anyChanged = true;
+                            }
                                 } else {
                                     dynLog('RENDER-EMPTY | cycle', cycle, '| slot', slotIdx,
                                            '| res:', JSON.stringify(renderRes)?.slice(0, 80));
@@ -2795,13 +3106,35 @@ class WolframNotebookKernel {
                     }
                 }
 
-                if (gotIdxs.length > 0) await _putAllOutputs(htmlBySlot, 'live');
+                // Only redraw if at least one slot actually changed this cycle.
+                if (_anyChanged) await _putAllOutputs(htmlBySlot, 'live');
                 scrollLog('[dyn] cycle', cycle, '| done | sleeping 500ms');
                 await new Promise(r => setTimeout(r, 500));
             }
         };
 
-        setTimeout(() => runLoop().catch(e => scrollLog('[dyn] runLoop error:', e.message)), 250);
+        setTimeout(() => runLoop().catch(e => {
+            scrollLog('[dyn] runLoop error:', e.message);
+            // --- Safety cleanup: ensure a crash never leaves the kernel in a blocked state ---
+            // Mark widget inactive so no further output writes happen.
+            state.active = false;
+            this._dynamicWidgets.delete(cellUri);
+            // Close any Dialog[] the crashed cycle may have left open — a stuck dialog
+            // blocks ALL future kernel evaluations until it is closed.
+            try { this.session.closeAllDialogs?.(); } catch (_) {}
+            // Release the dialog mutex so other widget loops (and new evaluations) can proceed.
+            // A leaked mutex would deadlock every subsequent busy-path interrupt attempt.
+            this._dynDialogMutex = Promise.resolve();
+            // Reset idle mutex too — a leaked sub() hold would block checkoutExecutionQueue.
+            this._dynIdleMutex = Promise.resolve();
+            // Clear stale Dynamic HTML from the cell so the output area doesn't show
+            // a permanently frozen '⟳ Dynamic' badge.
+            try {
+                const _errExe = this._controller.createNotebookCellExecution(cell);
+                _errExe.start(Date.now());
+                _errExe.replaceOutput([]).then(() => _errExe.end(true, Date.now())).catch(() => { try { _errExe.end(true, Date.now()); } catch(_){} });
+            } catch (_) {}
+        }), 250);
     }
 
     // Render a WExpr as a plain InputForm string (for Dialog: Out display)
@@ -3030,10 +3363,63 @@ class WolframNotebookKernel {
     // notebook editors, and notify the renderer webview.
     _applyKernelOfflineUI() {
         try { this._rendererMessaging.postMessage({ type: 'kernel-offline' }); } catch (_) {}
+        this._setNotebookCellColorsOffline(true);
     }
 
     _clearKernelOfflineUI() {
         try { this._rendererMessaging.postMessage({ type: 'kernel-online' }); } catch (_) {}
+        this._setNotebookCellColorsOffline(false);
+    }
+
+    // Desaturate / restore notebook cell background colours when the kernel goes offline.
+    // The cell editor colours live in workbench.colorCustomizations — we cache the originals
+    // and replace them with luminance-equivalent grays while offline.
+    _setNotebookCellColorsOffline(offline) {
+        try {
+            const config = vscode.workspace.getConfiguration('workbench');
+            const currentColors = config.get('colorCustomizations') || {};
+            const KEYS = [
+                'notebook.cellEditorBackground',
+                'notebook.editorBackground',
+                'notebook.cellBorderColor',
+                'notebook.inactiveFocusedCellBorder',
+                'notebook.collapsedCellBackground'
+            ];
+            const hasAny = KEYS.some(k => currentColors[k]);
+            if (!hasAny) return;
+            if (offline) {
+                // Cache originals and write grayscale equivalents
+                if (this._notebookColorCache) return; // already offline
+                this._notebookColorCache = {};
+                const updatedColors = { ...currentColors };
+                for (const k of KEYS) {
+                    if (currentColors[k]) {
+                        this._notebookColorCache[k] = currentColors[k];
+                        updatedColors[k] = this._toGrayscaleHex(currentColors[k]);
+                    }
+                }
+                config.update('colorCustomizations', updatedColors, vscode.ConfigurationTarget.Workspace).catch(() => {});
+            } else {
+                // Restore from cache
+                if (!this._notebookColorCache) return;
+                const updatedColors = { ...currentColors };
+                for (const k of KEYS) {
+                    if (this._notebookColorCache[k]) updatedColors[k] = this._notebookColorCache[k];
+                }
+                this._notebookColorCache = null;
+                config.update('colorCustomizations', updatedColors, vscode.ConfigurationTarget.Workspace).catch(() => {});
+            }
+        } catch (_) {}
+    }
+
+    // Luminance-preserving hex→gray conversion (e.g. "#F0FFF0" → "#FAFAFA")
+    _toGrayscaleHex(hex) {
+        try {
+            const num = parseInt(hex.replace('#', ''), 16);
+            const r = (num >> 16) & 0xFF, g = (num >> 8) & 0xFF, b = num & 0xFF;
+            const gray = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
+            return '#' + ((1 << 24) | (gray << 16) | (gray << 8) | gray).toString(16).slice(1);
+        } catch (_) { return hex; }
     }
 
     // -----------------------------------------------------------------------
@@ -3116,6 +3502,21 @@ class WolframNotebookKernel {
             // this call overrides it with whatever the workspace setting says).
             await this.session.sub(`$PageWidth = ${printPageWidth}`).catch(() => {});
 
+            // Set NotebookDirectory[] to the directory of the currently active wolfram
+            // notebook so that Get["relative/path"] and friends work as expected.
+            const _wolframNbEditor = vscode.window.visibleNotebookEditors.find(
+                ed => ed.notebook.notebookType === 'extended-wolfram-notebook'
+            );
+            if (_wolframNbEditor) {
+                let _nbDir = path.dirname(_wolframNbEditor.notebook.uri.fsPath);
+                if (process.platform === 'win32') _nbDir = _nbDir.replace(/\\/g, '/');
+                const _nbDirEsc = _nbDir.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+                await this.session.sub(
+                    `Unprotect[NotebookDirectory]; NotebookDirectory[] = "${_nbDirEsc}"; Protect[NotebookDirectory]`
+                ).catch(() => {});
+                console.log('[launchKernel] NotebookDirectory set to:', _nbDir);
+            }
+
             // Note: the interrupt → Dialog[] handler is installed by init.wl
             // (Quiet[Internal`AddHandler["Interrupt", Function[{}, Dialog[]]]]).
             // No separate evaluate() call needed here — that would waste a $Line slot
@@ -3142,9 +3543,37 @@ class WolframNotebookKernel {
 
     // -----------------------------------------------------------------------
     // -----------------------------------------------------------------------
+    // _prewarmSubKernel — fire-and-forget: start the subkernel and load init.wl
+    // as soon as the first Dynamic widget is registered, so the first real render
+    // doesn't pay the cold-start penalty (~1–2 s for a new WstpSession + init.wl).
+    // _ensureSubKernel() will reuse _subKernelInitPromise and just set imgDir.
+    _prewarmSubKernel() {
+        if (this._subKernel && this._subKernelReady)  return; // already warm
+        if (this._subKernelInitPromise)               return; // already warming
+        if (!WstpSession)                             return; // addon unavailable
+        const kernelCommand    = this.findKernel.resolveKernel();
+        let kernelInitPath     = path.join(this.extensionPath, 'resources', 'init.wl');
+        if (process.platform === 'win32') kernelInitPath = kernelInitPath.replace(/\\/g, '/');
+        const _initEscaped = kernelInitPath.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+        console.log('[subKernel] prewarming…');
+        this._subKernelInitPromise = (async () => {
+            this._subKernel = new WstpSession(kernelCommand, { interactive: false });
+            await this._subKernel.sub('Get["' + _initEscaped + '"]');
+            this._subKernelReady = true;
+            console.log('[subKernel] prewarm complete (ready for imgDir)');
+        })().catch(e => {
+            console.warn('[subKernel] prewarm failed:', e.message);
+            this._subKernelInitPromise = null;
+            this._subKernel = null;
+            this._subKernelReady = false;
+        });
+    }
+
+    // -----------------------------------------------------------------------
     // _ensureSubKernel — lazily boot a second kernel for subsession rendering.
     // - Loads the same init.wl so VsCodeRenderExpr is available.
     // - Updates VsCodeSetImgDir on every call so SVG files land in the right place.
+    // - If _prewarmSubKernel() already ran, this only sets imgDir (fast path).
     async _ensureSubKernel(imgDir, imgRel) {
         const _setImgDir = 'VsCodeSetImgDir["' + this.escapeWL(imgDir) + '", "' + this.escapeWL(imgRel) + '"]';
         if (this._subKernel && this._subKernelReady) {
@@ -3215,7 +3644,14 @@ class WolframNotebookKernel {
 
         const doAbort = () => {
             this._abortPending = false;
+            this._evalDispatched = false;
+            this._cellEpoch     = ((this._cellEpoch || 0) + 1) & 0xFFFFFF;
+            this._dispatchEpoch = (this._dispatchEpoch + 1) & 0xFFFFFF;
             _releaseMutexAbort(); // restore the mutex chain for future widget cycles
+
+            // Reset idle-sub mutex so any checkoutExecutionQueue waiting on it
+            // can proceed immediately after abort — don't wait for 3s sub() timeout.
+            this._dynIdleMutex = Promise.resolve();
 
             // Always close any stale dialog state before abort — closeAllDialogs()
             // rejects all pending dialogEval/exitDialog promises immediately,
