@@ -1401,11 +1401,12 @@ class WolframNotebookKernel {
             // (syntax check sub() / VsCodeSetImgDir), and sending interrupt() on
             // those calls desynchronises the WSTP packet stream.
             this._evalDispatched = true;
-            // _cellEpoch increments once per cell (for LiveCells expiry).
+            // NOTE: _cellEpoch increments at the END of the cell (just before executionQueue.end())
+            // so LiveCells counts a cell only after all sub-expressions have finished and
+            // all outputs have been committed and are visible.
             // _dispatchEpoch increments per sub-expression (inside the for loop) so that
             // LiveEvaluations counts individual sub-expression dispatches, not cell-level.
-            this._cellEpoch = (this._cellEpoch + 1) & 0xFFFFFF;
-            scrollLog('[checkout] _evalDispatched = true | cell', currentExecution.execution.cell.index, '| cellEpoch', this._cellEpoch);
+            scrollLog('[checkout] _evalDispatched = true | cell', currentExecution.execution.cell.index, '| cellEpoch (pre-cell)', this._cellEpoch);
 
             // ---- Evaluate each sub-expression one by one ----
             // Each goes through the interactive kernel main loop → gets its own
@@ -1459,9 +1460,12 @@ class WolframNotebookKernel {
                     continue;
                 }
 
+                // Skip pure comment sub-expressions entirely — they produce no kernel output
+                // and must not count as a dispatch for LiveEvaluations / LiveCells.
+                if (/^\(\*[\s\S]*\*\)$/.test(subExpr)) continue;
                 // Increment per-sub-expression dispatch epoch.
                 // LiveEvaluations tracks individual sub-expression dispatches after the
-                // widget started.  Dynamic[...] slots are skipped and do not count.
+                // widget started.  Dynamic[...] and pure-comment slots do not count.
                 this._dispatchEpoch = (this._dispatchEpoch + 1) & 0xFFFFFF;
 
                 // Per-sub-expression print accumulator
@@ -1774,8 +1778,11 @@ class WolframNotebookKernel {
                 }
             }
 
+            // _cellEpoch increments here — AFTER all sub-expression outputs are committed —
+            // so LiveCells counts a cell only once the cell has fully completed.
+            this._cellEpoch = (this._cellEpoch + 1) & 0xFFFFFF;
             scrollLog('[checkout-end] execution.end() about to fire — cell', execCell.index,
-                      '| wasRefine:', _wasRefine, '| viewportAtExecute:', _viewportAtExecute);
+                      '| wasRefine:', _wasRefine, '| viewportAtExecute:', _viewportAtExecute, '| cellEpoch', this._cellEpoch);
             this.executionQueue.end(currentExecution.id, !anyAborted);
             this._evalDispatched = false;
             // Deactivate early-start ref — execution is now closed; subsequent
@@ -2633,9 +2640,10 @@ class WolframNotebookKernel {
         // dispatch #1 and expires at the end of that cell.
         // For normal (non-early-start) widgets the own cell is not counted; dispatches
         // start from the NEXT cell (matching LiveCells->2 in test S).
-        const _cellEpochAtStart = ownedExec
-            ? ((this._cellEpoch - 1 + 0x1000000) & 0xFFFFFF)
-            : (this._cellEpoch || 0);
+        // _cellEpoch now increments at the END of each cell (after all outputs committed).
+        // At widget-start time it has NOT yet incremented for the current cell even in
+        // early-start mode, so no offset is needed for ownedExec.
+        const _cellEpochAtStart = this._cellEpoch || 0;
 
         // _badgeExtra: small counter appended to the live/paused badge text.
         // e.g. ' · 3 evals' or ' · 2 cells · 8s'. Updated before each _putAllOutputs call.
@@ -2658,10 +2666,13 @@ class WolframNotebookKernel {
         // Set initial counter for the pre-loop 'waiting' display (0 dispatches consumed yet).
         _updateBadgeExtra(0, 0);
 
-        // _isExpired: set true on first expiry detection. Prevents repeated _putAllOutputs
-        // calls during the busy-wait phase and lets _badge show the red ⊘ state.
+        // _isExpired: legacy flag (kept for safety).
+        // _slotExpired[i]: true once slot i's output has been blanked and loop should skip it.
+        // _slotTimeExpiredPending[i]: LiveTime deadline passed for slot i but kernel still busy;
+        //   _putAllOutputs shows ⊘ badge for that slot while waiting for idle.
         let _isExpired = false;
-        // Call once when any LiveXxx quota is first hit — flags expiry and (re-)renders badge.
+        const _slotExpired            = new Array(dynExprs.length).fill(false);
+        const _slotTimeExpiredPending = new Array(dynExprs.length).fill(false);
         const _markExpired = () => { _isExpired = true; };
 
         // _badge(status, de): build the badge HTML for one Dynamic slot.
@@ -2719,8 +2730,11 @@ class WolframNotebookKernel {
                 // createNotebookCellExecution would fail.  Instead, update just the
                 // Dynamic slot in-place via the owned execution's replaceOutputItems.
                 if (ownedExec && ownedExec.active) {
-                    for (const de of dynExprs) {
+                    for (let _i = 0; _i < dynExprs.length; _i++) {
+                        const de = dynExprs[_i];
+                        if (_slotExpired[_i]) continue; // already cleared — leave blank
                         if (de.slotIndex >= snapOutputs.length) continue;
+                        const _slotStatus = _slotTimeExpiredPending[_i] ? 'expired' : status;
                         const html = htmlBySlot[de.slotIndex] || null;
                         const body = html
                             ? '<div class="wl-output-content">' + html + '</div>'
@@ -2728,7 +2742,7 @@ class WolframNotebookKernel {
                         const newItem = vscode.NotebookCellOutputItem.text(
                             '<div data-dynamic="1" data-epoch="' + epoch + '">'
                             + '<div style="display:flex;align-items:center;padding:2px 0 4px;">'
-                            + _badge(status, de) + '</div>' + body + '</div>',
+                            + _badge(_slotStatus, de) + '</div>' + body + '</div>',
                             'x-application/wolfram-language-html'
                         );
                         try {
@@ -2741,7 +2755,9 @@ class WolframNotebookKernel {
                 exe.start(t);
                 const snap = snapOutputs.slice();
                 for (let i = 0; i < dynExprs.length; i++) {
-                    const de   = dynExprs[i];
+                    const de = dynExprs[i];
+                    if (_slotExpired[i]) continue; // already cleared — leave snap entry blank
+                    const _slotStatus = _slotTimeExpiredPending[i] ? 'expired' : status;
                     const html = htmlBySlot[de.slotIndex] || null;
                     const body = html
                         ? '<div class="wl-output-content">' + html + '</div>'
@@ -2750,7 +2766,7 @@ class WolframNotebookKernel {
                         vscode.NotebookCellOutputItem.text(
                             '<div data-dynamic="1" data-epoch="' + epoch + '">'
                             + '<div style="display:flex;align-items:center;padding:2px 0 4px;">'
-                            + _badge(status, de) + '</div>' + body + '</div>',
+                            + _badge(_slotStatus, de) + '</div>' + body + '</div>',
                             'x-application/wolfram-language-html'
                         )
                     ]);
@@ -2763,6 +2779,25 @@ class WolframNotebookKernel {
                 await exe.replaceOutput(snap);
                 exe.end(true, t);
             } catch (e) { scrollLog('[dyn] _putAllOutputs error:', e.message); }
+        };
+
+        // _clearOneSlot(slotIdx): blank ONE Dynamic slot output without touching other slots.
+        // Reads cell.outputs fresh to pick up Print/static outputs written since the last
+        // _putAllOutputs, syncs snapOutputs, then replaces only the expired slot with empty.
+        const _clearOneSlot = async (slotIdx) => {
+            if (this._sessionEpoch !== epoch) return;
+            if (ownedExec && ownedExec.active) return; // can't open a new execution during early-start
+            try {
+                const _live = Array.from(cell.outputs);
+                while (snapOutputs.length > _live.length) snapOutputs.pop();
+                for (let _ii = 0; _ii < _live.length; _ii++) snapOutputs[_ii] = _live[_ii];
+                const snap = snapOutputs.slice();
+                if (slotIdx < snap.length) snap[slotIdx] = new vscode.NotebookCellOutput([]);
+                for (let _ii = 0; _ii < snap.length; _ii++) snapOutputs[_ii] = snap[_ii];
+                if (this._dynCells?.has(cellUri)) this._dynCells.get(cellUri).outputs = snap;
+                const _cExe = this._controller.createNotebookCellExecution(cell);
+                _cExe.start(Date.now()); await _cExe.replaceOutput(snap); _cExe.end(true, Date.now());
+            } catch (_) {}
         };
 
         // Show initial waiting badge.
@@ -2834,48 +2869,48 @@ class WolframNotebookKernel {
                 // LiveTime expiry: once the wall-clock deadline passes, mark expired and show
                 // the red ⊘ badge (once). If the kernel is still busy, wait for it to finish
                 // before clearing the output — so the user sees the expiry state, not a void.
-                if (isFinite(liveTimeSec) && (Date.now() - _liveStartTime) / 1000 >= liveTimeSec) {
-                    if (!_isExpired) {
-                        scrollLog('[dyn] cell loop expired (LiveTime) | liveTimeSec:', liveTimeSec);
-                        _markExpired();
-                        await _putAllOutputs(htmlBySlot, 'expired');
+                // --- Per-slot expiry ---
+                // LiveTime: once the deadline passes show ⊘ badge for that slot only;
+                //   clear it when the kernel becomes idle (!busy).
+                // LiveEvals / LiveCells: clear the slot as soon as the Nth dispatch finishes.
+                for (let _si = 0; _si < dynExprs.length; _si++) {
+                    if (_slotExpired[_si]) continue;
+                    const _de = dynExprs[_si];
+                    if (_de.dynLiveTime != null && (Date.now() - _liveStartTime) / 1000 >= _de.dynLiveTime) {
+                        if (!_slotTimeExpiredPending[_si]) {
+                            scrollLog('[dyn] slot', _si, 'LiveTime expired | liveTime:', _de.dynLiveTime);
+                            _slotTimeExpiredPending[_si] = true;
+                            // Re-render with ⊘ badge for this slot only; other slots unaffected.
+                            await _putAllOutputs(htmlBySlot, 'live');
+                        }
+                        if (!busy) {
+                            _slotExpired[_si] = true;
+                            await _clearOneSlot(_de.slotIndex);
+                        }
                     }
-                    if (busy) { await new Promise(r => setTimeout(r, 300)); continue; }
-                    // Kernel is idle — safe to clear output and exit.
+                    if (!busy) {
+                        if (_de.dynLiveEvals != null && _evalsSinceStart >= _de.dynLiveEvals) {
+                            scrollLog('[dyn] slot', _si, 'LiveEvaluations expired | limit:', _de.dynLiveEvals);
+                            _slotExpired[_si] = true;
+                            await _clearOneSlot(_de.slotIndex);
+                        } else if (_de.dynLiveCells != null && _cellsSinceStart >= _de.dynLiveCells) {
+                            scrollLog('[dyn] slot', _si, 'LiveCells expired | limit:', _de.dynLiveCells);
+                            _slotExpired[_si] = true;
+                            await _clearOneSlot(_de.slotIndex);
+                        }
+                    }
+                }
+                // Exit the widget loop only when every slot has expired.
+                if (_slotExpired.every(v => v)) {
+                    scrollLog('[dyn] all slots expired — cell loop exit | cellUri:', cellUri);
                     this._dynamicWidgets.delete(cellUri);
-                    try {
-                        const _expExe = this._controller.createNotebookCellExecution(cell);
-                        _expExe.start(Date.now()); await _expExe.replaceOutput([]); _expExe.end(true, Date.now());
-                    } catch (_) {}
                     return;
                 }
-                // LiveEvaluations expiry is handled inside the !busy block below —
-                // we wait until the Nth evaluation has FINISHED (queue drained) before clearing.
+                if (busy) { await new Promise(r => setTimeout(r, 300)); continue; }
+
                 scrollLog('[dyn] cycle', cycle, '| busy:', busy, '| dlgOpen:', this.session?.isDialogOpen, '| dispatched:', this._evalDispatched, '| cND:', _consecutiveNoDialog, '| stale:', _staleDialogCycles, '| evalsSince:', _evalsSinceStart);
 
                 if (!busy) {
-                    // LiveEvaluations expiry: the Nth evaluation has now FINISHED (queue just
-                    // drained). Fire here so the widget stays alive for the full duration of
-                    // the last evaluation and disappears only once it completes.
-                    if (isFinite(liveEvalLimit) && _evalsSinceStart >= liveEvalLimit) {
-                        scrollLog('[dyn] cell loop expired (LiveEvaluations) | liveEvalLimit:', liveEvalLimit, '| evalsSinceStart:', _evalsSinceStart);
-                        this._dynamicWidgets.delete(cellUri);
-                        try {
-                            const _expExe = this._controller.createNotebookCellExecution(cell);
-                            _expExe.start(Date.now()); await _expExe.replaceOutput([]); _expExe.end(true, Date.now());
-                        } catch (_) {}
-                        return;
-                    }
-                    if (isFinite(liveCellLimit) && _cellsSinceStart >= liveCellLimit) {
-                        scrollLog('[dyn] cell loop expired (LiveCells) | liveCellLimit:', liveCellLimit, '| cellsSinceStart:', _cellsSinceStart);
-                        this._dynamicWidgets.delete(cellUri);
-                        try {
-                            const _expExe2 = this._controller.createNotebookCellExecution(cell);
-                            _expExe2.start(Date.now()); await _expExe2.replaceOutput([]); _expExe2.end(true, Date.now());
-                        } catch (_) {}
-                        return;
-                    }
-
                     // Recovery: if a dialog was left open after evaluation ended
                     // (e.g. exitDialog failed mid-cycle), kernel is frozen — close it.
                     if (this.session?.isDialogOpen) {
