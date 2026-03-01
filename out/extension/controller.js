@@ -2756,7 +2756,12 @@ class WolframNotebookKernel {
                 const snap = snapOutputs.slice();
                 for (let i = 0; i < dynExprs.length; i++) {
                     const de = dynExprs[i];
-                    if (_slotExpired[i]) continue; // already cleared — leave snap entry blank
+                    if (_slotExpired[i]) {
+                        // Slot already cleared — write an explicit empty output so the
+                        // stale snapOutputs content is not re-shown via replaceOutput.
+                        if (de.slotIndex < snap.length) snap[de.slotIndex] = new vscode.NotebookCellOutput([]);
+                        continue;
+                    }
                     const _slotStatus = _slotTimeExpiredPending[i] ? 'expired' : status;
                     const html = htmlBySlot[de.slotIndex] || null;
                     const body = html
@@ -2906,7 +2911,6 @@ class WolframNotebookKernel {
                     this._dynamicWidgets.delete(cellUri);
                     return;
                 }
-                if (busy) { await new Promise(r => setTimeout(r, 300)); continue; }
 
                 scrollLog('[dyn] cycle', cycle, '| busy:', busy, '| dlgOpen:', this.session?.isDialogOpen, '| dispatched:', this._evalDispatched, '| cND:', _consecutiveNoDialog, '| stale:', _staleDialogCycles, '| evalsSince:', _evalsSinceStart);
 
@@ -3044,7 +3048,9 @@ class WolframNotebookKernel {
                     // LiveTime countdown tick: refresh badge every ~1 s on the idle path
                     // so the displayed countdown decreases monotonically even when the
                     // slot value hasn't changed (i.e. _anyIdleChanged was false).
-                    if (isFinite(liveTimeSec) && !_isExpired
+                    // Use per-slot check: tick if any slot with LiveTime is still active.
+                    const _anyLiveTimeActive = dynExprs.some((de, _i) => de.dynLiveTime != null && !_slotExpired[_i]);
+                    if (_anyLiveTimeActive
                             && (Date.now() - _lastBadgeTickTime) >= 950) {
                         _lastBadgeTickTime = Date.now();
                         await _putAllOutputs(htmlBySlot, 'live');
