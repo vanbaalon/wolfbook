@@ -1608,9 +1608,19 @@ class WolframNotebookKernel {
                             // isGfx: read the authoritative marker embedded by VsCodeRender/VsCodeRenderFull,
                             // NOT from CSS classes — those vary by format (WL/TeX/LaTeX have no image classes).
                             const _isGfx = html.includes('vscode-wolfram-gfx-marker');
+                            // If the format was resolved pre-render as an expression-only format
+                            // but the output turned out to be a graphics type, override the stored
+                            // format to the graphics default so the header and format-switch buttons
+                            // reflect the actual render.  The kernel already promoted the render to
+                            // SVG (VsCodeRenderExpr promotion list), so the HTML is correct; this
+                            // only fixes the metadata shown in the output header.
+                            const _EXPR_ONLY_FMTS = new Set(['WLLatex', 'WLLatex2', 'MathML', 'TeX', 'TeXSrc']);
+                            const _effectiveFmt = (_isGfx && _EXPR_ONLY_FMTS.has(format))
+                                ? (() => { const _gf = this._resolveFormat(execCell, true); return _EXPR_ONLY_FMTS.has(_gf) ? 'Auto' : _gf; })()
+                                : format;
                             this._outputRegistry.set(outputId,
-                                { cell: execCell, outN: lineN, outName: r.outputName, format, isGfx: _isGfx });
-                            const headerRow = `<div class="wl-output-header" style="display:flex;align-items:center;gap:6px;width:100%;min-height:22px;" data-session-epoch="${this._sessionEpoch}" data-output-id="${outputId}" data-out-n="${lineN}" data-output-format="${format}" data-output-is-graphics="${_isGfx ? '1' : '0'}">${outLabel}</div>`;
+                                { cell: execCell, outN: lineN, outName: r.outputName, format: _effectiveFmt, isGfx: _isGfx });
+                            const headerRow = `<div class="wl-output-header" style="display:flex;align-items:center;gap:6px;width:100%;min-height:22px;" data-session-epoch="${this._sessionEpoch}" data-output-id="${outputId}" data-out-n="${lineN}" data-output-format="${_effectiveFmt}" data-output-is-graphics="${_isGfx ? '1' : '0'}">${outLabel}</div>`;
                             if (html.length > maxLen || isSkeleton) {                                const _oid = outputId;
                                 // For raw truncation: clip at maxLen
                                 const displayHtml = html.length > maxLen

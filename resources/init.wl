@@ -144,9 +144,11 @@ VsCodeRenderExpr[expr_, format_String, scale_?NumericQ] := Module[
              If[UseSvgQ[] && graphicsQ[expr], "SVG", "MathML"],
              format];
 
-    (* For graphics expressions: MathML/TeX/TeXSrc make no visual sense.
-       Promote those formats to SVG while respecting explicit WL/SVGSrc choices. *)
-    If[graphicsQ[expr] && MemberQ[{"MathML", "TeX", "TeXSrc"}, fmt],
+    (* For graphics expressions: expression-only formats make no visual sense.
+       Promote WLLatex/WLLatex2/MathML/TeX/TeXSrc to SVG so a Graphics output is
+       always rendered as an image regardless of the current expression-format setting.
+       Explicit WL/InputForm/SVGSrc choices are left untouched. *)
+    If[graphicsQ[expr] && MemberQ[{"WLLatex", "WLLatex2", "MathML", "TeX", "TeXSrc"}, fmt],
         fmt = "SVG"];
 
     (* ---- WLLatex path: TraditionalForm boxes → C++ boxToLatex addon → KaTeX HTML ---- *)
