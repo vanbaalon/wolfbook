@@ -1,142 +1,94 @@
-# .github/workflows/release.yml
+# wolfbook / .github/workflows/release.yml
 #
-# Builds platform-specific wstp.node binaries on self-hosted runners
-# (your Mac and Windows machines with Wolfram Engine installed),
-# then packages platform-specific VSIXs and uploads them as release assets.
+# Downloads pre-built wstp.node binaries from the latest release of
+# vanbaalon/mathematica-wstp-node, then packages platform-specific VSIXs
+# and creates a Wolfbook GitHub Release.
 #
-# Trigger:
-#   - Manually via "Run workflow" on GitHub Actions UI
-#   - Or on push of a version tag: git tag v2.x.x && git push --tags
+# No Wolfram Engine or self-hosted runner required — runs on ubuntu-latest.
+#
+# Triggers:
+#   - Push of a version tag:  git tag v2.x.x && git push --tags
+#   - Manual:                 GitHub Actions → "Run workflow"
 
-name: Build & Package (multi-platform)
+name: Package & Release
 
 on:
-  workflow_dispatch:
-    inputs:
-      version_tag:
-        description: 'Version tag (e.g. v2.0.3) — leave empty to use package.json'
-        required: false
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      wstp_tag:
+        description: 'wstp-node release tag to pull binaries from (e.g. v0.4.0; default: latest)'
+        required: false
+        default: 'latest'
 
 jobs:
-  # ── macOS ARM64 binary ──────────────────────────────────────────────────
-  build-macos-arm64:
-    name: Build macOS ARM64
-    runs-on: [self-hosted, macOS, ARM64]
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Build wstp.node
-        working-directory: ../WSTP Backend         # adjust if repos are co-located
-        run: |
-          npm ci
-          npm run build
-        env:
-          WSTP_DIR: /Applications/Wolfram 3.app/Contents/SystemFiles/Links/WSTP/DeveloperKit/MacOSX-ARM64/CompilerAdditions
-
-      - name: Stage prebuilt binary
-        run: cp "../WSTP Backend/build/Release/wstp.node" wstp/prebuilt/wstp-darwin-arm64.node
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wstp-darwin-arm64
-          path: wstp/prebuilt/wstp-darwin-arm64.node
-
-  # ── Windows x64 binary ─────────────────────────────────────────────────
-  build-win32-x64:
-    name: Build Windows x64
-    runs-on: [self-hosted, Windows, X64]
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Build wstp.node
-        working-directory: ..\WSTP Backend          # adjust if repos are co-located
-        shell: cmd
-        run: |
-          npm ci
-          npm run build
-
-      - name: Stage prebuilt binary
-        shell: pwsh
-        run: Copy-Item "..\WSTP Backend\build\Release\wstp.node" "wstp\prebuilt\wstp-win32-x64.node"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wstp-win32-x64
-          path: wstp/prebuilt/wstp-win32-x64.node
-
-  # ── Package platform-specific VSIXs ────────────────────────────────────
   package:
     name: Package VSIXs
-    needs: [build-macos-arm64, build-win32-x64]
-    runs-on: [self-hosted, macOS]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Node
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '20'
 
       - name: Install vsce
         run: npm install -g @vscode/vsce
 
-      - name: Download macOS binary
-        uses: actions/download-artifact@v4
-        with:
-          name: wstp-darwin-arm64
-          path: wstp/prebuilt/
+      - name: Install extension dependencies
+        run: npm ci
 
-      - name: Download Windows binary
-        uses: actions/download-artifact@v4
-        with:
-          name: wstp-win32-x64
-          path: wstp/prebuilt/
+      # ── Download wstp binaries from mathematica-wstp-node ───────────────
+      - name: Download wstp binaries
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WSTP_TAG: ${{ inputs.wstp_tag || 'latest' }}
+        run: |
+          mkdir -p wstp/prebuilt
+          if [ "$WSTP_TAG" = "latest" ]; then
+            FLAG="--repo vanbaalon/mathematica-wstp-node --latest"
+          else
+            FLAG="--repo vanbaalon/mathematica-wstp-node --tag $WSTP_TAG"
+          fi
+          gh release download $FLAG --pattern "wstp-darwin-arm64.node" --dir wstp/prebuilt/
+          gh release download $FLAG --pattern "wstp-win32-x64.node"    --dir wstp/prebuilt/
+          echo "Downloaded:"
+          ls -lh wstp/prebuilt/
 
+      # ── Package platform VSIXs ───────────────────────────────────────────
       - name: Get version
         id: ver
         run: echo "version=$(node -p \"require('./package.json').version\")" >> $GITHUB_OUTPUT
 
-      - name: Package darwin-arm64 VSIX
+      - name: Package darwin-arm64
         run: |
           vsce package --target darwin-arm64 --allow-missing-repository \
-            -o "../Extension Production VSIX/wolfbook-${{ steps.ver.outputs.version }}-darwin-arm64.vsix"
+            -o "wolfbook-${{ steps.ver.outputs.version }}-darwin-arm64.vsix"
 
-      - name: Package win32-x64 VSIX
+      - name: Package win32-x64
         run: |
           vsce package --target win32-x64 --allow-missing-repository \
-            -o "../Extension Production VSIX/wolfbook-${{ steps.ver.outputs.version }}-win32-x64.vsix"
+            -o "wolfbook-${{ steps.ver.outputs.version }}-win32-x64.vsix"
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: vsix-packages
-          path: ../Extension Production VSIX/*.vsix
-
-  # ── Create GitHub Release ───────────────────────────────────────────────
-  release:
-    name: Create Release
-    needs: package
-    runs-on: [self-hosted, macOS]
-    if: startsWith(github.ref, 'refs/tags/')
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: vsix-packages
-          path: vsix/
+      # ── Create GitHub Release ────────────────────────────────────────────
+      - name: Determine tag
+        id: tag
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            echo "tag=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=v${{ steps.ver.outputs.version }}" >> $GITHUB_OUTPUT
+          fi
 
       - uses: softprops/action-gh-release@v2
         with:
-          files: vsix/*.vsix
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: Wolfbook ${{ steps.tag.outputs.tag }}
           generate_release_notes: true
+          files: |
+            wolfbook-${{ steps.ver.outputs.version }}-darwin-arm64.vsix
+            wolfbook-${{ steps.ver.outputs.version }}-win32-x64.vsix
