@@ -94,10 +94,20 @@ function _hexDump(str, n) {
 // (SCROLL_DELAY_MS removed — Advance-mode scroll now fires on Shift+Enter,
 // not on first output arrival, so no layout-wait delay is needed.)
 
-// ---- lazy-load the native WSTP addon (requires wstp/build/Release/wstp.node) ----
+// ---- lazy-load the native WSTP addon (platform-aware) ----
+// Tries wstp/prebuilt/wstp-<platform>-<arch>.node first (bundled prebuilt),
+// then falls back to wstp/build/Release/wstp.node (locally compiled).
 let WstpSession;
 try {
-    WstpSession = require("../../wstp/build/Release/wstp.node").WstpSession;
+    const _path = require('path');
+    const _fs   = require('fs');
+    const _plat = process.platform; // 'darwin' | 'win32' | 'linux'
+    const _arch = process.arch;     // 'arm64'  | 'x64'
+    const _prebuilt = _path.join(__dirname, '../../wstp/prebuilt',
+                                 `wstp-${_plat}-${_arch}.node`);
+    const _fallback = _path.join(__dirname, '../../wstp/build/Release/wstp.node');
+    const _addonPath = _fs.existsSync(_prebuilt) ? _prebuilt : _fallback;
+    WstpSession = require(_addonPath).WstpSession;
 } catch (e) {
     console.error("[Controller] Failed to load wstp.node:", e.message);
 }
