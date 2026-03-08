@@ -3,7 +3,7 @@
 	"displayName": "Wolfbook — Wolfram Language Notebook",
 	"description": "Interactive Wolfram Language notebook for VS Code. WSTP-backed kernel, MathML/SVG/PNG rendering, Unicode input, LSP diagnostics, and output expansion controls.",
 	"publisher": "wolfbook",
-	"version": "2.0.3",
+	"version": "2.1.0",
 	"engines": {
 		"vscode": "^1.95.0"
 	},
@@ -54,7 +54,8 @@
 					".wlt",
 					".mt",
 					".vsnb",
-					".evsnb"
+					".evsnb",
+					".wb"
 				],
 				"configuration": "./wolfram.language-configuration.json"
 			}
@@ -73,7 +74,11 @@
 				"wolfram.evalMode": {
 					"scope": "workspace",
 					"type": "string",
-					"enum": ["auto", "advance", "refine"],
+					"enum": [
+						"auto",
+						"advance",
+						"refine"
+					],
 					"default": "auto",
 					"enumDescriptions": [
 						"Auto-detect: changed cells use Refine mode, unchanged cells use Advance mode",
@@ -273,6 +278,10 @@
 			{
 				"command": "wolfram.OpenNotebook",
 				"title": "Open in System Editor"
+			},
+			{
+				"command": "wolfram.registerFileTypes",
+				"title": "Wolfbook: Register .wb / .evsnb / .vsnb File Types with Finder (macOS)"
 			},
 			{
 				"command": "wolfram.DownloadWolframEngine",
@@ -523,9 +532,19 @@
 					},
 					{
 						"filenamePattern": "*.vsnb"
+					},
+					{
+						"filenamePattern": "*.wb"
 					}
 				],
 				"priority": "default"
+			}
+		],
+		"iconThemes": [
+			{
+				"id": "wolfbook-file-icons",
+				"label": "Wolfbook File Icons",
+				"path": "./icons/wolfbook-icon-theme.json"
 			}
 		],
 		"notebookRenderer": [
@@ -538,6 +557,128 @@
 				],
 				"dependencies": [],
 				"requiresMessaging": "optional"
+			}
+		],
+		"languageModelTools": [
+			{
+				"name": "wolfbook_getNotebookContext",
+				"displayName": "Wolfbook: Get Notebook Context",
+				"toolReferenceName": "wolfbookContext",
+				"modelDescription": "Returns a structured text representation of the currently open Wolfram Language notebook. Includes all cell sources (code and markdown), section headings, and cell outputs as LaTeX. Use this before writing or editing Wolfram Language code to understand what symbols are already defined, what has been computed, and what the mathematical goal of the notebook is.",
+				"canBeReferencedInPrompt": true,
+				"inputSchema": {
+					"type": "object",
+					"properties": {}
+				}
+			},
+			{
+				"name": "wolfbook_evaluateExpression",
+				"displayName": "Wolfbook: Evaluate Expression",
+				"toolReferenceName": "wolfbookEval",
+				"modelDescription": "Evaluates a Wolfram Language expression in the active notebook's live kernel and returns the result as LaTeX or InputForm text. Use this to verify that an expression simplifies correctly, check that a residual is zero, or explore the output of a function before inserting code into the notebook. Do not use for long-running computations.",
+				"canBeReferencedInPrompt": true,
+				"inputSchema": {
+					"type": "object",
+					"properties": {
+						"expression": {
+							"type": "string",
+							"description": "A valid Wolfram Language expression to evaluate."
+						},
+						"timeoutSeconds": {
+							"type": "number",
+							"description": "Maximum seconds to wait for result (default: 10)."
+						}
+					},
+					"required": [
+						"expression"
+					]
+				}
+			},
+			{
+				"name": "wolfbook_lookupSymbol",
+				"displayName": "Wolfbook: Lookup Symbol",
+				"toolReferenceName": "wolfbookLookup",
+				"modelDescription": "Returns the usage message and definition for a Wolfram Language symbol. Use this when unsure about the syntax or behaviour of a built-in function, or to understand a user-defined function in the notebook before using it.",
+				"canBeReferencedInPrompt": true,
+				"inputSchema": {
+					"type": "object",
+					"properties": {
+						"symbol": {
+							"type": "string",
+							"description": "The name of the Wolfram Language symbol to look up (e.g. 'BBrel', 'Solve', 'Signature')."
+						},
+						"longForm": {
+							"type": "boolean",
+							"description": "If true (default), appends a clickable link to the online Wolfram documentation page at the bottom of the result. Only applies to built-in System-context symbols."
+						}
+					},
+					"required": [
+						"symbol"
+					]
+				}
+			},
+			{
+				"name": "wolfbook_getSymbolWebHelp",
+				"displayName": "Wolfbook: Get Symbol Web Help",
+				"toolReferenceName": "wolfbookWebHelp",
+				"modelDescription": "Fetches the full online Wolfram Language documentation page for a built-in symbol from reference.wolfram.com and returns its text content. Use this when you need detailed examples, complete option descriptions, or behaviour details beyond what wolfbook_lookupSymbol provides. Only works for System-context (built-in) symbols.",
+				"canBeReferencedInPrompt": true,
+				"inputSchema": {
+					"type": "object",
+					"properties": {
+						"symbol": {
+							"type": "string",
+							"description": "The name of the Wolfram Language built-in symbol (e.g. 'FindRoot', 'NIntegrate', 'Plot')."
+						}
+					},
+					"required": [
+						"symbol"
+					]
+				}
+			},
+			{
+				"name": "wolfbook_insertCell",
+				"displayName": "Wolfbook: Insert Cell",
+				"toolReferenceName": "wolfbookInsert",
+				"modelDescription": "Inserts a new cell into the active Wolfram Language notebook at a specified position. Use this when the user asks you to add a computation, a check, or a documentation cell to the notebook. Always confirm the content with the user before inserting.",
+				"canBeReferencedInPrompt": true,
+				"inputSchema": {
+					"type": "object",
+					"properties": {
+						"position": {
+							"description": "Where to insert: 'after-cursor' inserts after the currently selected cell, 'end' appends at the end, or a zero-based cell index.",
+							"oneOf": [
+								{
+									"type": "string",
+									"enum": [
+										"after-cursor",
+										"end"
+									]
+								},
+								{
+									"type": "number"
+								}
+							]
+						},
+						"kind": {
+							"type": "string",
+							"enum": [
+								"code",
+								"markdown"
+							],
+							"description": "Cell type."
+						},
+						"content": {
+							"type": "string",
+							"description": "The cell source text."
+						}
+					},
+					"required": [
+						"position",
+						"kind",
+						"content"
+					]
+				}
 			}
 		],
 		"configurationDefaults": {

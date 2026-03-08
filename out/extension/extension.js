@@ -23,6 +23,7 @@ const escape_mode_1 = require("./escape-mode");
 const notebook_settings_1 = require("./notebook-settings");
 const vscode_1 = require("vscode");
 const node_1 = require("vscode-languageclient/node");
+const _tools = require('./tools/index');
 const NOTEBOOK_TYPE = 'extended-wolfram-notebook';
 let extensionKernel = new find_kernel_1.FindKernel();
 let client;
@@ -76,6 +77,8 @@ function activate(context) {
     if (nbKernelenabled) {
         controller.launchKernel();
     }
+    // Register Copilot language model tools (Phase 4)
+    _tools.registerTools(context, () => controller);
     ;
     context.subscriptions.push(vscode_1.commands.registerCommand("wolfram.launchKernel", () => {
         if (nbKernelenabled) {
@@ -274,7 +277,13 @@ function activate(context) {
         console.log('[Extension] ========================================');
     }));
     
-    context.subscriptions.push(vscode.workspace.registerNotebookSerializer(NOTEBOOK_TYPE, new serializer_1.VSNBContentSerializer()), controller);
+    context.subscriptions.push(vscode.workspace.registerNotebookSerializer(
+        NOTEBOOK_TYPE,
+        new serializer_1.VSNBContentSerializer(),
+        // Mark execution-related cell metadata as transient so VS Code does not
+        // include it in conflict detection when the file changes on disk (Dropbox sync).
+        { transientCellMetadata: { executionSummary: true, lastRunDuration: true, runStartTime: true } }
+    ), controller);
     
     // Setup Unicode replacer for \[Name] -> Unicode conversion
     const extensionPath = context.extensionPath;
@@ -325,6 +334,194 @@ function activate(context) {
     // Setup Notebook Settings
     (0, notebook_settings_1.registerNotebookSettings)(context);
     console.log('[Extension] Notebook settings registered');
+
+    // ---- One-time macOS file-association prompt ----
+    // Asks the user once whether to register .wb/.evsnb/.vsnb with VS Code in
+    // the macOS Launch Services database so Finder opens them automatically.
+    // Stored in globalState so it only fires once per installation.
+
+    // Shared helper — runs the actual duti + lsregister work.
+    // Uses a stub WolfbookOpener.app that exports the com.wolfbook.wb UTI so that
+    // macOS Launch Services accepts VS Code as the handler (VS Code itself doesn't
+    // declare these extensions in its own Info.plist, so direct duti per-extension fails).
+    const _runFileAssoc = () => {
+        const cp = require('child_process');
+        const _fs = require('fs');
+        const _path = require('path');
+        const os = require('os');
+
+        // ---- 1. Find duti ----
+        const dutiCandidates = ['/opt/homebrew/bin/duti', '/usr/local/bin/duti'];
+        const duti = dutiCandidates.find(p => _fs.existsSync(p));
+        if (!duti) {
+            vscode.window.showWarningMessage(
+                'duti not found — required to register file types on macOS. Install with: brew install duti',
+                'Copy command'
+            ).then(btn => {
+                if (btn === 'Copy command')
+                    vscode.env.clipboard.writeText('brew install duti');
+            });
+            context.globalState.update('wolfbook.fileAssocPrompted', false);
+            return;
+        }
+
+        // ---- 2. Ensure WolfbookOpener.app stub exists in ~/Applications ----
+        const stubApp = _path.join(os.homedir(), 'Applications', 'WolfbookOpener.app');
+        const contentsDir = _path.join(stubApp, 'Contents');
+        const macosDir = _path.join(contentsDir, 'MacOS');
+        try {
+            _fs.mkdirSync(macosDir, { recursive: true });
+            _fs.mkdirSync(_path.join(contentsDir, 'Resources'), { recursive: true });
+        } catch (e) { /* already exists */ }
+
+        // ---- 2b. Copy bundled .icns to stub app Resources so Finder shows the icon ----
+        const icnsSrc = _path.join(context.extensionPath, 'icons', 'wolfbook_doc.icns');
+        const icnsDst = _path.join(contentsDir, 'Resources', 'wolfbook_doc.icns');
+        try {
+            if (_fs.existsSync(icnsSrc)) _fs.copyFileSync(icnsSrc, icnsDst);
+        } catch (e) { /* non-fatal */ }
+
+        const plist = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>    <string>com.wolfbook.opener</string>
+    <key>CFBundleName</key>          <string>WolfbookOpener</string>
+    <key>CFBundleVersion</key>       <string>1.1</string>
+    <key>CFBundlePackageType</key>   <string>APPL</string>
+    <key>LSMinimumSystemVersion</key><string>10.13</string>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key>      <string>Wolfbook Notebook</string>
+            <key>CFBundleTypeRole</key>       <string>Editor</string>
+            <key>LSHandlerRank</key>          <string>Owner</string>
+            <key>CFBundleTypeIconFile</key>   <string>wolfbook_doc</string>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+                <string>wb</string>
+                <string>evsnb</string>
+                <string>vsnb</string>
+            </array>
+            <key>LSItemContentTypes</key>
+            <array><string>com.wolfbook.wb</string></array>
+        </dict>
+    </array>
+    <key>UTExportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key>     <string>com.wolfbook.wb</string>
+            <key>UTTypeDescription</key>    <string>Wolfbook Notebook</string>
+            <key>UTTypeIconFile</key>       <string>wolfbook_doc</string>
+            <key>UTTypeConformsTo</key>
+            <array><string>public.plain-text</string></array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>wb</string>
+                    <string>evsnb</string>
+                    <string>vsnb</string>
+                </array>
+            </dict>
+        </dict>
+    </array>
+</dict>
+</plist>`;
+
+        _fs.writeFileSync(_path.join(contentsDir, 'Info.plist'), plist);
+        _fs.writeFileSync(_path.join(contentsDir, 'PkgInfo'), 'APPL????');
+
+        // Minimal launcher if no binary present
+        const exeBin = _path.join(macosDir, 'WolfbookOpener');
+        if (!_fs.existsSync(exeBin)) {
+            const launcher = '#!/bin/bash\nexec /usr/local/bin/code "$@" 2>/dev/null || ' +
+                'exec "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code" "$@"\n';
+            _fs.writeFileSync(exeBin, launcher);
+            _fs.chmodSync(exeBin, 0o755);
+        }
+
+        const lsreg = '/System/Library/Frameworks/CoreServices.framework/Frameworks/' +
+                      'LaunchServices.framework/Support/lsregister';
+
+        // ---- 3. Rebuild LS database FIRST (wipes stale entries) ----
+        try {
+            cp.execFileSync(lsreg,
+                ['-kill', '-r', '-domain', 'local', '-domain', 'system', '-domain', 'user'],
+                { timeout: 20000 });
+        } catch (e) { /* non-fatal */ }
+
+        // ---- 4. Register stub AFTER rebuild so it's fresh in the new DB ----
+        try { cp.execFileSync(lsreg, ['-f', stubApp]); } catch (e) { /* non-fatal */ }
+
+        // ---- 5. Set VS Code as handler via UTI (AFTER both steps above) ----
+        let ok = false;
+        try {
+            cp.execFileSync(duti, ['-s', 'com.microsoft.VSCode', 'com.wolfbook.wb', 'all']);
+            ok = true;
+        } catch (e) { /* reported below */ }
+
+        if (ok) {
+            // Also auto-set the VS Code file icon theme
+            vscode.workspace.getConfiguration()
+                .update('workbench.iconTheme', 'wolfbook-file-icons',
+                        vscode.ConfigurationTarget.Global)
+                .then(() => {}, () => {});
+            vscode.window.showInformationMessage(
+                '✅ .wb, .evsnb and .vsnb files will now open in VS Code from Finder. Wolfbook file icons enabled.');
+        } else {
+            vscode.window.showWarningMessage(
+                'File association failed — duti could not set VS Code as handler for com.wolfbook.wb.');
+        }
+    };
+
+    // Command palette: "Wolfbook: Register File Types with Finder" — runnable any time.
+    if (process.platform === 'darwin') {
+        context.subscriptions.push(
+            vscode.commands.registerCommand('wolfram.registerFileTypes', _runFileAssoc)
+        );
+    }
+
+    // First-launch prompt (macOS only, fires once per install).
+    if (process.platform === 'darwin' && !context.globalState.get('wolfbook.fileAssocPrompted')) {
+        context.globalState.update('wolfbook.fileAssocPrompted', true);
+        vscode.window.showInformationMessage(
+            'Wolfbook: Associate .wb, .evsnb and .vsnb files with VS Code so Finder opens them automatically?',
+            'Yes, associate', 'Not now'
+        ).then(answer => {
+            if (answer === 'Yes, associate') _runFileAssoc();
+        });
+    }
+
+    // Silently ensure the Wolfbook icon theme is active on every activation,
+    // unless the user explicitly reverted it (flag === false).
+    // This survives reinstalls because globalState persists across extension updates.
+    if (context.globalState.get('wolfbook.iconThemeAutoSet') !== false) {
+        const cfg = vscode.workspace.getConfiguration();
+        const currentTheme = cfg.get('workbench.iconTheme');
+        if (currentTheme !== 'wolfbook-file-icons') {
+            cfg.update('workbench.iconTheme', 'wolfbook-file-icons',
+                       vscode.ConfigurationTarget.Global)
+               .then(() => {
+                   vscode.window.showInformationMessage(
+                       'Wolfbook file icons enabled in the Explorer.',
+                       'Revert'
+                   ).then(btn => {
+                       if (btn === 'Revert') {
+                           vscode.workspace.getConfiguration()
+                               .update('workbench.iconTheme',
+                                       currentTheme === undefined ? null : currentTheme,
+                                       vscode.ConfigurationTarget.Global)
+                               .then(() => {}, () => {});
+                           // Remember user preference — don't re-apply automatically
+                           context.globalState.update('wolfbook.iconThemeAutoSet', false);
+                       }
+                   });
+               }, () => {});
+        }
+        context.globalState.update('wolfbook.iconThemeAutoSet', true);
+    }
 
     // Setup LSP client
     let enabled = config.get("lsp.serverEnabled", true);

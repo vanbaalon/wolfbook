@@ -291,7 +291,7 @@ After toggling, the renderer fires a `scroll-to-output` postMessage to the contr
 
 The button is inserted into `.wl-output-header` (the flex row that contains the `Out[N]=` label) so it appears inline next to the label. If no header row is found (fallback for plain outputs) the button is inserted immediately after the `div.mathml-output`.
 
-**CSS baseline:** `div.mathml-output { overflow-x: auto; }` is part of the `WL_CSS` constant in `index-with-messaging.js` (line ~53), so all MathML outputs start with a horizontal scrollbar and gain the toggle button on render.
+**CSS baseline:** `div.mathml-output { overflow-x: auto; }` is part of the `WL_CSS` constant in `renderer-css.js`, so all MathML outputs start with a horizontal scrollbar and gain the toggle button on render.
 
 ### `scroll-to-output` message (controller side)
 
@@ -303,7 +303,7 @@ Handler in `this._rendererMessaging.onDidReceiveMessage`. When `msg.type === 'sc
 
 ## Additional styles in the renderer (`WL_CSS`)
 
-All styles injected into the notebook output webview live in the `WL_CSS` constant in `out/client/index-with-messaging.js` (lines ~30–56). Notable additions beyond the base Wolfram-element styles inherited from the original `index.js`:
+All styles injected into the notebook output webview live in the `WL_CSS` constant in `out/client/renderer-css.js`. Notable additions beyond the base Wolfram-element styles inherited from the original `index.js`:
 
 | Selector / rule | Purpose |
 |---|---|
@@ -315,7 +315,7 @@ All styles injected into the notebook output webview live in the `WL_CSS` consta
 | `div.mathml-output { overflow-x: auto; }` | Horizontal scrolling for wide MathML by default |
 | `body { filter: grayscale(0.75) opacity(0.55); transition: filter 0.4s, opacity 0.4s; }` | Grayscale fade applied when kernel is offline (injected via `data-wolfram-kernel-state` `<style>` element, not part of `WL_CSS`) |
 
-The grayscale style is controlled dynamically: when the controller broadcasts `kernel-offline` / `kernel-online` messages, the renderer creates or updates a separate `<style data-wolfram-kernel-state>` element in the webview document (index-with-messaging.js lines ~78–97).
+The grayscale style is controlled dynamically: when the controller broadcasts `kernel-offline` / `kernel-online` messages, the renderer creates or updates a separate `<style data-wolfram-kernel-state>` element in the webview document (`activate()` in `index-with-messaging.js`).
 
 ---
 
@@ -340,7 +340,9 @@ The official extension (`Extension Backups/wolframresearch.wolfram-2.0.1.backup/
 
 | File | Purpose |
 |---|---|
-| **`out/client/index-with-messaging.js`** | New renderer entry point. Replaces the original `out/client/index.js` for `.evsnb` notebooks. Adds the messaging API, truncated-output expand controls, wrap/scroll toggle buttons, kernel-offline fade, Dialog widget, and session epoch cleanup. The original `index.js` is still present and used for plain `.vsnb` rendering. |
+| **`out/client/index-with-messaging.js`** | Renderer entry point (~1070 lines). Exports `activate(context)`. Imports from `renderer-css.js` and `renderer-highlight.js`. Contains: splash screen, state vars, message listener, wexprToInputForm, dialog widget, renderOutputItem (expand/format/copy/KaTeX buttons, height sentinel), disposeOutputItem. |
+| **`out/client/renderer-css.js`** | DEV_MODE flag + `console.log` gate + `WL_CSS` stylesheet constant. Imported by `renderer-highlight.js`. Side-effect on import: silences console.log in production builds. |
+| **`out/client/renderer-highlight.js`** | `applyInlineHighlight(pre, lang)`, `injectRendererCSS(doc)`, `addLineNumberGutter(pre)`. Imports `WL_CSS` from `renderer-css.js`. |
 | **`out/extension/escape-mode.js`** | Backtick escape-alias input for `.wl` editor files. |
 | **`out/extension/unicode-replacer.js`** | `\[Name]` → Unicode inline auto-replacement for `.wl` files. |
 | **`out/extension/notebook-settings.js`** | Per-notebook background colour / appearance QuickPick panel. |
