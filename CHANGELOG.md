@@ -4,6 +4,84 @@ All notable changes to **Wolfbook** are documented here.
 
 ---
 
+## [2.2.0] - 2026-03-14
+
+### Added
+- **Live Watch Panel outside debugging** — the Wolfbook Watch sidebar now works as a
+  standalone variable monitor even when no debug session is active.  The breakpoints
+  list and step-control buttons are hidden automatically in live mode; only the watch
+  table and the Evaluate Selection result area are shown.  Watch values are refreshed
+  after every cell evaluation.
+
+- **Evaluate Selection (`Cmd+Shift+E`)** — select any Wolfram Language expression in
+  a cell and press `Cmd+Shift+E` to evaluate it in the Watch Panel sidebar without
+  running the full cell.  The result is rendered with the full LaTeX/SVG/MathML
+  pipeline (format switchable via the status-bar picker).  Works even while the kernel
+  is busy — uses the same `Dialog[]` interrupt path as Dynamic widgets.  The last
+  result is cached and re-displayed if the panel is closed and reopened.
+
+- **Add Selection to Watch (`Cmd+Shift+W`)** — select any expression in the editor and
+  press `Cmd+Shift+W` to add it to the live watch list instantly.  The expression is
+  validated for balanced brackets and closed strings before being added; invalid syntax
+  shows an error message without modifying the list.  The same validation runs when
+  typing in the Watch Panel input field.
+
+### Improved
+- **Large eval-sel results** — if the rendered HTML exceeds ~60 KB the sidebar shows a
+  size warning and a link *Open full result in editor* instead of attempting to display
+  it inline (which could make the panel sluggish).  The full HTML is written to a temp
+  file and opened via the standard VS Code text editor on click.
+
+- **Eval-sel disabled during debug** — pressing `Cmd+Shift+E` while a debug session is
+  active shows an informational message rather than trying to interrupt the paused
+  kernel.  This prevents accidental kernel interruption mid-step.
+
+- **WL syntax validation in watch input** — typing an expression with unbalanced
+  brackets (`Sin[x)`) or an unclosed string in the Watch Panel input field now shows a
+  red outline and a tooltip; the expression is not sent to the kernel.
+
+---
+
+## [2.1.1] - 2026-03-10
+
+### Added
+- **`WBExport[]` / `WBExport["path.nb"]`** — type `WBExport[]` in any code cell to
+  save the current notebook as a standard Mathematica `.nb` file (saved next to the
+  `.wb` by default, or at the specified path).  Markdown headings are mapped to
+  Wolfram `Title` / `Section` / `Subsection` / `Subsubsection` cell styles; markdown
+  text becomes `Text`; code cells become `Input`.  Intercepted by the extension —
+  never sent to the kernel.
+
+- **`WBInclude["file.nb"]`** — type `WBInclude["path"]` in any code cell to inline a
+  Mathematica `.nb` file directly into the notebook.  The expression is intercepted by
+  the extension (never sent to the kernel); the `.nb` is converted via the bundled
+  toolchain (`nb2m` + `convert_nb_to_vsnb.wls`) and the resulting cells are inserted
+  immediately after the `WBInclude` cell, preceded by a `## Included: filename.nb`
+  markdown header.  Paths may be relative to the host notebook's directory or absolute.
+  All temporary files are written to the system temp directory and cleaned up
+  automatically — the user's source directories are never modified.
+
+- **`wolfbook_restartKernel`** Copilot tool (`#wolfbookRestart`) — restarts the Wolfram
+  kernel.  Shows a VS Code confirmation dialog before proceeding.
+
+- **`wolfbook_abortEvaluation`** Copilot tool (`#wolfbookAbort`) — interrupts the
+  currently running evaluation, equivalent to the Abort toolbar button.
+
+### Fixed
+- **`wolfbook_editCell` diff dialog** — switched from `NotebookEdit.replaceCells()` to
+  a plain `TextEdit` on the cell's document URI, eliminating the VS Code structural-diff
+  dialog that previously appeared on every AI cell edit.
+- **`ai_eval_log.md` not written** — `clearEvalLog` / `appendEvalLog` now fall back to
+  `visibleNotebookEditors[0]` when `activeNotebookEditor` is `null`.
+- **Line-continuation split** — expressions spanning lines with a trailing operator
+  (`x = a +\n b`) were incorrectly split into two separate evaluations.  The newline is
+  now replaced with a space before dispatch so Wolfram sees one expression.
+- **`unicode_mappings_filtered.json` missing from package** — `.vscodeignore` was
+  excluding the entire `EditorVariation/` folder; now only the raw
+  `unicode_mappings.json` and its README are excluded.
+
+---
+
 ## [2.0.3] - 2026-03-01
 
 ### Added
