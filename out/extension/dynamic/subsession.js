@@ -141,34 +141,8 @@ async function openDialogSubsession(self) {
         return;
     }
 
-    // ---- Busy kernel: interrupt and open Dialog[] subsession ----
-    // Collect Print[] lines from inside the dialog via onDialogPrint
-    const dialogPrintLines = [];
-    self._dialogPrintCollector = line => dialogPrintLines.push(line);
-
-    const sent = self.session.interrupt();
-    if (!sent) {
-        self._dialogPrintCollector = null;
-        vscode.window.showWarningMessage('Could not send interrupt to kernel.');
-        return;
-    }
-
-    // Poll until dialog opens (max 8 s); show status so user knows it's working
-    const statusMsg = vscode.window.setStatusBarMessage('⏳ Dialog: waiting for kernel interrupt…');
-    const deadline = Date.now() + 8000;
-    while (!self.session.isDialogOpen && Date.now() < deadline) {
-        await new Promise(res => setTimeout(res, 50));
-    }
-    statusMsg.dispose();
-    if (!self.session.isDialogOpen) {
-        self._dialogPrintCollector = null;
-        vscode.window.showWarningMessage(
-            'Kernel did not open Dialog[] within 8 s. ' +
-            'The computation may have finished, or the kernel may be unresponsive. ' +
-            'Try again, or restart the kernel.'
-        );
-        return;
-    }
+    // ---- Busy kernel: evaluate via subAuto() ----
+    // subAuto routes through Dialog[] inline eval when busy — no interrupt needed.
     // Notebook image directory so the subkernel can save SVG files there.
     const _subNbPath = cell.notebook.uri.fsPath;
     const _subNbBase = path.basename(_subNbPath, path.extname(_subNbPath));
@@ -189,47 +163,39 @@ async function openDialogSubsession(self) {
         )
     ])]);
 
-    // Step 1: Evaluate cellCode inside the Dialog[], Export to a fixed .mx file,
-    // then return the path. No intermediate variables — avoids Module/With issues.
+    // Evaluate cellCode via subAuto, Export result to a .mx file.
     const _tmpFile = _subImgDir.replace(/\\/g, '/') + '/_subsession_transfer.mx';
     const _dlgSentExpr = '(Export["' + _tmpFile + '", ToExpression["' +
         self.escapeWL(cellCode) + '"]]; "' + _tmpFile + '")';
-    scrollLog('[subsession-dlg] cellCode:', cellCode);
-    scrollLog('[subsession-dlg] tmp file:', _tmpFile);
-    scrollLog('[subsession-dlg] sent to dialogEval:', _dlgSentExpr);
+    scrollLog('[subsession-subAuto] cellCode:', cellCode);
+    scrollLog('[subsession-subAuto] tmp file:', _tmpFile);
+    scrollLog('[subsession-subAuto] sent to subAuto:', _dlgSentExpr);
     let _dlgTmpFile = null;
     let _dlgEvalError = null;
     try {
-        const _dlgWexpr = await self.session.dialogEval(_dlgSentExpr);
-        scrollLog('[subsession-dlg] raw WExpr back:', JSON.stringify(_dlgWexpr));
-        // We already know _tmpFile in JS — just check Export didn't return $Failed.
-        // Don't use _dlgWexpr.value as path: TEXTPKT wrapping breaks paths with spaces.
+        const _dlgWexpr = await Promise.race([
+            self.session.subAuto(_dlgSentExpr),
+            new Promise((_, rej) => setTimeout(() => rej(new Error('subsession-subAuto timeout (15s)')), 15000))
+        ]);
+        scrollLog('[subsession-subAuto] raw WExpr back:', JSON.stringify(_dlgWexpr));
         const _rawVal = (_dlgWexpr && _dlgWexpr.value) ? String(_dlgWexpr.value) : '';
         if (_dlgWexpr && (_dlgWexpr.type === 'string' || _dlgWexpr.type === 'symbol') &&
                 !_rawVal.includes('Failed') && !_rawVal.includes('$Failed')) {
-            _dlgTmpFile = _tmpFile;  // use our JS-computed path directly
-            scrollLog('[subsession-dlg] Export succeeded, using JS path:', _dlgTmpFile);
+            _dlgTmpFile = _tmpFile;
+            scrollLog('[subsession-subAuto] Export succeeded, using JS path:', _dlgTmpFile);
         } else if (_dlgWexpr && _dlgWexpr.error) {
             _dlgEvalError = _dlgWexpr.error;
-            scrollLog('[subsession-dlg] WExpr error:', _dlgEvalError);
+            scrollLog('[subsession-subAuto] WExpr error:', _dlgEvalError);
         } else {
             _dlgEvalError = 'Export returned: ' + JSON.stringify(_dlgWexpr);
-            scrollLog('[subsession-dlg] Export failed:', _dlgEvalError);
+            scrollLog('[subsession-subAuto] Export failed:', _dlgEvalError);
         }
     } catch (_err) {
         _dlgEvalError = _err.message;
-        scrollLog('[subsession-dlg] dialogEval threw:', _dlgEvalError);
+        scrollLog('[subsession-subAuto] subAuto threw:', _dlgEvalError);
     }
 
-    const _dlgPrintLines = [...dialogPrintLines];
-    self._dialogPrintCollector = null;
-
-    // Step 2: Exit dialog immediately — main kernel resumes.
-    // Subkernel render runs independently after this.
-    try { await self.session.exitDialog(); } catch (_) {}
-    scrollLog('[subsession-dlg] exitDialog() done');
-
-    // Step 3: Render via the subkernel — full VsCodeRenderExpr pipeline
+    // Render via the subkernel — full VsCodeRenderExpr pipeline
     // (SVG/PNG graphics, WLLatex, MathML, etc.) identical to normal evaluation.
     const _subsBadge =
         '<span style="font-size:9px;color:#e8a020;background:rgba(232,160,32,0.12);' +
@@ -237,14 +203,6 @@ async function openDialogSubsession(self) {
         'margin-right:6px;font-style:italic;">subsession</span>';
 
     const parts = [];
-
-    if (_dlgPrintLines.length > 0) {
-        const printHtml = _dlgPrintLines.map(line => {
-            const text = self.decodeWolframOctal(line.replace(/\\012/g, '\n'));
-            return '<pre class="vscode-wolfram-print-output">' + self.escapeHtml(text) + '</pre>';
-        }).join('');
-        parts.push(printHtml);
-    }
 
     if (_dlgEvalError || _dlgTmpFile === null) {
         const _errMsg = _dlgEvalError || 'dialog eval returned no result';
@@ -591,7 +549,6 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
         let cycle = 0;
         const htmlBySlot     = {};
         const lastHtmlBySlot = {};
-        let _lastIdleRenderEpoch = null;
         let _lastBadgeTickTime   = 0;
         let _lastWatchExpr       = null;  // tracks registered watch expr to re-register on change
         while (true) {
@@ -726,10 +683,7 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
             //   idle  → subWhenIdle (immediate)
             //   busy  → Dialog[] inline eval via ScheduledTask
             // Dynamic values update continuously, even during busy evals.
-            const _queueEmpty = self.executionQueue.queue.length === 0;
-            const _epochUnchanged = _lastIdleRenderEpoch !== null
-                && self._dispatchEpoch === _lastIdleRenderEpoch;
-            if (!self._abortPending && !_epochUnchanged
+            if (!self._abortPending
                     && (Date.now() - (self._dynLastIdleRender || 0)) > 1000) {
                 self._dynLastIdleRender = Date.now();
                 const scale = Number(self.config?.get?.('imageScale') ?? 0.8) || 0.8;
@@ -790,7 +744,6 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
                         await _putAllOutputs(htmlBySlot, 'live');
                     }
                 }
-                _lastIdleRenderEpoch = self._dispatchEpoch;
             }
 
             // Live-watch: register via C++ registry when expression changes.
