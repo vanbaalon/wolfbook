@@ -29,18 +29,28 @@ function registerNotebookSettings(context) {
     // Register the settings command
     context.subscriptions.push(
         vscode.commands.registerCommand('wolfram.notebookSettings', async () => {
-            // Try to get the active notebook from visible notebook editors
-            const notebookEditors = vscode.window.visibleNotebookEditors;
-            const wolframEditor = notebookEditors.find(editor => 
-                editor.notebook.notebookType === 'extended-wolfram-notebook'
-            );
-            
-            if (!wolframEditor) {
-                vscode.window.showErrorMessage('No active Wolfram notebook found. Please ensure you have an .evsnb or .vsnb file open.');
-                return;
-            }
+            // *** DEBUG: confirm command fires ***
+            vscode.window.showInformationMessage('⚙️ Notebook Settings: command fired');
+            // Short delay so toolbar-click focus returns to notebook before QuickPick opens
+            await new Promise(resolve => setTimeout(resolve, 150));
+            try {
+                const active = vscode.window.activeNotebookEditor;
+                const notebookEditors = vscode.window.visibleNotebookEditors;
+                const wolframEditor =
+                    (active && active.notebook && active.notebook.notebookType === 'extended-wolfram-notebook' ? active : null) ||
+                    notebookEditors.find(e => e.notebook.notebookType === 'extended-wolfram-notebook');
 
-            await showSettingsUI(wolframEditor.notebook);
+                console.log('[NotebookSettings] active=', active && active.notebook.notebookType, 'found=', !!wolframEditor);
+                if (!wolframEditor) {
+                    vscode.window.showErrorMessage('No Wolfram notebook is open. active=' + (active && active.notebook.notebookType) + ' visible=' + notebookEditors.length);
+                    return;
+                }
+
+                await showSettingsUI(wolframEditor.notebook);
+            } catch (err) {
+                vscode.window.showErrorMessage('Notebook Settings error: ' + err.message);
+                console.error('[NotebookSettings] command error:', err);
+            }
         })
     );
 
@@ -66,9 +76,11 @@ async function showSettingsUI(notebook) {
     const currentSettings = getNotebookSettings(notebook);
 
     // Show quick pick for background color
+    // ignoreFocusOut: true prevents auto-dismiss when toolbar button click steals focus
     const colorPick = await vscode.window.showQuickPick(BACKGROUND_COLORS, {
         placeHolder: 'Select background color',
-        title: 'Notebook Background Color'
+        title: 'Notebook Background Color',
+        ignoreFocusOut: true
     });
 
     if (colorPick) {

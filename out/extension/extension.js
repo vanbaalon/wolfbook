@@ -8,11 +8,13 @@
  *  LSP client layer based on vscode-wolfram by Wolfram Research (Apache 2.0).
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.activate = void 0;
+exports.deactivate = exports.activate = void 0;
 const open = require('open');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
+// Module-level controller reference so deactivate() can call quitKernel().
+let _activeController = null;
 const find_kernel_1 = require("./find-kernel");
 const vscode = require("vscode");
 const controller_1 = require("./controller");
@@ -20,6 +22,7 @@ const { scrollLog } = controller_1;
 const serializer_1 = require("./serializer");
 const unicode_replacer_1 = require("./unicode-replacer");
 const escape_mode_1 = require("./escape-mode");
+const _scrollMgr = require("./scroll/manager");
 const notebook_settings_1 = require("./notebook-settings");
 const vscode_1 = require("vscode");
 const node_1 = require("vscode-languageclient/node");
@@ -31,6 +34,15 @@ let wolframTmpDir;
 let kernel_initialized = false;
 let implicitTokensDecorationType = vscode.window.createTextEditorDecorationType({});
 function activate(context) {
+    // Show a loading indicator while the extension activates
+    const _loadingStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 1000);
+    _loadingStatus.text = '$(loading~spin) Wolfbook loading…';
+    _loadingStatus.show();
+    const _dismissLoading = () => { try { _loadingStatus.dispose(); } catch (_) {} };
+    // Dismiss after activation completes (end of this function)
+    // or after 8s safety timeout
+    const _loadingTimeout = setTimeout(_dismissLoading, 8000);
+
     const config = vscode.workspace.getConfiguration("wolfram", null);
     // Setup the menu
     context.subscriptions.push(vscode_1.commands.registerCommand('wolfram.OpenNotebook', (name) => { if (name) {
@@ -40,6 +52,168 @@ function activate(context) {
     context.subscriptions.push(vscode.commands.registerCommand("wolfram.openConfigurations", async () => {
         await vscode.commands.executeCommand("workbench.action.openSettings", "@ext:wolfbook.wolfbook");
     }));
+    // Register settings command early — before kernel guard, so it works even without a kernel
+    (0, notebook_settings_1.registerNotebookSettings)(context);
+    console.log('[Extension] Notebook settings registered (early)');
+
+    // ── Debugger (Stages 4-7) ── instantiated early so keybindings work immediately
+    const { BreakpointManager }    = require('./debugger/breakpointManager');
+    const { WatchPanelProvider, VIEW_ID: DBG_VIEW_ID } = require('./debugger/watchPanel');
+    const { DebugController }      = require('./debugger/debugController');
+    const { WolframDebugAdapter }  = require('./debugger/wolframDebugAdapter');
+
+    const _bpMgr       = new BreakpointManager(context);
+    // Seed _bpMgr from any native breakpoints already present (set before this workspace loaded)
+    for (const bp of vscode.debug.breakpoints) {
+        if (!(bp instanceof vscode.SourceBreakpoint)) continue;
+        if (bp.location.uri.scheme !== 'vscode-notebook-cell') continue;
+        _bpMgr.addBreakpointAt(bp.location.uri.toString(), bp.location.range.start.line);
+    }
+    const _watchPanel  = new WatchPanelProvider();
+    const _debugCtrl   = new DebugController(() => controller, _bpMgr, _watchPanel);
+
+    // ── Evaluate Selection ─────────────────────────────────────────────────
+    const evalSel = require('./editor/evaluateSelection');
+    evalSel.register(context, () => controller, _watchPanel);
+    require('./execution/global-symbols').register(context);
+
+    // Register the Watch Panel webview view provider
+    context.subscriptions.push(
+        vscode.window.registerWebviewViewProvider(DBG_VIEW_ID, _watchPanel,
+            { webviewOptions: { retainContextWhenHidden: true } })
+    );
+
+    // ── Watch panel background: track active .wb notebook ─────────────────
+    function _updateWatchPanelBg() {
+        const nb     = vscode.window.activeNotebookEditor;
+        const isWb   = nb && nb.notebook.uri.fsPath.endsWith('.wb');
+        const colors = isWb
+            ? (vscode.workspace.getConfiguration('workbench').get('colorCustomizations') || {})
+            : {};
+        _watchPanel.setBackground(isWb ? (colors['notebook.cellEditorBackground'] || null) : null);
+    }
+    context.subscriptions.push(
+        vscode.window.onDidChangeActiveNotebookEditor(() => _updateWatchPanelBg()),
+        vscode.workspace.onDidChangeConfiguration(e => {
+            if (e.affectsConfiguration('workbench.colorCustomizations')) _updateWatchPanelBg();
+        })
+    );
+    _updateWatchPanelBg();
+
+    // ── DAP adapter factory + config provider ──────────────────────────────
+    context.subscriptions.push(
+        vscode.debug.registerDebugAdapterDescriptorFactory('wolfram', {
+            createDebugAdapterDescriptor(_session) {
+                return new vscode.DebugAdapterInlineImplementation(
+                    new WolframDebugAdapter(_debugCtrl, _bpMgr, () => controller)
+                );
+            }
+        })
+    );
+    context.subscriptions.push(
+        vscode.debug.registerDebugConfigurationProvider('wolfram', {
+            resolveDebugConfiguration(_folder, config) {
+                if (!config.cellUri) {
+                    const editor = vscode.window.activeNotebookEditor;
+                    if (editor && editor.selections.length > 0) {
+                        const cell = editor.notebook.cellAt(editor.selections[0].start);
+                        config.cellUri = cell.document.uri.toString();
+                    }
+                }
+                config.type    = config.type    || 'wolfram';
+                config.request = config.request || 'launch';
+                config.name    = config.name    || 'Debug Cell';
+                return config;
+            }
+        })
+    );
+
+    // Helper: get the currently-focused notebook cell
+    function _getFocusedCell() {
+        const editor = vscode.window.activeNotebookEditor;
+        if (!editor) return null;
+        const sel = editor.selections;
+        if (!sel || sel.length === 0) return null;
+        return editor.notebook.cellAt(sel[0].start);
+    }
+
+    // ── Debug commands ──────────────────────────────────────────────────────
+    context.subscriptions.push(vscode.commands.registerCommand('wolfbook.debug.debugCell', () => {
+        // Capture the cell URI NOW — before startDebugging() shifts focus away from
+        // the notebook editor (opening the Run & Debug panel changes activeNotebookEditor).
+        const cell = _getFocusedCell();
+        if (!cell) { vscode.window.showInformationMessage('Select a code cell to debug.'); return; }
+        vscode.debug.startDebugging(undefined, {
+            type:    'wolfram',
+            request: 'launch',
+            name:    'Debug Cell',
+            cellUri: cell.document.uri.toString(),
+        });
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand('wolfbook.debug.stepOver',  () => _debugCtrl.stepOver()));
+    context.subscriptions.push(vscode.commands.registerCommand('wolfbook.debug.stepInto',  () => _debugCtrl.stepInto()));
+    context.subscriptions.push(vscode.commands.registerCommand('wolfbook.debug.stepOut',   () => _debugCtrl.stepOut()));
+    context.subscriptions.push(vscode.commands.registerCommand('wolfbook.debug.continueToBreakpoint', () => _debugCtrl.continueRun()));
+    context.subscriptions.push(vscode.commands.registerCommand('wolfbook.debug.continueToEnd', () => _debugCtrl.runToEnd()));
+    context.subscriptions.push(vscode.commands.registerCommand('wolfbook.debug.stop',      () => _debugCtrl.stop()));
+    context.subscriptions.push(vscode.commands.registerCommand('wolfbook.debug.toggleBreakpoint', () => {
+        // Delegate to the native VS Code breakpoint toggle — this creates a proper
+        // SourceBreakpoint which syncs to _bpMgr via onDidChangeBreakpoints and
+        // shows in the VS Code Breakpoints panel.
+        vscode.commands.executeCommand('editor.debug.action.toggleBreakpoint');
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand('wolfbook.debug.clearTimings', () => {
+        // Exposed for manual palette use; normally auto-cleared on cell edit.
+        const cell = _getFocusedCell();
+        if (cell) _bpMgr.clearBreakpoints(cell); // clears BP decorations too
+        // Timing clear is internal to debugCtrl — trigger via a cell edit event is preferred
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand('wolfbook.debug.openWatchInEditor', async (arg) => {
+        // Invoked from debug/variables/context right-click menu.
+        // VS Code passes the selected tree item; extract the expression and displayed value defensively.
+        const expr       = arg?.variable?.evaluateName ?? arg?.variable?.name ?? arg?.evaluateName ?? arg?.name ?? '';
+        const displayed  = arg?.variable?.value        ?? arg?.value          ?? '';
+        if (!expr && !displayed) return;
+        // Prefer the cached full value (already fetched at each pause via wolfbookDebug$GetWatchValues)
+        const label      = expr || displayed;
+        const cached     = _debugCtrl.lastWatchValues.find(v => v.name === label);
+        const fullVal    = cached?.full ?? displayed;
+        _debugCtrl._openWatchInEditor(label, fullVal);
+    }));
+    console.log('[Extension] Debug commands registered (Stages 4-7)');
+
+    // ── Breakpoint sync ──────────────────────────────────────────────────────
+    // Native SourceBreakpoints (gutter click, F9, Breakpoints panel) are the
+    // single source of truth.  We mirror them into _bpMgr so the Watch panel
+    // can list them and so startDebugCell() can read them at launch time.
+    // When a wolfram DAP session is active, VS Code sends `setBreakpoints` DAP
+    // requests instead — the adapter handles those; we skip here to avoid races.
+    {
+        context.subscriptions.push(
+            vscode.debug.onDidChangeBreakpoints(e => {
+                if (vscode.debug.activeDebugSession?.type === 'wolfram') return;
+                for (const bp of e.added) {
+                    if (!(bp instanceof vscode.SourceBreakpoint)) continue;
+                    const uri = bp.location.uri;
+                    if (uri.scheme !== 'vscode-notebook-cell') continue;
+                    const uriStr = uri.toString();
+                    const line   = bp.location.range.start.line;
+                    _bpMgr.addBreakpointAt(uriStr, line);
+                    console.log('[wolfbook-bp] synced native add at line', line);
+                }
+                for (const bp of e.removed) {
+                    if (!(bp instanceof vscode.SourceBreakpoint)) continue;
+                    const uri = bp.location.uri;
+                    if (uri.scheme !== 'vscode-notebook-cell') continue;
+                    const uriStr = uri.toString();
+                    const line   = bp.location.range.start.line;
+                    _bpMgr.removeBreakpointLine(uriStr, line);
+                    console.log('[wolfbook-bp] synced native remove at line', line);
+                }
+            })
+        );
+    }
+
     let mainKernel = extensionKernel.resolveKernel();
     const download_WEngine_MDString = new vscode.MarkdownString(`[Download Wolfram Engine for kernel support.](https://www.wolfram.com/engine/)`);
     download_WEngine_MDString.supportHtml = true;
@@ -74,11 +248,12 @@ function activate(context) {
     // Setup Notebook client
     let nbKernelenabled = config.get("notebook.kernelEnabled", true);
     let controller = new controller_1.WolframNotebookKernel(context);
+    _activeController = controller;  // expose for deactivate()
     if (nbKernelenabled) {
         controller.launchKernel();
     }
     // Register Copilot language model tools (Phase 4)
-    _tools.registerTools(context, () => controller);
+    _tools.registerTools(context, () => controller, _debugCtrl);
     ;
     context.subscriptions.push(vscode_1.commands.registerCommand("wolfram.launchKernel", () => {
         if (nbKernelenabled) {
@@ -87,7 +262,13 @@ function activate(context) {
         }
     }));
     context.subscriptions.push(vscode_1.commands.registerCommand("wolfram.abortEvaluation", () => {
-        controller.abortEvaluation();
+        // If a debug session is active, let it handle the abort — it exits Dialog[]
+        // gracefully before aborting so the kernel is fully released.
+        if (_debugCtrl.isActive) {
+            _debugCtrl.stop();
+        } else {
+            controller.abortEvaluation();
+        }
     }));
     context.subscriptions.push(vscode_1.commands.registerCommand("wolfram.openDialogSubsession", () => {
         controller.openDialogSubsession();
@@ -110,7 +291,7 @@ function activate(context) {
     // when execution starts (before any output exists — inherited Jupyter behaviour).
     // We intercept Shift+Enter here instead, so the scroll only fires after first output.
     // console.log('[scroll] notebook.cell.execute auto-scroll') ← original built-in, bypassed here
-    context.subscriptions.push(vscode_1.commands.registerCommand("wolfram.executeCell", () => {
+    context.subscriptions.push(vscode_1.commands.registerCommand("wolfram.executeCell", async () => {
         console.log('[scroll] Shift+Enter detected — evaluation triggered, waiting for first output');
 
         // ---- Save cursor position NOW — before VS Code's Shift+Enter processing
@@ -135,44 +316,51 @@ function activate(context) {
         const cell = editor.notebook.cellAt(sel[0].start);
         if (!cell || cell.kind !== vscode.NotebookCellKind.Code) return;
 
-        // ---- PRE-EMPT VS Code's async internal scroll ----
-        // execution.start() and execution.end() internally fire revealRange via rAF
-        // (~16ms after our synchronous code). By calling revealRange HERE first —
-        // synchronously, before controller.execute() queues anything — we establish
-        // the correct viewport position. VS Code's subsequent internal scroll is then
-        // either a no-op (InCenterIfOutsideViewport on an already-visible cell) or
-        // aligns with our intent (AtTop for advance). The async counter-scrolls in
-        // checkoutExecutionQueue remain as belt-and-suspenders backup.
-        //
-        // Mode detection mirrors controller.execute() logic exactly so both agree.
-        {
-            const _cellUri    = cell.document.uri.toString();
-            const _curSrc     = cell.document.getText();
-            const _lastSrc    = controller._cellLastSource.get(_cellUri);
-            const _srcChanged = (_lastSrc !== undefined && _lastSrc !== _curSrc)
-                             || (_lastSrc === undefined  && controller._cellDirty.has(_cellUri));
-            const _autoMode   = _srcChanged ? 'refine' : 'advance';
-            const _preMode    = (controller._evalModeOverride !== 'auto')
-                              ? controller._evalModeOverride : _autoMode;
-            // Advance: AtTop — pin cell at top immediately, VS Code's Default([n,n+2]) can't override.
-            // Refine: InCenterIfOutsideViewport — no-op since cell is definitely visible right now
-            // (we're still in the synchronous Shift+Enter handler). Just ensures it stays visible.
-            // The real freeze logic is in the dynamic checks at t=0/16/32/50ms in controller.js.
+        // ---- Save viewport + selection for refine-mode scroll guard ----
+        // Saved NOW — before ANY execution-related scroll can fire.
+        // The scroll guard in scroll/manager.js restores these at Idle.
+        controller._scrollGuardSavedViewport   = editor.visibleRanges[0] || null;
+        controller._scrollGuardSavedSelections = [...editor.selections];
+        scrollLog('[executeCell] viewport saved: start',
+            controller._scrollGuardSavedViewport?.start,
+            '| selections:', controller._scrollGuardSavedSelections.map(r => r.start + '-' + r.end).join(', '));
+
+        // ---- Mode detection (read-only, no side-effects) ----
+        // Mirrors controller.execute() logic so we can pre-empt for advance mode.
+        const _cellUri    = cell.document.uri.toString();
+        const _curSrc     = cell.document.getText();
+        const _lastSrc    = controller._cellLastSource.get(_cellUri);
+        const _srcChanged = (_lastSrc !== undefined && _lastSrc !== _curSrc)
+                         || (_lastSrc === undefined  && controller._cellDirty.has(_cellUri));
+        const _autoMode   = _srcChanged ? 'refine' : 'advance';
+        const _preMode    = (controller._evalModeOverride !== 'auto')
+                          ? controller._evalModeOverride : _autoMode;
+
+        // ---- PRE-EMPT scroll for advance mode only ----
+        // Advance: AtTop — pin cell at top immediately so output fills in below.
+        // Refine: NO pre-empt — the scroll guard handles everything at Idle.
+        if (_preMode !== 'refine') {
             const RC = vscode.NotebookRange ?? vscode.NotebookCellRange;
             const _preRange = new RC(cell.index, cell.index + 1);
-            if (_preMode === 'refine') {
-                editor.revealRange(_preRange, vscode.NotebookEditorRevealType.InCenterIfOutsideViewport);
-                scrollLog('[executeCell-preempt] refine: InCenterIfOutsideViewport (no-op, cell visible) cell', cell.index);
-            } else {
-                editor.revealRange(_preRange, vscode.NotebookEditorRevealType.AtTop);
-                scrollLog('[executeCell-preempt] advance: AtTop cell', cell.index);
-            }
+            editor.revealRange(_preRange, vscode.NotebookEditorRevealType.AtTop);
+            scrollLog('[executeCell-preempt] advance: AtTop cell', cell.index);
+        } else {
+            scrollLog('[executeCell-preempt] refine: no pre-empt (scroll guard handles it)');
         }
 
         // Note: markKeyboardExecution is intentionally NOT called here.
         // execute() determines the eval mode (Advance vs Refine) from cell
         // source history and calls markKeyboardExecution internally with the
         // correct mode. Mode detection above is read-only (no side-effects).
+
+        // Stop any active debug session FIRST — the kernel must be free of Dialog[]
+        // before execute() queues the cell, otherwise the cell never runs.
+        if (_debugCtrl.isActive) {
+            await _debugCtrl.stop();
+            // Short settle so the kernel finishes processing the abort.
+            await new Promise(r => setTimeout(r, 200));
+        }
+
         controller.execute([cell], editor.notebook, controller._controller);
     }));
 
@@ -327,13 +515,105 @@ function activate(context) {
         )
     );
 
-    // Setup Escape Mode (` key for Mathematica-style aliases)
+    // wolfram.navLeft / wolfram.navRight (command mode — NOT in cell edit mode)
+    // Left:  enter the nearest code cell ABOVE the current selection, cursor at END.
+    // Right: enter the nearest code cell BELOW the current selection, cursor at START.
+    //        If no code cell exists below — create one and start editing.
+    context.subscriptions.push(vscode.commands.registerCommand('wolfram.navLeft', async () => {
+        const editor = vscode.window.activeNotebookEditor;
+        if (!editor) return;
+        const nb       = editor.notebook;
+        const selStart = editor.selection.start;
+
+        // Walk upward to find the nearest code cell above the selection.
+        for (let i = selStart - 1; i >= 0; i--) {
+            const cell = nb.cellAt(i);
+            if (cell.kind === vscode.NotebookCellKind.Code) {
+                // Select the target cell in the notebook.
+                editor.selection = new vscode.NotebookRange(i, i + 1);
+                // Enter edit mode.
+                await vscode.commands.executeCommand('notebook.cell.edit');
+                // Move cursor to the very end of the cell text.
+                const txtEditor = vscode.window.activeTextEditor;
+                if (txtEditor) {
+                    const lastLine = txtEditor.document.lineCount - 1;
+                    const endPos   = new vscode.Position(lastLine, txtEditor.document.lineAt(lastLine).text.length);
+                    txtEditor.selection = new vscode.Selection(endPos, endPos);
+                }
+                return;
+            }
+        }
+        // No code cell above — fall through to built-in notebook navigation.
+        await vscode.commands.executeCommand('notebook.focusPreviousCell');
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('wolfram.navRight', async () => {
+        const editor = vscode.window.activeNotebookEditor;
+        if (!editor) return;
+        const nb      = editor.notebook;
+        const selEnd  = editor.selection.end;  // exclusive end of selection range
+
+        // Walk downward to find the nearest code cell below (after) the selection.
+        for (let i = selEnd; i < nb.cellCount; i++) {
+            const cell = nb.cellAt(i);
+            if (cell.kind === vscode.NotebookCellKind.Code) {
+                editor.selection = new vscode.NotebookRange(i, i + 1);
+                await vscode.commands.executeCommand('notebook.cell.edit');
+                // Move cursor to the very start.
+                const txtEditor = vscode.window.activeTextEditor;
+                if (txtEditor) {
+                    const startPos = new vscode.Position(0, 0);
+                    txtEditor.selection = new vscode.Selection(startPos, startPos);
+                }
+                return;
+            }
+        }
+        // No code cell below — insert a new one at the bottom and start editing.
+        await vscode.commands.executeCommand('notebook.cell.insertCodeCellBelow');
+        await vscode.commands.executeCommand('notebook.cell.edit');
+    }));
+
+    // wolfram.cursorLeft / wolfram.cursorRight
+    // At the very start of a cell, Left arrow exits edit mode (like Escape).
+    // At the very end of a cell, Right arrow exits edit mode.
+    // Otherwise, delegates to the default cursorLeft / cursorRight.
+    // The !wolframInEscapeMode guard in the keybinding ensures these don't
+    // interfere with moving the cursor to extend an alias selection.
+    context.subscriptions.push(vscode.commands.registerCommand('wolfram.cursorLeft', async () => {
+        const editor = vscode.window.activeTextEditor;
+        if (editor && editor.selection.isEmpty) {
+            const pos = editor.selection.active;
+            if (pos.line === 0 && pos.character === 0) {
+                await vscode.commands.executeCommand('notebook.cell.quitEdit');
+                return;
+            }
+        }
+        await vscode.commands.executeCommand('cursorLeft');
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('wolfram.cursorRight', async () => {
+        const editor = vscode.window.activeTextEditor;
+        if (editor && editor.selection.isEmpty) {
+            const pos  = editor.selection.active;
+            const last = editor.document.lineCount - 1;
+            if (pos.line === last && pos.character === editor.document.lineAt(last).text.length) {
+                await vscode.commands.executeCommand('notebook.cell.quitEdit');
+                return;
+            }
+        }
+        await vscode.commands.executeCommand('cursorRight');
+    }));
+
+    // Setup Escape Mode (Esc key for Mathematica-style aliases)
     (0, escape_mode_1.registerEscapeMode)(context, extensionPath);
     console.log('[Extension] Escape mode registered');
-    
-    // Setup Notebook Settings
-    (0, notebook_settings_1.registerNotebookSettings)(context);
-    console.log('[Extension] Notebook settings registered');
+
+    // Setup refine-mode scroll guard: pins viewport to evaluated cell during
+    // streaming output, cancelling VS Code's internal appendOutput-triggered scrolls.
+    _scrollMgr.registerExecutionScrollGuard(context, () => controller);
+    console.log('[Extension] Execution scroll guard registered');
+
+    // Setup Notebook Settings — already registered early above
 
     // ---- One-time macOS file-association prompt ----
     // Asks the user once whether to register .wb/.evsnb/.vsnb with VS Code in
@@ -597,17 +877,29 @@ function activate(context) {
             // debugBracketMatcher: debugBracketMatcher
             semanticTokens: semanticTokens,
             ignoreUnicodeCharacters: ignoreUnicodeCharacters
+        },
+        // Filter noisy LSP diagnostics before VS Code ever sees them.
+        middleware: {
+            handleDiagnostics(uri, diagnostics, next) {
+                const filtered = diagnostics.filter((diag) => {
+                    const msg = diag.message;
+                    if (msg.toLowerCase().includes('unexpected expression at top-level')) return false;
+                    if (msg.includes('Suspicious use of') && msg.includes('session symbol')) return false;
+                    if (msg.includes('Non-ASCII character')) return false;
+                    return true;
+                });
+                next(uri, filtered);
+            }
         }
     };
     client = new node_1.LanguageClient('wolfram', 'Wolfram-LSP', serverOptions, clientOptions);
     
-    // Always filter certain noisy diagnostics from the Wolfram LSP:
-    //   • Any diagnostic whose range spans only non-ASCII characters —
-    //     these arise from \[Name] → Unicode replacements and are valid WL.
-    //   • "unexpected expression at top level" (common in notebook cells).
-    //   • "Suspicious use of session symbol" (spurious warning about Print etc.)
+    // The primary filter is in clientOptions.middleware.handleDiagnostics above.
+    // This secondary hook catches any diagnostics that slip through via other
+    // VS Code language-client code paths (e.g. pull-diagnostics in newer clients).
     client.onDidChangeState((event) => {
         if (event.newState === 2) { // Running state
+            if (!client.diagnostics?.onDidChangeDiagnostics) return;
             client.diagnostics.onDidChangeDiagnostics((event) => {
                 event.uris.forEach((uri) => {
                     const diagnostics = client.diagnostics.get(uri);
@@ -615,10 +907,9 @@ function activate(context) {
                     const doc = vscode_1.workspace.textDocuments.find(d => d.uri.toString() === uri.toString());
                     const filtered = diagnostics.filter((diag) => {
                         const msg = diag.message;
-                        // Suppress "unexpected expression at top level"
-                        if (msg.toLowerCase().includes('unexpected expression at top level')) return false;
-                        // Suppress "Suspicious use of session symbol" (e.g. Print, Echo)
+                        if (msg.toLowerCase().includes('unexpected expression at top-level')) return false;
                         if (msg.includes('Suspicious use of') && msg.includes('session symbol')) return false;
+                        if (msg.includes('Non-ASCII character')) return false;
                         // Suppress any diagnostic whose range contains ONLY non-ASCII characters
                         // (these are our \[Name] → Unicode replacements — fully valid WL).
                         if (doc) {
@@ -679,8 +970,26 @@ function activate(context) {
             activeEditor.setDecorations(implicitTokensDecorationType, opts);
         });
     });
+
+    // Dismiss the loading indicator now that activation is complete
+    clearTimeout(_loadingTimeout);
+    _dismissLoading();
 }
 exports.activate = activate;
+
+/**
+ * Called by VS Code when the extension is deactivated (window reload, disable, uninstall).
+ * Ensures the Wolfram kernel process is terminated cleanly so no orphan processes
+ * are left running after a window reload.
+ */
+function deactivate() {
+    if (_activeController) {
+        try { _activeController.quitKernel(); } catch(_) {}
+        _activeController = null;
+    }
+}
+exports.deactivate = deactivate;
+
 function kernel_initialization_check_function(command) {
     if (kernel_initialized) {
         return;

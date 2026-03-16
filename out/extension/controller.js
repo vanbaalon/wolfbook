@@ -99,23 +99,13 @@ class WolframNotebookKernel {
         this._subKernel = null;
         this._subKernelReady = false;
         this._subKernelInitPromise = null;
-        // Promise-chain mutex: only one Dynamic widget may hold the dialog at a time.
-        this._dynDialogMutex = Promise.resolve();
         this._abortPending   = false;
-        // True only between (await _dynIdleMutex resolves) and executionQueue.end().
-        // The Dialog busy-path guards on this so interrupt() is never sent while the
-        // kernel is queued-but-idle (between executionQueue.start and session.evaluate).
+        // True only between executionQueue.start() and executionQueue.end().
+        // Guards interrupt() so it is never sent while the kernel is queued-but-idle.
         this._evalDispatched = false;
         // Incremented every time a new cell begins executing (when _evalDispatched → true).
-        // The Dialog busy path captures this before awaiting the mutex and re-checks after;
-        // if the epoch changed the loop ended and a NEW cell started while we waited —
-        // sending interrupt() now would interrupt the wrong (innocent) cell.
         this._dispatchEpoch = 0;
         this._cellEpoch     = 0;  // increments once per cell; used by LiveCells expiry
-        // True while VsCodeRender[N] (ExportString SVG) is executing in the main kernel.
-        // Dynamic widget loops skip their interrupt cycle during this window so they
-        // cannot abort an in-flight ExportString/Rasterize call.
-        this._renderingActive = false;
         // Per-cell shared outputs array for mixed Dynamic+static cells.
         this._dynCells = new Map();
 
@@ -302,6 +292,12 @@ class WolframNotebookKernel {
         this._pendingScrollCellNotebook = null;  // set by markKeyboardExecution()
         this._pendingScrollMode         = null;  // 'advance' | 'refine' — set by execute()
         this._pendingViewportAtExecute  = null;  // cell-index of viewport top at Shift+Enter time
+        this._refineGuardActive         = false; // true while a refine-mode keyboard eval is about to dispatch
+
+        // Saved viewport state for refine-mode scroll restoration at Idle.
+        // Set by wolfram.executeCell in extension.js BEFORE execute() is called.
+        this._scrollGuardSavedViewport   = null;  // NotebookRange (visibleRanges[0])
+        this._scrollGuardSavedSelections = null;  // NotebookRange[] (editor.selections)
 
         // ---- Eval mode: two-mode scroll/focus behaviour ----
         // _cellLastSource: maps cellUri → source text of last evaluation.
@@ -779,6 +775,8 @@ class WolframNotebookKernel {
 
     // -----------------------------------------------------------------------
     execute(cells, _notebook, _controller) {
+        // Reset refine guard flag — set to true below if this is a refine keyboard eval.
+        this._refineGuardActive = false;
         // Detect keyboard-triggered execution (Shift+Enter on the selected cell).
         // IMPORTANT: VS Code advances the selection from N → N+1 BEFORE calling
         // execute([cell N]).  So at the time execute() is called, selIdx is already
@@ -835,6 +833,8 @@ class WolframNotebookKernel {
 
                     if (effectiveMode === 'refine') {
                         // ---- REFINE MODE ----
+                        // Arm the scroll guard to pin the viewport during streaming output.
+                        this._refineGuardActive = true;
                         // Note: cursor position is saved earlier — in the wolfram.executeCell
                         // command handler in extension.js, BEFORE the Shift+Enter key event
                         // causes VS Code to exit edit mode and blur the cell text editor.

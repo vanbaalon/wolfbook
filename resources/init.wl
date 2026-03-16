@@ -64,7 +64,10 @@ If[$VersionNumber < 12,
     logError["Wolfram version " <> ToString[$VersionNumber] <> " < 12, some features may not work"]];
 
 (* ===== CodeParser availability ===== *)
-$hasCodeParser = Quiet[Check[Needs["CodeParser`"]; True, False]];
+(* Actual Needs["CodeParser`"] is deferred to first use (VsCodeSyntaxCheck) or
+   loaded in the background by lifecycle.js via subWhenIdle() after kernel ready.
+   Setting True here so api.wl's lazy-load branch is enabled. *)
+$hasCodeParser = True;
 
 (* ===== Configuration ===== *)
 $config = <|
@@ -126,13 +129,8 @@ Protect[Print];
 Off[Interrupt::dgbgn]; Off[Interrupt::dgend];
 Quiet[Internal`AddHandler["Interrupt", Function[{}, Dialog[]]]];
 
-(* ===== Pre-warm SVG/typesetting pipeline ===== *)
-(* Running a tiny ExportString here initializes Wolfram's SVG/typesetting      *)
-(* subsystem once at kernel launch, before any user cells or Dynamic widgets   *)
-(* are active. This eliminates the 2-4s lag on the first Plot/Graphics output  *)
-(* and prevents mid-initialization interrupts from leaving the pipeline in a   *)
-(* broken state when a Dynamic widget is already running.                      *)
-Quiet[CheckAbort[ExportString[Graphics[{}], "SVG"], Null]];
+(* SVG/typesetting pipeline and CodeParser are prewarmed in the background by
+   lifecycle.js via subWhenIdle() after the kernel is declared ready.          *)
 
 logWrite["init.wl loaded (WSTP mode, no ZMQ)"];
 

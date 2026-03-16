@@ -115,6 +115,126 @@ function scrollToInputCellAnimated(self, cellIndex, notebook) {
 }
 
 // ---------------------------------------------------------------------------
+// Refine-mode viewport guard
+//
+// Uses onDidChangeCellExecutionState to detect execution lifecycle.
+// At Idle time, performs ONE viewport + selection restore — the most robust
+// approach per the VSCode source analysis (ScrolFixPlan.md).
+//
+// Why a single restore at Idle instead of continuous counter-scrolling:
+//   - VS Code's scroll anchoring (mechanism 2, NotebookCellList) is HELPFUL
+//     during streaming output — it keeps the input cell visible as output
+//     grows below.  Fighting it continuously causes back-and-forth jitter.
+//   - VS Code's handleAutoReveal (mechanism 1) fires only at start()/end()
+//     boundaries, so mid-execution the viewport is mostly stable.
+//   - A single restore at Idle is deterministic — no timing races with
+//     rAF frames, no fragile 50ms debounce windows.
+//
+// The guard is only armed for refine-mode keyboard executions.
+// Identification key: controller._refineGuardActive is set true by execute()
+// before checkoutExecutionQueue() → start() fires the Executing event.
+//
+// Drift detection: if the user manually scrolled away (>2 cells from saved
+// position), the restore is skipped to respect their intent.
+
+function registerExecutionScrollGuard(context, getController) {
+    let _guardActive      = false;
+    let _guardCellIndex   = null;
+    let _guardNotebook    = null;
+    let _safetyTimeout    = null;
+
+    function _doRestore(label) {
+        if (!_guardActive) return;
+        _guardActive = false;
+        if (_safetyTimeout) { clearTimeout(_safetyTimeout); _safetyTimeout = null; }
+
+        const self = getController();
+        if (!self) { scrollLog('[scroll-guard]', label, 'no controller — skip'); return; }
+
+        const savedRange = self._scrollGuardSavedViewport;
+        const savedSels  = self._scrollGuardSavedSelections;
+        self._scrollGuardSavedViewport   = null;
+        self._scrollGuardSavedSelections = null;
+
+        // Find the notebook editor for the guarded notebook.
+        let nbEditor = null;
+        for (const ed of vscode.window.visibleNotebookEditors) {
+            if (ed.notebook === _guardNotebook) { nbEditor = ed; break; }
+        }
+        if (!nbEditor) { scrollLog('[scroll-guard]', label, 'no matching editor — skip'); return; }
+
+        // Drift detection: if the viewport moved >2 cells from saved position,
+        // the user scrolled manually — respect their intent.
+        const currentRange = nbEditor.visibleRanges[0];
+        if (savedRange && currentRange) {
+            const drift = Math.abs(currentRange.start - savedRange.start);
+            if (drift > 2) {
+                scrollLog('[scroll-guard]', label, 'drift', drift, '> 2 cells — user scrolled, respecting');
+                _guardCellIndex = null;
+                _guardNotebook  = null;
+                return;
+            }
+        }
+
+        // Restore viewport position.
+        if (savedRange) {
+            try {
+                nbEditor.revealRange(savedRange, vscode.NotebookEditorRevealType.AtTop);
+                scrollLog('[scroll-guard]', label, 'viewport restored to cell', savedRange.start);
+            } catch (e) {
+                scrollLog('[scroll-guard]', label, 'revealRange error:', e.message);
+            }
+        }
+
+        // Restore cell selection so focus doesn't jump to next cell.
+        if (savedSels && savedSels.length > 0) {
+            try {
+                nbEditor.selections = savedSels;
+                scrollLog('[scroll-guard]', label, 'selections restored');
+            } catch (_) {}
+        }
+
+        _guardCellIndex = null;
+        _guardNotebook  = null;
+    }
+
+    if (!vscode.notebooks?.onDidChangeCellExecutionState) {
+        scrollLog('[scroll-guard] vscode.notebooks.onDidChangeCellExecutionState not available — skipping');
+        return;
+    }
+
+    const _stateListener = vscode.notebooks.onDidChangeCellExecutionState(evt => {
+        const ExecState = vscode.NotebookCellExecutionState;
+
+        if (evt.state === ExecState.Executing) {
+            const self = getController();
+            if (!self || !self._refineGuardActive) return;
+            // Consume the flag so a duplicate Executing event doesn't re-arm.
+            self._refineGuardActive = false;
+
+            _guardCellIndex = evt.cell.index;
+            _guardNotebook  = evt.cell.notebook;
+            _guardActive    = true;
+            scrollLog('[scroll-guard] armed (refine) — cell', _guardCellIndex);
+
+            // Safety timeout: if Idle never fires (kernel crash), clean up after 30s.
+            if (_safetyTimeout) clearTimeout(_safetyTimeout);
+            _safetyTimeout = setTimeout(() => _doRestore('safety-timeout'), 30000);
+
+        } else if (evt.state === ExecState.Idle) {
+            if (_guardActive &&
+                _guardCellIndex === evt.cell.index &&
+                _guardNotebook  === evt.cell.notebook) {
+                scrollLog('[scroll-guard] Idle — restoring viewport for cell', evt.cell.index);
+                _doRestore('idle');
+            }
+        }
+    });
+
+    context.subscriptions.push(_stateListener);
+}
+
+// ---------------------------------------------------------------------------
 
 module.exports = {
     markKeyboardExecution,
@@ -122,4 +242,5 @@ module.exports = {
     updateEvalModeStatusBar,
     restoreSelection,
     scrollToInputCellAnimated,
+    registerExecutionScrollGuard,
 };

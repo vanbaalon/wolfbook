@@ -77,6 +77,37 @@ export interface EvalOptions {
      * @param level  The nesting depth that just closed.
      */
     onDialogEnd?: (level: number) => void;
+    /**
+     * When `true`, any `BEGINDLGPKT` received during a non-interactive
+     * evaluation is automatically closed in C++ without informing the JS
+     * layer.  Use for `VsCodeRender`, handler-install, and `sub()` calls
+     * that must never block on a Dialog[] (prevents Pattern C deadlocks).
+     */
+    rejectDialog?: boolean;
+}
+
+/**
+ * One captured Dynamic[] result returned by `getDynamicResults()`.
+ */
+export interface DynResult {
+    /** String-form result returned by the kernel for this expression. */
+    value:      string;
+    /** Unix timestamp (ms) when this result was evaluated. */
+    timestamp:  number;
+    /** Set if evaluation failed (e.g. timeout, `$Failed`). */
+    error?:     string;
+}
+
+/**
+ * Optional options for subWhenIdle().
+ */
+export interface SubWhenIdleOptions {
+    /**
+     * Maximum number of milliseconds to wait in the queue before the
+     * returned Promise rejects with a timeout error.
+     * Omit or set to 0 for no timeout (wait indefinitely).
+     */
+    timeout?: number;
 }
 
 /**
@@ -159,6 +190,19 @@ export class WstpSession {
     readonly isDialogOpen: boolean;
 
     /**
+     * True when the session is fully ready to accept a new evaluation:
+     * the kernel is running (`isOpen`), no evaluation is currently executing
+     * or queued, and no Dialog[] subsession is open.
+     *
+     * Equivalent to:
+     *   `isOpen && !busy && !isDialogOpen && queue.empty() && subQueue.empty()`
+     *
+     * This is a synchronous snapshot; the value may change on the next tick
+     * if an async operation starts or finishes concurrently.
+     */
+    readonly isReady: boolean;
+
+    /**
      * Interrupt the currently running evaluate() call.
      *
      * Posts WSAbortMessage to the kernel.  The kernel stops its current
@@ -170,23 +214,6 @@ export class WstpSession {
      * @returns true if the abort message was posted successfully.
      */
     abort(): boolean;
-
-    /**
-     * Unconditionally reset all dialog state on the JS/Node side.
-     *
-     * Drains the internal `dialogQueue_`, immediately rejecting every pending
-     * `dialogEval()` / `exitDialog()` promise with an error message — so no
-     * caller is left waiting forever.  Clears `isDialogOpen` to `false`.
-     *
-     * This does **not** send any packet to the kernel; it only fixes Node-side
-     * bookkeeping.  Use it in error-recovery paths, before calling `abort()`,
-     * or whenever you need to guarantee clean dialog state without knowing
-     * whether a dialog is actually still running.
-     *
-     * @returns `true` if `isDialogOpen` was `true` before the call (something
-     *          was cleaned up), `false` if it was already clear.
-     */
-    closeAllDialogs(): boolean;
 
     /**
      * Evaluate an expression, returning just the result expression
@@ -207,6 +234,36 @@ export class WstpSession {
     sub(expr: string): Promise<WExpr>;
 
     /**
+     * Queue a background evaluation that runs only when the kernel is truly idle.
+     *
+     * Unlike `sub()`, which runs *before* any queued `evaluate()` calls,
+     * `subWhenIdle()` runs only *after* ALL pending `evaluate()` and `sub()`
+     * calls have completed.  This makes it safe for background queries
+     * (e.g. global-symbol coloring, auto-complete) that must not compete with
+     * active cell evaluations.
+     *
+     * If the kernel is idle at call time the query starts immediately;
+     * otherwise it is queued and executes as soon as the kernel becomes
+     * fully idle again.  Multiple `subWhenIdle()` calls are executed FIFO.
+     *
+     * If the session is closed while the request is still queued the Promise
+     * rejects with `"Session is closed"`.
+     *
+     * @param expr  Wolfram Language expression string to evaluate.
+     * @param opts  Optional: `{ timeout?: number }` — ms before the Promise
+     *              rejects with `"subWhenIdle: timeout"` if the kernel has
+     *              not become idle within that window.
+     * @returns     Promise that resolves with the WExpr result,
+     *              identical in shape to the value returned by `sub()`.
+     *
+     * @example
+     * session.subWhenIdle('Names["Global`*"]').then(result => {
+     *     // safe background query — never races with evaluate()
+     * });
+     */
+    subWhenIdle(expr: string, opts?: SubWhenIdleOptions): Promise<WExpr>;
+
+    /**
      * Launch an independent child kernel as a new WstpSession.
      *
      * The child has completely isolated state (variables, definitions, memory).
@@ -224,6 +281,79 @@ export class WstpSession {
 
     /** True while the link is open and the kernel is running. */
     readonly isOpen: boolean;
+
+    /**
+     * The OS process ID of the WolframKernel child process.
+     *
+     * Useful for external monitoring or force-terminating a stale kernel
+     * after a restart.  Returns `0` if the PID could not be determined
+     * at session-construction time (rare, non-fatal fallback).
+     *
+     * The PID is captured once during `new WstpSession()` and does not
+     * change; it remains set even after `close()` so callers can reference
+     * it in cleanup paths.
+     */
+    readonly kernelPid: number;
+
+    // ── Dynamic eval API ────────────────────────────────────────────────────
+
+    /**
+     * Register (or update) a Wolfram Language expression to be evaluated
+     * automatically every time the kernel enters a Dialog[] interrupt.
+     *
+     * @param id    Unique identifier for this registration (e.g. `"x"`).
+     * @param expr  Wolfram Language expression string (e.g. `"ToString[x]"`).
+     */
+    registerDynamic(id: string, expr: string): void;
+
+    /**
+     * Remove a previously registered Dynamic expression by id.
+     * Has no effect if the id was never registered.
+     */
+    unregisterDynamic(id: string): void;
+
+    /** Remove all registered Dynamic expressions. */
+    clearDynamicRegistry(): void;
+
+    /**
+     * Consume and return all results accumulated since the last call.
+     *
+     * Each key is a registration `id`; each value is the most recent
+     * `DynResult` for that expression.  Calling this clears the internal
+     * buffer so subsequent calls return only new results.
+     *
+     * @returns  A plain object mapping id → DynResult.
+     */
+    getDynamicResults(): Record<string, DynResult>;
+
+    /**
+     * Set the auto-interrupt period (in ms) for the Dynamic timer thread.
+     *
+     * The background thread sends `WSInterruptMessage` to the kernel every
+     * `ms` milliseconds while an evaluation is in progress and the registry
+     * is non-empty.  Set to `0` to disable.
+     *
+     * @param ms  Interval in milliseconds (0 = off).
+     */
+    setDynamicInterval(ms: number): void;
+
+    /**
+     * Switch the Dialog[] handling mode.
+     *
+     * - `true` (default): C++ intercepts every `BEGINDLGPKT` and evaluates
+     *   all registered expressions inline — no JS round-trip required.
+     * - `false`: Falls back to the legacy JS callback path
+     *   (`onDialogBegin` / `dialogEval` / `exitDialog`).
+     *
+     * @param auto  `true` to enable automatic C++ handling, `false` for legacy.
+     */
+    setDynAutoMode(auto: boolean): void;
+
+    /**
+     * `true` when the Dynamic registry is non-empty **and** the timer
+     * interval is greater than zero (i.e. auto-interrupts are active).
+     */
+    readonly dynamicActive: boolean;
 }
 
 /**

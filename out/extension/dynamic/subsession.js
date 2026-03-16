@@ -567,43 +567,57 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
     // Show initial waiting badge.
     _putAllOutputs({}, 'waiting');
 
+    // ---- Register Dynamic expressions with C++ for automatic periodic evaluation ----
+    // The C++ layer (WSTP 0.6.0) intercepts every BEGINDLGPKT opened by the kernel's
+    // scheduled task, evaluates all registered expressions inline, stores results, and
+    // closes the dialog — no JS round-trip required.  JS polls getDynamicResults().
+    // Unregister this cell's old slots first (idempotent), then register fresh ones.
+    // Do NOT call clearDynamicRegistry() — that would wipe other concurrently-active
+    // Dynamic cells' registrations.
+    if (self.session?.registerDynamic) {
+        for (const de of dynExprs)
+            try { self.session.unregisterDynamic(cellUri + ':' + de.slotIndex); } catch (_) {}
+        for (const de of dynExprs) {
+            const escaped = de.dynInner.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+            self.session.registerDynamic(cellUri + ':' + de.slotIndex,
+                'VsCodeDynExportValue["' + escaped + '"]');
+        }
+        self.session.setDynamicInterval(300);  // C++ fires Dialog[] every 300 ms; also auto-sets dynAutoMode=true (0.6.1+)
+    }
+
     const runLoop = async () => {
         let cycle = 0;
-        const htmlBySlot     = {}; // last rendered html per slot — shown with 'paused' badge when idle
-        const lastHtmlBySlot = {}; // raw htmlStr from subkernel — used to skip unchanged renders
-        let lastBusy = false; // track busy→idle transition to avoid repeated executions
-        // _lastIdleRenderEpoch: the _dispatchEpoch value at the time of the last idle render.
-        // null = never rendered yet (always do the first render).
-        // Non-null: skip idle render unless _dispatchEpoch has advanced (meaning a new
-        // evaluation has been dispatched — completed OR currently running — since last render).
+        const htmlBySlot     = {};
+        const lastHtmlBySlot = {};
+        let lastBusy = false;
         let _lastIdleRenderEpoch = null;
-        // _lastBadgeTickTime: timestamp of last badge-only refresh (for LiveTime countdown).
-        // Used to tick the timer display once per second even when slot content hasn't changed.
-        let _lastBadgeTickTime = 0;
-        // Safety counter: tracks how many consecutive interrupt cycles got no dialog.
-        // When >= 1 we know the kernel is inside Pause[N] or a C++ compute-bound
-        // section that ignores WSInterruptMessage.  Sending another interrupt while
-        // Pause is about to end causes a WSTP-level deadlock where dialogEval AND
-        // exitDialog both hang indefinitely (confirmed in test_pause_interrupt.js P6).
-        // We back off and wait for the evaluation to end naturally instead.
-        let _consecutiveNoDialog = 0;
-        // abort() clears Internal`AddHandler["Interrupt",...] on the kernel side
-        // (confirmed by WSTP regression test P5).  After any abort(), we must
-        // reinstall the handler before the next interrupt attempt, otherwise
-        // interrupt() fires but no Dialog[] opens and all subsequent cycles are dead.
-        // _reinstallPromise tracks the in-flight sub() reinstall so we can await it.
-        let _handlerNeedsReinstall = false;
-        let _reinstallPromise = Promise.resolve();
-        // Counts consecutive cycles where isDialogOpen=true in the pre-mutex guard.
-        // If a stale dialog is stuck open (e.g. exitDialog resolved for level-2→1 but
-        // level 1 was never closed), every cycle spins here forever.  After 10 cycles
-        // (~2 s) we force-abort to break the deadlock.
-        let _staleDialogCycles = 0;
+        let _lastBadgeTickTime   = 0;
+        let _lastWatchExpr       = null;  // tracks registered watch expr to re-register on change
         while (true) {
             cycle++;
             if (!state.active || self._sessionEpoch !== epoch) {
                 scrollLog('[dyn] cell loop exit | cycle:', cycle);
-                self._dynamicWidgets.delete(cellUri);
+                // Unregister this cell's slots from the C++ registry on exit.
+                if (self.session?.unregisterDynamic) {
+                    for (const de of dynExprs)
+                        try { self.session.unregisterDynamic(cellUri + ':' + de.slotIndex); } catch (_) {}
+                    if (_lastWatchExpr !== null)
+                        try { self.session.unregisterDynamic('__watch__'); } catch (_) {}
+                    if (self._evalSelectionCallback)
+                        try { self.session.unregisterDynamic('__evalsel__'); } catch (_) {}
+                }
+                // Only delete our own entry — a re-execution may have already
+                // overwritten cellUri with a new state object.
+                if (self._dynamicWidgets.get(cellUri) === state) {
+                    self._dynamicWidgets.delete(cellUri);
+                    // Restore legacy JS dialog path once no Dynamic cells are running.
+                    // dynAutoMode=true (set on cell start) persists session-wide and
+                    // intercepts every BEGINDLGPKT — breaking openDialogSubsession,
+                    // live-watch interrupt, and eval-selection when no Dynamic is active.
+                    if (self._dynamicWidgets.size === 0) {
+                        try { self.session?.setDynAutoMode?.(false); } catch (_) {}
+                    }
+                }
                 // Clear cell output immediately so stale Dynamic content doesn't
                 // linger after kernel restart — don't rely on launchKernel timing.
                 try {
@@ -667,89 +681,60 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
             // Exit the widget loop only when every slot has expired.
             if (_slotExpired.every(v => v)) {
                 scrollLog('[dyn] all slots expired — cell loop exit | cellUri:', cellUri);
-                self._dynamicWidgets.delete(cellUri);
+                if (self.session?.unregisterDynamic) {
+                    for (const de of dynExprs)
+                        try { self.session.unregisterDynamic(cellUri + ':' + de.slotIndex); } catch (_) {}
+                    if (_lastWatchExpr !== null)
+                        try { self.session.unregisterDynamic('__watch__'); } catch (_) {}
+                    if (self._evalSelectionCallback)
+                        try { self.session.unregisterDynamic('__evalsel__'); } catch (_) {}
+                }
+                if (self._dynamicWidgets.get(cellUri) === state) {
+                    self._dynamicWidgets.delete(cellUri);
+                    if (self._dynamicWidgets.size === 0) {
+                        try { self.session?.setDynAutoMode?.(false); } catch (_) {}
+                    }
+                }
                 return;
             }
 
-            scrollLog('[dyn] cycle', cycle, '| busy:', busy, '| dlgOpen:', self.session?.isDialogOpen, '| dispatched:', self._evalDispatched, '| cND:', _consecutiveNoDialog, '| stale:', _staleDialogCycles, '| evalsSince:', _evalsSinceStart);
+            scrollLog('[dyn] cycle', cycle, '| busy:', busy, '| dispatched:', self._evalDispatched, '| evalsSince:', _evalsSinceStart);
 
             if (!busy) {
-                // Recovery: if a dialog was left open after evaluation ended
-                // (e.g. exitDialog failed mid-cycle), kernel is frozen — close it.
-                if (self.session?.isDialogOpen) {
-                    scrollLog('[dyn] idle but dlgOpen=true — acquiring mutex for recovery exitDialog');
-                    let _releaseRec;
-                    const _prevRec = self._dynDialogMutex;
-                    self._dynDialogMutex = new Promise(r => _releaseRec = r);
-                    await _prevRec;
-                    try {
-                        if (self.session?.isDialogOpen) {
-                            scrollLog('[dyn] idle recovery: calling closeAllDialogs');
-                            self.session.closeAllDialogs?.();
-                            await new Promise(r => setTimeout(r, 300));
-                        }
-                    } finally {
-                        _releaseRec();
-                    }
-                    continue;
-                }
-
                 // ---- Idle-eval path ----
-                // When nothing is running, evaluate Dynamic slots directly via sub().
-                // Serialized via _dynIdleMutex — only ONE cell loop calls sub() at a
-                // time: concurrent sub() calls stack on the WSTP link and all time out.
-                // Skip if dialog is open (recovery block above handles that).
-                // Also skip if no new evaluation has been dispatched since the last
-                // idle render — nothing could have changed in the kernel state.
+                // Use subWhenIdle() per slot — safe at idle, no mutex needed since
+                // subWhenIdle() only runs when all queues are fully drained.
+                // Skip if no new dispatch has occurred since the last idle render.
                 const _queueEmpty = self.executionQueue.queue.length === 0;
                 const _epochUnchanged = _lastIdleRenderEpoch !== null
                     && self._dispatchEpoch === _lastIdleRenderEpoch;
-                if (_queueEmpty && !self._abortPending && !self.session.isDialogOpen
-                        && !_epochUnchanged
+                if (_queueEmpty && !self._abortPending && !_epochUnchanged
                         && (Date.now() - (self._dynLastIdleRender || 0)) > 1000) {
-                    // Acquire global idle mutex.
-                    if (!self._dynIdleMutex) self._dynIdleMutex = Promise.resolve();
-                    let _releaseIdle;
-                    const _prevIdle = self._dynIdleMutex;
-                    self._dynIdleMutex = new Promise(r => _releaseIdle = r);
-                    await _prevIdle;
-                    // Re-check after acquiring — another loop may have just fired.
-                    if (!state.active || self._sessionEpoch !== epoch
-                            || self.executionQueue.queue.length > 0
-                            || self._abortPending || self.session.isDialogOpen
-                            || (Date.now() - (self._dynLastIdleRender || 0)) < 800) {
-                        _releaseIdle();
-                        await new Promise(r => setTimeout(r, 300));
-                        continue;
-                    }
-                    // Pre-flight: always close any stale dialog before sub().
-                    self.session.closeAllDialogs?.();
                     self._dynLastIdleRender = Date.now();
                     const scale = Number(self.config?.get?.('imageScale') ?? 0.8) || 0.8;
                     const idlePending = {};
-                    try {
-                        for (const de of dynExprs) {
-                            if (!state.active || self._sessionEpoch !== epoch) break;
-                            const escaped = de.dynInner.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-                            const expr = 'VsCodeDynExportValue["' + escaped + '"]';
-                            dynLog('IDLE-SEND | cycle', cycle, '| slot', de.slotIndex);
-                            try {
-                                const res = await Promise.race([
-                                    self.session.sub(expr),
-                                    new Promise((_, rej) => setTimeout(() => rej(new Error('idle-sub timeout 3s')), 3000))
-                                ]);
-                                const _rv = res?.value;
-                                if (typeof _rv === 'string' && _rv.startsWith('WLVAL:FILE:')) {
-                                    const tmpFile = _rv.slice('WLVAL:FILE:'.length)
-                                        .replace(/\\012/g, '').replace(/\\015/g, '')
-                                        .replace(/[^a-zA-Z0-9/_.-]/g, '');
-                                    idlePending[de.slotIndex] = tmpFile;
-                                }
-                            } catch(_idleErr) {
-                                dynLog('IDLE-SEND-ERR | cycle', cycle, '| slot', de.slotIndex, '|', _idleErr.message);
+                    for (const de of dynExprs) {
+                        if (!state.active || self._sessionEpoch !== epoch) break;
+                        if (_slotExpired[dynExprs.indexOf(de)]) continue;
+                        const escaped = de.dynInner.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+                        const expr = 'VsCodeDynExportValue["' + escaped + '"]';
+                        dynLog('IDLE-SEND | cycle', cycle, '| slot', de.slotIndex);
+                        try {
+                            const res = await Promise.race([
+                                self.session.subWhenIdle(expr, { timeout: 3000 }),
+                                new Promise((_, rej) => setTimeout(() => rej(new Error('idle-sub timeout')), 3500))
+                            ]);
+                            const _rv = res?.value;
+                            if (typeof _rv === 'string' && _rv.startsWith('WLVAL:FILE:')) {
+                                const tmpFile = _rv.slice('WLVAL:FILE:'.length)
+                                    .replace(/\\012/g, '').replace(/\\015/g, '')
+                                    .replace(/[^a-zA-Z0-9/_.-]/g, '');
+                                idlePending[de.slotIndex] = tmpFile;
                             }
+                        } catch (_idleErr) {
+                            dynLog('IDLE-SEND-ERR | cycle', cycle, '| slot', de.slotIndex, '|', _idleErr.message);
                         }
-                    } finally { _releaseIdle(); }
+                    }
                     if (Object.keys(idlePending).length > 0) {
                         let _anyIdleChanged = false;
                         try {
@@ -762,7 +747,8 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
                                     const renderRes = await _subKern.sub(renderExpr);
                                     const htmlStr = renderRes?.value;
                                     if (typeof htmlStr === 'string' && htmlStr.length > 0) {
-                                        dynLog('IDLE-RENDER-OK | cycle', cycle, '| slot', slotIdx, '| htmlLen:', htmlStr.length,
+                                        dynLog('IDLE-RENDER-OK | cycle', cycle, '| slot', slotIdx,
+                                               '| htmlLen:', htmlStr.length,
                                                '| changed:', htmlStr !== lastHtmlBySlot[slotIdx]);
                                         if (htmlStr !== lastHtmlBySlot[slotIdx]) {
                                             lastHtmlBySlot[slotIdx] = htmlStr;
@@ -770,64 +756,43 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
                                             _anyIdleChanged = true;
                                         }
                                     }
-                                } catch(_) {
+                                } catch (_) {
                                 } finally {
-                                    try { require('fs').unlinkSync(tmpFile); } catch(_) {}
+                                    try { require('fs').unlinkSync(tmpFile); } catch (_) {}
                                 }
                             }
-                        } catch(_subErr) {
+                        } catch (_subErr) {
                             dynLog('IDLE-SUBKERN-ERR | cycle', cycle, '|', _subErr.message);
                         }
-                        // Redraw if value changed, OR if LiveTime is set (need to refresh
-                        // the countdown even when the slot value is the same).
                         if (_anyIdleChanged || (isFinite(liveTimeSec) && !_isExpired)) {
                             _lastBadgeTickTime = Date.now();
                             await _putAllOutputs(htmlBySlot, 'live');
                         }
                     }
-                    // Record the epoch we just rendered at — suppress further idle
-                    // renders until a new evaluation is dispatched.
                     _lastIdleRenderEpoch = self._dispatchEpoch;
-                    lastBusy = false;
-                    await new Promise(r => setTimeout(r, 800));
-                    continue;
                 }
 
-                // Only update output once on the busy→idle transition.
-                // Do NOT call createNotebookCellExecution every 300ms — VS Code
-                // treats each call as a cell execution and spams the output area.
+                // busy→idle transition: clear cached values and show "waiting".
                 if (lastBusy) {
-                    // Evaluation finished — clear cached values and show "waiting".
-                    // Do NOT show last-rendered values with a "paused" badge:
-                    // those values belonged to the now-finished computation.
                     for (const k of Object.keys(htmlBySlot)) delete htmlBySlot[k];
                     await _putAllOutputs({}, 'waiting');
                 }
                 lastBusy = false;
-                // LiveTime countdown tick: refresh badge every ~1 s on the idle path
-                // so the displayed countdown decreases monotonically even when the
-                // slot value hasn't changed (i.e. _anyIdleChanged was false).
-                // Use per-slot check: tick if any slot with LiveTime is still active.
+
+                // LiveTime countdown tick: refresh badge every ~1 s on the idle path.
                 const _anyLiveTimeActive = dynExprs.some((de, _i) => de.dynLiveTime != null && !_slotExpired[_i]);
-                if (_anyLiveTimeActive
-                        && (Date.now() - _lastBadgeTickTime) >= 950) {
+                if (_anyLiveTimeActive && (Date.now() - _lastBadgeTickTime) >= 950) {
                     _lastBadgeTickTime = Date.now();
                     await _putAllOutputs(htmlBySlot, 'live');
                 }
                 await new Promise(r => setTimeout(r, 300));
                 continue;
             }
-            // Reset the no-dialog backoff counter when a fresh busy period begins.
-            if (!lastBusy) {
-                if (_consecutiveNoDialog > 0) scrollLog('[dyn] cycle', cycle, '| fresh busy period — resetting cND:', _consecutiveNoDialog, '→ 0');
-                _consecutiveNoDialog = 0;
-            }
+
+            // ---- Busy path: poll C++ getDynamicResults() ----
             lastBusy = true;
-            // If the LiveEvaluations or LiveCells limit has already been reached,
-            // do NOT interrupt — let the computation finish undisturbed.
-            // The expiry check in the !busy block fires once the queue drains.
-            // Show the red ⊘ expired badge once on first entry so the user knows
-            // the limit was hit and no more updates are coming.
+
+            // LiveEvaluations / LiveCells limit: stop updating once hit.
             if (isFinite(liveEvalLimit) && _evalsSinceStart >= liveEvalLimit) {
                 if (!_isExpired) {
                     scrollLog('[dyn] busy-path: LiveEvaluations limit reached, showing expired badge');
@@ -844,415 +809,150 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
                 }
                 await new Promise(r => setTimeout(r, 300)); continue;
             }
-            // Gate: only send interrupt() once the kernel is actually computing.
-            // _evalDispatched is set true after _dynIdleMutex resolves (just before
-            // the first session.evaluate() call). Before that, queue[0].started is
-            // already true but the kernel is still idle — interrupt() on an idle
-            // kernel corrupts the WSTP link ("WSGet out of sequence").
-            if (!self._evalDispatched) {
-                await new Promise(r => setTimeout(r, 100)); continue;
+
+            // Live-watch: re-register in C++ registry when the watched expression changes.
+            const _curWatchExpr = self._liveWatchExpr || null;
+            if (_curWatchExpr !== _lastWatchExpr) {
+                _lastWatchExpr = _curWatchExpr;
+                if (_curWatchExpr) {
+                    try { self.session?.registerDynamic?.('__watch__', _curWatchExpr); } catch (_) {}
+                    dynLog('LIVE-WATCH-REG | cycle', cycle, '| registered new expr');
+                } else {
+                    try { self.session?.unregisterDynamic?.('__watch__'); } catch (_) {}
+                    dynLog('LIVE-WATCH-UNREG | cycle', cycle);
+                }
             }
 
-            // Skip this cycle if the kernel is actively rendering (ExportString/SVG).
-            // Sending an interrupt now would abort ExportString mid-call and corrupt
-            // the SVG pipeline state. Just wait and retry next cycle.
-            if (self._renderingActive) {
-                await new Promise(r => setTimeout(r, 150));
-                continue;
+            // Eval-selection one-shot: register in C++ registry when set.
+            if (self._evalSelectionExpr) {
+                const _esExpr = self._evalSelectionExpr;
+                self._evalSelectionExpr = null;  // Clear before await to prevent double-register.
+                try { self.session?.registerDynamic?.('__evalsel__', _esExpr); } catch (_) {}
+                dynLog('EVAL-SEL-REG | cycle', cycle, '| registered one-shot');
             }
 
-            // Skip if dialog is already open — don't interrupt, just wait.
-            // Fast path: if consecutiveNoDialog >= 1 and a dialog opens, this is
-            // the DEFERRED interrupt (sent earlier, fired late after Pause[N] ended).
-            // Exit it immediately to let the cell continue — do NOT abort.
-            // Watchdog: if this has been true for >= 10 consecutive 200 ms cycles
-            // (~2 s) the dialog is stale (exitDialog closed level-2→1 but level-1
-            // was never closed, or abort() left residual state).  Force-abort to
-            // break the deadlock rather than spinning forever.
-            if (self.session.isDialogOpen) {
-                if (_consecutiveNoDialog >= 1) {
-                    // Deferred-interrupt dialog: we sent an interrupt earlier that
-                    // Pause[] didn't open right away — it fired after Pause ended.
-                    // Close it cleanly so the cell's next expression can complete.
-                    scrollLog('[dyn] cycle', cycle, '| deferred-dialog detected (cND:', _consecutiveNoDialog, ') — calling exitDialog to unblock cell');
-                    const _t_dd = Date.now();
-                    try {
-                        await Promise.race([
-                            self.session.exitDialog(),
-                            new Promise((_, rej) => setTimeout(() => rej(new Error('deferred-dlg-timeout')), 2000))
-                        ]);
-                        scrollLog('[dyn] cycle', cycle, '| deferred-dialog exitDialog done | dlgOpen after:', self.session.isDialogOpen, '| dt:', Date.now() - _t_dd, 'ms');
-                        if (!self.session.isDialogOpen) _consecutiveNoDialog = 0;
-                    } catch (e) {
-                        scrollLog('[dyn] cycle', cycle, '| deferred-dialog exitDialog failed:', e.message, '| dlgOpen after:', self.session.isDialogOpen);
+            // Poll C++ results buffer — getDynamicResults() clears the buffer on call.
+            const results = self.session?.getDynamicResults?.();
+            if (results && Object.keys(results).length > 0) {
+                const scale = Number(self.config?.get?.('imageScale') ?? 0.8) || 0.8;
+                const pendingValues = {};
+                for (const [id, dynResult] of Object.entries(results)) {
+                    // Live-watch result.
+                    if (id === '__watch__') {
+                        if (!dynResult.error && self._liveWatchCallback) {
+                            dynLog('LIVE-WATCH | cycle', cycle, '| delivering result');
+                            try { self._liveWatchCallback({ type: 'string', value: dynResult.value }); } catch (_) {}
+                        }
+                        continue;
                     }
-                    await new Promise(r => setTimeout(r, 200));
-                    continue;
-                }
-                scrollLog('[dyn] cycle', cycle, '| pre-mutex dlgOpen=true | staleCount now:', _staleDialogCycles + 1, '| cND:', _consecutiveNoDialog);
-                _staleDialogCycles++;
-                if (_staleDialogCycles >= 10) {
-                    _staleDialogCycles = 0;
-                    scrollLog('[dyn] cycle', cycle, '| stale dialog (10 cycles) — force-abort to recover | cND was:', _consecutiveNoDialog);
-                    try { self.session.abort(); } catch(_) {}
-                    _handlerNeedsReinstall = true;
-                    _reinstallPromise = self.session.sub?.(
-                        'Quiet[Internal`AddHandler["Interrupt", Function[Null, Dialog[]]]]'
-                    ).then(() => {
-                        _handlerNeedsReinstall = false;
-                        scrollLog('[dyn] interrupt handler reinstalled after stale-dialog abort');
-                    }).catch(e => {
-                        _handlerNeedsReinstall = false;
-                        scrollLog('[dyn] stale-dialog reinstall failed:', e.message);
-                    }) ?? Promise.resolve();
-                    const _tsd = Date.now();
-                    while (self.session.isDialogOpen && Date.now() - _tsd < 3000)
-                        await new Promise(r => setTimeout(r, 50));
-                }
-                await new Promise(r => setTimeout(r, 200));
-                continue;
-            }
-            _staleDialogCycles = 0;
-
-            // ---- Global dialog mutex: serialises interrupt+dialogEval+exitDialog ----
-            // across ALL concurrent Dynamic cell loops so two loops never send competing
-            // interrupts and open nested Dialog[] sessions simultaneously.
-            let _releaseDlg;
-            const _prevDlg = self._dynDialogMutex;
-            self._dynDialogMutex = new Promise(r => _releaseDlg = r);
-            // Snapshot the dispatch epoch BEFORE yielding — if the epoch changes while
-            // we await the mutex the current evaluation ended (and possibly a new one
-            // started) so we must NOT send interrupt() to whoever is running now.
-            const _epochBeforeMutex = self._dispatchEpoch;
-            await _prevDlg;
-
-            // Re-check after acquiring lock (another loop may have just used the dialog).
-            if (!state.active || self._sessionEpoch !== epoch) { _releaseDlg(); continue; }
-            // Abort is pending — release immediately so abort can proceed cleanly.
-            if (self._abortPending) { scrollLog('[dyn] cycle', cycle, '| abort pending — skip'); _releaseDlg(); continue; }
-            // Rendering started while we were waiting on the mutex — release and retry.
-            if (self._renderingActive) { _releaseDlg(); await new Promise(r => setTimeout(r, 150)); continue; }
-            if (self.session.isDialogOpen) { _releaseDlg(); await new Promise(r => setTimeout(r, 200)); continue; }
-            // KEY RACE FIX: the evaluation that was running when we queued for the mutex
-            // may have finished and a NEW cell may have started while we were waiting.
-            // Re-check _evalDispatched: if it is false, no cell is executing right now —
-            // sending interrupt() would hit the idle kernel and corrupt the WSTP link.
-            if (!self._evalDispatched) {
-                scrollLog('[dyn] cycle', cycle, '| evalDispatched=false after mutex — skip interrupt');
-                _releaseDlg();
-                await new Promise(r => setTimeout(r, 200));
-                continue;
-            }
-            // Also check epoch: even if dispatched=true, it may belong to a NEW cell
-            // (old cell ended, new cell started, epoch bumped). Interrupting the new
-            // cell's first expression would be equally wrong.
-            if (self._dispatchEpoch !== _epochBeforeMutex) {
-                scrollLog('[dyn] cycle', cycle, '| epoch changed while awaiting mutex (',
-                          _epochBeforeMutex, '->', self._dispatchEpoch, ') — skip interrupt');
-                _releaseDlg();
-                await new Promise(r => setTimeout(r, 200));
-                continue;
-            }
-
-            // SAFETY guard: if the previous interrupt was silently swallowed (no
-            // dialog opened within 2500ms), do NOT immediately retry.  Retrying while
-            // the kernel is inside Pause[N]→completion transition triggers an
-            // irrecoverable WSTP deadlock (test_pause_interrupt.js P3/P6).
-            // Instead, wait for the eval to finish naturally (the !busy path).
-            if (_consecutiveNoDialog >= 1) {
-                scrollLog('[dyn] cycle', cycle, '| consecutiveNoDialog:', _consecutiveNoDialog,
-                          '— skipping interrupt | epoch:', self._dispatchEpoch, '| evalsSince:', _evalsSinceStart);
-                _releaseDlg();
-                await new Promise(r => setTimeout(r, 1000));
-                continue;
-            }
-            // Handler reinstall may be in flight after a previous abort().
-            // Wait for it to complete before attempting the next interrupt —
-            // otherwise we interrupt with no handler and the dialog never opens.
-            if (_handlerNeedsReinstall) {
-                _releaseDlg();
-                scrollLog('[dyn] cycle', cycle, '| handler reinstall pending — awaiting before next interrupt');
-                await _reinstallPromise;
-                if (!state.active || self._sessionEpoch !== epoch) continue;
-                // One-cycle pause so the kernel can register the new handler.
-                await new Promise(r => setTimeout(r, 300));
-                continue;
-            }
-
-            let gotIdxs = [];
-            let pendingValues = {}; // slotIndex → FullForm string (populated inside Dialog[])
-            const scale = Number(self.config?.get?.('imageScale') ?? 0.8) || 0.8;
-            // Busy-gone watcher: rejects dialogEval immediately when main evaluation
-            // finishes mid-cycle so we never hang for the full 8s timeout.
-            let _busyWatcher = null;
-            let _busyGoneReject = null;
-            const _busyGoneProm = new Promise((_, rej) => { _busyGoneReject = rej; });
-            try {
-            // ---- Single interrupt. Wait up to 2500ms — NO retry interrupt. ----
-            // Pre-flight closeAllDialogs: isDialogOpen is often stale. Reset
-            // any stale dialog state before the interrupt so the C++ state is clean.
-            self.session.closeAllDialogs?.();
-            const sent = self.session.interrupt();
-            scrollLog('[dyn] cycle', cycle, '| interrupt sent:', sent, '| epoch:', self._dispatchEpoch, '| evalsSince:', _evalsSinceStart);
-            if (!sent) { await new Promise(r => setTimeout(r, 500)); continue; }
-
-            const t1 = Date.now();
-            while (!self.session.isDialogOpen && Date.now() - t1 < 2500)
-                await new Promise(r => setTimeout(r, 25));
-            const dlgOpen = self.session.isDialogOpen;
-            scrollLog('[dyn] cycle', cycle, '| dlgOpen:', dlgOpen, '| waited:', Date.now() - t1, 'ms');
-            if (!dlgOpen) {
-                // Dialog never opened — kernel is inside Pause[N] or a compute-bound
-                // section that ignores WSInterruptMessage.  Increment backoff counter
-                // so the next cycle skips the interrupt entirely and just waits.
-                _consecutiveNoDialog++;
-                scrollLog('[dyn] cycle', cycle, '| no dialog — consecutiveNoDialog:', _consecutiveNoDialog,
-                          '(will skip interrupt next cycle until eval ends)');
-                self.session.closeAllDialogs?.();
-                await new Promise(r => setTimeout(r, 300)); continue;
-            }
-            // Dialog opened — reset backoff counter.
-            _consecutiveNoDialog = 0;
-
-            // Start watcher now (dialog is confirmed open).
-            _busyWatcher = setInterval(() => {
-                const _stillBusy = !self._abortPending &&
-                    self.executionQueue.queue.length > 0 && self.executionQueue.queue[0].started;
-                if (!_stillBusy) { clearInterval(_busyWatcher); _busyWatcher = null; _busyGoneReject(new Error('busy-lost')); }
-            }, 150);
-
-            // ---- Evaluate each Dynamic slot: export evaluated value to .mx temp file ----
-            // VsCodeDynExportValue["exprString"] evaluates the expression inside Dialog[]
-            // (where Do-loop variables like n are visible) and exports the CONCRETE result
-            // (e.g. a fully-built Graphics[...]) to a temp .mx file.
-            // IMPORTANT: NO CheckAbort wrapper — inside Dialog[] after an interrupt,
-            // CheckAbort traps the active abort flag and returns $Failed immediately
-            // before any expression is evaluated. The subsession (⌥⇧↵) uses the same
-            // approach and is proven correct.
-            // After exitDialog(), the file is imported on _subKernel (separate process)
-            // and rendered via VsCodeRenderExpr — full SVG/MathML, no context needed.
-            for (let i = 0; i < dynExprs.length; i++) {
-                const de      = dynExprs[i];
-                const escaped = de.dynInner.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-                const expr    = 'VsCodeDynExportValue["' + escaped + '"]';
-                dynLog('SEND | cycle', cycle, '| slot', de.slotIndex, '| expr:', de.dynInner.slice(0, 60));
-                try {
-                    const res = await Promise.race([
-                        self.session.dialogEval(expr),
-                        new Promise((_, rej) => setTimeout(() => rej(new Error('timeout 8s')), 8000)),
-                        _busyGoneProm,
-                    ]);
-                    const _rv = res?.value;
-                    dynLog('RECV | cycle', cycle, '| slot', de.slotIndex,
-                           '| type:', res?.type, '| len:', String(_rv).length,
-                           '| starts:', String(_rv).slice(0, 80));
-                    if (res && !res.error && typeof _rv === 'string' && _rv.startsWith('WLVAL:FILE:')) {
-                        // WSTP text-mode inserts ' \012>   ' line-continuation into long strings.
-                        // Step 1: strip the 4-char WSTP escape literals \012 \015 (else their
-                        //         digits '012' survive the path-char filter below).
-                        // Step 2: strip all non-path characters (space, >, \, etc.)
+                    // Eval-selection result.
+                    if (id === '__evalsel__') {
+                        const _esCb = self._evalSelectionCallback;
+                        self._evalSelectionCallback = null;
+                        try { self.session?.unregisterDynamic?.('__evalsel__'); } catch (_) {}
+                        if (_esCb) {
+                            dynLog('EVAL-SEL | cycle', cycle, '| delivering result');
+                            try { _esCb({ type: dynResult.error ? 'error' : 'string', value: dynResult.value }); } catch (_) {}
+                        }
+                        continue;
+                    }
+                    // Dynamic slot result: id is "cellUri:slotIndex".
+                    const colonIdx = id.lastIndexOf(':');
+                    if (colonIdx < 0) continue;
+                    const slotId  = id.slice(0, colonIdx);
+                    const slotIdx = Number(id.slice(colonIdx + 1));
+                    if (slotId !== cellUri || !isFinite(slotIdx)) continue;
+                    if (dynResult.error) {
+                        dynLog('DYN-RESULT-ERR | cycle', cycle, '| slot', slotIdx, '|', dynResult.error);
+                        continue;
+                    }
+                    const _rv = dynResult.value;
+                    if (typeof _rv === 'string' && _rv.startsWith('WLVAL:FILE:')) {
+                        // WSTP text-mode inserts '\012' line-continuation into long strings.
                         const tmpFile = _rv.slice('WLVAL:FILE:'.length)
                             .replace(/\\012/g, '').replace(/\\015/g, '')
                             .replace(/[^a-zA-Z0-9/_.-]/g, '');
-                        dynLog('WLVAL-FILE | cycle', cycle, '| slot', de.slotIndex,
-                               '| cleanPath:', tmpFile);
-                        pendingValues[de.slotIndex] = tmpFile;
-                        gotIdxs.push(i);
-                    } else if (res && !res.error && typeof _rv === 'string' && _rv === 'WLVAL:FAILED') {
-                        dynLog('WLVAL-FAILED | cycle', cycle, '| slot', de.slotIndex);
-                        // Keep previous output — expression returned $Failed (e.g. n not yet set).
-                    } else if (res && !res.error && typeof _rv === 'string' && _rv.length > 0) {
-                        dynLog('RAW-FALLBACK | cycle', cycle, '| slot', de.slotIndex,
-                               '| raw[0..120]:', _rv.slice(0, 120));
+                        dynLog('WLVAL-FILE | cycle', cycle, '| slot', slotIdx, '| cleanPath:', tmpFile);
+                        pendingValues[slotIdx] = tmpFile;
+                    } else if (_rv === 'WLVAL:FAILED') {
+                        dynLog('WLVAL-FAILED | cycle', cycle, '| slot', slotIdx);
+                    } else if (typeof _rv === 'string' && _rv.length > 0) {
+                        dynLog('RAW-FALLBACK | cycle', cycle, '| slot', slotIdx, '| raw[0..120]:', _rv.slice(0, 120));
                         const _esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-                        htmlBySlot[de.slotIndex] =
+                        htmlBySlot[slotIdx] =
                             '<pre style="margin:0;padding:4px 0;font-size:12px;color:#c00;' +
                             'font-family:monospace;white-space:pre-wrap;">'
                             + '⚠ restart kernel to load VsCodeDynExportValue\n\n'
                             + _esc(_rv.slice(0, 500)) + '</pre>';
-                        gotIdxs.push(i);
-                    } else {
-                        dynLog('NULL/ERR | cycle', cycle, '| slot', de.slotIndex,
-                               '| res:', JSON.stringify(res)?.slice(0, 120));
                     }
-                } catch (e) {
-                    if (e.message === 'busy-lost') {
-                        dynLog('BUSY-LOST | cycle', cycle, '| slot', de.slotIndex, '— eval ended mid-dialog, closing dialog');
-                    } else {
-                        dynLog('THROW | cycle', cycle, '| slot', de.slotIndex, '| err:', e.message);
-                        scrollLog('[dyn] cycle', cycle, '| slot', de.slotIndex, '| dialogEval error:', e.message);
-                    }
-                    break;  // don't try remaining slots
                 }
-            }
 
-            // ---- Exit dialog — retry up to 5 times if it hangs or only partially closes. ----
-            // IMPORTANT: exitDialog() can resolve without timeout AND yet the dialog is
-            // still open when the kernel is at Dialog level 2 (nested after a previous
-            // abort): exitDialog closes level 2 → level 1, returning successfully, but
-            // isDialogOpen is still true.  We must check isDialogOpen after each call
-            // and keep retrying until the dialog is genuinely closed.
-            let exited = false;
-            scrollLog('[dyn] cycle', cycle, '| exitDialog loop start (up to 5 attempts) | dlgOpen:', self.session.isDialogOpen);
-            for (let attempt = 0; attempt < 5 && !exited; attempt++) {
-                const _t_ed = Date.now();
-                try {
-                    await Promise.race([
-                        self.session.exitDialog(),
-                        new Promise((_, rej) => setTimeout(() => rej(new Error('exitDialog timeout')), 2000))
-                    ]);
-                    // exitDialog resolved — but it may have only closed one level.
-                    // Check whether the dialog is genuinely closed now.
-                    await new Promise(r => setTimeout(r, 30));
-                    if (!self.session.isDialogOpen) {
-                        exited = true;
-                        scrollLog('[dyn] cycle', cycle, '| exitDialog attempt', attempt + 1, 'succeeded | dt:', Date.now() - _t_ed, 'ms');
-                    } else {
-                        scrollLog('[dyn] cycle', cycle, '| exitDialog attempt', attempt + 1,
-                                  '— resolved but dialog still open (nested level), retrying | dt:', Date.now() - _t_ed, 'ms');
-                    }
-                } catch (e) {
-                    scrollLog('[dyn] cycle', cycle, '| exitDialog attempt', attempt + 1, 'failed:', e.message, '| dt:', Date.now() - _t_ed, 'ms');
-                }
-            }
-            // All exitDialog attempts failed — the kernel is stuck inside Dialog[]
-            // (e.g. ExportString/Rasterize is still running). Abort the kernel to
-            // forcibly terminate the stuck computation and release the WSTP link.
-            if (!exited) {
-                dynLog('ABORT | cycle', cycle, '| exitDialog failed 5 times — aborting kernel');
-                try { self.session.abort(); } catch(_) {}
-                // abort() clears Internal`AddHandler["Interrupt",...] on the kernel.
-                // Schedule handler reinstall via sub() — runs after the aborted eval
-                // finishes ($Aborted response) and before any queued evaluate() calls.
-                _handlerNeedsReinstall = true;
-                _reinstallPromise = self.session.sub?.(
-                    'Quiet[Internal`AddHandler["Interrupt", Function[Null, Dialog[]]]]'
-                ).then(() => {
-                    _handlerNeedsReinstall = false;
-                    scrollLog('[dyn] interrupt handler reinstalled after abort');
-                }).catch(e => {
-                    _handlerNeedsReinstall = false;
-                    scrollLog('[dyn] handler reinstall failed:', e.message);
-                }) ?? Promise.resolve();
-                // Wait up to 3s for the dialog to close post-abort.
-                const _ta = Date.now();
-                while (self.session.isDialogOpen && Date.now() - _ta < 3000)
-                    await new Promise(r => setTimeout(r, 50));
-                dynLog('ABORT-WAIT | cycle', cycle, '| dlgOpen after abort:', self.session.isDialogOpen, '| waited:', Date.now()-_ta, 'ms');
-                // If the kernel is still stuck in Dialog[] after abort, we cannot
-                // recover without a kernel restart.  Suspend the widget loop until
-                // the session epoch changes (i.e. user restarts the kernel).
-                if (self.session.isDialogOpen) {
-                    dynLog('STUCK | cycle', cycle, '| kernel stuck — suspending widget loop until kernel restart');
-                    await _putAllOutputs(htmlBySlot, 'paused');
-                    // Spin until epoch changes (kernel restarted) then exit loop.
-                    while (self._sessionEpoch === epoch && state.active)
-                        await new Promise(r => setTimeout(r, 500));
-                    return;  // exit runLoop
-                }
-            }
-
-            const t2 = Date.now();
-            while (self.session.isDialogOpen && Date.now() - t2 < 2000)
-                await new Promise(r => setTimeout(r, 30));
-            scrollLog('[dyn] cycle', cycle, '| dialog closed after', Date.now() - t2, 'ms | slots:', gotIdxs.length);
-            // Last-resort: dialog still open after all exits + 2s wait — abort to prevent
-            // the pre-mutex isDialogOpen guard from spinning forever on next cycles.
-            if (self.session.isDialogOpen) {
-                scrollLog('[dyn] cycle', cycle, '| dialog still open after t2 wait — aborting to prevent spin');
-                try { self.session.abort(); } catch(_) {}
-                _handlerNeedsReinstall = true;
-                _reinstallPromise = self.session.sub?.(
-                    'Quiet[Internal`AddHandler["Interrupt", Function[Null, Dialog[]]]]'
-                ).then(() => {
-                    _handlerNeedsReinstall = false;
-                    scrollLog('[dyn] interrupt handler reinstalled after t2-abort');
-                }).catch(e => {
-                    _handlerNeedsReinstall = false;
-                    scrollLog('[dyn] t2-abort reinstall failed:', e.message);
-                }) ?? Promise.resolve();
-                const _t2a = Date.now();
-                while (self.session.isDialogOpen && Date.now() - _t2a < 3000)
-                    await new Promise(r => setTimeout(r, 50));
-            }
-
-            // Brief pause so kernel resumes Do loop before next interrupt.
-            await new Promise(r => setTimeout(r, 150));
-            } finally {
-                if (_busyWatcher) { clearInterval(_busyWatcher); _busyWatcher = null; }
-                _releaseDlg();
-            }
-
-            if (!state.active || self._sessionEpoch !== epoch) continue;
-
-            // ---- Render pending slot values on _subKernel ----
-            // Dialog[] is now closed. pendingValues holds .mx temp file paths.
-            // The _subKernel is a separate process — SVG export cannot block the main kernel.
-            // This mirrors the subsession (⌥⇧↵) render path exactly.
-            let _anyChanged = false;
-            if (Object.keys(pendingValues).length > 0) {
-                try {
-                    const _subKern = await self._ensureSubKernel(imgDir, imgRel);
-            for (const [slotIdxStr, tmpFile] of Object.entries(pendingValues)) {
-                const slotIdx  = Number(slotIdxStr);
-                const fileEsc  = tmpFile.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-                const renderExpr = 'Module[{dynVal=Import["' + fileEsc + '"]},VsCodeRenderExpr[dynVal,"Auto",' + scale + ']]';
-                dynLog('RENDER | cycle', cycle, '| slot', slotIdx,
-                       '| tmpFile:', tmpFile,
-                       '| renderExpr[0..80]:', renderExpr.slice(0, 80));
-                try {
-                    const renderRes = await _subKern.sub(renderExpr);
-                    const htmlStr   = renderRes?.value;
-                    if (typeof htmlStr === 'string' && htmlStr.length > 0) {
-                        const _changed = htmlStr !== lastHtmlBySlot[slotIdx];
-                        dynLog('RENDER-OK | cycle', cycle, '| slot', slotIdx,
-                               '| htmlLen:', htmlStr.length,
-                               '| changed:', _changed,
-                               '| html[0..200]:', _changed ? htmlStr.slice(0, 200) : '(skipped)');
-                        if (_changed) {
-                            lastHtmlBySlot[slotIdx] = htmlStr;
-                            htmlBySlot[slotIdx] = self._processWLLatexBoxes(
-                                self._fixImageUris(htmlStr)
-                            );
-                            _anyChanged = true;
-                        }
-                            } else {
-                                dynLog('RENDER-EMPTY | cycle', cycle, '| slot', slotIdx,
-                                       '| res:', JSON.stringify(renderRes)?.slice(0, 80));
+                // Render pending slot values on _subKernel.
+                if (Object.keys(pendingValues).length > 0) {
+                    let _anyChanged = false;
+                    try {
+                        const _subKern = await self._ensureSubKernel(imgDir, imgRel);
+                        for (const [slotIdxStr, tmpFile] of Object.entries(pendingValues)) {
+                            const slotIdx  = Number(slotIdxStr);
+                            const fileEsc  = tmpFile.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+                            const renderExpr = 'Module[{dynVal=Import["' + fileEsc + '"]},VsCodeRenderExpr[dynVal,"Auto",' + scale + ']]';
+                            dynLog('RENDER | cycle', cycle, '| slot', slotIdx, '| tmpFile:', tmpFile);
+                            try {
+                                const renderRes = await _subKern.sub(renderExpr);
+                                const htmlStr   = renderRes?.value;
+                                if (typeof htmlStr === 'string' && htmlStr.length > 0) {
+                                    const _changed = htmlStr !== lastHtmlBySlot[slotIdx];
+                                    dynLog('RENDER-OK | cycle', cycle, '| slot', slotIdx,
+                                           '| htmlLen:', htmlStr.length, '| changed:', _changed,
+                                           '| html[0..200]:', _changed ? htmlStr.slice(0, 200) : '(skipped)');
+                                    if (_changed) {
+                                        lastHtmlBySlot[slotIdx] = htmlStr;
+                                        htmlBySlot[slotIdx] = self._processWLLatexBoxes(
+                                            self._fixImageUris(htmlStr));
+                                        _anyChanged = true;
+                                    }
+                                } else {
+                                    dynLog('RENDER-EMPTY | cycle', cycle, '| slot', slotIdx);
+                                }
+                            } catch (renderErr) {
+                                dynLog('RENDER-ERR | cycle', cycle, '| slot', slotIdx, '|', renderErr.message);
+                            } finally {
+                                try { require('fs').unlinkSync(tmpFile); } catch (_) {}
                             }
-                        } catch (renderErr) {
-                            dynLog('RENDER-ERR | cycle', cycle, '| slot', slotIdx, '|', renderErr.message);
-                        } finally {
-                            // Clean up temp file.
-                            try { require('fs').unlinkSync(tmpFile); } catch (_) {}
                         }
+                    } catch (subKernErr) {
+                        dynLog('SUBKERN-ERR | cycle', cycle, '|', subKernErr.message);
                     }
-                } catch (subKernErr) {
-                    dynLog('SUBKERN-ERR | cycle', cycle, '|', subKernErr.message);
+                    if (_anyChanged) {
+                        scrollLog('[dyn] cycle', cycle, '| rendered', Object.keys(pendingValues).length, 'slot(s)');
+                        await _putAllOutputs(htmlBySlot, 'live');
+                    }
                 }
             }
 
-            // Only redraw if at least one slot actually changed this cycle.
-            if (_anyChanged) await _putAllOutputs(htmlBySlot, 'live');
-            scrollLog('[dyn] cycle', cycle, '| done | sleeping 500ms');
-            await new Promise(r => setTimeout(r, 500));
+            await new Promise(r => setTimeout(r, 300));
         }
     };
+
 
     setTimeout(() => runLoop().catch(e => {
         scrollLog('[dyn] runLoop error:', e.message);
         // --- Safety cleanup: ensure a crash never leaves the kernel in a blocked state ---
-        // Mark widget inactive so no further output writes happen.
         state.active = false;
-        self._dynamicWidgets.delete(cellUri);
-        // Close any Dialog[] the crashed cycle may have left open — a stuck dialog
-        // blocks ALL future kernel evaluations until it is closed.
-        try { self.session.closeAllDialogs?.(); } catch (_) {}
-        // Release the dialog mutex so other widget loops (and new evaluations) can proceed.
-        // A leaked mutex would deadlock every subsequent busy-path interrupt attempt.
-        self._dynDialogMutex = Promise.resolve();
-        // Reset idle mutex too — a leaked sub() hold would block checkoutExecutionQueue.
-        self._dynIdleMutex = Promise.resolve();
+        if (self._dynamicWidgets.get(cellUri) === state) {
+            self._dynamicWidgets.delete(cellUri);
+        }
+        // Unregister all C++ Dynamic registry entries owned by this cell.
+        if (self.session?.unregisterDynamic) {
+            for (const de of dynExprs)
+                try { self.session.unregisterDynamic(cellUri + ':' + de.slotIndex); } catch (_) {}
+            try { self.session.unregisterDynamic('__watch__'); } catch (_) {}
+            try { self.session.unregisterDynamic('__evalsel__'); } catch (_) {}
+        }
+        // Restore legacy JS dialog path if no other Dynamic widgets are running.
+        if (self._dynamicWidgets.size === 0) {
+            try { self.session?.setDynAutoMode?.(false); } catch (_) {}
+        }
         // Clear stale Dynamic HTML from the cell so the output area doesn't show
         // a permanently frozen '⟳ Dynamic' badge.
         try {

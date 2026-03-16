@@ -208,41 +208,39 @@ async function pasteImageAsCell(self, args = {}) {
 function abortEvaluation(self) {
     // Dynamic cell loops are NOT killed on abort — they stay alive and naturally
     // transition to "paused" state once busy becomes false after the abort.
+    const _abortT0 = Date.now();
+    self.writeDebugLog(`[ABORT] abortEvaluation called | isAborting=${self.isAborting} _abortPending=${self._abortPending} queueLen=${self.executionQueue.queueLength()}`);
 
-    if (self.isAborting || self._abortPending) return;
-    if (!self.session) { self.executionQueue.clear(); return; }
+    if (self.isAborting || self._abortPending) {
+        self.writeDebugLog(`[ABORT] suppressed — already isAborting=${self.isAborting} _abortPending=${self._abortPending}`);
+        return;
+    }
+    if (!self.session) {
+        self.writeDebugLog('[ABORT] no session — just clearing queue');
+        self.executionQueue.clear();
+        return;
+    }
 
     // Signal widget loops to skip their current dialog cycle immediately.
     self._abortPending = true;
 
-    // Queue the actual kernel abort AFTER the current dialog mutex is released.
-    // This ensures we never call session.abort() mid-dialogEval, which confuses
-    // the WSTP link and prevents the aborted packet from ever arriving.
-    // Hard 2s fallback: if the dialog cycle takes longer, abort fires anyway.
-    const prevMutex = self._dynDialogMutex;
-    let _releaseMutexAbort;
-    self._dynDialogMutex = new Promise(r => _releaseMutexAbort = r);
-
     const doAbort = () => {
+        self.writeDebugLog(`[ABORT] doAbort fired | dt=${Date.now()-_abortT0}ms | queueLen=${self.executionQueue.queueLength()} | started=${self.executionQueue.queue[0]?.started}`);
         self._abortPending = false;
         self._evalDispatched = false;
         self._cellEpoch     = ((self._cellEpoch || 0) + 1) & 0xFFFFFF;
         self._dispatchEpoch = (self._dispatchEpoch + 1) & 0xFFFFFF;
-        _releaseMutexAbort(); // restore the mutex chain for future widget cycles
-
-        // Reset idle-sub mutex so any checkoutExecutionQueue waiting on it
-        // can proceed immediately after abort — don't wait for 3s sub() timeout.
-        self._dynIdleMutex = Promise.resolve();
 
         // Always close any stale dialog state before abort — closeAllDialogs()
-        // rejects all pending dialogEval/exitDialog promises immediately,
-        // so they don't hang while the kernel processes the abort.
+        // rejects all pending dialogEval/exitDialog promises immediately.
         self.session.closeAllDialogs?.();
 
         const didAbort = self.session.abort();
+        self.writeDebugLog(`[ABORT] session.abort() => ${didAbort} | dt=${Date.now()-_abortT0}ms`);
         scrollLog('[abort] session.abort() =>', didAbort);
 
         if (!didAbort) {
+            self.writeDebugLog('[ABORT] didAbort=false — clearing queue without setting isAborting');
             self.executionQueue.clear();
             return;
         }
@@ -253,45 +251,82 @@ function abortEvaluation(self) {
         // would block all future evaluations.
         const hasActiveCheckout = self.executionQueue.queue.length > 0 &&
                                   self.executionQueue.queue[0].started;
+        self.writeDebugLog(`[ABORT] hasActiveCheckout=${hasActiveCheckout} | queueLen=${self.executionQueue.queueLength()}`);
         self.executionQueue.clear();
 
         if (!hasActiveCheckout) {
+            self.writeDebugLog('[ABORT] no active checkout — not setting isAborting, done');
             scrollLog('[abort] no active checkout — not setting isAborting');
             return;
         }
 
         self.isAborting = true;
-        // Safety net: force-clear after 1s in case the aborted packet
-        // arrives but no handler processes it (timing edge case).
-        setTimeout(() => {
-            if (self.isAborting) {
-                scrollLog('[abort] safety timeout: forcing isAborting = false after 1s');
-                self.isAborting = false;
+        self.writeDebugLog('[ABORT] isAborting = true — waiting for aborted packet from kernel');
+
+        // If the first SIGINT is ignored (kernel in a CheckAbort-less region),
+        // retry 3 more times at increasing intervals before giving up.
+        // Do NOT auto-restart — that loses all variables.  Instead, show a
+        // warning so the user can decide whether to restart manually.
+        const _retryDelays = [2000, 5000, 10000];
+        let _retryIdx = 0;
+        const _scheduleRetry = () => {
+            if (_retryIdx >= _retryDelays.length) {
+                // Retries exhausted — kernel is not responding to SIGINT at all.
+                // Clear isAborting so future evaluations aren't permanently blocked,
+                // but leave the stuck evaluate() in place (kernel may still finish).
+                if (self.isAborting) {
+                    self.isAborting = false;
+                    self.writeDebugLog('[ABORT] all retries exhausted — kernel not responding to abort. Cleared isAborting. User must restart manually if needed.');
+                    scrollLog('[abort] all retries exhausted — kernel not responding');
+                    vscode.window.showWarningMessage(
+                        'Kernel is not responding to abort (computation may be in a non-interruptible loop). ' +
+                        'Either wait for it to finish, or restart the kernel.',
+                        'Restart Kernel'
+                    ).then(choice => {
+                        if (choice === 'Restart Kernel') self.restartKernel();
+                    });
+                }
+                return;
             }
-        }, 1000);
+            const delay = _retryDelays[_retryIdx++];
+            setTimeout(() => {
+                if (!self.isAborting) return; // abort was already handled — done
+                if (!self.session) return;
+                self.writeDebugLog(`[ABORT] retry ${_retryIdx}/${_retryDelays.length} — sending another SIGINT | dt=${Date.now()-_abortT0}ms`);
+                scrollLog(`[abort] retry ${_retryIdx} — sending another SIGINT`);
+                self.session.abort();
+                _scheduleRetry();
+            }, delay);
+        };
+        _scheduleRetry();
     };
 
-    // Wait for widget loop to release the mutex (max 2s), then abort.
-    Promise.race([
-        prevMutex,
-        new Promise(r => setTimeout(r, 2000))
-    ]).then(doAbort);
+    self.writeDebugLog('[ABORT] firing doAbort');
+    doAbort();
 }
 
 function restartKernel(self) {
-    self.writeDebugLog("[RESTART] restartKernel called");
+    const _rstT0 = Date.now();
+    self.writeDebugLog(`[RESTART] restartKernel called | isAborting=${self.isAborting} _abortPending=${self._abortPending} queueLen=${self.executionQueue.queueLength()} session=${!!self.session}`);
     if (self.isAborting) {
-        self.writeDebugLog("[RESTART] overriding in-progress abort");
+        self.writeDebugLog('[RESTART] overriding in-progress abort');
     }
+    self._abortPending = false;
     self.isAborting = false;
     self.executionQueue.clear();
+    self.writeDebugLog(`[RESTART] queue cleared | dt=${Date.now()-_rstT0}ms`);
 
     const hadKernel = !!self.session;
     self.quitKernel();
+    self.writeDebugLog(`[RESTART] quitKernel done | hadKernel=${hadKernel} | dt=${Date.now()-_rstT0}ms`);
 
     if (hadKernel || true) {
         setTimeout(() => {
-            self.launchKernel().catch(err => {
+            self.writeDebugLog(`[RESTART] launching new kernel | dt=${Date.now()-_rstT0}ms`);
+            self.launchKernel().then(() => {
+                self.writeDebugLog(`[RESTART] launchKernel resolved OK | total dt=${Date.now()-_rstT0}ms`);
+            }).catch(err => {
+                self.writeDebugLog(`[RESTART] launchKernel FAILED: ${err.message}`);
                 vscode.window.showErrorMessage(`Failed to restart kernel: ${err.message}`);
             });
         }, 300);

@@ -1,0 +1,91 @@
+#!/usr/bin/env wolframscript
+(* ::Package:: *)
+
+argv=Rest@$ScriptCommandLine;
+originalFile=argv[[1]];
+file=originalFile;
+
+(* PRE-PROCESS: Replace \[DoubleStruckX] with temporary markers in raw file *)
+rawContent = Import[file, "Text"];
+rawContent = StringReplace[rawContent, {
+  "\\[DoubleStruckA]" -> "__DBLSTKA__",
+  "\\[DoubleStruckB]" -> "__DBLSTKB__",
+  "\\[DoubleStruckC]" -> "__DBLSTKC__",
+  "\\[DoubleStruckD]" -> "__DBLSTKD__",
+  "\\[DoubleStruckE]" -> "__DBLSTKE__",
+  "\\[DoubleStruckF]" -> "__DBLSTKF__",
+  "\\[DoubleStruckG]" -> "__DBLSTKG__",
+  "\\[DoubleStruckH]" -> "__DBLSTKH__",
+  "\\[DoubleStruckI]" -> "__DBLSTKI__",
+  "\\[DoubleStruckJ]" -> "__DBLSTKJ__",
+  "\\[DoubleStruckK]" -> "__DBLSTKK__",
+  "\\[DoubleStruckL]" -> "__DBLSTKL__",
+  "\\[DoubleStruckM]" -> "__DBLSTKM__",
+  "\\[DoubleStruckN]" -> "__DBLSTKN__",
+  "\\[DoubleStruckO]" -> "__DBLSTKO__",
+  "\\[DoubleStruckP]" -> "__DBLSTKP__",
+  "\\[DoubleStruckQ]" -> "__DBLSTKQ__",
+  "\\[DoubleStruckR]" -> "__DBLSTKR__",
+  "\\[DoubleStruckS]" -> "__DBLSTKS__",
+  "\\[DoubleStruckT]" -> "__DBLSTKT__",
+  "\\[DoubleStruckU]" -> "__DBLSTKU__",
+  "\\[DoubleStruckV]" -> "__DBLSTKV__",
+  "\\[DoubleStruckW]" -> "__DBLSTKW__",
+  "\\[DoubleStruckX]" -> "__DBLSTKX__",
+  "\\[DoubleStruckY]" -> "__DBLSTKY__",
+  "\\[DoubleStruckZ]" -> "__DBLSTKZ__"
+}];
+(* Write modified notebook to temp file *)
+Export["/tmp/preprocessed.nb", rawContent, "Text"];
+file = "/tmp/preprocessed.nb";
+
+cellPattern = 
+  "Title" | "Input" | "Chapter" | "Section" | "Subsection" | 
+   "Subsubection" | "Text" | "Subchapter";
+
+types = {
+   "Title" -> "Cell" ,
+   "Chapter" -> "Cell",
+   "Subchapter" -> "Cell",
+   "Section" -> "Cell",
+   "Subsection" -> "Cell",
+   "Subsubsection" -> "Cell",
+   "Text" -> "Cell",
+   "Input" -> "RowBox"};
+
+finalSubs = {
+   "\r" -> "",
+   FromCharacterCode[62371] -> "\n",
+   FromCharacterCode[62754] -> "->",
+   FromCharacterCode[62751] -> ":>",
+   FromCharacterCode[62513] -> "=="
+   };
+
+cells = NotebookImport[file,
+   cellPattern,
+   "StyleImportRules" -> types];
+
+cells = ReplaceRepeated[{
+     StyleBox[a_, ___] :> a,  (* Strip StyleBox wrappers *)
+     RowBox[a_List] :> StringJoin[a],  (* Flatten RowBox - ReplaceRepeated will convert nested boxes to strings first *)
+     SubscriptBox[a_?StringQ, b_?StringQ] :> a <> b,
+     SuperscriptBox[a_?StringQ, b_?StringQ] :> 
+      "Power[" <> a <> "," <> b <> "]",
+     SqrtBox[a_?StringQ] :> "Sqrt[" <> a <> "]",
+     FractionBox[a_?StringQ, b_?StringQ] :> 
+      "(" <> a <> ")/(" <> b <> ")",
+     BoxData[a_] :> a
+     }][cells]/. a_?(VectorQ[#, StringQ] &) :> StringRiffle[a, "\n"];
+
+cells = Flatten@Replace[cells,
+    {a_?StringQ :> {"(* ::Input::Initialization:: *)", a, "\n"},
+     Cell[a_, b_, ___] :> {
+      "(* ::" <> b <> ":: *)", 
+       "(*" <> a <> "*)", "\n"}},
+    1];
+
+resString = 
+  "(* ::Package:: *)\n\n" <> 
+   StringReplace[StringRiffle[cells, "\n"], finalSubs];
+
+Export[StringDrop[originalFile, -2] <> "m", resString, "Text"];

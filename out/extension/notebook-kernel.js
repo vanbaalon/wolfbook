@@ -26,19 +26,35 @@ class ExecutionQueue {
         return this.queue.length;
     }
     clear() {
+        const { scrollLog } = require('./utils/dev-logger');
+        scrollLog(`[queue.clear] called | queueLen=${this.queue.length}`);
         console.log(`ExecutionQueue.clear() called with ${this.queue.length} items in queue`);
         const itemsToProcess = [...this.queue]; // Make a copy to avoid modification during iteration
+        this.queue = []; // Empty queue FIRST to prevent re-entrant calls
         itemsToProcess.forEach((item, index) => {
-            console.log(`Clearing execution ${index}: id=${item.id}, started=${item.started}`);
+            const ex = item.execution;
+            const cellIdx = ex?.cell?.index ?? '?';
+            scrollLog(`[queue.clear] item ${index}: cell=${cellIdx} started=${item.started} preVisual=${item.preVisualStarted}`);
+            console.log(`Clearing execution ${index}: cell=${cellIdx} id=${item.id}, started=${item.started}, preVisual=${item.preVisualStarted}`);
+            // For not-yet-started items: always try calling start() before end().
+            // Some VS Code versions throw "cannot end unstarted execution" if end()
+            // is called without prior start().  The throw here is benign (already started).
+            // For started items (started=true), skip — VS Code already has it running.
+            if (!item.started) {
+                try { ex.start(Date.now()); scrollLog(`[queue.clear]   start() OK cell=${cellIdx}`); }
+                catch (e) { scrollLog(`[queue.clear]   start() threw: ${e.message} cell=${cellIdx}`); }
+            }
             try {
-                this.end(item.id, false);
-                console.log(`Successfully ended execution ${index}`);
+                ex.end(false, Date.now());
+                scrollLog(`[queue.clear]   end() OK cell=${cellIdx}`);
+                console.log(`Successfully ended execution ${index} cell=${cellIdx}`);
             } catch (err) {
-                console.error(`Failed to end execution ${index}:`, err);
+                scrollLog(`[queue.clear]   end() THREW: ${err.message} cell=${cellIdx}`);
+                console.error(`Failed to end execution ${index}:`, err.message);
             }
         });
-        this.queue = [];
-        console.log("ExecutionQueue cleared, queue is now empty");
+        scrollLog('[queue.clear] done — queue is now empty');
+        console.log('ExecutionQueue cleared, queue is now empty');
     }
     push(execution) {
         const id = uuid.v4();
@@ -106,14 +122,23 @@ class ExecutionQueue {
         }
     }
     end(id, succeed) {
+        const { scrollLog } = require('./utils/dev-logger');
         const execution = this.find(id);
         if (execution) {
+            const cellIdx = execution.execution.cell.index;
             // Only call .start() if neither started nor preVisualStarted has already done so.
             if (!execution.started && !execution.preVisualStarted) {
                 execution.execution.start(Date.now());
             }
-            execution.execution.end(succeed, Date.now());
+            try {
+                execution.execution.end(succeed, Date.now());
+                scrollLog(`[queue.end] cell=${cellIdx} succeed=${succeed} OK`);
+            } catch (e) {
+                scrollLog(`[queue.end] cell=${cellIdx} end() threw: ${e.message}`);
+            }
             this.remove(id);
+        } else {
+            scrollLog(`[queue.end] id not found (already cleared) succeed=${succeed}`);
         }
     }
     getNextPendingExecution() {

@@ -9,7 +9,8 @@ node_modules/**/webpack.config.js
 # Extension source / dev files
 .vscode/**
 .vscode-test/**
-EditorVariation/**
+EditorVariation/README.md
+EditorVariation/unicode_mappings.json
 Docs/**
 
 # Build scripts (not needed at runtime)

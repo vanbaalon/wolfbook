@@ -74,8 +74,13 @@ For quick iteration without repackaging:
 
 ## Debugging
 
-Kernel logs: tail -f ~/wolfram-kernel-debug.log
-Extension:   Help -> Toggle Developer Tools -> Console
+Kernel logs:          tail -f ~/wolfram-kernel-debug.log
+Extension main log:   tail -f "VSCodeWolframExtension/Temporary Docs/wolfbook-extension-debug.log"
+Extension dyn log:    tail -f "VSCodeWolframExtension/Temporary Docs/wolfbook-dynamic-debug.log"
+Extension console:    Help -> Toggle Developer Tools -> Console
+
+Both extension logs are truncated automatically on each kernel start.
+They are written only on the dev machine (username k0959535); no-op on user installs.
 
 note: console.log() output never appears in VS Code Output panel
 

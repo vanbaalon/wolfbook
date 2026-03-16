@@ -10,7 +10,10 @@ const _output = require('../output/renderer');
 
 async function checkoutExecutionQueue(self) {
     const currentExecution = self.executionQueue.getNextPendingExecution();
-    if (!currentExecution) return;
+    if (!currentExecution) {
+        scrollLog('[checkout] getNextPending → null (queue empty or all started), returning');
+        return;
+    }
 
     // Was this cell queued via openDialogSubsession() on an idle kernel?
     // If so, add the "subsession" badge to every Out[...] label this run.
@@ -40,7 +43,8 @@ async function checkoutExecutionQueue(self) {
 
     if (!code.trim()) {
         self.executionQueue.start(currentExecution.id);
-        self.executionQueue.end(currentExecution.id, false);
+        self.executionQueue.end(currentExecution.id, true);  // empty cell = silent success
+        self.checkoutExecutionQueue();  // advance to next queued cell
         return;
     }
 
@@ -74,61 +78,37 @@ async function checkoutExecutionQueue(self) {
     scrollLog('[start] after executionQueue.start() | dt=', Date.now() - _t0, 'ms');
 
     // ---- Counter-scroll at execution START ----
-    // executionQueue.start() triggers VS Code's internal revealRange showing the executing
-    // cell. For long-running evaluations this means the viewport jumps at start and stays
-    // wrong for the entire duration. Fire the same freeze/pin logic that we use at end-time,
-    // so the viewport is correct from the very first frame of evaluation.
+    // executionQueue.start() triggers VS Code's internal revealRange showing
+    // the executing cell. Counter-scroll for advance mode only.
+    // Refine mode: the scroll guard in scroll/manager.js handles viewport
+    // restoration at Idle time — no timed counter-scrolls needed.
     {
         const _startCell = currentExecution.execution.cell;
         const _startNb   = _startCell.notebook;
         const _startIdx  = _startCell.index;
         const _startMode = self._pendingScrollMode || 'advance';
-        const _startVae  = self._pendingViewportAtExecute;
-        const _vaeS      = _startVae !== null ? _startVae : _startIdx;
-        const _visibleAtStart = _startMode !== 'refine' || (_vaeS <= _startIdx + 1);
-        scrollLog('[start-reveal] mode:', _startMode, '| vae:', _vaeS, '| cell:', _startIdx, '| visibleAtStart:', _visibleAtStart);
+        scrollLog('[start-reveal] mode:', _startMode, '| cell:', _startIdx);
 
-        if (_visibleAtStart) {
+        if (_startMode !== 'refine') {
             const _doStartReveal = (label) => {
                 try {
                     for (const _sed of vscode.window.visibleNotebookEditors) {
                         if (_sed.notebook === _startNb) {
                             const RC = vscode.NotebookRange ?? vscode.NotebookCellRange;
-                            if (_startMode === 'refine') {
-                                // Refine: freeze — do nothing if cell is still visible.
-                                // Only snap back with AtTop if VS Code scrolled it fully off-screen.
-                                // visibleRanges[0].start > cellIdx+1 means cell is fully above viewport.
-                                try {
-                                    const _vrNow = _sed.visibleRanges;
-                                    const _topNow = (_vrNow && _vrNow.length > 0) ? _vrNow[0].start : -1;
-                                    if (_topNow > _startIdx + 1) {
-                                        _sed.revealRange(new RC(_startIdx, _startIdx + 1),
-                                                         vscode.NotebookEditorRevealType.AtTop);
-                                        scrollLog('[start-reveal]', label, 'refine: cell scrolled off, AtTop cell', _startIdx, '(topNow=' + _topNow + ')');
-                                    } else {
-                                        scrollLog('[start-reveal]', label, 'refine: cell still visible, no-op (topNow=' + _topNow + ')');
-                                    }
-                                } catch (_) {
-                                    _sed.revealRange(new RC(_startIdx, _startIdx + 1),
-                                                     vscode.NotebookEditorRevealType.AtTop);
-                                }
-                            } else {
-                                // Advance: always AtTop — deterministic pin.
-                                _sed.revealRange(new RC(_startIdx, _startIdx + 1),
-                                                 vscode.NotebookEditorRevealType.AtTop);
-                                scrollLog('[start-reveal]', label, 'advance: AtTop cell', _startIdx);
-                            }
+                            _sed.revealRange(new RC(_startIdx, _startIdx + 1),
+                                             vscode.NotebookEditorRevealType.AtTop);
+                            scrollLog('[start-reveal]', label, 'advance: AtTop cell', _startIdx);
                             break;
                         }
                     }
                 } catch (e) { scrollLog('[start-reveal] error:', e.message); }
             };
-            // Fire at t=0, t=16, t=32, t=50ms — covers every rAF frame in the
-            // first 3 animation frames during which VS Code fires its internal scrolls.
             setTimeout(() => _doStartReveal('t=0'),  0);
             setTimeout(() => _doStartReveal('t=16'), 16);
             setTimeout(() => _doStartReveal('t=32'), 32);
             setTimeout(() => _doStartReveal('t=50'), 50);
+        } else {
+            scrollLog('[start-reveal] refine: skipped — scroll guard handles it');
         }
     }
 
@@ -216,12 +196,29 @@ async function checkoutExecutionQueue(self) {
                 else if ((ch === "\n" || ch === "\r") && depth === 0 && cDepth === 0) {
                     // potential split point
                     const t = current.trim();
+                    // Keep lines together when current ends with a continuation operator
+                    const endsWithOp = t.length > 0 && /[+\-*\/=]$/.test(t);
+                    // Peek at first non-whitespace char of the next line
+                    let peekPos = i + 1;
+                    if (ch === '\r' && next === '\n') peekPos = i + 2;
+                    while (peekPos < code.length && (code[peekPos] === ' ' || code[peekPos] === '\t')) peekPos++;
+                    const peekCh = peekPos < code.length ? code[peekPos] : '';
+                    const startsWithOp = t.length > 0 && peekCh.length > 0 && '=+-*/'.includes(peekCh);
+                    if (endsWithOp || startsWithOp) {
+                        // Continuation line — replace newline with space so WL
+                        // sees "a + b +c" (one expression), not "a + b\n+c" (two).
+                        current += ' ';
+                        if (ch === '\r' && next === '\n') i++; // skip \r of CRLF
+                        i++;
+                        lineNum++;
+                    } else {
                     if (t.length > 0) parts.push({ text: t, startLine: exprStartLine, endLine: lineNum });
                     current = "";
                     if (ch === "\r" && next === "\n") i++; // CRLF
                     i++;
                     lineNum++;
                     exprStartLine = lineNum;
+                    }
                 } else {
                     if (ch === '\n') lineNum++;   // newlines inside nested brackets
                     current += ch; i++;
@@ -251,11 +248,6 @@ async function checkoutExecutionQueue(self) {
         // fs — no kernel round-trip, no timing dependency.
         self._cleanupImgDir(currentExecution.execution.cell.notebook, imgDir);
 
-        // Wait for any ongoing idle sub() call to finish before starting evaluate().
-        // Concurrent sub() + evaluate() on the same WSTP link causes
-        // "WSGet out of sequence" / connection-lost errors.
-        if (self._dynIdleMutex) await self._dynIdleMutex;
-
         // NOTE: _evalDispatched and _dispatchEpoch are set AFTER the setup phase
         // (syntax check + VsCodeSetImgDir) so the Dynamic widget does not interrupt
         // these sub()/evaluate() calls. Interrupting the syntax-check sub() while it
@@ -264,9 +256,8 @@ async function checkoutExecutionQueue(self) {
         // loop, which is the earliest point the kernel is processing real cell code.
 
         // ---- Syntax check on full cell text (non-blocking, non-fatal) ----
-        // IMPORTANT: must run AFTER await _dynIdleMutex so it does NOT race
-        // with idle-path sub() calls from Dynamic widget loops. Concurrent
-        // sub() calls on the same WSTP link cause "WSGet out of sequence".
+        // sub() has higher priority than evaluate() — runs before queued evaluate() calls.
+        // Dynamic idle-path now uses subWhenIdle() (not sub()), so no mutex needed.
         try {
             const syntaxResult = await self.session.sub(
                 "VsCodeSyntaxCheck[" + JSON.stringify(code) + "]"
@@ -281,13 +272,33 @@ async function checkoutExecutionQueue(self) {
             self.writeDebugLog(`[CHECKOUT] Syntax check error (non-fatal): ${syntaxErr.message}`);
         }
 
+        const _coT0 = Date.now();
+        scrollLog('[checkout] VsCodeSetImgDir start | cell', currentExecution.execution.cell.index);
         try {
             await self.session.evaluate(
                 `VsCodeSetImgDir["${self.escapeWL(imgDir)}", "${self.escapeWL(imgRel)}"]`,
-                { interactive: false }
+                { interactive: false, rejectDialog: true }
             );
+            scrollLog('[checkout] VsCodeSetImgDir done | dt=', Date.now() - _coT0, 'ms');
         } catch (imgDirErr) {
             self.writeDebugLog(`[CHECKOUT] VsCodeSetImgDir failed (non-fatal): ${imgDirErr.message}`);
+        }
+
+        // Reinstall interrupt handler unconditionally before each cell run.
+        // A previous abort() (user-triggered or internal) clears the kernel's
+        // Internal`AddHandler["Interrupt",...] registration.  Without reinstalling
+        // here, every interrupt in the new run silently returns "no dialog" and
+        // the Dynamic widget loop spins in the 15-cycle backoff forever.
+        // This runs before _evalDispatched=true so Dynamic loops cannot interrupt it.
+        scrollLog('[checkout] interrupt handler reinstall start | cell', currentExecution.execution.cell.index);
+        try {
+            await self.session.evaluate(
+                'Quiet[Internal`AddHandler["Interrupt", Function[Null, Dialog[]]]]',
+                { interactive: false, rejectDialog: true }
+            );
+            scrollLog('[checkout] interrupt handler reinstalled at cell start | dt=', Date.now() - _coT0, 'ms');
+        } catch (hdlrErr) {
+            self.writeDebugLog(`[CHECKOUT] interrupt handler reinstall failed (non-fatal): ${hdlrErr.message}`);
         }
 
         let firstLineNum  = 0;
@@ -345,6 +356,7 @@ async function checkoutExecutionQueue(self) {
             if (self.isAborting) { anyAborted = true; break; }
 
             const { text: subExpr, startLine: _subStartLine, endLine: _subEndLine } = subExprs[i];
+            scrollLog('[checkout] sub', i, '/', subExprs.length, 'start | cell', currentExecution.execution.cell.index, '| expr:', subExpr.slice(0, 60));
 
             // ---- Skip Dynamic[...] — bypass kernel entirely ----
             // Dynamic slots are rendered by the widget loop; we never send
@@ -392,6 +404,35 @@ async function checkoutExecutionQueue(self) {
             // Skip pure comment sub-expressions entirely — they produce no kernel output
             // and must not count as a dispatch for LiveEvaluations / LiveCells.
             if (/^\(\*[\s\S]*\*\)$/.test(subExpr)) continue;
+
+            // ---- Handle WBInclude["path"] — intercept, convert, insert cells ----
+            // Never sent to the kernel; the converter runs out-of-process.
+            {
+                const _wbm = /^WBInclude\["((?:[^"\\]|\\.)*)"\]$/.exec(subExpr.trim());
+                if (_wbm) {
+                    const { handleWBInclude } = require('./wb-include');
+                    const _execCell   = currentExecution.execution.cell;
+                    const _nbDir      = path.dirname(_execCell.notebook.uri.fsPath);
+                    const _insertIdx  = _execCell.index;
+                    await handleWBInclude(self, _wbm[1], _nbDir, currentExecution, _insertIdx);
+                    continue;
+                }
+            }
+
+            // ---- Handle WBExport[] / WBExport["path"] — save notebook as .nb ----
+            // Never sent to the kernel.
+            {
+                const _wbem = /^WBExport\[(?:"((?:[^"\\]|\\.)*)")?\]$/.exec(subExpr.trim());
+                if (_wbem) {
+                    const { handleWBExport } = require('./wb-export');
+                    const _execCell = currentExecution.execution.cell;
+                    const _nbFsPath = _execCell.notebook.uri.fsPath;
+                    const _nbDir    = path.dirname(_nbFsPath);
+                    await handleWBExport(_wbem[1] || null, _nbDir, _nbFsPath, currentExecution);
+                    continue;
+                }
+            }
+
             // Increment per-sub-expression dispatch epoch.
             // LiveEvaluations tracks individual sub-expression dispatches after the
             // widget started.  Dynamic[...] and pure-comment slots do not count.
@@ -443,6 +484,7 @@ async function checkoutExecutionQueue(self) {
             // onMessage fires for kernel warnings/errors (e.g. Set::write for Protected).
             // onDialogBegin/onDialogPrint/onDialogEnd forward Dialog[] events to the
             // renderer so the dialog widget can appear while this eval is suspended.
+            const _subT0 = Date.now();
             const r = await self.session.evaluate(subExpr, {
                 onPrint: line => {
                     printLineQueue.push(line);
@@ -487,15 +529,22 @@ async function checkoutExecutionQueue(self) {
                     }
                     printOutput = null;  // next Print starts a fresh block
                 },
-                onDialogBegin: (level) => {
-                },
                 onDialogPrint: (line) => {
                     // Feed collector set by openDialogSubsession(); ignore otherwise.
                     if (self._dialogPrintCollector) self._dialogPrintCollector(line);
                 },
-                onDialogEnd: (level) => {
-                },
+                // NOTE: onDialogBegin/onDialogEnd intentionally omitted.
+                // Passing them sets hasOnDialogBegin=true in C++, which makes
+                // it respond 'i' to MENUPKT (idle-kernel interrupt).  On
+                // Wolfram 3/ARM64, 'i' to MENUPKT does not open Dialog[] and
+                // hangs the evaluate() permanently.  Without these callbacks
+                // C++ responds 'c' (continue) — the interrupt is dismissed and
+                // the evaluate resolves normally.
+                // v0.6.2 safety fallback: any BEGINDLGPKT (e.g. from a stale
+                // ScheduledTask after Dynamic teardown) is auto-closed by C++
+                // when hasOnDialogBegin=false — no hang, no legacy loop entered.
             });
+            scrollLog('[checkout] sub', i, 'done | dt=', Date.now() - _subT0, 'ms | aborted:', r.aborted, '| outputName:', r.outputName || '(none)');
 
             const lineN = r.cellIndex;
             if (i === 0 && lineN > 0) firstLineNum = lineN;
@@ -505,6 +554,11 @@ async function checkoutExecutionQueue(self) {
             if (printLineQueue.length > 0) await flushPrint();
 
             if (r.aborted) {
+                scrollLog('[checkout] r.aborted received — sub-expr', i, 'cell', currentExecution.execution.cell.index,
+                          '| clearing isAborting (' + self.isAborting + ')');
+                if (self.logFile !== 'Off') {
+                    try { fs.appendFileSync(self.logFile, `[ABORT-PKT] sub ${i} cell ${currentExecution.execution.cell.index} — aborted packet received, clearing isAborting\n`); } catch (_) {}
+                }
                 self.isAborting = false;
                 anyAborted = true;
                 // Do not show any output on abort — just stop silently.
@@ -514,14 +568,17 @@ async function checkoutExecutionQueue(self) {
             // ---- Render the result if non-Null (outputName non-empty) ----
             // VsCodeRender[N] reads Out[N] from the kernel's history via a
             // non-interactive evaluate() (EvaluatePacket) on the main kernel queue.
-            // _renderingActive blocks Dynamic widget interrupts for the duration.
+            // rejectDialog: true ensures any BEGINDLGPKT during render is auto-closed
+            // by C++, preventing Pattern-C deadlocks without needing _renderingActive.
             if (r.outputName && lineN > 0) {
-                self._renderingActive = true;
                 try {
+                    scrollLog('[checkout] VsCodeRender start | sub', i, '| lineN', lineN, '| format', format);
+                    const _renderT0 = Date.now();
                     const renderResult = await self.session.evaluate(
                         `VsCodeRender[${lineN}, "${format}", ${scale}]`,
-                        { interactive: false }
+                        { interactive: false, rejectDialog: true }
                     );
+                    scrollLog('[checkout] VsCodeRender done | dt=', Date.now() - _renderT0, 'ms | type:', renderResult?.result?.type);
                     // ---- Forward any messages emitted during the render call ----
                     // e.g. $RecursionLimit::reclim from a recursive Format rule.
                     // In the non-interactive render path these were previously silently
@@ -616,7 +673,7 @@ async function checkoutExecutionQueue(self) {
                         try {
                             const fallback = await self.session.evaluate(
                                 `CheckAbort[ToString[Out[${lineN}], InputForm], "(output unavailable)"]`,
-                                { interactive: false }
+                                { interactive: false, rejectDialog: true }
                             );
                             const outLabel =
                                 `<span style="font-size:10px;color:#888;margin-right:8px;">${r.outputName}</span>`;
@@ -651,7 +708,7 @@ async function checkoutExecutionQueue(self) {
                     try {
                         const fallback = await self.session.evaluate(
                             `ToString[Out[${lineN}], InputForm]`,
-                            { interactive: false }
+                            { interactive: false, rejectDialog: true }
                         );
                         if (fallback?.result?.type === "string" && fallback.result.value) {
                             const outLabel =
@@ -671,11 +728,11 @@ async function checkoutExecutionQueue(self) {
                             }
                         }
                     } catch (_) {}
-                } finally {
-                    self._renderingActive = false;
                 }
             }
         }
+
+        scrollLog('[checkout] sub-expr loop done | cell', currentExecution.execution.cell.index, '| total dt=', Date.now() - _coT0, 'ms | anyAborted:', anyAborted);
 
         if (firstLineNum > 0) currentExecution.execution.executionOrder = firstLineNum;
 
@@ -711,7 +768,9 @@ async function checkoutExecutionQueue(self) {
         let _nextCellCollapsed = false;
         let _nextCellCollapseIdx = -1;
         let _nextCellPrevMeta = null;
-        if (isKeyboardExec) {
+        // Refine mode: skip next-cell collapse trick — the scroll guard
+        // restores viewport at Idle, so suppressing [n,n+2) is unnecessary.
+        if (isKeyboardExec && !_wasRefine) {
             try {
                 const _nextCell = execCell.notebook.cellAt(execCell.index + 1);
                 if (_nextCell) {
@@ -765,6 +824,10 @@ async function checkoutExecutionQueue(self) {
         // anyMessages: mark cell as errored so VS Code shows the Copilot AI-fix button
         self.executionQueue.end(currentExecution.id, !anyAborted && !anyMessages);
         self._evalDispatched = false;
+        // Refresh Global` symbol highlighting once the kernel is idle.
+        setTimeout(() => {
+            try { require('./global-symbols').updateAll(self).catch(() => {}); } catch (_) {}
+        }, 200);
         // Deactivate early-start ref — execution is now closed; subsequent
         // _putAllOutputs calls in the widget switch to createNotebookCellExecution.
         if (_dynEarlyRef) { _dynEarlyRef.active = false; _dynEarlyRef = null; }
@@ -775,16 +838,6 @@ async function checkoutExecutionQueue(self) {
         // so call unconditionally whenever dynamic widgets are running.
         if (self._dynamicWidgets && self._dynamicWidgets.size > 0) {
             self.session.closeAllDialogs?.();
-            // NOTE: do NOT reset _dynIdleMutex here. The idle path sets
-            // _dynIdleMutex = new Promise(...) and calls session.sub() under that
-            // mutex. Overriding it with Promise.resolve() lets checkoutExecutionQueue
-            // bypass the lock — causing two concurrent session.sub() calls on the
-            // same WSTP link, which desynchronises the packet stream and makes the
-            // next session.evaluate() hang forever.  The idle sub() has a 3-second
-            // Promise.race timeout and always calls _releaseIdle() in its finally
-            // block, so checkoutExecutionQueue will unblock naturally within 3s max.
-            // (The _dynIdleMutex reset IS kept in doAbort() where the kernel is
-            //  explicitly killed and WSTP safety is not a concern.)
         }
 
         // ---- Dynamic widgets: scan all top-level expressions in the cell ----
@@ -863,46 +916,33 @@ async function checkoutExecutionQueue(self) {
             scrollLog('[post-end-reveal] cellWasVisible:', _cellWasVisible, '| _vae:', _vae, '| cell:', _peIdx);
 
             if (_cellWasVisible) {
-                const _doReveal = (label) => {
-                    try {
-                        for (const ed of vscode.window.visibleNotebookEditors) {
-                            if (ed.notebook === _peNb) {
-                                const RangeCtor = vscode.NotebookRange ?? vscode.NotebookCellRange;
-                                if (_wasRefine) {
-                                    // Refine: freeze — only act if VS Code scrolled cell fully off-screen.
-                                    // visibleRanges[0].start > cellIdx+1 ⇒ cell is fully above viewport.
-                                    try {
-                                        const _vrNow = ed.visibleRanges;
-                                        const _topNow = (_vrNow && _vrNow.length > 0) ? _vrNow[0].start : -1;
-                                        if (_topNow > _peIdx + 1) {
-                                            ed.revealRange(new RangeCtor(_peIdx, _peIdx + 1),
-                                                           vscode.NotebookEditorRevealType.AtTop);
-                                            scrollLog('[post-end-reveal]', label, 'refine: cell scrolled off, AtTop cell', _peIdx, '(topNow=' + _topNow + ')');
-                                        } else {
-                                            scrollLog('[post-end-reveal]', label, 'refine: cell still visible, no-op (topNow=' + _topNow + ')');
-                                        }
-                                    } catch (_) {
-                                        ed.revealRange(new RangeCtor(_peIdx, _peIdx + 1),
-                                                       vscode.NotebookEditorRevealType.AtTop);
-                                    }
-                                } else {
+                if (_wasRefine) {
+                    // Refine: scroll guard in scroll/manager.js handles viewport restoration
+                    // at Idle time with drift detection — no counter-scrolls needed here.
+                    scrollLog('[post-end-reveal] refine: skipped — scroll guard handles it');
+                } else {
+                    const _doReveal = (label) => {
+                        try {
+                            for (const ed of vscode.window.visibleNotebookEditors) {
+                                if (ed.notebook === _peNb) {
+                                    const RangeCtor = vscode.NotebookRange ?? vscode.NotebookCellRange;
                                     // Advance: always AtTop — deterministic pin.
                                     ed.revealRange(new RangeCtor(_peIdx, _peIdx + 1),
                                                    vscode.NotebookEditorRevealType.AtTop);
                                     scrollLog('[post-end-reveal]', label, 'advance: AtTop cell', _peIdx);
+                                    break;
                                 }
-                                break;
                             }
+                        } catch (e) {
+                            scrollLog('[post-end-reveal] error (non-fatal):', e.message);
                         }
-                    } catch (e) {
-                        scrollLog('[post-end-reveal] error (non-fatal):', e.message);
-                    }
-                };
-                // t=0/16/32/50ms: cover every rAF frame during which VS Code fires its scroll.
-                setTimeout(() => _doReveal('t=0'),  0);
-                setTimeout(() => _doReveal('t=16'), 16);
-                setTimeout(() => _doReveal('t=32'), 32);
-                setTimeout(() => _doReveal('t=50'), 50);
+                    };
+                    // t=0/16/32/50ms: cover every rAF frame during which VS Code fires its scroll.
+                    setTimeout(() => _doReveal('t=0'),  0);
+                    setTimeout(() => _doReveal('t=16'), 16);
+                    setTimeout(() => _doReveal('t=32'), 32);
+                    setTimeout(() => _doReveal('t=50'), 50);
+                }
             } else {
                 scrollLog('[post-end-reveal] cell', _peIdx, 'clearly above viewport at execute (_vae=' + _vae + ') — not overriding VS Code scroll');
             }
@@ -1004,10 +1044,15 @@ async function checkoutExecutionQueue(self) {
         }
 
     } catch (err) {
-        // "Cannot modify cell output after calling resolve" is a benign race
-        // that occurs when abort clears the execution before output arrives.
-        // Silently ignore it — do not write to the Output panel.
-        const isResolvedRace = err.message && err.message.includes('Cannot modify cell output after calling resolve');
+        // "Cannot modify cell output after calling resolve" (VS Code ≤ 1.80) or
+        // "NotebookCellExecution has been resolved already!" (VS Code ≥ 1.81) or
+        // similar — a benign race that occurs when abort/restart clears the execution
+        // before output arrives.  Silently ignore — do not write to the Output panel.
+        const isResolvedRace = err.message && (
+            err.message.includes('Cannot modify cell output after calling resolve') ||
+            err.message.includes('resolved already') ||
+            err.message.includes('has been resolved')
+        );
         if (isResolvedRace) {
             self.executionQueue.end(currentExecution.id, false);
             self.checkoutExecutionQueue();

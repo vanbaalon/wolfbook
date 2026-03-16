@@ -21,11 +21,69 @@
 
 const vscode = require('vscode');
 const path   = require('path');
+const os     = require('os');
+const fs     = require('fs');
 const { truncateLogs, dynLog, scrollLog } = require('../utils/dev-logger');
 const _encoding = require('../utils/encoding');
+const { clearEvalLog } = require('../tools/index');
 
 // ---------------------------------------------------------------------------
-// Offline UI — desaturate notebook cell backgrounds while kernel is down
+// Orphan-kernel protection: track PIDs in a temp file
+//
+// On VS Code window reload, deactivate() is called and quitKernel() runs.
+// On crash / SIGKILL of the extension host, no cleanup runs — the next
+// launchKernel() detects stale PIDs and kills those processes before starting
+// a fresh kernel.
+
+const _PID_FILE = path.join(os.tmpdir(), 'wolfbook_kernel_pids.json');
+
+function _savePidFile(pids) {
+    try { fs.writeFileSync(_PID_FILE, JSON.stringify(pids)); } catch(_) {}
+}
+function _loadPidFile() {
+    try { return JSON.parse(fs.readFileSync(_PID_FILE, 'utf8')); } catch(_) { return []; }
+}
+function _clearPidFile() {
+    try { fs.unlinkSync(_PID_FILE); } catch(_) {}
+}
+
+/** Kill a process by PID. Tries SIGTERM; schedules SIGKILL 1.5s later in case
+ *  WolframKernel is stuck inside Dialog[] and ignores SIGTERM. */
+function _killPid(pid) {
+    try {
+        process.kill(pid, 0); // throws if PID doesn't exist
+        if (process.platform === 'win32') {
+            // On Windows, process.kill is TerminateProcess — immediate.
+            process.kill(pid);
+        } else {
+            process.kill(pid, 'SIGTERM');
+            // Belt-and-suspenders: SIGKILL if still alive after 1.5 s
+            setTimeout(() => {
+                try { process.kill(pid, 'SIGKILL'); } catch(_) {}
+            }, 1500);
+        }
+        console.log('[lifecycle] killed stale kernel PID:', pid);
+    } catch(_) { /* process already gone */ }
+}
+
+/** Read the PID file, kill every listed process, and delete the file. */
+function _killStalePids() {
+    const pids = _loadPidFile();
+    if (pids.length > 0) {
+        scrollLog('[lifecycle] killing stale kernel PIDs from previous session:', pids);
+        for (const pid of pids) _killPid(pid);
+        _clearPidFile();
+    }
+}
+
+/** Append a PID to the PID file (called after kernel/subkernel starts). */
+function _appendPid(pid) {
+    const pids = _loadPidFile();
+    if (!pids.includes(pid)) {
+        pids.push(pid);
+        _savePidFile(pids);
+    }
+}
 
 function applyKernelOfflineUI(self) {
     try { self._rendererMessaging.postMessage({ type: 'kernel-offline' }); } catch (_) {}
@@ -119,6 +177,10 @@ function _toGrayscaleHex(hex) {
 async function launchKernel(self, WstpSession) {
     console.log('[launchKernel] entering (WSTP)');
 
+    // Kill any WolframKernel processes abandoned by a previous VS Code session
+    // (crash, SIGKILL of extension host, etc.).
+    _killStalePids();
+
     let kernelInitPath = path.join(self.extensionPath, "resources", "init.wl");
     if (process.platform === "win32") kernelInitPath = kernelInitPath.replace(/\\/g, "/");
 
@@ -138,6 +200,8 @@ async function launchKernel(self, WstpSession) {
         // Increment epoch so the renderer knows outputs from this point belong
         // to a fresh session.  Broadcast happens after init.wl loads.
         self._sessionEpoch++;
+        // Clear the AI eval log so it only contains entries from this kernel epoch.
+        clearEvalLog();
         // Stop all running Dynamic widgets — they belong to the old session.
         if (self._dynamicWidgets) {
             for (const state of self._dynamicWidgets.values()) state.active = false;
@@ -149,17 +213,18 @@ async function launchKernel(self, WstpSession) {
                 try {
                     const _clrExec = self._controller.createNotebookCellExecution(_dc);
                     _clrExec.start(Date.now());
-                    await _clrExec.replaceOutput([]);
-                    _clrExec.end(true, Date.now());
-                } catch (_e) { /* cell may already be gone */ }
+                    try {
+                        await _clrExec.replaceOutput([]);
+                        _clrExec.end(true, Date.now());
+                    } catch (_e) {
+                        // replaceOutput failed (cell edited/deleted mid-flight) — still end
+                        try { _clrExec.end(false, Date.now()); } catch (_) {}
+                    }
+                } catch (_e) { /* createNotebookCellExecution or start() threw — cell gone */ }
             }
             self._dynCells.clear();
         }
-        // Reset dialog mutex so new widgets start on a clean chain.
-        self._dynDialogMutex = Promise.resolve();
-        self._dynIdleMutex   = Promise.resolve();
         self._abortPending   = false;
-        self._renderingActive = false;
         // Clear per-output registries — Out[N] values don't survive a kernel restart,
         // so any format-switch buttons referencing them must become inert.
         self._outputRegistry.clear();
@@ -224,6 +289,16 @@ async function launchKernel(self, WstpSession) {
         vscode.commands.executeCommand("setContext", "wolframKernelActive", true);
         vscode.window.showInformationMessage("Wolfram kernel launched (WSTP), ready for evaluation.");
         console.log('[launchKernel] kernel ready');
+
+        // Track PID so we can kill the process if VS Code crashes before quitKernel()
+        try {
+            const _pidExpr = await self.session.sub('$ProcessID');
+            if (_pidExpr?.type === 'integer' && typeof _pidExpr.value === 'number') {
+                _appendPid(_pidExpr.value);
+                scrollLog('[launchKernel] kernel PID registered:', _pidExpr.value);
+            }
+        } catch(_) {}
+
         clearKernelOfflineUI(self);
         // Notify renderer that a new session started — it will remove stale
         // Out[N]= labels and expand banners tagged with the old epoch.
@@ -238,6 +313,24 @@ async function launchKernel(self, WstpSession) {
         // is already 'started').
         scrollLog('[launchKernel] resolved — calling checkoutExecutionQueue | queue:', self.executionQueue.queueLength());
         self.checkoutExecutionQueue();
+
+        // Prewarm the sub-kernel immediately so it's ready for both Cmd+Shift+E
+        // (evaluateSelection SVG/MathML rendering) and Dynamic widget rendering.
+        // Fire-and-forget — main kernel is already running so this doesn't block cells.
+        setTimeout(() => { try { prewarmSubKernel(self, WstpSession); } catch(_) {} }, 500);
+
+        // Background-prewarm on the MAIN kernel via subWhenIdle() so it runs only
+        // when the kernel is idle and never blocks user cell evaluation:
+        //  1) SVG/typesetting pipeline — eliminates the 2-4s lag on first Plot output
+        //  2) CodeParser` package      — eliminates lag on first syntax check
+        // Both were previously loaded synchronously inside init.wl, adding 3-5s to
+        // every kernel startup.  Now init.wl returns immediately and these run later.
+        if (self.session?.subWhenIdle) {
+            self.session.subWhenIdle(
+                'Quiet[CheckAbort[ExportString[Graphics[{}],"SVG"],Null]];' +
+                'Quiet[Needs["CodeParser`"]]; $hasCodeParser=True; Null'
+            ).catch(() => {});
+        }
     } catch (err) {
         console.error(`[launchKernel] error: ${err.message}`);
         vscode.window.showErrorMessage(`Failed to launch Wolfram kernel: ${err.message}`);
@@ -266,6 +359,11 @@ function prewarmSubKernel(self, WstpSession) {
     self._subKernelInitPromise = (async () => {
         self._subKernel = new WstpSession(kernelCommand, { interactive: false });
         await self._subKernel.sub('Block[{$wolframResourceDir="' + _resDirEscPre + '"},Get["' + _initEscaped + '"]]');
+        // Track PID for orphan cleanup
+        try {
+            const _spid = await self._subKernel.sub('$ProcessID');
+            if (_spid?.type === 'integer' && typeof _spid.value === 'number') _appendPid(_spid.value);
+        } catch(_) {}
         self._subKernelReady = true;
         console.log('[subKernel] prewarm complete (ready for imgDir)');
     })().catch(e => {
@@ -304,6 +402,11 @@ async function ensureSubKernel(self, WstpSession, imgDir, imgRel) {
         self._subKernel = new WstpSession(kernelCommand, { interactive: false });
         await self._subKernel.sub('Block[{$wolframResourceDir="' + _resDirEscEns + '"},Get["' + _initEscaped + '"]]');
         await self._subKernel.sub(_setImgDir);
+        // Track PID for orphan cleanup
+        try {
+            const _spidE = await self._subKernel.sub('$ProcessID');
+            if (_spidE?.type === 'integer' && typeof _spidE.value === 'number') _appendPid(_spidE.value);
+        } catch(_) {}
         self._subKernelReady = true;
         console.log('[subKernel] ready');
     })();
@@ -327,6 +430,9 @@ function quitKernel(self) {
         try { self.session.close(); } catch (_) {}
         self.session = undefined;
     }
+    // Clean exit — remove the PID file so the next launch doesn't try to kill
+    // processes that are already gone.
+    _clearPidFile();
     self.kernelStatusString = "unresolved";
     vscode.commands.executeCommand("setContext", "wolframKernelActive", false);
     applyKernelOfflineUI(self);

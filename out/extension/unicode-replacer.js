@@ -182,8 +182,9 @@ function registerUnicodeReplacer(context, extensionPath) {
 
                 const completions = [];
                 
-                // Create completion items for all Unicode characters
+                // Create completion items for all Unicode characters (skip entries with empty name)
                 unicodeMappings.forEach(mapping => {
+                    if (!mapping || !mapping.name) return;
                     const item = new vscode.CompletionItem(mapping.name, vscode.CompletionItemKind.Text);
                     item.insertText = mapping.name + ']';
                     item.detail = `${mapping.unicode} (U+${mapping.hex.substring(2).toUpperCase()})`;

@@ -29,14 +29,14 @@ function _resolveScrollLogPath() {
         if (!folders || folders.length === 0) return null;
         const extFolder = folders.find(f => f.name === 'VSCodeWolframExtension');
         const base = extFolder ? extFolder.uri.fsPath : folders[0].uri.fsPath;
-        _scrollLogPath = require('path').join(base, 'Temporary Docs', 'wolfram-scroll-debug.log');
-        _dynLogPath    = require('path').join(base, 'Temporary Docs', 'wolfram-dyn-debug.log');
+        _scrollLogPath = require('path').join(base, 'Temporary Docs', 'wolfbook-extension-debug.log');
+        _dynLogPath    = require('path').join(base, 'Temporary Docs', 'wolfbook-dynamic-debug.log');
     } catch (_) {}
     return _scrollLogPath;
 }
 
 /**
- * scrollLog — writes to DevTools console + wolfram-scroll-debug.log.
+ * scrollLog — writes to DevTools console + wolfbook-extension-debug.log.
  * No-op on non-dev machines.
  */
 function scrollLog(...args) {
