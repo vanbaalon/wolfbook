@@ -453,7 +453,7 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
         const label = status === 'live'    ? '⟳ Dynamic' + badgeExtra
                     : status === 'paused'  ? '⏸ Dynamic' + badgeExtra
                     : status === 'expired' ? '⊘ Dynamic' + badgeExtra
-                    : '⏳ Dynamic' + badgeExtra + ' — start a computation to see live updates';
+                    : '⏳ Dynamic' + badgeExtra;
         return '<span style="font-size:9px;color:' + color + ';background:' + bg + ';' +
                'border:1px solid ' + bd + ';border-radius:3px;padding:1px 6px;' +
                'margin-right:6px;font-style:italic;">' + label + '</span>';
@@ -564,16 +564,16 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
         } catch (_) {}
     };
 
-    // Show initial waiting badge.
-    _putAllOutputs({}, 'waiting');
+    // Show initial paused badge — the widget is alive,
+    // the runLoop starts polling via subAuto() in 250ms.
+    _putAllOutputs({}, 'paused');
 
-    // ---- Register Dynamic expressions with C++ for automatic periodic evaluation ----
-    // The C++ layer (WSTP 0.6.0) intercepts every BEGINDLGPKT opened by the kernel's
-    // scheduled task, evaluates all registered expressions inline, stores results, and
-    // closes the dialog — no JS round-trip required.  JS polls getDynamicResults().
-    // Unregister this cell's old slots first (idempotent), then register fresh ones.
-    // Do NOT call clearDynamicRegistry() — that would wipe other concurrently-active
-    // Dynamic cells' registrations.
+    // ---- Register Dynamic expressions with C++ registry ----
+    // Dynamic slot updates use subAuto() which auto-routes:
+    //   idle  → subWhenIdle (immediate)
+    //   busy  → Dialog[] inline eval via ScheduledTask
+    // C++ registry also provides live-watch (__watch__) and eval-selection
+    // (__evalsel__) piggyback via getDynamicResults().
     if (self.session?.registerDynamic) {
         for (const de of dynExprs)
             try { self.session.unregisterDynamic(cellUri + ':' + de.slotIndex); } catch (_) {}
@@ -582,14 +582,15 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
             self.session.registerDynamic(cellUri + ':' + de.slotIndex,
                 'VsCodeDynExportValue["' + escaped + '"]');
         }
-        self.session.setDynamicInterval(300);  // C++ fires Dialog[] every 300 ms; also auto-sets dynAutoMode=true (0.6.1+)
+        // Enable ScheduledTask so Dialog[] fires during busy evals.
+        // subAuto's busy path evaluates inline inside Dialog[] cycles.
+        try { self.session.setDynamicInterval(300); } catch (_) {}
     }
 
     const runLoop = async () => {
         let cycle = 0;
         const htmlBySlot     = {};
         const lastHtmlBySlot = {};
-        let lastBusy = false;
         let _lastIdleRenderEpoch = null;
         let _lastBadgeTickTime   = 0;
         let _lastWatchExpr       = null;  // tracks registered watch expr to re-register on change
@@ -610,12 +611,12 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
                 // overwritten cellUri with a new state object.
                 if (self._dynamicWidgets.get(cellUri) === state) {
                     self._dynamicWidgets.delete(cellUri);
-                    // Restore legacy JS dialog path once no Dynamic cells are running.
-                    // dynAutoMode=true (set on cell start) persists session-wide and
-                    // intercepts every BEGINDLGPKT — breaking openDialogSubsession,
-                    // live-watch interrupt, and eval-selection when no Dynamic is active.
+                    // Restore legacy paths once no Dynamic cells are running.
+                    // dynAutoMode=true intercepts every BEGINDLGPKT — must disable.
+                    // setDynamicInterval(0) stops the ScheduledTask timer.
                     if (self._dynamicWidgets.size === 0) {
                         try { self.session?.setDynAutoMode?.(false); } catch (_) {}
+                        try { self.session?.setDynamicInterval?.(0); } catch (_) {}
                     }
                 }
                 // Clear cell output immediately so stale Dynamic content doesn't
@@ -700,117 +701,99 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
 
             scrollLog('[dyn] cycle', cycle, '| busy:', busy, '| dispatched:', self._evalDispatched, '| evalsSince:', _evalsSinceStart);
 
-            if (!busy) {
-                // ---- Idle-eval path ----
-                // Use subWhenIdle() per slot — safe at idle, no mutex needed since
-                // subWhenIdle() only runs when all queues are fully drained.
-                // Skip if no new dispatch has occurred since the last idle render.
-                const _queueEmpty = self.executionQueue.queue.length === 0;
-                const _epochUnchanged = _lastIdleRenderEpoch !== null
-                    && self._dispatchEpoch === _lastIdleRenderEpoch;
-                if (_queueEmpty && !self._abortPending && !_epochUnchanged
-                        && (Date.now() - (self._dynLastIdleRender || 0)) > 1000) {
-                    self._dynLastIdleRender = Date.now();
-                    const scale = Number(self.config?.get?.('imageScale') ?? 0.8) || 0.8;
-                    const idlePending = {};
-                    for (const de of dynExprs) {
-                        if (!state.active || self._sessionEpoch !== epoch) break;
-                        if (_slotExpired[dynExprs.indexOf(de)]) continue;
-                        const escaped = de.dynInner.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-                        const expr = 'VsCodeDynExportValue["' + escaped + '"]';
-                        dynLog('IDLE-SEND | cycle', cycle, '| slot', de.slotIndex);
-                        try {
-                            const res = await Promise.race([
-                                self.session.subWhenIdle(expr, { timeout: 3000 }),
-                                new Promise((_, rej) => setTimeout(() => rej(new Error('idle-sub timeout')), 3500))
-                            ]);
-                            const _rv = res?.value;
-                            if (typeof _rv === 'string' && _rv.startsWith('WLVAL:FILE:')) {
-                                const tmpFile = _rv.slice('WLVAL:FILE:'.length)
-                                    .replace(/\\012/g, '').replace(/\\015/g, '')
-                                    .replace(/[^a-zA-Z0-9/_.-]/g, '');
-                                idlePending[de.slotIndex] = tmpFile;
-                            }
-                        } catch (_idleErr) {
-                            dynLog('IDLE-SEND-ERR | cycle', cycle, '| slot', de.slotIndex, '|', _idleErr.message);
-                        }
-                    }
-                    if (Object.keys(idlePending).length > 0) {
-                        let _anyIdleChanged = false;
-                        try {
-                            const _subKern = await self._ensureSubKernel(imgDir, imgRel);
-                            for (const [slotIdxStr, tmpFile] of Object.entries(idlePending)) {
-                                const slotIdx = Number(slotIdxStr);
-                                const fileEsc = tmpFile.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-                                const renderExpr = 'Module[{dynVal=Import["' + fileEsc + '"]},VsCodeRenderExpr[dynVal,"Auto",' + scale + ']]';
-                                try {
-                                    const renderRes = await _subKern.sub(renderExpr);
-                                    const htmlStr = renderRes?.value;
-                                    if (typeof htmlStr === 'string' && htmlStr.length > 0) {
-                                        dynLog('IDLE-RENDER-OK | cycle', cycle, '| slot', slotIdx,
-                                               '| htmlLen:', htmlStr.length,
-                                               '| changed:', htmlStr !== lastHtmlBySlot[slotIdx]);
-                                        if (htmlStr !== lastHtmlBySlot[slotIdx]) {
-                                            lastHtmlBySlot[slotIdx] = htmlStr;
-                                            htmlBySlot[slotIdx] = self._processWLLatexBoxes(self._fixImageUris(htmlStr));
-                                            _anyIdleChanged = true;
-                                        }
-                                    }
-                                } catch (_) {
-                                } finally {
-                                    try { require('fs').unlinkSync(tmpFile); } catch (_) {}
-                                }
-                            }
-                        } catch (_subErr) {
-                            dynLog('IDLE-SUBKERN-ERR | cycle', cycle, '|', _subErr.message);
-                        }
-                        if (_anyIdleChanged || (isFinite(liveTimeSec) && !_isExpired)) {
-                            _lastBadgeTickTime = Date.now();
-                            await _putAllOutputs(htmlBySlot, 'live');
-                        }
-                    }
-                    _lastIdleRenderEpoch = self._dispatchEpoch;
-                }
-
-                // busy→idle transition: clear cached values and show "waiting".
-                if (lastBusy) {
-                    for (const k of Object.keys(htmlBySlot)) delete htmlBySlot[k];
-                    await _putAllOutputs({}, 'waiting');
-                }
-                lastBusy = false;
-
-                // LiveTime countdown tick: refresh badge every ~1 s on the idle path.
-                const _anyLiveTimeActive = dynExprs.some((de, _i) => de.dynLiveTime != null && !_slotExpired[_i]);
-                if (_anyLiveTimeActive && (Date.now() - _lastBadgeTickTime) >= 950) {
-                    _lastBadgeTickTime = Date.now();
-                    await _putAllOutputs(htmlBySlot, 'live');
-                }
-                await new Promise(r => setTimeout(r, 300));
-                continue;
-            }
-
-            // ---- Busy path: poll C++ getDynamicResults() ----
-            lastBusy = true;
-
             // LiveEvaluations / LiveCells limit: stop updating once hit.
-            if (isFinite(liveEvalLimit) && _evalsSinceStart >= liveEvalLimit) {
-                if (!_isExpired) {
-                    scrollLog('[dyn] busy-path: LiveEvaluations limit reached, showing expired badge');
-                    _markExpired();
-                    await _putAllOutputs(htmlBySlot, 'expired');
+            if (!busy) {
+                if (isFinite(liveEvalLimit) && _evalsSinceStart >= liveEvalLimit) {
+                    if (!_isExpired) {
+                        scrollLog('[dyn] LiveEvaluations limit reached, showing expired badge');
+                        _markExpired();
+                        await _putAllOutputs(htmlBySlot, 'expired');
+                    }
+                    await new Promise(r => setTimeout(r, 300)); continue;
                 }
-                await new Promise(r => setTimeout(r, 300)); continue;
-            }
-            if (isFinite(liveCellLimit) && _cellsSinceStart >= liveCellLimit) {
-                if (!_isExpired) {
-                    scrollLog('[dyn] busy-path: LiveCells limit reached, showing expired badge');
-                    _markExpired();
-                    await _putAllOutputs(htmlBySlot, 'expired');
+                if (isFinite(liveCellLimit) && _cellsSinceStart >= liveCellLimit) {
+                    if (!_isExpired) {
+                        scrollLog('[dyn] LiveCells limit reached, showing expired badge');
+                        _markExpired();
+                        await _putAllOutputs(htmlBySlot, 'expired');
+                    }
+                    await new Promise(r => setTimeout(r, 300)); continue;
                 }
-                await new Promise(r => setTimeout(r, 300)); continue;
             }
 
-            // Live-watch: re-register in C++ registry when the watched expression changes.
+            // ---- Unified subAuto() path ----
+            // Poll Dynamic values via subAuto() which auto-routes:
+            //   idle  → subWhenIdle (immediate)
+            //   busy  → Dialog[] inline eval via ScheduledTask
+            // Dynamic values update continuously, even during busy evals.
+            const _queueEmpty = self.executionQueue.queue.length === 0;
+            const _epochUnchanged = _lastIdleRenderEpoch !== null
+                && self._dispatchEpoch === _lastIdleRenderEpoch;
+            if (!self._abortPending && !_epochUnchanged
+                    && (Date.now() - (self._dynLastIdleRender || 0)) > 1000) {
+                self._dynLastIdleRender = Date.now();
+                const scale = Number(self.config?.get?.('imageScale') ?? 0.8) || 0.8;
+                const idlePending = {};
+                for (const de of dynExprs) {
+                    if (!state.active || self._sessionEpoch !== epoch) break;
+                    if (_slotExpired[dynExprs.indexOf(de)]) continue;
+                    const escaped = de.dynInner.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+                    const expr = 'VsCodeDynExportValue["' + escaped + '"]';
+                    dynLog('DYN-SUB | cycle', cycle, '| slot', de.slotIndex);
+                    try {
+                        const res = await Promise.race([
+                            self.session.subAuto(expr),
+                            new Promise((_, rej) => setTimeout(() => rej(new Error('dyn-sub timeout')), 8000))
+                        ]);
+                        const _rv = res?.value;
+                        if (typeof _rv === 'string' && _rv.startsWith('WLVAL:FILE:')) {
+                            const tmpFile = _rv.slice('WLVAL:FILE:'.length)
+                                .replace(/\\012/g, '').replace(/\\015/g, '')
+                                .replace(/[^a-zA-Z0-9/_.-]/g, '');
+                            idlePending[de.slotIndex] = tmpFile;
+                        }
+                    } catch (_subErr) {
+                        dynLog('DYN-SUB-ERR | cycle', cycle, '| slot', de.slotIndex, '|', _subErr.message);
+                    }
+                }
+                if (Object.keys(idlePending).length > 0) {
+                    let _anyChanged = false;
+                    try {
+                        const _subKern = await self._ensureSubKernel(imgDir, imgRel);
+                        for (const [slotIdxStr, tmpFile] of Object.entries(idlePending)) {
+                            const slotIdx = Number(slotIdxStr);
+                            const fileEsc = tmpFile.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+                            const renderExpr = 'Module[{dynVal=Import["' + fileEsc + '"]},VsCodeRenderExpr[dynVal,"Auto",' + scale + ']]';
+                            try {
+                                const renderRes = await _subKern.sub(renderExpr);
+                                const htmlStr = renderRes?.value;
+                                if (typeof htmlStr === 'string' && htmlStr.length > 0) {
+                                    dynLog('DYN-RENDER-OK | cycle', cycle, '| slot', slotIdx,
+                                           '| htmlLen:', htmlStr.length,
+                                           '| changed:', htmlStr !== lastHtmlBySlot[slotIdx]);
+                                    if (htmlStr !== lastHtmlBySlot[slotIdx]) {
+                                        lastHtmlBySlot[slotIdx] = htmlStr;
+                                        htmlBySlot[slotIdx] = self._processWLLatexBoxes(self._fixImageUris(htmlStr));
+                                        _anyChanged = true;
+                                    }
+                                }
+                            } catch (_) {
+                            } finally {
+                                try { require('fs').unlinkSync(tmpFile); } catch (_) {}
+                            }
+                        }
+                    } catch (_subErr) {
+                        dynLog('DYN-SUBKERN-ERR | cycle', cycle, '|', _subErr.message);
+                    }
+                    if (_anyChanged) {
+                        _lastBadgeTickTime = Date.now();
+                        await _putAllOutputs(htmlBySlot, 'live');
+                    }
+                }
+                _lastIdleRenderEpoch = self._dispatchEpoch;
+            }
+
+            // Live-watch: register via C++ registry when expression changes.
             const _curWatchExpr = self._liveWatchExpr || null;
             if (_curWatchExpr !== _lastWatchExpr) {
                 _lastWatchExpr = _curWatchExpr;
@@ -826,18 +809,15 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
             // Eval-selection one-shot: register in C++ registry when set.
             if (self._evalSelectionExpr) {
                 const _esExpr = self._evalSelectionExpr;
-                self._evalSelectionExpr = null;  // Clear before await to prevent double-register.
+                self._evalSelectionExpr = null;
                 try { self.session?.registerDynamic?.('__evalsel__', _esExpr); } catch (_) {}
                 dynLog('EVAL-SEL-REG | cycle', cycle, '| registered one-shot');
             }
 
-            // Poll C++ results buffer — getDynamicResults() clears the buffer on call.
+            // Poll C++ results buffer for live-watch / eval-selection results.
             const results = self.session?.getDynamicResults?.();
             if (results && Object.keys(results).length > 0) {
-                const scale = Number(self.config?.get?.('imageScale') ?? 0.8) || 0.8;
-                const pendingValues = {};
                 for (const [id, dynResult] of Object.entries(results)) {
-                    // Live-watch result.
                     if (id === '__watch__') {
                         if (!dynResult.error && self._liveWatchCallback) {
                             dynLog('LIVE-WATCH | cycle', cycle, '| delivering result');
@@ -845,7 +825,6 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
                         }
                         continue;
                     }
-                    // Eval-selection result.
                     if (id === '__evalsel__') {
                         const _esCb = self._evalSelectionCallback;
                         self._evalSelectionCallback = null;
@@ -856,80 +835,16 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
                         }
                         continue;
                     }
-                    // Dynamic slot result: id is "cellUri:slotIndex".
-                    const colonIdx = id.lastIndexOf(':');
-                    if (colonIdx < 0) continue;
-                    const slotId  = id.slice(0, colonIdx);
-                    const slotIdx = Number(id.slice(colonIdx + 1));
-                    if (slotId !== cellUri || !isFinite(slotIdx)) continue;
-                    if (dynResult.error) {
-                        dynLog('DYN-RESULT-ERR | cycle', cycle, '| slot', slotIdx, '|', dynResult.error);
-                        continue;
-                    }
-                    const _rv = dynResult.value;
-                    if (typeof _rv === 'string' && _rv.startsWith('WLVAL:FILE:')) {
-                        // WSTP text-mode inserts '\012' line-continuation into long strings.
-                        const tmpFile = _rv.slice('WLVAL:FILE:'.length)
-                            .replace(/\\012/g, '').replace(/\\015/g, '')
-                            .replace(/[^a-zA-Z0-9/_.-]/g, '');
-                        dynLog('WLVAL-FILE | cycle', cycle, '| slot', slotIdx, '| cleanPath:', tmpFile);
-                        pendingValues[slotIdx] = tmpFile;
-                    } else if (_rv === 'WLVAL:FAILED') {
-                        dynLog('WLVAL-FAILED | cycle', cycle, '| slot', slotIdx);
-                    } else if (typeof _rv === 'string' && _rv.length > 0) {
-                        dynLog('RAW-FALLBACK | cycle', cycle, '| slot', slotIdx, '| raw[0..120]:', _rv.slice(0, 120));
-                        const _esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-                        htmlBySlot[slotIdx] =
-                            '<pre style="margin:0;padding:4px 0;font-size:12px;color:#c00;' +
-                            'font-family:monospace;white-space:pre-wrap;">'
-                            + '⚠ restart kernel to load VsCodeDynExportValue\n\n'
-                            + _esc(_rv.slice(0, 500)) + '</pre>';
-                    }
-                }
-
-                // Render pending slot values on _subKernel.
-                if (Object.keys(pendingValues).length > 0) {
-                    let _anyChanged = false;
-                    try {
-                        const _subKern = await self._ensureSubKernel(imgDir, imgRel);
-                        for (const [slotIdxStr, tmpFile] of Object.entries(pendingValues)) {
-                            const slotIdx  = Number(slotIdxStr);
-                            const fileEsc  = tmpFile.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-                            const renderExpr = 'Module[{dynVal=Import["' + fileEsc + '"]},VsCodeRenderExpr[dynVal,"Auto",' + scale + ']]';
-                            dynLog('RENDER | cycle', cycle, '| slot', slotIdx, '| tmpFile:', tmpFile);
-                            try {
-                                const renderRes = await _subKern.sub(renderExpr);
-                                const htmlStr   = renderRes?.value;
-                                if (typeof htmlStr === 'string' && htmlStr.length > 0) {
-                                    const _changed = htmlStr !== lastHtmlBySlot[slotIdx];
-                                    dynLog('RENDER-OK | cycle', cycle, '| slot', slotIdx,
-                                           '| htmlLen:', htmlStr.length, '| changed:', _changed,
-                                           '| html[0..200]:', _changed ? htmlStr.slice(0, 200) : '(skipped)');
-                                    if (_changed) {
-                                        lastHtmlBySlot[slotIdx] = htmlStr;
-                                        htmlBySlot[slotIdx] = self._processWLLatexBoxes(
-                                            self._fixImageUris(htmlStr));
-                                        _anyChanged = true;
-                                    }
-                                } else {
-                                    dynLog('RENDER-EMPTY | cycle', cycle, '| slot', slotIdx);
-                                }
-                            } catch (renderErr) {
-                                dynLog('RENDER-ERR | cycle', cycle, '| slot', slotIdx, '|', renderErr.message);
-                            } finally {
-                                try { require('fs').unlinkSync(tmpFile); } catch (_) {}
-                            }
-                        }
-                    } catch (subKernErr) {
-                        dynLog('SUBKERN-ERR | cycle', cycle, '|', subKernErr.message);
-                    }
-                    if (_anyChanged) {
-                        scrollLog('[dyn] cycle', cycle, '| rendered', Object.keys(pendingValues).length, 'slot(s)');
-                        await _putAllOutputs(htmlBySlot, 'live');
-                    }
+                    // Ignore Dynamic slot results from C++ registry — we use subAuto() now.
                 }
             }
 
+            // LiveTime countdown tick: refresh badge every ~1 s.
+            const _anyLiveTimeActive = dynExprs.some((de, _i) => de.dynLiveTime != null && !_slotExpired[_i]);
+            if (_anyLiveTimeActive && (Date.now() - _lastBadgeTickTime) >= 950) {
+                _lastBadgeTickTime = Date.now();
+                await _putAllOutputs(htmlBySlot, 'live');
+            }
             await new Promise(r => setTimeout(r, 300));
         }
     };
@@ -952,6 +867,7 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
         // Restore legacy JS dialog path if no other Dynamic widgets are running.
         if (self._dynamicWidgets.size === 0) {
             try { self.session?.setDynAutoMode?.(false); } catch (_) {}
+            try { self.session?.setDynamicInterval?.(0); } catch (_) {}
         }
         // Clear stale Dynamic HTML from the cell so the output area doesn't show
         // a permanently frozen '⟳ Dynamic' badge.

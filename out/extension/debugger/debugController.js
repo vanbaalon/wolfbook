@@ -482,14 +482,17 @@ class DebugController {
             return;
         }
 
-        // ── Idle-kernel path ──
+        // ── Idle-kernel path — use subAuto to avoid interfering with queued cells ──
         if (this._liveWatchInFlight) return;
         this._liveWatchInFlight = true;
         try {
-            scrollLog('[live-watch] idle evaluate');
-            const result = await ctrl.session.evaluate(wlExpr, { interactive: false });
-            scrollLog('[live-watch] idle result type:', result?.result?.type);
-            this._applyWatchWexpr(wl, result?.result);
+            scrollLog('[live-watch] idle subAuto');
+            const result = await Promise.race([
+                ctrl.session.subAuto(wlExpr),
+                new Promise((_, rej) => setTimeout(() => rej(new Error('watch-idle-timeout')), 6000))
+            ]);
+            scrollLog('[live-watch] idle result type:', result?.type);
+            this._applyWatchWexpr(wl, result);
         } catch (err) {
             scrollLog('[live-watch] idle ERROR:', err.message);
             this._watchPanel.liveUpdate(wl.map(n => ({ name: n, shortVal: '⚠', fullVal: String(err), isWatch: true })));

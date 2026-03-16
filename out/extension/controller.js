@@ -68,7 +68,13 @@ try {
                                  `wstp-${_plat}-${_arch}.node`);
     const _fallback = _path.join(__dirname, '../../wstp/build/Release/wstp.node');
     const _addonPath = _fs.existsSync(_prebuilt) ? _prebuilt : _fallback;
-    WstpSession = require(_addonPath).WstpSession;
+    const _addon = require(_addonPath);
+    WstpSession = _addon.WstpSession;
+    // Pipe C++ DiagLog messages into the extension debug log.
+    if (typeof _addon.setDiagHandler === 'function') {
+        const { scrollLog: _sl } = require('./utils/dev-logger');
+        _addon.setDiagHandler(msg => { _sl('[C++]', msg); });
+    }
 } catch (e) {
     console.error("[Controller] Failed to load wstp.node:", e.message);
 }

@@ -369,7 +369,7 @@ async function checkoutExecutionQueue(self) {
                 const _dynPlaceholder = new vscode.NotebookCellOutput([
                     vscode.NotebookCellOutputItem.text(
                         '<div style="color:#888;font-style:italic;font-size:12px;padding:4px 0;">' +
-                        '⏳ Dynamic — start a computation to see live updates</div>',
+                        'Waiting for computation…</div>',
                         'x-application/wolfram-language-html'
                     ),
                     // TODO-1g: initial text/plain so Copilot knows which Dynamic expression this slot holds
