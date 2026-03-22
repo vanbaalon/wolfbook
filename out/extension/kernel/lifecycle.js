@@ -200,7 +200,7 @@ async function launchKernel(self, WstpSession) {
         // Increment epoch so the renderer knows outputs from this point belong
         // to a fresh session.  Broadcast happens after init.wl loads.
         self._sessionEpoch++;
-        // Clear the AI eval log so it only contains entries from this kernel epoch.
+        // Append a kernel restart marker to the persistent AI action log.
         clearEvalLog();
         // Stop all running Dynamic widgets — they belong to the old session.
         if (self._dynamicWidgets) {
@@ -229,8 +229,9 @@ async function launchKernel(self, WstpSession) {
         // so any format-switch buttons referencing them must become inert.
         self._outputRegistry.clear();
         self.truncatedOutputCells.clear();
-        // Truncate both debug logs on every kernel start so only fresh data is visible.
+        // Truncate all debug logs on every kernel start so only fresh data is visible.
         truncateLogs();
+        if (typeof self.clearDebugLog === 'function') self.clearDebugLog();
         dynLog('=== KERNEL START ===', new Date().toISOString());
         self.session = new WstpSession(kernelCommand, { interactive: true });
 

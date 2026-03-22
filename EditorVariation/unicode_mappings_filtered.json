@@ -6437,5 +6437,421 @@
     "mathematica": "\\[]",
     "name": "",
     "aliases": []
+  },
+  {
+    "hex": "0x1d538",
+    "codepoint": 120120,
+    "unicode": "𝔸",
+    "mathematica": "\\[DoubleStruckCapitalA]",
+    "name": "DoubleStruckCapitalA",
+    "aliases": []
+  },
+  {
+    "hex": "0x1d539",
+    "codepoint": 120121,
+    "unicode": "𝔹",
+    "mathematica": "\\[DoubleStruckCapitalB]",
+    "name": "DoubleStruckCapitalB",
+    "aliases": []
+  },
+  {
+    "hex": "0x2102",
+    "codepoint": 8450,
+    "unicode": "ℂ",
+    "mathematica": "\\[DoubleStruckCapitalC]",
+    "name": "DoubleStruckCapitalC",
+    "aliases": []
+  },
+  {
+    "hex": "0x1d53b",
+    "codepoint": 120123,
+    "unicode": "𝔻",
+    "mathematica": "\\[DoubleStruckCapitalD]",
+    "name": "DoubleStruckCapitalD",
+    "aliases": []
+  },
+  {
+    "hex": "0x1d53c",
+    "codepoint": 120124,
+    "unicode": "𝔼",
+    "mathematica": "\\[DoubleStruckCapitalE]",
+    "name": "DoubleStruckCapitalE",
+    "aliases": []
+  },
+  {
+    "hex": "0x1d53d",
+    "codepoint": 120125,
+    "unicode": "𝔽",
+    "mathematica": "\\[DoubleStruckCapitalF]",
+    "name": "DoubleStruckCapitalF",
+    "aliases": []
+  },
+  {
+    "hex": "0x1d53e",
+    "codepoint": 120126,
+    "unicode": "𝔾",
+    "mathematica": "\\[DoubleStruckCapitalG]",
+    "name": "DoubleStruckCapitalG",
+    "aliases": []
+  },
+  {
+    "hex": "0x210d",
+    "codepoint": 8461,
+    "unicode": "ℍ",
+    "mathematica": "\\[DoubleStruckCapitalH]",
+    "name": "DoubleStruckCapitalH",
+    "aliases": []
+  },
+  {
+    "hex": "0x1d540",
+    "codepoint": 120128,
+    "unicode": "𝕀",
+    "mathematica": "\\[DoubleStruckCapitalI]",
+    "name": "DoubleStruckCapitalI",
+    "aliases": []
+  },
+  {
+    "hex": "0x1d541",
+    "codepoint": 120129,
+    "unicode": "𝕁",
+    "mathematica": "\\[DoubleStruckCapitalJ]",
+    "name": "DoubleStruckCapitalJ",
+    "aliases": []
+  },
+  {
+    "hex": "0x1d542",
+    "codepoint": 120130,
+    "unicode": "𝕂",
+    "mathematica": "\\[DoubleStruckCapitalK]",
+    "name": "DoubleStruckCapitalK",
+    "aliases": []
+  },
+  {
+    "hex": "0x1d543",
+    "codepoint": 120131,
+    "unicode": "𝕃",
+    "mathematica": "\\[DoubleStruckCapitalL]",
+    "name": "DoubleStruckCapitalL",
+    "aliases": []
+  },
+  {
+    "hex": "0x1d544",
+    "codepoint": 120132,
+    "unicode": "𝕄",
+    "mathematica": "\\[DoubleStruckCapitalM]",
+    "name": "DoubleStruckCapitalM",
+    "aliases": []
+  },
+  {
+    "hex": "0x2115",
+    "codepoint": 8469,
+    "unicode": "ℕ",
+    "mathematica": "\\[DoubleStruckCapitalN]",
+    "name": "DoubleStruckCapitalN",
+    "aliases": []
+  },
+  {
+    "hex": "0x1d546",
+    "codepoint": 120134,
+    "unicode": "𝕆",
+    "mathematica": "\\[DoubleStruckCapitalO]",
+    "name": "DoubleStruckCapitalO",
+    "aliases": []
+  },
+  {
+    "hex": "0x2119",
+    "codepoint": 8473,
+    "unicode": "ℙ",
+    "mathematica": "\\[DoubleStruckCapitalP]",
+    "name": "DoubleStruckCapitalP",
+    "aliases": []
+  },
+  {
+    "hex": "0x211a",
+    "codepoint": 8474,
+    "unicode": "ℚ",
+    "mathematica": "\\[DoubleStruckCapitalQ]",
+    "name": "DoubleStruckCapitalQ",
+    "aliases": []
+  },
+  {
+    "hex": "0x211d",
+    "codepoint": 8477,
+    "unicode": "ℝ",
+    "mathematica": "\\[DoubleStruckCapitalR]",
+    "name": "DoubleStruckCapitalR",
+    "aliases": []
+  },
+  {
+    "hex": "0x1d54a",
+    "codepoint": 120138,
+    "unicode": "𝕊",
+    "mathematica": "\\[DoubleStruckCapitalS]",
+    "name": "DoubleStruckCapitalS",
+    "aliases": []
+  },
+  {
+    "hex": "0x1d54b",
+    "codepoint": 120139,
+    "unicode": "𝕋",
+    "mathematica": "\\[DoubleStruckCapitalT]",
+    "name": "DoubleStruckCapitalT",
+    "aliases": []
+  },
+  {
+    "hex": "0x1d54c",
+    "codepoint": 120140,
+    "unicode": "𝕌",
+    "mathematica": "\\[DoubleStruckCapitalU]",
+    "name": "DoubleStruckCapitalU",
+    "aliases": []
+  },
+  {
+    "hex": "0x1d54d",
+    "codepoint": 120141,
+    "unicode": "𝕍",
+    "mathematica": "\\[DoubleStruckCapitalV]",
+    "name": "DoubleStruckCapitalV",
+    "aliases": []
+  },
+  {
+    "hex": "0x1d54e",
+    "codepoint": 120142,
+    "unicode": "𝕎",
+    "mathematica": "\\[DoubleStruckCapitalW]",
+    "name": "DoubleStruckCapitalW",
+    "aliases": []
+  },
+  {
+    "hex": "0x1d54f",
+    "codepoint": 120143,
+    "unicode": "𝕏",
+    "mathematica": "\\[DoubleStruckCapitalX]",
+    "name": "DoubleStruckCapitalX",
+    "aliases": []
+  },
+  {
+    "hex": "0x1d550",
+    "codepoint": 120144,
+    "unicode": "𝕐",
+    "mathematica": "\\[DoubleStruckCapitalY]",
+    "name": "DoubleStruckCapitalY",
+    "aliases": []
+  },
+  {
+    "hex": "0x2124",
+    "codepoint": 8484,
+    "unicode": "ℤ",
+    "mathematica": "\\[DoubleStruckCapitalZ]",
+    "name": "DoubleStruckCapitalZ",
+    "aliases": []
+  },
+  {
+    "hex": "0x1d552",
+    "codepoint": 120146,
+    "unicode": "𝕒",
+    "mathematica": "\\[DoubleStrucka]",
+    "name": "DoubleStrucka",
+    "aliases": []
+  },
+  {
+    "hex": "0x1d553",
+    "codepoint": 120147,
+    "unicode": "𝕓",
+    "mathematica": "\\[DoubleStruckb]",
+    "name": "DoubleStruckb",
+    "aliases": []
+  },
+  {
+    "hex": "0x1d554",
+    "codepoint": 120148,
+    "unicode": "𝕔",
+    "mathematica": "\\[DoubleStruckc]",
+    "name": "DoubleStruckc",
+    "aliases": []
+  },
+  {
+    "hex": "0x1d555",
+    "codepoint": 120149,
+    "unicode": "𝕕",
+    "mathematica": "\\[DoubleStruckd]",
+    "name": "DoubleStruckd",
+    "aliases": []
+  },
+  {
+    "hex": "0x1d556",
+    "codepoint": 120150,
+    "unicode": "𝕖",
+    "mathematica": "\\[DoubleStrucke]",
+    "name": "DoubleStrucke",
+    "aliases": []
+  },
+  {
+    "hex": "0x1d557",
+    "codepoint": 120151,
+    "unicode": "𝕗",
+    "mathematica": "\\[DoubleStruckf]",
+    "name": "DoubleStruckf",
+    "aliases": []
+  },
+  {
+    "hex": "0x1d558",
+    "codepoint": 120152,
+    "unicode": "𝕘",
+    "mathematica": "\\[DoubleStruckg]",
+    "name": "DoubleStruckg",
+    "aliases": []
+  },
+  {
+    "hex": "0x1d559",
+    "codepoint": 120153,
+    "unicode": "𝕙",
+    "mathematica": "\\[DoubleStruckh]",
+    "name": "DoubleStruckh",
+    "aliases": []
+  },
+  {
+    "hex": "0x1d55a",
+    "codepoint": 120154,
+    "unicode": "𝕚",
+    "mathematica": "\\[DoubleStrucki]",
+    "name": "DoubleStrucki",
+    "aliases": []
+  },
+  {
+    "hex": "0x1d55b",
+    "codepoint": 120155,
+    "unicode": "𝕛",
+    "mathematica": "\\[DoubleStruckj]",
+    "name": "DoubleStruckj",
+    "aliases": []
+  },
+  {
+    "hex": "0x1d55c",
+    "codepoint": 120156,
+    "unicode": "𝕜",
+    "mathematica": "\\[DoubleStruckk]",
+    "name": "DoubleStruckk",
+    "aliases": []
+  },
+  {
+    "hex": "0x1d55d",
+    "codepoint": 120157,
+    "unicode": "𝕝",
+    "mathematica": "\\[DoubleStruckl]",
+    "name": "DoubleStruckl",
+    "aliases": []
+  },
+  {
+    "hex": "0x1d55e",
+    "codepoint": 120158,
+    "unicode": "𝕞",
+    "mathematica": "\\[DoubleStruckm]",
+    "name": "DoubleStruckm",
+    "aliases": []
+  },
+  {
+    "hex": "0x1d55f",
+    "codepoint": 120159,
+    "unicode": "𝕟",
+    "mathematica": "\\[DoubleStruckn]",
+    "name": "DoubleStruckn",
+    "aliases": []
+  },
+  {
+    "hex": "0x1d560",
+    "codepoint": 120160,
+    "unicode": "𝕠",
+    "mathematica": "\\[DoubleStrucko]",
+    "name": "DoubleStrucko",
+    "aliases": []
+  },
+  {
+    "hex": "0x1d561",
+    "codepoint": 120161,
+    "unicode": "𝕡",
+    "mathematica": "\\[DoubleStruckp]",
+    "name": "DoubleStruckp",
+    "aliases": []
+  },
+  {
+    "hex": "0x1d562",
+    "codepoint": 120162,
+    "unicode": "𝕢",
+    "mathematica": "\\[DoubleStruckq]",
+    "name": "DoubleStruckq",
+    "aliases": []
+  },
+  {
+    "hex": "0x1d563",
+    "codepoint": 120163,
+    "unicode": "𝕣",
+    "mathematica": "\\[DoubleStruckr]",
+    "name": "DoubleStruckr",
+    "aliases": []
+  },
+  {
+    "hex": "0x1d564",
+    "codepoint": 120164,
+    "unicode": "𝕤",
+    "mathematica": "\\[DoubleStrucks]",
+    "name": "DoubleStrucks",
+    "aliases": []
+  },
+  {
+    "hex": "0x1d565",
+    "codepoint": 120165,
+    "unicode": "𝕥",
+    "mathematica": "\\[DoubleStruckt]",
+    "name": "DoubleStruckt",
+    "aliases": []
+  },
+  {
+    "hex": "0x1d566",
+    "codepoint": 120166,
+    "unicode": "𝕦",
+    "mathematica": "\\[DoubleStrucku]",
+    "name": "DoubleStrucku",
+    "aliases": []
+  },
+  {
+    "hex": "0x1d567",
+    "codepoint": 120167,
+    "unicode": "𝕧",
+    "mathematica": "\\[DoubleStruckv]",
+    "name": "DoubleStruckv",
+    "aliases": []
+  },
+  {
+    "hex": "0x1d568",
+    "codepoint": 120168,
+    "unicode": "𝕨",
+    "mathematica": "\\[DoubleStruckw]",
+    "name": "DoubleStruckw",
+    "aliases": []
+  },
+  {
+    "hex": "0x1d569",
+    "codepoint": 120169,
+    "unicode": "𝕩",
+    "mathematica": "\\[DoubleStruckx]",
+    "name": "DoubleStruckx",
+    "aliases": []
+  },
+  {
+    "hex": "0x1d56a",
+    "codepoint": 120170,
+    "unicode": "𝕪",
+    "mathematica": "\\[DoubleStrucky]",
+    "name": "DoubleStrucky",
+    "aliases": []
+  },
+  {
+    "hex": "0x1d56b",
+    "codepoint": 120171,
+    "unicode": "𝕫",
+    "mathematica": "\\[DoubleStruckz]",
+    "name": "DoubleStruckz",
+    "aliases": []
   }
 ]

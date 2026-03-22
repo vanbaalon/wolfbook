@@ -27,6 +27,7 @@ const notebook_settings_1 = require("./notebook-settings");
 const vscode_1 = require("vscode");
 const node_1 = require("vscode-languageclient/node");
 const _tools = require('./tools/index');
+const { wlSanitizeForLSP } = require('./namedchars');
 const NOTEBOOK_TYPE = 'extended-wolfram-notebook';
 let extensionKernel = new find_kernel_1.FindKernel();
 let client;
@@ -76,6 +77,154 @@ function activate(context) {
     const evalSel = require('./editor/evaluateSelection');
     evalSel.register(context, () => controller, _watchPanel);
     require('./execution/global-symbols').register(context);
+
+    // ── WL Code Formatter ──────────────────────────────────────────────────
+    try {
+        const { format: wlFormat } = require('./wl-formatter');
+
+        function _getFormatterOpts(overrides) {
+            const cfg = vscode.workspace.getConfiguration('wolfbook');
+            return {
+                lineWidth: cfg.get('formatter.pageLength', 150),
+                replaceNamedChars: cfg.get('formatter.replaceNamedChars', false),
+                ...overrides
+            };
+        }
+
+        function _formatDocument(editor, opts) {
+            const doc  = editor.document;
+            const text = doc.getText();
+            let formatted;
+            try {
+                formatted = wlFormat(text, opts);
+            } catch (e) {
+                vscode.window.showErrorMessage('Wolfbook formatter error: ' + e.message);
+                return Promise.resolve(false);
+            }
+            const fullRange = new vscode.Range(
+                doc.positionAt(0),
+                doc.positionAt(text.length)
+            );
+            const edit = new vscode.WorkspaceEdit();
+            edit.replace(doc.uri, fullRange, formatted);
+            return vscode.workspace.applyEdit(edit);
+        }
+
+        context.subscriptions.push(vscode.commands.registerCommand('wolfbook.format', () => {
+            const editor = vscode.window.activeTextEditor;
+            if (!editor) return;
+            _formatDocument(editor, _getFormatterOpts({}));
+        }));
+
+        context.subscriptions.push(vscode.commands.registerCommand('wolfbook.formatWithUTF', () => {
+            const editor = vscode.window.activeTextEditor;
+            if (!editor) return;
+            _formatDocument(editor, _getFormatterOpts({ replaceNamedChars: true }));
+        }));
+
+        context.subscriptions.push(vscode.commands.registerCommand('wolfbook.formatWithUTFWide', () => {
+            const editor = vscode.window.activeTextEditor;
+            if (!editor) return;
+            _formatDocument(editor, _getFormatterOpts({ replaceNamedChars: true, lineWidth: 200 }));
+        }));
+
+        context.subscriptions.push(
+            vscode.languages.registerDocumentFormattingEditProvider(
+                [{ language: 'wolfram' }, { scheme: 'vscode-notebook-cell' }],
+                {
+                    provideDocumentFormattingEdits(doc) {
+                        const text = doc.getText();
+                        try {
+                            const formatted = wlFormat(text, _getFormatterOpts({ replaceNamedChars: true }));
+                            const fullRange = new vscode.Range(doc.positionAt(0), doc.positionAt(text.length));
+                            return [vscode.TextEdit.replace(fullRange, formatted)];
+                        } catch (e) {
+                            return [];
+                        }
+                    }
+                }
+            )
+        );
+
+        context.subscriptions.push(
+            vscode.languages.registerDocumentRangeFormattingEditProvider(
+                [{ language: 'wolfram' }, { scheme: 'vscode-notebook-cell' }],
+                {
+                    provideDocumentRangeFormattingEdits(doc, range) {
+                        const text = doc.getText(range);
+                        try {
+                            const formatted = wlFormat(text, _getFormatterOpts({}));
+                            return [vscode.TextEdit.replace(range, formatted)];
+                        } catch (e) {
+                            return [];
+                        }
+                    }
+                }
+            )
+        );
+
+        // ── Auto-format on Enter (when wolfbook.formatter.autoFormat is enabled) ──
+        // Strategy: intercept Enter via a keybinding → command.
+        //   1. Format the document FIRST (no newline in the text yet, so formatter
+        //      won't strip it and offsets won't shift).
+        //   2. await applyEdit so the document is updated.
+        //   3. Insert '\n' at the current cursor position in the formatted text.
+        // The cursor ends up on the freshly-inserted blank line, correct position.
+        context.subscriptions.push(vscode.commands.registerCommand('wolfbook.handleEnter', async () => {
+            const cfg = vscode.workspace.getConfiguration('wolfbook');
+            if (!cfg.get('formatter.autoFormat', false)) {
+                return vscode.commands.executeCommand('default:type', { text: '\n' });
+            }
+
+            const editor = vscode.window.activeTextEditor;
+            if (!editor) return vscode.commands.executeCommand('default:type', { text: '\n' });
+
+            const doc = editor.document;
+            const isWolfram = doc.languageId === 'wolfram' ||
+                doc.uri.scheme === 'vscode-notebook-cell' ||
+                doc.fileName.endsWith('.evsnb') || doc.fileName.endsWith('.vsnb');
+            if (!isWolfram) return vscode.commands.executeCommand('default:type', { text: '\n' });
+
+            // Format first — cursor stays at its pre-Enter position in the formatted result
+            await _formatDocument(editor, _getFormatterOpts({ replaceNamedChars: true }));
+
+            // Now insert the newline; cursor lands on the new blank line
+            await vscode.commands.executeCommand('default:type', { text: '\n' });
+        }));
+
+
+        context.subscriptions.push(vscode.commands.registerCommand('wolfbook.formatNotebook', async () => {
+            const nb = vscode.window.activeNotebookEditor?.notebook;
+            if (!nb) {
+                vscode.window.showInformationMessage('No active notebook.');
+                return;
+            }
+            const opts = _getFormatterOpts({});
+            const we = new vscode.WorkspaceEdit();
+            let count = 0;
+            for (const cell of nb.getCells()) {
+                if (cell.kind !== vscode.NotebookCellKind.Code) continue;
+                const doc = cell.document;
+                const text = doc.getText();
+                try {
+                    const formatted = wlFormat(text, opts);
+                    if (formatted !== text) {
+                        const fullRange = new vscode.Range(doc.positionAt(0), doc.positionAt(text.length));
+                        we.replace(doc.uri, fullRange, formatted);
+                        count++;
+                    }
+                } catch (e) { /* skip cells that fail to parse */ }
+            }
+            if (count > 0) {
+                await vscode.workspace.applyEdit(we);
+                vscode.window.showInformationMessage(`Formatted ${count} cell(s).`);
+            }
+        }));
+
+        console.log('[Extension] WL code formatter registered');
+    } catch (e) {
+        console.error('[Extension] WL formatter failed to load, skipping:', e.message);
+    }
 
     // Register the Watch Panel webview view provider
     context.subscriptions.push(
@@ -254,6 +403,8 @@ function activate(context) {
     }
     // Register Copilot language model tools (Phase 4)
     _tools.registerTools(context, () => controller, _debugCtrl);
+    // Register @wolfbook chat participant
+    _tools.registerChatParticipant(context, () => controller);
     ;
     context.subscriptions.push(vscode_1.commands.registerCommand("wolfram.launchKernel", () => {
         if (nbKernelenabled) {
@@ -269,6 +420,10 @@ function activate(context) {
         } else {
             controller.abortEvaluation();
         }
+        // Always hard-reset all debugger flags so abort is the reliable last resort.
+        // This catches stuck states even when debug wasn't "active" (e.g. _finishing
+        // stuck true, _liveWatchInFlight stuck, stale _evalQueue promises).
+        _debugCtrl.resetAllState();
     }));
     context.subscriptions.push(vscode_1.commands.registerCommand("wolfram.openDialogSubsession", () => {
         controller.openDialogSubsession();
@@ -279,7 +434,54 @@ function activate(context) {
     context.subscriptions.push(vscode_1.commands.registerCommand("wolfram.pasteImageCellBelow", () => {
         controller.pasteImageAsCell({ insertBelow: true });
     }));
+    // Auto-enter-edit mode: whether new cells jump straight into the editor on insert.
+    let _autoEnterEditMode = true;
+    const _autoEditStatusBar = vscode.window.createStatusBarItem(
+        'wolfbook-auto-edit', vscode.StatusBarAlignment.Right, 98
+    );
+    _autoEditStatusBar.name = 'Wolfbook Auto Edit';
+    _autoEditStatusBar.command = 'wolfbook.toggleAutoEditMode';
+    const _updateAutoEditStatusBar = () => {
+        _autoEditStatusBar.text    = _autoEnterEditMode ? '$(edit) WL: Edit↓' : '$(dash) WL: Edit↓';
+        _autoEditStatusBar.tooltip = _autoEnterEditMode
+            ? 'New cell enters edit mode. Click to disable.'
+            : 'New cell stays selected (no edit). Click to enable.';
+    };
+    _updateAutoEditStatusBar();
+    _autoEditStatusBar.hide(); // hidden until a wolfbook notebook is active
+    context.subscriptions.push(_autoEditStatusBar);
+    context.subscriptions.push(vscode.window.onDidChangeActiveNotebookEditor(ed => {
+        if (ed?.notebook?.notebookType === 'extended-wolfram-notebook') _autoEditStatusBar.show();
+        else _autoEditStatusBar.hide();
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand('wolfbook.toggleAutoEditMode', () => {
+        _autoEnterEditMode = !_autoEnterEditMode;
+        _updateAutoEditStatusBar();
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand('wolfbook.insertCellAbove', async () => {
+        await vscode.commands.executeCommand('notebook.cell.insertCodeCellAbove');
+        await new Promise(r => setTimeout(r, 80));
+        // VS Code may have auto-entered edit mode after insert — don't toggle it off.
+        if (!vscode.window.activeTextEditor) {
+            await vscode.commands.executeCommand('notebook.cell.edit');
+        }
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand('wolfbook.insertCellBelow', async () => {
+        await vscode.commands.executeCommand('notebook.cell.insertCodeCellBelow');
+        await new Promise(r => setTimeout(r, 80));
+        // VS Code may have auto-entered edit mode after insert — don't toggle it off.
+        if (!vscode.window.activeTextEditor) {
+            await vscode.commands.executeCommand('notebook.cell.edit');
+        }
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand('wolfbook.deleteActiveCell', async () => {
+        await vscode.commands.executeCommand('notebook.cell.delete');
+        await new Promise(r => setTimeout(r, 50));
+        await vscode.commands.executeCommand('notebook.cell.edit');
+    }));
     context.subscriptions.push(vscode_1.commands.registerCommand("wolfram.restartKernel", () => {
+        // Hard-reset all debugger state before restarting kernel
+        _debugCtrl.resetAllState();
         controller.restartKernel();
     }));
 
@@ -880,12 +1082,65 @@ function activate(context) {
         },
         // Filter noisy LSP diagnostics before VS Code ever sees them.
         middleware: {
+            // Wolfram's ReadRawJSONString crashes on UTF-16 surrogate pairs
+            // (supplementary-plane chars like 𝕊 U+1D54A).  Replace them with
+            // \[WolframName] escapes so the LSP sees valid WL, not surrogates.
+            didOpen(document, next) {
+                const text = document.getText();
+                const safe = wlSanitizeForLSP(text);
+                if (safe !== text) {
+                    return next({
+                        uri: document.uri,
+                        languageId: document.languageId,
+                        version: document.version,
+                        fileName: document.fileName,
+                        isUntitled: document.isUntitled,
+                        isDirty: document.isDirty,
+                        isClosed: document.isClosed,
+                        eol: document.eol,
+                        lineCount: document.lineCount,
+                        getText: () => safe,
+                        getWordRangeAtPosition: (...a) => document.getWordRangeAtPosition(...a),
+                        lineAt: (...a) => document.lineAt(...a),
+                        offsetAt: (...a) => document.offsetAt(...a),
+                        positionAt: (...a) => document.positionAt(...a),
+                        validateRange: (...a) => document.validateRange(...a),
+                        validatePosition: (...a) => document.validatePosition(...a),
+                    });
+                }
+                return next(document);
+            },
+            didChange(event, next) {
+                if (event.contentChanges.some(c => c.text !== wlSanitizeForLSP(c.text))) {
+                    const sanitized = Object.assign({}, event, {
+                        contentChanges: event.contentChanges.map(c => {
+                            const s = wlSanitizeForLSP(c.text);
+                            return s !== c.text ? Object.assign({}, c, { text: s }) : c;
+                        })
+                    });
+                    return next(sanitized);
+                }
+                return next(event);
+            },
             handleDiagnostics(uri, diagnostics, next) {
+                const doc = vscode_1.workspace.textDocuments.find(d => d.uri.toString() === uri.toString());
                 const filtered = diagnostics.filter((diag) => {
                     const msg = diag.message;
                     if (msg.toLowerCase().includes('unexpected expression at top-level')) return false;
                     if (msg.includes('Suspicious use of') && msg.includes('session symbol')) return false;
                     if (msg.includes('Non-ASCII character')) return false;
+                    if (msg.includes('letterlike') || msg.includes('Unexpected character') ||
+                        msg.includes('unexpected character') || msg.includes('Unknown character')) {
+                        if (doc) {
+                            const text = doc.getText(diag.range);
+                            if (text && /[^\x00-\x7F]/.test(text)) return false;
+                        }
+                    }
+                    // Suppress any diagnostic whose range contains ONLY non-ASCII characters
+                    if (doc) {
+                        const text = doc.getText(diag.range);
+                        if (text && /^[^\x00-\x7F]+$/.test(text)) return false;
+                    }
                     return true;
                 });
                 next(uri, filtered);
@@ -918,7 +1173,8 @@ function activate(context) {
                         }
                         // Legacy: suppress explicit "Unexpected/Unknown character" LSP messages
                         // on ranges that contain non-ASCII text.
-                        if (msg.includes('Unexpected character') ||
+                        if (msg.includes('letterlike') ||
+                            msg.includes('Unexpected character') ||
                             msg.includes('unexpected character') ||
                             msg.includes('Unknown character')) {
                             if (doc) {

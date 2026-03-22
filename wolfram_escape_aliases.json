@@ -1554,316 +1554,316 @@
     "codepoint": "0x2128"
   },
   "dsa": {
-    "name": "DoubleStruckA",
-    "unicode": "",
-    "fullName": "\\[DoubleStruckA]",
-    "codepoint": "0xF6E6"
+    "name": "DoubleStrucka",
+    "unicode": "𝕒",
+    "fullName": "\\[DoubleStrucka]",
+    "codepoint": "0x1d552"
   },
   "dsb": {
-    "name": "DoubleStruckB",
-    "unicode": "",
-    "fullName": "\\[DoubleStruckB]",
-    "codepoint": "0xF6E7"
+    "name": "DoubleStruckb",
+    "unicode": "𝕓",
+    "fullName": "\\[DoubleStruckb]",
+    "codepoint": "0x1d553"
   },
   "dsc": {
-    "name": "DoubleStruckC",
-    "unicode": "",
-    "fullName": "\\[DoubleStruckC]",
-    "codepoint": "0xF6E8"
+    "name": "DoubleStruckc",
+    "unicode": "𝕔",
+    "fullName": "\\[DoubleStruckc]",
+    "codepoint": "0x1d554"
   },
   "dsd": {
-    "name": "DoubleStruckD",
-    "unicode": "",
-    "fullName": "\\[DoubleStruckD]",
-    "codepoint": "0xF6E9"
+    "name": "DoubleStruckd",
+    "unicode": "𝕕",
+    "fullName": "\\[DoubleStruckd]",
+    "codepoint": "0x1d555"
   },
   "dse": {
-    "name": "DoubleStruckE",
-    "unicode": "",
-    "fullName": "\\[DoubleStruckE]",
-    "codepoint": "0xF6EA"
+    "name": "DoubleStrucke",
+    "unicode": "𝕖",
+    "fullName": "\\[DoubleStrucke]",
+    "codepoint": "0x1d556"
   },
   "dsf": {
-    "name": "DoubleStruckF",
-    "unicode": "",
-    "fullName": "\\[DoubleStruckF]",
-    "codepoint": "0xF6EB"
+    "name": "DoubleStruckf",
+    "unicode": "𝕗",
+    "fullName": "\\[DoubleStruckf]",
+    "codepoint": "0x1d557"
   },
   "dsg": {
-    "name": "DoubleStruckG",
-    "unicode": "",
-    "fullName": "\\[DoubleStruckG]",
-    "codepoint": "0xF6EC"
+    "name": "DoubleStruckg",
+    "unicode": "𝕘",
+    "fullName": "\\[DoubleStruckg]",
+    "codepoint": "0x1d558"
   },
   "dsh": {
-    "name": "DoubleStruckH",
-    "unicode": "",
-    "fullName": "\\[DoubleStruckH]",
-    "codepoint": "0xF6ED"
+    "name": "DoubleStruckh",
+    "unicode": "𝕙",
+    "fullName": "\\[DoubleStruckh]",
+    "codepoint": "0x1d559"
   },
   "dsi": {
-    "name": "DoubleStruckI",
-    "unicode": "",
-    "fullName": "\\[DoubleStruckI]",
-    "codepoint": "0xF6EE"
+    "name": "DoubleStrucki",
+    "unicode": "𝕚",
+    "fullName": "\\[DoubleStrucki]",
+    "codepoint": "0x1d55a"
   },
   "dsj": {
-    "name": "DoubleStruckJ",
-    "unicode": "",
-    "fullName": "\\[DoubleStruckJ]",
-    "codepoint": "0xF6EF"
+    "name": "DoubleStruckj",
+    "unicode": "𝕛",
+    "fullName": "\\[DoubleStruckj]",
+    "codepoint": "0x1d55b"
   },
   "dsk": {
-    "name": "DoubleStruckK",
-    "unicode": "",
-    "fullName": "\\[DoubleStruckK]",
-    "codepoint": "0xF6F0"
+    "name": "DoubleStruckk",
+    "unicode": "𝕜",
+    "fullName": "\\[DoubleStruckk]",
+    "codepoint": "0x1d55c"
   },
   "dsl": {
-    "name": "DoubleStruckL",
-    "unicode": "",
-    "fullName": "\\[DoubleStruckL]",
-    "codepoint": "0xF6F1"
+    "name": "DoubleStruckl",
+    "unicode": "𝕝",
+    "fullName": "\\[DoubleStruckl]",
+    "codepoint": "0x1d55d"
   },
   "dsm": {
-    "name": "DoubleStruckM",
-    "unicode": "",
-    "fullName": "\\[DoubleStruckM]",
-    "codepoint": "0xF6F2"
+    "name": "DoubleStruckm",
+    "unicode": "𝕞",
+    "fullName": "\\[DoubleStruckm]",
+    "codepoint": "0x1d55e"
   },
   "dsn": {
-    "name": "DoubleStruckN",
-    "unicode": "",
-    "fullName": "\\[DoubleStruckN]",
-    "codepoint": "0xF6F3"
+    "name": "DoubleStruckn",
+    "unicode": "𝕟",
+    "fullName": "\\[DoubleStruckn]",
+    "codepoint": "0x1d55f"
   },
   "dso": {
-    "name": "DoubleStruckO",
-    "unicode": "",
-    "fullName": "\\[DoubleStruckO]",
-    "codepoint": "0xF6F4"
+    "name": "DoubleStrucko",
+    "unicode": "𝕠",
+    "fullName": "\\[DoubleStrucko]",
+    "codepoint": "0x1d560"
   },
   "dsp": {
-    "name": "DoubleStruckP",
-    "unicode": "",
-    "fullName": "\\[DoubleStruckP]",
-    "codepoint": "0xF6F5"
+    "name": "DoubleStruckp",
+    "unicode": "𝕡",
+    "fullName": "\\[DoubleStruckp]",
+    "codepoint": "0x1d561"
   },
   "dsq": {
-    "name": "DoubleStruckQ",
-    "unicode": "",
-    "fullName": "\\[DoubleStruckQ]",
-    "codepoint": "0xF6F6"
+    "name": "DoubleStruckq",
+    "unicode": "𝕢",
+    "fullName": "\\[DoubleStruckq]",
+    "codepoint": "0x1d562"
   },
   "dsr": {
-    "name": "DoubleStruckR",
-    "unicode": "",
-    "fullName": "\\[DoubleStruckR]",
-    "codepoint": "0xF6F7"
+    "name": "DoubleStruckr",
+    "unicode": "𝕣",
+    "fullName": "\\[DoubleStruckr]",
+    "codepoint": "0x1d563"
   },
   "dss": {
-    "name": "DoubleStruckS",
-    "unicode": "",
-    "fullName": "\\[DoubleStruckS]",
-    "codepoint": "0xF6F8"
+    "name": "DoubleStrucks",
+    "unicode": "𝕤",
+    "fullName": "\\[DoubleStrucks]",
+    "codepoint": "0x1d564"
   },
   "dst": {
-    "name": "DoubleStruckT",
-    "unicode": "",
-    "fullName": "\\[DoubleStruckT]",
-    "codepoint": "0xF6F9"
+    "name": "DoubleStruckt",
+    "unicode": "𝕥",
+    "fullName": "\\[DoubleStruckt]",
+    "codepoint": "0x1d565"
   },
   "dsu": {
-    "name": "DoubleStruckU",
-    "unicode": "",
-    "fullName": "\\[DoubleStruckU]",
-    "codepoint": "0xF6FA"
+    "name": "DoubleStrucku",
+    "unicode": "𝕦",
+    "fullName": "\\[DoubleStrucku]",
+    "codepoint": "0x1d566"
   },
   "dsv": {
-    "name": "DoubleStruckV",
-    "unicode": "",
-    "fullName": "\\[DoubleStruckV]",
-    "codepoint": "0xF6FB"
+    "name": "DoubleStruckv",
+    "unicode": "𝕧",
+    "fullName": "\\[DoubleStruckv]",
+    "codepoint": "0x1d567"
   },
   "dsw": {
-    "name": "DoubleStruckW",
-    "unicode": "",
-    "fullName": "\\[DoubleStruckW]",
-    "codepoint": "0xF6FC"
+    "name": "DoubleStruckw",
+    "unicode": "𝕨",
+    "fullName": "\\[DoubleStruckw]",
+    "codepoint": "0x1d568"
   },
   "dsx": {
-    "name": "DoubleStruckX",
-    "unicode": "",
-    "fullName": "\\[DoubleStruckX]",
-    "codepoint": "0xF6FD"
+    "name": "DoubleStruckx",
+    "unicode": "𝕩",
+    "fullName": "\\[DoubleStruckx]",
+    "codepoint": "0x1d569"
   },
   "dsy": {
-    "name": "DoubleStruckY",
-    "unicode": "",
-    "fullName": "\\[DoubleStruckY]",
-    "codepoint": "0xF6FE"
+    "name": "DoubleStrucky",
+    "unicode": "𝕪",
+    "fullName": "\\[DoubleStrucky]",
+    "codepoint": "0x1d56a"
   },
   "dsz": {
-    "name": "DoubleStruckZ",
-    "unicode": "",
-    "fullName": "\\[DoubleStruckZ]",
-    "codepoint": "0xF6FF"
+    "name": "DoubleStruckz",
+    "unicode": "𝕫",
+    "fullName": "\\[DoubleStruckz]",
+    "codepoint": "0x1d56b"
   },
   "dsA": {
     "name": "DoubleStruckCapitalA",
-    "unicode": "",
+    "unicode": "𝔸",
     "fullName": "\\[DoubleStruckCapitalA]",
-    "codepoint": "0xF7A4"
+    "codepoint": "0x1d538"
   },
   "dsB": {
     "name": "DoubleStruckCapitalB",
-    "unicode": "",
+    "unicode": "𝔹",
     "fullName": "\\[DoubleStruckCapitalB]",
-    "codepoint": "0xF7A5"
+    "codepoint": "0x1d539"
   },
   "dsC": {
     "name": "DoubleStruckCapitalC",
-    "unicode": "",
+    "unicode": "ℂ",
     "fullName": "\\[DoubleStruckCapitalC]",
-    "codepoint": "0xF7A6"
+    "codepoint": "0x2102"
   },
   "dsD": {
     "name": "DoubleStruckCapitalD",
-    "unicode": "",
+    "unicode": "𝔻",
     "fullName": "\\[DoubleStruckCapitalD]",
-    "codepoint": "0xF7A7"
+    "codepoint": "0x1d53b"
   },
   "dsE": {
     "name": "DoubleStruckCapitalE",
-    "unicode": "",
+    "unicode": "𝔼",
     "fullName": "\\[DoubleStruckCapitalE]",
-    "codepoint": "0xF7A8"
+    "codepoint": "0x1d53c"
   },
   "dsF": {
     "name": "DoubleStruckCapitalF",
-    "unicode": "",
+    "unicode": "𝔽",
     "fullName": "\\[DoubleStruckCapitalF]",
-    "codepoint": "0xF7A9"
+    "codepoint": "0x1d53d"
   },
   "dsG": {
     "name": "DoubleStruckCapitalG",
-    "unicode": "",
+    "unicode": "𝔾",
     "fullName": "\\[DoubleStruckCapitalG]",
-    "codepoint": "0xF7AA"
+    "codepoint": "0x1d53e"
   },
   "dsH": {
     "name": "DoubleStruckCapitalH",
-    "unicode": "",
+    "unicode": "ℍ",
     "fullName": "\\[DoubleStruckCapitalH]",
-    "codepoint": "0xF7AB"
+    "codepoint": "0x210d"
   },
   "dsI": {
     "name": "DoubleStruckCapitalI",
-    "unicode": "",
+    "unicode": "𝕀",
     "fullName": "\\[DoubleStruckCapitalI]",
-    "codepoint": "0xF7AC"
+    "codepoint": "0x1d540"
   },
   "dsJ": {
     "name": "DoubleStruckCapitalJ",
-    "unicode": "",
+    "unicode": "𝕁",
     "fullName": "\\[DoubleStruckCapitalJ]",
-    "codepoint": "0xF7AD"
+    "codepoint": "0x1d541"
   },
   "dsK": {
     "name": "DoubleStruckCapitalK",
-    "unicode": "",
+    "unicode": "𝕂",
     "fullName": "\\[DoubleStruckCapitalK]",
-    "codepoint": "0xF7AE"
+    "codepoint": "0x1d542"
   },
   "dsL": {
     "name": "DoubleStruckCapitalL",
-    "unicode": "",
+    "unicode": "𝕃",
     "fullName": "\\[DoubleStruckCapitalL]",
-    "codepoint": "0xF7AF"
+    "codepoint": "0x1d543"
   },
   "dsM": {
     "name": "DoubleStruckCapitalM",
-    "unicode": "",
+    "unicode": "𝕄",
     "fullName": "\\[DoubleStruckCapitalM]",
-    "codepoint": "0xF7B0"
+    "codepoint": "0x1d544"
   },
   "dsN": {
     "name": "DoubleStruckCapitalN",
-    "unicode": "",
+    "unicode": "ℕ",
     "fullName": "\\[DoubleStruckCapitalN]",
-    "codepoint": "0xF7B1"
+    "codepoint": "0x2115"
   },
   "dsO": {
     "name": "DoubleStruckCapitalO",
-    "unicode": "",
+    "unicode": "𝕆",
     "fullName": "\\[DoubleStruckCapitalO]",
-    "codepoint": "0xF7B2"
+    "codepoint": "0x1d546"
   },
   "dsP": {
     "name": "DoubleStruckCapitalP",
-    "unicode": "",
+    "unicode": "ℙ",
     "fullName": "\\[DoubleStruckCapitalP]",
-    "codepoint": "0xF7B3"
+    "codepoint": "0x2119"
   },
   "dsQ": {
     "name": "DoubleStruckCapitalQ",
-    "unicode": "",
+    "unicode": "ℚ",
     "fullName": "\\[DoubleStruckCapitalQ]",
-    "codepoint": "0xF7B4"
+    "codepoint": "0x211a"
   },
   "dsR": {
     "name": "DoubleStruckCapitalR",
-    "unicode": "",
+    "unicode": "ℝ",
     "fullName": "\\[DoubleStruckCapitalR]",
-    "codepoint": "0xF7B5"
+    "codepoint": "0x211d"
   },
   "dsS": {
     "name": "DoubleStruckCapitalS",
-    "unicode": "",
+    "unicode": "𝕊",
     "fullName": "\\[DoubleStruckCapitalS]",
-    "codepoint": "0xF7B6"
+    "codepoint": "0x1d54a"
   },
   "dsT": {
     "name": "DoubleStruckCapitalT",
-    "unicode": "",
+    "unicode": "𝕋",
     "fullName": "\\[DoubleStruckCapitalT]",
-    "codepoint": "0xF7B7"
+    "codepoint": "0x1d54b"
   },
   "dsU": {
     "name": "DoubleStruckCapitalU",
-    "unicode": "",
+    "unicode": "𝕌",
     "fullName": "\\[DoubleStruckCapitalU]",
-    "codepoint": "0xF7B8"
+    "codepoint": "0x1d54c"
   },
   "dsV": {
     "name": "DoubleStruckCapitalV",
-    "unicode": "",
+    "unicode": "𝕍",
     "fullName": "\\[DoubleStruckCapitalV]",
-    "codepoint": "0xF7B9"
+    "codepoint": "0x1d54d"
   },
   "dsW": {
     "name": "DoubleStruckCapitalW",
-    "unicode": "",
+    "unicode": "𝕎",
     "fullName": "\\[DoubleStruckCapitalW]",
-    "codepoint": "0xF7BA"
+    "codepoint": "0x1d54e"
   },
   "dsX": {
     "name": "DoubleStruckCapitalX",
-    "unicode": "",
+    "unicode": "𝕏",
     "fullName": "\\[DoubleStruckCapitalX]",
-    "codepoint": "0xF7BB"
+    "codepoint": "0x1d54f"
   },
   "dsY": {
     "name": "DoubleStruckCapitalY",
-    "unicode": "",
+    "unicode": "𝕐",
     "fullName": "\\[DoubleStruckCapitalY]",
-    "codepoint": "0xF7BC"
+    "codepoint": "0x1d550"
   },
   "dsZ": {
     "name": "DoubleStruckCapitalZ",
-    "unicode": "",
+    "unicode": "ℤ",
     "fullName": "\\[DoubleStruckCapitalZ]",
-    "codepoint": "0xF7BD"
+    "codepoint": "0x2124"
   },
   "a": {
     "name": "Alpha",

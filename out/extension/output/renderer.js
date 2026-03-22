@@ -25,20 +25,30 @@
  */
 
 const vscode = require('vscode');
+const fs = require('fs');
+const path = require('path');
 const { DEV_MODE } = require('../utils/dev-logger');
 const _encoding = require('../utils/encoding');
+const { wlUTFtoNames } = require('../namedchars');
 
 // ---- WolfbookLaTeX C++ addon (lazy-loaded, shared with controller) --------
 // We re-expose the same module-level lazy references that controller.js uses,
 // loaded independently here since this module has its own require scope.
-const _BTL_ADDON_PATH       = require('path').join(__dirname, '../../../wllatex-addon/wolfbook_btl.node');
+// Platform-aware: tries prebuilt/wolfbook_btl-<platform>-<arch>.node first,
+// then falls back to the generic wolfbook_btl.node (locally compiled).
+const _BTL_DIR              = require('path').join(__dirname, '../../../wllatex-addon');
 const _KATEX_PRERENDER_PATH = require('path').join(__dirname, '../../../wllatex-addon/katexPrerender.js');
 let _btlAddon = null;
 let _btlPrerenderLatex = null;
 function _loadBtlAddon() {
     if (_btlAddon) return true;
     try {
-        _btlAddon = require(_BTL_ADDON_PATH);
+        const _fs = require('fs');
+        const _prebuilt = require('path').join(_BTL_DIR, 'prebuilt',
+            `wolfbook_btl-${process.platform}-${process.arch}.node`);
+        const _fallback = require('path').join(_BTL_DIR, 'wolfbook_btl.node');
+        const _addonPath = _fs.existsSync(_prebuilt) ? _prebuilt : _fallback;
+        _btlAddon = require(_addonPath);
         _btlPrerenderLatex = require(_KATEX_PRERENDER_PATH).prerenderLatex;
         return true;
     } catch (_) { return false; }
@@ -53,15 +63,19 @@ const GFX_ONLY_FMTS  = new Set(['SVGSrc']);
 // ---------------------------------------------------------------------------
 // Format resolution
 
-// Resolve the render format for a cell, respecting the type-split notebook defaults.
+// Resolve the render format for a cell output, respecting the type-split notebook defaults.
+// outN:        stable 0-based local sub-expression index within the cell (i from the eval loop),
+//              NOT the global Out[N] counter.  Pass undefined when outN is not yet known.
 // knownIsGfx: true/false if already known; undefined = scan registry for last output of this cell.
 // Guarantees: never returns an expression-only format (WLLatex/WLLatex2/MathML/TeX/TeXSrc) for a
 // known-graphics output, and never returns a graphics-only format (SVGSrc) for a known-expression
 // output.  Falls back to 'Auto' (→ SVG for gfx, MathML for expr in the kernel) in those cases.
-function resolveFormat(self, cell, knownIsGfx) {
+function resolveFormat(self, cell, knownIsGfx, outN) {
     const cellUri = cell.document.uri.toString();
-    // 1. Per-cell explicit override (set when user clicks a format button)
-    const perCell = self._cellOutputFormat.get(cellUri);
+    // 1a. Per-output explicit override (keyed cellUri:outN — most specific)
+    const perOutput = (outN !== undefined) ? self._cellOutputFormat.get(cellUri + ':' + outN) : undefined;
+    // 1b. Per-cell fallback (legacy / first-eval before outN is known)
+    const perCell = perOutput ?? self._cellOutputFormat.get(cellUri);
     // 2. Notebook-level default — pick the right one based on output type
     const nbUri = cell.notebook.uri.toString();
     let isGfx = knownIsGfx;
@@ -82,8 +96,9 @@ function resolveFormat(self, cell, knownIsGfx) {
         // isGfx === false (known expression) or undefined (first eval, unknown type)
         fmt = self._notebookDefaultExprFormat.get(nbUri) || '';
     }
-    if (!fmt) fmt = String(self.config.get('outputFormat') || 'Auto');
+    if (!fmt) fmt = String(self.config.get('outputFormat') || 'WLLatex');
     // Sanitise: if type is known, never return a format incompatible with it.
+    // WLLatex/WLLatex2 are expression-only; graphics always fall back to 'Auto' (→ SVG).
     if (isGfx === true  && EXPR_ONLY_FMTS.has(fmt)) return 'Auto';
     if (isGfx === false && GFX_ONLY_FMTS.has(fmt))  return 'Auto';
     return fmt;
@@ -95,7 +110,18 @@ function resolveFormat(self, cell, knownIsGfx) {
 // Post-process HTML from the kernel: if it contains a WLLatex box-placeholder
 // div, decode the boxes, run through the C++ boxToLatex addon, then either
 // KaTeX-prerender (WLLatex) or emit a raw-latex div for webview rendering (WLLatex2).
-function processWLLatexBoxes(self, html) {
+function processWLLatexBoxes(self, html, logPath) {
+    // If no logPath was given, try to derive one from the active notebook
+    if (!logPath) {
+        try {
+            const ed = vscode.window.activeNotebookEditor;
+            if (ed && ed.notebook.uri.scheme === 'file') {
+                const nbFsPath = ed.notebook.uri.fsPath;
+                const nbBase = path.basename(nbFsPath, path.extname(nbFsPath));
+                logPath = path.join(path.dirname(nbFsPath), 'img', nbBase, 'btl.log');
+            }
+        } catch (_) {}
+    }
     const hasPrerendered = html.includes('vscode-wolfram-wllatex-boxes"');
     const hasRaw         = html.includes('vscode-wolfram-wllatex-boxes-raw"');
     const hasSrc         = html.includes('vscode-wolfram-wllatex-boxes-src"');
@@ -109,7 +135,9 @@ function processWLLatexBoxes(self, html) {
     // Helper: run boxToLatex and return { latex, error }
     const translate = (b64) => {
         try {
-            const boxStr = Buffer.from(b64, 'base64').toString('utf8');
+            let boxStr = Buffer.from(b64, 'base64').toString('utf8');
+            // Convert all Unicode chars + \|XXXX hex escapes to \[Name] for BTL
+            boxStr = wlUTFtoNames(boxStr);
             const result = _btlAddon.boxToLatex(boxStr);
             // boxToLatex returns { latex, error } per README
             if (result && typeof result === 'object') return { boxStr, latex: result.latex, error: result.error || null };
@@ -121,9 +149,23 @@ function processWLLatexBoxes(self, html) {
     };
     // ---- Mode A: pre-render in extension host (LaTeX button) ----
     if (hasPrerendered) {
-        html = html.replace(/<div class="vscode-wolfram-wllatex-boxes" data-boxes-b64="([^"]*)">\s*<\/div>/g,
-            (_, b64) => {
+        html = html.replace(/<div class="vscode-wolfram-wllatex-boxes" data-boxes-b64="([^"]*)"(?:\s+data-raw-b64="([^"]*)")?\s*>\s*<\/div>/g,
+            (_, b64, rawB64) => {
                 const { boxStr, latex, error } = translate(b64);
+                // Write to btl.log if a log path was supplied (Print/BoxData path only)
+                if (logPath) {
+                    try {
+                        const rawText = rawB64 ? Buffer.from(rawB64, 'base64').toString('utf8') : '';
+                        const sep = '='.repeat(72) + '\n';
+                        const entry = sep +
+                            '-- kernel output --\n' + rawText + '\n' +
+                            '-- btl input (cleaned boxes) --\n' + boxStr + '\n' +
+                            '-- btl output (latex) --\n' + latex + '\n' +
+                            (error ? '-- btl error --\n' + error + '\n' : '');
+                        fs.mkdirSync(path.dirname(logPath), { recursive: true });
+                        fs.appendFileSync(logPath, entry);
+                    } catch (_) {}
+                }
                 let rendered;
                 try {
                     rendered = _btlPrerenderLatex(latex, true);
@@ -135,16 +177,8 @@ function processWLLatexBoxes(self, html) {
                     ? `<div style="color:#e05c4e;font-size:11px;margin:2px 0;">` +
                       `⚠️ boxToLatex error: ${_encoding.escapeHtml(error)}</div>`
                     : '';
-                const debugHtml =
-                    '<details style="margin-top:4px;font-size:11px;opacity:0.65;">' +
-                    '<summary style="cursor:pointer;user-select:none;">WLLatex debug</summary>' +
-                    '<pre style="margin:2px 0;white-space:pre-wrap;word-break:break-all;">' +
-                    '<b>boxes:</b> ' + _encoding.escapeHtml(boxStr) + '\n' +
-                    '<b>latex:</b> ' + _encoding.escapeHtml(latex) +
-                    (error ? '\n<b style="color:#e05c4e;">error:</b> ' + _encoding.escapeHtml(error) : '') +
-                    '</pre></details>';
                 return '<div class="vscode-wolfram-wllatex-prerendered">' +
-                       errorNote + rendered + debugHtml + '</div>';
+                       errorNote + rendered + '</div>';
             });
     }
     // ---- Mode B: emit raw-latex div, rendered by webview KaTeX (LaTeX2 button) ----
@@ -152,17 +186,38 @@ function processWLLatexBoxes(self, html) {
         html = html.replace(/<div class="vscode-wolfram-wllatex-boxes-raw" data-boxes-b64="([^"]*)">\s*<\/div>/g,
             (_, b64) => {
                 const { boxStr, latex, error } = translate(b64);
+                if (logPath) {
+                    try {
+                        const sep = '='.repeat(72) + '\n';
+                        const entry = sep +
+                            '-- btl input (cleaned boxes) --\n' + boxStr + '\n' +
+                            '-- btl output (latex) --\n' + latex + '\n' +
+                            (error ? '-- btl error --\n' + error + '\n' : '');
+                        fs.mkdirSync(path.dirname(logPath), { recursive: true });
+                        fs.appendFileSync(logPath, entry);
+                    } catch (_) {}
+                }
                 const latexB64 = Buffer.from(latex).toString('base64');
                 const errorAttr = error ? ` data-btl-error="${_encoding.escapeHtml(error)}"` : '';
-                const boxesAttr = ` data-boxes-b64="${b64}"`;
-                return `<div class="vscode-wolfram-wllatex-raw-latex" data-latex-b64="${latexB64}"${errorAttr}${boxesAttr}></div>`;
+                return `<div class="vscode-wolfram-wllatex-raw-latex" data-latex-b64="${latexB64}"${errorAttr}></div>`;
             });
     }
     // ---- Mode C: emit src-latex div containing raw LaTeX for source display (WLLatexSrc button) ----
     if (hasSrc) {
         html = html.replace(/<div class="vscode-wolfram-wllatex-boxes-src" data-boxes-b64="([^"]*)">\s*<\/div>/g,
             (_, b64) => {
-                const { latex, error } = translate(b64);
+                const { boxStr, latex, error } = translate(b64);
+                if (logPath) {
+                    try {
+                        const sep = '='.repeat(72) + '\n';
+                        const entry = sep +
+                            '-- btl input (cleaned boxes) --\n' + boxStr + '\n' +
+                            '-- btl output (latex) --\n' + latex + '\n' +
+                            (error ? '-- btl error --\n' + error + '\n' : '');
+                        fs.mkdirSync(path.dirname(logPath), { recursive: true });
+                        fs.appendFileSync(logPath, entry);
+                    } catch (_) {}
+                }
                 const latexB64 = Buffer.from(latex).toString('base64');
                 const errorAttr = error ? ` data-btl-error="${_encoding.escapeHtml(error)}"` : '';
                 return `<div class="vscode-wolfram-wllatex-src-latex" data-latex-b64="${latexB64}"${errorAttr}></div>`;
@@ -206,7 +261,7 @@ async function replaceOutputByUuid(self, cell, uuid, fullHtml, outN) {
         `<div class="wl-output-block">` +
         `<div class="wl-output-header" style="display:flex;align-items:center;gap:6px;width:100%;min-height:22px;" ` +
         `data-session-epoch="${self._sessionEpoch}" data-output-id="${uuid}" ` +
-        `data-out-n="${outN}" data-output-format="${fmt}" data-output-is-graphics="${_isGfxUuid ? '1' : '0'}">${outLabel}</div>` +
+        `data-out-n="${outN}" data-sub-idx="${regInfo?.subIdx ?? ''}" data-output-format="${fmt}" data-output-is-graphics="${_isGfxUuid ? '1' : '0'}">${outLabel}</div>` +
         `<div class="wl-output-content">${fullHtml}</div>` +
         `</div>`;
     // Snapshot outputs BEFORE start() — start() can clear cell.outputs in some VS Code versions
@@ -246,9 +301,10 @@ async function replaceOutputById(self, cell, outputId, contentHtml, outN, outNam
     // lose the graphics-specific button set.
     const _regEntry  = self._outputRegistry.get(outputId);
     const _isGfxById = _regEntry?.isGfx ?? (contentHtml.includes('vscode-wolfram-svg-output') || contentHtml.includes('vscode-wolfram-png-output'));
+    const _subIdxById = _regEntry?.subIdx;
     const headerRow  = `<div class="wl-output-header" style="display:flex;align-items:center;gap:6px;width:100%;min-height:22px;" ` +
                        `data-session-epoch="${self._sessionEpoch}" data-output-id="${outputId}" ` +
-                       `data-out-n="${outN}" data-output-format="${newFormat}" data-output-is-graphics="${_isGfxById ? '1' : '0'}">${outLabel}</div>`;
+                       `data-out-n="${outN}" data-sub-idx="${_subIdxById ?? ''}" data-output-format="${newFormat}" data-output-is-graphics="${_isGfxById ? '1' : '0'}">${outLabel}</div>`;
     const finalHtml  = `<div class="wl-output-block">${headerRow}<div class="wl-output-content">${contentHtml}</div></div>` + bannerHtml;
 
     let targetIndex = -1;
@@ -300,8 +356,8 @@ function extractPlainText(html, outName, isGfx, cellSource) {
             if (latex.trim()) return `${outName} ${latex}`;
         } catch (_) {}
     }
-    // Kernel message/warning output (amber boxes — ToExpression::sntx, Set::write, etc.)
-    const msgMatch = html.match(/<div[^>]*class="vscode-wolfram-message-output"[^>]*>([\s\S]*?)<\/div>/);
+    // Kernel message/warning output — may be <div> (single short) or <details> (long/grouped).
+    const msgMatch = html.match(/<(?:div|details)[^>]*class="vscode-wolfram-message-output"[^>]*>([\s\S]*?)<\/(?:div|details)>/);
     if (msgMatch) {
         const text = msgMatch[1]
             .replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'");

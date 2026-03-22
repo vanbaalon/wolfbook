@@ -3,7 +3,7 @@
     "displayName": "Wolfbook \u2014 Wolfram Language Notebook",
     "description": "Interactive Wolfram Language notebook for VS Code. WSTP-backed kernel, MathML/SVG/PNG rendering, Unicode input, LSP diagnostics, and output expansion controls.",
     "publisher": "wolfbook",
-    "version": "2.2.1",
+    "version": "2.3.2",
     "engines": {
         "vscode": "^1.95.0"
     },
@@ -191,8 +191,8 @@
                 "wolfram.editor.globalSymbolColor": {
                     "scope": "user",
                     "type": "string",
-                    "default": "",
-                    "description": "Highlight Global` context symbols (user-defined variables) in Wolfram cell editors with this CSS color. E.g. \"#336699\" or \"cornflowerblue\". Leave empty to disable.",
+                    "default": "#333333",
+                    "description": "Color applied to Global` symbols that have a value (set variables). Unset symbols use the theme's color for the 'symbol.unrecognized' TM scope (default: #336699 blue). Leave empty to disable both.",
                     "order": 3
                 },
                 "wolfram.notebook.rendering.invertBrightnessInDarkThemes": {
@@ -223,6 +223,26 @@
                         "Plain text InputForm (flattened boxes)"
                     ],
                     "description": "Output rendering format",
+                    "order": 4
+                },
+                "wolfbook.formatter.pageLength": {
+                    "type": "integer",
+                    "default": 150,
+                    "minimum": 40,
+                    "maximum": 300,
+                    "description": "Target line width for the Wolfbook WL code formatter. Default: 150.",
+                    "order": 4
+                },
+                "wolfbook.formatter.replaceNamedChars": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "When formatting, replace \\[Name] escape sequences with their UTF-8 Unicode characters (e.g. \\[Alpha] → α).",
+                    "order": 4
+                },
+                "wolfbook.formatter.autoFormat": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Automatically format the current cell when Enter is pressed (new line). Disabled by default.",
                     "order": 4
                 },
                 "wolfram.notebook.textOutput.pageWidth": {
@@ -348,6 +368,26 @@
                 "title": "Wolfram Language: Convert Selection to Unicode"
             },
             {
+                "command": "wolfbook.format",
+                "title": "Wolfbook: Format Cell"
+            },
+            {
+                "command": "wolfbook.formatWithUTF",
+                "title": "Wolfbook: Format Cell (with Unicode chars)"
+            },
+            {
+                "command": "wolfbook.handleEnter",
+                "title": "Wolfbook: Handle Enter (auto-format + newline)"
+            },
+            {
+                "command": "wolfbook.formatWithUTFWide",
+                "title": "Wolfbook: Format Cell (Unicode, wide)"
+            },
+            {
+                "command": "wolfbook.formatNotebook",
+                "title": "Wolfbook: Format Notebook (all cells)"
+            },
+            {
                 "command": "wolfram.setOutputFormatImage",
                 "title": "Output: Image (PNG)",
                 "icon": "$(file-media)"
@@ -434,6 +474,22 @@
                 "title": "Wolfbook: Add Selection to Watch"
             },
             {
+                "command": "wolfbook.insertCellAbove",
+                "title": "Wolfbook: Insert Code Cell Above"
+            },
+            {
+                "command": "wolfbook.insertCellBelow",
+                "title": "Wolfbook: Insert Code Cell Below"
+            },
+            {
+                "command": "wolfbook.deleteActiveCell",
+                "title": "Wolfbook: Delete Active Cell"
+            },
+            {
+                "command": "wolfbook.toggleAutoEditMode",
+                "title": "Wolfbook: Toggle Auto Enter Edit Mode"
+            },
+            {
                 "command": "wolfram.clearCellOutput",
                 "title": "Clear Output",
                 "icon": "$(clear-all)"
@@ -496,6 +552,26 @@
                     "when": "resourceExtname == .nb || resourceExtname == .m || resourceExtname == .wl || resourceExtname == .wls || resourceExtname == .cdf",
                     "command": "workbench.action.terminal.runActiveFile",
                     "group": "navigation"
+                },
+                {
+                    "when": "editorLangId == wolfram",
+                    "command": "wolfbook.formatWithUTF",
+                    "group": "1_modification@51"
+                },
+                {
+                    "when": "editorLangId == wolfram",
+                    "command": "wolfbook.formatWithUTFWide",
+                    "group": "1_modification@52"
+                },
+                {
+                    "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook'",
+                    "command": "wolfbook.evaluateSelection",
+                    "group": "wolframNotebook@1"
+                },
+                {
+                    "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook'",
+                    "command": "wolfbook.addSelectionToWatch",
+                    "group": "wolframNotebook@2"
                 }
             ],
             "commandPalette": [
@@ -632,16 +708,26 @@
         },
         "keybindings": [
             {
+                "command": "wolfbook.formatWithUTF",
+                "key": "alt+shift+f",
+                "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook'"
+            },
+            {
+                "command": "wolfbook.handleEnter",
+                "key": "enter",
+                "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook' && !wolframInEscapeMode && !suggestWidgetVisible"
+            },
+            {
                 "command": "wolfram.pasteImageCellBelow",
                 "key": "ctrl+v",
                 "mac": "cmd+v",
-                "when": "notebookEditorFocused && !editorTextFocus && notebookType == 'extended-wolfram-notebook'"
+                "when": "notebookEditorFocused && !editorTextFocus && !inputFocus && notebookType == 'extended-wolfram-notebook'"
             },
             {
                 "command": "wolfram.pasteImageCell",
                 "key": "ctrl+shift+v",
                 "mac": "cmd+shift+v",
-                "when": "notebookEditorFocused && notebookType == 'extended-wolfram-notebook'"
+                "when": "notebookEditorFocused && !inputFocus && notebookType == 'extended-wolfram-notebook'"
             },
             {
                 "command": "wolfram.abortEvaluation",
@@ -681,12 +767,12 @@
             {
                 "command": "wolfram.navLeft",
                 "key": "left",
-                "when": "notebookEditorFocused && !editorTextFocus && notebookType == 'extended-wolfram-notebook'"
+                "when": "notebookEditorFocused && !editorTextFocus && !inputFocus && notebookType == 'extended-wolfram-notebook'"
             },
             {
                 "command": "wolfram.navRight",
                 "key": "right",
-                "when": "notebookEditorFocused && !editorTextFocus && notebookType == 'extended-wolfram-notebook'"
+                "when": "notebookEditorFocused && !editorTextFocus && !inputFocus && notebookType == 'extended-wolfram-notebook'"
             },
             {
                 "command": "wolfbook.debug.toggleBreakpoint",
@@ -741,6 +827,30 @@
                 "key": "ctrl+shift+w",
                 "mac": "cmd+shift+w",
                 "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook'"
+            },
+            {
+                "command": "wolfbook.insertCellAbove",
+                "key": "ctrl+shift+a",
+                "mac": "cmd+shift+a",
+                "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook'"
+            },
+            {
+                "command": "wolfbook.insertCellBelow",
+                "key": "ctrl+shift+b",
+                "mac": "cmd+shift+b",
+                "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook'"
+            },
+            {
+                "command": "wolfbook.deleteActiveCell",
+                "key": "ctrl+shift+x",
+                "mac": "cmd+shift+x",
+                "when": "(editorTextFocus || notebookEditorFocused) && notebookType == 'extended-wolfram-notebook'"
+            },
+            {
+                "command": "wolfram.restartKernel",
+                "key": "ctrl+. ,",
+                "mac": "cmd+. ,",
+                "when": "(notebookEditorFocused || editorTextFocus) && notebookType == 'extended-wolfram-notebook'"
             }
         ],
         "views": {
@@ -789,23 +899,84 @@
                 "requiresMessaging": "optional"
             }
         ],
+        "chatParticipants": [
+            {
+                "id": "wolfbook.wolfbook",
+                "fullName": "Wolfbook",
+                "name": "wolfbook",
+                "description": "Wolfram Language expert with live kernel access. Reads your notebook, evaluates expressions, edits cells, and debugs code.",
+                "isSticky": true,
+                "commands": [
+                    {
+                        "name": "run",
+                        "description": "Run cells in the notebook and report results"
+                    },
+                    {
+                        "name": "explain",
+                        "description": "Explain what the code in the notebook does"
+                    },
+                    {
+                        "name": "debug",
+                        "description": "Debug errors and fix issues in the notebook"
+                    },
+                    {
+                        "name": "insert",
+                        "description": "Insert new cells into the notebook"
+                    }
+                ]
+            }
+        ],
         "languageModelTools": [
+            {
+                "name": "wolfbook_switchNotebook",
+                "displayName": "Wolfbook: Switch Notebook",
+                "toolReferenceName": "wolfbookSwitch",
+                "modelDescription": "Lists all open Wolfram notebooks or switches the active editor to a specific one. Use action='list' (default) to see all open .wb notebooks with their cell counts and active status — call this first when you need to work with a different notebook. Use action='switch' with a notebook filename (e.g. 'test.wb') to bring that notebook to the foreground and make it the target for all subsequent tool calls. After switching, tools like wolfbook_getNotebookContext, wolfbook_insertCell, wolfbook_runCell etc. will operate on the newly activated notebook. You can also pass the optional 'notebook' parameter directly to wolfbook_getNotebookContext to read a specific notebook without switching the active editor.",
+                "canBeReferencedInPrompt": true,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["list", "switch"],
+                            "description": "'list' (default) to show all open notebooks; 'switch' to bring a specific notebook to the foreground."
+                        },
+                        "notebook": {
+                            "type": "string",
+                            "description": "Filename of the notebook to switch to (e.g. 'test.wb'). Required when action='switch'."
+                        }
+                    }
+                }
+            },
             {
                 "name": "wolfbook_getNotebookContext",
                 "displayName": "Wolfbook: Get Notebook Context",
                 "toolReferenceName": "wolfbookContext",
-                "modelDescription": "Returns a structured text representation of the currently open Wolfram Language notebook. Includes all cell sources (code and markdown), section headings, and cell outputs as LaTeX. Use this before writing or editing Wolfram Language code to understand what symbols are already defined, what has been computed, and what the mathematical goal of the notebook is.",
+                "modelDescription": "Returns a structured text representation of the currently open Wolfram Language notebook (or a specific notebook if the optional 'notebook' parameter is provided). Includes all cell sources (code and markdown), section headings, and cell outputs as LaTeX. Use this before writing or editing Wolfram Language code to understand what symbols are already defined, what has been computed, and what the mathematical goal of the notebook is. Pass notebook='filename.wb' to read a different open notebook without switching the active editor. Use startCell/endCell to read only a range of cells instead of the entire notebook — useful for large notebooks when you know which cells you need.",
                 "canBeReferencedInPrompt": true,
                 "inputSchema": {
                     "type": "object",
-                    "properties": {}
+                    "properties": {
+                        "notebook": {
+                            "type": "string",
+                            "description": "Optional: filename of a specific open notebook to read (e.g. 'prototype.wb'). If omitted, reads the currently active notebook."
+                        },
+                        "startCell": {
+                            "type": "number",
+                            "description": "Optional: 1-based cell number to start reading from. Defaults to 1 (beginning of notebook). Use with endCell to read a specific range."
+                        },
+                        "endCell": {
+                            "type": "number",
+                            "description": "Optional: 1-based cell number to end at (inclusive). Defaults to the last cell. Use with startCell to read a specific range."
+                        }
+                    }
                 }
             },
             {
                 "name": "wolfbook_evaluateExpression",
                 "displayName": "Wolfbook: Evaluate Expression",
                 "toolReferenceName": "wolfbookEval",
-                "modelDescription": "Evaluates a Wolfram Language expression in the active notebook's live kernel and returns the result as InputForm text. Use this to verify that an expression simplifies correctly, check that a residual is zero, or explore the output of a function before inserting code into the notebook. Set multiLine: true to evaluate each line as a separate expression (like pressing Shift+Enter on a multi-expression cell) \u2014 results are returned as Out[1]=, Out[2]=, etc., and lines ending with ; are evaluated but output suppressed. Do not use for long-running computations.",
+                "modelDescription": "Evaluates a Wolfram Language expression in the active notebook's live kernel and returns the result as InputForm text. CRITICAL \u2014 multi-expression pitfall: passing multiple lines WITHOUT semicolons in single-expression mode (multiLine:false) causes the kernel to interpret newline-separated subexpressions as Times[...] multiplication, NOT as sequential statements \u2014 always use explicit semicolons (;) between statements, or set multiLine:true. Set multiLine:true to evaluate each non-empty line as a separate, independent expression \u2014 results are labeled Out[1]=, Out[2]=, etc.; lines ending with ; are evaluated silently. State accumulates across lines. Do not use for long-running computations.",
                 "canBeReferencedInPrompt": true,
                 "inputSchema": {
                     "type": "object",
@@ -826,6 +997,38 @@
                     "required": [
                         "expression"
                     ]
+                }
+            },
+            {
+                "name": "wolfbook_evaluateAndInsert",
+                "displayName": "Wolfbook: Evaluate and Insert",
+                "toolReferenceName": "wolfbookEvalInsert",
+                "modelDescription": "Evaluates a Wolfram Language expression in the live kernel: if the evaluation is clean (no kernel error messages, or the output matches the optional expectedOutput string), the expression is inserted as a new code cell in the notebook. Returns the evaluation result plus either an insert confirmation or an explanation of why it was not inserted. Use this to reduce the two-step workflow of: evaluate-to-test → manually insert the same code. Typical use: write a definition, verify it raises no errors, and land it in the notebook in one tool call. If expectedOutput is given, insertion only happens when the result string starts with that value (e.g. pass '0' to require a zero residual). Position defaults to 'end'; pass a cell number or 'after-cursor' to control placement.",
+                "canBeReferencedInPrompt": true,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "expression": {
+                            "type": "string",
+                            "description": "A valid Wolfram Language expression to evaluate and (if clean) insert as a new code cell."
+                        },
+                        "expectedOutput": {
+                            "type": "string",
+                            "description": "Optional. If given, the cell is only inserted when the evaluation result string starts with this value (e.g. '0', 'True', 'Null'). If omitted, insertion proceeds as long as there are no kernel error messages."
+                        },
+                        "position": {
+                            "description": "Where to insert the new cell (same semantics as wolfbook_insertCell). Defaults to 'end'.",
+                            "oneOf": [
+                                { "type": "string", "enum": ["after-cursor", "end"] },
+                                { "type": "number" }
+                            ]
+                        },
+                        "timeoutSeconds": {
+                            "type": "number",
+                            "description": "Maximum seconds to wait for the evaluation (default: 15)."
+                        }
+                    },
+                    "required": ["expression"]
                 }
             },
             {
@@ -880,7 +1083,7 @@
                     "type": "object",
                     "properties": {
                         "position": {
-                            "description": "Where to insert: 'after-cursor' inserts after the currently selected cell, 'end' appends at the end, or a zero-based cell index.",
+                            "description": "Where to insert: a number N inserts after Cell N (use Cell numbers from wolfbook_getNotebookContext; 0 = before Cell 1), 'after-cursor' inserts after the currently selected cell, or 'end' appends at the end.",
                             "oneOf": [
                                 {
                                     "type": "string",
@@ -896,11 +1099,8 @@
                         },
                         "kind": {
                             "type": "string",
-                            "enum": [
-                                "code",
-                                "markdown"
-                            ],
-                            "description": "Cell type."
+                            "enum": ["code", "markdown"],
+                            "description": "Cell type: 'code' for Wolfram Language expressions that will be sent to the kernel for evaluation; 'markdown' for explanatory text, headings, or LaTeX math — markdown cells are never evaluated by the kernel."
                         },
                         "content": {
                             "type": "string",
@@ -923,26 +1123,187 @@
                 }
             },
             {
+                "name": "wolfbook_insertCells",
+                "displayName": "Wolfbook: Insert Multiple Cells",
+                "toolReferenceName": "wolfbookInsertMany",
+                "modelDescription": "Inserts a contiguous block of new cells into the active Wolfram notebook in a single operation. Prefer this over multiple wolfbook_insertCell calls whenever you need to add 2 or more cells. Call wolfbook_getNotebookContext first to get current cell numbers. position=N inserts after Cell N (0 = before Cell 1); 'end' appends; 'after-cursor' inserts after the selected cell. Each cell in the cells array specifies kind ('code' for Wolfram Language or 'markdown' for text/headings/LaTeX) and content.",
+                "canBeReferencedInPrompt": true,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "position": {
+                            "description": "Where to insert the block: a number N inserts after Cell N (use Cell numbers from wolfbook_getNotebookContext; 0 = before Cell 1), 'end' appends at the end, or 'after-cursor' inserts after the currently selected cell.",
+                            "oneOf": [
+                                { "type": "string", "enum": ["after-cursor", "end"] },
+                                { "type": "number" }
+                            ]
+                        },
+                        "cells": {
+                            "type": "array",
+                            "description": "Ordered list of cells to insert as a contiguous block.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "kind": {
+                                        "type": "string",
+                                        "enum": ["code", "markdown"],
+                                        "description": "Cell type: 'code' for Wolfram Language expressions that will be sent to the kernel for evaluation; 'markdown' for explanatory text, headings, or LaTeX math — markdown cells are never evaluated by the kernel."
+                                    },
+                                    "content": {
+                                        "type": "string",
+                                        "description": "The cell source text."
+                                    }
+                                },
+                                "required": ["kind", "content"]
+                            }
+                        }
+                    },
+                    "required": ["cells"]
+                }
+            },
+            {
                 "name": "wolfbook_deleteCell",
-                "displayName": "Wolfbook: Delete Cell",
+                "displayName": "Wolfbook: Delete Cell(s)",
                 "toolReferenceName": "wolfbookDelete",
-                "modelDescription": "Deletes a cell from the active Wolfram notebook. The deleted cell's content is saved to ai_deleted_cells.md in the img/<notebook>/ directory for recovery. Call wolfbook_getNotebookContext first to confirm the correct cell number before deleting. Use this to remove redundant, broken, or superseded cells during notebook cleanup.",
+                "modelDescription": "Deletes one or more cells from the active Wolfram notebook. Deleted content is saved to ai_deleted_cells.md for recovery (use wolfbook_restoreDeletedCells to undo). Call wolfbook_getNotebookContext first to confirm cell numbers. Pass cellNumber for a single cell or cellNumbers (array) for multiple — they are removed in descending index order so earlier indices remain accurate. Each deleted cell's content is returned as confirmation.",
                 "canBeReferencedInPrompt": true,
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "cellNumber": {
                             "type": "number",
-                            "description": "1-based cell number to delete (from wolfbook_getNotebookContext)."
+                            "description": "1-based cell number to delete (single cell). Use cellNumbers for multiple."
+                        },
+                        "cellNumbers": {
+                            "type": "array",
+                            "items": { "type": "number" },
+                            "description": "Array of 1-based cell numbers to delete (multiple cells). Cells are deleted in descending index order."
                         },
                         "saveToRecovery": {
                             "type": "boolean",
-                            "description": "If true (default), save the deleted cell content to ai_deleted_cells.md before removing it."
+                            "description": "If true (default), save deleted cell content to ai_deleted_cells.md before removing."
+                        }
+                    }
+                }
+            },
+            {
+                "name": "wolfbook_restoreDeletedCells",
+                "displayName": "Wolfbook: Restore Deleted Cells",
+                "toolReferenceName": "wolfbookRestore",
+                "modelDescription": "Lists or restores recently deleted cells from the ai_deleted_cells.md recovery log maintained by wolfbook_deleteCell. Use action=\"list\" to browse the last N deleted cells (default 10) — useful to review what was just removed or to confirm what to restore. Use action=\"restore\" to re-insert the last N deleted cells at a specified position (default: end of notebook). The recovery log is never cleared.",
+                "canBeReferencedInPrompt": true,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["list", "restore"],
+                            "description": "\"list\" to show recent deleted cells; \"restore\" to re-insert them into the notebook."
+                        },
+                        "count": {
+                            "type": "number",
+                            "description": "How many recent deletions to list or restore (default: 10 for list, 1 for restore)."
+                        },
+                        "insertPosition": {
+                            "description": "Where to insert restored cells: \"end\" (default) or a 1-based cell index N (inserts before Cell N).",
+                            "oneOf": [
+                                { "type": "string", "enum": ["end"] },
+                                { "type": "number" }
+                            ]
                         }
                     },
-                    "required": [
-                        "cellNumber"
-                    ]
+                    "required": ["action"]
+                }
+            },
+            {
+                "name": "wolfbook_moveCell",
+                "displayName": "Wolfbook: Move Cell",
+                "toolReferenceName": "wolfbookMove",
+                "modelDescription": "Moves a cell from one position to another within the active Wolfram notebook. Reordering is done atomically (delete + re-insert in one edit), so notebook cell numbers shift as expected. Call wolfbook_getNotebookContext first to confirm cell numbers. Use toPosition=0 to move a cell to the very beginning, or toPosition=N to place it after Cell N.",
+                "canBeReferencedInPrompt": true,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "cellNumber": {
+                            "type": "number",
+                            "description": "1-based number of the cell to move."
+                        },
+                        "toPosition": {
+                            "type": "number",
+                            "description": "Insert the cell after this 1-based cell number. Use 0 to move it to the very beginning (before Cell 1)."
+                        }
+                    },
+                    "required": ["cellNumber", "toPosition"]
+                }
+            },
+            {
+                "name": "wolfbook_runAllCells",
+                "displayName": "Wolfbook: Run All Cells",
+                "toolReferenceName": "wolfbookRunAll",
+                "modelDescription": "Executes a range of cells in the active Wolfram notebook sequentially — one at a time, waiting for each to finish before starting the next. Returns a per-cell summary of status and text/plain output. Useful for clean-run validation after a kernel restart or after editing many cells. Markdown cells are automatically skipped. Set stopOnError:true to halt on the first kernel message/error.",
+                "canBeReferencedInPrompt": true,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "startCell": {
+                            "type": "number",
+                            "description": "1-based cell number to start from (default: 1 = beginning of notebook)."
+                        },
+                        "endCell": {
+                            "type": "number",
+                            "description": "1-based cell number to end at, inclusive (default: last cell)."
+                        },
+                        "timeoutSeconds": {
+                            "type": "number",
+                            "description": "Total time budget for the entire run in seconds (default: 120). Individual cells are each capped at 5 minutes or the remaining budget, whichever is smaller."
+                        },
+                        "stopOnError": {
+                            "type": "boolean",
+                            "description": "If true, stop the run when a cell produces a kernel message/error (default: false — run all cells regardless)."
+                        }
+                    }
+                }
+            },
+            {
+                "name": "wolfbook_findPackage",
+                "displayName": "Wolfbook: Find Package",
+                "toolReferenceName": "wolfbookFindPkg",
+                "modelDescription": "Searches for Wolfram Language packages on the Wolfram Paclet Server (via PacletFindRemote) and on GitHub. Returns names, descriptions, and ready-to-run install commands for each result. For Paclet Server hits the result includes the exact PacletInstall[\"Name\"] command; for GitHub hits it includes the releases URL and explains both the .paclet-URL install path and the URLDownload+ExtractArchive+AppendTo[$Path]+Get workflow for plain source repos. After finding a package, use wolfbook_evaluateExpression with timeoutSeconds>=120 to run the install command — do NOT guess install syntax, always use the commands returned by this tool.",
+                "canBeReferencedInPrompt": true,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Search term, e.g. \"numerical ODE\", \"quantum field theory\", \"cluster algebra\". Alphanumeric words and hyphens only."
+                        }
+                    },
+                    "required": ["query"]
+                }
+            },
+            {
+                "name": "wolfbook_kernelCrashLog",
+                "displayName": "Wolfbook: Kernel Crash Log",
+                "toolReferenceName": "wolfbookCrashLog",
+                "modelDescription": "Reads the Wolfram kernel debug log (img/<notebookName>/wolfram-kernel-debug.log) and/or macOS crash reports (~/Library/Logs/DiagnosticReports/) to help diagnose kernel crashes and unexpected disconnections. The debug log lives next to btl.log in the notebook's img/ subfolder and is recreated fresh each kernel start. Crash reports contain stack traces from kernel aborts. Use source=\"debug\" for the live debug log, source=\"crash\" for crash reports, source=\"all\" for both.",
+                "canBeReferencedInPrompt": true,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "source": {
+                            "type": "string",
+                            "enum": ["debug", "crash", "all"],
+                            "description": "\"debug\" (default) reads the kernel debug log from img/<notebookName>/; \"crash\" reads macOS DiagnosticReports; \"all\" reads both."
+                        },
+                        "lines": {
+                            "type": "number",
+                            "description": "How many tail lines of the debug log to return (default: 150, max: 1000)."
+                        },
+                        "filter": {
+                            "type": "string",
+                            "description": "Optional keyword or regex to filter log lines (case-insensitive). E.g. \"ERROR\", \"ABORT\", \"crash\"."
+                        }
+                    }
                 }
             },
             {
@@ -981,7 +1342,7 @@
                 "name": "wolfbook_runCell",
                 "displayName": "Wolfbook: Run Cell",
                 "toolReferenceName": "wolfbookRun",
-                "modelDescription": "Executes an existing notebook cell through the normal Wolfbook execution pipeline (equivalent to the user pressing Shift+Enter on it), waits for completion, and returns the cell's text/plain output. Unlike wolfbook_evaluateExpression, this runs the cell in-place so the result is stored as the cell's output in the notebook and visible to the user. Use this to re-run a cell after editing it with wolfbook_editCell, or to run a setup cell whose definitions are needed by later cells.",
+                "modelDescription": "Executes an existing notebook cell through the normal Wolfbook execution pipeline (equivalent to pressing Shift+Enter), waits for completion, and returns the cell output summary. Unlike wolfbook_evaluateExpression, the result is stored as the cell output in the notebook and visible to the user. Output format: first line is 'Cell N of M executed (T s).' followed by the result text, or '(no output — definition or suppressed expression)' when the cell defines functions or uses trailing semicolons. If the kernel emitted messages or errors they are appended as '⚠ Kernel messages (N):' — treat any such messages as errors that need fixing. Use wolfbook_getNotebookContext to read back the cell output in detail if needed.",
                 "canBeReferencedInPrompt": true,
                 "inputSchema": {
                     "type": "object",
@@ -1105,10 +1466,50 @@
                         }
                     }
                 }
+            },
+            {
+                "name": "wolfbook_searchCells",
+                "displayName": "Wolfbook: Search Cells",
+                "toolReferenceName": "wolfbookSearch",
+                "modelDescription": "Searches notebook cells for a given query string or regex pattern. Returns matching cell numbers with source previews and whether the match was in the source code, output, or both. Use this to quickly locate cells containing a specific variable, function, or error message without reading the entire notebook. Useful in long notebooks before calling wolfbook_getNotebookContext with a targeted startCell/endCell range.",
+                "canBeReferencedInPrompt": true,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "The text or regex pattern to search for (case-insensitive)."
+                        },
+                        "regex": {
+                            "type": "boolean",
+                            "description": "If true, treat query as a regular expression. Default: false (plain text search)."
+                        },
+                        "kind": {
+                            "type": "string",
+                            "enum": ["code", "markdown"],
+                            "description": "Optional: restrict search to only code or only markdown cells."
+                        },
+                        "includeOutput": {
+                            "type": "boolean",
+                            "description": "If true (default), also search cell outputs, not just source code."
+                        }
+                    },
+                    "required": ["query"]
+                }
             }
         ],
         "configurationDefaults": {
+            "editor.tokenColorCustomizations": {
+                "textMateRules": [
+                    {
+                        "scope": "symbol.unrecognized.wolfram",
+                        "settings": { "foreground": "#336699" }
+                    }
+                ]
+            },
             "[wolfram]": {
+                "editor.defaultFormatter": "wolfbook.wolfbook",
+                "editor.fontFamily": "Menlo, Monaco, 'Courier New', 'STIX Two Math', 'Noto Sans Math', 'Cambria Math', monospace",
                 "github.copilot.enable": {
                     "*": true
                 },
@@ -1121,6 +1522,7 @@
                     "comments": false,
                     "strings": false
                 },
+                "editor.unicodeHighlight.ambiguousCharacters": false,
                 "editor.unicodeHighlight.allowedCharacters": {
                     "\u00ab": true,
                     "\u00ad": true,

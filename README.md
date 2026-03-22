@@ -25,26 +25,62 @@ Switch Copilot to **Agent mode** and it gains live access to your running kernel
 
 | Tool | Reference | What Copilot can do |
 |------|-----------|---------------------|
-| 📋 **Get notebook context** | `#wolfbookContext` | Reads all cells and their outputs — Copilot sees exactly what you've computed |
+| � **Switch notebook** | `#wolfbookSwitch` | Lists all open `.wb` notebooks or switches Copilot's target to a specific one — use `action:"list"` to see what's open, `action:"switch"` to change the active notebook |
+| 📋 **Get notebook context** | `#wolfbookContext` | Reads all cells and their outputs — Copilot sees exactly what you've computed; pass `notebook:"file.wb"` to read a different open notebook without switching |
 | ⚡ **Evaluate expression** | `#wolfbookEval` | Runs any Wolfram Language expression in your live kernel and gets the result back |
 | 🔍 **Look up symbol** | `#wolfbookLookup` | Retrieves full usage docs, options table, and a link to the online reference for any symbol — built-in or user-defined |
 | 🌐 **Full web help** | `#wolfbookWebHelp` | Fetches and returns the complete Wolfram reference page for a built-in symbol — examples, details, and all |
 | ➕ **Insert cell** | `#wolfbookInsert` | Adds a new code or markdown cell at any position in your notebook |
+| ➕ **Insert cells (bulk)** | `#wolfbookInsertMany` | Adds multiple cells in a single operation — prefer this over repeated `#wolfbookInsert` calls |
 | ✏️ **Edit cell** | `#wolfbookEdit` | Replaces the source of an existing cell in-place; set `evaluate:true` to immediately run the new content and verify the result |
 | ▶️ **Run cell** | `#wolfbookRun` | Executes an existing cell through the normal pipeline (equivalent to Shift+Enter); the result is stored as the cell's output and visible to the user |
-| 🗑️ **Delete cell** | `#wolfbookDelete` | Removes a cell from the notebook; the deleted source is saved to `ai_deleted_cells.md` for recovery before deletion |
+| 🗑️ **Delete cell(s)** | `#wolfbookDelete` | Removes one or more cells from the notebook; pass `cellNumber` for a single cell or `cellNumbers` (array) for multiple — deleted content is saved to `ai_deleted_cells.md` for recovery |
+| ↩️ **Restore deleted cells** | `#wolfbookRestore` | Lists or re-inserts recently deleted cells from `ai_deleted_cells.md`; use `action:"list"` to see what was removed, `action:"restore"` to re-insert the last N cells at any position |
+| ↕️ **Move cell** | `#wolfbookMove` | Moves a cell from one position to another atomically (delete + re-insert in one edit); use `toPosition:0` to move to the beginning |
+| ▶️ **Run all cells** | `#wolfbookRunAll` | Executes a range of cells sequentially, waiting for each to finish; returns per-cell status and output — ideal for clean-run validation after a kernel restart |
 | 🔎 **Kernel state** | `#wolfbookState` | Lists all user-defined symbols matching a context pattern, showing their current values or rule counts — use this to understand what is already defined before writing code |
 | 💾 **Save notebook** | `#wolfbookSaveNotebook` | Saves the active notebook to disk — call this after a batch of insertions, edits, or deletions to persist the changes |
-| 📥 **Restart kernel** | `#wolfbookRestart` | Restarts the Wolfram kernel with a confirmation dialog — clears all definitions and resets the session |
+| 📦 **Find package** | `#wolfbookFindPkg` | Searches for Wolfram Language packages simultaneously on the Wolfram Paclet Server (via `PacletFindRemote` in the live kernel) and on GitHub — returns results with star counts and descriptions |
+| 📅 **Restart kernel** | `#wolfbookRestart` | Restarts the Wolfram kernel with a confirmation dialog — clears all definitions and resets the session |
 | ⏹️ **Abort evaluation** | `#wolfbookAbort` | Interrupts the currently running evaluation — equivalent to the Abort button in the toolbar |
 | 🐛 **Debug session** | `#wolfbookDebug` | Full AI control of the step-through debugger: analyze cell structure, start/stop sessions, step over/into/out, set and remove breakpoints, and manage the Watch Panel variable list — see [AI-controlled Debugging](#ai-controlled-debugging) below |
+| 🟥 **Kernel crash log** | `#wolfbookCrashLog` | Reads `img/<notebookName>/wolfram-kernel-debug.log` and/or macOS crash reports in `~/Library/Logs/DiagnosticReports/` to diagnose kernel crashes and unexpected disconnections |
+| 🔍 **Search cells** | `#wolfbookSearch` | Search notebook cells by text, regex, and/or kind (code/markdown) — returns matching cell numbers, content previews, and output summaries; useful for locating definitions in large notebooks |
 
 ### How to activate
+
+There are two ways to use Copilot with Wolfbook:
+
+**Option 1 — `@wolfbook` chat participant** *(recommended)*
+
+1. Open the Copilot Chat panel (`⌃⌘I`)
+2. Type `@wolfbook` followed by your question or request
+3. Wolfbook automatically injects notebook state, kernel status, and Wolfram Language best practices into every conversation
+
+`@wolfbook` has four slash commands:
+
+| Command | What it does |
+|---------|-------------|
+| `/run` | Run cells in the notebook and report results |
+| `/explain` | Explain what the code in the notebook does |
+| `/debug` | Debug errors and fix issues in the notebook |
+| `/insert` | Insert new cells into the notebook |
+
+Examples:
+```
+@wolfbook what does the function BBrel do?
+@wolfbook /run all cells from 3 to 20
+@wolfbook /debug why is cell 7 returning {}?
+@wolfbook /insert a cell that plots the residuals
+@wolfbook /explain the QSC equations in this notebook
+```
+
+**Option 2 — Agent mode** (works without `@wolfbook`)
 
 1. Open the Copilot Chat panel (`⌃⌘I`)
 2. Switch to **Agent** mode (dropdown at the top of the panel)
 3. Open a Wolfbook notebook (`.wb`) and start the kernel
-4. Ask anything — Copilot automatically reads your full notebook context
+4. Ask anything — Copilot automatically has access to all Wolfbook tools
 
 ### Example prompts
 
@@ -57,24 +93,38 @@ Switch Copilot to **Agent mode** and it gains live access to your running kernel
 "Fetch the NIntegrate documentation page and show me the available Method options"
 "Fix the bug in cell 7 without adding a new cell"
 "Re-run cell 5 to refresh its output after the kernel restart"
-"Delete cell 12 — it's superseded by cell 15"
+"Delete cells 12 and 15 — they are superseded by the new implementation"
+"Undo those deletions — restore the last 2 deleted cells at the end of the notebook"
+"Move cell 5 to after cell 12 — it belongs with that section"
+"Run all cells from cell 3 to cell 20 and show me which ones fail"
+"Restart the kernel then run all cells to verify the notebook runs clean from top to bottom"
+"Search for a Wolfram package for working with cluster algebras"
+"Check the kernel crash log — the kernel just died unexpectedly"
 "What symbols have I defined so far? Show me the kernel state."
 "Save the notebook after making these edits"
+"List all open notebooks and switch to prototype.wb"
 "Analyze the step structure of cell 4, set a breakpoint at line 6, then step through it"
 "Add x and i to the watch list, then debug cell 3 and tell me what goes wrong"
 ```
 
 You can also reference tools directly in your prompt:
+- `#wolfbookSwitch` — list all open notebooks or switch to a specific one
 - `#wolfbookContext` — read all notebook cells and outputs before asking a question
 - `#wolfbookEval Integrate[1/(x^2+1), x]` — evaluate in the live kernel
 - `#wolfbookLookup NDSolve` — look up usage, options, and documentation link
 - `#wolfbookWebHelp NMinimize` — fetch the full online reference page
 - `#wolfbookEdit` — replace the source of a cell (used automatically when Copilot fixes a cell)
 - `#wolfbookRun` — re-run a cell and get its output (stores result in the notebook)
-- `#wolfbookDelete` — remove a cell (recovery copy written to `ai_deleted_cells.md`)
+- `#wolfbookDelete` — remove one or more cells (recovery copies written to `ai_deleted_cells.md`)
+- `#wolfbookRestore` — list or re-insert recently deleted cells from the recovery log
+- `#wolfbookMove` — move a cell to a new position in the notebook
+- `#wolfbookRunAll` — run a range of cells sequentially with per-cell output summary
 - `#wolfbookState` — list all user-defined symbols and their current values
+- `#wolfbookFindPkg` — search Wolfram Paclet Server + GitHub for packages
+- `#wolfbookCrashLog` — read the kernel debug log or macOS crash reports
 - `#wolfbookSaveNotebook` — persist the notebook to disk
 - `#wolfbookDebug` — control the step-through debugger (analyze, start, step, breakpoints, watch list)
+- `#wolfbookSearch` — search cells by text/regex/kind; returns matching cell numbers and content previews
 
 ### Kernel safety
 
@@ -82,22 +132,36 @@ The tools are kernel-aware and safe to use at any time:
 - **Kernel busy detection** — if a notebook cell is currently evaluating, `#wolfbookEval` and `#wolfbookLookup` refuse to dispatch and return a clear "kernel is busy" message instead of queuing a competing evaluation that could corrupt the WSTP link.
 - **Dynamic widget awareness** — if `Dynamic[...]` widgets are active, evaluation tools note this but remain safe to use (Dynamic runs on a separate sub-channel).
 - **Timeout abort** — if an evaluation exceeds `timeoutSeconds`, the kernel is cleanly interrupted via `session.abort()` so it is immediately ready for the next request.
-- **Eval log rotation** — `ai_eval_log.md` (in `img/<notebook>/`) records every expression Copilot evaluates with its result. The log is automatically cleared when the kernel restarts so it stays relevant to the current session.
+- **Persistent action log** — `ai_eval_log.md` (in `img/<notebook>/`) records every expression Copilot evaluates, plus all cell edits, inserts, and deletes. Kernel restarts are marked with a `---` divider but the log is never cleared, so the full session history is preserved across reboots.
 
-### WBExport — save the notebook as a Mathematica `.nb` file
+### WBExport — multi-format notebook export
 
-Type `WBExport[]` in any code cell to convert the current notebook to a standard Mathematica `.nb` file saved alongside it. An optional path argument redirects the output:
+Type `WBExport["filename.ext"]` in any code cell to export the current notebook. The output format is chosen by the file extension. The `WBExport` cell itself is always excluded from the export.
 
 ```wolfram
-WBExport[]               (* saves as <notebook-name>.nb next to the .wb file *)
-WBExport["output.nb"]    (* relative path from the notebook's directory *)
-WBExport["/abs/path/to/result.nb"]
+WBExport[]                      (* saves as <notebook-name>.nb next to the .wb file *)
+WBExport["output.nb"]           (* Mathematica notebook *)
+WBExport["output.pdf"]          (* PDF via Chrome headless *)
+WBExport["output.html"]         (* self-contained HTML, all assets inlined *)
+WBExport["output.md"]           (* Markdown; graphics saved to output_images/ *)
+WBExport["output.tex"]          (* LaTeX article; graphics saved to output_images/ *)
+WBExport["/absolute/path/out.pdf"]
 ```
 
+**All formats:**
 - **Never sent to the kernel** — intercepted by the extension like `WBInclude`.
-- Markdown heading cells (`#`, `##`, `###`, `####`) become Wolfram `Title`, `Section`, `Subsection`, `Subsubsection` cells.
-- Markdown text cells become `Text` cells; code cells become `Input` cells.
-- The resulting `.nb` opens directly in Mathematica or the Wolfram Desktop.
+- Exported with a **light background** using VS Code Light+ syntax colours.
+- Every graphic output (SVG/PNG) is inlined or copied so exported files have no broken image links.
+
+**Format details:**
+
+| Format | Notes |
+|--------|-------|
+| `.nb` | Headings → `Title`/`Section`/etc.; text → `Text`; code → `Input`. Opens in Mathematica. |
+| `.pdf` | Requires Google Chrome. KaTeX fonts inlined; math renders offline. |
+| `.html` | Fully self-contained: KaTeX CSS+fonts, WL element CSS, and all images embedded as base64 data URIs. |
+| `.md` | Code cells become ` ```mathematica ``` ` fenced blocks. Outputs with graphics are extracted to `<name>_images/` and referenced with `![output](...)`. Text outputs become blockquotes. |
+| `.tex` | Full `\documentclass{article}` preamble with `amsmath`, `listings`, `graphicx`, `float`, `hyperref`. Code cells use `lstlisting` with a custom Mathematica language definition. Graphics saved to `<name>_images/` and included with `\includegraphics`. |
 
 ### WBInclude — import a Mathematica notebook
 
@@ -121,7 +185,10 @@ Copilot has full read/write/delete access to notebook cells — not just the abi
 
 - **`#wolfbookEdit`** replaces the source of any existing cell. Pass `evaluate:true` to run the updated content immediately and have the result returned to Copilot for verification.
 - **`#wolfbookRun`** executes an existing cell through the standard Wolfbook pipeline. Unlike `#wolfbookEval`, the result is stored as the cell's output in the notebook (visible in the editor), not just returned to the chat.
-- **`#wolfbookDelete`** removes a cell. Before deleting, the source is appended to `img/<notebook>/ai_deleted_cells.md` so nothing is permanently lost.
+- **`#wolfbookDelete`** removes one or more cells. Pass `cellNumber` for a single cell or `cellNumbers` (array) for multiple; cells are removed in descending index order. Before each deletion the source is appended to `img/<notebook>/ai_deleted_cells.md` so nothing is permanently lost.
+- **`#wolfbookRestore`** re-inserts recently deleted cells from the recovery log. Use `action:"list"` to browse the last N deletions (with timestamps and content previews) and `action:"restore"` to re-insert them at any notebook position. The recovery log is never cleared.
+- **`#wolfbookMove`** reorders a cell atomically: delete from the old position and re-insert at the new one in a single `WorkspaceEdit`. Use `toPosition:0` to move a cell to the very beginning, or `toPosition:N` to place it after Cell N.
+- **`#wolfbookRunAll`** runs a range of cells (default: all) sequentially, waiting for each to finish before starting the next. Returns a per-cell status and output summary. Ideal for clean-run validation after a kernel restart: restart the kernel, then ask Copilot to run all cells.
 - **`#wolfbookState`** queries the live kernel for all symbols in a given context (default: `Global\`*`) and returns their current values or rule counts. Useful before writing new code to avoid name conflicts.
 - **`#wolfbookSaveNotebook`** saves the active notebook to disk. Call this at the end of a batch edit session to ensure no changes are lost.
 
@@ -338,14 +405,36 @@ Do[n = k; Pause[0.5], {k, 1, 20}]  (* runs concurrently *)
 
 ---
 
+## ⌨️ Keyboard Shortcuts
+
+A complete reference for all keyboard shortcuts in Wolfbook notebooks (`.evsnb`).
+
+| Action | macOS | Windows / Linux |
+|---|---|---|
+| **Execute cell** | `Shift+Enter` | `Shift+Enter` |
+| **Insert code cell above** *(enters edit mode)* | `Cmd+Shift+A` | `Ctrl+Shift+A` |
+| **Insert code cell below** *(enters edit mode)* | `Cmd+Shift+B` | `Ctrl+Shift+B` |
+| **Delete current cell** | `Cmd+Shift+X` | `Ctrl+Shift+X` |
+| **Evaluate selection** | `Cmd+Shift+E` | `Ctrl+Shift+E` |
+| **Add selection to Watch panel** | `Cmd+Shift+W` | `Ctrl+Shift+W` |
+| **Debug cell (step-by-step)** | `Cmd+Shift+D` | `Ctrl+Shift+D` |
+| **Paste image as cell below** | `Cmd+Shift+V` | — |
+| **Enter alias mode** (type `alpha` → `α`, etc.) | `Esc` | `Esc` |
+| **Jump to cell above** (command mode) | `←` | `←` |
+| **Jump to cell below / create new** (command mode) | `→` | `→` |
+
+> All notebook-specific shortcuts are active only when a wolfbook `.evsnb` file is open.
+
+---
+
 ## Requirements
 
 - [Wolfram Mathematica](https://www.wolfram.com/mathematica/) or [Wolfram Engine](https://www.wolfram.com/engine/) installed locally
 - VS Code 1.95+
-- The bespoke **WSTP connector** (`wstp.node`) — a native Node.js addon that connects directly to the Wolfram kernel via the WSTP protocol. Prebuilt for **macOS** (Apple Silicon and Intel); Windows support is planned for a future release.
-- The bespoke **wolfbook-btl** addon (`wolfbook_btl.node`) — a native C++ addon that translates Wolfram `TraditionalForm` box structures to LaTeX. Also prebuilt for macOS only currently; Windows support coming.
+- The bespoke **WSTP connector** (`wstp.node`) — a native Node.js addon that connects directly to the Wolfram kernel via the WSTP protocol. Prebuilt for **macOS** (Apple Silicon and Intel) and **Windows x64** (from v2.3.0).
+- The bespoke **wolfbook-btl** addon (`wolfbook_btl.node`) — a native C++ addon that translates Wolfram `TraditionalForm` box structures to LaTeX. Prebuilt for **macOS** only currently; Windows support coming in a future release.
 
-Both native addons are bundled inside the `.vsix` so no separate build step is needed on macOS.
+Both native addons are bundled inside the `.vsix` so no separate build step is needed.
 
 ---
 

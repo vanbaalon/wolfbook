@@ -143,8 +143,6 @@ class DebugController {
         this._lastWatchValues = [];  // [{name, short, full}] from last _onDialogBegin
         this._watchDocMap        = new Map(); // varName → TextDocument for open-in-editor live update
         this._liveWatchInFlight      = false;    // prevents overlapping refreshLiveWatch calls
-        this._liveWatchNoDialog      = false;    // Pause-boundary guard: skip interrupt next cycle
-        this._liveWatchSentInterrupt = false;    // true between interrupt() and dialog-open/timeout
 
         // Clean up _watchDocMap entries when the user closes a tracked document
         vscode.workspace.onDidCloseTextDocument(doc => {
@@ -327,36 +325,63 @@ class DebugController {
      *  that directly.  In the idle evaluate() path the ReturnPacket payload is also
      *  a WL String (type:'string').  Either way JSON.parse works. */
     _applyWatchWexpr(wl, raw) {
-        if (!raw) return 0;
+        scrollLog('[live-watch] _applyWatchWexpr | raw.type:', raw?.type, '| raw.value truthy:', !!raw?.value,
+            '| raw.value repr:', JSON.stringify(String(raw?.value ?? '').slice(0, 120)));
+        if (!raw) { scrollLog('[live-watch] _applyWatchWexpr: raw is null/undefined — abort'); return 0; }
+        const { decodeWstpText } = require('../utils/encoding');
         let parsed = {};
+        let parseErr = null;
         if (raw.type === 'string' && raw.value) {
-            // Strip WSTP octal-continuation artifacts before JSON.parse.
-            // WSTP encodes non-printable chars as literal \NNN sequences in text packets:
-            //   \011 = tab (JSON indentation), \012 = newline, \015 = CR.
-            // These are only formatting whitespace — strip them to get compact valid JSON.
-            const cleaned = String(raw.value)
-                .replace(/\\011/g, '')
-                .replace(/\\012/g, '')
-                .replace(/\\015/g, '');
-            try { parsed = JSON.parse(cleaned); } catch (_) {}
-            scrollLog('[live-watch] _applyWatchWexpr | JSON.parse ok:', Object.keys(parsed).length > 0,
-                '| preview:', cleaned.slice(0, 80));
+            // Decode ALL WSTP octal escapes (\NNN) back to the actual characters.
+            // This handles \012 (newline) and \011 (tab) from JSON formatting,
+            // \042 (") and \134 (\) from string values containing quotes/backslashes,
+            // and multi-byte UTF-8 sequences for Unicode symbols.
+            const decoded = decodeWstpText(raw.value);
+            // The decoded string is now proper JSON with real newlines/tabs as whitespace
+            // — JSON.parse handles those natively.
+            scrollLog('[live-watch] decoded JSON (first 200):', JSON.stringify(decoded.slice(0, 200)));
+            try { parsed = JSON.parse(decoded); }
+            catch (e) {
+                parseErr = e.message;
+                // Extract position from error message and dump surrounding chars
+                const posMatch = parseErr.match(/position (\d+)/);
+                if (posMatch) {
+                    const pos = parseInt(posMatch[1]);
+                    const start = Math.max(0, pos - 40);
+                    const end = Math.min(decoded.length, pos + 40);
+                    scrollLog('[live-watch] JSON error at pos', pos,
+                        '| char code:', decoded.charCodeAt(pos),
+                        '| context:', JSON.stringify(decoded.slice(start, end)),
+                        '| ← pos marker at offset', pos - start);
+                }
+                scrollLog('[live-watch] FULL decoded JSON:', JSON.stringify(decoded));
+            }
+            scrollLog('[live-watch] JSON.parse ok:', parseErr == null,
+                '| keys:', Object.keys(parsed).join(', ') || '(none)',
+                parseErr ? '| ERROR: ' + parseErr : '');
+        } else if (!raw.value) {
+            scrollLog('[live-watch] _applyWatchWexpr: raw.value is falsy (empty string or missing) — type:', raw.type);
         } else {
+            scrollLog('[live-watch] _applyWatchWexpr: non-string type, using wexprToJs fallback | type:', raw.type);
             // Fallback: WExpr Association (BEGINDLGPKT / future path)
             const j = wexprToJs(raw);
             if (j && typeof j === 'object' && !Array.isArray(j)) parsed = j;
+            scrollLog('[live-watch] wexprToJs result keys:', Object.keys(parsed).join(', ') || '(none)');
         }
         const variables = wl.map(name => {
             const vals = parsed[name];
+            scrollLog('[live-watch] var', JSON.stringify(name),
+                '| found in parsed:', vals != null,
+                '| vals type:', typeof vals,
+                '| vals:', JSON.stringify(vals)?.slice(0, 80));
             if (vals == null) return null;
-            return {
-                name,
-                shortVal: (typeof vals === 'object') ? String(vals['short'] ?? '?') : String(vals),
-                fullVal:  (typeof vals === 'object') ? String(vals['full']  ?? '?') : String(vals),
-                isWatch: true,
-            };
+            const shortVal = (typeof vals === 'object') ? String(vals['short'] ?? '?') : String(vals);
+            const fullVal  = (typeof vals === 'object') ? String(vals['full']  ?? '?') : String(vals);
+            scrollLog('[live-watch] var', JSON.stringify(name), '→ shortVal:', JSON.stringify(shortVal), '| fullVal:', JSON.stringify(fullVal));
+            return { name, shortVal, fullVal, isWatch: true };
         }).filter(Boolean);
-        scrollLog('[live-watch] resolved', variables.length, '/', wl.length, '| vars:', variables.map(v => v.name + '=' + v.shortVal).join(', '));
+        scrollLog('[live-watch] resolved', variables.length, '/', wl.length,
+            '| rendered:', variables.map(v => v.name + '=' + JSON.stringify(v.shortVal)).join(', '));
         if (variables.length > 0) {
             this._watchPanel.liveUpdate(variables);
             this._updateWatchDocuments(variables).catch(() => {});
@@ -392,12 +417,6 @@ class DebugController {
         const kernelBusy    = !!(ctrl.executionQueue?.queue?.length > 0 && !ctrl._abortPending);
         const dynActive     = !!(ctrl._dynamicWidgets?.size > 0);
 
-        // Reset noDialog guard when kernel is idle so the next cell evaluation
-        // gets a fresh interrupt attempt.  Previously this was reset inside the
-        // busy-interrupt loop (after one skipped cycle), causing repeated
-        // interrupts on long-running cells that never open a dialog.
-        if (!kernelBusy) this._liveWatchNoDialog = false;
-
         scrollLog('[live-watch] cycle | busy:', kernelBusy, '| dynActive:', dynActive,
             '| dispatched:', ctrl._evalDispatched, '| dlgOpen:', ctrl.session.isDialogOpen);
 
@@ -409,92 +428,42 @@ class DebugController {
             return;
         }
 
-        if (kernelBusy && !dynActive) {
-            // Kernel is busy but no Dynamic loop — safe to interrupt ourselves.
-            if (this._liveWatchInFlight) { scrollLog('[live-watch] skip — in flight'); return; }
-            if (!ctrl._evalDispatched || ctrl.session.isDialogOpen) {
-                scrollLog('[live-watch] busy but not interruptible | dispatched:', ctrl._evalDispatched,
-                    '| dlgOpen:', ctrl.session.isDialogOpen);
-                return;
-            }
-            if (this._liveWatchNoDialog) {
-                // No dialog appeared after the last interrupt — suppress further
-                // interrupts until the kernel goes idle (guard resets above when
-                // !kernelBusy).  This prevents the live-watch from repeatedly
-                // poking a kernel that is doing a long computation without dialogs.
-                scrollLog('[live-watch] noDialog guard — suppressing until idle');
-                return;
-            }
-            this._liveWatchInFlight = true;
-            try {
-                if (!ctrl._evalDispatched || ctrl._abortPending || ctrl.session.isDialogOpen) {
-                    scrollLog('[live-watch] guards failed');
-                    return;
-                }
-
-                ctrl.session.closeAllDialogs?.();
-                const sent = ctrl.session.interrupt();
-                scrollLog('[live-watch] interrupt sent:', sent);
-                if (!sent) { return; }
-
-                const t1 = Date.now();
-                while (!ctrl.session.isDialogOpen && Date.now() - t1 < 2500)
-                    await new Promise(r => setTimeout(r, 25));
-                const dlgOpen = ctrl.session.isDialogOpen;
-                scrollLog('[live-watch] waited', Date.now() - t1, 'ms | dlgOpen:', dlgOpen);
-
-                if (!dlgOpen) {
-                    scrollLog('[live-watch] no dialog — polling for deferred');
-                    const t2 = Date.now();
-                    let deferred = false;
-                    while (Date.now() - t2 < 1500) {
-                        await new Promise(r => setTimeout(r, 100));
-                        if (ctrl.session.isDialogOpen) {
-                            deferred = true;
-                            scrollLog('[live-watch] deferred dialog appeared after', Date.now() - t1, 'ms');
-                            break;
-                        }
-                    }
-                    if (!deferred) {
-                        scrollLog('[live-watch] no deferred dialog in 4s — giving up');
-                        this._liveWatchNoDialog = true;
-                        return;
-                    }
-                }
-                this._liveWatchNoDialog = false;
-
-                try {
-                    const raw = await Promise.race([
-                        ctrl.session.dialogEval(wlExpr),
-                        new Promise((_, rej) => setTimeout(() => rej(new Error('watch-timeout')), 5000)),
-                    ]);
-                    scrollLog('[live-watch] dialogEval ok | type:', raw?.type);
-                    this._applyWatchWexpr(wl, raw);
-                } finally {
-                    try { await ctrl.session.exitDialog(); scrollLog('[live-watch] exitDialog done'); }
-                    catch (e) { scrollLog('[live-watch] exitDialog err:', e.message); }
-                }
-            } catch (err) {
-                scrollLog('[live-watch] interrupt-path ERROR:', err.message);
-            } finally {
-                this._liveWatchInFlight = false;
-            }
+        // ── Both busy and idle paths use subAuto() ──
+        // subAuto() auto-routes: idle → subWhenIdle (immediate), busy → C++
+        // ScheduledTask Dialog inline eval — no interrupt/SIGINT needed, so
+        // long-running computations like Do[...; Pause[1], {n,1,8}] are never
+        // broken by the watch panel.
+        if (this._liveWatchInFlight) return;
+        // Stop hammering a dead link — after 3 consecutive errors, give up until
+        // the kernel is restarted (which resets _liveWatchConsecErrors via _cleanup).
+        if ((this._liveWatchConsecErrors || 0) >= 3) {
+            scrollLog('[live-watch] suppressed — link appears dead (' + this._liveWatchConsecErrors + ' consecutive errors)');
             return;
         }
-
-        // ── Idle-kernel path — use subAuto to avoid interfering with queued cells ──
-        if (this._liveWatchInFlight) return;
+        // Skip if a Dynamic loop's subAuto is still in-flight at the C++ level.
+        // Overlapping idle-path subAuto calls can corrupt the WSTP link state.
+        if (ctrl._subAutoLock) return;
+        // Post-eval cooldown: C++ stale Dialog drain after busy evals can leave
+        // the WSTP link broken.  Skip subAuto for 3s after eval ends.
+        if (ctrl._evalEndedAt && (Date.now() - ctrl._evalEndedAt) < 3000) return;
         this._liveWatchInFlight = true;
+        const _cppPromise = ctrl.session.subAuto(wlExpr);
+        ctrl._subAutoLock = _cppPromise;
+        _cppPromise.finally(() => {
+            if (ctrl._subAutoLock === _cppPromise) ctrl._subAutoLock = null;
+        });
         try {
-            scrollLog('[live-watch] idle subAuto');
+            scrollLog('[live-watch] subAuto | busy:', kernelBusy);
             const result = await Promise.race([
-                ctrl.session.subAuto(wlExpr),
-                new Promise((_, rej) => setTimeout(() => rej(new Error('watch-idle-timeout')), 6000))
+                _cppPromise,
+                new Promise((_, rej) => setTimeout(() => rej(new Error('watch-timeout')), 6000))
             ]);
-            scrollLog('[live-watch] idle result type:', result?.type);
+            scrollLog('[live-watch] subAuto result type:', result?.type);
             this._applyWatchWexpr(wl, result);
+            this._liveWatchConsecErrors = 0;  // success — reset counter
         } catch (err) {
-            scrollLog('[live-watch] idle ERROR:', err.message);
+            scrollLog('[live-watch] subAuto ERROR:', err.message);
+            this._liveWatchConsecErrors = (this._liveWatchConsecErrors || 0) + 1;
             this._watchPanel.liveUpdate(wl.map(n => ({ name: n, shortVal: '⚠', fullVal: String(err), isWatch: true })));
         } finally {
             this._liveWatchInFlight = false;
@@ -521,9 +490,7 @@ class DebugController {
         const code = cell.document.getText().trim();
         const { transformCode } = require('./codeTransformer');
         const bpLines = [...this._bpMgr.getBreakpointsForCell(cell)];
-        console.log('[wolfbook-debug] startDebugCell: cellUri=', cell.document.uri.toString());
-        console.log('[wolfbook-debug] startDebugCell: bpLines from _bpMgr=', bpLines);
-        console.log('[wolfbook-debug] startDebugCell: full _bpMgr map=', JSON.stringify([...this._bpMgr._map]));
+        scrollLog('[wolfbook-debug] startDebugCell: cellUri=', cell.document.uri.toString(), 'bpLines=', bpLines);
         const xfm = transformCode(code, bpLines);
         if (!xfm) {
             vscode.window.showInformationMessage('Cell is empty — nothing to debug.');
@@ -568,12 +535,12 @@ class DebugController {
         vscode.commands.executeCommand('setContext', 'wolfbook.debugActive', true);
         if (this._watchPanel) this._watchPanel.setDebugActive(true);
         if (this._watchPanel) this._watchPanel.log('Starting debug session…');
-        console.log('[wolfbook-debug] startDebugCell: active, steps=', xfm.steps.length);
+        scrollLog('[wolfbook-debug] startDebugCell: active, steps=', xfm.steps.length);
 
         // ── Step 1: reset kernel-side debug state
         // First, close any stale Dialog[] from a previous crashed session.
         if (ctrl.session.isDialogOpen) {
-            console.warn('[wolfbook-debug] stale dialog open — closing before init');
+            scrollLog('[wolfbook-debug] stale dialog open — closing before init');
             if (this._watchPanel) this._watchPanel.log('⚠ Closing stale dialog…');
             try { await ctrl.session.exitDialog(); } catch (_) {}
         }
@@ -581,13 +548,13 @@ class DebugController {
         // avoids any string-escaping issues with large inline file content.
         const initWlPath = path.join(__dirname, 'kernelDebugInit.wl').replace(/\\/g, '/');
         const getExpr = `Get["${initWlPath}"]`;
-        console.log('[wolfbook-debug] loading kernelDebugInit from:', initWlPath);
+        scrollLog('[wolfbook-debug] loading kernelDebugInit from:', initWlPath);
         try {
             await ctrl.session.evaluate(getExpr, { interactive: false });
         } catch (err) {
             this._cleanup();
             const msg = err?.message || String(err);
-            console.error('[wolfbook-debug] init evaluate failed:', err);
+            scrollLog('[wolfbook-debug] init evaluate failed:', err?.message);
             if (this._watchPanel) this._watchPanel.log('✗ init failed: ' + msg);
             vscode.window.showErrorMessage('Debug init failed: ' + msg);
             return;
@@ -596,9 +563,7 @@ class DebugController {
         // ── Step 2: push watch list and breakpoints into kernel
         const wl = this._watchPanel ? this._watchPanel.getWatchList() : [];
         const bpSteps = _bpLinesToKernelSteps(bpLines, xfm.steps);
-        console.log('[wolfbook-debug] startDebugCell: bpSteps=', bpSteps,
-            '| steps count=', xfm.steps.length,
-            '| steps=', xfm.steps.map(s => `${s.startLine}-${s.endLine}@d${s.depth}s${s.localStep}`));
+        scrollLog('[wolfbook-debug] startDebugCell: bpSteps=', bpSteps, '| steps=', xfm.steps.length);
         const initState = [
             `wolfbookDebug$WatchList = {${wl.map(n => `"${n}"`).join(', ')}}`,
             `wolfbookDebug$Breakpoints = {${bpSteps.join(', ')}}`,
@@ -608,6 +573,12 @@ class DebugController {
         } catch (_) {}
 
         // ── Step 3: fire the instrumented cell asynchronously
+        // CRITICAL: disable Dynamic-widget auto-mode so BEGINDLGPKT from
+        // wolfbookDebug$BeforeStep's Dialog[] reaches the onDialogBegin callback
+        // instead of being auto-closed by the C++ inline eval path.
+        // If a live-watch ScheduledTask was active, it had set dynAutoMode_=true;
+        // setDynAutoMode(false) resets it and stops the timer thread.
+        try { ctrl.session?.setDynAutoMode?.(false); } catch (_) {}
         this._evalPromise = ctrl.session.evaluate(xfm.instrumentedCode, {
             onDialogBegin: () => { this._onDialogBegin().catch(e => console.error('[debug] onDialogBegin error:', e)); },
             onDialogEnd:   () => { /* kernel exited dialog — loop continues */ },
@@ -675,11 +646,12 @@ class DebugController {
             },
         };
         const fn = map[cmd];
-        if (fn) fn(); else console.warn('[wolfbook-debug] unknown debugCommand:', cmd);
+        if (fn) fn(); else scrollLog('[wolfbook-debug] unknown debugCommand:', cmd);
     }
 
     async stop() {
         if (!this._active) return;
+        scrollLog('[wolfbook-debug] stop() called');
         this._stopping = true;  // suppress auto-advance even if evaluation finishes cleanly
 
         // Immediately clear all decorations so UI looks clean at once
@@ -691,16 +663,20 @@ class DebugController {
         // If the kernel is currently paused inside Dialog[], exit it first so the
         // evaluation thread is unblocked and the abort signal can reach it cleanly.
         if (ctrl?.session?.isDialogOpen) {
+            scrollLog('[wolfbook-debug] stop: dialog open — disabling debug + exiting');
             try {
                 // Disable further pauses so the kernel won't enter Dialog[] again
                 await ctrl.session.dialogEval(
                     'wolfbookDebug$Active=False;wolfbookDebug$StepMode=False');
-            } catch (_) {}
-            try { await ctrl.session.exitDialog(); } catch (_) {}
+            } catch (e) { scrollLog('[wolfbook-debug] stop: dialogEval disable failed:', e?.message); }
+            try { await ctrl.session.exitDialog(); } catch (e) { scrollLog('[wolfbook-debug] stop: exitDialog failed:', e?.message); }
         }
 
         // Abort the running evaluation
-        if (ctrl) { try { ctrl.abortEvaluation(); } catch (_) {} }
+        if (ctrl) {
+            scrollLog('[wolfbook-debug] stop: aborting evaluation');
+            try { ctrl.abortEvaluation(); } catch (_) {}
+        }
 
         // Force-finalize immediately — don't rely on _evalPromise rejection which
         // can be delayed or swallowed, leaving the notebook stuck in pending state.
@@ -711,7 +687,7 @@ class DebugController {
 
     async _sendStep(command) {
         const dialogOpen = this._getController()?.session?.isDialogOpen;
-        console.log('[wolfbook-debug] _sendStep:', command, '| active=', this._active, '| dialogOpen=', dialogOpen);
+        scrollLog('[wolfbook-debug] _sendStep:', command, '| active=', this._active, '| dialogOpen=', dialogOpen);
         if (this._watchPanel) this._watchPanel.log(`→ ${command} (dialog=${dialogOpen})`);
         if (!this._active) return;
         const ctrl = this._getController();
@@ -727,19 +703,19 @@ class DebugController {
         await new Promise((resolve, reject) => {
             this._evalQueue = this._evalQueue.catch(() => {}).then(async () => {
                 const stillOpen = ctrl?.session?.isDialogOpen;
-                console.log('[wolfbook-debug] _sendStep QUEUE-SLOT:', command, '| stillOpen=', stillOpen);
+                scrollLog('[wolfbook-debug] _sendStep QUEUE-SLOT:', command, '| stillOpen=', stillOpen);
                 if (!stillOpen) { resolve(); return; }
                 // Verify what breakpoints the kernel currently has before running
                 try {
                     const bpCheck = await ctrl.session.dialogEval('wolfbookDebug$Breakpoints');
-                    console.log('[wolfbook-debug] _sendStep PRE-RUN kernel bps=', JSON.stringify(bpCheck));
-                } catch (e) { console.warn('[wolfbook-debug] _sendStep: could not read bps:', e?.message); }
+                    scrollLog('[wolfbook-debug] _sendStep PRE-RUN kernel bps=', JSON.stringify(bpCheck));
+                } catch (e) { scrollLog('[wolfbook-debug] _sendStep: could not read bps:', e?.message); }
                 try {
                     await ctrl.session.dialogEval(command);
                     await ctrl.session.exitDialog();
                     resolve();
                 } catch (err) {
-                    console.error('[wolfbook-debug] _sendStep error:', err);
+                    scrollLog('[wolfbook-debug] _sendStep error:', err?.message);
                     if (this._watchPanel) this._watchPanel.log(`✗ _sendStep error: ${err.message}`);
                     resolve(); // resolve, not reject — don't poison the queue
                 }
@@ -769,12 +745,12 @@ class DebugController {
     }
 
     async _onDialogBegin() {
-        console.log('[wolfbook-debug] _onDialogBegin | active=', this._active, '| dialogOpen=', this._getController()?.session?.isDialogOpen);
+        scrollLog('[wolfbook-debug] _onDialogBegin | active=', this._active, '| dialogOpen=', this._getController()?.session?.isDialogOpen);
         if (this._watchPanel) this._watchPanel.log('Dialog opened (kernel paused)');
         if (!this._active) return;
         const ctrl = this._getController();
         if (!ctrl?.session?.isDialogOpen) {
-            console.warn('[wolfbook-debug] _onDialogBegin: dialog not open — skipping');
+            scrollLog('[wolfbook-debug] _onDialogBegin: dialog not open — skipping');
             return;
         }
 
@@ -782,7 +758,11 @@ class DebugController {
         try {
             stepInfoWexpr = await this._queuedDialogEval('wolfbookDebug$GetStepInfo[]');
         } catch (err) {
-            console.error('[debug] GetStepInfo failed:', err);
+            scrollLog('[wolfbook-debug] _onDialogBegin: GetStepInfo FAILED:', err?.message);
+            // Dialog is still open — try to exit it and stop the session
+            try { await ctrl.session.exitDialog(); } catch (_) {}
+            scrollLog('[wolfbook-debug] _onDialogBegin: stopping session after GetStepInfo failure');
+            this.stop();
             return;
         }
         if (!this._active) return;  // stop() may have fired while we were awaiting
@@ -803,8 +783,7 @@ class DebugController {
         const prevTimingStep  = si['prevTimingStep']  ?? -1;
 
         this._lastStepInfo = { depth, localStep, iterVars };
-        console.log('[wolfbook-debug] _onDialogBegin: depth=', depth, 'step=', localStep, 'iterVars=', JSON.stringify(iterVars),
-            'stepInfoHead=', stepInfoWexpr?.head ?? stepInfoWexpr?.type, 'watchHead=', watchWexpr?.head ?? watchWexpr?.type);
+        scrollLog('[wolfbook-debug] _onDialogBegin: depth=', depth, 'step=', localStep, 'iterVars=', JSON.stringify(iterVars));
         if (this._watchPanel) this._watchPanel.log(`Paused: depth=${depth} step=${localStep}`);
 
         // Record timing for the step that just completed (tracked by kernel via LastCompleted)
@@ -865,7 +844,7 @@ class DebugController {
                         ]));
                     }
                 } catch (rErr) {
-                    console.error('[wolfbook-debug] _onDialogBegin: step render failed:', rErr);
+                    scrollLog('[wolfbook-debug] _onDialogBegin: step render failed:', rErr?.message);
                 }
             }
         }
@@ -875,10 +854,9 @@ class DebugController {
         // breakpoints since the last pause while the kernel was running).
         const bpLinesNow = [...this._bpMgr.getBreakpointsForCell(this._cell || { document: { uri: { toString: () => '' } } })];
         const bpStepsNow = _bpLinesToKernelSteps(bpLinesNow, this._xfm?.steps ?? []);
-        console.log('[wolfbook-debug] _onDialogBegin: re-pushing bpLines=', bpLinesNow, '| bpStepsNow=', bpStepsNow);
+        scrollLog('[wolfbook-debug] _onDialogBegin: re-pushing bpStepsNow=', bpStepsNow);
         try {
             await this._queuedDialogEval(`wolfbookDebug$Breakpoints = {${bpStepsNow.join(', ')}}`);
-            console.log('[wolfbook-debug] _onDialogBegin: re-push done, breakpoints now=', bpStepsNow);
         } catch (_) {}
 
         // Apply step highlight
@@ -924,9 +902,9 @@ class DebugController {
         const pauseReason = this._pauseCount === 1 ? 'entry'
             : (this._lastStepCommand === 'continue' || this._lastStepCommand === 'runToEnd') ? 'breakpoint'
             : 'step';
-        console.log('[wolfbook-debug] _onDialogBegin: firing stopped event, reason=', pauseReason,
-            '| watchValues count=', this._lastWatchValues.length,
-            '| dialogOpen=', this._getController()?.session?.isDialogOpen);
+        scrollLog('[wolfbook-debug] _onDialogBegin: firing stopped event, reason=', pauseReason,
+            '| watchValues:', this._lastWatchValues.length,
+            '| dialogOpen:', this._getController()?.session?.isDialogOpen);
         this._onDidPause.fire({ reason: pauseReason });
     }
 
@@ -934,13 +912,14 @@ class DebugController {
 
     async _finishDebug(isError, err, evalResult = null) {
         if (!this._active) return;
+        // Guard against double-call (stop() force-finishes, then Promise rejection fires too)
+        if (this._finishing) return;
+        this._finishing = true;
         const finishedCell = this._cell;   // capture before _cleanup() nulls it
         const wasStopping  = this._stopping;
         const ctrl = this._getController();
 
-        console.log('[wolfbook-debug] _finishDebug: isError=', isError, 'wasStopping=', wasStopping,
-            'evalResult.outputName=', evalResult?.outputName, 'evalResult.cellIndex=', evalResult?.cellIndex,
-            'evalResult.result?.type=', evalResult?.result?.type, 'evalResult.result?.value=', evalResult?.result?.value,
+        scrollLog('[wolfbook-debug] _finishDebug: isError=', isError, 'wasStopping=', wasStopping,
             'hasExecution=', !!this._debugExecution, 'hasSession=', !!ctrl?.session);
 
         // Render and append the final cell result BEFORE ending the execution.
@@ -953,14 +932,7 @@ class DebugController {
                            && !lastD0Step?.suppressedOutput
                            && (evalResult?.cellIndex ?? 0) > 0
                            && this._debugExecution && ctrl?.session;
-        console.log('[wolfbook-debug] _finishDebug: canRender=', _canRender,
-            '| reasons:', !isError ? '' : 'isError',
-            !wasStopping ? '' : 'wasStopping',
-            evalResult?.outputName ? '' : 'no-outputName',
-            !lastD0Step?.suppressedOutput ? '' : 'lastStepSuppressed',
-            (evalResult?.cellIndex ?? 0) > 0 ? '' : 'cellIndex<=0',
-            this._debugExecution ? '' : 'no-execution',
-            ctrl?.session ? '' : 'no-session');
+        console.log('[wolfbook-debug] _finishDebug: canRender=', _canRender);
         if (_canRender) {
             try {
                 const cellForFmt = this._cell || finishedCell;
@@ -969,13 +941,12 @@ class DebugController {
                     : (vscode.workspace.getConfiguration('wolfram').get('notebook.rendering.outputFormat') || 'Auto');
                 const scale  = Number(ctrl.config?.get?.('imageScale') ??
                     vscode.workspace.getConfiguration('wolfram').get('imageScale') ?? 0.8);
-                console.log('[wolfbook-debug] _finishDebug: calling VsCodeRender[', evalResult.cellIndex, '] format=', format, 'scale=', scale);
+                scrollLog('[wolfbook-debug] _finishDebug: calling VsCodeRender[', evalResult.cellIndex, '] format=', format);
                 const renderResult = await ctrl.session.evaluate(
                     `VsCodeRender[${evalResult.cellIndex}, "${format}", ${scale}]`,
                     { interactive: false, rejectDialog: true }
                 );
-                console.log('[wolfbook-debug] _finishDebug: renderResult type=', renderResult?.result?.type,
-                    'value length=', renderResult?.result?.value?.length);
+                scrollLog('[wolfbook-debug] _finishDebug: renderResult type=', renderResult?.result?.type);
                 if (renderResult?.result?.type === 'string' && renderResult.result.value) {
                     const _rawHtml = renderResult.result.value;
                     const html = ctrl._processWLLatexBoxes
@@ -990,19 +961,18 @@ class DebugController {
                             vscode.NotebookCellOutputItem.text(wrapped, 'x-application/wolfram-language-html'),
                             vscode.NotebookCellOutputItem.text(evalResult.outputName + ' ' + String(evalResult.result?.value ?? ''), 'text/plain'),
                         ]));
-                        console.log('[wolfbook-debug] _finishDebug: output appended successfully');
+                        scrollLog('[wolfbook-debug] _finishDebug: output appended');
                     } else {
-                        console.log('[wolfbook-debug] _finishDebug: _debugExecution was nulled during render (stop() race) — output lost');
+                        scrollLog('[wolfbook-debug] _finishDebug: _debugExecution nulled during render — output lost');
                     }
                 } else {
-                    console.log('[wolfbook-debug] _finishDebug: renderResult did not contain string HTML',
-                        '| aborted=', renderResult?.aborted, '| type=', renderResult?.result?.type);
+                    scrollLog('[wolfbook-debug] _finishDebug: renderResult not HTML, aborted=', renderResult?.aborted);
                 }
             } catch (renderErr) {
-                console.error('[wolfbook-debug] _finishDebug: render/append failed:', renderErr);
+                scrollLog('[wolfbook-debug] _finishDebug: render failed:', renderErr?.message);
             }
         } else {
-            console.log('[wolfbook-debug] _finishDebug: skipped output render — conditions not met');
+            scrollLog('[wolfbook-debug] _finishDebug: skipped output render');
         }
 
         // End the notebook cell execution (stops the spinner, makes output permanent)
@@ -1041,11 +1011,18 @@ class DebugController {
             } catch (_) {}
         }
 
-        // Cleanup kernel state — skip when stopping (kernel may still be aborting)
-        if (!wasStopping && ctrl?.session) {
+        // Always attempt kernel cleanup — even after abort/stop.
+        // Use rejectDialog + short timeout so it won't hang if kernel is mid-abort.
+        if (ctrl?.session) {
             try {
-                await ctrl.session.evaluate('wolfbookDebug$Cleanup[]', { interactive: false });
-            } catch (_) {}
+                await Promise.race([
+                    ctrl.session.evaluate('wolfbookDebug$Cleanup[]', { interactive: false, rejectDialog: true }),
+                    new Promise(r => setTimeout(r, 2000)),
+                ]);
+                scrollLog('[wolfbook-debug] _finishDebug: kernel cleanup done');
+            } catch (e) {
+                scrollLog('[wolfbook-debug] _finishDebug: kernel cleanup failed (ok after abort):', e?.message);
+            }
         }
 
         this._clearStepHighlight();
@@ -1060,11 +1037,11 @@ class DebugController {
         }
 
         if (isError && err) {
-            console.error('[debug] session ended with error:', err);
+            scrollLog('[wolfbook-debug] session ended with error:', err?.message || String(err));
         }
 
         this._cleanup();
-        console.log('[wolfbook-debug] _finishDebug complete, error=', isError);
+        scrollLog('[wolfbook-debug] _finishDebug complete, error=', isError);
 
         // Auto-advance first — if we're continuing on the next cell the DAP session
         // must stay open (no 'terminated' event) so VS Code's debug UI stays connected.
@@ -1109,7 +1086,7 @@ class DebugController {
 
         // Brief delay so VS Code can render/focus the cell editor
         setTimeout(() => {
-            console.log('[wolfbook-debug] auto-advancing to cell index', nextCell.index);
+            scrollLog('[wolfbook-debug] auto-advancing to cell index', nextCell.index);
             this.startDebugCell(nextCell);
         }, 300);
         return true;   // caller must NOT fire _onDidFinish — DAP session stays open
@@ -1128,9 +1105,61 @@ class DebugController {
         }
 
         this._stopping       = false;
+        this._finishing      = false;
         vscode.commands.executeCommand('setContext', 'wolfbook.debugActive', false);
         if (this._watchPanel) this._watchPanel.setDebugActive(false);
-        console.log('[wolfbook-debug] _cleanup done');
+        // Restore dynAutoMode if Dynamic widgets are still active after debug ends.
+        const ctrl = this._getController();
+        if (ctrl?.session && ctrl._dynamicWidgets?.size > 0) {
+            try { ctrl.session.setDynAutoMode?.(true); } catch (_) {}
+        }
+        scrollLog('[wolfbook-debug] _cleanup done');
+    }
+
+    /**
+     * Hard-reset ALL debugger state to defaults. Called by the global abort
+     * and restart handlers as a last-resort to ensure no flags remain stuck.
+     * This is safe to call even if no debug session was active.
+     */
+    resetAllState() {
+        scrollLog('[wolfbook-debug] resetAllState called | wasActive=', this._active);
+        // End any active execution spinner
+        if (this._debugExecution) {
+            try { this._debugExecution.end(false, Date.now()); } catch (_) {}
+            this._debugExecution = null;
+        }
+        // Reset every session flag
+        this._active         = false;
+        this._cell           = null;
+        this._xfm            = null;
+        this._evalPromise    = null;
+        this._lastStepInfo   = null;
+        this._cellEditor     = null;
+        this._debugPrintHtml = '';
+        this._debugPrintOut  = null;
+        this._restartPending = false;
+        this._stopping       = false;
+        this._finishing      = false;
+        this._pauseCount     = 0;
+        this._lastStepCommand = null;
+        this._lastWatchValues = [];
+        this._liveWatchInFlight      = false;
+        this._liveWatchNoDialog      = false;
+        this._liveWatchSentInterrupt = false;
+        this._liveWatchConsecErrors  = 0;
+        this._evalQueue      = Promise.resolve();
+
+        // Clear UI
+        this._clearStepHighlight();
+        this._clearPendingDeco();
+        vscode.commands.executeCommand('setContext', 'wolfbook.debugActive', false);
+        if (this._watchPanel) {
+            this._watchPanel.setDebugActive(false);
+            this._watchPanel.clear();
+        }
+
+        // Fire finished event so DAP session terminates
+        this._onDidFinish.fire();
     }
 
     // ── Decorations ───────────────────────────────────────────────────────────

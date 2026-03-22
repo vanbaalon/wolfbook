@@ -19,8 +19,10 @@
 *)
 
 
-$IterationLimit=400000;
-$RecursionLimit=100000;
+(* NOTE: $IterationLimit and $RecursionLimit are raised locally inside
+   VsCodeRenderExpr (render-expr.wl) via Block, NOT globally.
+   A global $RecursionLimit=100000 caused C-stack overflow on user code
+   like s=s<>"sdf" with undefined s. *)
 
 
 ClearAll[renderWrapper,renderHTML,renderImage,renderHTMLimage,renderMathML,renderInputForm];

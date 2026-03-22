@@ -922,23 +922,13 @@ export function activate(context) {
                 const renderRawWithKatex = (katex) => {
                     rawLatexDivs.forEach(div => {
                         const btlError = div.getAttribute('data-btl-error');
-                        const rawBoxes = (() => { try { return atob(div.getAttribute('data-boxes-b64') || ''); } catch(e) { return ''; } })();
                         let latex = '';
                         try { latex = atob(div.getAttribute('data-latex-b64') || ''); } catch(e) {}
                         // Error banner from boxToLatex (parse error etc.)
-                        const errBanner = btlError
-                            ? `<div style="color:#e05c4e;font-size:11px;margin:0 0 3px;">⚠️ boxToLatex error: ${btlError.replace(/&/g,'&amp;').replace(/</g,'&lt;')}</div>`
-                            : '';
-                        // Debug disclosure widget
                         const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-                        const debugHtml =
-                            '<details style="margin-top:4px;font-size:11px;opacity:0.65;">' +
-                            '<summary style="cursor:pointer;user-select:none;">WLLatex2 debug</summary>' +
-                            '<pre style="margin:2px 0;white-space:pre-wrap;word-break:break-all;">' +
-                            '<b>boxes:</b> ' + esc(rawBoxes) + '\n' +
-                            '<b>latex:</b> ' + esc(latex) +
-                            (btlError ? '\n<b style="color:#e05c4e;">error:</b> ' + esc(btlError) : '') +
-                            '</pre></details>';
+                        const errBanner = btlError
+                            ? `<div style="color:#e05c4e;font-size:11px;margin:0 0 3px;">⚠️ boxToLatex error: ${esc(btlError)}</div>`
+                            : '';
                         let rendered = '';
                         try {
                             rendered = katex.renderToString(latex, {
@@ -948,7 +938,7 @@ export function activate(context) {
                         } catch(e) {
                             rendered = '<pre style="color:#e05c4e;">KaTeX error: ' + esc(String(e.message||e)) + '</pre>';
                         }
-                        div.innerHTML = errBanner + rendered + debugHtml;
+                        div.innerHTML = errBanner + rendered;
                     });
                     // ---- Height fix: KaTeX renders async (CDN load), so VS Code may have
                     // already measured this cell's height as 0 (empty latex divs). Trigger

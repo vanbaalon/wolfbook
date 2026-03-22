@@ -212,7 +212,14 @@ function abortEvaluation(self) {
     self.writeDebugLog(`[ABORT] abortEvaluation called | isAborting=${self.isAborting} _abortPending=${self._abortPending} queueLen=${self.executionQueue.queueLength()}`);
 
     if (self.isAborting || self._abortPending) {
-        self.writeDebugLog(`[ABORT] suppressed — already isAborting=${self.isAborting} _abortPending=${self._abortPending}`);
+        self.writeDebugLog(`[ABORT] already isAborting=${self.isAborting} _abortPending=${self._abortPending} — force-reset to non-evaluating state`);
+        // Force-reset: the first abort may have failed (dead link, etc.).
+        // Always bring VS Code back to non-evaluating state on second press.
+        self.isAborting     = false;
+        self._abortPending  = false;
+        self._evalDispatched = false;
+        self.executionQueue.clear();
+        scrollLog('[abort] force-reset on second abort press');
         return;
     }
     if (!self.session) {
@@ -230,6 +237,9 @@ function abortEvaluation(self) {
         self._evalDispatched = false;
         self._cellEpoch     = ((self._cellEpoch || 0) + 1) & 0xFFFFFF;
         self._dispatchEpoch = (self._dispatchEpoch + 1) & 0xFFFFFF;
+        // Reset any other flags that can get stuck
+        self._refineGuardActive   = false;
+        self._dialogPrintCollector = null;
 
         // Always close any stale dialog state before abort — closeAllDialogs()
         // rejects all pending dialogEval/exitDialog promises immediately.
@@ -311,10 +321,16 @@ function restartKernel(self) {
     if (self.isAborting) {
         self.writeDebugLog('[RESTART] overriding in-progress abort');
     }
-    self._abortPending = false;
-    self.isAborting = false;
+    // Reset ALL controller-level flags to defaults
+    self._abortPending          = false;
+    self.isAborting              = false;
+    self._evalDispatched         = false;
+    self._refineGuardActive     = false;
+    self._dialogPrintCollector  = null;
+    self._cellEpoch             = ((self._cellEpoch || 0) + 1) & 0xFFFFFF;
+    self._dispatchEpoch         = (self._dispatchEpoch + 1) & 0xFFFFFF;
     self.executionQueue.clear();
-    self.writeDebugLog(`[RESTART] queue cleared | dt=${Date.now()-_rstT0}ms`);
+    self.writeDebugLog(`[RESTART] all flags reset, queue cleared | dt=${Date.now()-_rstT0}ms`);
 
     const hadKernel = !!self.session;
     self.quitKernel();

@@ -256,6 +256,47 @@ class WolframNotebookKernel {
                             } catch (_) {}
                         }
                     }
+                    // Restore per-output format overrides from globalState (primary)
+                    // and from saved output HTML (fallback for outputs written before
+                    // the globalState persistence was added).
+                    if (this._extContext) {
+                        try {
+                            const _storeKey = 'wolfbook.perOutputFmt.' + key;
+                            const _saved    = this._extContext.globalState.get(_storeKey);
+                            if (_saved && typeof _saved === 'object') {
+                                for (const [_k, _v] of Object.entries(_saved)) {
+                                    if (!this._cellOutputFormat.has(_k))
+                                        this._cellOutputFormat.set(_k, _v);
+                                }
+                            }
+                        } catch (_) {}
+                    }
+                    // HTML-scan fallback for outputs that predate globalState persistence.
+                    for (let ci = 0; ci < ed.notebook.cellCount; ci++) {
+                        const cell = ed.notebook.cellAt(ci);
+                        const cellUri = cell.document.uri.toString();
+                        for (const output of cell.outputs) {
+                            for (const item of output.items) {
+                                if (item.mime !== 'x-application/wolfram-language-html' && item.mime !== 'text/html') continue;
+                                try {
+                                    const html = Buffer.from(item.data).toString('utf8');
+                                    // Match data-sub-idx and data-output-format from each output header
+                                    const re = /data-sub-idx="(\d+)"[^>]*data-output-format="([^"]+)"|data-output-format="([^"]+)"[^>]*data-sub-idx="(\d+)"/g;
+                                    let match;
+                                    while ((match = re.exec(html)) !== null) {
+                                        const subIdx = match[1] ?? match[4];
+                                        const fmt    = match[2] ?? match[3];
+                                        if (subIdx !== undefined && fmt && fmt !== 'Auto') {
+                                            const k = cellUri + ':' + subIdx;
+                                            if (!this._cellOutputFormat.has(k))
+                                                this._cellOutputFormat.set(k, fmt);
+                                        }
+                                    }
+                                } catch (_) {}
+                                break; // only first html item per output
+                            }
+                        }
+                    }
                     // Restore last scroll position (once per notebook, per session)
                     if (this._extContext && !this._scrollPosRestored.has(key)) {
                         this._scrollPosRestored.add(key);
@@ -552,8 +593,21 @@ class WolframNotebookKernel {
                     if (DEV_MODE) this.outputPanel.print(`[Reformat] outputId ${outputId} not found in registry`);
                     return;
                 }
-                // Remember format for next evaluation of this cell
-                this._cellOutputFormat.set(info.cell.document.uri.toString(), newFormat);
+                // Remember format for this specific output (keyed cellUri:subIdx) so that
+                // other outputs of the same cell keep their own formats.
+                // subIdx is the stable 0-based local sub-expression index (not Out[N]).
+                const _fmtKey = info.cell.document.uri.toString() + ':' + info.subIdx;
+                this._cellOutputFormat.set(_fmtKey, newFormat);
+                // Persist to globalState so format survives extension-host restarts.
+                if (this._extContext) {
+                    try {
+                        const _nbUri    = info.cell.notebook.uri.toString();
+                        const _storeKey = 'wolfbook.perOutputFmt.' + _nbUri;
+                        const _existing = this._extContext.globalState.get(_storeKey) || {};
+                        _existing[_fmtKey] = newFormat;
+                        this._extContext.globalState.update(_storeKey, _existing).catch(() => {});
+                    } catch (_) {}
+                }
                 const _rfScale = Number(this.config.get('imageScale') || 0.8);
                 try {
                     const rfResult = await this.session.evaluate(
@@ -717,13 +771,37 @@ class WolframNotebookKernel {
         if (!DEV_MODE) return;
         const timestamp = new Date().toISOString();
         this.outputPanel.print(message);
-        const workspaceFolders = vscode.workspace.workspaceFolders;
-        if (workspaceFolders && workspaceFolders.length > 0) {
-            const extFolder = workspaceFolders.find(f => f.name === "VSCodeWolframExtension");
-            const logPath = extFolder
-                ? path.join(extFolder.uri.fsPath, "Temporary Docs", "wolfram-kernel-debug.log")
-                : path.join(workspaceFolders[0].uri.fsPath, "wolfram-kernel-debug.log");
-            try { fs.appendFileSync(logPath, `[${timestamp}] ${message}\n`); } catch (_) {}
+        const logPath = this._resolveDebugLogPath();
+        if (logPath) {
+            try {
+                fs.mkdirSync(path.dirname(logPath), { recursive: true });
+                fs.appendFileSync(logPath, `[${timestamp}] ${message}\n`);
+            } catch (_) {}
+        }
+    }
+
+    /** Compute kernel debug log path: img/<nbBase>/wolfram-kernel-debug.log */
+    _resolveDebugLogPath() {
+        // Try active notebook editor first
+        const ed = vscode.window.activeNotebookEditor;
+        if (ed && ed.notebook && ed.notebook.uri.scheme === 'file') {
+            const nbFsPath = ed.notebook.uri.fsPath;
+            const nbBase   = path.basename(nbFsPath, path.extname(nbFsPath));
+            const imgDir   = path.join(path.dirname(nbFsPath), 'img', nbBase);
+            this._lastDebugLogPath = path.join(imgDir, 'wolfram-kernel-debug.log');
+        }
+        // Fall back to cached path (e.g. during abort when no editor is focused)
+        return this._lastDebugLogPath || null;
+    }
+
+    /** Truncate the kernel debug log (called on kernel start). */
+    clearDebugLog() {
+        const logPath = this._resolveDebugLogPath();
+        if (logPath) {
+            try {
+                fs.mkdirSync(path.dirname(logPath), { recursive: true });
+                fs.writeFileSync(logPath, '');
+            } catch (_) {}
         }
     }
 
@@ -769,11 +847,12 @@ class WolframNotebookKernel {
     static get _EXPR_ONLY_FMTS() { return _output.EXPR_ONLY_FMTS; }
     static get _GFX_ONLY_FMTS()  { return _output.GFX_ONLY_FMTS; }
 
-    // Resolve the render format for a cell — thin wrapper.
-    _resolveFormat(cell, knownIsGfx)  { return _output.resolveFormat(this, cell, knownIsGfx); }
+    // Resolve the render format for a cell output — thin wrapper.
+    // outN: output index within the cell (1-based); pass undefined when not yet known.
+    _resolveFormat(cell, knownIsGfx, outN)  { return _output.resolveFormat(this, cell, knownIsGfx, outN); }
 
     // Post-process HTML containing WLLatex box placeholders — thin wrapper.
-    _processWLLatexBoxes(html) { return _output.processWLLatexBoxes(this, html); }
+    _processWLLatexBoxes(html, logPath) { return _output.processWLLatexBoxes(this, html, logPath); }
 
     makeTruncationBanner(outputId, headerText, shortLines = null) { return _output.makeTruncationBanner(this, outputId, headerText, shortLines); }
     async _replaceOutputByUuid(cell, uuid, fullHtml, outN) { return _output.replaceOutputByUuid(this, cell, uuid, fullHtml, outN); }

@@ -6,6 +6,7 @@ let escapeAliases = {};
 let isInEscapeMode = false;
 let escapeBuffer = '';
 let escapeStartPosition = null;
+let escapeStartEditor = null;
 let escapeDecorationType = null;
 let emptyEscapeDecorationType = null;
 
@@ -108,6 +109,19 @@ function registerEscapeMode(context, extensionPath) {
 
     context.subscriptions.push(selectionChangeListener);
 
+    // Cancel escape mode when focus moves to a different editor (cell switch, notebook close).
+    const focusChangeListener = vscode.window.onDidChangeActiveTextEditor(newEditor => {
+        if (isInEscapeMode && newEditor !== escapeStartEditor) {
+            if (escapeStartEditor) {
+                escapeStartEditor.setDecorations(escapeDecorationType, []);
+                escapeStartEditor.setDecorations(emptyEscapeDecorationType, []);
+            }
+            resetEscapeMode();
+            vscode.window.setStatusBarMessage('$(x) Escape mode cancelled', 2000);
+        }
+    });
+    context.subscriptions.push(focusChangeListener);
+
     // Register character accumulator — intercepts keypresses while in escape mode
     // so typed characters build up the alias buffer.  Backtick is no longer special
     // (falls through to normal typing).  Escape key is handled by wolfram.escapeKey below.
@@ -171,6 +185,7 @@ function registerEscapeMode(context, extensionPath) {
             isInEscapeMode = true;
             escapeBuffer = '';
             escapeStartPosition = editor.selection.active;
+            escapeStartEditor = editor;
             vscode.commands.executeCommand('setContext', 'wolframInEscapeMode', true);
 
             updateEscapeModeHighlight(editor);
@@ -287,6 +302,7 @@ function resetEscapeMode() {
     isInEscapeMode = false;
     escapeBuffer = '';
     escapeStartPosition = null;
+    escapeStartEditor = null;
     vscode.commands.executeCommand('setContext', 'wolframInEscapeMode', false);
 }
 

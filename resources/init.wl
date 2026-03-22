@@ -113,7 +113,15 @@ Unprotect[Print];
 Print[args___] /; !TrueQ[$inPrintPatch] :=
     Block[{$inPrintPatch = True},
         WriteString[$Output,
-            StringJoin[ToString[#, OutputForm, PageWidth -> $PageWidth] & /@ {args}] <> "\n"
+            StringJoin[Function[arg,
+                (* BoxData[_] from CellPrint-fallback / OGRe-style packages:
+                   serialize inner boxes as InputForm so all leaf atoms are
+                   quoted strings — required by the C++ boxToLatex parser. *)
+                If[MatchQ[arg, _BoxData],
+                    "BoxData[" <> ToString[First[arg], InputForm] <> "]",
+                    ToString[arg, OutputForm, PageWidth -> $PageWidth]
+                ]
+            ] /@ {args}] <> "\n"
         ]
     ];
 Protect[Print];
@@ -189,7 +197,7 @@ VsCodeSymbolMarkdown[symName_String, longForm_: True] :=
                         StringJoin["| `" <> ToString[#[[1]]] <> "` | `" <>
                             ToString[#[[2]], InputForm] <> "` |\n" & /@ opts]]];
                 If[TrueQ[longForm] && StringQ[docURL],
-                    AppendTo[parts, "\n---\n[\360\237\223\226 Full documentation](" <> docURL <> ")"]];  (* 📖 *)
+                    AppendTo[parts, "\n---\n[Full documentation](" <> docURL <> ")"]];
                 StringJoin[parts]
             ],
         HoldFirst]

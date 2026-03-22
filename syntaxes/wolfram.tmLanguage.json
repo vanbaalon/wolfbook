@@ -65,7 +65,7 @@
                             "name": "meta.function.wolfram entity.name.Context.wolfram"
                         },
                         "2": {
-                            "name": "meta.function.wolfram entity.name.constant.wolfram"
+                            "name": "symbol.unrecognized.wolfram"
                         }
                     }
                 }

@@ -4,6 +4,66 @@ All notable changes to **Wolfbook** are documented here.
 
 ---
 
+## [2.3.2] - 2026-03-21
+
+### Added
+- **Cell shortcuts from editor focus** — `Cmd+Shift+A` inserts a code cell above, `Cmd+Shift+B` inserts a code cell below; both place the new cell in edit mode immediately.  `Cmd+Shift+X` deletes the current cell.  All three work while typing inside a cell — no need to leave edit mode first.
+- **Right-click context menu** — *Wolfbook: Evaluate Selection* (`Cmd+Shift+E`) and *Wolfbook: Add Selection to Watch* (`Cmd+Shift+W`) are now available in the editor right-click menu inside wolfbook notebooks.
+
+### Changed
+- **Debug log location** — `wolfram-kernel-debug.log` now lives in `img/<notebookName>/` next to `btl.log` instead of `~/` or `Temporary Docs/`.  Tool, docs, and reader all updated.
+
+### Fixed
+- **Unicode symbol colouring** — global-symbol highlighting now correctly handles symbol names that contain Unicode characters (e.g. `varα2β`).  WSTP delivers non-ASCII name segments as `\:XXXX` four-digit hex escapes; these are now decoded before the colouring pass so symbols stay blue rather than reverting to the default token colour.
+
+---
+
+## [2.3.0] - 2026-03-18
+
+### Added
+- **`WBExport` multi-format export** — `WBExport` now supports five output formats
+  selected by the file extension in the path argument.  The cell containing `WBExport`
+  itself is always excluded from the export.
+
+  | Expression | Output |
+  |---|---|
+  | `WBExport[]` or `WBExport["name.nb"]` | Mathematica `.nb` (unchanged) |
+  | `WBExport["name.pdf"]` | PDF via Chrome headless `--print-to-pdf` |
+  | `WBExport["name.html"]` | Self-contained HTML (all assets inlined) |
+  | `WBExport["name.md"]` | Markdown; graphics saved to `name_images/` |
+  | `WBExport["name.tex"]` | LaTeX article with `lstlisting` code blocks; graphics saved to `name_images/` |
+
+  All formats:
+  - Render with a **light background** (code cells: pale grey `#f6f8fa`, light-mode
+    syntax colours matching VS Code Light+).
+  - Inline or copy every graphic output (SVG/PNG) so the exported file is truly
+    portable — no broken image links.
+  - HTML/PDF include fully inlined KaTeX fonts and CSS so math renders offline.
+  - LaTeX output includes a complete `\documentclass{article}` preamble with
+    `amsmath`, `listings`, `graphicx`, `float`, `hyperref`.
+
+- **`wolfbook_searchCells`** Copilot tool (`#wolfbookSearch`) — search notebook cells
+  by text query, regex, and/or cell kind (code/markdown), with optional output
+  inclusion.  Returns matching cell numbers, kinds, content previews, and output
+  summaries.  Ideal for quickly locating definitions or results in large notebooks.
+
+- **`wolfbook_getNotebookContext` range parameters** — `startCell` and `endCell`
+  parameters added; Copilot can now read a specific range of cells instead of the
+  entire notebook when context-window space is limited.
+
+- **`wolfbook_runAllCells` output cap increased** — per-cell output summary raised
+  from 300 to 800 characters to surface more result detail in Copilot.
+
+### Fixed
+- **BoxData backslash doubling** — WSTP backslashes in `BoxData[...]` outputs were
+  double-escaped, causing stray `\\` in rendered LaTeX.  Fixed by un-doubling in the
+  `flushPrint` BoxData path.
+- **`InactiveD` template** — `TemplateBox[{"Inactive", expr, var}, "InactiveD"]` was
+  rendered as raw text instead of `∂_var expr`.  Added a dedicated handler in the
+  wolfbook-btl C++ addon.
+
+---
+
 ## [2.2.0] - 2026-03-14
 
 ### Added

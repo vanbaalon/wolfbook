@@ -74,8 +74,19 @@ wolfbookDebug$BeforeStep[depth_Integer, localStep_Integer, iterVarValues_] :=
 SetAttributes[wolfbookDebug$Timed, HoldRest];
 
 wolfbookDebug$Timed[depth_Integer, localStep_, expr_] :=
-  Module[{timing, result},
-    {timing, result} = AbsoluteTiming[expr];
+  Module[{timing, result, msgs = {}, captured},
+    (* Capture Messages emitted during evaluation so we can surface them *)
+    captured = Check[
+      {timing, result} = AbsoluteTiming[expr];
+      (* Check returns its first argument on success *)
+      True,
+      (* On any Message, record it but let the expression return its value *)
+      False
+    ];
+    (* If Check caught an error, timing/result may still be set by AbsoluteTiming,
+       but if the expression Threw or Aborted, they won't be. Guard against that. *)
+    If[!ValueQ[timing], timing = 0];
+    If[!ValueQ[result], result = $Failed];
     wolfbookDebug$StepTimings[{depth, localStep}] = timing;
     wolfbookDebug$StepResults[{depth, localStep}] = result;
     wolfbookDebug$LastCompletedDepth = depth;

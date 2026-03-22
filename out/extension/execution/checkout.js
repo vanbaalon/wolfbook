@@ -24,10 +24,16 @@ async function checkoutExecutionQueue(self) {
     const code = currentExecution.execution.cell.document.getText();
 
     // Cancel the Dynamic loop for this cell before starting a new execution.
+    // cancel() resolves state._cancelPromise, which unblocks any pending
+    // subAuto race in the old runLoop so it exits immediately.
     if (self._dynamicWidgets) {
         const _cUri = currentExecution.execution.cell.document.uri.toString();
         const _prev = self._dynamicWidgets.get(_cUri);
-        if (_prev) { _prev.active = false; scrollLog('[dyn] cancelled cell loop for re-execution'); }
+        if (_prev) {
+            if (_prev.cancel) _prev.cancel(); else _prev.active = false;
+            self._dynamicWidgets.delete(_cUri);
+            scrollLog('[dyn] cancelled cell loop for re-execution');
+        }
     }
     if (self._dynCells) self._dynCells.delete(
         currentExecution.execution.cell.document.uri.toString());
@@ -255,6 +261,23 @@ async function checkoutExecutionQueue(self) {
         // cell evaluate() to hang forever. The flag is set just before the subExpr
         // loop, which is the earliest point the kernel is processing real cell code.
 
+        // ---- Wait for any pending subAuto to drain ----
+        // If a Dynamic loop's subAuto() is still in-flight at the C++ level,
+        // our setup sub()/evaluate() calls would block behind it.  If C++ is
+        // wedged (stale packets after Dialog-heavy eval), that blocks forever.
+        // Wait briefly so the C++ call can finish; if it doesn't, the Dynamic
+        // loop's _subAutoLock prevents new subAuto calls from piling on.
+        if (self._subAutoLock) {
+            scrollLog('[checkout] waiting for pending subAuto to drain...');
+            try {
+                await Promise.race([
+                    self._subAutoLock,
+                    new Promise(r => setTimeout(r, 3000))
+                ]);
+            } catch (_) {}
+            scrollLog('[checkout] subAuto drain done | lock still held:', !!self._subAutoLock);
+        }
+
         // ---- Syntax check on full cell text (non-blocking, non-fatal) ----
         // sub() has higher priority than evaluate() — runs before queued evaluate() calls.
         // Dynamic idle-path now uses subWhenIdle() (not sub()), so no mutex needed.
@@ -352,6 +375,42 @@ async function checkoutExecutionQueue(self) {
         // cell's remaining sub-expressions run).  Deactivated after execution.end()
         // so the widget switches from replaceOutputItems to createNotebookCellExecution.
         let _dynEarlyRef = null;
+
+        // ---- Helper: build compact, collapsible HTML for kernel warning messages ----
+        // Single short message → compact inline div.
+        // Single long message (>120 chars or multi-line) → <details> spoiler.
+        // Multiple messages → grouped <details> with count in summary.
+        const buildMsgGroupHtml = (parts) => {
+            const baseStyle =
+                'color:#f44;border-left:3px solid #f44;' +
+                'background:rgba(255,68,68,0.08);' +
+                'padding:2px 6px;margin:1px 0;border-radius:0 3px 3px 0;' +
+                'font-family:monospace;font-size:0.85em';
+            if (parts.length === 1) {
+                const msg = parts[0];
+                const escaped = self.escapeHtml(msg);
+                const isLong = msg.length > 120 || msg.includes('\n');
+                if (isLong) {
+                    const preview = self.escapeHtml(msg.split('\n')[0].slice(0, 100));
+                    return `<details class="vscode-wolfram-message-output" style="${baseStyle}">` +
+                        `<summary style="cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%">${preview}\u2026</summary>` +
+                        `<pre style="margin:4px 0;white-space:pre-wrap;font-size:1em">${escaped}</pre>` +
+                        '</details>';
+                }
+                return `<div class="vscode-wolfram-message-output" style="${baseStyle};white-space:pre-wrap">` +
+                    escaped + '</div>';
+            }
+            // Multiple messages — grouped collapsible block.
+            const items = parts.map(msg =>
+                '<div style="padding:2px 0 2px 4px;border-top:1px solid rgba(255,68,68,0.15)">' +
+                self.escapeHtml(msg) + '</div>'
+            ).join('');
+            return `<details class="vscode-wolfram-message-output" style="${baseStyle}">` +
+                `<summary style="cursor:pointer">${parts.length}\u00a0warnings</summary>` +
+                items +
+                '</details>';
+        };
+
         for (let i = 0; i < subExprs.length; i++) {
             if (self.isAborting) { anyAborted = true; break; }
 
@@ -441,8 +500,15 @@ async function checkoutExecutionQueue(self) {
             // Per-sub-expression print accumulator
             let printOutput       = null;
             let printHtml         = "";
+            let printText         = "";  // plain-text mirror for the AI-readable text/plain MIME item
             const printLineQueue  = [];
             let printFlushPending = false;
+
+            // Per-sub-expression message (warning) accumulator.
+            // All kernel warnings for this sub-expression share one output cell,
+            // updated in-place as each new message arrives (live grouping).
+            let msgOutput    = null;
+            const msgHtmlParts = [];
 
             const flushPrint = async () => {
                 if (printLineQueue.length === 0) { printFlushPending = false; return; }
@@ -450,20 +516,43 @@ async function checkoutExecutionQueue(self) {
                 // Decode \012 → real newlines, then decode Wolfram octal byte escapes → Unicode.
                 // Each WSTP TextPacket becomes one <pre> block; internal newlines render
                 // as-is so OutputForm ASCII art (e.g. exponents above the line) is preserved.
-                const newHtml = packets.map(pkt => {
-                    const text = self.decodeWolframOctal(pkt.replace(/\\012/g, '\n'));
+                const decodedTexts = packets.map(pkt => self.decodeWolframOctal(pkt.replace(/\\012/g, '\n')));
+                // If a Print packet is a WL box expression wrapped in BoxData[...] (e.g. from
+                // OGRe/packages that use CellPrint falling back to Print in script mode), render
+                // it via BTL→KaTeX instead of showing raw box syntax in a <pre>.
+                const htmlParts = decodedTexts.map(text => {
+                    const t = text.trim();
+                    if (t.startsWith('BoxData[') && t.endsWith(']')) {
+                        const inner = t.slice(8, -1);                    // strip outer BoxData[…]
+                        // WSTP doubles backslashes in text content; un-double them so
+                        // InputForm escapes like \" and \[Eta] reach BTL correctly.
+                        const unesc = inner.replace(/\\\\/g, '\\');
+                        const clean = unesc.replace(/\n\s*>?\s*/g, ' '); // strip Wolfram ">" line-fold markers and collapse whitespace
+                        const b64   = Buffer.from(clean).toString('base64');
+                        const rawB64 = Buffer.from(t).toString('base64'); // original verbatim string from kernel
+                        return `<div class="vscode-wolfram-wllatex-boxes" data-boxes-b64="${b64}" data-raw-b64="${rawB64}"></div>`;
+                    }
                     return '<pre class="vscode-wolfram-print-output">' + self.escapeHtml(text) + '</pre>';
-                }).join('');
+                });
+                const btlLogPath = path.join(imgDir, 'btl.log');
+                const newHtml = self._processWLLatexBoxes(htmlParts.join(''), btlLogPath);
+                const newText = decodedTexts.map(t => t.trim().startsWith('BoxData[') ? '[formula]' : t).join('');
                 if (printOutput) {
                     printHtml += newHtml;
+                    printText += newText;
                     await currentExecution.execution.replaceOutputItems(
-                        [vscode.NotebookCellOutputItem.text(printHtml, "x-application/wolfram-language-html")],
+                        [
+                            vscode.NotebookCellOutputItem.text(printHtml, "x-application/wolfram-language-html"),
+                            vscode.NotebookCellOutputItem.text('Print: ' + printText.trimEnd(), "text/plain")
+                        ],
                         printOutput
                     );
                 } else {
                     printHtml   = newHtml;
+                    printText   = newText;
                     printOutput = new vscode.NotebookCellOutput([
-                        vscode.NotebookCellOutputItem.text(printHtml, "x-application/wolfram-language-html")
+                        vscode.NotebookCellOutputItem.text(printHtml, "x-application/wolfram-language-html"),
+                        vscode.NotebookCellOutputItem.text('Print: ' + printText.trimEnd(), "text/plain")
                     ]);
                     if (currentExecution.hasOutput) {
                         await currentExecution.execution.appendOutput(printOutput);
@@ -487,6 +576,10 @@ async function checkoutExecutionQueue(self) {
             const _subT0 = Date.now();
             const r = await self.session.evaluate(subExpr, {
                 onPrint: line => {
+                    // Suppress Wolfram's internal scheduling noise — this message
+                    // is emitted by $Inspector[] / the ScheduledTask mechanism when
+                    // it can't find a safe evaluation window and is not user output.
+                    if (line.startsWith('Still waiting for a safe time to evaluate $Inspector')) return;
                     printLineQueue.push(line);
                     if (!printFlushPending) {
                         printFlushPending = true;
@@ -511,21 +604,29 @@ async function checkoutExecutionQueue(self) {
                     const _diag = new vscode.Diagnostic(_msgRng, msg, vscode.DiagnosticSeverity.Error);
                     _diag.source = 'Wolfram Kernel';
                     _runtimeDiags.push(_diag);
-                    const msgHtml = '<div class="vscode-wolfram-message-output" style="'
-                        + 'color:#f44;border-left:3px solid #f44;'
-                        + 'background:rgba(255,68,68,0.08);'
-                        + 'padding:4px 8px;margin:2px 0;border-radius:0 3px 3px 0;'
-                        + 'font-family:monospace;white-space:pre-wrap">'
-                        + self.escapeHtml(msg) + '</div>';
-                    const msgItem = new vscode.NotebookCellOutput([
-                        vscode.NotebookCellOutputItem.text(msgHtml, 'x-application/wolfram-language-html'),
-                        vscode.NotebookCellOutputItem.text(msg, 'text/plain'),
-                    ]);
-                    if (currentExecution.hasOutput) {
-                        await currentExecution.execution.appendOutput(msgItem);
+                    msgHtmlParts.push(msg);
+                    const groupedMsgHtml = buildMsgGroupHtml(msgHtmlParts);
+                    const plainMsgText   = msgHtmlParts.join('\n');
+                    if (msgOutput) {
+                        // Update the existing grouped output in-place.
+                        await currentExecution.execution.replaceOutputItems(
+                            [
+                                vscode.NotebookCellOutputItem.text(groupedMsgHtml, 'x-application/wolfram-language-html'),
+                                vscode.NotebookCellOutputItem.text(plainMsgText, 'text/plain'),
+                            ],
+                            msgOutput
+                        );
                     } else {
-                        currentExecution.hasOutput = true;  // set BEFORE await — prevents race
-                        await currentExecution.execution.replaceOutput(msgItem);
+                        msgOutput = new vscode.NotebookCellOutput([
+                            vscode.NotebookCellOutputItem.text(groupedMsgHtml, 'x-application/wolfram-language-html'),
+                            vscode.NotebookCellOutputItem.text(plainMsgText, 'text/plain'),
+                        ]);
+                        if (currentExecution.hasOutput) {
+                            await currentExecution.execution.appendOutput(msgOutput);
+                        } else {
+                            currentExecution.hasOutput = true;  // set BEFORE await — prevents race
+                            await currentExecution.execution.replaceOutput(msgOutput);
+                        }
                     }
                     printOutput = null;  // next Print starts a fresh block
                 },
@@ -572,10 +673,16 @@ async function checkoutExecutionQueue(self) {
             // by C++, preventing Pattern-C deadlocks without needing _renderingActive.
             if (r.outputName && lineN > 0) {
                 try {
-                    scrollLog('[checkout] VsCodeRender start | sub', i, '| lineN', lineN, '| format', format);
+                    // Resolve format per sub-expression using stable index i.
+                    // knownIsGfx is undefined here (we learn it from the rendered HTML),
+                    // but resolveFormat already sanitises incompatible combos after render.
+                    // Using i guarantees the saved per-output choice is picked up even when
+                    // the global Out[N] counter changed on re-evaluation.
+                    const subFmt = self._resolveFormat(execCell, undefined, i);
+                    scrollLog('[checkout] VsCodeRender start | sub', i, '| lineN', lineN, '| format', subFmt);
                     const _renderT0 = Date.now();
                     const renderResult = await self.session.evaluate(
-                        `VsCodeRender[${lineN}, "${format}", ${scale}]`,
+                        `VsCodeRender[${lineN}, "${subFmt}", ${scale}]`,
                         { interactive: false, rejectDialog: true }
                     );
                     scrollLog('[checkout] VsCodeRender done | dt=', Date.now() - _renderT0, 'ms | type:', renderResult?.result?.type);
@@ -585,12 +692,31 @@ async function checkoutExecutionQueue(self) {
                     // discarded because no onMessage callback was wired.  Now they are
                     // captured in renderResult.messages and shown as amber warning boxes.
                     for (const renderMsg of (renderResult.messages || [])) {
-                        const msgHtml =
-                            '<div class="vscode-wolfram-message-output" style="color:#cc8800;padding:4px 0">' +
-                            self.escapeHtml(renderMsg) + '</div>';
-                        // TODO-1e: expose render-phase messages to Copilot as text/plain
+                        // Render-phase messages (e.g. $RecursionLimit::reclim) — amber, compact.
+                        const isLong = renderMsg.length > 120 || renderMsg.includes('\n');
+                        let renderMsgHtml;
+                        if (isLong) {
+                            const preview = self.escapeHtml(renderMsg.split('\n')[0].slice(0, 100));
+                            renderMsgHtml =
+                                '<details class="vscode-wolfram-message-output" style="' +
+                                'color:#cc8800;border-left:3px solid #cc8800;' +
+                                'background:rgba(204,136,0,0.08);' +
+                                'padding:2px 6px;margin:1px 0;border-radius:0 3px 3px 0;' +
+                                'font-family:monospace;font-size:0.85em">' +
+                                `<summary style="cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${preview}\u2026</summary>` +
+                                '<pre style="margin:4px 0;white-space:pre-wrap;font-size:1em">' + self.escapeHtml(renderMsg) + '</pre>' +
+                                '</details>';
+                        } else {
+                            renderMsgHtml =
+                                '<div class="vscode-wolfram-message-output" style="' +
+                                'color:#cc8800;border-left:3px solid #cc8800;' +
+                                'background:rgba(204,136,0,0.08);' +
+                                'padding:2px 6px;margin:1px 0;border-radius:0 3px 3px 0;' +
+                                'font-family:monospace;font-size:0.85em;white-space:pre-wrap">' +
+                                self.escapeHtml(renderMsg) + '</div>';
+                        }
                         const msgOut = new vscode.NotebookCellOutput([
-                            vscode.NotebookCellOutputItem.text(msgHtml, "x-application/wolfram-language-html"),
+                            vscode.NotebookCellOutputItem.text(renderMsgHtml, "x-application/wolfram-language-html"),
                             vscode.NotebookCellOutputItem.text(renderMsg, "text/plain")
                         ]);
                         if (currentExecution.hasOutput) {
@@ -602,7 +728,8 @@ async function checkoutExecutionQueue(self) {
                     }
 
                     if (renderResult?.result?.type === "string" && renderResult.result.value) {
-                        let html = self._processWLLatexBoxes(self._fixImageUris(renderResult.result.value));
+                        const btlLogPath2 = path.join(imgDir, 'btl.log');
+                        let html = self._processWLLatexBoxes(self._fixImageUris(renderResult.result.value), btlLogPath2);
                         const _subsBadge = _isSubsession
                             ? '<span style="font-size:9px;color:#e8a020;background:rgba(232,160,32,0.12);border:1px solid rgba(232,160,32,0.35);border-radius:3px;padding:1px 5px;margin-right:6px;font-style:italic;">subsession</span>'
                             : '';
@@ -619,13 +746,15 @@ async function checkoutExecutionQueue(self) {
                         const _isGfx = html.includes('vscode-wolfram-gfx-marker');
                         // TODO-1a/1b: extract text/plain for AI context before truncation/wrapping
                         const _plainText = _output.extractPlainText(html, r.outputName, _isGfx, code);
-                        // Re-resolve format now that isGfx is known: _resolveFormat sanitises
-                        // incompatible format/type combos (e.g. WLLatex for a graphics output)
-                        // so the header and format-switch buttons always reflect the right set.
-                        const _effectiveFmt = self._resolveFormat(execCell, _isGfx);
+                        // Re-resolve format now that isGfx is known: sanitises
+                        // incompatible combos (e.g. WLLatex for a graphics output).
+                        // This is the format that was actually rendered (subFmt was
+                        // passed to VsCodeRender but the kernel promotes expr-only
+                        // formats to SVG for graphics — resolveFormat mirrors that).
+                        const _effectiveFmt = self._resolveFormat(execCell, _isGfx, i);
                         self._outputRegistry.set(outputId,
-                            { cell: execCell, outN: lineN, outName: r.outputName, format: _effectiveFmt, isGfx: _isGfx });
-                        const headerRow = `<div class="wl-output-header" style="display:flex;align-items:center;gap:6px;width:100%;min-height:22px;" data-session-epoch="${self._sessionEpoch}" data-output-id="${outputId}" data-out-n="${lineN}" data-output-format="${_effectiveFmt}" data-output-is-graphics="${_isGfx ? '1' : '0'}">${outLabel}</div>`;
+                            { cell: execCell, outN: lineN, subIdx: i, outName: r.outputName, format: _effectiveFmt, isGfx: _isGfx });
+                        const headerRow = `<div class="wl-output-header" style="display:flex;align-items:center;gap:6px;width:100%;min-height:22px;" data-session-epoch="${self._sessionEpoch}" data-output-id="${outputId}" data-out-n="${lineN}" data-sub-idx="${i}" data-output-format="${_effectiveFmt}" data-output-is-graphics="${_isGfx ? '1' : '0'}">${outLabel}</div>`;
                         if (html.length > maxLen || isSkeleton) {                                const _oid = outputId;
                             // For raw truncation: clip at maxLen
                             const displayHtml = html.length > maxLen
@@ -824,6 +953,7 @@ async function checkoutExecutionQueue(self) {
         // anyMessages: mark cell as errored so VS Code shows the Copilot AI-fix button
         self.executionQueue.end(currentExecution.id, !anyAborted && !anyMessages);
         self._evalDispatched = false;
+        self._evalEndedAt = Date.now();
         // Refresh Global` symbol highlighting once the kernel is idle.
         setTimeout(() => {
             try { require('./global-symbols').updateAll(self).catch(() => {}); } catch (_) {}
@@ -1044,6 +1174,12 @@ async function checkoutExecutionQueue(self) {
         }
 
     } catch (err) {
+        // ALWAYS reset _evalDispatched — no matter what error occurred, the
+        // checkout loop is done and VS Code must return to non-evaluating state.
+        self._evalDispatched = false;
+        self._evalEndedAt = Date.now();
+        scrollLog('[checkout-catch] _evalDispatched = false | err:', err?.message);
+
         // "Cannot modify cell output after calling resolve" (VS Code ≤ 1.80) or
         // "NotebookCellExecution has been resolved already!" (VS Code ≥ 1.81) or
         // similar — a benign race that occurs when abort/restart clears the execution
@@ -1062,25 +1198,41 @@ async function checkoutExecutionQueue(self) {
         if (self.logFile !== 'Off') {
             try { fs.appendFileSync(self.logFile, `[CHECKOUT] Fatal error: ${err.message}\n`); } catch (_) {}
         }
-        // If the session is broken (link error), mark it dead so user knows to restart
+        // If the session is broken (link error), mark it dead so user knows to restart.
+        // Match actual error strings from the C++ WSTP addon:
+        //   "WSTP connection was lost." / "WSTP link error" — from WSErrorMessage()
+        //   "Failed to send packet to kernel" / "failed to send EvaluatePacket" — from evaluate_worker / sub workers
+        //   "Session is closed" — from JS guard
         const isFatal = err.message && (
             err.message.includes("WSGetFunction") ||
             err.message.includes("WSTP link") ||
+            err.message.includes("WSTP connection") ||
+            err.message.includes("WSTP error") ||
             err.message.includes("Session is closed") ||
             err.message.includes("WSNextPacket") ||
-            err.message.includes("ILLEGALPKT")
+            err.message.includes("ILLEGALPKT") ||
+            err.message.includes("Failed to send") ||
+            err.message.includes("failed to send") ||
+            err.message.includes("link error") ||
+            err.message.includes("pkt=0")
         );
-        await currentExecution.execution.replaceOutput([
-            new vscode.NotebookCellOutput([
-                vscode.NotebookCellOutputItem.text(
-                    `<div style="color:red;padding:8px;border:1px solid red;border-radius:4px">
-                      ${isFatal ? '&#128165; Fatal kernel error — please restart:<br>' : ''}
-                      ${self.escapeHtml(err.message)}</div>`,
-                    "text/html"
-                )
-            ])
-        ]);
+        try {
+            await currentExecution.execution.replaceOutput([
+                new vscode.NotebookCellOutput([
+                    vscode.NotebookCellOutputItem.text(
+                        `<div style="color:red;padding:8px;border:1px solid red;border-radius:4px">
+                          ${isFatal ? '&#128165; Fatal kernel error — restarting automatically:<br>' : ''}
+                          ${self.escapeHtml(err.message)}</div>`,
+                        "text/html"
+                    )
+                ])
+            ]);
+        } catch (_outputErr) {
+            scrollLog('[checkout-catch] replaceOutput failed:', _outputErr?.message);
+        }
         self.executionQueue.end(currentExecution.id, false);
+        // Drain ALL remaining queued cells — the link is broken, don't attempt them.
+        self.executionQueue.clear();
         // If fatal link error — auto-restart the session
         if (isFatal && self.session) {
             self.writeDebugLog("[CHECKOUT] Fatal link error — auto-restarting session");
@@ -1088,8 +1240,11 @@ async function checkoutExecutionQueue(self) {
             self.restartKernel();
             return;  // don't call checkoutExecutionQueue; restartKernel does it after relaunch
         }
+        // Non-fatal error: queue already cleared above, nothing more to dequeue.
+        return;
     }
 
+    // Normal completion — advance to the next queued cell.
     self.checkoutExecutionQueue();
 }
 

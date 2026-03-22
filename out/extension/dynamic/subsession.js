@@ -300,8 +300,12 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
 
     if (!self._dynamicWidgets) self._dynamicWidgets = new Map();
     const prev = self._dynamicWidgets.get(cellUri);
-    if (prev) prev.active = false;
+    if (prev) { if (prev.cancel) prev.cancel(); else prev.active = false; }
+    let _cancelResolve;
+    const _cancelPromise = new Promise(resolve => { _cancelResolve = resolve; });
     const state = { active: true };
+    state._cancelPromise = _cancelPromise;
+    state.cancel = () => { state.active = false; _cancelResolve(); };
     self._dynamicWidgets.set(cellUri, state);
 
     // earlyStart: true when started inline (before execution.end() of the owner cell).
@@ -504,7 +508,19 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
     // _putAllOutputs, syncs snapOutputs, then replaces only the expired slot with empty.
     const _clearOneSlot = async (slotIdx) => {
         if (self._sessionEpoch !== epoch) return;
-        if (ownedExec && ownedExec.active) return; // can't open a new execution during early-start
+        if (ownedExec && ownedExec.active) {
+            // Early-start: owned execution is still open — use replaceOutputItems to blank
+            // this slot in-place so the output visually clears even before execution.end().
+            if (slotIdx < snapOutputs.length) {
+                try {
+                    await ownedExec.exec.replaceOutputItems(
+                        [vscode.NotebookCellOutputItem.text('', 'x-application/wolfram-language-html')],
+                        snapOutputs[slotIdx]
+                    );
+                } catch (_) {}
+            }
+            return;
+        }
         try {
             const _live = Array.from(cell.outputs);
             while (snapOutputs.length > _live.length) snapOutputs.pop();
@@ -555,35 +571,34 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
             cycle++;
             if (!state.active || self._sessionEpoch !== epoch) {
                 scrollLog('[dyn] cell loop exit | cycle:', cycle);
-                // Unregister this cell's slots from the C++ registry on exit.
-                if (self.session?.unregisterDynamic) {
-                    for (const de of dynExprs)
-                        try { self.session.unregisterDynamic(cellUri + ':' + de.slotIndex); } catch (_) {}
-                    if (_lastWatchExpr !== null)
-                        try { self.session.unregisterDynamic('__watch__'); } catch (_) {}
-                    if (self._evalSelectionCallback)
-                        try { self.session.unregisterDynamic('__evalsel__'); } catch (_) {}
-                }
-                // Only delete our own entry — a re-execution may have already
-                // overwritten cellUri with a new state object.
-                if (self._dynamicWidgets.get(cellUri) === state) {
+                // Only clean up C++ registry, timer, and cell output if this
+                // widget is still the active one. A re-execution replaces the
+                // map entry before cancel fires, so the old loop must not
+                // unregister slots or clear output that the new loop owns.
+                const _isStillOwner = self._dynamicWidgets.get(cellUri) === state;
+                if (_isStillOwner) {
+                    if (self.session?.unregisterDynamic) {
+                        for (const de of dynExprs)
+                            try { self.session.unregisterDynamic(cellUri + ':' + de.slotIndex); } catch (_) {}
+                        if (_lastWatchExpr !== null)
+                            try { self.session.unregisterDynamic('__watch__'); } catch (_) {}
+                        if (self._evalSelectionCallback)
+                            try { self.session.unregisterDynamic('__evalsel__'); } catch (_) {}
+                    }
                     self._dynamicWidgets.delete(cellUri);
-                    // Restore legacy paths once no Dynamic cells are running.
-                    // dynAutoMode=true intercepts every BEGINDLGPKT — must disable.
-                    // setDynamicInterval(0) stops the ScheduledTask timer.
                     if (self._dynamicWidgets.size === 0) {
                         try { self.session?.setDynAutoMode?.(false); } catch (_) {}
                         try { self.session?.setDynamicInterval?.(0); } catch (_) {}
                     }
+                    // Clear cell output so stale Dynamic content doesn't linger
+                    // after kernel restart — don't rely on launchKernel timing.
+                    try {
+                        const _exitExe = self._controller.createNotebookCellExecution(cell);
+                        _exitExe.start(Date.now());
+                        await _exitExe.replaceOutput([]);
+                        _exitExe.end(true, Date.now());
+                    } catch (_) {}
                 }
-                // Clear cell output immediately so stale Dynamic content doesn't
-                // linger after kernel restart — don't rely on launchKernel timing.
-                try {
-                    const _exitExe = self._controller.createNotebookCellExecution(cell);
-                    _exitExe.start(Date.now());
-                    await _exitExe.replaceOutput([]);
-                    _exitExe.end(true, Date.now());
-                } catch (_) {}
                 return;
             }
 
@@ -651,6 +666,7 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
                     self._dynamicWidgets.delete(cellUri);
                     if (self._dynamicWidgets.size === 0) {
                         try { self.session?.setDynAutoMode?.(false); } catch (_) {}
+                        try { self.session?.setDynamicInterval?.(0); } catch (_) {}
                     }
                 }
                 return;
@@ -683,7 +699,34 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
             //   idle  → subWhenIdle (immediate)
             //   busy  → Dialog[] inline eval via ScheduledTask
             // Dynamic values update continuously, even during busy evals.
-            if (!self._abortPending
+            // Also skip while isAborting — subAuto() enqueues into autoExprQueue_,
+            // which makes C++ choose the slow dynAutoMode BEGINDLGPKT path on the
+            // next ScheduledTask cycle instead of the fast safety fallback (<100ms).
+            // With pending entries each cycle takes up to ~5.5s, chaining across
+            // the full 17s abort-retry window and preventing abort from resolving.
+            //
+            // _subAutoLock: serialize subAuto calls across all Dynamic loops.
+            // Multiple concurrent idle-path subAuto calls right after a Dialog-
+            // heavy evaluation (Do[...;Pause,...]) can leave stale RETURNPKTs
+            // on the WSTP link and wedge the C++ session.  The lock tracks the
+            // *actual* C++ promise (not the Promise.race timeout) so a timed-out
+            // but still-pending C++ call keeps the lock held.
+            //
+            // _setupRunning: skip subAuto while checkout setup is in progress
+            // (syntax check + VsCodeSetImgDir).  Those sub()/evaluate() calls
+            // share the WSTP link and overlapping them with an idle-path subAuto
+            // desynchronises the packet stream.
+            const _setupRunning = self.executionQueue.queue.length > 0
+                && self.executionQueue.queue[0].started && !self._evalDispatched;
+            // Post-eval cooldown: after a cell evaluation ends (especially one
+            // that used Dialog-based busy-path subAuto during Do/Pause loops),
+            // C++ may still be draining stale Dialog packets.  Calling subAuto
+            // idle-path during that window corrupts the WSTP link permanently.
+            // Wait 3 seconds after _evalDispatched goes false.
+            const _postEvalCooldown = self._evalEndedAt
+                && (Date.now() - self._evalEndedAt) < 3000;
+            if (!self._abortPending && !self.isAborting
+                    && !self._subAutoLock && !_setupRunning && !_postEvalCooldown
                     && (Date.now() - (self._dynLastIdleRender || 0)) > 1000) {
                 self._dynLastIdleRender = Date.now();
                 const scale = Number(self.config?.get?.('imageScale') ?? 0.8) || 0.8;
@@ -694,11 +737,18 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
                     const escaped = de.dynInner.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
                     const expr = 'VsCodeDynExportValue["' + escaped + '"]';
                     dynLog('DYN-SUB | cycle', cycle, '| slot', de.slotIndex);
+                    const _cppPromise = self.session.subAuto(expr);
+                    self._subAutoLock = _cppPromise;
+                    _cppPromise.finally(() => {
+                        if (self._subAutoLock === _cppPromise) self._subAutoLock = null;
+                    });
                     try {
                         const res = await Promise.race([
-                            self.session.subAuto(expr),
-                            new Promise((_, rej) => setTimeout(() => rej(new Error('dyn-sub timeout')), 8000))
+                            _cppPromise,
+                            new Promise((_, rej) => setTimeout(() => rej(new Error('dyn-sub timeout')), 8000)),
+                            state._cancelPromise
                         ]);
+                        if (!state.active) break;
                         const _rv = res?.value;
                         if (typeof _rv === 'string' && _rv.startsWith('WLVAL:FILE:')) {
                             const tmpFile = _rv.slice('WLVAL:FILE:'.length)
@@ -798,37 +848,34 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
                 _lastBadgeTickTime = Date.now();
                 await _putAllOutputs(htmlBySlot, 'live');
             }
-            await new Promise(r => setTimeout(r, 300));
+            if (state.active) await new Promise(r => setTimeout(r, 300));
         }
     };
 
 
     setTimeout(() => runLoop().catch(e => {
         scrollLog('[dyn] runLoop error:', e.message);
-        // --- Safety cleanup: ensure a crash never leaves the kernel in a blocked state ---
         state.active = false;
-        if (self._dynamicWidgets.get(cellUri) === state) {
+        // Only clean up if this widget is still the active one for the cell.
+        const _isOwner = self._dynamicWidgets.get(cellUri) === state;
+        if (_isOwner) {
             self._dynamicWidgets.delete(cellUri);
+            if (self.session?.unregisterDynamic) {
+                for (const de of dynExprs)
+                    try { self.session.unregisterDynamic(cellUri + ':' + de.slotIndex); } catch (_) {}
+                try { self.session.unregisterDynamic('__watch__'); } catch (_) {}
+                try { self.session.unregisterDynamic('__evalsel__'); } catch (_) {}
+            }
+            if (self._dynamicWidgets.size === 0) {
+                try { self.session?.setDynAutoMode?.(false); } catch (_) {}
+                try { self.session?.setDynamicInterval?.(0); } catch (_) {}
+            }
+            try {
+                const _errExe = self._controller.createNotebookCellExecution(cell);
+                _errExe.start(Date.now());
+                _errExe.replaceOutput([]).then(() => _errExe.end(true, Date.now())).catch(() => { try { _errExe.end(true, Date.now()); } catch(_){} });
+            } catch (_) {}
         }
-        // Unregister all C++ Dynamic registry entries owned by this cell.
-        if (self.session?.unregisterDynamic) {
-            for (const de of dynExprs)
-                try { self.session.unregisterDynamic(cellUri + ':' + de.slotIndex); } catch (_) {}
-            try { self.session.unregisterDynamic('__watch__'); } catch (_) {}
-            try { self.session.unregisterDynamic('__evalsel__'); } catch (_) {}
-        }
-        // Restore legacy JS dialog path if no other Dynamic widgets are running.
-        if (self._dynamicWidgets.size === 0) {
-            try { self.session?.setDynAutoMode?.(false); } catch (_) {}
-            try { self.session?.setDynamicInterval?.(0); } catch (_) {}
-        }
-        // Clear stale Dynamic HTML from the cell so the output area doesn't show
-        // a permanently frozen '⟳ Dynamic' badge.
-        try {
-            const _errExe = self._controller.createNotebookCellExecution(cell);
-            _errExe.start(Date.now());
-            _errExe.replaceOutput([]).then(() => _errExe.end(true, Date.now())).catch(() => { try { _errExe.end(true, Date.now()); } catch(_){} });
-        } catch (_) {}
     }), 250);
 }
 

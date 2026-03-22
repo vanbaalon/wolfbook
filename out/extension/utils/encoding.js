@@ -42,6 +42,28 @@ function decodeWolframOctal(s) {
 }
 
 /**
+ * decodeWstpText — consolidated WSTP text decoder.
+ *
+ * Handles two WSTP escape mechanisms:
+ * 1. Octal byte escapes (\NNN) — \012 (newline), \011 (tab), \015 (CR),
+ *    and multi-byte UTF-8 sequences (e.g. \316\273 → λ).
+ * 2. Backslash doubling — WSTP doubles every \ in string content,
+ *    so JSON escape sequences like \" become \\" which breaks JSON.parse.
+ *    Un-doubling restores the original text.
+ *
+ * Order matters: octal decode first (consumes \NNN patterns), then
+ * un-double backslashes (restores JSON escape sequences).
+ * @param {string} s
+ * @returns {string}
+ */
+function decodeWstpText(s) {
+    let result = decodeWolframOctal(String(s));
+    // Un-double WSTP backslash escaping: \\\\ → \\
+    result = result.replace(/\\\\/g, '\\');
+    return result;
+}
+
+/**
  * escapeWL — escape a JS string for embedding inside a Wolfram string literal
  * (wrapping double-quotes and backslashes).
  * @param {string} code
@@ -51,4 +73,4 @@ function escapeWL(code) {
     return code.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
-module.exports = { escapeHtml, decodeWolframOctal, escapeWL };
+module.exports = { escapeHtml, decodeWolframOctal, decodeWstpText, escapeWL };

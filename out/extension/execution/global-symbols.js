@@ -10,6 +10,13 @@
 // On editor focus changes the cached list is re-applied without a kernel round-trip.
 
 const vscode = require('vscode');
+const { wlNameToUTF, CODE_TO_NAME } = require('../namedchars');
+const { decodeWolframOctal } = require('../utils/encoding');
+
+/** Decode WSTP \:XXXX hex escapes (e.g. \:03B1 → α) */
+function decodeWolframHex(s) {
+    return s.replace(/\\:([0-9A-Fa-f]{4})/g, (_, hex) => String.fromCodePoint(parseInt(hex, 16)));
+}
 
 let _decorType  = null;    // current TextEditorDecorationType (color-specific)
 let _colorCfg   = null;    // color string the current _decorType was created with
@@ -34,6 +41,63 @@ function _ensureDecorType(color) {
     return _decorType;
 }
 
+// ── Named-char helpers ────────────────────────────────────────────────────────
+
+/**
+ * For a UTF symbol name containing non-ASCII chars (e.g. "α"), return the
+ * regex pattern string that matches the WL \[Name] form (e.g. \\\[Alpha\]).
+ * Returns null for all-ASCII names.
+ */
+function _symToWLPattern(sym) {
+    if (!/[^\x00-\x7F]/.test(sym)) return null;
+    // Build the literal WL text first, e.g. "α" → '\[Alpha]'
+    let wlLiteral = '';
+    for (const ch of sym) {
+        const cp = ch.codePointAt(0);
+        if (cp > 0x7F) {
+            const name = CODE_TO_NAME[cp];
+            if (!name) return null; // unknown non-ASCII, no \[Name] form
+            wlLiteral += '\\[' + name + ']';
+        } else {
+            wlLiteral += ch;
+        }
+    }
+    // Regex-escape the literal so it can be used in new RegExp()
+    return wlLiteral.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// ── Comment range detection ─────────────────────────────────────────────────
+
+/**
+ * Returns an array of [start, end] byte-index pairs for all WL comment spans.
+ * Handles nesting: (* outer (* inner *) outer *) is a single range.
+ */
+function _commentRanges(text) {
+    const ranges = [];
+    let depth = 0;
+    let start = 0;
+    let i = 0;
+    while (i < text.length - 1) {
+        if (text[i] === '(' && text[i + 1] === '*') {
+            if (depth === 0) start = i;
+            depth++;
+            i += 2;
+        } else if (text[i] === '*' && text[i + 1] === ')' && depth > 0) {
+            depth--;
+            if (depth === 0) ranges.push([start, i + 2]);
+            i += 2;
+        } else {
+            i++;
+        }
+    }
+    return ranges;
+}
+
+function _inComment(idx, ranges) {
+    for (const [s, e] of ranges) if (idx >= s && idx < e) return true;
+    return false;
+}
+
 // ── Decoration application ──────────────────────────────────────────────────
 
 function _applyToEditor(editor, decor) {
@@ -43,7 +107,8 @@ function _applyToEditor(editor, decor) {
         return;
     }
     try {
-        const text   = editor.document.getText();
+        const text         = editor.document.getText();
+        const commentSpans = _commentRanges(text);
         const ranges = [];
         // WL identifiers: letters (incl. Unicode \u0080+), digits, $ and _.
         // Use custom word-boundary lookaround so Greek letters are matched correctly.
@@ -52,11 +117,15 @@ function _applyToEditor(editor, decor) {
         for (const sym of _symbols) {
             if (!sym) continue;
             const escaped = sym.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            const re = new RegExp(boundary + escaped + boundaryR, 'g');
+            const wlPat   = _symToWLPattern(sym);
+            // Match both the UTF form (e.g. α) and the unconverted \[Name] form
+            const pattern = wlPat ? `(?:${escaped}|${wlPat})` : escaped;
+            const re = new RegExp(boundary + pattern + boundaryR, 'g');
             let m;
             while ((m = re.exec(text)) !== null) {
+                if (_inComment(m.index, commentSpans)) continue;  // skip symbols inside (* ... *)
                 const start = editor.document.positionAt(m.index);
-                const end   = editor.document.positionAt(m.index + sym.length);
+                const end   = editor.document.positionAt(m.index + m[0].length);
                 ranges.push(new vscode.Range(start, end));
             }
         }
@@ -83,6 +152,7 @@ function _applyToAllEditors() {
  */
 async function updateAll(ctrl) {
     const color = _getColor();
+    try { require('fs').writeFileSync('/tmp/gs_debug.txt', 'ENTRY color=' + JSON.stringify(color) + '\n'); } catch(_) {}
     console.log('[global-symbols] updateAll | color:', JSON.stringify(color), '| symbols cached:', _symbols.length);
     if (!color) {
         // Feature disabled: clear any stale decorations and bail out.
@@ -100,16 +170,32 @@ async function updateAll(ctrl) {
     try {
         // subWhenIdle() runs only when the kernel is fully idle — safe for background queries,
         // never races with evaluate() or Dynamic widget sub() calls.
-        // StringReplace strips context prefix defensively — Names[] may return "Global`x" or "x".
+        // Only include symbols that actually have a value set (OwnValues, DownValues, etc.)
+        // so unset Global` symbols (e.g. loop variables, pattern names) are not coloured.
         const result = await ctrl.session.subWhenIdle(
-            '"GLOBALNAMES:"<>StringRiffle[StringReplace[Names["Global`*"],"Global`"->""],","]'
+            '"GLOBALNAMES:"<>StringRiffle[StringReplace[Select[Names["Global`*"],ToExpression["ValueQ[Global`"<>#<>"]"]&],"Global`"->""],","]'
         );
         console.log('[global-symbols] sub result type:', result?.type, '| value prefix:', typeof result?.value === 'string' ? result.value.slice(0, 80) : result?.value);
         // result is WExpr: { type: "string", value: "GLOBALNAMES:x,y,..." }
         if (result && result.type === 'string' && typeof result.value === 'string'
                 && result.value.startsWith('GLOBALNAMES:')) {
             const raw = result.value.slice('GLOBALNAMES:'.length);
-            _symbols = raw ? raw.split(',').filter(Boolean) : [];
+            // Debug: dump raw bytes to temp file
+            try {
+                require('fs').writeFileSync('/tmp/gs_debug.txt',
+                    'RAW: ' + JSON.stringify(raw.slice(0, 300)) + '\n');
+            } catch(_) {}
+            // Debug: show raw bytes so we can see exactly what WSTP delivers
+            console.log('[global-symbols] RAW (first 200 chars):', JSON.stringify(raw.slice(0, 200)));
+            // Decode all WSTP escape forms: \:XXXX hex, \NNN octal, \[Name]
+            const decoded = raw ? wlNameToUTF(decodeWolframOctal(decodeWolframHex(raw))) : '';
+            try {
+                require('fs').appendFileSync('/tmp/gs_debug.txt',
+                    'DECODED: ' + JSON.stringify(decoded.slice(0, 300)) + '\n' +
+                    'SYMBOLS: ' + JSON.stringify(decoded ? decoded.split(',').filter(Boolean) : []) + '\n');
+            } catch(_) {}
+            console.log('[global-symbols] DECODED:', JSON.stringify(decoded.slice(0, 200)));
+            _symbols = decoded ? decoded.split(',').filter(Boolean) : [];
             console.log('[global-symbols] symbols updated, count:', _symbols.length, '| sample:', _symbols.slice(0, 5));
         } else {
             console.log('[global-symbols] unexpected result, symbols unchanged');

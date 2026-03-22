@@ -32,6 +32,26 @@ vscodeStripSVGFonts[s_String] := Module[{r},
     r
 ];
 
+(* ===== Expand TemplateBox to elementary display boxes ===== *)
+(* TemplateBox[{args}, "Tag"] is opaque to our C++ boxToLatex translator for most
+   tags.  BoxForm`TemplateBoxToDisplayBoxes resolves the display-function on the
+   kernel side and returns only primitive boxes (RowBox, SubscriptBox, …) that
+   btl already handles. The expansion is applied recursively so nested
+   TemplateBoxes inside FractionBox, RowBox etc. are all resolved.
+   If the expansion fails for any reason (e.g. BoxForm not yet initialised during
+   early kernel startup), the original TemplateBox is left unchanged so the C++
+   translateTemplateBox fallback in btl handles it instead. *)
+expandAllTemplateBoxes[tb_TemplateBox] :=
+    Module[{expanded},
+        expanded = Quiet[Check[BoxForm`TemplateBoxToDisplayBoxes[tb], tb]];
+        If[expanded === tb, tb, expandAllTemplateBoxes[expanded]]
+    ];
+expandAllTemplateBoxes[h_[args___]] :=
+    h @@ (expandAllTemplateBoxes /@ {args});
+expandAllTemplateBoxes[s_String] := s;
+expandAllTemplateBoxes[n_?NumericQ] := n;
+expandAllTemplateBoxes[other_] := other;
+
 (* ===== Render a single result expression as HTML string ===== *)
 mathematicaformatResult[expr_] := Module[{boxes, svgStr, mathmlStr},
     (* SVG path — post-process to strip SVG 1.1 <font> elements (Chrome/Electron
@@ -56,7 +76,9 @@ mathematicaformatResult[expr_] := Module[{boxes, svgStr, mathmlStr},
 graphicsQ[expr_] := !FreeQ[expr,
     _Graphics | _Graphics3D | _Graph | _GeoGraphics | _Legended | _Image | _Image3D];
 
-VsCodeRenderExpr[expr_, format_String, scale_?NumericQ] := Module[
+VsCodeRenderExpr[expr_, format_String, scale_?NumericQ] :=
+ Block[{$RecursionLimit = 100000, $IterationLimit = 400000},
+  Module[
     {fmt, svgStr, svgStart, pngData, pngStr, mathmlStr, html, mathStart,
      rasImg, rasData, rasStr, rasFname, rasFpath, texStr},
     fmt = If[format === "Auto",
@@ -77,6 +99,7 @@ VsCodeRenderExpr[expr_, format_String, scale_?NumericQ] := Module[
             If[boxes === $Failed,
                 Return["<pre class=\"vscode-wolfram-text-output\">WLLatex: MakeBoxes failed.</pre>"]
             ];
+            boxes = expandAllTemplateBoxes[boxes];
             boxStr = ToString[boxes, InputForm];
             b64 = StringReplace[Quiet[ExportString[boxStr, "Base64"]], WhitespaceCharacter -> ""];
             Return["<div class=\"vscode-wolfram-wllatex-boxes\" data-boxes-b64=\"" <> b64 <> "\"></div>"]
@@ -90,6 +113,7 @@ VsCodeRenderExpr[expr_, format_String, scale_?NumericQ] := Module[
             If[boxes === $Failed,
                 Return["<pre class=\"vscode-wolfram-text-output\">WLLatex2: MakeBoxes failed.</pre>"]
             ];
+            boxes = expandAllTemplateBoxes[boxes];
             boxStr = ToString[boxes, InputForm];
             b64 = StringReplace[Quiet[ExportString[boxStr, "Base64"]], WhitespaceCharacter -> ""];
             Return["<div class=\"vscode-wolfram-wllatex-boxes-raw\" data-boxes-b64=\"" <> b64 <> "\"></div>"]
@@ -103,6 +127,7 @@ VsCodeRenderExpr[expr_, format_String, scale_?NumericQ] := Module[
             If[boxes === $Failed,
                 Return["<pre class=\"vscode-wolfram-text-output\">LaTeX src: MakeBoxes failed.</pre>"]
             ];
+            boxes = expandAllTemplateBoxes[boxes];
             boxStr = ToString[boxes, InputForm];
             b64 = StringReplace[Quiet[ExportString[boxStr, "Base64"]], WhitespaceCharacter -> ""];
             Return["<div class=\"vscode-wolfram-wllatex-boxes-src\" data-boxes-b64=\"" <> b64 <> "\"></div>"]
@@ -331,5 +356,6 @@ VsCodeRenderExpr[expr_, format_String, scale_?NumericQ] := Module[
         "<pre class=\"vscode-wolfram-text-output\">" <>
         StringReplace[ToString[expr, FullForm], {"<" -> "&lt;", ">" -> "&gt;", "&" -> "&amp;"}] <>
         "</pre>"]
-];
+ ] (* end Module *)
+]; (* end Block *)
 
