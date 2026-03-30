@@ -171,6 +171,9 @@ class WolframNotebookKernel {
         // prior VS Code session (which used a different random epoch) are cleaned up
         // by the renderer's session-changed handler on notebook open/reload.
         this._sessionEpoch = (Math.random() * 999998 | 0) + 1;
+        // Container pixel width reported by the renderer webview via 'container-width'
+        // messages.  Converted to em and passed to lineBreakLatex when > 0.
+        this._latexPageWidthEm = 0;
         // Extension context — used to persist per-notebook settings (globalState).
         this._extContext = extContext || null;
 
@@ -415,6 +418,13 @@ class WolframNotebookKernel {
                 scrollLog('[renderer-ready] re-broadcasting', _kState, '| epoch:', this._sessionEpoch);
                 try { this._rendererMessaging.postMessage({ type: _kState }); } catch (_) {}
                 try { this._rendererMessaging.postMessage({ type: 'session-changed', epoch: this._sessionEpoch }); } catch (_) {}
+                return;
+            }
+
+            // Renderer reports its container pixel width — store as em for lineBreakLatex.
+            // VS Code notebooks use 14 px/em body font; we divide by that to get em units.
+            if (message.type === 'container-width' && message.widthPx > 0) {
+                this._latexPageWidthEm = Math.round(message.widthPx / 14);
                 return;
             }
 
@@ -843,7 +853,7 @@ class WolframNotebookKernel {
     _resolveFormat(cell, knownIsGfx, outN)  { return _output.resolveFormat(this, cell, knownIsGfx, outN); }
 
     // Post-process HTML containing WLLatex box placeholders — thin wrapper.
-    _processWLLatexBoxes(html, logPath) { return _output.processWLLatexBoxes(this, html, logPath); }
+    _processWLLatexBoxes(html, logPath) { return _output.processWLLatexBoxes(this, html, logPath, this._latexPageWidthEm); }
 
     makeTruncationBanner(outputId, headerText, shortLines = null) { return _output.makeTruncationBanner(this, outputId, headerText, shortLines); }
     async _replaceOutputByUuid(cell, uuid, fullHtml, outN) { return _output.replaceOutputByUuid(this, cell, uuid, fullHtml, outN); }

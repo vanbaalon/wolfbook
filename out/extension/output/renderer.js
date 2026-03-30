@@ -110,7 +110,7 @@ function resolveFormat(self, cell, knownIsGfx, outN) {
 // Post-process HTML from the kernel: if it contains a WLLatex box-placeholder
 // div, decode the boxes, run through the C++ boxToLatex addon, then either
 // KaTeX-prerender (WLLatex) or emit a raw-latex div for webview rendering (WLLatex2).
-function processWLLatexBoxes(self, html, logPath) {
+function processWLLatexBoxes(self, html, logPath, pageWidthEm = 0) {
     // If no logPath was given, try to derive one from the active notebook
     if (!logPath) {
         try {
@@ -167,6 +167,12 @@ function processWLLatexBoxes(self, html, logPath) {
                     } catch (_) {}
                 }
                 let rendered;
+                // Apply line-breaking if enabled and we have a container width estimate.
+                const _lineBreakEnabled = self.config?.get('notebook.rendering.lineBreaking') !== false;
+                if (_lineBreakEnabled && pageWidthEm > 20 && _btlAddon.lineBreakLatex) {
+                    try { latex = _btlAddon.lineBreakLatex(latex, { pageWidth: pageWidthEm }); }
+                    catch (_) {}
+                }
                 try {
                     rendered = _btlPrerenderLatex(latex, true);
                 } catch (e) {

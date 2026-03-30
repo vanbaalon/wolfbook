@@ -202,6 +202,24 @@ export function activate(context) {
         // the current kernel status immediately, correcting the case where the
         // extension sent kernel-offline before this webview's listener was live.
         try { context.postMessage({ type: 'renderer-ready' }); } catch (_) {}
+
+        // Report container width to extension host so it can pass an accurate
+        // pageWidth to lineBreakLatex.  We send once immediately and re-send on
+        // every resize so the value stays up-to-date when the user resizes the
+        // VS Code window or panel.
+        (function _initContainerWidthReporting() {
+            function _reportWidth() {
+                if (!(context && context.postMessage)) return;
+                const el = document.body || document.documentElement;
+                const w = el ? el.clientWidth : 0;
+                if (w > 0) try { context.postMessage({ type: 'container-width', widthPx: w }); } catch (_) {}
+            }
+            _reportWidth();
+            try {
+                const _ro = new ResizeObserver(_reportWidth);
+                _ro.observe(document.body || document.documentElement);
+            } catch (_) {}
+        })();
     }
     
     // -----------------------------------------------------------------------

@@ -1,0 +1,7310 @@
+{
+  "\\%": {
+    "name": "RawPercent",
+    "unicode": "%",
+    "fullName": "\\[RawPercent]",
+    "codepoint": "0x0025"
+  },
+  "\\&": {
+    "name": "RawAmpersand",
+    "unicode": "&",
+    "fullName": "\\[RawAmpersand]",
+    "codepoint": "0x0026"
+  },
+  "\\rq": {
+    "name": "RawQuote",
+    "unicode": "'",
+    "fullName": "\\[RawQuote]",
+    "codepoint": "0x0027"
+  },
+  "\\diagup": {
+    "name": "RawSlash",
+    "unicode": "/",
+    "fullName": "\\[RawSlash]",
+    "codepoint": "0x002F"
+  },
+  "\\backslash": {
+    "name": "RawBackslash",
+    "unicode": "\\",
+    "fullName": "\\[RawBackslash]",
+    "codepoint": "0x005C"
+  },
+  "\\_": {
+    "name": "RawUnderscore",
+    "unicode": "_",
+    "fullName": "\\[RawUnderscore]",
+    "codepoint": "0x005F"
+  },
+  "\\lq": {
+    "name": "RawBackquote",
+    "unicode": "`",
+    "fullName": "\\[RawBackquote]",
+    "codepoint": "0x0060"
+  },
+  "\\lbrace": {
+    "name": "RawLeftBrace",
+    "unicode": "{",
+    "fullName": "\\[RawLeftBrace]",
+    "codepoint": "0x007B"
+  },
+  "\\rbrace": {
+    "name": "RawRightBrace",
+    "unicode": "}",
+    "fullName": "\\[RawRightBrace]",
+    "codepoint": "0x007D"
+  },
+  "g<<": {
+    "name": "LeftGuillemet",
+    "unicode": "«",
+    "fullName": "\\[LeftGuillemet]",
+    "codepoint": "0x00AB"
+  },
+  "dhy": {
+    "name": "DiscretionaryHyphen",
+    "unicode": "­",
+    "fullName": "\\[DiscretionaryHyphen]",
+    "codepoint": "0x00AD"
+  },
+  "\\-": {
+    "name": "DiscretionaryHyphen",
+    "unicode": "­",
+    "fullName": "\\[DiscretionaryHyphen]",
+    "codepoint": "0x00AD"
+  },
+  "g>>": {
+    "name": "RightGuillemet",
+    "unicode": "»",
+    "fullName": "\\[RightGuillemet]",
+    "codepoint": "0x00BB"
+  },
+  "A`": {
+    "name": "CapitalAGrave",
+    "unicode": "À",
+    "fullName": "\\[CapitalAGrave]",
+    "codepoint": "0x00C0"
+  },
+  "A'": {
+    "name": "CapitalAAcute",
+    "unicode": "Á",
+    "fullName": "\\[CapitalAAcute]",
+    "codepoint": "0x00C1"
+  },
+  "A^": {
+    "name": "CapitalAHat",
+    "unicode": "Â",
+    "fullName": "\\[CapitalAHat]",
+    "codepoint": "0x00C2"
+  },
+  "A~": {
+    "name": "CapitalATilde",
+    "unicode": "Ã",
+    "fullName": "\\[CapitalATilde]",
+    "codepoint": "0x00C3"
+  },
+  "A\"": {
+    "name": "CapitalADoubleDot",
+    "unicode": "Ä",
+    "fullName": "\\[CapitalADoubleDot]",
+    "codepoint": "0x00C4"
+  },
+  "Ao": {
+    "name": "CapitalARing",
+    "unicode": "Å",
+    "fullName": "\\[CapitalARing]",
+    "codepoint": "0x00C5"
+  },
+  "AE": {
+    "name": "CapitalAE",
+    "unicode": "Æ",
+    "fullName": "\\[CapitalAE]",
+    "codepoint": "0x00C6"
+  },
+  "\\AE": {
+    "name": "CapitalAE",
+    "unicode": "Æ",
+    "fullName": "\\[CapitalAE]",
+    "codepoint": "0x00C6"
+  },
+  "C,": {
+    "name": "CapitalCCedilla",
+    "unicode": "Ç",
+    "fullName": "\\[CapitalCCedilla]",
+    "codepoint": "0x00C7"
+  },
+  "E`": {
+    "name": "CapitalEGrave",
+    "unicode": "È",
+    "fullName": "\\[CapitalEGrave]",
+    "codepoint": "0x00C8"
+  },
+  "E'": {
+    "name": "CapitalEAcute",
+    "unicode": "É",
+    "fullName": "\\[CapitalEAcute]",
+    "codepoint": "0x00C9"
+  },
+  "E^": {
+    "name": "CapitalEHat",
+    "unicode": "Ê",
+    "fullName": "\\[CapitalEHat]",
+    "codepoint": "0x00CA"
+  },
+  "E\"": {
+    "name": "CapitalEDoubleDot",
+    "unicode": "Ë",
+    "fullName": "\\[CapitalEDoubleDot]",
+    "codepoint": "0x00CB"
+  },
+  "I`": {
+    "name": "CapitalIGrave",
+    "unicode": "Ì",
+    "fullName": "\\[CapitalIGrave]",
+    "codepoint": "0x00CC"
+  },
+  "I'": {
+    "name": "CapitalIAcute",
+    "unicode": "Í",
+    "fullName": "\\[CapitalIAcute]",
+    "codepoint": "0x00CD"
+  },
+  "I^": {
+    "name": "CapitalIHat",
+    "unicode": "Î",
+    "fullName": "\\[CapitalIHat]",
+    "codepoint": "0x00CE"
+  },
+  "I\"": {
+    "name": "CapitalIDoubleDot",
+    "unicode": "Ï",
+    "fullName": "\\[CapitalIDoubleDot]",
+    "codepoint": "0x00CF"
+  },
+  "D-": {
+    "name": "CapitalEth",
+    "unicode": "Ð",
+    "fullName": "\\[CapitalEth]",
+    "codepoint": "0x00D0"
+  },
+  "N~": {
+    "name": "CapitalNTilde",
+    "unicode": "Ñ",
+    "fullName": "\\[CapitalNTilde]",
+    "codepoint": "0x00D1"
+  },
+  "O`": {
+    "name": "CapitalOGrave",
+    "unicode": "Ò",
+    "fullName": "\\[CapitalOGrave]",
+    "codepoint": "0x00D2"
+  },
+  "O'": {
+    "name": "CapitalOAcute",
+    "unicode": "Ó",
+    "fullName": "\\[CapitalOAcute]",
+    "codepoint": "0x00D3"
+  },
+  "OE": {
+    "name": "CapitalOE",
+    "unicode": "Œ",
+    "fullName": "\\[CapitalOE]",
+    "codepoint": "0x0152"
+  },
+  "\\OE": {
+    "name": "CapitalOE",
+    "unicode": "Œ",
+    "fullName": "\\[CapitalOE]",
+    "codepoint": "0x0152"
+  },
+  "O^": {
+    "name": "CapitalOHat",
+    "unicode": "Ô",
+    "fullName": "\\[CapitalOHat]",
+    "codepoint": "0x00D4"
+  },
+  "O~": {
+    "name": "CapitalOTilde",
+    "unicode": "Õ",
+    "fullName": "\\[CapitalOTilde]",
+    "codepoint": "0x00D5"
+  },
+  "O\"": {
+    "name": "CapitalODoubleDot",
+    "unicode": "Ö",
+    "fullName": "\\[CapitalODoubleDot]",
+    "codepoint": "0x00D6"
+  },
+  "O/": {
+    "name": "CapitalOSlash",
+    "unicode": "Ø",
+    "fullName": "\\[CapitalOSlash]",
+    "codepoint": "0x00D8"
+  },
+  "\\O": {
+    "name": "CapitalOSlash",
+    "unicode": "Ø",
+    "fullName": "\\[CapitalOSlash]",
+    "codepoint": "0x00D8"
+  },
+  "U`": {
+    "name": "CapitalUGrave",
+    "unicode": "Ù",
+    "fullName": "\\[CapitalUGrave]",
+    "codepoint": "0x00D9"
+  },
+  "U'": {
+    "name": "CapitalUAcute",
+    "unicode": "Ú",
+    "fullName": "\\[CapitalUAcute]",
+    "codepoint": "0x00DA"
+  },
+  "U^": {
+    "name": "CapitalUHat",
+    "unicode": "Û",
+    "fullName": "\\[CapitalUHat]",
+    "codepoint": "0x00DB"
+  },
+  "U\"": {
+    "name": "CapitalUDoubleDot",
+    "unicode": "Ü",
+    "fullName": "\\[CapitalUDoubleDot]",
+    "codepoint": "0x00DC"
+  },
+  "Y'": {
+    "name": "CapitalYAcute",
+    "unicode": "Ý",
+    "fullName": "\\[CapitalYAcute]",
+    "codepoint": "0x00DD"
+  },
+  "Thn": {
+    "name": "CapitalThorn",
+    "unicode": "Þ",
+    "fullName": "\\[CapitalThorn]",
+    "codepoint": "0x00DE"
+  },
+  "sz": {
+    "name": "SZ",
+    "unicode": "ß",
+    "fullName": "\\[SZ]",
+    "codepoint": "0x00DF"
+  },
+  "ss": {
+    "name": "SZ",
+    "unicode": "ß",
+    "fullName": "\\[SZ]",
+    "codepoint": "0x00DF"
+  },
+  "\\ss": {
+    "name": "SZ",
+    "unicode": "ß",
+    "fullName": "\\[SZ]",
+    "codepoint": "0x00DF"
+  },
+  "a`": {
+    "name": "AGrave",
+    "unicode": "à",
+    "fullName": "\\[AGrave]",
+    "codepoint": "0x00E0"
+  },
+  "a'": {
+    "name": "AAcute",
+    "unicode": "á",
+    "fullName": "\\[AAcute]",
+    "codepoint": "0x00E1"
+  },
+  "a^": {
+    "name": "AHat",
+    "unicode": "â",
+    "fullName": "\\[AHat]",
+    "codepoint": "0x00E2"
+  },
+  "a~": {
+    "name": "ATilde",
+    "unicode": "ã",
+    "fullName": "\\[ATilde]",
+    "codepoint": "0x00E3"
+  },
+  "a\"": {
+    "name": "ADoubleDot",
+    "unicode": "ä",
+    "fullName": "\\[ADoubleDot]",
+    "codepoint": "0x00E4"
+  },
+  "ao": {
+    "name": "ARing",
+    "unicode": "å",
+    "fullName": "\\[ARing]",
+    "codepoint": "0x00E5"
+  },
+  "ae": {
+    "name": "AE",
+    "unicode": "æ",
+    "fullName": "\\[AE]",
+    "codepoint": "0x00E6"
+  },
+  "\\ae": {
+    "name": "AE",
+    "unicode": "æ",
+    "fullName": "\\[AE]",
+    "codepoint": "0x00E6"
+  },
+  "c,": {
+    "name": "CCedilla",
+    "unicode": "ç",
+    "fullName": "\\[CCedilla]",
+    "codepoint": "0x00E7"
+  },
+  "e`": {
+    "name": "EGrave",
+    "unicode": "è",
+    "fullName": "\\[EGrave]",
+    "codepoint": "0x00E8"
+  },
+  "e'": {
+    "name": "EAcute",
+    "unicode": "é",
+    "fullName": "\\[EAcute]",
+    "codepoint": "0x00E9"
+  },
+  "e^": {
+    "name": "EHat",
+    "unicode": "ê",
+    "fullName": "\\[EHat]",
+    "codepoint": "0x00EA"
+  },
+  "e\"": {
+    "name": "EDoubleDot",
+    "unicode": "ë",
+    "fullName": "\\[EDoubleDot]",
+    "codepoint": "0x00EB"
+  },
+  "i`": {
+    "name": "IGrave",
+    "unicode": "ì",
+    "fullName": "\\[IGrave]",
+    "codepoint": "0x00EC"
+  },
+  "i'": {
+    "name": "IAcute",
+    "unicode": "í",
+    "fullName": "\\[IAcute]",
+    "codepoint": "0x00ED"
+  },
+  "i^": {
+    "name": "IHat",
+    "unicode": "î",
+    "fullName": "\\[IHat]",
+    "codepoint": "0x00EE"
+  },
+  "i\"": {
+    "name": "IDoubleDot",
+    "unicode": "ï",
+    "fullName": "\\[IDoubleDot]",
+    "codepoint": "0x00EF"
+  },
+  "d-": {
+    "name": "Eth",
+    "unicode": "ð",
+    "fullName": "\\[Eth]",
+    "codepoint": "0x00F0"
+  },
+  "\\eth": {
+    "name": "Eth",
+    "unicode": "ð",
+    "fullName": "\\[Eth]",
+    "codepoint": "0x00F0"
+  },
+  "n~": {
+    "name": "NTilde",
+    "unicode": "ñ",
+    "fullName": "\\[NTilde]",
+    "codepoint": "0x00F1"
+  },
+  "o`": {
+    "name": "OGrave",
+    "unicode": "ò",
+    "fullName": "\\[OGrave]",
+    "codepoint": "0x00F2"
+  },
+  "o'": {
+    "name": "OAcute",
+    "unicode": "ó",
+    "fullName": "\\[OAcute]",
+    "codepoint": "0x00F3"
+  },
+  "oe": {
+    "name": "OE",
+    "unicode": "œ",
+    "fullName": "\\[OE]",
+    "codepoint": "0x0153"
+  },
+  "\\oe": {
+    "name": "OE",
+    "unicode": "œ",
+    "fullName": "\\[OE]",
+    "codepoint": "0x0153"
+  },
+  "o^": {
+    "name": "OHat",
+    "unicode": "ô",
+    "fullName": "\\[OHat]",
+    "codepoint": "0x00F4"
+  },
+  "o~": {
+    "name": "OTilde",
+    "unicode": "õ",
+    "fullName": "\\[OTilde]",
+    "codepoint": "0x00F5"
+  },
+  "o\"": {
+    "name": "ODoubleDot",
+    "unicode": "ö",
+    "fullName": "\\[ODoubleDot]",
+    "codepoint": "0x00F6"
+  },
+  "o/": {
+    "name": "OSlash",
+    "unicode": "ø",
+    "fullName": "\\[OSlash]",
+    "codepoint": "0x00F8"
+  },
+  "\\o": {
+    "name": "OSlash",
+    "unicode": "ø",
+    "fullName": "\\[OSlash]",
+    "codepoint": "0x00F8"
+  },
+  "u`": {
+    "name": "UGrave",
+    "unicode": "ù",
+    "fullName": "\\[UGrave]",
+    "codepoint": "0x00F9"
+  },
+  "u'": {
+    "name": "UAcute",
+    "unicode": "ú",
+    "fullName": "\\[UAcute]",
+    "codepoint": "0x00FA"
+  },
+  "u^": {
+    "name": "UHat",
+    "unicode": "û",
+    "fullName": "\\[UHat]",
+    "codepoint": "0x00FB"
+  },
+  "u\"": {
+    "name": "UDoubleDot",
+    "unicode": "ü",
+    "fullName": "\\[UDoubleDot]",
+    "codepoint": "0x00FC"
+  },
+  "y'": {
+    "name": "YAcute",
+    "unicode": "ý",
+    "fullName": "\\[YAcute]",
+    "codepoint": "0x00FD"
+  },
+  "thn": {
+    "name": "Thorn",
+    "unicode": "þ",
+    "fullName": "\\[Thorn]",
+    "codepoint": "0x00FE"
+  },
+  "y\"": {
+    "name": "YDoubleDot",
+    "unicode": "ÿ",
+    "fullName": "\\[YDoubleDot]",
+    "codepoint": "0x00FF"
+  },
+  "a-": {
+    "name": "ABar",
+    "unicode": "ā",
+    "fullName": "\\[ABar]",
+    "codepoint": "0x0101"
+  },
+  "A-": {
+    "name": "CapitalABar",
+    "unicode": "Ā",
+    "fullName": "\\[CapitalABar]",
+    "codepoint": "0x0100"
+  },
+  "au": {
+    "name": "ACup",
+    "unicode": "ă",
+    "fullName": "\\[ACup]",
+    "codepoint": "0x0103"
+  },
+  "Au": {
+    "name": "CapitalACup",
+    "unicode": "Ă",
+    "fullName": "\\[CapitalACup]",
+    "codepoint": "0x0102"
+  },
+  "c'": {
+    "name": "CAcute",
+    "unicode": "ć",
+    "fullName": "\\[CAcute]",
+    "codepoint": "0x0107"
+  },
+  "C'": {
+    "name": "CapitalCAcute",
+    "unicode": "Ć",
+    "fullName": "\\[CapitalCAcute]",
+    "codepoint": "0x0106"
+  },
+  "cv": {
+    "name": "CHacek",
+    "unicode": "č",
+    "fullName": "\\[CHacek]",
+    "codepoint": "0x010D"
+  },
+  "Cv": {
+    "name": "CapitalCHacek",
+    "unicode": "Č",
+    "fullName": "\\[CapitalCHacek]",
+    "codepoint": "0x010C"
+  },
+  "dv": {
+    "name": "DHacek",
+    "unicode": "ď",
+    "fullName": "\\[DHacek]",
+    "codepoint": "0x010F"
+  },
+  "Dv": {
+    "name": "CapitalDHacek",
+    "unicode": "Ď",
+    "fullName": "\\[CapitalDHacek]",
+    "codepoint": "0x010E"
+  },
+  "ev": {
+    "name": "EHacek",
+    "unicode": "ě",
+    "fullName": "\\[EHacek]",
+    "codepoint": "0x011B"
+  },
+  "Ev": {
+    "name": "CapitalEHacek",
+    "unicode": "Ě",
+    "fullName": "\\[CapitalEHacek]",
+    "codepoint": "0x011A"
+  },
+  "nv": {
+    "name": "NHacek",
+    "unicode": "ň",
+    "fullName": "\\[NHacek]",
+    "codepoint": "0x0148"
+  },
+  "Nv": {
+    "name": "CapitalNHacek",
+    "unicode": "Ň",
+    "fullName": "\\[CapitalNHacek]",
+    "codepoint": "0x0147"
+  },
+  "rv": {
+    "name": "RHacek",
+    "unicode": "ř",
+    "fullName": "\\[RHacek]",
+    "codepoint": "0x0159"
+  },
+  "Rv": {
+    "name": "CapitalRHacek",
+    "unicode": "Ř",
+    "fullName": "\\[CapitalRHacek]",
+    "codepoint": "0x0158"
+  },
+  "tv": {
+    "name": "THacek",
+    "unicode": "ť",
+    "fullName": "\\[THacek]",
+    "codepoint": "0x0165"
+  },
+  "Tv": {
+    "name": "CapitalTHacek",
+    "unicode": "Ť",
+    "fullName": "\\[CapitalTHacek]",
+    "codepoint": "0x0164"
+  },
+  "uo": {
+    "name": "URing",
+    "unicode": "ů",
+    "fullName": "\\[URing]",
+    "codepoint": "0x016F"
+  },
+  "Uo": {
+    "name": "CapitalURing",
+    "unicode": "Ů",
+    "fullName": "\\[CapitalURing]",
+    "codepoint": "0x016E"
+  },
+  "zv": {
+    "name": "ZHacek",
+    "unicode": "ž",
+    "fullName": "\\[ZHacek]",
+    "codepoint": "0x017E"
+  },
+  "Zv": {
+    "name": "CapitalZHacek",
+    "unicode": "Ž",
+    "fullName": "\\[CapitalZHacek]",
+    "codepoint": "0x017D"
+  },
+  "e-": {
+    "name": "EBar",
+    "unicode": "ē",
+    "fullName": "\\[EBar]",
+    "codepoint": "0x0113"
+  },
+  "E-": {
+    "name": "CapitalEBar",
+    "unicode": "Ē",
+    "fullName": "\\[CapitalEBar]",
+    "codepoint": "0x0112"
+  },
+  "eu": {
+    "name": "ECup",
+    "unicode": "ĕ",
+    "fullName": "\\[ECup]",
+    "codepoint": "0x0115"
+  },
+  "Eu": {
+    "name": "CapitalECup",
+    "unicode": "Ĕ",
+    "fullName": "\\[CapitalECup]",
+    "codepoint": "0x0114"
+  },
+  "iu": {
+    "name": "ICup",
+    "unicode": "ĭ",
+    "fullName": "\\[ICup]",
+    "codepoint": "0x012D"
+  },
+  "Iu": {
+    "name": "CapitalICup",
+    "unicode": "Ĭ",
+    "fullName": "\\[CapitalICup]",
+    "codepoint": "0x012C"
+  },
+  "l/": {
+    "name": "LSlash",
+    "unicode": "ł",
+    "fullName": "\\[LSlash]",
+    "codepoint": "0x0142"
+  },
+  "\\l": {
+    "name": "LSlash",
+    "unicode": "ł",
+    "fullName": "\\[LSlash]",
+    "codepoint": "0x0142"
+  },
+  "L/": {
+    "name": "CapitalLSlash",
+    "unicode": "Ł",
+    "fullName": "\\[CapitalLSlash]",
+    "codepoint": "0x0141"
+  },
+  "\\L": {
+    "name": "CapitalLSlash",
+    "unicode": "Ł",
+    "fullName": "\\[CapitalLSlash]",
+    "codepoint": "0x0141"
+  },
+  "o''": {
+    "name": "ODoubleAcute",
+    "unicode": "ő",
+    "fullName": "\\[ODoubleAcute]",
+    "codepoint": "0x0151"
+  },
+  "O''": {
+    "name": "CapitalODoubleAcute",
+    "unicode": "Ő",
+    "fullName": "\\[CapitalODoubleAcute]",
+    "codepoint": "0x0150"
+  },
+  "sv": {
+    "name": "SHacek",
+    "unicode": "š",
+    "fullName": "\\[SHacek]",
+    "codepoint": "0x0161"
+  },
+  "Sv": {
+    "name": "CapitalSHacek",
+    "unicode": "Š",
+    "fullName": "\\[CapitalSHacek]",
+    "codepoint": "0x0160"
+  },
+  "u''": {
+    "name": "UDoubleAcute",
+    "unicode": "ű",
+    "fullName": "\\[UDoubleAcute]",
+    "codepoint": "0x0171"
+  },
+  "U''": {
+    "name": "CapitalUDoubleAcute",
+    "unicode": "Ű",
+    "fullName": "\\[CapitalUDoubleAcute]",
+    "codepoint": "0x0170"
+  },
+  "bv": {
+    "name": "Breve",
+    "unicode": "˘",
+    "fullName": "\\[Breve]",
+    "codepoint": "0x02D8"
+  },
+  "hck": {
+    "name": "Hacek",
+    "unicode": "ˇ",
+    "fullName": "\\[Hacek]",
+    "codepoint": "0x02C7"
+  },
+  "dbv": {
+    "name": "DownBreve",
+    "unicode": "",
+    "fullName": "\\[DownBreve]",
+    "codepoint": "0xF755"
+  },
+  "cd": {
+    "name": "Cedilla",
+    "unicode": "¸",
+    "fullName": "\\[Cedilla]",
+    "codepoint": "0x00B8"
+  },
+  "Di": {
+    "name": "CapitalDigamma",
+    "unicode": "Ϝ",
+    "fullName": "\\[CapitalDigamma]",
+    "codepoint": "0x03DC"
+  },
+  "Digamma": {
+    "name": "FormalDigamma",
+    "unicode": "",
+    "fullName": "\\[FormalDigamma]",
+    "codepoint": "0xF880"
+  },
+  "Sti": {
+    "name": "CapitalStigma",
+    "unicode": "Ϛ",
+    "fullName": "\\[CapitalStigma]",
+    "codepoint": "0x03DA"
+  },
+  "Stigma": {
+    "name": "FormalStigma",
+    "unicode": "",
+    "fullName": "\\[FormalStigma]",
+    "codepoint": "0xF87E"
+  },
+  "Ko": {
+    "name": "CapitalKoppa",
+    "unicode": "Ϟ",
+    "fullName": "\\[CapitalKoppa]",
+    "codepoint": "0x03DE"
+  },
+  "Koppa": {
+    "name": "FormalKoppa",
+    "unicode": "",
+    "fullName": "\\[FormalKoppa]",
+    "codepoint": "0xF882"
+  },
+  "Sa": {
+    "name": "CapitalSampi",
+    "unicode": "Ϡ",
+    "fullName": "\\[CapitalSampi]",
+    "codepoint": "0x03E0"
+  },
+  "Sampi": {
+    "name": "FormalSampi",
+    "unicode": "",
+    "fullName": "\\[FormalSampi]",
+    "codepoint": "0xF884"
+  },
+  "sti": {
+    "name": "Stigma",
+    "unicode": "ϛ",
+    "fullName": "\\[Stigma]",
+    "codepoint": "0x03DB"
+  },
+  "stigma": {
+    "name": "Stigma",
+    "unicode": "ϛ",
+    "fullName": "\\[Stigma]",
+    "codepoint": "0x03DB"
+  },
+  "\\stigma": {
+    "name": "Stigma",
+    "unicode": "ϛ",
+    "fullName": "\\[Stigma]",
+    "codepoint": "0x03DB"
+  },
+  "di": {
+    "name": "Digamma",
+    "unicode": "ϝ",
+    "fullName": "\\[Digamma]",
+    "codepoint": "0x03DD"
+  },
+  "digamma": {
+    "name": "Digamma",
+    "unicode": "ϝ",
+    "fullName": "\\[Digamma]",
+    "codepoint": "0x03DD"
+  },
+  "\\digamma": {
+    "name": "Digamma",
+    "unicode": "ϝ",
+    "fullName": "\\[Digamma]",
+    "codepoint": "0x03DD"
+  },
+  "ko": {
+    "name": "Koppa",
+    "unicode": "ϟ",
+    "fullName": "\\[Koppa]",
+    "codepoint": "0x03DF"
+  },
+  "koppa": {
+    "name": "Koppa",
+    "unicode": "ϟ",
+    "fullName": "\\[Koppa]",
+    "codepoint": "0x03DF"
+  },
+  "\\koppa": {
+    "name": "Koppa",
+    "unicode": "ϟ",
+    "fullName": "\\[Koppa]",
+    "codepoint": "0x03DF"
+  },
+  "sa": {
+    "name": "Sampi",
+    "unicode": "ϡ",
+    "fullName": "\\[Sampi]",
+    "codepoint": "0x03E1"
+  },
+  "sampi": {
+    "name": "Sampi",
+    "unicode": "ϡ",
+    "fullName": "\\[Sampi]",
+    "codepoint": "0x03E1"
+  },
+  "\\sampi": {
+    "name": "Sampi",
+    "unicode": "ϡ",
+    "fullName": "\\[Sampi]",
+    "codepoint": "0x03E1"
+  },
+  "ee": {
+    "name": "ExponentialE",
+    "unicode": "",
+    "fullName": "\\[ExponentialE]",
+    "codepoint": "0xF74D"
+  },
+  "ii": {
+    "name": "ImaginaryI",
+    "unicode": "",
+    "fullName": "\\[ImaginaryI]",
+    "codepoint": "0xF74E"
+  },
+  "jj": {
+    "name": "ImaginaryJ",
+    "unicode": "",
+    "fullName": "\\[ImaginaryJ]",
+    "codepoint": "0xF74F"
+  },
+  "cc": {
+    "name": "ConstantC",
+    "unicode": "",
+    "fullName": "\\[ConstantC]",
+    "codepoint": "0xF7DA"
+  },
+  "sca": {
+    "name": "ScriptA",
+    "unicode": "",
+    "fullName": "\\[ScriptA]",
+    "codepoint": "0xF6B2"
+  },
+  "scb": {
+    "name": "ScriptB",
+    "unicode": "",
+    "fullName": "\\[ScriptB]",
+    "codepoint": "0xF6B3"
+  },
+  "scc": {
+    "name": "ScriptC",
+    "unicode": "",
+    "fullName": "\\[ScriptC]",
+    "codepoint": "0xF6B4"
+  },
+  "scd": {
+    "name": "ScriptD",
+    "unicode": "",
+    "fullName": "\\[ScriptD]",
+    "codepoint": "0xF6B5"
+  },
+  "sce": {
+    "name": "ScriptE",
+    "unicode": "ℯ",
+    "fullName": "\\[ScriptE]",
+    "codepoint": "0x212F"
+  },
+  "scf": {
+    "name": "ScriptF",
+    "unicode": "",
+    "fullName": "\\[ScriptF]",
+    "codepoint": "0xF6B7"
+  },
+  "scg": {
+    "name": "ScriptG",
+    "unicode": "ℊ",
+    "fullName": "\\[ScriptG]",
+    "codepoint": "0x210A"
+  },
+  "sch": {
+    "name": "ScriptH",
+    "unicode": "",
+    "fullName": "\\[ScriptH]",
+    "codepoint": "0xF6B9"
+  },
+  "sci": {
+    "name": "ScriptI",
+    "unicode": "",
+    "fullName": "\\[ScriptI]",
+    "codepoint": "0xF6BA"
+  },
+  "scj": {
+    "name": "ScriptJ",
+    "unicode": "",
+    "fullName": "\\[ScriptJ]",
+    "codepoint": "0xF6BB"
+  },
+  "sck": {
+    "name": "ScriptK",
+    "unicode": "",
+    "fullName": "\\[ScriptK]",
+    "codepoint": "0xF6BC"
+  },
+  "scl": {
+    "name": "ScriptL",
+    "unicode": "ℓ",
+    "fullName": "\\[ScriptL]",
+    "codepoint": "0x2113"
+  },
+  "\\ell": {
+    "name": "ScriptL",
+    "unicode": "ℓ",
+    "fullName": "\\[ScriptL]",
+    "codepoint": "0x2113"
+  },
+  "scm": {
+    "name": "ScriptM",
+    "unicode": "",
+    "fullName": "\\[ScriptM]",
+    "codepoint": "0xF6BE"
+  },
+  "scn": {
+    "name": "ScriptN",
+    "unicode": "",
+    "fullName": "\\[ScriptN]",
+    "codepoint": "0xF6BF"
+  },
+  "sco": {
+    "name": "ScriptO",
+    "unicode": "ℴ",
+    "fullName": "\\[ScriptO]",
+    "codepoint": "0x2134"
+  },
+  "scp": {
+    "name": "ScriptP",
+    "unicode": "",
+    "fullName": "\\[ScriptP]",
+    "codepoint": "0xF6C1"
+  },
+  "scq": {
+    "name": "ScriptQ",
+    "unicode": "",
+    "fullName": "\\[ScriptQ]",
+    "codepoint": "0xF6C2"
+  },
+  "scr": {
+    "name": "ScriptR",
+    "unicode": "",
+    "fullName": "\\[ScriptR]",
+    "codepoint": "0xF6C3"
+  },
+  "scs": {
+    "name": "ScriptS",
+    "unicode": "",
+    "fullName": "\\[ScriptS]",
+    "codepoint": "0xF6C4"
+  },
+  "sct": {
+    "name": "ScriptT",
+    "unicode": "",
+    "fullName": "\\[ScriptT]",
+    "codepoint": "0xF6C5"
+  },
+  "scu": {
+    "name": "ScriptU",
+    "unicode": "",
+    "fullName": "\\[ScriptU]",
+    "codepoint": "0xF6C6"
+  },
+  "scv": {
+    "name": "ScriptV",
+    "unicode": "",
+    "fullName": "\\[ScriptV]",
+    "codepoint": "0xF6C7"
+  },
+  "scw": {
+    "name": "ScriptW",
+    "unicode": "",
+    "fullName": "\\[ScriptW]",
+    "codepoint": "0xF6C8"
+  },
+  "scx": {
+    "name": "ScriptX",
+    "unicode": "",
+    "fullName": "\\[ScriptX]",
+    "codepoint": "0xF6C9"
+  },
+  "scy": {
+    "name": "ScriptY",
+    "unicode": "",
+    "fullName": "\\[ScriptY]",
+    "codepoint": "0xF6CA"
+  },
+  "scz": {
+    "name": "ScriptZ",
+    "unicode": "",
+    "fullName": "\\[ScriptZ]",
+    "codepoint": "0xF6CB"
+  },
+  "scA": {
+    "name": "ScriptCapitalA",
+    "unicode": "",
+    "fullName": "\\[ScriptCapitalA]",
+    "codepoint": "0xF770"
+  },
+  "scB": {
+    "name": "ScriptCapitalB",
+    "unicode": "ℬ",
+    "fullName": "\\[ScriptCapitalB]",
+    "codepoint": "0x212C"
+  },
+  "scC": {
+    "name": "ScriptCapitalC",
+    "unicode": "",
+    "fullName": "\\[ScriptCapitalC]",
+    "codepoint": "0xF772"
+  },
+  "scD": {
+    "name": "ScriptCapitalD",
+    "unicode": "",
+    "fullName": "\\[ScriptCapitalD]",
+    "codepoint": "0xF773"
+  },
+  "scE": {
+    "name": "ScriptCapitalE",
+    "unicode": "ℰ",
+    "fullName": "\\[ScriptCapitalE]",
+    "codepoint": "0x2130"
+  },
+  "scF": {
+    "name": "ScriptCapitalF",
+    "unicode": "ℱ",
+    "fullName": "\\[ScriptCapitalF]",
+    "codepoint": "0x2131"
+  },
+  "scG": {
+    "name": "ScriptCapitalG",
+    "unicode": "",
+    "fullName": "\\[ScriptCapitalG]",
+    "codepoint": "0xF776"
+  },
+  "scH": {
+    "name": "ScriptCapitalH",
+    "unicode": "ℋ",
+    "fullName": "\\[ScriptCapitalH]",
+    "codepoint": "0x210B"
+  },
+  "scI": {
+    "name": "ScriptCapitalI",
+    "unicode": "ℐ",
+    "fullName": "\\[ScriptCapitalI]",
+    "codepoint": "0x2110"
+  },
+  "scJ": {
+    "name": "ScriptCapitalJ",
+    "unicode": "",
+    "fullName": "\\[ScriptCapitalJ]",
+    "codepoint": "0xF779"
+  },
+  "scK": {
+    "name": "ScriptCapitalK",
+    "unicode": "",
+    "fullName": "\\[ScriptCapitalK]",
+    "codepoint": "0xF77A"
+  },
+  "scL": {
+    "name": "ScriptCapitalL",
+    "unicode": "ℒ",
+    "fullName": "\\[ScriptCapitalL]",
+    "codepoint": "0x2112"
+  },
+  "scM": {
+    "name": "ScriptCapitalM",
+    "unicode": "ℳ",
+    "fullName": "\\[ScriptCapitalM]",
+    "codepoint": "0x2133"
+  },
+  "scN": {
+    "name": "ScriptCapitalN",
+    "unicode": "",
+    "fullName": "\\[ScriptCapitalN]",
+    "codepoint": "0xF77D"
+  },
+  "scO": {
+    "name": "ScriptCapitalO",
+    "unicode": "",
+    "fullName": "\\[ScriptCapitalO]",
+    "codepoint": "0xF77E"
+  },
+  "scP": {
+    "name": "ScriptCapitalP",
+    "unicode": "",
+    "fullName": "\\[ScriptCapitalP]",
+    "codepoint": "0xF77F"
+  },
+  "scQ": {
+    "name": "ScriptCapitalQ",
+    "unicode": "",
+    "fullName": "\\[ScriptCapitalQ]",
+    "codepoint": "0xF780"
+  },
+  "scR": {
+    "name": "ScriptCapitalR",
+    "unicode": "ℛ",
+    "fullName": "\\[ScriptCapitalR]",
+    "codepoint": "0x211B"
+  },
+  "scS": {
+    "name": "ScriptCapitalS",
+    "unicode": "",
+    "fullName": "\\[ScriptCapitalS]",
+    "codepoint": "0xF782"
+  },
+  "scT": {
+    "name": "ScriptCapitalT",
+    "unicode": "",
+    "fullName": "\\[ScriptCapitalT]",
+    "codepoint": "0xF783"
+  },
+  "scU": {
+    "name": "ScriptCapitalU",
+    "unicode": "",
+    "fullName": "\\[ScriptCapitalU]",
+    "codepoint": "0xF784"
+  },
+  "scV": {
+    "name": "ScriptCapitalV",
+    "unicode": "",
+    "fullName": "\\[ScriptCapitalV]",
+    "codepoint": "0xF785"
+  },
+  "scW": {
+    "name": "ScriptCapitalW",
+    "unicode": "",
+    "fullName": "\\[ScriptCapitalW]",
+    "codepoint": "0xF786"
+  },
+  "scX": {
+    "name": "ScriptCapitalX",
+    "unicode": "",
+    "fullName": "\\[ScriptCapitalX]",
+    "codepoint": "0xF787"
+  },
+  "scY": {
+    "name": "ScriptCapitalY",
+    "unicode": "",
+    "fullName": "\\[ScriptCapitalY]",
+    "codepoint": "0xF788"
+  },
+  "scZ": {
+    "name": "ScriptCapitalZ",
+    "unicode": "",
+    "fullName": "\\[ScriptCapitalZ]",
+    "codepoint": "0xF789"
+  },
+  "goa": {
+    "name": "GothicA",
+    "unicode": "",
+    "fullName": "\\[GothicA]",
+    "codepoint": "0xF6CC"
+  },
+  "gob": {
+    "name": "GothicB",
+    "unicode": "",
+    "fullName": "\\[GothicB]",
+    "codepoint": "0xF6CD"
+  },
+  "goc": {
+    "name": "GothicC",
+    "unicode": "",
+    "fullName": "\\[GothicC]",
+    "codepoint": "0xF6CE"
+  },
+  "god": {
+    "name": "GothicD",
+    "unicode": "",
+    "fullName": "\\[GothicD]",
+    "codepoint": "0xF6CF"
+  },
+  "goe": {
+    "name": "GothicE",
+    "unicode": "",
+    "fullName": "\\[GothicE]",
+    "codepoint": "0xF6D0"
+  },
+  "gof": {
+    "name": "GothicF",
+    "unicode": "",
+    "fullName": "\\[GothicF]",
+    "codepoint": "0xF6D1"
+  },
+  "gog": {
+    "name": "GothicG",
+    "unicode": "",
+    "fullName": "\\[GothicG]",
+    "codepoint": "0xF6D2"
+  },
+  "goh": {
+    "name": "GothicH",
+    "unicode": "",
+    "fullName": "\\[GothicH]",
+    "codepoint": "0xF6D3"
+  },
+  "goi": {
+    "name": "GothicI",
+    "unicode": "",
+    "fullName": "\\[GothicI]",
+    "codepoint": "0xF6D4"
+  },
+  "goj": {
+    "name": "GothicJ",
+    "unicode": "",
+    "fullName": "\\[GothicJ]",
+    "codepoint": "0xF6D5"
+  },
+  "gok": {
+    "name": "GothicK",
+    "unicode": "",
+    "fullName": "\\[GothicK]",
+    "codepoint": "0xF6D6"
+  },
+  "gol": {
+    "name": "GothicL",
+    "unicode": "",
+    "fullName": "\\[GothicL]",
+    "codepoint": "0xF6D7"
+  },
+  "gom": {
+    "name": "GothicM",
+    "unicode": "",
+    "fullName": "\\[GothicM]",
+    "codepoint": "0xF6D8"
+  },
+  "gon": {
+    "name": "GothicN",
+    "unicode": "",
+    "fullName": "\\[GothicN]",
+    "codepoint": "0xF6D9"
+  },
+  "goo": {
+    "name": "GothicO",
+    "unicode": "",
+    "fullName": "\\[GothicO]",
+    "codepoint": "0xF6DA"
+  },
+  "gop": {
+    "name": "GothicP",
+    "unicode": "",
+    "fullName": "\\[GothicP]",
+    "codepoint": "0xF6DB"
+  },
+  "goq": {
+    "name": "GothicQ",
+    "unicode": "",
+    "fullName": "\\[GothicQ]",
+    "codepoint": "0xF6DC"
+  },
+  "gor": {
+    "name": "GothicR",
+    "unicode": "",
+    "fullName": "\\[GothicR]",
+    "codepoint": "0xF6DD"
+  },
+  "gos": {
+    "name": "GothicS",
+    "unicode": "",
+    "fullName": "\\[GothicS]",
+    "codepoint": "0xF6DE"
+  },
+  "got": {
+    "name": "GothicT",
+    "unicode": "",
+    "fullName": "\\[GothicT]",
+    "codepoint": "0xF6DF"
+  },
+  "gou": {
+    "name": "GothicU",
+    "unicode": "",
+    "fullName": "\\[GothicU]",
+    "codepoint": "0xF6E0"
+  },
+  "gov": {
+    "name": "GothicV",
+    "unicode": "",
+    "fullName": "\\[GothicV]",
+    "codepoint": "0xF6E1"
+  },
+  "gow": {
+    "name": "GothicW",
+    "unicode": "",
+    "fullName": "\\[GothicW]",
+    "codepoint": "0xF6E2"
+  },
+  "gox": {
+    "name": "GothicX",
+    "unicode": "",
+    "fullName": "\\[GothicX]",
+    "codepoint": "0xF6E3"
+  },
+  "goy": {
+    "name": "GothicY",
+    "unicode": "",
+    "fullName": "\\[GothicY]",
+    "codepoint": "0xF6E4"
+  },
+  "goz": {
+    "name": "GothicZ",
+    "unicode": "",
+    "fullName": "\\[GothicZ]",
+    "codepoint": "0xF6E5"
+  },
+  "goA": {
+    "name": "GothicCapitalA",
+    "unicode": "",
+    "fullName": "\\[GothicCapitalA]",
+    "codepoint": "0xF78A"
+  },
+  "goB": {
+    "name": "GothicCapitalB",
+    "unicode": "",
+    "fullName": "\\[GothicCapitalB]",
+    "codepoint": "0xF78B"
+  },
+  "goC": {
+    "name": "GothicCapitalC",
+    "unicode": "ℭ",
+    "fullName": "\\[GothicCapitalC]",
+    "codepoint": "0x212D"
+  },
+  "goD": {
+    "name": "GothicCapitalD",
+    "unicode": "",
+    "fullName": "\\[GothicCapitalD]",
+    "codepoint": "0xF78D"
+  },
+  "goE": {
+    "name": "GothicCapitalE",
+    "unicode": "",
+    "fullName": "\\[GothicCapitalE]",
+    "codepoint": "0xF78E"
+  },
+  "goF": {
+    "name": "GothicCapitalF",
+    "unicode": "",
+    "fullName": "\\[GothicCapitalF]",
+    "codepoint": "0xF78F"
+  },
+  "goG": {
+    "name": "GothicCapitalG",
+    "unicode": "",
+    "fullName": "\\[GothicCapitalG]",
+    "codepoint": "0xF790"
+  },
+  "goH": {
+    "name": "GothicCapitalH",
+    "unicode": "ℌ",
+    "fullName": "\\[GothicCapitalH]",
+    "codepoint": "0x210C"
+  },
+  "goI": {
+    "name": "GothicCapitalI",
+    "unicode": "ℑ",
+    "fullName": "\\[GothicCapitalI]",
+    "codepoint": "0x2111"
+  },
+  "\\Im": {
+    "name": "GothicCapitalI",
+    "unicode": "ℑ",
+    "fullName": "\\[GothicCapitalI]",
+    "codepoint": "0x2111"
+  },
+  "goJ": {
+    "name": "GothicCapitalJ",
+    "unicode": "",
+    "fullName": "\\[GothicCapitalJ]",
+    "codepoint": "0xF793"
+  },
+  "goK": {
+    "name": "GothicCapitalK",
+    "unicode": "",
+    "fullName": "\\[GothicCapitalK]",
+    "codepoint": "0xF794"
+  },
+  "goL": {
+    "name": "GothicCapitalL",
+    "unicode": "",
+    "fullName": "\\[GothicCapitalL]",
+    "codepoint": "0xF795"
+  },
+  "goM": {
+    "name": "GothicCapitalM",
+    "unicode": "",
+    "fullName": "\\[GothicCapitalM]",
+    "codepoint": "0xF796"
+  },
+  "goN": {
+    "name": "GothicCapitalN",
+    "unicode": "",
+    "fullName": "\\[GothicCapitalN]",
+    "codepoint": "0xF797"
+  },
+  "goO": {
+    "name": "GothicCapitalO",
+    "unicode": "",
+    "fullName": "\\[GothicCapitalO]",
+    "codepoint": "0xF798"
+  },
+  "goP": {
+    "name": "GothicCapitalP",
+    "unicode": "",
+    "fullName": "\\[GothicCapitalP]",
+    "codepoint": "0xF799"
+  },
+  "goQ": {
+    "name": "GothicCapitalQ",
+    "unicode": "",
+    "fullName": "\\[GothicCapitalQ]",
+    "codepoint": "0xF79A"
+  },
+  "goR": {
+    "name": "GothicCapitalR",
+    "unicode": "ℜ",
+    "fullName": "\\[GothicCapitalR]",
+    "codepoint": "0x211C"
+  },
+  "\\Re": {
+    "name": "GothicCapitalR",
+    "unicode": "ℜ",
+    "fullName": "\\[GothicCapitalR]",
+    "codepoint": "0x211C"
+  },
+  "goS": {
+    "name": "GothicCapitalS",
+    "unicode": "",
+    "fullName": "\\[GothicCapitalS]",
+    "codepoint": "0xF79C"
+  },
+  "goT": {
+    "name": "GothicCapitalT",
+    "unicode": "",
+    "fullName": "\\[GothicCapitalT]",
+    "codepoint": "0xF79D"
+  },
+  "goU": {
+    "name": "GothicCapitalU",
+    "unicode": "",
+    "fullName": "\\[GothicCapitalU]",
+    "codepoint": "0xF79E"
+  },
+  "goV": {
+    "name": "GothicCapitalV",
+    "unicode": "",
+    "fullName": "\\[GothicCapitalV]",
+    "codepoint": "0xF79F"
+  },
+  "goW": {
+    "name": "GothicCapitalW",
+    "unicode": "",
+    "fullName": "\\[GothicCapitalW]",
+    "codepoint": "0xF7A0"
+  },
+  "goX": {
+    "name": "GothicCapitalX",
+    "unicode": "",
+    "fullName": "\\[GothicCapitalX]",
+    "codepoint": "0xF7A1"
+  },
+  "goY": {
+    "name": "GothicCapitalY",
+    "unicode": "",
+    "fullName": "\\[GothicCapitalY]",
+    "codepoint": "0xF7A2"
+  },
+  "goZ": {
+    "name": "GothicCapitalZ",
+    "unicode": "ℨ",
+    "fullName": "\\[GothicCapitalZ]",
+    "codepoint": "0x2128"
+  },
+  "dsa": {
+    "name": "DoubleStrucka",
+    "unicode": "𝕒",
+    "fullName": "\\[DoubleStrucka]",
+    "codepoint": "0x1d552"
+  },
+  "dsb": {
+    "name": "DoubleStruckb",
+    "unicode": "𝕓",
+    "fullName": "\\[DoubleStruckb]",
+    "codepoint": "0x1d553"
+  },
+  "dsc": {
+    "name": "DoubleStruckc",
+    "unicode": "𝕔",
+    "fullName": "\\[DoubleStruckc]",
+    "codepoint": "0x1d554"
+  },
+  "dsd": {
+    "name": "DoubleStruckd",
+    "unicode": "𝕕",
+    "fullName": "\\[DoubleStruckd]",
+    "codepoint": "0x1d555"
+  },
+  "dse": {
+    "name": "DoubleStrucke",
+    "unicode": "𝕖",
+    "fullName": "\\[DoubleStrucke]",
+    "codepoint": "0x1d556"
+  },
+  "dsf": {
+    "name": "DoubleStruckf",
+    "unicode": "𝕗",
+    "fullName": "\\[DoubleStruckf]",
+    "codepoint": "0x1d557"
+  },
+  "dsg": {
+    "name": "DoubleStruckg",
+    "unicode": "𝕘",
+    "fullName": "\\[DoubleStruckg]",
+    "codepoint": "0x1d558"
+  },
+  "dsh": {
+    "name": "DoubleStruckh",
+    "unicode": "𝕙",
+    "fullName": "\\[DoubleStruckh]",
+    "codepoint": "0x1d559"
+  },
+  "dsi": {
+    "name": "DoubleStrucki",
+    "unicode": "𝕚",
+    "fullName": "\\[DoubleStrucki]",
+    "codepoint": "0x1d55a"
+  },
+  "dsj": {
+    "name": "DoubleStruckj",
+    "unicode": "𝕛",
+    "fullName": "\\[DoubleStruckj]",
+    "codepoint": "0x1d55b"
+  },
+  "dsk": {
+    "name": "DoubleStruckk",
+    "unicode": "𝕜",
+    "fullName": "\\[DoubleStruckk]",
+    "codepoint": "0x1d55c"
+  },
+  "dsl": {
+    "name": "DoubleStruckl",
+    "unicode": "𝕝",
+    "fullName": "\\[DoubleStruckl]",
+    "codepoint": "0x1d55d"
+  },
+  "dsm": {
+    "name": "DoubleStruckm",
+    "unicode": "𝕞",
+    "fullName": "\\[DoubleStruckm]",
+    "codepoint": "0x1d55e"
+  },
+  "dsn": {
+    "name": "DoubleStruckn",
+    "unicode": "𝕟",
+    "fullName": "\\[DoubleStruckn]",
+    "codepoint": "0x1d55f"
+  },
+  "dso": {
+    "name": "DoubleStrucko",
+    "unicode": "𝕠",
+    "fullName": "\\[DoubleStrucko]",
+    "codepoint": "0x1d560"
+  },
+  "dsp": {
+    "name": "DoubleStruckp",
+    "unicode": "𝕡",
+    "fullName": "\\[DoubleStruckp]",
+    "codepoint": "0x1d561"
+  },
+  "dsq": {
+    "name": "DoubleStruckq",
+    "unicode": "𝕢",
+    "fullName": "\\[DoubleStruckq]",
+    "codepoint": "0x1d562"
+  },
+  "dsr": {
+    "name": "DoubleStruckr",
+    "unicode": "𝕣",
+    "fullName": "\\[DoubleStruckr]",
+    "codepoint": "0x1d563"
+  },
+  "dss": {
+    "name": "DoubleStrucks",
+    "unicode": "𝕤",
+    "fullName": "\\[DoubleStrucks]",
+    "codepoint": "0x1d564"
+  },
+  "dst": {
+    "name": "DoubleStruckt",
+    "unicode": "𝕥",
+    "fullName": "\\[DoubleStruckt]",
+    "codepoint": "0x1d565"
+  },
+  "dsu": {
+    "name": "DoubleStrucku",
+    "unicode": "𝕦",
+    "fullName": "\\[DoubleStrucku]",
+    "codepoint": "0x1d566"
+  },
+  "dsv": {
+    "name": "DoubleStruckv",
+    "unicode": "𝕧",
+    "fullName": "\\[DoubleStruckv]",
+    "codepoint": "0x1d567"
+  },
+  "dsw": {
+    "name": "DoubleStruckw",
+    "unicode": "𝕨",
+    "fullName": "\\[DoubleStruckw]",
+    "codepoint": "0x1d568"
+  },
+  "dsx": {
+    "name": "DoubleStruckx",
+    "unicode": "𝕩",
+    "fullName": "\\[DoubleStruckx]",
+    "codepoint": "0x1d569"
+  },
+  "dsy": {
+    "name": "DoubleStrucky",
+    "unicode": "𝕪",
+    "fullName": "\\[DoubleStrucky]",
+    "codepoint": "0x1d56a"
+  },
+  "dsz": {
+    "name": "DoubleStruckz",
+    "unicode": "𝕫",
+    "fullName": "\\[DoubleStruckz]",
+    "codepoint": "0x1d56b"
+  },
+  "dsA": {
+    "name": "DoubleStruckCapitalA",
+    "unicode": "𝔸",
+    "fullName": "\\[DoubleStruckCapitalA]",
+    "codepoint": "0x1d538"
+  },
+  "dsB": {
+    "name": "DoubleStruckCapitalB",
+    "unicode": "𝔹",
+    "fullName": "\\[DoubleStruckCapitalB]",
+    "codepoint": "0x1d539"
+  },
+  "dsC": {
+    "name": "DoubleStruckCapitalC",
+    "unicode": "ℂ",
+    "fullName": "\\[DoubleStruckCapitalC]",
+    "codepoint": "0x2102"
+  },
+  "dsD": {
+    "name": "DoubleStruckCapitalD",
+    "unicode": "𝔻",
+    "fullName": "\\[DoubleStruckCapitalD]",
+    "codepoint": "0x1d53b"
+  },
+  "dsE": {
+    "name": "DoubleStruckCapitalE",
+    "unicode": "𝔼",
+    "fullName": "\\[DoubleStruckCapitalE]",
+    "codepoint": "0x1d53c"
+  },
+  "dsF": {
+    "name": "DoubleStruckCapitalF",
+    "unicode": "𝔽",
+    "fullName": "\\[DoubleStruckCapitalF]",
+    "codepoint": "0x1d53d"
+  },
+  "dsG": {
+    "name": "DoubleStruckCapitalG",
+    "unicode": "𝔾",
+    "fullName": "\\[DoubleStruckCapitalG]",
+    "codepoint": "0x1d53e"
+  },
+  "dsH": {
+    "name": "DoubleStruckCapitalH",
+    "unicode": "ℍ",
+    "fullName": "\\[DoubleStruckCapitalH]",
+    "codepoint": "0x210d"
+  },
+  "dsI": {
+    "name": "DoubleStruckCapitalI",
+    "unicode": "𝕀",
+    "fullName": "\\[DoubleStruckCapitalI]",
+    "codepoint": "0x1d540"
+  },
+  "dsJ": {
+    "name": "DoubleStruckCapitalJ",
+    "unicode": "𝕁",
+    "fullName": "\\[DoubleStruckCapitalJ]",
+    "codepoint": "0x1d541"
+  },
+  "dsK": {
+    "name": "DoubleStruckCapitalK",
+    "unicode": "𝕂",
+    "fullName": "\\[DoubleStruckCapitalK]",
+    "codepoint": "0x1d542"
+  },
+  "dsL": {
+    "name": "DoubleStruckCapitalL",
+    "unicode": "𝕃",
+    "fullName": "\\[DoubleStruckCapitalL]",
+    "codepoint": "0x1d543"
+  },
+  "dsM": {
+    "name": "DoubleStruckCapitalM",
+    "unicode": "𝕄",
+    "fullName": "\\[DoubleStruckCapitalM]",
+    "codepoint": "0x1d544"
+  },
+  "dsN": {
+    "name": "DoubleStruckCapitalN",
+    "unicode": "ℕ",
+    "fullName": "\\[DoubleStruckCapitalN]",
+    "codepoint": "0x2115"
+  },
+  "dsO": {
+    "name": "DoubleStruckCapitalO",
+    "unicode": "𝕆",
+    "fullName": "\\[DoubleStruckCapitalO]",
+    "codepoint": "0x1d546"
+  },
+  "dsP": {
+    "name": "DoubleStruckCapitalP",
+    "unicode": "ℙ",
+    "fullName": "\\[DoubleStruckCapitalP]",
+    "codepoint": "0x2119"
+  },
+  "dsQ": {
+    "name": "DoubleStruckCapitalQ",
+    "unicode": "ℚ",
+    "fullName": "\\[DoubleStruckCapitalQ]",
+    "codepoint": "0x211a"
+  },
+  "dsR": {
+    "name": "DoubleStruckCapitalR",
+    "unicode": "ℝ",
+    "fullName": "\\[DoubleStruckCapitalR]",
+    "codepoint": "0x211d"
+  },
+  "dsS": {
+    "name": "DoubleStruckCapitalS",
+    "unicode": "𝕊",
+    "fullName": "\\[DoubleStruckCapitalS]",
+    "codepoint": "0x1d54a"
+  },
+  "dsT": {
+    "name": "DoubleStruckCapitalT",
+    "unicode": "𝕋",
+    "fullName": "\\[DoubleStruckCapitalT]",
+    "codepoint": "0x1d54b"
+  },
+  "dsU": {
+    "name": "DoubleStruckCapitalU",
+    "unicode": "𝕌",
+    "fullName": "\\[DoubleStruckCapitalU]",
+    "codepoint": "0x1d54c"
+  },
+  "dsV": {
+    "name": "DoubleStruckCapitalV",
+    "unicode": "𝕍",
+    "fullName": "\\[DoubleStruckCapitalV]",
+    "codepoint": "0x1d54d"
+  },
+  "dsW": {
+    "name": "DoubleStruckCapitalW",
+    "unicode": "𝕎",
+    "fullName": "\\[DoubleStruckCapitalW]",
+    "codepoint": "0x1d54e"
+  },
+  "dsX": {
+    "name": "DoubleStruckCapitalX",
+    "unicode": "𝕏",
+    "fullName": "\\[DoubleStruckCapitalX]",
+    "codepoint": "0x1d54f"
+  },
+  "dsY": {
+    "name": "DoubleStruckCapitalY",
+    "unicode": "𝕐",
+    "fullName": "\\[DoubleStruckCapitalY]",
+    "codepoint": "0x1d550"
+  },
+  "dsZ": {
+    "name": "DoubleStruckCapitalZ",
+    "unicode": "ℤ",
+    "fullName": "\\[DoubleStruckCapitalZ]",
+    "codepoint": "0x2124"
+  },
+  "a": {
+    "name": "Alpha",
+    "unicode": "α",
+    "fullName": "\\[Alpha]",
+    "codepoint": "0x03B1"
+  },
+  ".a": {
+    "name": "FormalA",
+    "unicode": "",
+    "fullName": "\\[FormalA]",
+    "codepoint": "0xF800"
+  },
+  "b": {
+    "name": "Beta",
+    "unicode": "β",
+    "fullName": "\\[Beta]",
+    "codepoint": "0x03B2"
+  },
+  ".b": {
+    "name": "FormalB",
+    "unicode": "",
+    "fullName": "\\[FormalB]",
+    "codepoint": "0xF801"
+  },
+  "c": {
+    "name": "Chi",
+    "unicode": "χ",
+    "fullName": "\\[Chi]",
+    "codepoint": "0x03C7"
+  },
+  ".c": {
+    "name": "FormalC",
+    "unicode": "",
+    "fullName": "\\[FormalC]",
+    "codepoint": "0xF802"
+  },
+  "d": {
+    "name": "Delta",
+    "unicode": "δ",
+    "fullName": "\\[Delta]",
+    "codepoint": "0x03B4"
+  },
+  ".d": {
+    "name": "FormalD",
+    "unicode": "",
+    "fullName": "\\[FormalD]",
+    "codepoint": "0xF803"
+  },
+  "e": {
+    "name": "Epsilon",
+    "unicode": "ϵ",
+    "fullName": "\\[Epsilon]",
+    "codepoint": "0x03F5"
+  },
+  ".e": {
+    "name": "FormalE",
+    "unicode": "",
+    "fullName": "\\[FormalE]",
+    "codepoint": "0xF804"
+  },
+  "f": {
+    "name": "Phi",
+    "unicode": "ϕ",
+    "fullName": "\\[Phi]",
+    "codepoint": "0x03D5"
+  },
+  ".f": {
+    "name": "FormalF",
+    "unicode": "",
+    "fullName": "\\[FormalF]",
+    "codepoint": "0xF805"
+  },
+  "g": {
+    "name": "Gamma",
+    "unicode": "γ",
+    "fullName": "\\[Gamma]",
+    "codepoint": "0x03B3"
+  },
+  ".g": {
+    "name": "FormalG",
+    "unicode": "",
+    "fullName": "\\[FormalG]",
+    "codepoint": "0xF806"
+  },
+  "h": {
+    "name": "Eta",
+    "unicode": "η",
+    "fullName": "\\[Eta]",
+    "codepoint": "0x03B7"
+  },
+  ".h": {
+    "name": "FormalH",
+    "unicode": "",
+    "fullName": "\\[FormalH]",
+    "codepoint": "0xF807"
+  },
+  "i": {
+    "name": "Iota",
+    "unicode": "ι",
+    "fullName": "\\[Iota]",
+    "codepoint": "0x03B9"
+  },
+  ".i": {
+    "name": "FormalI",
+    "unicode": "",
+    "fullName": "\\[FormalI]",
+    "codepoint": "0xF808"
+  },
+  "j": {
+    "name": "CurlyPhi",
+    "unicode": "φ",
+    "fullName": "\\[CurlyPhi]",
+    "codepoint": "0x03C6"
+  },
+  ".j": {
+    "name": "FormalJ",
+    "unicode": "",
+    "fullName": "\\[FormalJ]",
+    "codepoint": "0xF809"
+  },
+  "k": {
+    "name": "Kappa",
+    "unicode": "κ",
+    "fullName": "\\[Kappa]",
+    "codepoint": "0x03BA"
+  },
+  ".k": {
+    "name": "FormalK",
+    "unicode": "",
+    "fullName": "\\[FormalK]",
+    "codepoint": "0xF80A"
+  },
+  "l": {
+    "name": "Lambda",
+    "unicode": "λ",
+    "fullName": "\\[Lambda]",
+    "codepoint": "0x03BB"
+  },
+  ".l": {
+    "name": "FormalL",
+    "unicode": "",
+    "fullName": "\\[FormalL]",
+    "codepoint": "0xF80B"
+  },
+  "m": {
+    "name": "Mu",
+    "unicode": "μ",
+    "fullName": "\\[Mu]",
+    "codepoint": "0x03BC"
+  },
+  ".m": {
+    "name": "FormalM",
+    "unicode": "",
+    "fullName": "\\[FormalM]",
+    "codepoint": "0xF80C"
+  },
+  "n": {
+    "name": "Nu",
+    "unicode": "ν",
+    "fullName": "\\[Nu]",
+    "codepoint": "0x03BD"
+  },
+  ".n": {
+    "name": "FormalN",
+    "unicode": "",
+    "fullName": "\\[FormalN]",
+    "codepoint": "0xF80D"
+  },
+  "o": {
+    "name": "Omega",
+    "unicode": "ω",
+    "fullName": "\\[Omega]",
+    "codepoint": "0x03C9"
+  },
+  ".o": {
+    "name": "FormalO",
+    "unicode": "",
+    "fullName": "\\[FormalO]",
+    "codepoint": "0xF80E"
+  },
+  "p": {
+    "name": "Pi",
+    "unicode": "π",
+    "fullName": "\\[Pi]",
+    "codepoint": "0x03C0"
+  },
+  ".p": {
+    "name": "FormalP",
+    "unicode": "",
+    "fullName": "\\[FormalP]",
+    "codepoint": "0xF80F"
+  },
+  "q": {
+    "name": "Theta",
+    "unicode": "θ",
+    "fullName": "\\[Theta]",
+    "codepoint": "0x03B8"
+  },
+  ".q": {
+    "name": "FormalQ",
+    "unicode": "",
+    "fullName": "\\[FormalQ]",
+    "codepoint": "0xF810"
+  },
+  "r": {
+    "name": "Rho",
+    "unicode": "ρ",
+    "fullName": "\\[Rho]",
+    "codepoint": "0x03C1"
+  },
+  ".r": {
+    "name": "FormalR",
+    "unicode": "",
+    "fullName": "\\[FormalR]",
+    "codepoint": "0xF811"
+  },
+  "s": {
+    "name": "Sigma",
+    "unicode": "σ",
+    "fullName": "\\[Sigma]",
+    "codepoint": "0x03C3"
+  },
+  ".s": {
+    "name": "FormalS",
+    "unicode": "",
+    "fullName": "\\[FormalS]",
+    "codepoint": "0xF812"
+  },
+  "t": {
+    "name": "Tau",
+    "unicode": "τ",
+    "fullName": "\\[Tau]",
+    "codepoint": "0x03C4"
+  },
+  ".t": {
+    "name": "FormalT",
+    "unicode": "",
+    "fullName": "\\[FormalT]",
+    "codepoint": "0xF813"
+  },
+  "u": {
+    "name": "Upsilon",
+    "unicode": "υ",
+    "fullName": "\\[Upsilon]",
+    "codepoint": "0x03C5"
+  },
+  ".u": {
+    "name": "FormalU",
+    "unicode": "",
+    "fullName": "\\[FormalU]",
+    "codepoint": "0xF814"
+  },
+  "v": {
+    "name": "Vee",
+    "unicode": "⋁",
+    "fullName": "\\[Vee]",
+    "codepoint": "0x22C1"
+  },
+  ".v": {
+    "name": "FormalV",
+    "unicode": "",
+    "fullName": "\\[FormalV]",
+    "codepoint": "0xF815"
+  },
+  "w": {
+    "name": "Omega",
+    "unicode": "ω",
+    "fullName": "\\[Omega]",
+    "codepoint": "0x03C9"
+  },
+  ".w": {
+    "name": "FormalW",
+    "unicode": "",
+    "fullName": "\\[FormalW]",
+    "codepoint": "0xF816"
+  },
+  "x": {
+    "name": "Xi",
+    "unicode": "ξ",
+    "fullName": "\\[Xi]",
+    "codepoint": "0x03BE"
+  },
+  ".x": {
+    "name": "FormalX",
+    "unicode": "",
+    "fullName": "\\[FormalX]",
+    "codepoint": "0xF817"
+  },
+  "y": {
+    "name": "Psi",
+    "unicode": "ψ",
+    "fullName": "\\[Psi]",
+    "codepoint": "0x03C8"
+  },
+  ".y": {
+    "name": "FormalY",
+    "unicode": "",
+    "fullName": "\\[FormalY]",
+    "codepoint": "0xF818"
+  },
+  "z": {
+    "name": "Zeta",
+    "unicode": "ζ",
+    "fullName": "\\[Zeta]",
+    "codepoint": "0x03B6"
+  },
+  ".z": {
+    "name": "FormalZ",
+    "unicode": "",
+    "fullName": "\\[FormalZ]",
+    "codepoint": "0xF819"
+  },
+  "A": {
+    "name": "CapitalAlpha",
+    "unicode": "Α",
+    "fullName": "\\[CapitalAlpha]",
+    "codepoint": "0x0391"
+  },
+  ".A": {
+    "name": "FormalCapitalA",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalA]",
+    "codepoint": "0xF81A"
+  },
+  "B": {
+    "name": "CapitalBeta",
+    "unicode": "Β",
+    "fullName": "\\[CapitalBeta]",
+    "codepoint": "0x0392"
+  },
+  ".B": {
+    "name": "FormalCapitalB",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalB]",
+    "codepoint": "0xF81B"
+  },
+  "C": {
+    "name": "CapitalChi",
+    "unicode": "Χ",
+    "fullName": "\\[CapitalChi]",
+    "codepoint": "0x03A7"
+  },
+  ".C": {
+    "name": "FormalCapitalC",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalC]",
+    "codepoint": "0xF81C"
+  },
+  "D": {
+    "name": "CapitalDelta",
+    "unicode": "Δ",
+    "fullName": "\\[CapitalDelta]",
+    "codepoint": "0x0394"
+  },
+  ".D": {
+    "name": "FormalCapitalD",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalD]",
+    "codepoint": "0xF81D"
+  },
+  "E": {
+    "name": "CapitalEpsilon",
+    "unicode": "Ε",
+    "fullName": "\\[CapitalEpsilon]",
+    "codepoint": "0x0395"
+  },
+  ".E": {
+    "name": "FormalCapitalE",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalE]",
+    "codepoint": "0xF81E"
+  },
+  "F": {
+    "name": "CapitalPhi",
+    "unicode": "Φ",
+    "fullName": "\\[CapitalPhi]",
+    "codepoint": "0x03A6"
+  },
+  ".F": {
+    "name": "FormalCapitalF",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalF]",
+    "codepoint": "0xF81F"
+  },
+  "G": {
+    "name": "CapitalGamma",
+    "unicode": "Γ",
+    "fullName": "\\[CapitalGamma]",
+    "codepoint": "0x0393"
+  },
+  ".G": {
+    "name": "FormalCapitalG",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalG]",
+    "codepoint": "0xF820"
+  },
+  "H": {
+    "name": "CapitalEta",
+    "unicode": "Η",
+    "fullName": "\\[CapitalEta]",
+    "codepoint": "0x0397"
+  },
+  ".H": {
+    "name": "FormalCapitalH",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalH]",
+    "codepoint": "0xF821"
+  },
+  "I": {
+    "name": "CapitalIota",
+    "unicode": "Ι",
+    "fullName": "\\[CapitalIota]",
+    "codepoint": "0x0399"
+  },
+  ".I": {
+    "name": "FormalCapitalI",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalI]",
+    "codepoint": "0xF822"
+  },
+  "J": {
+    "name": "FormalCapitalJ",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalJ]",
+    "codepoint": "0xF823"
+  },
+  ".J": {
+    "name": "FormalCapitalJ",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalJ]",
+    "codepoint": "0xF823"
+  },
+  "K": {
+    "name": "CapitalKappa",
+    "unicode": "Κ",
+    "fullName": "\\[CapitalKappa]",
+    "codepoint": "0x039A"
+  },
+  ".K": {
+    "name": "FormalCapitalK",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalK]",
+    "codepoint": "0xF824"
+  },
+  "L": {
+    "name": "CapitalLambda",
+    "unicode": "Λ",
+    "fullName": "\\[CapitalLambda]",
+    "codepoint": "0x039B"
+  },
+  ".L": {
+    "name": "FormalCapitalL",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalL]",
+    "codepoint": "0xF825"
+  },
+  "M": {
+    "name": "CapitalMu",
+    "unicode": "Μ",
+    "fullName": "\\[CapitalMu]",
+    "codepoint": "0x039C"
+  },
+  ".M": {
+    "name": "FormalCapitalM",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalM]",
+    "codepoint": "0xF826"
+  },
+  "N": {
+    "name": "CapitalNu",
+    "unicode": "Ν",
+    "fullName": "\\[CapitalNu]",
+    "codepoint": "0x039D"
+  },
+  ".N": {
+    "name": "FormalCapitalN",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalN]",
+    "codepoint": "0xF827"
+  },
+  "O": {
+    "name": "CapitalOmega",
+    "unicode": "Ω",
+    "fullName": "\\[CapitalOmega]",
+    "codepoint": "0x03A9"
+  },
+  ".O": {
+    "name": "FormalCapitalO",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalO]",
+    "codepoint": "0xF828"
+  },
+  "P": {
+    "name": "CapitalPi",
+    "unicode": "Π",
+    "fullName": "\\[CapitalPi]",
+    "codepoint": "0x03A0"
+  },
+  ".P": {
+    "name": "FormalCapitalP",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalP]",
+    "codepoint": "0xF829"
+  },
+  "Q": {
+    "name": "CapitalTheta",
+    "unicode": "Θ",
+    "fullName": "\\[CapitalTheta]",
+    "codepoint": "0x0398"
+  },
+  ".Q": {
+    "name": "FormalCapitalQ",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalQ]",
+    "codepoint": "0xF82A"
+  },
+  "R": {
+    "name": "CapitalRho",
+    "unicode": "Ρ",
+    "fullName": "\\[CapitalRho]",
+    "codepoint": "0x03A1"
+  },
+  ".R": {
+    "name": "FormalCapitalR",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalR]",
+    "codepoint": "0xF82B"
+  },
+  "S": {
+    "name": "CapitalSigma",
+    "unicode": "Σ",
+    "fullName": "\\[CapitalSigma]",
+    "codepoint": "0x03A3"
+  },
+  ".S": {
+    "name": "FormalCapitalS",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalS]",
+    "codepoint": "0xF82C"
+  },
+  "T": {
+    "name": "CapitalTau",
+    "unicode": "Τ",
+    "fullName": "\\[CapitalTau]",
+    "codepoint": "0x03A4"
+  },
+  ".T": {
+    "name": "FormalCapitalT",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalT]",
+    "codepoint": "0xF82D"
+  },
+  "U": {
+    "name": "CapitalUpsilon",
+    "unicode": "Υ",
+    "fullName": "\\[CapitalUpsilon]",
+    "codepoint": "0x03A5"
+  },
+  ".U": {
+    "name": "FormalCapitalU",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalU]",
+    "codepoint": "0xF82E"
+  },
+  "V": {
+    "name": "FormalCapitalV",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalV]",
+    "codepoint": "0xF82F"
+  },
+  ".V": {
+    "name": "FormalCapitalV",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalV]",
+    "codepoint": "0xF82F"
+  },
+  "W": {
+    "name": "CapitalOmega",
+    "unicode": "Ω",
+    "fullName": "\\[CapitalOmega]",
+    "codepoint": "0x03A9"
+  },
+  ".W": {
+    "name": "FormalCapitalW",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalW]",
+    "codepoint": "0xF830"
+  },
+  "X": {
+    "name": "CapitalXi",
+    "unicode": "Ξ",
+    "fullName": "\\[CapitalXi]",
+    "codepoint": "0x039E"
+  },
+  ".X": {
+    "name": "FormalCapitalX",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalX]",
+    "codepoint": "0xF831"
+  },
+  "Y": {
+    "name": "CapitalPsi",
+    "unicode": "Ψ",
+    "fullName": "\\[CapitalPsi]",
+    "codepoint": "0x03A8"
+  },
+  ".Y": {
+    "name": "FormalCapitalY",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalY]",
+    "codepoint": "0xF832"
+  },
+  "Z": {
+    "name": "CapitalZeta",
+    "unicode": "Ζ",
+    "fullName": "\\[CapitalZeta]",
+    "codepoint": "0x0396"
+  },
+  ".Z": {
+    "name": "FormalCapitalZ",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalZ]",
+    "codepoint": "0xF833"
+  },
+  "CapitalStigma": {
+    "name": "FormalCapitalStigma",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalStigma]",
+    "codepoint": "0xF87D"
+  },
+  ".CapitalStigma": {
+    "name": "FormalCapitalStigma",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalStigma]",
+    "codepoint": "0xF87D"
+  },
+  ".Stigma": {
+    "name": "FormalStigma",
+    "unicode": "",
+    "fullName": "\\[FormalStigma]",
+    "codepoint": "0xF87E"
+  },
+  "CapitalDigamma": {
+    "name": "FormalCapitalDigamma",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalDigamma]",
+    "codepoint": "0xF87F"
+  },
+  ".CapitalDigamma": {
+    "name": "FormalCapitalDigamma",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalDigamma]",
+    "codepoint": "0xF87F"
+  },
+  ".Digamma": {
+    "name": "FormalDigamma",
+    "unicode": "",
+    "fullName": "\\[FormalDigamma]",
+    "codepoint": "0xF880"
+  },
+  "CapitalKoppa": {
+    "name": "FormalCapitalKoppa",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalKoppa]",
+    "codepoint": "0xF881"
+  },
+  ".CapitalKoppa": {
+    "name": "FormalCapitalKoppa",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalKoppa]",
+    "codepoint": "0xF881"
+  },
+  ".Koppa": {
+    "name": "FormalKoppa",
+    "unicode": "",
+    "fullName": "\\[FormalKoppa]",
+    "codepoint": "0xF882"
+  },
+  "CapitalSampi": {
+    "name": "FormalCapitalSampi",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalSampi]",
+    "codepoint": "0xF883"
+  },
+  ".CapitalSampi": {
+    "name": "FormalCapitalSampi",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalSampi]",
+    "codepoint": "0xF883"
+  },
+  ".Sampi": {
+    "name": "FormalSampi",
+    "unicode": "",
+    "fullName": "\\[FormalSampi]",
+    "codepoint": "0xF884"
+  },
+  ".sca": {
+    "name": "FormalScriptA",
+    "unicode": "ꀀ",
+    "fullName": "\\[FormalScriptA]",
+    "codepoint": "0x0FA000"
+  },
+  ".scb": {
+    "name": "FormalScriptB",
+    "unicode": "ꀁ",
+    "fullName": "\\[FormalScriptB]",
+    "codepoint": "0x0FA001"
+  },
+  ".scc": {
+    "name": "FormalScriptC",
+    "unicode": "ꀂ",
+    "fullName": "\\[FormalScriptC]",
+    "codepoint": "0x0FA002"
+  },
+  ".scd": {
+    "name": "FormalScriptD",
+    "unicode": "ꀃ",
+    "fullName": "\\[FormalScriptD]",
+    "codepoint": "0x0FA003"
+  },
+  ".sce": {
+    "name": "FormalScriptE",
+    "unicode": "ꀄ",
+    "fullName": "\\[FormalScriptE]",
+    "codepoint": "0x0FA004"
+  },
+  ".scf": {
+    "name": "FormalScriptF",
+    "unicode": "ꀅ",
+    "fullName": "\\[FormalScriptF]",
+    "codepoint": "0x0FA005"
+  },
+  ".scg": {
+    "name": "FormalScriptG",
+    "unicode": "ꀆ",
+    "fullName": "\\[FormalScriptG]",
+    "codepoint": "0x0FA006"
+  },
+  ".sch": {
+    "name": "FormalScriptH",
+    "unicode": "ꀇ",
+    "fullName": "\\[FormalScriptH]",
+    "codepoint": "0x0FA007"
+  },
+  ".sci": {
+    "name": "FormalScriptI",
+    "unicode": "ꀈ",
+    "fullName": "\\[FormalScriptI]",
+    "codepoint": "0x0FA008"
+  },
+  ".scj": {
+    "name": "FormalScriptJ",
+    "unicode": "ꀉ",
+    "fullName": "\\[FormalScriptJ]",
+    "codepoint": "0x0FA009"
+  },
+  ".sck": {
+    "name": "FormalScriptK",
+    "unicode": "ꀊ",
+    "fullName": "\\[FormalScriptK]",
+    "codepoint": "0x0FA00A"
+  },
+  ".scl": {
+    "name": "FormalScriptL",
+    "unicode": "ꀋ",
+    "fullName": "\\[FormalScriptL]",
+    "codepoint": "0x0FA00B"
+  },
+  ".scm": {
+    "name": "FormalScriptM",
+    "unicode": "ꀌ",
+    "fullName": "\\[FormalScriptM]",
+    "codepoint": "0x0FA00C"
+  },
+  ".scn": {
+    "name": "FormalScriptN",
+    "unicode": "ꀍ",
+    "fullName": "\\[FormalScriptN]",
+    "codepoint": "0x0FA00D"
+  },
+  ".sco": {
+    "name": "FormalScriptO",
+    "unicode": "ꀎ",
+    "fullName": "\\[FormalScriptO]",
+    "codepoint": "0x0FA00E"
+  },
+  ".scp": {
+    "name": "FormalScriptP",
+    "unicode": "ꀏ",
+    "fullName": "\\[FormalScriptP]",
+    "codepoint": "0x0FA00F"
+  },
+  ".scq": {
+    "name": "FormalScriptQ",
+    "unicode": "ꀐ",
+    "fullName": "\\[FormalScriptQ]",
+    "codepoint": "0x0FA010"
+  },
+  ".scr": {
+    "name": "FormalScriptR",
+    "unicode": "ꀑ",
+    "fullName": "\\[FormalScriptR]",
+    "codepoint": "0x0FA011"
+  },
+  ".scs": {
+    "name": "FormalScriptS",
+    "unicode": "ꀒ",
+    "fullName": "\\[FormalScriptS]",
+    "codepoint": "0x0FA012"
+  },
+  ".sct": {
+    "name": "FormalScriptT",
+    "unicode": "ꀓ",
+    "fullName": "\\[FormalScriptT]",
+    "codepoint": "0x0FA013"
+  },
+  ".scu": {
+    "name": "FormalScriptU",
+    "unicode": "ꀔ",
+    "fullName": "\\[FormalScriptU]",
+    "codepoint": "0x0FA014"
+  },
+  ".scv": {
+    "name": "FormalScriptV",
+    "unicode": "ꀕ",
+    "fullName": "\\[FormalScriptV]",
+    "codepoint": "0x0FA015"
+  },
+  ".scw": {
+    "name": "FormalScriptW",
+    "unicode": "ꀖ",
+    "fullName": "\\[FormalScriptW]",
+    "codepoint": "0x0FA016"
+  },
+  ".scx": {
+    "name": "FormalScriptX",
+    "unicode": "ꀗ",
+    "fullName": "\\[FormalScriptX]",
+    "codepoint": "0x0FA017"
+  },
+  ".scy": {
+    "name": "FormalScriptY",
+    "unicode": "ꀘ",
+    "fullName": "\\[FormalScriptY]",
+    "codepoint": "0x0FA018"
+  },
+  ".scz": {
+    "name": "FormalScriptZ",
+    "unicode": "ꀙ",
+    "fullName": "\\[FormalScriptZ]",
+    "codepoint": "0x0FA019"
+  },
+  ".scA": {
+    "name": "FormalScriptCapitalA",
+    "unicode": "ꀚ",
+    "fullName": "\\[FormalScriptCapitalA]",
+    "codepoint": "0x0FA01A"
+  },
+  ".scB": {
+    "name": "FormalScriptCapitalB",
+    "unicode": "ꀛ",
+    "fullName": "\\[FormalScriptCapitalB]",
+    "codepoint": "0x0FA01B"
+  },
+  ".scC": {
+    "name": "FormalScriptCapitalC",
+    "unicode": "ꀜ",
+    "fullName": "\\[FormalScriptCapitalC]",
+    "codepoint": "0x0FA01C"
+  },
+  ".scD": {
+    "name": "FormalScriptCapitalD",
+    "unicode": "ꀝ",
+    "fullName": "\\[FormalScriptCapitalD]",
+    "codepoint": "0x0FA01D"
+  },
+  ".scE": {
+    "name": "FormalScriptCapitalE",
+    "unicode": "ꀞ",
+    "fullName": "\\[FormalScriptCapitalE]",
+    "codepoint": "0x0FA01E"
+  },
+  ".scF": {
+    "name": "FormalScriptCapitalF",
+    "unicode": "ꀟ",
+    "fullName": "\\[FormalScriptCapitalF]",
+    "codepoint": "0x0FA01F"
+  },
+  ".scG": {
+    "name": "FormalScriptCapitalG",
+    "unicode": "ꀠ",
+    "fullName": "\\[FormalScriptCapitalG]",
+    "codepoint": "0x0FA020"
+  },
+  ".scH": {
+    "name": "FormalScriptCapitalH",
+    "unicode": "ꀡ",
+    "fullName": "\\[FormalScriptCapitalH]",
+    "codepoint": "0x0FA021"
+  },
+  ".scI": {
+    "name": "FormalScriptCapitalI",
+    "unicode": "ꀢ",
+    "fullName": "\\[FormalScriptCapitalI]",
+    "codepoint": "0x0FA022"
+  },
+  ".scJ": {
+    "name": "FormalScriptCapitalJ",
+    "unicode": "ꀣ",
+    "fullName": "\\[FormalScriptCapitalJ]",
+    "codepoint": "0x0FA023"
+  },
+  ".scK": {
+    "name": "FormalScriptCapitalK",
+    "unicode": "ꀤ",
+    "fullName": "\\[FormalScriptCapitalK]",
+    "codepoint": "0x0FA024"
+  },
+  ".scL": {
+    "name": "FormalScriptCapitalL",
+    "unicode": "ꀥ",
+    "fullName": "\\[FormalScriptCapitalL]",
+    "codepoint": "0x0FA025"
+  },
+  ".scM": {
+    "name": "FormalScriptCapitalM",
+    "unicode": "ꀦ",
+    "fullName": "\\[FormalScriptCapitalM]",
+    "codepoint": "0x0FA026"
+  },
+  ".scN": {
+    "name": "FormalScriptCapitalN",
+    "unicode": "ꀧ",
+    "fullName": "\\[FormalScriptCapitalN]",
+    "codepoint": "0x0FA027"
+  },
+  ".scO": {
+    "name": "FormalScriptCapitalO",
+    "unicode": "ꀨ",
+    "fullName": "\\[FormalScriptCapitalO]",
+    "codepoint": "0x0FA028"
+  },
+  ".scP": {
+    "name": "FormalScriptCapitalP",
+    "unicode": "ꀩ",
+    "fullName": "\\[FormalScriptCapitalP]",
+    "codepoint": "0x0FA029"
+  },
+  ".scQ": {
+    "name": "FormalScriptCapitalQ",
+    "unicode": "ꀪ",
+    "fullName": "\\[FormalScriptCapitalQ]",
+    "codepoint": "0x0FA02A"
+  },
+  ".scR": {
+    "name": "FormalScriptCapitalR",
+    "unicode": "ꀫ",
+    "fullName": "\\[FormalScriptCapitalR]",
+    "codepoint": "0x0FA02B"
+  },
+  ".scS": {
+    "name": "FormalScriptCapitalS",
+    "unicode": "ꀬ",
+    "fullName": "\\[FormalScriptCapitalS]",
+    "codepoint": "0x0FA02C"
+  },
+  ".scT": {
+    "name": "FormalScriptCapitalT",
+    "unicode": "ꀭ",
+    "fullName": "\\[FormalScriptCapitalT]",
+    "codepoint": "0x0FA02D"
+  },
+  ".scU": {
+    "name": "FormalScriptCapitalU",
+    "unicode": "ꀮ",
+    "fullName": "\\[FormalScriptCapitalU]",
+    "codepoint": "0x0FA02E"
+  },
+  ".scV": {
+    "name": "FormalScriptCapitalV",
+    "unicode": "ꀯ",
+    "fullName": "\\[FormalScriptCapitalV]",
+    "codepoint": "0x0FA02F"
+  },
+  ".scW": {
+    "name": "FormalScriptCapitalW",
+    "unicode": "ꀰ",
+    "fullName": "\\[FormalScriptCapitalW]",
+    "codepoint": "0x0FA030"
+  },
+  ".scX": {
+    "name": "FormalScriptCapitalX",
+    "unicode": "ꀱ",
+    "fullName": "\\[FormalScriptCapitalX]",
+    "codepoint": "0x0FA031"
+  },
+  ".scY": {
+    "name": "FormalScriptCapitalY",
+    "unicode": "ꀲ",
+    "fullName": "\\[FormalScriptCapitalY]",
+    "codepoint": "0x0FA032"
+  },
+  ".scZ": {
+    "name": "FormalScriptCapitalZ",
+    "unicode": "ꀳ",
+    "fullName": "\\[FormalScriptCapitalZ]",
+    "codepoint": "0x0FA033"
+  },
+  "wp": {
+    "name": "WeierstrassP",
+    "unicode": "℘",
+    "fullName": "\\[WeierstrassP]",
+    "codepoint": "0x2118"
+  },
+  "\\wp": {
+    "name": "WeierstrassP",
+    "unicode": "℘",
+    "fullName": "\\[WeierstrassP]",
+    "codepoint": "0x2118"
+  },
+  "al": {
+    "name": "Aleph",
+    "unicode": "ℵ",
+    "fullName": "\\[Aleph]",
+    "codepoint": "0x2135"
+  },
+  "\\aleph": {
+    "name": "Aleph",
+    "unicode": "ℵ",
+    "fullName": "\\[Aleph]",
+    "codepoint": "0x2135"
+  },
+  "be": {
+    "name": "Bet",
+    "unicode": "ℶ",
+    "fullName": "\\[Bet]",
+    "codepoint": "0x2136"
+  },
+  "\\beth": {
+    "name": "Bet",
+    "unicode": "ℶ",
+    "fullName": "\\[Bet]",
+    "codepoint": "0x2136"
+  },
+  "gi": {
+    "name": "Gimel",
+    "unicode": "ℷ",
+    "fullName": "\\[Gimel]",
+    "codepoint": "0x2137"
+  },
+  "\\gimel": {
+    "name": "Gimel",
+    "unicode": "ℷ",
+    "fullName": "\\[Gimel]",
+    "codepoint": "0x2137"
+  },
+  "da": {
+    "name": "Dalet",
+    "unicode": "ℸ",
+    "fullName": "\\[Dalet]",
+    "codepoint": "0x2138"
+  },
+  "\\daleth": {
+    "name": "Dalet",
+    "unicode": "ℸ",
+    "fullName": "\\[Dalet]",
+    "codepoint": "0x2138"
+  },
+  "d!": {
+    "name": "DownExclamation",
+    "unicode": "¡",
+    "fullName": "\\[DownExclamation]",
+    "codepoint": "0x00A1"
+  },
+  "cent": {
+    "name": "Cent",
+    "unicode": "¢",
+    "fullName": "\\[Cent]",
+    "codepoint": "0x00A2"
+  },
+  "euro": {
+    "name": "Euro",
+    "unicode": "€",
+    "fullName": "\\[Euro]",
+    "codepoint": "0x20AC"
+  },
+  "\\euro": {
+    "name": "Euro",
+    "unicode": "€",
+    "fullName": "\\[Euro]",
+    "codepoint": "0x20AC"
+  },
+  "\\rupee": {
+    "name": "Rupee",
+    "unicode": "₹",
+    "fullName": "\\[Rupee]",
+    "codepoint": "0x20B9"
+  },
+  "\\yen": {
+    "name": "Yen",
+    "unicode": "¥",
+    "fullName": "\\[Yen]",
+    "codepoint": "0x00A5"
+  },
+  "\\S": {
+    "name": "Section",
+    "unicode": "§",
+    "fullName": "\\[Section]",
+    "codepoint": "0x00A7"
+  },
+  "\\copyright": {
+    "name": "Copyright",
+    "unicode": "©",
+    "fullName": "\\[Copyright]",
+    "codepoint": "0x00A9"
+  },
+  "rtm": {
+    "name": "RegisteredTrademark",
+    "unicode": "®",
+    "fullName": "\\[RegisteredTrademark]",
+    "codepoint": "0x00AE"
+  },
+  "\\circledR": {
+    "name": "RegisteredTrademark",
+    "unicode": "®",
+    "fullName": "\\[RegisteredTrademark]",
+    "codepoint": "0x00AE"
+  },
+  "tm": {
+    "name": "Trademark",
+    "unicode": "™",
+    "fullName": "\\[Trademark]",
+    "codepoint": "0x2122"
+  },
+  "deg": {
+    "name": "Degree",
+    "unicode": "°",
+    "fullName": "\\[Degree]",
+    "codepoint": "0x00B0"
+  },
+  "mi": {
+    "name": "Micro",
+    "unicode": "µ",
+    "fullName": "\\[Micro]",
+    "codepoint": "0x00B5"
+  },
+  "\\P": {
+    "name": "Paragraph",
+    "unicode": "¶",
+    "fullName": "\\[Paragraph]",
+    "codepoint": "0x00B6"
+  },
+  "d?": {
+    "name": "DownQuestion",
+    "unicode": "¿",
+    "fullName": "\\[DownQuestion]",
+    "codepoint": "0x00BF"
+  },
+  "hb": {
+    "name": "HBar",
+    "unicode": "ℏ",
+    "fullName": "\\[HBar]",
+    "codepoint": "0x210F"
+  },
+  "\\hslash": {
+    "name": "HBar",
+    "unicode": "ℏ",
+    "fullName": "\\[HBar]",
+    "codepoint": "0x210F"
+  },
+  "mho": {
+    "name": "Mho",
+    "unicode": "℧",
+    "fullName": "\\[Mho]",
+    "codepoint": "0x2127"
+  },
+  "\\mho": {
+    "name": "Mho",
+    "unicode": "℧",
+    "fullName": "\\[Mho]",
+    "codepoint": "0x2127"
+  },
+  "Ang": {
+    "name": "Angstrom",
+    "unicode": "Å",
+    "fullName": "\\[Angstrom]",
+    "codepoint": "0x212B"
+  },
+  "\\AA": {
+    "name": "Angstrom",
+    "unicode": "Å",
+    "fullName": "\\[Angstrom]",
+    "codepoint": "0x212B"
+  },
+  "es": {
+    "name": "EmptySet",
+    "unicode": "∅",
+    "fullName": "\\[EmptySet]",
+    "codepoint": "0x2205"
+  },
+  "\\emptyset": {
+    "name": "EmptySet",
+    "unicode": "∅",
+    "fullName": "\\[EmptySet]",
+    "codepoint": "0x2205"
+  },
+  "hy": {
+    "name": "Hyphen",
+    "unicode": "‐",
+    "fullName": "\\[Hyphen]",
+    "codepoint": "0x2010"
+  },
+  "-": {
+    "name": "NegativeThickSpace",
+    "unicode": "",
+    "fullName": "\\[NegativeThickSpace]",
+    "codepoint": "0xF384"
+  },
+  "--": {
+    "name": "LongDash",
+    "unicode": "—",
+    "fullName": "\\[LongDash]",
+    "codepoint": "0x2014"
+  },
+  "dg": {
+    "name": "Dagger",
+    "unicode": "†",
+    "fullName": "\\[Dagger]",
+    "codepoint": "0x2020"
+  },
+  "\\dagger": {
+    "name": "Dagger",
+    "unicode": "†",
+    "fullName": "\\[Dagger]",
+    "codepoint": "0x2020"
+  },
+  "\\dag": {
+    "name": "Dagger",
+    "unicode": "†",
+    "fullName": "\\[Dagger]",
+    "codepoint": "0x2020"
+  },
+  "ddg": {
+    "name": "DoubleDagger",
+    "unicode": "‡",
+    "fullName": "\\[DoubleDagger]",
+    "codepoint": "0x2021"
+  },
+  "\\ddagger": {
+    "name": "DoubleDagger",
+    "unicode": "‡",
+    "fullName": "\\[DoubleDagger]",
+    "codepoint": "0x2021"
+  },
+  "\\ddag": {
+    "name": "DoubleDagger",
+    "unicode": "‡",
+    "fullName": "\\[DoubleDagger]",
+    "codepoint": "0x2021"
+  },
+  "bu": {
+    "name": "Bullet",
+    "unicode": "•",
+    "fullName": "\\[Bullet]",
+    "codepoint": "0x2022"
+  },
+  "\\bullet": {
+    "name": "Bullet",
+    "unicode": "•",
+    "fullName": "\\[Bullet]",
+    "codepoint": "0x2022"
+  },
+  "\\i": {
+    "name": "DotlessI",
+    "unicode": "ı",
+    "fullName": "\\[DotlessI]",
+    "codepoint": "0x0131"
+  },
+  "\\j": {
+    "name": "DotlessJ",
+    "unicode": "",
+    "fullName": "\\[DotlessJ]",
+    "codepoint": "0xF700"
+  },
+  "\\imath": {
+    "name": "ScriptDotlessI",
+    "unicode": "",
+    "fullName": "\\[ScriptDotlessI]",
+    "codepoint": "0xF730"
+  },
+  "\\jmath": {
+    "name": "ScriptDotlessJ",
+    "unicode": "",
+    "fullName": "\\[ScriptDotlessJ]",
+    "codepoint": "0xF731"
+  },
+  "\\angle": {
+    "name": "Angle",
+    "unicode": "∠",
+    "fullName": "\\[Angle]",
+    "codepoint": "0x2220"
+  },
+  "...": {
+    "name": "Ellipsis",
+    "unicode": "…",
+    "fullName": "\\[Ellipsis]",
+    "codepoint": "0x2026"
+  },
+  "\\ldots": {
+    "name": "Ellipsis",
+    "unicode": "…",
+    "fullName": "\\[Ellipsis]",
+    "codepoint": "0x2026"
+  },
+  "\\vdots": {
+    "name": "VerticalEllipsis",
+    "unicode": "⋮",
+    "fullName": "\\[VerticalEllipsis]",
+    "codepoint": "0x22EE"
+  },
+  "\\cdots": {
+    "name": "CenterEllipsis",
+    "unicode": "⋯",
+    "fullName": "\\[CenterEllipsis]",
+    "codepoint": "0x22EF"
+  },
+  "\\ddots": {
+    "name": "DescendingEllipsis",
+    "unicode": "⋱",
+    "fullName": "\\[DescendingEllipsis]",
+    "codepoint": "0x22F1"
+  },
+  "'": {
+    "name": "Prime",
+    "unicode": "′",
+    "fullName": "\\[Prime]",
+    "codepoint": "0x2032"
+  },
+  "\\prime": {
+    "name": "Prime",
+    "unicode": "′",
+    "fullName": "\\[Prime]",
+    "codepoint": "0x2032"
+  },
+  "''": {
+    "name": "DoublePrime",
+    "unicode": "″",
+    "fullName": "\\[DoublePrime]",
+    "codepoint": "0x2033"
+  },
+  "`": {
+    "name": "ReversePrime",
+    "unicode": "‵",
+    "fullName": "\\[ReversePrime]",
+    "codepoint": "0x2035"
+  },
+  "``": {
+    "name": "ReverseDoublePrime",
+    "unicode": "‶",
+    "fullName": "\\[ReverseDoublePrime]",
+    "codepoint": "0x2036"
+  },
+  "\\because": {
+    "name": "Because",
+    "unicode": "∵",
+    "fullName": "\\[Because]",
+    "codepoint": "0x2235"
+  },
+  "st": {
+    "name": "SuchThat",
+    "unicode": "∍",
+    "fullName": "\\[SuchThat]",
+    "codepoint": "0x220D"
+  },
+  "|": {
+    "name": "VerticalBar",
+    "unicode": "",
+    "fullName": "\\[VerticalBar]",
+    "codepoint": "0xF3D0"
+  },
+  "tf": {
+    "name": "Therefore",
+    "unicode": "∴",
+    "fullName": "\\[Therefore]",
+    "codepoint": "0x2234"
+  },
+  "\\therefore": {
+    "name": "Therefore",
+    "unicode": "∴",
+    "fullName": "\\[Therefore]",
+    "codepoint": "0x2234"
+  },
+  "~": {
+    "name": "Tilde",
+    "unicode": "∼",
+    "fullName": "\\[Tilde]",
+    "codepoint": "0x223C"
+  },
+  "\\sim": {
+    "name": "Tilde",
+    "unicode": "∼",
+    "fullName": "\\[Tilde]",
+    "codepoint": "0x223C"
+  },
+  "!~": {
+    "name": "NotTilde",
+    "unicode": "≁",
+    "fullName": "\\[NotTilde]",
+    "codepoint": "0x2241"
+  },
+  "\\nsim": {
+    "name": "NotTilde",
+    "unicode": "≁",
+    "fullName": "\\[NotTilde]",
+    "codepoint": "0x2241"
+  },
+  "=~": {
+    "name": "EqualTilde",
+    "unicode": "≂",
+    "fullName": "\\[EqualTilde]",
+    "codepoint": "0x2242"
+  },
+  "~=": {
+    "name": "TildeEqual",
+    "unicode": "≃",
+    "fullName": "\\[TildeEqual]",
+    "codepoint": "0x2243"
+  },
+  "\\simeq": {
+    "name": "TildeEqual",
+    "unicode": "≃",
+    "fullName": "\\[TildeEqual]",
+    "codepoint": "0x2243"
+  },
+  "!~=": {
+    "name": "NotTildeEqual",
+    "unicode": "≄",
+    "fullName": "\\[NotTildeEqual]",
+    "codepoint": "0x2244"
+  },
+  "~==": {
+    "name": "TildeFullEqual",
+    "unicode": "≅",
+    "fullName": "\\[TildeFullEqual]",
+    "codepoint": "0x2245"
+  },
+  "\\cong": {
+    "name": "TildeFullEqual",
+    "unicode": "≅",
+    "fullName": "\\[TildeFullEqual]",
+    "codepoint": "0x2245"
+  },
+  "~~": {
+    "name": "TildeTilde",
+    "unicode": "≈",
+    "fullName": "\\[TildeTilde]",
+    "codepoint": "0x2248"
+  },
+  "\\approx": {
+    "name": "TildeTilde",
+    "unicode": "≈",
+    "fullName": "\\[TildeTilde]",
+    "codepoint": "0x2248"
+  },
+  "!~~": {
+    "name": "NotTildeTilde",
+    "unicode": "≉",
+    "fullName": "\\[NotTildeTilde]",
+    "codepoint": "0x2249"
+  },
+  "!~==": {
+    "name": "NotTildeFullEqual",
+    "unicode": "≇",
+    "fullName": "\\[NotTildeFullEqual]",
+    "codepoint": "0x2247"
+  },
+  "<~": {
+    "name": "LessTilde",
+    "unicode": "≲",
+    "fullName": "\\[LessTilde]",
+    "codepoint": "0x2272"
+  },
+  "\\lesssim": {
+    "name": "LessTilde",
+    "unicode": "≲",
+    "fullName": "\\[LessTilde]",
+    "codepoint": "0x2272"
+  },
+  ">~": {
+    "name": "GreaterTilde",
+    "unicode": "≳",
+    "fullName": "\\[GreaterTilde]",
+    "codepoint": "0x2273"
+  },
+  "\\gtrsim": {
+    "name": "GreaterTilde",
+    "unicode": "≳",
+    "fullName": "\\[GreaterTilde]",
+    "codepoint": "0x2273"
+  },
+  "!<~": {
+    "name": "NotLessTilde",
+    "unicode": "≴",
+    "fullName": "\\[NotLessTilde]",
+    "codepoint": "0x2274"
+  },
+  "!>~": {
+    "name": "NotGreaterTilde",
+    "unicode": "≵",
+    "fullName": "\\[NotGreaterTilde]",
+    "codepoint": "0x2275"
+  },
+  "\\triangleleft": {
+    "name": "LeftTriangle",
+    "unicode": "⊲",
+    "fullName": "\\[LeftTriangle]",
+    "codepoint": "0x22B2"
+  },
+  "\\triangleright": {
+    "name": "RightTriangle",
+    "unicode": "⊳",
+    "fullName": "\\[RightTriangle]",
+    "codepoint": "0x22B3"
+  },
+  "\\trianglelefteq": {
+    "name": "LeftTriangleEqual",
+    "unicode": "⊴",
+    "fullName": "\\[LeftTriangleEqual]",
+    "codepoint": "0x22B4"
+  },
+  "\\trianglerighteq": {
+    "name": "RightTriangleEqual",
+    "unicode": "⊵",
+    "fullName": "\\[RightTriangleEqual]",
+    "codepoint": "0x22B5"
+  },
+  "!<": {
+    "name": "NotLess",
+    "unicode": "≮",
+    "fullName": "\\[NotLess]",
+    "codepoint": "0x226E"
+  },
+  "\\nless": {
+    "name": "NotLess",
+    "unicode": "≮",
+    "fullName": "\\[NotLess]",
+    "codepoint": "0x226E"
+  },
+  "!>": {
+    "name": "NotGreater",
+    "unicode": "≯",
+    "fullName": "\\[NotGreater]",
+    "codepoint": "0x226F"
+  },
+  "\\ngtr": {
+    "name": "NotGreater",
+    "unicode": "≯",
+    "fullName": "\\[NotGreater]",
+    "codepoint": "0x226F"
+  },
+  "\\ll": {
+    "name": "LessLess",
+    "unicode": "≪",
+    "fullName": "\\[LessLess]",
+    "codepoint": "0x226A"
+  },
+  "\\gg": {
+    "name": "GreaterGreater",
+    "unicode": "≫",
+    "fullName": "\\[GreaterGreater]",
+    "codepoint": "0x226B"
+  },
+  "</": {
+    "name": "LessSlantEqual",
+    "unicode": "⩽",
+    "fullName": "\\[LessSlantEqual]",
+    "codepoint": "0x2A7D"
+  },
+  "!</": {
+    "name": "NotLessSlantEqual",
+    "unicode": "",
+    "fullName": "\\[NotLessSlantEqual]",
+    "codepoint": "0xF424"
+  },
+  ">/": {
+    "name": "GreaterSlantEqual",
+    "unicode": "⩾",
+    "fullName": "\\[GreaterSlantEqual]",
+    "codepoint": "0x2A7E"
+  },
+  "!>/": {
+    "name": "NotGreaterSlantEqual",
+    "unicode": "",
+    "fullName": "\\[NotGreaterSlantEqual]",
+    "codepoint": "0xF429"
+  },
+  "v>": {
+    "name": "VectorGreater",
+    "unicode": "",
+    "fullName": "\\[VectorGreater]",
+    "codepoint": "0xF434"
+  },
+  "v<": {
+    "name": "VectorLess",
+    "unicode": "",
+    "fullName": "\\[VectorLess]",
+    "codepoint": "0xF436"
+  },
+  "lim": {
+    "name": "Limit",
+    "unicode": "",
+    "fullName": "\\[Limit]",
+    "codepoint": "0xF438"
+  },
+  "\\lim": {
+    "name": "Limit",
+    "unicode": "",
+    "fullName": "\\[Limit]",
+    "codepoint": "0xF438"
+  },
+  "Mlim": {
+    "name": "MaxLimit",
+    "unicode": "",
+    "fullName": "\\[MaxLimit]",
+    "codepoint": "0xF439"
+  },
+  "\\limsup": {
+    "name": "MaxLimit",
+    "unicode": "",
+    "fullName": "\\[MaxLimit]",
+    "codepoint": "0xF439"
+  },
+  "mlim": {
+    "name": "MinLimit",
+    "unicode": "",
+    "fullName": "\\[MinLimit]",
+    "codepoint": "0xF43A"
+  },
+  "\\liminf": {
+    "name": "MinLimit",
+    "unicode": "",
+    "fullName": "\\[MinLimit]",
+    "codepoint": "0xF43A"
+  },
+  "sub": {
+    "name": "Subset",
+    "unicode": "⊂",
+    "fullName": "\\[Subset]",
+    "codepoint": "0x2282"
+  },
+  "\\subset": {
+    "name": "Subset",
+    "unicode": "⊂",
+    "fullName": "\\[Subset]",
+    "codepoint": "0x2282"
+  },
+  "sup": {
+    "name": "Superset",
+    "unicode": "⊃",
+    "fullName": "\\[Superset]",
+    "codepoint": "0x2283"
+  },
+  "\\supset": {
+    "name": "Superset",
+    "unicode": "⊃",
+    "fullName": "\\[Superset]",
+    "codepoint": "0x2283"
+  },
+  "!sub": {
+    "name": "NotSubset",
+    "unicode": "⊄",
+    "fullName": "\\[NotSubset]",
+    "codepoint": "0x2284"
+  },
+  "!sup": {
+    "name": "NotSuperset",
+    "unicode": "⊅",
+    "fullName": "\\[NotSuperset]",
+    "codepoint": "0x2285"
+  },
+  "sub=": {
+    "name": "SubsetEqual",
+    "unicode": "⊆",
+    "fullName": "\\[SubsetEqual]",
+    "codepoint": "0x2286"
+  },
+  "\\subseteq": {
+    "name": "SubsetEqual",
+    "unicode": "⊆",
+    "fullName": "\\[SubsetEqual]",
+    "codepoint": "0x2286"
+  },
+  "sup=": {
+    "name": "SupersetEqual",
+    "unicode": "⊇",
+    "fullName": "\\[SupersetEqual]",
+    "codepoint": "0x2287"
+  },
+  "\\supseteq": {
+    "name": "SupersetEqual",
+    "unicode": "⊇",
+    "fullName": "\\[SupersetEqual]",
+    "codepoint": "0x2287"
+  },
+  "!sub=": {
+    "name": "NotSubsetEqual",
+    "unicode": "⊈",
+    "fullName": "\\[NotSubsetEqual]",
+    "codepoint": "0x2288"
+  },
+  "\\nsubseteq": {
+    "name": "NotSubsetEqual",
+    "unicode": "⊈",
+    "fullName": "\\[NotSubsetEqual]",
+    "codepoint": "0x2288"
+  },
+  "!sup=": {
+    "name": "NotSupersetEqual",
+    "unicode": "⊉",
+    "fullName": "\\[NotSupersetEqual]",
+    "codepoint": "0x2289"
+  },
+  "\\nsupseteq": {
+    "name": "NotSupersetEqual",
+    "unicode": "⊉",
+    "fullName": "\\[NotSupersetEqual]",
+    "codepoint": "0x2289"
+  },
+  "\\sqsubset": {
+    "name": "SquareSubset",
+    "unicode": "⊏",
+    "fullName": "\\[SquareSubset]",
+    "codepoint": "0x228F"
+  },
+  "\\sqsupset": {
+    "name": "SquareSuperset",
+    "unicode": "⊐",
+    "fullName": "\\[SquareSuperset]",
+    "codepoint": "0x2290"
+  },
+  "\\sqsubseteq": {
+    "name": "SquareSubsetEqual",
+    "unicode": "⊑",
+    "fullName": "\\[SquareSubsetEqual]",
+    "codepoint": "0x2291"
+  },
+  "\\sqsupseteq": {
+    "name": "SquareSupersetEqual",
+    "unicode": "⊒",
+    "fullName": "\\[SquareSupersetEqual]",
+    "codepoint": "0x2292"
+  },
+  "\\prec": {
+    "name": "Precedes",
+    "unicode": "≺",
+    "fullName": "\\[Precedes]",
+    "codepoint": "0x227A"
+  },
+  "\\succ": {
+    "name": "Succeeds",
+    "unicode": "≻",
+    "fullName": "\\[Succeeds]",
+    "codepoint": "0x227B"
+  },
+  "\\preceq": {
+    "name": "PrecedesEqual",
+    "unicode": "⪯",
+    "fullName": "\\[PrecedesEqual]",
+    "codepoint": "0x2AAF"
+  },
+  "\\succeq": {
+    "name": "SucceedsEqual",
+    "unicode": "⪰",
+    "fullName": "\\[SucceedsEqual]",
+    "codepoint": "0x2AB0"
+  },
+  "\\precsim": {
+    "name": "PrecedesTilde",
+    "unicode": "≾",
+    "fullName": "\\[PrecedesTilde]",
+    "codepoint": "0x227E"
+  },
+  "\\succsim": {
+    "name": "SucceedsTilde",
+    "unicode": "≿",
+    "fullName": "\\[SucceedsTilde]",
+    "codepoint": "0x227F"
+  },
+  "\\nprec": {
+    "name": "NotPrecedes",
+    "unicode": "⊀",
+    "fullName": "\\[NotPrecedes]",
+    "codepoint": "0x2280"
+  },
+  "\\nsucc": {
+    "name": "NotSucceeds",
+    "unicode": "⊁",
+    "fullName": "\\[NotSucceeds]",
+    "codepoint": "0x2281"
+  },
+  "uT": {
+    "name": "UpTee",
+    "unicode": "⊥",
+    "fullName": "\\[UpTee]",
+    "codepoint": "0x22A5"
+  },
+  "\\bot": {
+    "name": "UpTee",
+    "unicode": "⊥",
+    "fullName": "\\[UpTee]",
+    "codepoint": "0x22A5"
+  },
+  "perp": {
+    "name": "Perpendicular",
+    "unicode": "⟂",
+    "fullName": "\\[Perpendicular]",
+    "codepoint": "0x27C2"
+  },
+  "\\perp": {
+    "name": "Perpendicular",
+    "unicode": "⟂",
+    "fullName": "\\[Perpendicular]",
+    "codepoint": "0x27C2"
+  },
+  "prop": {
+    "name": "Proportional",
+    "unicode": "∝",
+    "fullName": "\\[Proportional]",
+    "codepoint": "0x221D"
+  },
+  "\\propto": {
+    "name": "Proportional",
+    "unicode": "∝",
+    "fullName": "\\[Proportional]",
+    "codepoint": "0x221D"
+  },
+  "===": {
+    "name": "Congruent",
+    "unicode": "≡",
+    "fullName": "\\[Congruent]",
+    "codepoint": "0x2261"
+  },
+  "\\equiv": {
+    "name": "Congruent",
+    "unicode": "≡",
+    "fullName": "\\[Congruent]",
+    "codepoint": "0x2261"
+  },
+  "!===": {
+    "name": "NotCongruent",
+    "unicode": "≢",
+    "fullName": "\\[NotCongruent]",
+    "codepoint": "0x2262"
+  },
+  "\\asymp": {
+    "name": "CupCap",
+    "unicode": "≍",
+    "fullName": "\\[CupCap]",
+    "codepoint": "0x224D"
+  },
+  "equi": {
+    "name": "Equilibrium",
+    "unicode": "⇌",
+    "fullName": "\\[Equilibrium]",
+    "codepoint": "0x21CC"
+  },
+  "rT": {
+    "name": "RightTee",
+    "unicode": "⊢",
+    "fullName": "\\[RightTee]",
+    "codepoint": "0x22A2"
+  },
+  "\\vdash": {
+    "name": "RightTee",
+    "unicode": "⊢",
+    "fullName": "\\[RightTee]",
+    "codepoint": "0x22A2"
+  },
+  "lT": {
+    "name": "LeftTee",
+    "unicode": "⊣",
+    "fullName": "\\[LeftTee]",
+    "codepoint": "0x22A3"
+  },
+  "\\dashv": {
+    "name": "LeftTee",
+    "unicode": "⊣",
+    "fullName": "\\[LeftTee]",
+    "codepoint": "0x22A3"
+  },
+  "dT": {
+    "name": "DownTee",
+    "unicode": "⊤",
+    "fullName": "\\[DownTee]",
+    "codepoint": "0x22A4"
+  },
+  "\\models": {
+    "name": "DoubleRightTee",
+    "unicode": "⊨",
+    "fullName": "\\[DoubleRightTee]",
+    "codepoint": "0x22A8"
+  },
+  "h=": {
+    "name": "HumpEqual",
+    "unicode": "≏",
+    "fullName": "\\[HumpEqual]",
+    "codepoint": "0x224F"
+  },
+  "\\bumpeq": {
+    "name": "HumpEqual",
+    "unicode": "≏",
+    "fullName": "\\[HumpEqual]",
+    "codepoint": "0x224F"
+  },
+  "!h=": {
+    "name": "NotHumpEqual",
+    "unicode": "",
+    "fullName": "\\[NotHumpEqual]",
+    "codepoint": "0xF401"
+  },
+  ".=": {
+    "name": "DotEqual",
+    "unicode": "≐",
+    "fullName": "\\[DotEqual]",
+    "codepoint": "0x2250"
+  },
+  "\\doteq": {
+    "name": "DotEqual",
+    "unicode": "≐",
+    "fullName": "\\[DotEqual]",
+    "codepoint": "0x2250"
+  },
+  ":": {
+    "name": "Colon",
+    "unicode": "∶",
+    "fullName": "\\[Colon]",
+    "codepoint": "0x2236"
+  },
+  "==": {
+    "name": "Equal",
+    "unicode": "",
+    "fullName": "\\[Equal]",
+    "codepoint": "0xF431"
+  },
+  "l=": {
+    "name": "LongEqual",
+    "unicode": "",
+    "fullName": "\\[LongEqual]",
+    "codepoint": "0xF7D9"
+  },
+  "sqrt": {
+    "name": "Sqrt",
+    "unicode": "√",
+    "fullName": "\\[Sqrt]",
+    "codepoint": "0x221A"
+  },
+  "\\surd": {
+    "name": "Sqrt",
+    "unicode": "√",
+    "fullName": "\\[Sqrt]",
+    "codepoint": "0x221A"
+  },
+  "cbrti": {
+    "name": "CubeRoot",
+    "unicode": "∛",
+    "fullName": "\\[CubeRoot]",
+    "codepoint": "0x221B"
+  },
+  "divides": {
+    "name": "Divides",
+    "unicode": "∣",
+    "fullName": "\\[Divides]",
+    "codepoint": "0x2223"
+  },
+  "||": {
+    "name": "Or",
+    "unicode": "∨",
+    "fullName": "\\[Or]",
+    "codepoint": "0x2228"
+  },
+  "\\Vert": {
+    "name": "DoubleVerticalBar",
+    "unicode": "∥",
+    "fullName": "\\[DoubleVerticalBar]",
+    "codepoint": "0x2225"
+  },
+  "\\parallel": {
+    "name": "DoubleVerticalBar",
+    "unicode": "∥",
+    "fullName": "\\[DoubleVerticalBar]",
+    "codepoint": "0x2225"
+  },
+  "\\|": {
+    "name": "DoubleVerticalBar",
+    "unicode": "∥",
+    "fullName": "\\[DoubleVerticalBar]",
+    "codepoint": "0x2225"
+  },
+  "!||": {
+    "name": "NotDoubleVerticalBar",
+    "unicode": "∦",
+    "fullName": "\\[NotDoubleVerticalBar]",
+    "codepoint": "0x2226"
+  },
+  "not": {
+    "name": "Not",
+    "unicode": "¬",
+    "fullName": "\\[Not]",
+    "codepoint": "0x00AC"
+  },
+  "!": {
+    "name": "Not",
+    "unicode": "¬",
+    "fullName": "\\[Not]",
+    "codepoint": "0x00AC"
+  },
+  "\\neg": {
+    "name": "Not",
+    "unicode": "¬",
+    "fullName": "\\[Not]",
+    "codepoint": "0x00AC"
+  },
+  "\\lnot": {
+    "name": "Not",
+    "unicode": "¬",
+    "fullName": "\\[Not]",
+    "codepoint": "0x00AC"
+  },
+  "\\wr": {
+    "name": "VerticalTilde",
+    "unicode": "≀",
+    "fullName": "\\[VerticalTilde]",
+    "codepoint": "0x2240"
+  },
+  "*": {
+    "name": "Times",
+    "unicode": "×",
+    "fullName": "\\[Times]",
+    "codepoint": "0x00D7"
+  },
+  "+-": {
+    "name": "PlusMinus",
+    "unicode": "±",
+    "fullName": "\\[PlusMinus]",
+    "codepoint": "0x00B1"
+  },
+  "\\pm": {
+    "name": "PlusMinus",
+    "unicode": "±",
+    "fullName": "\\[PlusMinus]",
+    "codepoint": "0x00B1"
+  },
+  "-+": {
+    "name": "MinusPlus",
+    "unicode": "∓",
+    "fullName": "\\[MinusPlus]",
+    "codepoint": "0x2213"
+  },
+  "\\mp": {
+    "name": "MinusPlus",
+    "unicode": "∓",
+    "fullName": "\\[MinusPlus]",
+    "codepoint": "0x2213"
+  },
+  "div": {
+    "name": "Divide",
+    "unicode": "÷",
+    "fullName": "\\[Divide]",
+    "codepoint": "0x00F7"
+  },
+  "\\div": {
+    "name": "Divide",
+    "unicode": "÷",
+    "fullName": "\\[Divide]",
+    "codepoint": "0x00F7"
+  },
+  ".": {
+    "name": "CenterDot",
+    "unicode": "·",
+    "fullName": "\\[CenterDot]",
+    "codepoint": "0x00B7"
+  },
+  "\\cdot": {
+    "name": "CenterDot",
+    "unicode": "·",
+    "fullName": "\\[CenterDot]",
+    "codepoint": "0x00B7"
+  },
+  "\\centerdot": {
+    "name": "CenterDot",
+    "unicode": "·",
+    "fullName": "\\[CenterDot]",
+    "codepoint": "0x00B7"
+  },
+  "sc": {
+    "name": "SmallCircle",
+    "unicode": "∘",
+    "fullName": "\\[SmallCircle]",
+    "codepoint": "0x2218"
+  },
+  "cross": {
+    "name": "Cross",
+    "unicode": "",
+    "fullName": "\\[Cross]",
+    "codepoint": "0xF4A0"
+  },
+  "\\times": {
+    "name": "Cross",
+    "unicode": "",
+    "fullName": "\\[Cross]",
+    "codepoint": "0xF4A0"
+  },
+  "c+": {
+    "name": "CirclePlus",
+    "unicode": "⊕",
+    "fullName": "\\[CirclePlus]",
+    "codepoint": "0x2295"
+  },
+  "\\oplus": {
+    "name": "CirclePlus",
+    "unicode": "⊕",
+    "fullName": "\\[CirclePlus]",
+    "codepoint": "0x2295"
+  },
+  "c-": {
+    "name": "CircleMinus",
+    "unicode": "⊖",
+    "fullName": "\\[CircleMinus]",
+    "codepoint": "0x2296"
+  },
+  "\\ominus": {
+    "name": "CircleMinus",
+    "unicode": "⊖",
+    "fullName": "\\[CircleMinus]",
+    "codepoint": "0x2296"
+  },
+  "c*": {
+    "name": "CircleTimes",
+    "unicode": "⊗",
+    "fullName": "\\[CircleTimes]",
+    "codepoint": "0x2297"
+  },
+  "\\otimes": {
+    "name": "CircleTimes",
+    "unicode": "⊗",
+    "fullName": "\\[CircleTimes]",
+    "codepoint": "0x2297"
+  },
+  "c.": {
+    "name": "CircleDot",
+    "unicode": "⊙",
+    "fullName": "\\[CircleDot]",
+    "codepoint": "0x2299"
+  },
+  "\\odot": {
+    "name": "CircleDot",
+    "unicode": "⊙",
+    "fullName": "\\[CircleDot]",
+    "codepoint": "0x2299"
+  },
+  "t^": {
+    "name": "TensorWedge",
+    "unicode": "",
+    "fullName": "\\[TensorWedge]",
+    "codepoint": "0xF3DB"
+  },
+  "star": {
+    "name": "Star",
+    "unicode": "⋆",
+    "fullName": "\\[Star]",
+    "codepoint": "0x22C6"
+  },
+  "sq": {
+    "name": "Square",
+    "unicode": "",
+    "fullName": "\\[Square]",
+    "codepoint": "0xF520"
+  },
+  "dia": {
+    "name": "Diamond",
+    "unicode": "⋄",
+    "fullName": "\\[Diamond]",
+    "codepoint": "0x22C4"
+  },
+  "ap": {
+    "name": "Application",
+    "unicode": "",
+    "fullName": "\\[Application]",
+    "codepoint": "0xF530"
+  },
+  "sha": {
+    "name": "Shah",
+    "unicode": "",
+    "fullName": "\\[Shah]",
+    "codepoint": "0xF11D"
+  },
+  "\\": {
+    "name": "Backslash",
+    "unicode": "∖",
+    "fullName": "\\[Backslash]",
+    "codepoint": "0x2216"
+  },
+  "\\setminus": {
+    "name": "Backslash",
+    "unicode": "∖",
+    "fullName": "\\[Backslash]",
+    "codepoint": "0x2216"
+  },
+  "\\frown": {
+    "name": "Cap",
+    "unicode": "⌢",
+    "fullName": "\\[Cap]",
+    "codepoint": "0x2322"
+  },
+  "\\smile": {
+    "name": "Cup",
+    "unicode": "⌣",
+    "fullName": "\\[Cup]",
+    "codepoint": "0x2323"
+  },
+  "coprod": {
+    "name": "Coproduct",
+    "unicode": "∐",
+    "fullName": "\\[Coproduct]",
+    "codepoint": "0x2210"
+  },
+  "\\amalg": {
+    "name": "Coproduct",
+    "unicode": "∐",
+    "fullName": "\\[Coproduct]",
+    "codepoint": "0x2210"
+  },
+  "inter": {
+    "name": "Intersection",
+    "unicode": "⋂",
+    "fullName": "\\[Intersection]",
+    "codepoint": "0x22C2"
+  },
+  "\\cap": {
+    "name": "Intersection",
+    "unicode": "⋂",
+    "fullName": "\\[Intersection]",
+    "codepoint": "0x22C2"
+  },
+  "\\bigcap": {
+    "name": "Intersection",
+    "unicode": "⋂",
+    "fullName": "\\[Intersection]",
+    "codepoint": "0x22C2"
+  },
+  "un": {
+    "name": "Union",
+    "unicode": "⋃",
+    "fullName": "\\[Union]",
+    "codepoint": "0x22C3"
+  },
+  "\\cup": {
+    "name": "Union",
+    "unicode": "⋃",
+    "fullName": "\\[Union]",
+    "codepoint": "0x22C3"
+  },
+  "\\bigcup": {
+    "name": "Union",
+    "unicode": "⋃",
+    "fullName": "\\[Union]",
+    "codepoint": "0x22C3"
+  },
+  "\\biguplus": {
+    "name": "UnionPlus",
+    "unicode": "⊎",
+    "fullName": "\\[UnionPlus]",
+    "codepoint": "0x228E"
+  },
+  "\\uplus": {
+    "name": "UnionPlus",
+    "unicode": "⊎",
+    "fullName": "\\[UnionPlus]",
+    "codepoint": "0x228E"
+  },
+  "\\sqcap": {
+    "name": "SquareIntersection",
+    "unicode": "⊓",
+    "fullName": "\\[SquareIntersection]",
+    "codepoint": "0x2293"
+  },
+  "\\sqcup": {
+    "name": "SquareUnion",
+    "unicode": "⊔",
+    "fullName": "\\[SquareUnion]",
+    "codepoint": "0x2294"
+  },
+  "^": {
+    "name": "Wedge",
+    "unicode": "⋀",
+    "fullName": "\\[Wedge]",
+    "codepoint": "0x22C0"
+  },
+  "\\wedge": {
+    "name": "Wedge",
+    "unicode": "⋀",
+    "fullName": "\\[Wedge]",
+    "codepoint": "0x22C0"
+  },
+  "and": {
+    "name": "And",
+    "unicode": "∧",
+    "fullName": "\\[And]",
+    "codepoint": "0x2227"
+  },
+  "\\land": {
+    "name": "And",
+    "unicode": "∧",
+    "fullName": "\\[And]",
+    "codepoint": "0x2227"
+  },
+  "nand": {
+    "name": "Nand",
+    "unicode": "⊼",
+    "fullName": "\\[Nand]",
+    "codepoint": "0x22BC"
+  },
+  "!&&": {
+    "name": "Nand",
+    "unicode": "⊼",
+    "fullName": "\\[Nand]",
+    "codepoint": "0x22BC"
+  },
+  "\\vee": {
+    "name": "Vee",
+    "unicode": "⋁",
+    "fullName": "\\[Vee]",
+    "codepoint": "0x22C1"
+  },
+  "or": {
+    "name": "Or",
+    "unicode": "∨",
+    "fullName": "\\[Or]",
+    "codepoint": "0x2228"
+  },
+  "\\lor": {
+    "name": "Or",
+    "unicode": "∨",
+    "fullName": "\\[Or]",
+    "codepoint": "0x2228"
+  },
+  "nor": {
+    "name": "Nor",
+    "unicode": "⊽",
+    "fullName": "\\[Nor]",
+    "codepoint": "0x22BD"
+  },
+  "xor": {
+    "name": "Xor",
+    "unicode": "⊻",
+    "fullName": "\\[Xor]",
+    "codepoint": "0x22BB"
+  },
+  "xnor": {
+    "name": "Xnor",
+    "unicode": "",
+    "fullName": "\\[Xnor]",
+    "codepoint": "0xF4A2"
+  },
+  "shift": {
+    "name": "DiscreteShift",
+    "unicode": "",
+    "fullName": "\\[DiscreteShift]",
+    "codepoint": "0xF4A3"
+  },
+  "dratio": {
+    "name": "DiscreteRatio",
+    "unicode": "",
+    "fullName": "\\[DiscreteRatio]",
+    "codepoint": "0xF4A5"
+  },
+  "dd": {
+    "name": "DifferentialD",
+    "unicode": "",
+    "fullName": "\\[DifferentialD]",
+    "codepoint": "0xF74C"
+  },
+  "DD": {
+    "name": "CapitalDifferentialD",
+    "unicode": "",
+    "fullName": "\\[CapitalDifferentialD]",
+    "codepoint": "0xF74B"
+  },
+  "@>": {
+    "name": "InlinePart",
+    "unicode": "",
+    "fullName": "\\[InlinePart]",
+    "codepoint": "0xF51E"
+  },
+  "->": {
+    "name": "RightArrow",
+    "unicode": "→",
+    "fullName": "\\[RightArrow]",
+    "codepoint": "0x2192"
+  },
+  "fn": {
+    "name": "Function",
+    "unicode": "",
+    "fullName": "\\[Function]",
+    "codepoint": "0xF4A1"
+  },
+  "|->": {
+    "name": "Function",
+    "unicode": "",
+    "fullName": "\\[Function]",
+    "codepoint": "0xF4A1"
+  },
+  "vec": {
+    "name": "RightVector",
+    "unicode": "⇀",
+    "fullName": "\\[RightVector]",
+    "codepoint": "0x21C0"
+  },
+  "\\rightharpoonup": {
+    "name": "RightVector",
+    "unicode": "⇀",
+    "fullName": "\\[RightVector]",
+    "codepoint": "0x21C0"
+  },
+  "\\leftharpoonup": {
+    "name": "LeftVector",
+    "unicode": "↼",
+    "fullName": "\\[LeftVector]",
+    "codepoint": "0x21BC"
+  },
+  "[[": {
+    "name": "LeftDoubleBracket",
+    "unicode": "〚",
+    "fullName": "\\[LeftDoubleBracket]",
+    "codepoint": "0x301A"
+  },
+  "]]": {
+    "name": "RightDoubleBracket",
+    "unicode": "〛",
+    "fullName": "\\[RightDoubleBracket]",
+    "codepoint": "0x301B"
+  },
+  "<": {
+    "name": "LeftAngleBracket",
+    "unicode": "〈",
+    "fullName": "\\[LeftAngleBracket]",
+    "codepoint": "0x2329"
+  },
+  "\\langle": {
+    "name": "LeftAngleBracket",
+    "unicode": "〈",
+    "fullName": "\\[LeftAngleBracket]",
+    "codepoint": "0x2329"
+  },
+  ">": {
+    "name": "RightAngleBracket",
+    "unicode": "〉",
+    "fullName": "\\[RightAngleBracket]",
+    "codepoint": "0x232A"
+  },
+  "\\rangle": {
+    "name": "RightAngleBracket",
+    "unicode": "〉",
+    "fullName": "\\[RightAngleBracket]",
+    "codepoint": "0x232A"
+  },
+  "<|": {
+    "name": "LeftAssociation",
+    "unicode": "",
+    "fullName": "\\[LeftAssociation]",
+    "codepoint": "0xF113"
+  },
+  "|>": {
+    "name": "RightAssociation",
+    "unicode": "",
+    "fullName": "\\[RightAssociation]",
+    "codepoint": "0xF114"
+  },
+  "lf": {
+    "name": "LeftFloor",
+    "unicode": "⌊",
+    "fullName": "\\[LeftFloor]",
+    "codepoint": "0x230A"
+  },
+  "\\lfloor": {
+    "name": "LeftFloor",
+    "unicode": "⌊",
+    "fullName": "\\[LeftFloor]",
+    "codepoint": "0x230A"
+  },
+  "rf": {
+    "name": "RightFloor",
+    "unicode": "⌋",
+    "fullName": "\\[RightFloor]",
+    "codepoint": "0x230B"
+  },
+  "\\rfloor": {
+    "name": "RightFloor",
+    "unicode": "⌋",
+    "fullName": "\\[RightFloor]",
+    "codepoint": "0x230B"
+  },
+  "lc": {
+    "name": "LeftCeiling",
+    "unicode": "⌈",
+    "fullName": "\\[LeftCeiling]",
+    "codepoint": "0x2308"
+  },
+  "\\lceil": {
+    "name": "LeftCeiling",
+    "unicode": "⌈",
+    "fullName": "\\[LeftCeiling]",
+    "codepoint": "0x2308"
+  },
+  "rc": {
+    "name": "RightCeiling",
+    "unicode": "⌉",
+    "fullName": "\\[RightCeiling]",
+    "codepoint": "0x2309"
+  },
+  "\\rceil": {
+    "name": "RightCeiling",
+    "unicode": "⌉",
+    "fullName": "\\[RightCeiling]",
+    "codepoint": "0x2309"
+  },
+  "l|": {
+    "name": "LeftBracketingBar",
+    "unicode": "",
+    "fullName": "\\[LeftBracketingBar]",
+    "codepoint": "0xF603"
+  },
+  "r|": {
+    "name": "RightBracketingBar",
+    "unicode": "",
+    "fullName": "\\[RightBracketingBar]",
+    "codepoint": "0xF604"
+  },
+  "l||": {
+    "name": "LeftDoubleBracketingBar",
+    "unicode": "",
+    "fullName": "\\[LeftDoubleBracketingBar]",
+    "codepoint": "0xF605"
+  },
+  "r||": {
+    "name": "RightDoubleBracketingBar",
+    "unicode": "",
+    "fullName": "\\[RightDoubleBracketingBar]",
+    "codepoint": "0xF606"
+  },
+  "esci": {
+    "name": "EmptySmallCircle",
+    "unicode": "◦",
+    "fullName": "\\[EmptySmallCircle]",
+    "codepoint": "0x25E6"
+  },
+  "\\circ": {
+    "name": "EmptySmallCircle",
+    "unicode": "◦",
+    "fullName": "\\[EmptySmallCircle]",
+    "codepoint": "0x25E6"
+  },
+  "fsci": {
+    "name": "FilledSmallCircle",
+    "unicode": "",
+    "fullName": "\\[FilledSmallCircle]",
+    "codepoint": "0xF750"
+  },
+  "eci": {
+    "name": "EmptyCircle",
+    "unicode": "○",
+    "fullName": "\\[EmptyCircle]",
+    "codepoint": "0x25CB"
+  },
+  "\\bigcirc": {
+    "name": "EmptyCircle",
+    "unicode": "○",
+    "fullName": "\\[EmptyCircle]",
+    "codepoint": "0x25CB"
+  },
+  "fci": {
+    "name": "FilledCircle",
+    "unicode": "●",
+    "fullName": "\\[FilledCircle]",
+    "codepoint": "0x25CF"
+  },
+  "\\blacklozenge": {
+    "name": "FilledDiamond",
+    "unicode": "◆",
+    "fullName": "\\[FilledDiamond]",
+    "codepoint": "0x25C6"
+  },
+  "\\qed": {
+    "name": "FilledRectangle",
+    "unicode": "▮",
+    "fullName": "\\[FilledRectangle]",
+    "codepoint": "0x25AE"
+  },
+  "esq": {
+    "name": "EmptySquare",
+    "unicode": "□",
+    "fullName": "\\[EmptySquare]",
+    "codepoint": "0x25A1"
+  },
+  "essq": {
+    "name": "EmptySmallSquare",
+    "unicode": "◻",
+    "fullName": "\\[EmptySmallSquare]",
+    "codepoint": "0x25FB"
+  },
+  "evssq": {
+    "name": "EmptyVerySmallSquare",
+    "unicode": "▫",
+    "fullName": "\\[EmptyVerySmallSquare]",
+    "codepoint": "0x25AB"
+  },
+  "fsq": {
+    "name": "FilledSquare",
+    "unicode": "■",
+    "fullName": "\\[FilledSquare]",
+    "codepoint": "0x25A0"
+  },
+  "fssq": {
+    "name": "FilledSmallSquare",
+    "unicode": "◼",
+    "fullName": "\\[FilledSmallSquare]",
+    "codepoint": "0x25FC"
+  },
+  "fvssq": {
+    "name": "FilledVerySmallSquare",
+    "unicode": "▪",
+    "fullName": "\\[FilledVerySmallSquare]",
+    "codepoint": "0x25AA"
+  },
+  "\\triangle": {
+    "name": "EmptyUpTriangle",
+    "unicode": "△",
+    "fullName": "\\[EmptyUpTriangle]",
+    "codepoint": "0x25B3"
+  },
+  "*5": {
+    "name": "FivePointedStar",
+    "unicode": "★",
+    "fullName": "\\[FivePointedStar]",
+    "codepoint": "0x2605"
+  },
+  "\\star": {
+    "name": "FivePointedStar",
+    "unicode": "★",
+    "fullName": "\\[FivePointedStar]",
+    "codepoint": "0x2605"
+  },
+  "*6": {
+    "name": "SixPointedStar",
+    "unicode": "✶",
+    "fullName": "\\[SixPointedStar]",
+    "codepoint": "0x2736"
+  },
+  "gsq": {
+    "name": "GraySquare",
+    "unicode": "",
+    "fullName": "\\[GraySquare]",
+    "codepoint": "0xF752"
+  },
+  "gci": {
+    "name": "GrayCircle",
+    "unicode": "",
+    "fullName": "\\[GrayCircle]",
+    "codepoint": "0xF753"
+  },
+  "ls": {
+    "name": "LetterSpace",
+    "unicode": "",
+    "fullName": "\\[LetterSpace]",
+    "codepoint": "0xF754"
+  },
+  "_": {
+    "name": "LetterSpace",
+    "unicode": "",
+    "fullName": "\\[LetterSpace]",
+    "codepoint": "0xF754"
+  },
+  "math": {
+    "name": "MathematicaIcon",
+    "unicode": "",
+    "fullName": "\\[MathematicaIcon]",
+    "codepoint": "0xF757"
+  },
+  "wking": {
+    "name": "WhiteKing",
+    "unicode": "♔",
+    "fullName": "\\[WhiteKing]",
+    "codepoint": "0x2654"
+  },
+  "wqueen": {
+    "name": "WhiteQueen",
+    "unicode": "♕",
+    "fullName": "\\[WhiteQueen]",
+    "codepoint": "0x2655"
+  },
+  "wrook": {
+    "name": "WhiteRook",
+    "unicode": "♖",
+    "fullName": "\\[WhiteRook]",
+    "codepoint": "0x2656"
+  },
+  "wbishop": {
+    "name": "WhiteBishop",
+    "unicode": "♗",
+    "fullName": "\\[WhiteBishop]",
+    "codepoint": "0x2657"
+  },
+  "wknight": {
+    "name": "WhiteKnight",
+    "unicode": "♘",
+    "fullName": "\\[WhiteKnight]",
+    "codepoint": "0x2658"
+  },
+  "wpawn": {
+    "name": "WhitePawn",
+    "unicode": "♙",
+    "fullName": "\\[WhitePawn]",
+    "codepoint": "0x2659"
+  },
+  "bking": {
+    "name": "BlackKing",
+    "unicode": "♚",
+    "fullName": "\\[BlackKing]",
+    "codepoint": "0x265A"
+  },
+  "bqueen": {
+    "name": "BlackQueen",
+    "unicode": "♛",
+    "fullName": "\\[BlackQueen]",
+    "codepoint": "0x265B"
+  },
+  "brook": {
+    "name": "BlackRook",
+    "unicode": "♜",
+    "fullName": "\\[BlackRook]",
+    "codepoint": "0x265C"
+  },
+  "bbishop": {
+    "name": "BlackBishop",
+    "unicode": "♝",
+    "fullName": "\\[BlackBishop]",
+    "codepoint": "0x265D"
+  },
+  "bknight": {
+    "name": "BlackKnight",
+    "unicode": "♞",
+    "fullName": "\\[BlackKnight]",
+    "codepoint": "0x265E"
+  },
+  "bpawn": {
+    "name": "BlackPawn",
+    "unicode": "♟",
+    "fullName": "\\[BlackPawn]",
+    "codepoint": "0x265F"
+  },
+  "\\spadesuit": {
+    "name": "SpadeSuit",
+    "unicode": "♠",
+    "fullName": "\\[SpadeSuit]",
+    "codepoint": "0x2660"
+  },
+  "\\heartsuit": {
+    "name": "HeartSuit",
+    "unicode": "♡",
+    "fullName": "\\[HeartSuit]",
+    "codepoint": "0x2661"
+  },
+  "\\diamondsuit": {
+    "name": "DiamondSuit",
+    "unicode": "♢",
+    "fullName": "\\[DiamondSuit]",
+    "codepoint": "0x2662"
+  },
+  "\\clubsuit": {
+    "name": "ClubSuit",
+    "unicode": "♣",
+    "fullName": "\\[ClubSuit]",
+    "codepoint": "0x2663"
+  },
+  "\\flat": {
+    "name": "Flat",
+    "unicode": "♭",
+    "fullName": "\\[Flat]",
+    "codepoint": "0x266D"
+  },
+  "\\natural": {
+    "name": "Natural",
+    "unicode": "♮",
+    "fullName": "\\[Natural]",
+    "codepoint": "0x266E"
+  },
+  "\\sharp": {
+    "name": "Sharp",
+    "unicode": "♯",
+    "fullName": "\\[Sharp]",
+    "codepoint": "0x266F"
+  },
+  "wolf": {
+    "name": "Wolf",
+    "unicode": "",
+    "fullName": "\\[Wolf]",
+    "codepoint": "0xF720"
+  },
+  "wf": {
+    "name": "Wolf",
+    "unicode": "",
+    "fullName": "\\[Wolf]",
+    "codepoint": "0xF720"
+  },
+  "wolfram": {
+    "name": "Wolf",
+    "unicode": "",
+    "fullName": "\\[Wolf]",
+    "codepoint": "0xF720"
+  },
+  "howl": {
+    "name": "Wolf",
+    "unicode": "",
+    "fullName": "\\[Wolf]",
+    "codepoint": "0xF720"
+  },
+  "tungsten": {
+    "name": "Wolf",
+    "unicode": "",
+    "fullName": "\\[Wolf]",
+    "codepoint": "0xF720"
+  },
+  "lupine": {
+    "name": "Wolf",
+    "unicode": "",
+    "fullName": "\\[Wolf]",
+    "codepoint": "0xF720"
+  },
+  "werewolf": {
+    "name": "Wolf",
+    "unicode": "",
+    "fullName": "\\[Wolf]",
+    "codepoint": "0xF720"
+  },
+  ":-": {
+    "name": "HappySmiley",
+    "unicode": "☺",
+    "fullName": "\\[HappySmiley]",
+    "codepoint": "0x263A"
+  },
+  ":-(": {
+    "name": "SadSmiley",
+    "unicode": "☹",
+    "fullName": "\\[SadSmiley]",
+    "codepoint": "0x2639"
+  },
+  ":-@": {
+    "name": "FreakedSmiley",
+    "unicode": "",
+    "fullName": "\\[FreakedSmiley]",
+    "codepoint": "0xF721"
+  },
+  ":-|": {
+    "name": "NeutralSmiley",
+    "unicode": "",
+    "fullName": "\\[NeutralSmiley]",
+    "codepoint": "0xF722"
+  },
+  "+": {
+    "name": "ImplicitPlus",
+    "unicode": "",
+    "fullName": "\\[ImplicitPlus]",
+    "codepoint": "0xF39E"
+  },
+  "is": {
+    "name": "InvisibleSpace",
+    "unicode": "",
+    "fullName": "\\[InvisibleSpace]",
+    "codepoint": "0xF360"
+  },
+  "\\,": {
+    "name": "ThinSpace",
+    "unicode": " ",
+    "fullName": "\\[ThinSpace]",
+    "codepoint": "0x2009"
+  },
+  "\\thinspace": {
+    "name": "ThinSpace",
+    "unicode": " ",
+    "fullName": "\\[ThinSpace]",
+    "codepoint": "0x2009"
+  },
+  "\\>": {
+    "name": "MediumSpace",
+    "unicode": " ",
+    "fullName": "\\[MediumSpace]",
+    "codepoint": "0x205F"
+  },
+  "\\:": {
+    "name": "MediumSpace",
+    "unicode": " ",
+    "fullName": "\\[MediumSpace]",
+    "codepoint": "0x205F"
+  },
+  "\\medspace": {
+    "name": "MediumSpace",
+    "unicode": " ",
+    "fullName": "\\[MediumSpace]",
+    "codepoint": "0x205F"
+  },
+  "\\;": {
+    "name": "ThickSpace",
+    "unicode": " ",
+    "fullName": "\\[ThickSpace]",
+    "codepoint": "0x2005"
+  },
+  "\\thickspace": {
+    "name": "ThickSpace",
+    "unicode": " ",
+    "fullName": "\\[ThickSpace]",
+    "codepoint": "0x2005"
+  },
+  "\\!": {
+    "name": "NegativeThinSpace",
+    "unicode": "",
+    "fullName": "\\[NegativeThinSpace]",
+    "codepoint": "0xF382"
+  },
+  "\\negthinspace": {
+    "name": "NegativeThinSpace",
+    "unicode": "",
+    "fullName": "\\[NegativeThinSpace]",
+    "codepoint": "0xF382"
+  },
+  "\\negmedspace": {
+    "name": "NegativeMediumSpace",
+    "unicode": "",
+    "fullName": "\\[NegativeMediumSpace]",
+    "codepoint": "0xF383"
+  },
+  "\\negthickspace": {
+    "name": "NegativeThickSpace",
+    "unicode": "",
+    "fullName": "\\[NegativeThickSpace]",
+    "codepoint": "0xF384"
+  },
+  "['": {
+    "name": "OpenCurlyQuote",
+    "unicode": "‘",
+    "fullName": "\\[OpenCurlyQuote]",
+    "codepoint": "0x2018"
+  },
+  "]'": {
+    "name": "CloseCurlyQuote",
+    "unicode": "’",
+    "fullName": "\\[CloseCurlyQuote]",
+    "codepoint": "0x2019"
+  },
+  "[\"": {
+    "name": "OpenCurlyDoubleQuote",
+    "unicode": "“",
+    "fullName": "\\[OpenCurlyDoubleQuote]",
+    "codepoint": "0x201C"
+  },
+  "]\"": {
+    "name": "CloseCurlyDoubleQuote",
+    "unicode": "”",
+    "fullName": "\\[CloseCurlyDoubleQuote]",
+    "codepoint": "0x201D"
+  },
+  "o(": {
+    "name": "OverParenthesis",
+    "unicode": "︵",
+    "fullName": "\\[OverParenthesis]",
+    "codepoint": "0xFE35"
+  },
+  "u(": {
+    "name": "UnderParenthesis",
+    "unicode": "︶",
+    "fullName": "\\[UnderParenthesis]",
+    "codepoint": "0xFE36"
+  },
+  "o{": {
+    "name": "OverBrace",
+    "unicode": "︷",
+    "fullName": "\\[OverBrace]",
+    "codepoint": "0xFE37"
+  },
+  "\\overbrace": {
+    "name": "OverBrace",
+    "unicode": "︷",
+    "fullName": "\\[OverBrace]",
+    "codepoint": "0xFE37"
+  },
+  "u{": {
+    "name": "UnderBrace",
+    "unicode": "︸",
+    "fullName": "\\[UnderBrace]",
+    "codepoint": "0xFE38"
+  },
+  "\\underbrace": {
+    "name": "UnderBrace",
+    "unicode": "︸",
+    "fullName": "\\[UnderBrace]",
+    "codepoint": "0xFE38"
+  },
+  "o[": {
+    "name": "OverBracket",
+    "unicode": "⎴",
+    "fullName": "\\[OverBracket]",
+    "codepoint": "0x23B4"
+  },
+  "u[": {
+    "name": "UnderBracket",
+    "unicode": "⎵",
+    "fullName": "\\[UnderBracket]",
+    "codepoint": "0x23B5"
+  },
+  "nl": {
+    "name": "IndentingNewLine",
+    "unicode": "",
+    "fullName": "\\[IndentingNewLine]",
+    "codepoint": "0xF3A3"
+  },
+  "nb": {
+    "name": "NoBreak",
+    "unicode": "⁠",
+    "fullName": "\\[NoBreak]",
+    "codepoint": "0x2060"
+  },
+  "nbs": {
+    "name": "NonBreakingSpace",
+    "unicode": " ",
+    "fullName": "\\[NonBreakingSpace]",
+    "codepoint": "0x00A0"
+  },
+  "cont": {
+    "name": "Continuation",
+    "unicode": "",
+    "fullName": "\\[Continuation]",
+    "codepoint": "0xF3B1"
+  },
+  "space": {
+    "name": "SpaceIndicator",
+    "unicode": "␣",
+    "fullName": "\\[SpaceIndicator]",
+    "codepoint": "0x2423"
+  },
+  "i-": {
+    "name": "InvisiblePrefixScriptBase",
+    "unicode": "",
+    "fullName": "\\[InvisiblePrefixScriptBase]",
+    "codepoint": "0xF3B3"
+  },
+  "-i": {
+    "name": "InvisiblePostfixScriptBase",
+    "unicode": "",
+    "fullName": "\\[InvisiblePostfixScriptBase]",
+    "codepoint": "0xF3B4"
+  },
+  "sfl": {
+    "name": "SpanFromLeft",
+    "unicode": "",
+    "fullName": "\\[SpanFromLeft]",
+    "codepoint": "0xF3BA"
+  },
+  "sfa": {
+    "name": "SpanFromAbove",
+    "unicode": "",
+    "fullName": "\\[SpanFromAbove]",
+    "codepoint": "0xF3BB"
+  },
+  "sft": {
+    "name": "SpanFromAbove",
+    "unicode": "",
+    "fullName": "\\[SpanFromAbove]",
+    "codepoint": "0xF3BB"
+  },
+  "sfb": {
+    "name": "SpanFromBoth",
+    "unicode": "",
+    "fullName": "\\[SpanFromBoth]",
+    "codepoint": "0xF3BC"
+  },
+  "cmd": {
+    "name": "CommandKey",
+    "unicode": "",
+    "fullName": "\\[CommandKey]",
+    "codepoint": "0xF76A"
+  },
+  "[": {
+    "name": "LeftModified",
+    "unicode": "",
+    "fullName": "\\[LeftModified]",
+    "codepoint": "0xF76B"
+  },
+  "]": {
+    "name": "RightModified",
+    "unicode": "",
+    "fullName": "\\[RightModified]",
+    "codepoint": "0xF76C"
+  },
+  "@": {
+    "name": "InvisibleApplication",
+    "unicode": "",
+    "fullName": "\\[InvisibleApplication]",
+    "codepoint": "0xF76D"
+  },
+  "cl": {
+    "name": "CloverLeaf",
+    "unicode": "⌘",
+    "fullName": "\\[CloverLeaf]",
+    "codepoint": "0x2318"
+  },
+  "ctrl": {
+    "name": "ControlKey",
+    "unicode": "",
+    "fullName": "\\[ControlKey]",
+    "codepoint": "0xF763"
+  },
+  "esc": {
+    "name": "AliasIndicator",
+    "unicode": "",
+    "fullName": "\\[AliasIndicator]",
+    "codepoint": "0xF768"
+  },
+  "tab": {
+    "name": "TabKey",
+    "unicode": "",
+    "fullName": "\\[TabKey]",
+    "codepoint": "0xF7BE"
+  },
+  "spc": {
+    "name": "SpaceKey",
+    "unicode": "",
+    "fullName": "\\[SpaceKey]",
+    "codepoint": "0xF7BF"
+  },
+  "alt": {
+    "name": "AltKey",
+    "unicode": "",
+    "fullName": "\\[AltKey]",
+    "codepoint": "0xF7D1"
+  },
+  "opt": {
+    "name": "OptionKey",
+    "unicode": "",
+    "fullName": "\\[OptionKey]",
+    "codepoint": "0xF7D2"
+  },
+  "kb": {
+    "name": "KeyBar",
+    "unicode": "",
+    "fullName": "\\[KeyBar]",
+    "codepoint": "0xF7D3"
+  },
+  "ent": {
+    "name": "EnterKey",
+    "unicode": "",
+    "fullName": "\\[EnterKey]",
+    "codepoint": "0xF7D4"
+  },
+  "sh": {
+    "name": "ShiftKey",
+    "unicode": "",
+    "fullName": "\\[ShiftKey]",
+    "codepoint": "0xF7D5"
+  },
+  "m1": {
+    "name": "Mod1Key",
+    "unicode": "",
+    "fullName": "\\[Mod1Key]",
+    "codepoint": "0xF7D6"
+  },
+  "m2": {
+    "name": "Mod2Key",
+    "unicode": "",
+    "fullName": "\\[Mod2Key]",
+    "codepoint": "0xF7D7"
+  },
+  "ret": {
+    "name": "ReturnKey",
+    "unicode": "",
+    "fullName": "\\[ReturnKey]",
+    "codepoint": "0xF766"
+  },
+  "lsep": {
+    "name": "LineSeparator",
+    "unicode": " ",
+    "fullName": "\\[LineSeparator]",
+    "codepoint": "0x2028"
+  },
+  "psep": {
+    "name": "ParagraphSeparator",
+    "unicode": " ",
+    "fullName": "\\[ParagraphSeparator]",
+    "codepoint": "0x2029"
+  },
+  "dlsep": {
+    "name": "DiscretionaryLineSeparator",
+    "unicode": "",
+    "fullName": "\\[DiscretionaryLineSeparator]",
+    "codepoint": "0xF76E"
+  },
+  "dpsep": {
+    "name": "DiscretionaryParagraphSeparator",
+    "unicode": "",
+    "fullName": "\\[DiscretionaryParagraphSeparator]",
+    "codepoint": "0xF76F"
+  },
+  "pba": {
+    "name": "PageBreakAbove",
+    "unicode": "",
+    "fullName": "\\[PageBreakAbove]",
+    "codepoint": "0xF3BD"
+  },
+  "pbb": {
+    "name": "PageBreakBelow",
+    "unicode": "",
+    "fullName": "\\[PageBreakBelow]",
+    "codepoint": "0xF3BE"
+  },
+  "dpba": {
+    "name": "DiscretionaryPageBreakAbove",
+    "unicode": "",
+    "fullName": "\\[DiscretionaryPageBreakAbove]",
+    "codepoint": "0xF3BF"
+  },
+  "dpbb": {
+    "name": "DiscretionaryPageBreakBelow",
+    "unicode": "",
+    "fullName": "\\[DiscretionaryPageBreakBelow]",
+    "codepoint": "0xF3C6"
+  },
+  "hline": {
+    "name": "HorizontalLine",
+    "unicode": "─",
+    "fullName": "\\[HorizontalLine]",
+    "codepoint": "0x2500"
+  },
+  "vline": {
+    "name": "VerticalLine",
+    "unicode": "│",
+    "fullName": "\\[VerticalLine]",
+    "codepoint": "0x2502"
+  },
+  ",": {
+    "name": "InvisibleComma",
+    "unicode": "",
+    "fullName": "\\[InvisibleComma]",
+    "codepoint": "0xF765"
+  },
+  "spl": {
+    "name": "SelectionPlaceholder",
+    "unicode": "",
+    "fullName": "\\[SelectionPlaceholder]",
+    "codepoint": "0xF527"
+  },
+  "pl": {
+    "name": "Placeholder",
+    "unicode": "",
+    "fullName": "\\[Placeholder]",
+    "codepoint": "0xF528"
+  },
+  "am": {
+    "name": "AlignmentMarker",
+    "unicode": "",
+    "fullName": "\\[AlignmentMarker]",
+    "codepoint": "0xF760"
+  },
+  "\\left.": {
+    "name": "AutoLeftMatch",
+    "unicode": "",
+    "fullName": "\\[AutoLeftMatch]",
+    "codepoint": "0xF3A8"
+  },
+  "\\right.": {
+    "name": "AutoRightMatch",
+    "unicode": "",
+    "fullName": "\\[AutoRightMatch]",
+    "codepoint": "0xF3A9"
+  },
+  "ds0": {
+    "name": "DoubleStruckZero",
+    "unicode": "",
+    "fullName": "\\[DoubleStruckZero]",
+    "codepoint": "0xF7DB"
+  },
+  "ds1": {
+    "name": "DoubleStruckOne",
+    "unicode": "",
+    "fullName": "\\[DoubleStruckOne]",
+    "codepoint": "0xF7DC"
+  },
+  "ds2": {
+    "name": "DoubleStruckTwo",
+    "unicode": "",
+    "fullName": "\\[DoubleStruckTwo]",
+    "codepoint": "0xF7DD"
+  },
+  "ds3": {
+    "name": "DoubleStruckThree",
+    "unicode": "",
+    "fullName": "\\[DoubleStruckThree]",
+    "codepoint": "0xF7DE"
+  },
+  "ds4": {
+    "name": "DoubleStruckFour",
+    "unicode": "",
+    "fullName": "\\[DoubleStruckFour]",
+    "codepoint": "0xF7DF"
+  },
+  "ds5": {
+    "name": "DoubleStruckFive",
+    "unicode": "",
+    "fullName": "\\[DoubleStruckFive]",
+    "codepoint": "0xF7E0"
+  },
+  "ds6": {
+    "name": "DoubleStruckSix",
+    "unicode": "",
+    "fullName": "\\[DoubleStruckSix]",
+    "codepoint": "0xF7E1"
+  },
+  "ds7": {
+    "name": "DoubleStruckSeven",
+    "unicode": "",
+    "fullName": "\\[DoubleStruckSeven]",
+    "codepoint": "0xF7E2"
+  },
+  "ds8": {
+    "name": "DoubleStruckEight",
+    "unicode": "",
+    "fullName": "\\[DoubleStruckEight]",
+    "codepoint": "0xF7E3"
+  },
+  "ds9": {
+    "name": "DoubleStruckNine",
+    "unicode": "",
+    "fullName": "\\[DoubleStruckNine]",
+    "codepoint": "0xF7E4"
+  },
+  "go0": {
+    "name": "GothicZero",
+    "unicode": "",
+    "fullName": "\\[GothicZero]",
+    "codepoint": "0xF7E5"
+  },
+  "go1": {
+    "name": "GothicOne",
+    "unicode": "",
+    "fullName": "\\[GothicOne]",
+    "codepoint": "0xF7E6"
+  },
+  "go2": {
+    "name": "GothicTwo",
+    "unicode": "",
+    "fullName": "\\[GothicTwo]",
+    "codepoint": "0xF7E7"
+  },
+  "go3": {
+    "name": "GothicThree",
+    "unicode": "",
+    "fullName": "\\[GothicThree]",
+    "codepoint": "0xF7E8"
+  },
+  "go4": {
+    "name": "GothicFour",
+    "unicode": "",
+    "fullName": "\\[GothicFour]",
+    "codepoint": "0xF7E9"
+  },
+  "go5": {
+    "name": "GothicFive",
+    "unicode": "",
+    "fullName": "\\[GothicFive]",
+    "codepoint": "0xF7EA"
+  },
+  "go6": {
+    "name": "GothicSix",
+    "unicode": "",
+    "fullName": "\\[GothicSix]",
+    "codepoint": "0xF7EB"
+  },
+  "go7": {
+    "name": "GothicSeven",
+    "unicode": "",
+    "fullName": "\\[GothicSeven]",
+    "codepoint": "0xF7EC"
+  },
+  "go8": {
+    "name": "GothicEight",
+    "unicode": "",
+    "fullName": "\\[GothicEight]",
+    "codepoint": "0xF7ED"
+  },
+  "go9": {
+    "name": "GothicNine",
+    "unicode": "",
+    "fullName": "\\[GothicNine]",
+    "codepoint": "0xF7EF"
+  },
+  "sc0": {
+    "name": "ScriptZero",
+    "unicode": "",
+    "fullName": "\\[ScriptZero]",
+    "codepoint": "0xF7F0"
+  },
+  "sc1": {
+    "name": "ScriptOne",
+    "unicode": "",
+    "fullName": "\\[ScriptOne]",
+    "codepoint": "0xF7F1"
+  },
+  "sc2": {
+    "name": "ScriptTwo",
+    "unicode": "",
+    "fullName": "\\[ScriptTwo]",
+    "codepoint": "0xF7F2"
+  },
+  "sc3": {
+    "name": "ScriptThree",
+    "unicode": "",
+    "fullName": "\\[ScriptThree]",
+    "codepoint": "0xF7F3"
+  },
+  "sc4": {
+    "name": "ScriptFour",
+    "unicode": "",
+    "fullName": "\\[ScriptFour]",
+    "codepoint": "0xF7F4"
+  },
+  "sc5": {
+    "name": "ScriptFive",
+    "unicode": "",
+    "fullName": "\\[ScriptFive]",
+    "codepoint": "0xF7F5"
+  },
+  "sc6": {
+    "name": "ScriptSix",
+    "unicode": "",
+    "fullName": "\\[ScriptSix]",
+    "codepoint": "0xF7F6"
+  },
+  "sc7": {
+    "name": "ScriptSeven",
+    "unicode": "",
+    "fullName": "\\[ScriptSeven]",
+    "codepoint": "0xF7F7"
+  },
+  "sc8": {
+    "name": "ScriptEight",
+    "unicode": "",
+    "fullName": "\\[ScriptEight]",
+    "codepoint": "0xF7F8"
+  },
+  "sc9": {
+    "name": "ScriptNine",
+    "unicode": "",
+    "fullName": "\\[ScriptNine]",
+    "codepoint": "0xF7F9"
+  },
+  "sun": {
+    "name": "Sun",
+    "unicode": "☉",
+    "fullName": "\\[Sun]",
+    "codepoint": "0x2609"
+  },
+  "earth": {
+    "name": "Earth",
+    "unicode": "",
+    "fullName": "\\[Earth]",
+    "codepoint": "0xF3DF"
+  },
+  "aries": {
+    "name": "AriesSign",
+    "unicode": "♈",
+    "fullName": "\\[AriesSign]",
+    "codepoint": "0x2648"
+  },
+  "gem": {
+    "name": "GeminiSign",
+    "unicode": "♊",
+    "fullName": "\\[GeminiSign]",
+    "codepoint": "0x264A"
+  },
+  "cancer": {
+    "name": "CancerSign",
+    "unicode": "♋",
+    "fullName": "\\[CancerSign]",
+    "codepoint": "0x264B"
+  },
+  "leo": {
+    "name": "LeoSign",
+    "unicode": "♌",
+    "fullName": "\\[LeoSign]",
+    "codepoint": "0x264C"
+  },
+  "virgo": {
+    "name": "VirgoSign",
+    "unicode": "♍",
+    "fullName": "\\[VirgoSign]",
+    "codepoint": "0x264D"
+  },
+  "libra": {
+    "name": "LibraSign",
+    "unicode": "♎",
+    "fullName": "\\[LibraSign]",
+    "codepoint": "0x264E"
+  },
+  "scorp": {
+    "name": "ScorpioSign",
+    "unicode": "♏",
+    "fullName": "\\[ScorpioSign]",
+    "codepoint": "0x264F"
+  },
+  "sag": {
+    "name": "SagittariusSign",
+    "unicode": "♐",
+    "fullName": "\\[SagittariusSign]",
+    "codepoint": "0x2650"
+  },
+  "capri": {
+    "name": "CapricornSign",
+    "unicode": "♑",
+    "fullName": "\\[CapricornSign]",
+    "codepoint": "0x2651"
+  },
+  "aqua": {
+    "name": "AquariusSign",
+    "unicode": "♒",
+    "fullName": "\\[AquariusSign]",
+    "codepoint": "0x2652"
+  },
+  "tr": {
+    "name": "Transpose",
+    "unicode": "",
+    "fullName": "\\[Transpose]",
+    "codepoint": "0xF3C7"
+  },
+  "co": {
+    "name": "Conjugate",
+    "unicode": "",
+    "fullName": "\\[Conjugate]",
+    "codepoint": "0xF3C8"
+  },
+  "conj": {
+    "name": "Conjugate",
+    "unicode": "",
+    "fullName": "\\[Conjugate]",
+    "codepoint": "0xF3C8"
+  },
+  "hc": {
+    "name": "HermitianConjugate",
+    "unicode": "",
+    "fullName": "\\[HermitianConjugate]",
+    "codepoint": "0xF3CE"
+  },
+  "ct": {
+    "name": "ConjugateTranspose",
+    "unicode": "",
+    "fullName": "\\[ConjugateTranspose]",
+    "codepoint": "0xF3C9"
+  },
+  "\\mid": {
+    "name": "VerticalBar",
+    "unicode": "",
+    "fullName": "\\[VerticalBar]",
+    "codepoint": "0xF3D0"
+  },
+  "\\vert": {
+    "name": "VerticalBar",
+    "unicode": "",
+    "fullName": "\\[VerticalBar]",
+    "codepoint": "0xF3D0"
+  },
+  "!|": {
+    "name": "NotVerticalBar",
+    "unicode": "",
+    "fullName": "\\[NotVerticalBar]",
+    "codepoint": "0xF3D1"
+  },
+  "dist": {
+    "name": "Distributed",
+    "unicode": "",
+    "fullName": "\\[Distributed]",
+    "codepoint": "0xF3D2"
+  },
+  "cond": {
+    "name": "Conditioned",
+    "unicode": "",
+    "fullName": "\\[Conditioned]",
+    "codepoint": "0xF3D3"
+  },
+  "ue": {
+    "name": "UndirectedEdge",
+    "unicode": "",
+    "fullName": "\\[UndirectedEdge]",
+    "codepoint": "0xF3D4"
+  },
+  "o-o": {
+    "name": "UndirectedEdge",
+    "unicode": "",
+    "fullName": "\\[UndirectedEdge]",
+    "codepoint": "0xF3D4"
+  },
+  "de": {
+    "name": "DirectedEdge",
+    "unicode": "",
+    "fullName": "\\[DirectedEdge]",
+    "codepoint": "0xF3D5"
+  },
+  "o->": {
+    "name": "DirectedEdge",
+    "unicode": "",
+    "fullName": "\\[DirectedEdge]",
+    "codepoint": "0xF3D5"
+  },
+  "<->": {
+    "name": "LeftRightArrow",
+    "unicode": "↔",
+    "fullName": "\\[LeftRightArrow]",
+    "codepoint": "0x2194"
+  },
+  "Alpha": {
+    "name": "FormalAlpha",
+    "unicode": "",
+    "fullName": "\\[FormalAlpha]",
+    "codepoint": "0xF854"
+  },
+  "Beta": {
+    "name": "FormalBeta",
+    "unicode": "",
+    "fullName": "\\[FormalBeta]",
+    "codepoint": "0xF855"
+  },
+  "Gamma": {
+    "name": "FormalGamma",
+    "unicode": "",
+    "fullName": "\\[FormalGamma]",
+    "codepoint": "0xF856"
+  },
+  "\\Gamma": {
+    "name": "CapitalGamma",
+    "unicode": "Γ",
+    "fullName": "\\[CapitalGamma]",
+    "codepoint": "0x0393"
+  },
+  "Delta": {
+    "name": "FormalDelta",
+    "unicode": "",
+    "fullName": "\\[FormalDelta]",
+    "codepoint": "0xF857"
+  },
+  "\\Delta": {
+    "name": "CapitalDelta",
+    "unicode": "Δ",
+    "fullName": "\\[CapitalDelta]",
+    "codepoint": "0x0394"
+  },
+  "Epsilon": {
+    "name": "FormalEpsilon",
+    "unicode": "",
+    "fullName": "\\[FormalEpsilon]",
+    "codepoint": "0xF88A"
+  },
+  "Zeta": {
+    "name": "FormalZeta",
+    "unicode": "",
+    "fullName": "\\[FormalZeta]",
+    "codepoint": "0xF859"
+  },
+  "Et": {
+    "name": "CapitalEta",
+    "unicode": "Η",
+    "fullName": "\\[CapitalEta]",
+    "codepoint": "0x0397"
+  },
+  "Eta": {
+    "name": "FormalEta",
+    "unicode": "",
+    "fullName": "\\[FormalEta]",
+    "codepoint": "0xF85A"
+  },
+  "Th": {
+    "name": "CapitalTheta",
+    "unicode": "Θ",
+    "fullName": "\\[CapitalTheta]",
+    "codepoint": "0x0398"
+  },
+  "Theta": {
+    "name": "FormalTheta",
+    "unicode": "",
+    "fullName": "\\[FormalTheta]",
+    "codepoint": "0xF85B"
+  },
+  "\\Theta": {
+    "name": "CapitalTheta",
+    "unicode": "Θ",
+    "fullName": "\\[CapitalTheta]",
+    "codepoint": "0x0398"
+  },
+  "Iota": {
+    "name": "FormalIota",
+    "unicode": "",
+    "fullName": "\\[FormalIota]",
+    "codepoint": "0xF85C"
+  },
+  "Kappa": {
+    "name": "FormalKappa",
+    "unicode": "",
+    "fullName": "\\[FormalKappa]",
+    "codepoint": "0xF85D"
+  },
+  "Lambda": {
+    "name": "FormalLambda",
+    "unicode": "",
+    "fullName": "\\[FormalLambda]",
+    "codepoint": "0xF85E"
+  },
+  "\\Lambda": {
+    "name": "CapitalLambda",
+    "unicode": "Λ",
+    "fullName": "\\[CapitalLambda]",
+    "codepoint": "0x039B"
+  },
+  "Mu": {
+    "name": "FormalMu",
+    "unicode": "",
+    "fullName": "\\[FormalMu]",
+    "codepoint": "0xF85F"
+  },
+  "Nu": {
+    "name": "FormalNu",
+    "unicode": "",
+    "fullName": "\\[FormalNu]",
+    "codepoint": "0xF860"
+  },
+  "Xi": {
+    "name": "FormalXi",
+    "unicode": "",
+    "fullName": "\\[FormalXi]",
+    "codepoint": "0xF861"
+  },
+  "\\Xi": {
+    "name": "CapitalXi",
+    "unicode": "Ξ",
+    "fullName": "\\[CapitalXi]",
+    "codepoint": "0x039E"
+  },
+  "Om": {
+    "name": "CapitalOmicron",
+    "unicode": "Ο",
+    "fullName": "\\[CapitalOmicron]",
+    "codepoint": "0x039F"
+  },
+  "Omicron": {
+    "name": "FormalOmicron",
+    "unicode": "",
+    "fullName": "\\[FormalOmicron]",
+    "codepoint": "0xF862"
+  },
+  "Pi": {
+    "name": "FormalPi",
+    "unicode": "",
+    "fullName": "\\[FormalPi]",
+    "codepoint": "0xF863"
+  },
+  "\\Pi": {
+    "name": "CapitalPi",
+    "unicode": "Π",
+    "fullName": "\\[CapitalPi]",
+    "codepoint": "0x03A0"
+  },
+  "Rho": {
+    "name": "FormalRho",
+    "unicode": "",
+    "fullName": "\\[FormalRho]",
+    "codepoint": "0xF864"
+  },
+  "Sigma": {
+    "name": "FormalSigma",
+    "unicode": "",
+    "fullName": "\\[FormalSigma]",
+    "codepoint": "0xF866"
+  },
+  "\\Sigma": {
+    "name": "CapitalSigma",
+    "unicode": "Σ",
+    "fullName": "\\[CapitalSigma]",
+    "codepoint": "0x03A3"
+  },
+  "Tau": {
+    "name": "FormalTau",
+    "unicode": "",
+    "fullName": "\\[FormalTau]",
+    "codepoint": "0xF867"
+  },
+  "Upsilon": {
+    "name": "FormalUpsilon",
+    "unicode": "",
+    "fullName": "\\[FormalUpsilon]",
+    "codepoint": "0xF868"
+  },
+  "\\Upsilon": {
+    "name": "CapitalUpsilon",
+    "unicode": "Υ",
+    "fullName": "\\[CapitalUpsilon]",
+    "codepoint": "0x03A5"
+  },
+  "cU": {
+    "name": "CurlyCapitalUpsilon",
+    "unicode": "ϒ",
+    "fullName": "\\[CurlyCapitalUpsilon]",
+    "codepoint": "0x03D2"
+  },
+  "cUpsilon": {
+    "name": "CurlyCapitalUpsilon",
+    "unicode": "ϒ",
+    "fullName": "\\[CurlyCapitalUpsilon]",
+    "codepoint": "0x03D2"
+  },
+  "Ph": {
+    "name": "CapitalPhi",
+    "unicode": "Φ",
+    "fullName": "\\[CapitalPhi]",
+    "codepoint": "0x03A6"
+  },
+  "Phi": {
+    "name": "FormalPhi",
+    "unicode": "",
+    "fullName": "\\[FormalPhi]",
+    "codepoint": "0xF878"
+  },
+  "\\Phi": {
+    "name": "CapitalPhi",
+    "unicode": "Φ",
+    "fullName": "\\[CapitalPhi]",
+    "codepoint": "0x03A6"
+  },
+  "Ch": {
+    "name": "CapitalChi",
+    "unicode": "Χ",
+    "fullName": "\\[CapitalChi]",
+    "codepoint": "0x03A7"
+  },
+  "Chi": {
+    "name": "FormalChi",
+    "unicode": "",
+    "fullName": "\\[FormalChi]",
+    "codepoint": "0xF86A"
+  },
+  "Ps": {
+    "name": "CapitalPsi",
+    "unicode": "Ψ",
+    "fullName": "\\[CapitalPsi]",
+    "codepoint": "0x03A8"
+  },
+  "Psi": {
+    "name": "FormalPsi",
+    "unicode": "",
+    "fullName": "\\[FormalPsi]",
+    "codepoint": "0xF86B"
+  },
+  "\\Psi": {
+    "name": "CapitalPsi",
+    "unicode": "Ψ",
+    "fullName": "\\[CapitalPsi]",
+    "codepoint": "0x03A8"
+  },
+  "Omega": {
+    "name": "FormalOmega",
+    "unicode": "",
+    "fullName": "\\[FormalOmega]",
+    "codepoint": "0xF86C"
+  },
+  "\\Omega": {
+    "name": "CapitalOmega",
+    "unicode": "Ω",
+    "fullName": "\\[CapitalOmega]",
+    "codepoint": "0x03A9"
+  },
+  "alpha": {
+    "name": "Alpha",
+    "unicode": "α",
+    "fullName": "\\[Alpha]",
+    "codepoint": "0x03B1"
+  },
+  "\\alpha": {
+    "name": "Alpha",
+    "unicode": "α",
+    "fullName": "\\[Alpha]",
+    "codepoint": "0x03B1"
+  },
+  "beta": {
+    "name": "Beta",
+    "unicode": "β",
+    "fullName": "\\[Beta]",
+    "codepoint": "0x03B2"
+  },
+  "\\beta": {
+    "name": "Beta",
+    "unicode": "β",
+    "fullName": "\\[Beta]",
+    "codepoint": "0x03B2"
+  },
+  "gamma": {
+    "name": "Gamma",
+    "unicode": "γ",
+    "fullName": "\\[Gamma]",
+    "codepoint": "0x03B3"
+  },
+  "\\gamma": {
+    "name": "Gamma",
+    "unicode": "γ",
+    "fullName": "\\[Gamma]",
+    "codepoint": "0x03B3"
+  },
+  "delta": {
+    "name": "Delta",
+    "unicode": "δ",
+    "fullName": "\\[Delta]",
+    "codepoint": "0x03B4"
+  },
+  "\\delta": {
+    "name": "Delta",
+    "unicode": "δ",
+    "fullName": "\\[Delta]",
+    "codepoint": "0x03B4"
+  },
+  "epsilon": {
+    "name": "Epsilon",
+    "unicode": "ϵ",
+    "fullName": "\\[Epsilon]",
+    "codepoint": "0x03F5"
+  },
+  "\\epsilon": {
+    "name": "Epsilon",
+    "unicode": "ϵ",
+    "fullName": "\\[Epsilon]",
+    "codepoint": "0x03F5"
+  },
+  "ce": {
+    "name": "CurlyEpsilon",
+    "unicode": "ε",
+    "fullName": "\\[CurlyEpsilon]",
+    "codepoint": "0x03B5"
+  },
+  "cepsilon": {
+    "name": "CurlyEpsilon",
+    "unicode": "ε",
+    "fullName": "\\[CurlyEpsilon]",
+    "codepoint": "0x03B5"
+  },
+  "\\varepsilon": {
+    "name": "CurlyEpsilon",
+    "unicode": "ε",
+    "fullName": "\\[CurlyEpsilon]",
+    "codepoint": "0x03B5"
+  },
+  "zeta": {
+    "name": "Zeta",
+    "unicode": "ζ",
+    "fullName": "\\[Zeta]",
+    "codepoint": "0x03B6"
+  },
+  "\\zeta": {
+    "name": "Zeta",
+    "unicode": "ζ",
+    "fullName": "\\[Zeta]",
+    "codepoint": "0x03B6"
+  },
+  "et": {
+    "name": "Eta",
+    "unicode": "η",
+    "fullName": "\\[Eta]",
+    "codepoint": "0x03B7"
+  },
+  "eta": {
+    "name": "Eta",
+    "unicode": "η",
+    "fullName": "\\[Eta]",
+    "codepoint": "0x03B7"
+  },
+  "\\eta": {
+    "name": "Eta",
+    "unicode": "η",
+    "fullName": "\\[Eta]",
+    "codepoint": "0x03B7"
+  },
+  "th": {
+    "name": "Theta",
+    "unicode": "θ",
+    "fullName": "\\[Theta]",
+    "codepoint": "0x03B8"
+  },
+  "theta": {
+    "name": "Theta",
+    "unicode": "θ",
+    "fullName": "\\[Theta]",
+    "codepoint": "0x03B8"
+  },
+  "\\theta": {
+    "name": "Theta",
+    "unicode": "θ",
+    "fullName": "\\[Theta]",
+    "codepoint": "0x03B8"
+  },
+  "cq": {
+    "name": "CurlyTheta",
+    "unicode": "ϑ",
+    "fullName": "\\[CurlyTheta]",
+    "codepoint": "0x03D1"
+  },
+  "cth": {
+    "name": "CurlyTheta",
+    "unicode": "ϑ",
+    "fullName": "\\[CurlyTheta]",
+    "codepoint": "0x03D1"
+  },
+  "ctheta": {
+    "name": "CurlyTheta",
+    "unicode": "ϑ",
+    "fullName": "\\[CurlyTheta]",
+    "codepoint": "0x03D1"
+  },
+  "\\vartheta": {
+    "name": "CurlyTheta",
+    "unicode": "ϑ",
+    "fullName": "\\[CurlyTheta]",
+    "codepoint": "0x03D1"
+  },
+  "iota": {
+    "name": "Iota",
+    "unicode": "ι",
+    "fullName": "\\[Iota]",
+    "codepoint": "0x03B9"
+  },
+  "\\iota": {
+    "name": "Iota",
+    "unicode": "ι",
+    "fullName": "\\[Iota]",
+    "codepoint": "0x03B9"
+  },
+  "kappa": {
+    "name": "Kappa",
+    "unicode": "κ",
+    "fullName": "\\[Kappa]",
+    "codepoint": "0x03BA"
+  },
+  "\\kappa": {
+    "name": "Kappa",
+    "unicode": "κ",
+    "fullName": "\\[Kappa]",
+    "codepoint": "0x03BA"
+  },
+  "ck": {
+    "name": "CurlyKappa",
+    "unicode": "ϰ",
+    "fullName": "\\[CurlyKappa]",
+    "codepoint": "0x03F0"
+  },
+  "ckappa": {
+    "name": "CurlyKappa",
+    "unicode": "ϰ",
+    "fullName": "\\[CurlyKappa]",
+    "codepoint": "0x03F0"
+  },
+  "lambda": {
+    "name": "Lambda",
+    "unicode": "λ",
+    "fullName": "\\[Lambda]",
+    "codepoint": "0x03BB"
+  },
+  "\\lambda": {
+    "name": "Lambda",
+    "unicode": "λ",
+    "fullName": "\\[Lambda]",
+    "codepoint": "0x03BB"
+  },
+  "mu": {
+    "name": "Mu",
+    "unicode": "μ",
+    "fullName": "\\[Mu]",
+    "codepoint": "0x03BC"
+  },
+  "\\mu": {
+    "name": "Mu",
+    "unicode": "μ",
+    "fullName": "\\[Mu]",
+    "codepoint": "0x03BC"
+  },
+  "nu": {
+    "name": "Nu",
+    "unicode": "ν",
+    "fullName": "\\[Nu]",
+    "codepoint": "0x03BD"
+  },
+  "\\nu": {
+    "name": "Nu",
+    "unicode": "ν",
+    "fullName": "\\[Nu]",
+    "codepoint": "0x03BD"
+  },
+  "xi": {
+    "name": "Xi",
+    "unicode": "ξ",
+    "fullName": "\\[Xi]",
+    "codepoint": "0x03BE"
+  },
+  "\\xi": {
+    "name": "Xi",
+    "unicode": "ξ",
+    "fullName": "\\[Xi]",
+    "codepoint": "0x03BE"
+  },
+  "om": {
+    "name": "Omicron",
+    "unicode": "ο",
+    "fullName": "\\[Omicron]",
+    "codepoint": "0x03BF"
+  },
+  "omicron": {
+    "name": "Omicron",
+    "unicode": "ο",
+    "fullName": "\\[Omicron]",
+    "codepoint": "0x03BF"
+  },
+  "pi": {
+    "name": "Pi",
+    "unicode": "π",
+    "fullName": "\\[Pi]",
+    "codepoint": "0x03C0"
+  },
+  "\\pi": {
+    "name": "Pi",
+    "unicode": "π",
+    "fullName": "\\[Pi]",
+    "codepoint": "0x03C0"
+  },
+  "cp": {
+    "name": "CurlyPi",
+    "unicode": "ϖ",
+    "fullName": "\\[CurlyPi]",
+    "codepoint": "0x03D6"
+  },
+  "cpi": {
+    "name": "CurlyPi",
+    "unicode": "ϖ",
+    "fullName": "\\[CurlyPi]",
+    "codepoint": "0x03D6"
+  },
+  "\\varpi": {
+    "name": "CurlyPi",
+    "unicode": "ϖ",
+    "fullName": "\\[CurlyPi]",
+    "codepoint": "0x03D6"
+  },
+  "rho": {
+    "name": "Rho",
+    "unicode": "ρ",
+    "fullName": "\\[Rho]",
+    "codepoint": "0x03C1"
+  },
+  "\\rho": {
+    "name": "Rho",
+    "unicode": "ρ",
+    "fullName": "\\[Rho]",
+    "codepoint": "0x03C1"
+  },
+  "cr": {
+    "name": "CurlyRho",
+    "unicode": "ϱ",
+    "fullName": "\\[CurlyRho]",
+    "codepoint": "0x03F1"
+  },
+  "crho": {
+    "name": "CurlyRho",
+    "unicode": "ϱ",
+    "fullName": "\\[CurlyRho]",
+    "codepoint": "0x03F1"
+  },
+  "\\varrho": {
+    "name": "CurlyRho",
+    "unicode": "ϱ",
+    "fullName": "\\[CurlyRho]",
+    "codepoint": "0x03F1"
+  },
+  "sigma": {
+    "name": "Sigma",
+    "unicode": "σ",
+    "fullName": "\\[Sigma]",
+    "codepoint": "0x03C3"
+  },
+  "\\sigma": {
+    "name": "Sigma",
+    "unicode": "σ",
+    "fullName": "\\[Sigma]",
+    "codepoint": "0x03C3"
+  },
+  "fs": {
+    "name": "FinalSigma",
+    "unicode": "ς",
+    "fullName": "\\[FinalSigma]",
+    "codepoint": "0x03C2"
+  },
+  "\\varsigma": {
+    "name": "FinalSigma",
+    "unicode": "ς",
+    "fullName": "\\[FinalSigma]",
+    "codepoint": "0x03C2"
+  },
+  "tau": {
+    "name": "Tau",
+    "unicode": "τ",
+    "fullName": "\\[Tau]",
+    "codepoint": "0x03C4"
+  },
+  "\\tau": {
+    "name": "Tau",
+    "unicode": "τ",
+    "fullName": "\\[Tau]",
+    "codepoint": "0x03C4"
+  },
+  "upsilon": {
+    "name": "Upsilon",
+    "unicode": "υ",
+    "fullName": "\\[Upsilon]",
+    "codepoint": "0x03C5"
+  },
+  "\\upsilon": {
+    "name": "Upsilon",
+    "unicode": "υ",
+    "fullName": "\\[Upsilon]",
+    "codepoint": "0x03C5"
+  },
+  "ph": {
+    "name": "Phi",
+    "unicode": "ϕ",
+    "fullName": "\\[Phi]",
+    "codepoint": "0x03D5"
+  },
+  "phi": {
+    "name": "Phi",
+    "unicode": "ϕ",
+    "fullName": "\\[Phi]",
+    "codepoint": "0x03D5"
+  },
+  "\\phi": {
+    "name": "Phi",
+    "unicode": "ϕ",
+    "fullName": "\\[Phi]",
+    "codepoint": "0x03D5"
+  },
+  "cph": {
+    "name": "CurlyPhi",
+    "unicode": "φ",
+    "fullName": "\\[CurlyPhi]",
+    "codepoint": "0x03C6"
+  },
+  "cphi": {
+    "name": "CurlyPhi",
+    "unicode": "φ",
+    "fullName": "\\[CurlyPhi]",
+    "codepoint": "0x03C6"
+  },
+  "\\varphi": {
+    "name": "CurlyPhi",
+    "unicode": "φ",
+    "fullName": "\\[CurlyPhi]",
+    "codepoint": "0x03C6"
+  },
+  "ch": {
+    "name": "Chi",
+    "unicode": "χ",
+    "fullName": "\\[Chi]",
+    "codepoint": "0x03C7"
+  },
+  "chi": {
+    "name": "Chi",
+    "unicode": "χ",
+    "fullName": "\\[Chi]",
+    "codepoint": "0x03C7"
+  },
+  "\\chi": {
+    "name": "Chi",
+    "unicode": "χ",
+    "fullName": "\\[Chi]",
+    "codepoint": "0x03C7"
+  },
+  "ps": {
+    "name": "Psi",
+    "unicode": "ψ",
+    "fullName": "\\[Psi]",
+    "codepoint": "0x03C8"
+  },
+  "psi": {
+    "name": "Psi",
+    "unicode": "ψ",
+    "fullName": "\\[Psi]",
+    "codepoint": "0x03C8"
+  },
+  "\\psi": {
+    "name": "Psi",
+    "unicode": "ψ",
+    "fullName": "\\[Psi]",
+    "codepoint": "0x03C8"
+  },
+  "omega": {
+    "name": "Omega",
+    "unicode": "ω",
+    "fullName": "\\[Omega]",
+    "codepoint": "0x03C9"
+  },
+  "\\omega": {
+    "name": "Omega",
+    "unicode": "ω",
+    "fullName": "\\[Omega]",
+    "codepoint": "0x03C9"
+  },
+  "inf": {
+    "name": "Infinity",
+    "unicode": "∞",
+    "fullName": "\\[Infinity]",
+    "codepoint": "0x221E"
+  },
+  "\\infty": {
+    "name": "Infinity",
+    "unicode": "∞",
+    "fullName": "\\[Infinity]",
+    "codepoint": "0x221E"
+  },
+  "gg": {
+    "name": "DoubledGamma",
+    "unicode": "",
+    "fullName": "\\[DoubledGamma]",
+    "codepoint": "0xF74A"
+  },
+  "pp": {
+    "name": "DoubledPi",
+    "unicode": "",
+    "fullName": "\\[DoubledPi]",
+    "codepoint": "0xF749"
+  },
+  "CapitalAlpha": {
+    "name": "FormalCapitalAlpha",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalAlpha]",
+    "codepoint": "0xF834"
+  },
+  ".CapitalAlpha": {
+    "name": "FormalCapitalAlpha",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalAlpha]",
+    "codepoint": "0xF834"
+  },
+  "CapitalBeta": {
+    "name": "FormalCapitalBeta",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalBeta]",
+    "codepoint": "0xF835"
+  },
+  ".CapitalBeta": {
+    "name": "FormalCapitalBeta",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalBeta]",
+    "codepoint": "0xF835"
+  },
+  "CapitalGamma": {
+    "name": "FormalCapitalGamma",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalGamma]",
+    "codepoint": "0xF836"
+  },
+  ".CapitalGamma": {
+    "name": "FormalCapitalGamma",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalGamma]",
+    "codepoint": "0xF836"
+  },
+  "CapitalDelta": {
+    "name": "FormalCapitalDelta",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalDelta]",
+    "codepoint": "0xF837"
+  },
+  ".CapitalDelta": {
+    "name": "FormalCapitalDelta",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalDelta]",
+    "codepoint": "0xF837"
+  },
+  "CapitalEpsilon": {
+    "name": "FormalCapitalEpsilon",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalEpsilon]",
+    "codepoint": "0xF838"
+  },
+  ".CapitalEpsilon": {
+    "name": "FormalCapitalEpsilon",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalEpsilon]",
+    "codepoint": "0xF838"
+  },
+  "CapitalZeta": {
+    "name": "FormalCapitalZeta",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalZeta]",
+    "codepoint": "0xF839"
+  },
+  ".CapitalZeta": {
+    "name": "FormalCapitalZeta",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalZeta]",
+    "codepoint": "0xF839"
+  },
+  "CapitalEta": {
+    "name": "FormalCapitalEta",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalEta]",
+    "codepoint": "0xF83A"
+  },
+  ".CapitalEta": {
+    "name": "FormalCapitalEta",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalEta]",
+    "codepoint": "0xF83A"
+  },
+  "CapitalTheta": {
+    "name": "FormalCapitalTheta",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalTheta]",
+    "codepoint": "0xF83B"
+  },
+  ".CapitalTheta": {
+    "name": "FormalCapitalTheta",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalTheta]",
+    "codepoint": "0xF83B"
+  },
+  "CapitalIota": {
+    "name": "FormalCapitalIota",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalIota]",
+    "codepoint": "0xF83C"
+  },
+  ".CapitalIota": {
+    "name": "FormalCapitalIota",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalIota]",
+    "codepoint": "0xF83C"
+  },
+  "CapitalKappa": {
+    "name": "FormalCapitalKappa",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalKappa]",
+    "codepoint": "0xF83D"
+  },
+  ".CapitalKappa": {
+    "name": "FormalCapitalKappa",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalKappa]",
+    "codepoint": "0xF83D"
+  },
+  "CapitalLambda": {
+    "name": "FormalCapitalLambda",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalLambda]",
+    "codepoint": "0xF83E"
+  },
+  ".CapitalLambda": {
+    "name": "FormalCapitalLambda",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalLambda]",
+    "codepoint": "0xF83E"
+  },
+  "CapitalMu": {
+    "name": "FormalCapitalMu",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalMu]",
+    "codepoint": "0xF83F"
+  },
+  ".CapitalMu": {
+    "name": "FormalCapitalMu",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalMu]",
+    "codepoint": "0xF83F"
+  },
+  "CapitalNu": {
+    "name": "FormalCapitalNu",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalNu]",
+    "codepoint": "0xF840"
+  },
+  ".CapitalNu": {
+    "name": "FormalCapitalNu",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalNu]",
+    "codepoint": "0xF840"
+  },
+  "CapitalXi": {
+    "name": "FormalCapitalXi",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalXi]",
+    "codepoint": "0xF841"
+  },
+  ".CapitalXi": {
+    "name": "FormalCapitalXi",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalXi]",
+    "codepoint": "0xF841"
+  },
+  "CapitalOmicron": {
+    "name": "FormalCapitalOmicron",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalOmicron]",
+    "codepoint": "0xF842"
+  },
+  ".CapitalOmicron": {
+    "name": "FormalCapitalOmicron",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalOmicron]",
+    "codepoint": "0xF842"
+  },
+  "CapitalPi": {
+    "name": "FormalCapitalPi",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalPi]",
+    "codepoint": "0xF843"
+  },
+  ".CapitalPi": {
+    "name": "FormalCapitalPi",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalPi]",
+    "codepoint": "0xF843"
+  },
+  "CapitalRho": {
+    "name": "FormalCapitalRho",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalRho]",
+    "codepoint": "0xF844"
+  },
+  ".CapitalRho": {
+    "name": "FormalCapitalRho",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalRho]",
+    "codepoint": "0xF844"
+  },
+  "CapitalSigma": {
+    "name": "FormalCapitalSigma",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalSigma]",
+    "codepoint": "0xF846"
+  },
+  ".CapitalSigma": {
+    "name": "FormalCapitalSigma",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalSigma]",
+    "codepoint": "0xF846"
+  },
+  "CapitalTau": {
+    "name": "FormalCapitalTau",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalTau]",
+    "codepoint": "0xF847"
+  },
+  ".CapitalTau": {
+    "name": "FormalCapitalTau",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalTau]",
+    "codepoint": "0xF847"
+  },
+  "CapitalUpsilon": {
+    "name": "FormalCapitalUpsilon",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalUpsilon]",
+    "codepoint": "0xF848"
+  },
+  ".CapitalUpsilon": {
+    "name": "FormalCapitalUpsilon",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalUpsilon]",
+    "codepoint": "0xF848"
+  },
+  "CapitalPhi": {
+    "name": "FormalCapitalPhi",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalPhi]",
+    "codepoint": "0xF849"
+  },
+  ".CapitalPhi": {
+    "name": "FormalCapitalPhi",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalPhi]",
+    "codepoint": "0xF849"
+  },
+  "CapitalChi": {
+    "name": "FormalCapitalChi",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalChi]",
+    "codepoint": "0xF84A"
+  },
+  ".CapitalChi": {
+    "name": "FormalCapitalChi",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalChi]",
+    "codepoint": "0xF84A"
+  },
+  "CapitalPsi": {
+    "name": "FormalCapitalPsi",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalPsi]",
+    "codepoint": "0xF84B"
+  },
+  ".CapitalPsi": {
+    "name": "FormalCapitalPsi",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalPsi]",
+    "codepoint": "0xF84B"
+  },
+  "CapitalOmega": {
+    "name": "FormalCapitalOmega",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalOmega]",
+    "codepoint": "0xF84C"
+  },
+  ".CapitalOmega": {
+    "name": "FormalCapitalOmega",
+    "unicode": "",
+    "fullName": "\\[FormalCapitalOmega]",
+    "codepoint": "0xF84C"
+  },
+  ".Alpha": {
+    "name": "FormalAlpha",
+    "unicode": "",
+    "fullName": "\\[FormalAlpha]",
+    "codepoint": "0xF854"
+  },
+  ".Beta": {
+    "name": "FormalBeta",
+    "unicode": "",
+    "fullName": "\\[FormalBeta]",
+    "codepoint": "0xF855"
+  },
+  ".Gamma": {
+    "name": "FormalGamma",
+    "unicode": "",
+    "fullName": "\\[FormalGamma]",
+    "codepoint": "0xF856"
+  },
+  ".Delta": {
+    "name": "FormalDelta",
+    "unicode": "",
+    "fullName": "\\[FormalDelta]",
+    "codepoint": "0xF857"
+  },
+  "CurlyEpsilon": {
+    "name": "FormalCurlyEpsilon",
+    "unicode": "",
+    "fullName": "\\[FormalCurlyEpsilon]",
+    "codepoint": "0xF858"
+  },
+  ".CurlyEpsilon": {
+    "name": "FormalCurlyEpsilon",
+    "unicode": "",
+    "fullName": "\\[FormalCurlyEpsilon]",
+    "codepoint": "0xF858"
+  },
+  ".Zeta": {
+    "name": "FormalZeta",
+    "unicode": "",
+    "fullName": "\\[FormalZeta]",
+    "codepoint": "0xF859"
+  },
+  ".Eta": {
+    "name": "FormalEta",
+    "unicode": "",
+    "fullName": "\\[FormalEta]",
+    "codepoint": "0xF85A"
+  },
+  ".Theta": {
+    "name": "FormalTheta",
+    "unicode": "",
+    "fullName": "\\[FormalTheta]",
+    "codepoint": "0xF85B"
+  },
+  ".Iota": {
+    "name": "FormalIota",
+    "unicode": "",
+    "fullName": "\\[FormalIota]",
+    "codepoint": "0xF85C"
+  },
+  ".Kappa": {
+    "name": "FormalKappa",
+    "unicode": "",
+    "fullName": "\\[FormalKappa]",
+    "codepoint": "0xF85D"
+  },
+  ".Lambda": {
+    "name": "FormalLambda",
+    "unicode": "",
+    "fullName": "\\[FormalLambda]",
+    "codepoint": "0xF85E"
+  },
+  ".Mu": {
+    "name": "FormalMu",
+    "unicode": "",
+    "fullName": "\\[FormalMu]",
+    "codepoint": "0xF85F"
+  },
+  ".Nu": {
+    "name": "FormalNu",
+    "unicode": "",
+    "fullName": "\\[FormalNu]",
+    "codepoint": "0xF860"
+  },
+  ".Xi": {
+    "name": "FormalXi",
+    "unicode": "",
+    "fullName": "\\[FormalXi]",
+    "codepoint": "0xF861"
+  },
+  ".Omicron": {
+    "name": "FormalOmicron",
+    "unicode": "",
+    "fullName": "\\[FormalOmicron]",
+    "codepoint": "0xF862"
+  },
+  ".Pi": {
+    "name": "FormalPi",
+    "unicode": "",
+    "fullName": "\\[FormalPi]",
+    "codepoint": "0xF863"
+  },
+  ".Rho": {
+    "name": "FormalRho",
+    "unicode": "",
+    "fullName": "\\[FormalRho]",
+    "codepoint": "0xF864"
+  },
+  "FinalSigma": {
+    "name": "FormalFinalSigma",
+    "unicode": "",
+    "fullName": "\\[FormalFinalSigma]",
+    "codepoint": "0xF865"
+  },
+  ".FinalSigma": {
+    "name": "FormalFinalSigma",
+    "unicode": "",
+    "fullName": "\\[FormalFinalSigma]",
+    "codepoint": "0xF865"
+  },
+  ".Sigma": {
+    "name": "FormalSigma",
+    "unicode": "",
+    "fullName": "\\[FormalSigma]",
+    "codepoint": "0xF866"
+  },
+  ".Tau": {
+    "name": "FormalTau",
+    "unicode": "",
+    "fullName": "\\[FormalTau]",
+    "codepoint": "0xF867"
+  },
+  ".Upsilon": {
+    "name": "FormalUpsilon",
+    "unicode": "",
+    "fullName": "\\[FormalUpsilon]",
+    "codepoint": "0xF868"
+  },
+  "CurlyPhi": {
+    "name": "FormalCurlyPhi",
+    "unicode": "",
+    "fullName": "\\[FormalCurlyPhi]",
+    "codepoint": "0xF869"
+  },
+  ".CurlyPhi": {
+    "name": "FormalCurlyPhi",
+    "unicode": "",
+    "fullName": "\\[FormalCurlyPhi]",
+    "codepoint": "0xF869"
+  },
+  ".Chi": {
+    "name": "FormalChi",
+    "unicode": "",
+    "fullName": "\\[FormalChi]",
+    "codepoint": "0xF86A"
+  },
+  ".Psi": {
+    "name": "FormalPsi",
+    "unicode": "",
+    "fullName": "\\[FormalPsi]",
+    "codepoint": "0xF86B"
+  },
+  ".Omega": {
+    "name": "FormalOmega",
+    "unicode": "",
+    "fullName": "\\[FormalOmega]",
+    "codepoint": "0xF86C"
+  },
+  "CurlyTheta": {
+    "name": "FormalCurlyTheta",
+    "unicode": "",
+    "fullName": "\\[FormalCurlyTheta]",
+    "codepoint": "0xF874"
+  },
+  ".CurlyTheta": {
+    "name": "FormalCurlyTheta",
+    "unicode": "",
+    "fullName": "\\[FormalCurlyTheta]",
+    "codepoint": "0xF874"
+  },
+  "CurlyCapitalUpsilon": {
+    "name": "FormalCurlyCapitalUpsilon",
+    "unicode": "",
+    "fullName": "\\[FormalCurlyCapitalUpsilon]",
+    "codepoint": "0xF875"
+  },
+  ".CurlyCapitalUpsilon": {
+    "name": "FormalCurlyCapitalUpsilon",
+    "unicode": "",
+    "fullName": "\\[FormalCurlyCapitalUpsilon]",
+    "codepoint": "0xF875"
+  },
+  ".Phi": {
+    "name": "FormalPhi",
+    "unicode": "",
+    "fullName": "\\[FormalPhi]",
+    "codepoint": "0xF878"
+  },
+  "CurlyPi": {
+    "name": "FormalCurlyPi",
+    "unicode": "",
+    "fullName": "\\[FormalCurlyPi]",
+    "codepoint": "0xF879"
+  },
+  ".CurlyPi": {
+    "name": "FormalCurlyPi",
+    "unicode": "",
+    "fullName": "\\[FormalCurlyPi]",
+    "codepoint": "0xF879"
+  },
+  "CurlyKappa": {
+    "name": "FormalCurlyKappa",
+    "unicode": "",
+    "fullName": "\\[FormalCurlyKappa]",
+    "codepoint": "0xF885"
+  },
+  ".CurlyKappa": {
+    "name": "FormalCurlyKappa",
+    "unicode": "",
+    "fullName": "\\[FormalCurlyKappa]",
+    "codepoint": "0xF885"
+  },
+  "CurlyRho": {
+    "name": "FormalCurlyRho",
+    "unicode": "",
+    "fullName": "\\[FormalCurlyRho]",
+    "codepoint": "0xF886"
+  },
+  ".CurlyRho": {
+    "name": "FormalCurlyRho",
+    "unicode": "",
+    "fullName": "\\[FormalCurlyRho]",
+    "codepoint": "0xF886"
+  },
+  ".Epsilon": {
+    "name": "FormalEpsilon",
+    "unicode": "",
+    "fullName": "\\[FormalEpsilon]",
+    "codepoint": "0xF88A"
+  },
+  "fa": {
+    "name": "ForAll",
+    "unicode": "∀",
+    "fullName": "\\[ForAll]",
+    "codepoint": "0x2200"
+  },
+  "\\forall": {
+    "name": "ForAll",
+    "unicode": "∀",
+    "fullName": "\\[ForAll]",
+    "codepoint": "0x2200"
+  },
+  "ex": {
+    "name": "Exists",
+    "unicode": "∃",
+    "fullName": "\\[Exists]",
+    "codepoint": "0x2203"
+  },
+  "\\exists": {
+    "name": "Exists",
+    "unicode": "∃",
+    "fullName": "\\[Exists]",
+    "codepoint": "0x2203"
+  },
+  "!ex": {
+    "name": "NotExists",
+    "unicode": "∄",
+    "fullName": "\\[NotExists]",
+    "codepoint": "0x2204"
+  },
+  "\\nexists": {
+    "name": "NotExists",
+    "unicode": "∄",
+    "fullName": "\\[NotExists]",
+    "codepoint": "0x2204"
+  },
+  "elem": {
+    "name": "Element",
+    "unicode": "∈",
+    "fullName": "\\[Element]",
+    "codepoint": "0x2208"
+  },
+  "el": {
+    "name": "Element",
+    "unicode": "∈",
+    "fullName": "\\[Element]",
+    "codepoint": "0x2208"
+  },
+  "\\in": {
+    "name": "Element",
+    "unicode": "∈",
+    "fullName": "\\[Element]",
+    "codepoint": "0x2208"
+  },
+  "!elem": {
+    "name": "NotElement",
+    "unicode": "∉",
+    "fullName": "\\[NotElement]",
+    "codepoint": "0x2209"
+  },
+  "!el": {
+    "name": "NotElement",
+    "unicode": "∉",
+    "fullName": "\\[NotElement]",
+    "codepoint": "0x2209"
+  },
+  "\\notin": {
+    "name": "NotElement",
+    "unicode": "∉",
+    "fullName": "\\[NotElement]",
+    "codepoint": "0x2209"
+  },
+  "mem": {
+    "name": "ReverseElement",
+    "unicode": "∋",
+    "fullName": "\\[ReverseElement]",
+    "codepoint": "0x220B"
+  },
+  "\\ni": {
+    "name": "ReverseElement",
+    "unicode": "∋",
+    "fullName": "\\[ReverseElement]",
+    "codepoint": "0x220B"
+  },
+  "\\owns": {
+    "name": "ReverseElement",
+    "unicode": "∋",
+    "fullName": "\\[ReverseElement]",
+    "codepoint": "0x220B"
+  },
+  "!mem": {
+    "name": "NotReverseElement",
+    "unicode": "∌",
+    "fullName": "\\[NotReverseElement]",
+    "codepoint": "0x220C"
+  },
+  "=>": {
+    "name": "DoubleRightArrow",
+    "unicode": "⇒",
+    "fullName": "\\[DoubleRightArrow]",
+    "codepoint": "0x21D2"
+  },
+  "equiv": {
+    "name": "Equivalent",
+    "unicode": "⧦",
+    "fullName": "\\[Equivalent]",
+    "codepoint": "0x29E6"
+  },
+  "!=~": {
+    "name": "NotEqualTilde",
+    "unicode": "",
+    "fullName": "\\[NotEqualTilde]",
+    "codepoint": "0xF400"
+  },
+  "!=": {
+    "name": "NotEqual",
+    "unicode": "≠",
+    "fullName": "\\[NotEqual]",
+    "codepoint": "0x2260"
+  },
+  "\\neq": {
+    "name": "NotEqual",
+    "unicode": "≠",
+    "fullName": "\\[NotEqual]",
+    "codepoint": "0x2260"
+  },
+  "\\ne": {
+    "name": "NotEqual",
+    "unicode": "≠",
+    "fullName": "\\[NotEqual]",
+    "codepoint": "0x2260"
+  },
+  "\\not=": {
+    "name": "NotEqual",
+    "unicode": "≠",
+    "fullName": "\\[NotEqual]",
+    "codepoint": "0x2260"
+  },
+  "<=": {
+    "name": "DoubleLeftArrow",
+    "unicode": "⇐",
+    "fullName": "\\[DoubleLeftArrow]",
+    "codepoint": "0x21D0"
+  },
+  "\\leq": {
+    "name": "LessEqual",
+    "unicode": "≤",
+    "fullName": "\\[LessEqual]",
+    "codepoint": "0x2264"
+  },
+  "\\le": {
+    "name": "LessEqual",
+    "unicode": "≤",
+    "fullName": "\\[LessEqual]",
+    "codepoint": "0x2264"
+  },
+  "!<=": {
+    "name": "NotLessEqual",
+    "unicode": "≰",
+    "fullName": "\\[NotLessEqual]",
+    "codepoint": "0x2270"
+  },
+  "\\nleq": {
+    "name": "NotLessEqual",
+    "unicode": "≰",
+    "fullName": "\\[NotLessEqual]",
+    "codepoint": "0x2270"
+  },
+  ">=": {
+    "name": "GreaterEqual",
+    "unicode": "≥",
+    "fullName": "\\[GreaterEqual]",
+    "codepoint": "0x2265"
+  },
+  "\\geq": {
+    "name": "GreaterEqual",
+    "unicode": "≥",
+    "fullName": "\\[GreaterEqual]",
+    "codepoint": "0x2265"
+  },
+  "\\ge": {
+    "name": "GreaterEqual",
+    "unicode": "≥",
+    "fullName": "\\[GreaterEqual]",
+    "codepoint": "0x2265"
+  },
+  "!>=": {
+    "name": "NotGreaterEqual",
+    "unicode": "≱",
+    "fullName": "\\[NotGreaterEqual]",
+    "codepoint": "0x2271"
+  },
+  "\\ngeq": {
+    "name": "NotGreaterEqual",
+    "unicode": "≱",
+    "fullName": "\\[NotGreaterEqual]",
+    "codepoint": "0x2271"
+  },
+  "v>=": {
+    "name": "VectorGreaterEqual",
+    "unicode": "",
+    "fullName": "\\[VectorGreaterEqual]",
+    "codepoint": "0xF435"
+  },
+  "v<=": {
+    "name": "VectorLessEqual",
+    "unicode": "",
+    "fullName": "\\[VectorLessEqual]",
+    "codepoint": "0xF437"
+  },
+  "p*": {
+    "name": "PermutationProduct",
+    "unicode": "",
+    "fullName": "\\[PermutationProduct]",
+    "codepoint": "0xF3DE"
+  },
+  "t*": {
+    "name": "TensorProduct",
+    "unicode": "",
+    "fullName": "\\[TensorProduct]",
+    "codepoint": "0xF3DA"
+  },
+  "del": {
+    "name": "DeleteKey",
+    "unicode": "",
+    "fullName": "\\[DeleteKey]",
+    "codepoint": "0xF7D0"
+  },
+  "\\nabla": {
+    "name": "Del",
+    "unicode": "∇",
+    "fullName": "\\[Del]",
+    "codepoint": "0x2207"
+  },
+  "int": {
+    "name": "Integral",
+    "unicode": "∫",
+    "fullName": "\\[Integral]",
+    "codepoint": "0x222B"
+  },
+  "\\int": {
+    "name": "Integral",
+    "unicode": "∫",
+    "fullName": "\\[Integral]",
+    "codepoint": "0x222B"
+  },
+  "\\intop": {
+    "name": "Integral",
+    "unicode": "∫",
+    "fullName": "\\[Integral]",
+    "codepoint": "0x222B"
+  },
+  "cint": {
+    "name": "ContourIntegral",
+    "unicode": "∮",
+    "fullName": "\\[ContourIntegral]",
+    "codepoint": "0x222E"
+  },
+  "\\oint": {
+    "name": "ContourIntegral",
+    "unicode": "∮",
+    "fullName": "\\[ContourIntegral]",
+    "codepoint": "0x222E"
+  },
+  "cccint": {
+    "name": "CounterClockwiseContourIntegral",
+    "unicode": "∳",
+    "fullName": "\\[CounterClockwiseContourIntegral]",
+    "codepoint": "0x2233"
+  },
+  "ccint": {
+    "name": "ClockwiseContourIntegral",
+    "unicode": "∲",
+    "fullName": "\\[ClockwiseContourIntegral]",
+    "codepoint": "0x2232"
+  },
+  "sum": {
+    "name": "Sum",
+    "unicode": "∑",
+    "fullName": "\\[Sum]",
+    "codepoint": "0x2211"
+  },
+  "\\sum": {
+    "name": "Sum",
+    "unicode": "∑",
+    "fullName": "\\[Sum]",
+    "codepoint": "0x2211"
+  },
+  "prod": {
+    "name": "Product",
+    "unicode": "∏",
+    "fullName": "\\[Product]",
+    "codepoint": "0x220F"
+  },
+  "\\prod": {
+    "name": "Product",
+    "unicode": "∏",
+    "fullName": "\\[Product]",
+    "codepoint": "0x220F"
+  },
+  "diffd": {
+    "name": "DifferenceDelta",
+    "unicode": "",
+    "fullName": "\\[DifferenceDelta]",
+    "codepoint": "0xF4A4"
+  },
+  "pd": {
+    "name": "PartialD",
+    "unicode": "∂",
+    "fullName": "\\[PartialD]",
+    "codepoint": "0x2202"
+  },
+  "\\partial": {
+    "name": "PartialD",
+    "unicode": "∂",
+    "fullName": "\\[PartialD]",
+    "codepoint": "0x2202"
+  },
+  "\\rightarrow": {
+    "name": "RightArrow",
+    "unicode": "→",
+    "fullName": "\\[RightArrow]",
+    "codepoint": "0x2192"
+  },
+  "\\to": {
+    "name": "RightArrow",
+    "unicode": "→",
+    "fullName": "\\[RightArrow]",
+    "codepoint": "0x2192"
+  },
+  "<-": {
+    "name": "LeftArrow",
+    "unicode": "←",
+    "fullName": "\\[LeftArrow]",
+    "codepoint": "0x2190"
+  },
+  "\\leftarrow": {
+    "name": "LeftArrow",
+    "unicode": "←",
+    "fullName": "\\[LeftArrow]",
+    "codepoint": "0x2190"
+  },
+  "\\gets": {
+    "name": "LeftArrow",
+    "unicode": "←",
+    "fullName": "\\[LeftArrow]",
+    "codepoint": "0x2190"
+  },
+  "\\uparrow": {
+    "name": "UpArrow",
+    "unicode": "↑",
+    "fullName": "\\[UpArrow]",
+    "codepoint": "0x2191"
+  },
+  "\\downarrow": {
+    "name": "DownArrow",
+    "unicode": "↓",
+    "fullName": "\\[DownArrow]",
+    "codepoint": "0x2193"
+  },
+  "\\leftrightarrow": {
+    "name": "LeftRightArrow",
+    "unicode": "↔",
+    "fullName": "\\[LeftRightArrow]",
+    "codepoint": "0x2194"
+  },
+  "\\updownarrow": {
+    "name": "UpDownArrow",
+    "unicode": "↕",
+    "fullName": "\\[UpDownArrow]",
+    "codepoint": "0x2195"
+  },
+  ":>": {
+    "name": "RuleDelayed",
+    "unicode": "",
+    "fullName": "\\[RuleDelayed]",
+    "codepoint": "0xF51F"
+  },
+  "\\Rightarrow": {
+    "name": "DoubleRightArrow",
+    "unicode": "⇒",
+    "fullName": "\\[DoubleRightArrow]",
+    "codepoint": "0x21D2"
+  },
+  "\\Leftarrow": {
+    "name": "DoubleLeftArrow",
+    "unicode": "⇐",
+    "fullName": "\\[DoubleLeftArrow]",
+    "codepoint": "0x21D0"
+  },
+  "\\Uparrow": {
+    "name": "DoubleUpArrow",
+    "unicode": "⇑",
+    "fullName": "\\[DoubleUpArrow]",
+    "codepoint": "0x21D1"
+  },
+  "\\Downarrow": {
+    "name": "DoubleDownArrow",
+    "unicode": "⇓",
+    "fullName": "\\[DoubleDownArrow]",
+    "codepoint": "0x21D3"
+  },
+  "<=>": {
+    "name": "DoubleLeftRightArrow",
+    "unicode": "⇔",
+    "fullName": "\\[DoubleLeftRightArrow]",
+    "codepoint": "0x21D4"
+  },
+  "\\Leftrightarrow": {
+    "name": "DoubleLeftRightArrow",
+    "unicode": "⇔",
+    "fullName": "\\[DoubleLeftRightArrow]",
+    "codepoint": "0x21D4"
+  },
+  "\\Updownarrow": {
+    "name": "DoubleUpDownArrow",
+    "unicode": "⇕",
+    "fullName": "\\[DoubleUpDownArrow]",
+    "codepoint": "0x21D5"
+  },
+  "\\mapsto": {
+    "name": "RightTeeArrow",
+    "unicode": "↦",
+    "fullName": "\\[RightTeeArrow]",
+    "codepoint": "0x21A6"
+  },
+  "\\nwarrow": {
+    "name": "UpperLeftArrow",
+    "unicode": "↖",
+    "fullName": "\\[UpperLeftArrow]",
+    "codepoint": "0x2196"
+  },
+  "\\nearrow": {
+    "name": "UpperRightArrow",
+    "unicode": "↗",
+    "fullName": "\\[UpperRightArrow]",
+    "codepoint": "0x2197"
+  },
+  "\\searrow": {
+    "name": "LowerRightArrow",
+    "unicode": "↘",
+    "fullName": "\\[LowerRightArrow]",
+    "codepoint": "0x2198"
+  },
+  "\\swarrow": {
+    "name": "LowerLeftArrow",
+    "unicode": "↙",
+    "fullName": "\\[LowerLeftArrow]",
+    "codepoint": "0x2199"
+  },
+  "-->": {
+    "name": "LongRightArrow",
+    "unicode": "⟶",
+    "fullName": "\\[LongRightArrow]",
+    "codepoint": "0x27F6"
+  },
+  "\\longrightarrow": {
+    "name": "LongRightArrow",
+    "unicode": "⟶",
+    "fullName": "\\[LongRightArrow]",
+    "codepoint": "0x27F6"
+  },
+  "<--": {
+    "name": "LongLeftArrow",
+    "unicode": "⟵",
+    "fullName": "\\[LongLeftArrow]",
+    "codepoint": "0x27F5"
+  },
+  "\\longleftarrow": {
+    "name": "LongLeftArrow",
+    "unicode": "⟵",
+    "fullName": "\\[LongLeftArrow]",
+    "codepoint": "0x27F5"
+  },
+  "<==": {
+    "name": "DoubleLongLeftArrow",
+    "unicode": "⟸",
+    "fullName": "\\[DoubleLongLeftArrow]",
+    "codepoint": "0x27F8"
+  },
+  "\\Longleftarrow": {
+    "name": "DoubleLongLeftArrow",
+    "unicode": "⟸",
+    "fullName": "\\[DoubleLongLeftArrow]",
+    "codepoint": "0x27F8"
+  },
+  "==>": {
+    "name": "DoubleLongRightArrow",
+    "unicode": "⟹",
+    "fullName": "\\[DoubleLongRightArrow]",
+    "codepoint": "0x27F9"
+  },
+  "\\Longrightarrow": {
+    "name": "DoubleLongRightArrow",
+    "unicode": "⟹",
+    "fullName": "\\[DoubleLongRightArrow]",
+    "codepoint": "0x27F9"
+  },
+  "<-->": {
+    "name": "LongLeftRightArrow",
+    "unicode": "⟷",
+    "fullName": "\\[LongLeftRightArrow]",
+    "codepoint": "0x27F7"
+  },
+  "\\longleftrightarrow": {
+    "name": "LongLeftRightArrow",
+    "unicode": "⟷",
+    "fullName": "\\[LongLeftRightArrow]",
+    "codepoint": "0x27F7"
+  },
+  "<==>": {
+    "name": "DoubleLongLeftRightArrow",
+    "unicode": "⟺",
+    "fullName": "\\[DoubleLongLeftRightArrow]",
+    "codepoint": "0x27FA"
+  },
+  "\\Longleftrightarrow": {
+    "name": "DoubleLongLeftRightArrow",
+    "unicode": "⟺",
+    "fullName": "\\[DoubleLongLeftRightArrow]",
+    "codepoint": "0x27FA"
+  },
+  "\\iff": {
+    "name": "DoubleLongLeftRightArrow",
+    "unicode": "⟺",
+    "fullName": "\\[DoubleLongLeftRightArrow]",
+    "codepoint": "0x27FA"
+  },
+  "#": {
+    "name": "NumberSign",
+    "unicode": "",
+    "fullName": "\\[NumberSign]",
+    "codepoint": "0xF724"
+  },
+  "null": {
+    "name": "Null",
+    "unicode": "",
+    "fullName": "\\[Null]",
+    "codepoint": "0xF3A0"
+  },
+  "n,": {
+    "name": "NumberComma",
+    "unicode": "",
+    "fullName": "\\[NumberComma]",
+    "codepoint": "0xF7FC"
+  },
+  "delay": {
+    "name": "SystemsModelDelay",
+    "unicode": "",
+    "fullName": "\\[SystemsModelDelay]",
+    "codepoint": "0xF3AF"
+  },
+  "taur": {
+    "name": "TaurusSign",
+    "unicode": "♉",
+    "fullName": "\\[TaurusSign]",
+    "codepoint": "0x2649"
+  },
+  "pisc": {
+    "name": "PiscesSign",
+    "unicode": "♓",
+    "fullName": "\\[PiscesSign]",
+    "codepoint": "0x2653"
+  },
+  "pw": {
+    "name": "Piecewise",
+    "unicode": "",
+    "fullName": "\\[Piecewise]",
+    "codepoint": "0xF361"
+  }
+}
