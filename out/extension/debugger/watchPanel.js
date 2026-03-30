@@ -33,41 +33,44 @@ class WatchPanelProvider {
         this._lastBpList     = [];     // cached breakpoint list for resend on visibility
         this._lastEvalSel    = null;   // cached eval-selection state {type,html,expr,format} for resend
         this._bgColor        = null;   // hex color, or null = use sidebar default
+        this._pendingHoverDoc = null;  // {html, symbol} — resent on next visibility
     }
 
     // Called by extension.js when registering:
     //   vscode.window.registerWebviewViewProvider(VIEW_ID, provider, { webviewOptions: { retainContextWhenHidden: true } })
     resolveWebviewView(webviewView /*, _context, _token */) {
-        console.log('[wolfbook-watch] resolveWebviewView called');
         this._view = webviewView;
         webviewView.webview.options = {
             enableScripts: true,
             localResourceRoots: [
                 vscode.Uri.file(__dirname),                                          // watchPanel.webview.js lives here
+                vscode.Uri.file(path.join(__dirname, '../../../wllatex-addon')),      // katex CSS + fonts
                 vscode.Uri.file(require('os').tmpdir()),                             // eval-sel tmp images
                 ...(vscode.workspace.workspaceFolders || []).map(f => f.uri),        // notebook images
             ],
         };
         webviewView.webview.html   = this._buildHtml(webviewView);
-        console.log('[wolfbook-watch] HTML set, length=', webviewView.webview.html.length);
 
         // Re-send accumulated state whenever the panel becomes visible
         // (first open, or re-shown after being hidden). This fixes the race
         // where postMessage was called before the webview had loaded.
         webviewView.onDidChangeVisibility(() => {
-            if (webviewView.visible) this._sendCurrentState();
+            if (webviewView.visible) {
+                this._sendCurrentState();
+                if (this._pendingHoverDoc) {
+                    webviewView.webview.postMessage({ command: 'hoverDoc', ...this._pendingHoverDoc });
+                }
+            }
         });
         // Also send immediately — the panel may already be visible now.
         // Use setImmediate so the webview JS has time to load first.
         setImmediate(() => this._sendCurrentState());
 
         webviewView.webview.onDidReceiveMessage(msg => {
-            console.log('[wolfbook-watch] received from webview:', msg.command, msg.name || msg.action || '');
             if (msg.command === 'addWatch' && msg.name) {
                 const name = String(msg.name).trim();
                 if (name && !this._watchList.includes(name)) {
                     this._watchList.push(name);
-                    console.log('[wolfbook-watch] added to watchList:', name, '| total:', this._watchList.length, '| hasCallback:', !!this._onAddWatch);
                     if (this._onAddWatch) this._onAddWatch(name);
                 }
             } else if (msg.command === 'removeWatch' && msg.name) {
@@ -99,6 +102,9 @@ class WatchPanelProvider {
                     .then(doc => vscode.window.showTextDocument(doc, { preview: false }));
             } else if (msg.command === 'scriptLoaded') {
                 console.log('[wolfbook-watch] ✓ webview script loaded and running');
+            } else if (msg.command === 'hoverDocReceived') {
+                console.log('[wolfbook-watch] ✓ webview confirmed hoverDoc received for:', msg.symbol);
+                this._pendingHoverDoc = null;
             } else {
                 console.log('[wolfbook-watch] unhandled webview msg:', JSON.stringify(msg));
             }
@@ -119,8 +125,7 @@ class WatchPanelProvider {
 
     /** Post a live (non-debug) variable update to the webview. */
     liveUpdate(variables) {
-        if (!this._view) { console.log('[wolfbook-watch] liveUpdate: no view'); return; }
-        console.log('[wolfbook-watch] liveUpdate: posting', variables?.length, 'variables');
+        if (!this._view) return;
         this._view.webview.postMessage({ command: 'liveUpdate', variables });
     }
 
@@ -161,8 +166,7 @@ class WatchPanelProvider {
     /** Notify the webview whether a debug session is active (enables/disables buttons). */
     setDebugActive(active) {
         this._debugActive = active;
-        if (!this._view) { console.log('[wolfbook-watch] setDebugActive: no view, saved state=', active); return; }
-        console.log('[wolfbook-watch] setDebugActive: posting active=', active);
+        if (!this._view) return;
         this._view.webview.postMessage({ command: 'setDebugActive', active });
     }
 
@@ -224,6 +228,46 @@ class WatchPanelProvider {
 
     // ── Eval Selection ───────────────────────────────────────────────────
 
+    /** Convert Markdown (from LSP hover) to safe HTML for display in the webview. */
+    static _mdToHtml(md) {
+        // Unescape Markdown backslash-escapes (e.g. \[ → [, \_ → _)
+        let s = md.replace(/\\([\\`*_{}\[\]()#+\-.!|>])/g, '$1');
+        // HTML-encode
+        s = s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        // Fenced code blocks
+        s = s.replace(/```\w*\n?([\s\S]*?)```/g, (_, code) =>
+            `<pre>${code.trimEnd()}</pre>`);
+        // Inline code
+        s = s.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+        // Bold
+        s = s.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+        // Italic *text* — use [A-Za-z0-9] boundary (not \w) so _ adjacent to * still matches
+        s = s.replace(/(?<![A-Za-z0-9])\*([^*\n]+)\*(?![A-Za-z0-9])/g, '<em>$1</em>');
+        // Italic _text_ — only at word boundaries so i_max stays plain
+        s = s.replace(/(?<!\w)_([^_\n]+)_(?!\w)/g, '<em>$1</em>');
+        // Links
+        s = s.replace(/\[([^\]]*)\]\((https?:\/\/[^)]+)\)/g,
+            '<a href="$2">$1</a>');
+        // Horizontal rule
+        s = s.replace(/^[ \t]*---+[ \t]*$/gm,
+            '<hr>');
+        // Paragraphs
+        return s.split(/\n{2,}/).map(p => {
+            p = p.trim();
+            if (!p) return '';
+            if (p.startsWith('<pre') || p.startsWith('<hr')) return p;
+            return '<p>' + p.replace(/\n/g, '<br>') + '</p>';
+        }).filter(Boolean).join('');
+    }
+
+    /** Show hover documentation in the panel (Markdown converted to HTML here in Node.js). */
+    showHoverDoc(markdown, symbol) {
+        if (!this._view) return;
+        const html = WatchPanelProvider._mdToHtml(markdown);
+        this._pendingHoverDoc = { html, symbol: symbol || '' };
+        this._view.webview.postMessage({ command: 'hoverDoc', html, symbol: symbol || '' });
+    }
+
     /** Show eval-selection result HTML in the panel. */
     evalSelUpdate(html, expr, format, notebookDir, openFilePath) {
         // If no pre-made file path, write the HTML now so the Open button always works.
@@ -281,9 +325,30 @@ class WatchPanelProvider {
         const scriptUri  = webview.asWebviewUri(
             vscode.Uri.file(path.join(__dirname, 'watchPanel.webview.js'))
         );
+
+        // Inline KaTeX CSS with font URLs replaced by base64 data URIs.
+        // Same approach as wb-export.js — guarantees fonts load regardless of
+        // webview CSP or relative-URL resolution issues.
+        const katexCssPath = path.join(__dirname, '../../../wllatex-addon/node_modules/katex/dist/katex.min.css');
+        const katexFontsDir = path.join(__dirname, '../../../wllatex-addon/node_modules/katex/dist/fonts');
+        const _fs = require('fs');
+        let katexCssInline = '';
+        try {
+            katexCssInline = _fs.readFileSync(katexCssPath, 'utf8')
+                .replace(/url\(fonts\/([^)]+)\)/g, (match, fontFile) => {
+                    try {
+                        const buf = _fs.readFileSync(path.join(katexFontsDir, fontFile));
+                        const ext = path.extname(fontFile).toLowerCase();
+                        const mime = ext === '.woff2' ? 'font/woff2' : ext === '.woff' ? 'font/woff' : 'font/ttf';
+                        return `url(data:${mime};base64,${buf.toString('base64')})`;
+                    } catch (_) { return match; }
+                });
+        } catch (_) { /* KaTeX CSS not available */ }
+
         const csp = [
             `default-src 'none'`,
-            `style-src 'unsafe-inline'`,
+            `style-src 'unsafe-inline' ${webview.cspSource}`,
+            `font-src ${webview.cspSource} data:`,
             `script-src ${webview.cspSource}`,
             `img-src ${webview.cspSource} data: https:`,
         ].join('; ');
@@ -292,7 +357,13 @@ class WatchPanelProvider {
 <head>
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy" content="${csp}">
+<style>${katexCssInline}</style>
 <style>
+  /* KaTeX overrides for the watch panel */
+  .katex-display { text-align: left !important; margin: 0.2em 0 !important; }
+  .katex-mathml  { display: none !important; }
+  .katex svg        { fill: currentColor; stroke: currentColor; }
+  .katex svg path   { stroke: none; }
   body {
     font-family: var(--vscode-font-family);
     font-size: var(--vscode-font-size);
@@ -521,9 +592,18 @@ class WatchPanelProvider {
     padding: 4px 0;
     overflow-x: auto;
   }
-  #eval-sel-content img, #eval-sel-content svg {
+  #eval-sel-content img {
     max-width: 100%;
     height: auto;
+  }
+  /* max-width for svgs; do NOT add height:auto — KaTeX SVGs use height:inherit
+     from .hide-tail (1.08em); height:auto with a 400000:1080 viewBox = ~0px height */
+  #eval-sel-content svg {
+    max-width: 100%;
+  }
+  /* Explicitly restore height:inherit for KaTeX SVGs so max-width doesn't reset it */
+  #eval-sel-content .katex svg {
+    height: inherit;
   }
   .eval-sel-error { color: var(--vscode-errorForeground, #f44); }
   .eval-sel-spinner {
@@ -531,7 +611,60 @@ class WatchPanelProvider {
     animation: spin 1s linear infinite;
     color: var(--vscode-descriptionForeground);
   }
-  @keyframes spin { to { transform: rotate(360deg); } }
+  #hover-doc-section {
+    margin-top: 8px;
+    border-top: 1px solid var(--vscode-panel-border);
+    padding-top: 6px;
+    display: none;
+  }
+  #hover-doc-header-row {
+    display: flex; align-items: center; gap: 4px; margin-bottom: 4px;
+  }
+  #hover-doc-label {
+    font-size: 0.82em; font-weight: bold;
+    color: var(--vscode-descriptionForeground); letter-spacing: 0.05em;
+  }
+  #hover-doc-clear {
+    margin-left: auto; background: none; border: none;
+    color: var(--vscode-descriptionForeground); cursor: pointer;
+    font-size: 0.9em; padding: 0 2px; opacity: 0.7;
+  }
+  #hover-doc-clear:hover { opacity: 1; color: var(--vscode-errorForeground); }
+  #hover-doc-symbol {
+    font-size: 0.78em; color: var(--vscode-descriptionForeground);
+    font-family: var(--vscode-editor-font-family, monospace);
+    opacity: 0.7; margin-bottom: 4px;
+  }
+  #hover-doc-content {
+    padding: 2px 0; font-size: 0.9em; line-height: 1.5;
+  }
+  #hover-doc-content p { margin: 0 0 6px 0; }
+  #hover-doc-content code {
+    background: var(--vscode-textCodeBlock-background, #f0f4f0);
+    padding: 1px 4px; border-radius: 3px;
+    font-family: var(--vscode-editor-font-family, monospace);
+    font-size: 0.92em;
+  }
+  #hover-doc-content pre {
+    background: var(--vscode-textCodeBlock-background, #f0f4f0);
+    padding: 7px 10px; border-radius: 4px; overflow-x: auto;
+    font-family: var(--vscode-editor-font-family, monospace);
+    font-size: 0.88em; margin: 6px 0;
+  }
+  #hover-doc-content pre code { background: none; padding: 0; }
+  #hover-doc-content a { color: var(--vscode-textLink-foreground, #0066cc); }
+  #hover-doc-content hr { border: none; border-top: 1px solid var(--vscode-panel-border); margin: 8px 0; }
+  #hover-doc-content pre {
+    background: var(--vscode-textCodeBlock-background, #f0f4f0);
+    padding: 6px 10px; border-radius: 4px; overflow-x: auto;
+    font-family: var(--vscode-editor-font-family, monospace);
+    font-size: 0.88em; margin: 4px 0;
+  }
+  #hover-doc-content code {
+    background: var(--vscode-textCodeBlock-background, #f0f4f0);
+    padding: 1px 4px; border-radius: 3px;
+    font-family: var(--vscode-editor-font-family, monospace); font-size: 0.92em;
+  }
 </style>
 </head>
 <body>
@@ -574,6 +707,14 @@ class WatchPanelProvider {
   </div>
   <div id="bp-empty">None. Use F9 in a cell to toggle.</div>
   <div id="bp-list"></div>
+</div>
+<div id="hover-doc-section" style="display:none">
+  <div id="hover-doc-header-row">
+    <span id="hover-doc-label">📖 DOCUMENTATION</span>
+    <button id="hover-doc-clear" title="Clear">×</button>
+  </div>
+  <div id="hover-doc-symbol"></div>
+  <div id="hover-doc-content"></div>
 </div>
 <script src="${scriptUri}"></script>
 </body>
