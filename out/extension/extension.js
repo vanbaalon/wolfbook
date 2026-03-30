@@ -28,6 +28,9 @@ const vscode_1 = require("vscode");
 const node_1 = require("vscode-languageclient/node");
 const _tools = require('./tools/index');
 const { wlSanitizeForLSP } = require('./namedchars');
+
+/** Convert hover Markdown text to a minimal HTML string for the Watch panel. */
+
 const NOTEBOOK_TYPE = 'extended-wolfram-notebook';
 let extensionKernel = new find_kernel_1.FindKernel();
 let client;
@@ -45,6 +48,11 @@ function activate(context) {
     const _loadingTimeout = setTimeout(_dismissLoading, 8000);
 
     const config = vscode.workspace.getConfiguration("wolfram", null);
+
+    // Hoisted here so wolfram.expandHoverDoc command (registered below) can close over it
+    // even though the LSP client (which populates it) is set up later.
+    const _hoverDocCache = new Map();  // key → full vscode.Hover
+
     // Setup the menu
     context.subscriptions.push(vscode_1.commands.registerCommand('wolfram.OpenNotebook', (name) => { if (name) {
         open(name.fsPath);
@@ -128,16 +136,39 @@ function activate(context) {
             _formatDocument(editor, _getFormatterOpts({ replaceNamedChars: true, lineWidth: 200 }));
         }));
 
+        // Compute minimal TextEdits so formatting doesn't nuke the undo stack.
+        // Splits old/new text into lines, finds the first and last differing line,
+        // and returns a single replacement covering only the changed region.
+        function _computeMinimalEdits(doc, oldText, newText) {
+            const oldLines = oldText.split('\n');
+            const newLines = newText.split('\n');
+            // Find first differing line
+            let top = 0;
+            while (top < oldLines.length && top < newLines.length && oldLines[top] === newLines[top]) top++;
+            if (top === oldLines.length && oldLines.length === newLines.length) return []; // identical
+            // Find last differing line (from end)
+            let botOld = oldLines.length - 1;
+            let botNew = newLines.length - 1;
+            while (botOld > top && botNew > top && oldLines[botOld] === newLines[botNew]) { botOld--; botNew--; }
+            const startPos = new vscode.Position(top, 0);
+            const endPos = top <= botOld
+                ? new vscode.Position(botOld, oldLines[botOld].length)
+                : new vscode.Position(top, 0);
+            const replacement = newLines.slice(top, botNew + 1).join('\n');
+            return [vscode.TextEdit.replace(new vscode.Range(startPos, endPos), replacement)];
+        }
+
         context.subscriptions.push(
             vscode.languages.registerDocumentFormattingEditProvider(
                 [{ language: 'wolfram' }, { scheme: 'vscode-notebook-cell' }],
                 {
                     provideDocumentFormattingEdits(doc) {
+                        if (doc.languageId === 'markdown') return [];
                         const text = doc.getText();
                         try {
                             const formatted = wlFormat(text, _getFormatterOpts({ replaceNamedChars: true }));
-                            const fullRange = new vscode.Range(doc.positionAt(0), doc.positionAt(text.length));
-                            return [vscode.TextEdit.replace(fullRange, formatted)];
+                            if (formatted === text) return [];
+                            return _computeMinimalEdits(doc, text, formatted);
                         } catch (e) {
                             return [];
                         }
@@ -151,9 +182,11 @@ function activate(context) {
                 [{ language: 'wolfram' }, { scheme: 'vscode-notebook-cell' }],
                 {
                     provideDocumentRangeFormattingEdits(doc, range) {
+                        if (doc.languageId === 'markdown') return [];
                         const text = doc.getText(range);
                         try {
                             const formatted = wlFormat(text, _getFormatterOpts({}));
+                            if (formatted === text) return [];
                             return [vscode.TextEdit.replace(range, formatted)];
                         } catch (e) {
                             return [];
@@ -181,7 +214,6 @@ function activate(context) {
 
             const doc = editor.document;
             const isWolfram = doc.languageId === 'wolfram' ||
-                doc.uri.scheme === 'vscode-notebook-cell' ||
                 doc.fileName.endsWith('.evsnb') || doc.fileName.endsWith('.vsnb');
             if (!isWolfram) return vscode.commands.executeCommand('default:type', { text: '\n' });
 
@@ -405,6 +437,8 @@ function activate(context) {
     _tools.registerTools(context, () => controller, _debugCtrl);
     // Register @wolfbook chat participant
     _tools.registerChatParticipant(context, () => controller);
+    // Register @wolfteam collaborative chat participant
+    _tools.registerWolfteamParticipant(context, () => controller);
     ;
     context.subscriptions.push(vscode_1.commands.registerCommand("wolfram.launchKernel", () => {
         if (nbKernelenabled) {
@@ -434,30 +468,37 @@ function activate(context) {
     context.subscriptions.push(vscode_1.commands.registerCommand("wolfram.pasteImageCellBelow", () => {
         controller.pasteImageAsCell({ insertBelow: true });
     }));
-    // Auto-enter-edit mode: whether new cells jump straight into the editor on insert.
-    let _autoEnterEditMode = true;
-    const _autoEditStatusBar = vscode.window.createStatusBarItem(
-        'wolfbook-auto-edit', vscode.StatusBarAlignment.Right, 98
+    // Auto-format status bar toggle — mirrors wolfbook.formatter.autoFormat setting.
+    const _cfg = vscode.workspace.getConfiguration('wolfbook');
+    let _autoFormatEnabled = _cfg.get('formatter.autoFormat', false);
+    const _fmtStatusBar = vscode.window.createStatusBarItem(
+        'wolfbook-auto-format', vscode.StatusBarAlignment.Right, 98
     );
-    _autoEditStatusBar.name = 'Wolfbook Auto Edit';
-    _autoEditStatusBar.command = 'wolfbook.toggleAutoEditMode';
-    const _updateAutoEditStatusBar = () => {
-        _autoEditStatusBar.text    = _autoEnterEditMode ? '$(edit) WL: Edit↓' : '$(dash) WL: Edit↓';
-        _autoEditStatusBar.tooltip = _autoEnterEditMode
-            ? 'New cell enters edit mode. Click to disable.'
-            : 'New cell stays selected (no edit). Click to enable.';
+    _fmtStatusBar.name = 'Wolfbook Auto Format';
+    _fmtStatusBar.command = 'wolfbook.toggleAutoFormat';
+    const _updateFmtStatusBar = () => {
+        _fmtStatusBar.text    = _autoFormatEnabled ? '$(check) WL: Fmt' : '$(dash) WL: Fmt';
+        _fmtStatusBar.tooltip = _autoFormatEnabled
+            ? 'Auto-format on Enter: ON. Click to disable.'
+            : 'Auto-format on Enter: OFF. Click to enable.';
     };
-    _updateAutoEditStatusBar();
-    _autoEditStatusBar.hide(); // hidden until a wolfbook notebook is active
-    context.subscriptions.push(_autoEditStatusBar);
+    _updateFmtStatusBar();
+    _fmtStatusBar.hide(); // hidden until a wolfbook notebook is active
+    context.subscriptions.push(_fmtStatusBar);
     context.subscriptions.push(vscode.window.onDidChangeActiveNotebookEditor(ed => {
-        if (ed?.notebook?.notebookType === 'extended-wolfram-notebook') _autoEditStatusBar.show();
-        else _autoEditStatusBar.hide();
+        if (ed?.notebook?.notebookType === 'extended-wolfram-notebook') _fmtStatusBar.show();
+        else _fmtStatusBar.hide();
     }));
-    context.subscriptions.push(vscode.commands.registerCommand('wolfbook.toggleAutoEditMode', () => {
-        _autoEnterEditMode = !_autoEnterEditMode;
-        _updateAutoEditStatusBar();
+    context.subscriptions.push(vscode.commands.registerCommand('wolfbook.toggleAutoFormat', async () => {
+        _autoFormatEnabled = !_autoFormatEnabled;
+        await vscode.workspace.getConfiguration('wolfbook').update(
+            'formatter.autoFormat', _autoFormatEnabled,
+            vscode.ConfigurationTarget.Global
+        );
+        _updateFmtStatusBar();
     }));
+    // Keep toggleAutoEditMode registered (no-op) in case keybinding survives in user settings
+    context.subscriptions.push(vscode.commands.registerCommand('wolfbook.toggleAutoEditMode', () => {}));
     context.subscriptions.push(vscode.commands.registerCommand('wolfbook.insertCellAbove', async () => {
         await vscode.commands.executeCommand('notebook.cell.insertCodeCellAbove');
         await new Promise(r => setTimeout(r, 80));
@@ -775,15 +816,24 @@ function activate(context) {
         await vscode.commands.executeCommand('notebook.cell.edit');
     }));
 
-    // wolfram.cursorLeft / wolfram.cursorRight
-    // At the very start of a cell, Left arrow exits edit mode (like Escape).
-    // At the very end of a cell, Right arrow exits edit mode.
-    // Otherwise, delegates to the default cursorLeft / cursorRight.
-    // The !wolframInEscapeMode guard in the keybinding ensures these don't
-    // interfere with moving the cursor to extend an alias selection.
+    // wolfram.cursorLeft / cursorRight / cursorUp / cursorDown
+    // At cell boundaries, an isolated key press exits edit mode (like Escape).
+    // A repeated press (user holding the key) is treated as auto-repeat and
+    // simply moves the cursor — so navigating through code with a held key
+    // never accidentally pops out of the cell.
+    // Auto-repeat threshold: macOS fires at ~30 Hz (33 ms); human taps are >150 ms apart.
+    const ARROW_REPEAT_MS = 120;
+    let lastLeftTime  = 0;
+    let lastRightTime = 0;
+    let lastUpTime    = 0;
+    let lastDownTime  = 0;
+
     context.subscriptions.push(vscode.commands.registerCommand('wolfram.cursorLeft', async () => {
+        const now = Date.now();
+        const isRepeat = (now - lastLeftTime) < ARROW_REPEAT_MS;
+        lastLeftTime = now;
         const editor = vscode.window.activeTextEditor;
-        if (editor && editor.selection.isEmpty) {
+        if (!isRepeat && editor && editor.selection.isEmpty) {
             const pos = editor.selection.active;
             if (pos.line === 0 && pos.character === 0) {
                 await vscode.commands.executeCommand('notebook.cell.quitEdit');
@@ -794,8 +844,11 @@ function activate(context) {
     }));
 
     context.subscriptions.push(vscode.commands.registerCommand('wolfram.cursorRight', async () => {
+        const now = Date.now();
+        const isRepeat = (now - lastRightTime) < ARROW_REPEAT_MS;
+        lastRightTime = now;
         const editor = vscode.window.activeTextEditor;
-        if (editor && editor.selection.isEmpty) {
+        if (!isRepeat && editor && editor.selection.isEmpty) {
             const pos  = editor.selection.active;
             const last = editor.document.lineCount - 1;
             if (pos.line === last && pos.character === editor.document.lineAt(last).text.length) {
@@ -806,9 +859,68 @@ function activate(context) {
         await vscode.commands.executeCommand('cursorRight');
     }));
 
+    context.subscriptions.push(vscode.commands.registerCommand('wolfram.cursorUp', async () => {
+        const now = Date.now();
+        const isRepeat = (now - lastUpTime) < ARROW_REPEAT_MS;
+        lastUpTime = now;
+        const editor = vscode.window.activeTextEditor;
+        if (!isRepeat && editor && editor.selection.isEmpty) {
+            if (editor.selection.active.line === 0) {
+                await vscode.commands.executeCommand('notebook.cell.quitEdit');
+                return;
+            }
+        }
+        await vscode.commands.executeCommand('cursorUp');
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('wolfram.cursorDown', async () => {
+        const now = Date.now();
+        const isRepeat = (now - lastDownTime) < ARROW_REPEAT_MS;
+        lastDownTime = now;
+        const editor = vscode.window.activeTextEditor;
+        if (!isRepeat && editor && editor.selection.isEmpty) {
+            const last = editor.document.lineCount - 1;
+            if (editor.selection.active.line === last) {
+                await vscode.commands.executeCommand('notebook.cell.quitEdit');
+                return;
+            }
+        }
+        await vscode.commands.executeCommand('cursorDown');
+    }));
+
+    // Hover doc expand command: triggered when user clicks the 📖 stub in a hover.
+    // Sends raw Markdown to the Watch panel webview; marked+KaTeX renders it there.
+    context.subscriptions.push(vscode.commands.registerCommand('wolfram.expandHoverDoc', async (cacheKey) => {
+        if (!cacheKey) return;
+        // Extract fallback Markdown from LSP cache (used only when kernel is off)
+        const cached = _hoverDocCache.get(cacheKey);
+        let fallbackMd = null;
+        if (cached) {
+            const parts = Array.isArray(cached.contents) ? cached.contents : [cached.contents];
+            fallbackMd = parts.map(c =>
+                typeof c === 'string' ? c
+                : (c && typeof c === 'object' && 'value' in c) ? c.value
+                : ''
+            ).filter(Boolean).join('\n\n---\n\n');
+        }
+        // Focus the watch panel first
+        try { await vscode.commands.executeCommand('wolfbook.watchPanel.focus'); } catch(_) {}
+        // Use same eval-sel pipeline: kernel → BTL render → evalSelUpdate
+        // Works for built-in AND user-defined symbols; falls back to LSP Markdown if kernel is off
+        await evalSel.docLookup(controller, cacheKey, _watchPanel, fallbackMd);
+    }));
+
     // Setup Escape Mode (Esc key for Mathematica-style aliases)
     (0, escape_mode_1.registerEscapeMode)(context, extensionPath);
     console.log('[Extension] Escape mode registered');
+
+    // Setup SmartSelect / Expand Selection for Wolfram Language
+    require('./editor/selectionRange').register(context);
+    console.log('[Extension] Selection range provider registered');
+
+    // Setup bracket-based code folding for Wolfram Language
+    require('./editor/folding').register(context);
+    console.log('[Extension] Folding range provider registered');
 
     // Setup refine-mode scroll guard: pins viewport to evaluated cell during
     // streaming output, cancelling VS Code's internal appendOutput-triggered scrolls.
@@ -1006,6 +1118,55 @@ function activate(context) {
     }
 
     // Setup LSP client
+    // Popular Wolfram Language functions for completion priority sorting.
+    // Items in this set appear before alphabetical results.
+    const _wolframPopularFunctions = new Set([
+        'Table', 'Do', 'For', 'While', 'If', 'Which', 'Switch', 'Module', 'Block', 'With',
+        'Map', 'Apply', 'Select', 'Cases', 'Fold', 'FoldList', 'Nest', 'NestList', 'Thread',
+        'Print', 'Echo', 'StringJoin', 'StringReplace', 'StringCases', 'StringSplit',
+        'ToString', 'ToExpression', 'InputForm', 'FullForm',
+        'Plot', 'ListPlot', 'Plot3D', 'ListLinePlot', 'Show', 'Graphics', 'GraphicsComplex',
+        'Solve', 'NSolve', 'DSolve', 'NDSolve', 'Reduce', 'Simplify', 'FullSimplify',
+        'Series', 'Normal', 'Coefficient', 'CoefficientList', 'Expand', 'Factor', 'Apart',
+        'Integrate', 'NIntegrate', 'D', 'Dt', 'Limit', 'Sum', 'Product',
+        'Replace', 'ReplaceAll', 'ReplaceRepeated', 'Rule', 'RuleDelayed',
+        'List', 'Association', 'Append', 'Prepend', 'Join', 'Flatten', 'Part', 'Take', 'Drop',
+        'Length', 'Dimensions', 'Range', 'ConstantArray', 'Array', 'SparseArray',
+        'Sort', 'SortBy', 'Reverse', 'Position', 'MemberQ', 'FreeQ', 'Count',
+        'Plus', 'Times', 'Power', 'Sqrt', 'Log', 'Exp', 'Sin', 'Cos', 'Tan',
+        'Abs', 'Re', 'Im', 'Conjugate', 'Arg',
+        'MatrixForm', 'Transpose', 'Inverse', 'Det', 'Dot', 'Cross', 'Eigenvalues', 'Eigenvectors',
+        'LinearSolve', 'SingularValueDecomposition',
+        'Set', 'SetDelayed', 'Clear', 'ClearAll', 'Remove',
+        'True', 'False', 'None', 'Null', 'Infinity', 'All', 'Automatic',
+        'Function', 'Slot', 'SlotSequence', 'Return', 'Break', 'Continue', 'Throw', 'Catch',
+        'Head', 'MatchQ', 'Pattern', 'Blank', 'BlankSequence', 'BlankNullSequence',
+        'Quiet', 'Check', 'AbsoluteTime', 'AbsoluteTiming', 'Timing',
+        'Export', 'Import', 'Put', 'Get', 'ReadList', 'Read', 'Write',
+        'Names', 'Context', 'Contexts', 'Begin', 'End', 'BeginPackage', 'EndPackage',
+        'Manipulate', 'Dynamic', 'DynamicModule', 'Slider', 'Button',
+        'Row', 'Column', 'Grid', 'Panel', 'Pane', 'Style', 'Text',
+        'Labeled', 'Tooltip', 'Framed', 'Item',
+        'ParallelMap', 'ParallelTable', 'ParallelDo',
+        'FindRoot', 'NMinimize', 'NMaximize', 'FindMinimum', 'FindMaximum',
+        'Interpolation', 'Fit', 'FindFit', 'LinearModelFit',
+        'DownValues', 'OwnValues', 'SubValues', 'UpValues', 'Attributes',
+        'Hold', 'HoldForm', 'Evaluate', 'ReleaseHold', 'Unevaluated',
+        'Condition', 'PatternTest', 'Alternatives',
+        'StringForm', 'TemplateApply', 'FileNameJoin', 'DirectoryName',
+        'DateString', 'Now', 'Pause',
+        'Keys', 'Values', 'Lookup', 'AssociationThread', 'Merge', 'KeySort',
+        'GroupBy', 'Counts', 'Tally', 'DeleteDuplicates', 'Union', 'Intersection', 'Complement',
+        'Piecewise', 'Boole', 'UnitStep', 'HeavisideTheta',
+        'Assuming', 'Refine', '$Assumptions',
+        'N', 'Rationalize', 'Round', 'Floor', 'Ceiling', 'IntegerPart', 'FractionalPart',
+        'Mod', 'Quotient', 'GCD', 'LCM', 'FactorInteger', 'PrimeQ',
+        'RandomReal', 'RandomInteger', 'RandomChoice', 'SeedRandom',
+        'Partition', 'Riffle', 'Transpose', 'MapThread', 'MapIndexed',
+        'Total', 'Mean', 'Median', 'Variance', 'StandardDeviation',
+        'Max', 'Min', 'MinMax', 'Ordering', 'TakeLargest', 'TakeSmallest',
+    ]);
+
     let enabled = config.get("lsp.serverEnabled", true);
     if (!enabled) {
         return;
@@ -1128,6 +1289,8 @@ function activate(context) {
                     const msg = diag.message;
                     if (msg.toLowerCase().includes('unexpected expression at top-level')) return false;
                     if (msg.includes('Suspicious use of') && msg.includes('session symbol')) return false;
+                    if (msg.includes('Suspicious uppercase') && msg.includes('pattern')) return false;
+                    if (msg.includes('Operands') && msg.includes('different lines')) return false;
                     if (msg.includes('Non-ASCII character')) return false;
                     if (msg.includes('letterlike') || msg.includes('Unexpected character') ||
                         msg.includes('unexpected character') || msg.includes('Unknown character')) {
@@ -1144,6 +1307,81 @@ function activate(context) {
                     return true;
                 });
                 next(uri, filtered);
+            },
+            // Completion middleware: suppress auto-triggered LSP completions so the
+            // dropdown doesn't steal arrow keys.  Only show LSP completions when
+            // explicitly invoked (Ctrl+Space / Cmd+Space) or on trigger characters.
+            // When shown, re-sort by approximate function popularity.
+            async provideCompletionItem(document, position, context, token, next) {
+                // vscode.CompletionTriggerKind: 0=Invoke, 1=TriggerCharacter, 2=TriggerForIncompleteCompletions
+                if (context.triggerKind !== 0 && context.triggerKind !== 1) {
+                    // Auto-triggered (typing): require at least 3 chars of the current word
+                    const line = document.lineAt(position.line).text;
+                    const before = line.slice(0, position.character);
+                    const wordMatch = before.match(/[A-Za-z$][A-Za-z0-9$]*$/);
+                    if (!wordMatch || wordMatch[0].length < 3) {
+                        return undefined;
+                    }
+                }
+                const result = await next(document, position, context, token);
+                if (!result) return result;
+                // Re-sort by popularity: items in the top-tier list get sortText '0...',
+                // others get '1...' so VS Code orders popular items first.
+                const items = Array.isArray(result) ? result : (result.items || result);
+                if (Array.isArray(items)) {
+                    const popSet = _wolframPopularFunctions;
+                    for (const it of items) {
+                        const label = typeof it.label === 'string' ? it.label : it.label?.label;
+                        if (label && popSet.has(label)) {
+                            it.sortText = '0' + (it.sortText || label);
+                        } else {
+                            it.sortText = '1' + (it.sortText || label || '');
+                        }
+                    }
+                }
+                return result;
+            },
+            // Hover middleware: two-phase hover.
+            // Phase 1: immediately return a stub with only a 📖 book-icon link.
+            // Phase 2: when user clicks 📖, the expandHoverDoc command sets the
+            //   cache key in _hoverExpandSet and re-triggers showHover; this call
+            //   then returns the full cached LSP content.
+            async provideHover(document, position, token, next) {
+                const hover = await next(document, position, token);
+                if (!hover) return hover;
+
+                // Suppress the LSP "No function information." placeholder
+                const contents = hover.contents;
+                const texts = Array.isArray(contents) ? contents : [contents];
+                const allEmpty = texts.every(c => {
+                    const val = typeof c === 'string' ? c
+                              : (c && typeof c === 'object' && 'value' in c) ? c.value
+                              : '';
+                    return !val || val.trim() === '' || /^No function information\.?$/i.test(val.trim());
+                });
+                if (allEmpty) return null;
+
+                // Cache the hover keyed by docUri|symbolName (cap at 300 entries)
+                const wordRange = document.getWordRangeAtPosition(
+                    position,
+                    /[A-Za-z$\u00C0-\u024F\u0370-\u03FF\u1E00-\u1EFF][A-Za-z0-9$\u00C0-\u024F\u0370-\u03FF\u1E00-\u1EFF]*/
+                );
+                const word = wordRange ? document.getText(wordRange) : null;
+                // Key by symbol name only — Wolfram docs don't vary by file,
+                // and the notebook cell URI fragment changes between hover and click.
+                const cacheKey = word || `${position.line}:${position.character}`;
+                _hoverDocCache.set(cacheKey, hover);
+                if (_hoverDocCache.size > 300) {
+                    _hoverDocCache.delete(_hoverDocCache.keys().next().value);
+                }
+
+                // Return stub: clickable 📖 that shows full doc in the Watch panel
+                const cmdArg = encodeURIComponent(JSON.stringify([cacheKey]));
+                const md = new vscode.MarkdownString(
+                    `[📖](command:wolfram.expandHoverDoc?${cmdArg})`
+                );
+                md.isTrusted = { enabledCommands: ['wolfram.expandHoverDoc'] };
+                return new vscode.Hover(md);
             }
         }
     };
@@ -1164,6 +1402,8 @@ function activate(context) {
                         const msg = diag.message;
                         if (msg.toLowerCase().includes('unexpected expression at top-level')) return false;
                         if (msg.includes('Suspicious use of') && msg.includes('session symbol')) return false;
+                        if (msg.includes('Suspicious uppercase') && msg.includes('pattern')) return false;
+                        if (msg.includes('Operands') && msg.includes('different lines')) return false;
                         if (msg.includes('Non-ASCII character')) return false;
                         // Suppress any diagnostic whose range contains ONLY non-ASCII characters
                         // (these are our \[Name] → Unicode replacements — fully valid WL).
