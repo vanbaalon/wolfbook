@@ -501,6 +501,7 @@ class DebugController {
         this._xfm            = xfm;
         this._active         = true;
         this._timingMap      = new Map();
+        this._renderedSteps  = new Set();   // tracks depth:step keys already rendered as output
         this._timingCellUri  = cell.document.uri.toString();
         this._pauseCount     = 0;
         this._lastStepCommand = null;
@@ -820,10 +821,16 @@ class DebugController {
 
         // Render the result of the step that JUST completed (prevTimingStep),
         // so output appears immediately as each step finishes.
-        if (prevTimingDepth === 0 && prevTimingStep > 0 && this._debugExecution && ctrl) {
+        // Guard with _renderedSteps to avoid re-rendering the same step on every inner-loop
+        // pause (LastCompleted stays at the outer step while we're executing inside the loop).
+        const _renderKey = `${prevTimingDepth}:${prevTimingStep}`;
+        if (prevTimingDepth === 0 && prevTimingStep > 0
+                && !this._renderedSteps.has(_renderKey)
+                && this._debugExecution && ctrl) {
             const prevStepMeta = (this._xfm?.steps ?? []).find(
                 s => s.depth === 0 && s.localStep === prevTimingStep);
             if (prevStepMeta && !prevStepMeta.suppressedOutput) {
+                this._renderedSteps.add(_renderKey);
                 const cellForFmt = this._cell;
                 const fmt = (ctrl._resolveFormat && cellForFmt)
                     ? ctrl._resolveFormat(cellForFmt)
