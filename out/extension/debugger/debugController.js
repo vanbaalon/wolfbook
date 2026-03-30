@@ -590,13 +590,16 @@ class DebugController {
                 if (this._watchPanel) this._watchPanel.log('[Print] ' + text.split('\n')[0]);
                 const newHtml = '<pre class="vscode-wolfram-print-output">' + escapeHtml(text) + '</pre>';
                 if (this._debugExecution) {
-                    this._debugPrintHtml += newHtml;
                     if (this._debugPrintOut) {
+                        // Existing block: append to accumulated HTML and replace in-place
+                        this._debugPrintHtml += newHtml;
                         this._debugExecution.replaceOutputItems(
                             [vscode.NotebookCellOutputItem.text(this._debugPrintHtml, 'x-application/wolfram-language-html')],
                             this._debugPrintOut
                         ).catch(() => {});
                     } else {
+                        // New block: reset accumulator to only this line, then append
+                        this._debugPrintHtml = newHtml;
                         this._debugPrintOut = new vscode.NotebookCellOutput([
                             vscode.NotebookCellOutputItem.text(this._debugPrintHtml, 'x-application/wolfram-language-html')
                         ]);
@@ -986,6 +989,46 @@ class DebugController {
             }
         } else {
             scrollLog('[wolfbook-debug] _finishDebug: skipped output render');
+        }
+
+        // Render any intermediate depth-0 steps whose results were never shown
+        // (e.g. when the user pressed Continue and skipped all pauses, or the last
+        // step was a loop so _canRender was false and earlier scalar results were missed).
+        if (!wasStopping && ctrl?.session && this._debugExecution && this._xfm) {
+            const d0Steps = (this._xfm.steps ?? [])
+                .filter(s => s.depth === 0 && !s.suppressedOutput)
+                .sort((a, b) => a.localStep - b.localStep);
+            const lastD0 = d0Steps[d0Steps.length - 1];
+            for (const step of d0Steps) {
+                const rk = `0:${step.localStep}`;
+                // Skip if already rendered in _onDialogBegin, or if _canRender handled the last step
+                if (this._renderedSteps.has(rk)) continue;
+                if (_canRender && step === lastD0) continue;
+                try {
+                    const cellForFmt = this._cell || finishedCell;
+                    const fmt = (ctrl._resolveFormat && cellForFmt)
+                        ? ctrl._resolveFormat(cellForFmt)
+                        : (vscode.workspace.getConfiguration('wolfram').get('notebook.rendering.outputFormat') || 'Auto');
+                    const scale = Number(ctrl.config?.get?.('imageScale') ??
+                        vscode.workspace.getConfiguration('wolfram').get('imageScale') ?? 0.8);
+                    const rw = await ctrl.session.evaluate(
+                        `wolfbookDebug$RenderStep[0, ${step.localStep}, "${fmt}", ${scale}]`,
+                        { interactive: false, rejectDialog: true });
+                    const rawHtml = rw?.result?.type === 'string' ? rw.result.value : null;
+                    if (rawHtml && this._debugExecution) {
+                        const html = ctrl._processWLLatexBoxes
+                            ? ctrl._processWLLatexBoxes(ctrl._fixImageUris ? ctrl._fixImageUris(rawHtml) : rawHtml)
+                            : rawHtml;
+                        this._debugPrintOut = null;
+                        await this._debugExecution.appendOutput(new vscode.NotebookCellOutput([
+                            vscode.NotebookCellOutputItem.text(
+                                `<div class="wl-output-block"><div class="wl-output-content">${html}</div></div>`,
+                                'x-application/wolfram-language-html'),
+                        ]));
+                        this._renderedSteps.add(rk);
+                    }
+                } catch (_) {}
+            }
         }
 
         // End the notebook cell execution (stops the spinner, makes output permanent)
