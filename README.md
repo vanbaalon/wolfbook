@@ -208,6 +208,7 @@ Copilot has full read/write/delete access to notebook cells — not just the abi
   - **Advance mode** (unchanged cell) — the evaluated cell scrolls to the top of the viewport the moment you press Shift+Enter, before output arrives. Output fills in below without any further viewport jump. Focus advances to the next cell so you can keep evaluating.
   - **Refine mode** (cell was edited since last run) — the viewport stays completely still. Focus returns to the same cell in edit mode with the cursor restored, so you can immediately continue editing. Use this mode when iterating on a single cell.
   - Auto-detection works on first run too: if you edit a fresh cell before ever running it, it correctly enters Refine mode. The active mode is shown in the status bar (bottom-right) and can be forced with the toolbar button.
+- **Smart bracket selection** — `⌃⇧→` / `Alt+Shift+Right` progressively expands the selection through Wolfram Language bracket levels, Mathematica-style. Starting from the cursor, each press widens the selection to the next enclosing scope: word → comma-separated argument → bracketed group → head + brackets → outer expression → …. Works with all bracket types (`[…]`, `[[…]]`, `{…}`, `(…)`) and correctly handles strings, comments, and nested structures.
 - **AI-readable output layer** — every cell output carries a `text/plain` MIME item containing a clean, readable summary (InputForm result, error messages, and kernel warnings) alongside the rich HTML. This is what the `#wolfbookContext` tool reads — Copilot sees exactly what was computed in each cell, with no HTML noise. The official extension has no machine-readable output format or notebook specific agentic tools.
 
 
@@ -397,6 +398,8 @@ Do[n = k; Pause[0.5], {k, 1, 20}]  (* runs concurrently *)
 - **LSP diagnostics** — powered by Wolfram's `LSPServer` package (hover, completion, error underlining)
 - **Unicode input** — type `\[Alpha]` and it auto-replaces to `α`; or use `` ` `` + alias (Mathematica-style escape sequences)
 - **Themes** — Coloured themes for distinguished look: Light, Dark, Dark Rainbow
+- **Code folding** — fold/unfold any bracket pair that spans multiple lines: `( )`, `[ ]`, `{ }`, `[[ ]]`, `<| |>`, and `(* *)` comments.  Closing-bracket lines are always kept visible so structure is clear at a glance.  Works in `.wb` / `.evsnb` notebooks and standalone `.wl` / `.wls` files.
+- **WL code formatter** — press `Alt+Shift+F` (or enable `wolfbook.formatter.autoFormat`) to format the current cell.  The formatter is bracket-depth-aware and preserves strings and comments.  Inline comments (e.g. `x = 1;(*comment*)`) are moved to their own line; blank lines around standalone comments are preserved; trailing newlines are kept as-is.
 - **Paste image as cell** *(macOS only)* — copy any image to the clipboard, then:
   - `⌘V` with a cell selected (but not in edit mode) — inserts the image immediately as a new Markdown cell below
   - `⌘⇧V` anywhere in the notebook — shows a prompt to insert the image above or below the current cell
@@ -418,6 +421,8 @@ A complete reference for all keyboard shortcuts in Wolfbook notebooks (`.evsnb`)
 | **Evaluate selection** | `Cmd+Shift+E` | `Ctrl+Shift+E` |
 | **Add selection to Watch panel** | `Cmd+Shift+W` | `Ctrl+Shift+W` |
 | **Debug cell (step-by-step)** | `Cmd+Shift+D` | `Ctrl+Shift+D` |
+| **Expand selection (smart bracket select)** | `⌃⇧→` | `Alt+Shift+Right` |
+| **Shrink selection** | `⌃⇧←` | `Alt+Shift+Left` |
 | **Paste image as cell below** | `Cmd+Shift+V` | — |
 | **Enter alias mode** (type `alpha` → `α`, etc.) | `Esc` | `Esc` |
 | **Jump to cell above** (command mode) | `←` | `←` |

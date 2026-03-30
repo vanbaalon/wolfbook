@@ -4,6 +4,37 @@ All notable changes to **Wolfbook** are documented here.
 
 ---
 
+## [2.5.9] - 2026-03-30
+
+### Added
+- **Code folding** — fold/unfold any Wolfram Language bracket pair that spans multiple lines: `( )`, `[ ]`, `{ }`, `[[ ]]` (Part), `<| |>` (Association), and `(* *)` comments.  Closing-bracket lines are always kept visible when folded so code structure remains clear.  Works in `.wb` / `.evsnb` / `.vsnb` notebooks as well as standalone `.wl` / `.wls` / `.m` files.
+
+---
+
+## [2.4.0] - 2026-03-24
+
+### Fixed
+- **Standard LaTeX math operators** — functions such as `cosh`, `sinh`, `log`, `det`, `gcd`, etc. are now rendered as proper LaTeX operator commands (`\cosh`, `\sinh`, `\log`, `\det`, …) in both the C++ BTL addon and the WL fallback renderer.  This gives correct automatic spacing in math mode (e.g. `−i cosh²(ρ(σ))` no longer runs the operator letter-for-letter into adjacent terms).  ~40 standard operators are mapped; user-defined names continue to use `\mathrm{…}`.
+
+- **Code formatter — inline comment placement** — a comment immediately following a semicolon on the same line (`var=4;(*comment*)`) is now moved to its own line without adding extra blank lines around it:
+  ```
+  Before: var=4; (*comment*)
+  After:  var=4;
+          (*comment*)
+          a=5;
+  ```
+  Blank lines are only inserted around comments that were originally on their own line; inline-trailing comments get no surrounding blank lines.
+
+- **Code formatter — trailing newlines preserved** — the formatter no longer normalises trailing newlines to exactly 0 or 1; the original trailing newline count is preserved.
+
+- **Code formatter — Enter key in markdown cells** — the auto-format-on-Enter feature (when `wolfbook.formatter.autoFormat` is enabled) previously triggered inside markdown cells, reformatting them as Wolfram Language code.  It now only activates in `wolfram` language cells.
+
+- **Global symbol colouring in new workspaces** — `wolfram.editor.globalSymbolColor` now defaults to `#333333` so unrecognised symbols are coloured immediately in any new workspace, without requiring a manual entry in `.code-workspace`.  Set the value to `off` or `none` to disable.
+
+- **TextMate scope for global-symbol highlighting** — the extension's `configurationDefaults` now correctly specifies the `symbol.unrecognized` scope (was the non-functional `symbol.unrecognized.wolfram`).
+
+---
+
 ## [2.3.2] - 2026-03-21
 
 ### Added

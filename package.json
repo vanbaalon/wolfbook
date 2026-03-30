@@ -3,7 +3,7 @@
     "displayName": "Wolfbook \u2014 Wolfram Language Notebook",
     "description": "Interactive Wolfram Language notebook for VS Code. WSTP-backed kernel, MathML/SVG/PNG rendering, Unicode input, LSP diagnostics, and output expansion controls.",
     "publisher": "wolfbook",
-    "version": "2.3.2",
+    "version": "2.5.9",
     "engines": {
         "vscode": "^1.95.0"
     },
@@ -189,10 +189,10 @@
                     "order": 3
                 },
                 "wolfram.editor.globalSymbolColor": {
-                    "scope": "user",
+                    "scope": "window",
                     "type": "string",
                     "default": "#333333",
-                    "description": "Color applied to Global` symbols that have a value (set variables). Unset symbols use the theme's color for the 'symbol.unrecognized' TM scope (default: #336699 blue). Leave empty to disable both.",
+                    "description": "Color applied to Global` symbols that have a value (set variables). Unset symbols use #336699 blue via the 'symbol.unrecognized' TM scope. Leave empty or set to 'off' to disable.",
                     "order": 3
                 },
                 "wolfram.notebook.rendering.invertBrightnessInDarkThemes": {
@@ -388,6 +388,10 @@
                 "title": "Wolfbook: Format Notebook (all cells)"
             },
             {
+                "command": "wolfbook.testSelectionRange",
+                "title": "Wolfbook: Test Selection Range (debug)"
+            },
+            {
                 "command": "wolfram.setOutputFormatImage",
                 "title": "Output: Image (PNG)",
                 "icon": "$(file-media)"
@@ -412,6 +416,10 @@
                 "title": "Notebook Settings",
                 "shortTitle": "Settings",
                 "icon": "$(settings-gear)"
+            },
+            {
+                "command": "wolfram.expandHoverDoc",
+                "title": "Wolfram: Show Full Documentation (expand hover)"
             },
             {
                 "command": "wolfbook.debug.debugCell",
@@ -727,12 +735,12 @@
                 "command": "wolfram.pasteImageCell",
                 "key": "ctrl+shift+v",
                 "mac": "cmd+shift+v",
-                "when": "notebookEditorFocused && !inputFocus && notebookType == 'extended-wolfram-notebook'"
+                "when": "notebookEditorFocused && notebookType == 'extended-wolfram-notebook'"
             },
             {
                 "command": "wolfram.abortEvaluation",
                 "key": "cmd+.",
-                "when": "notebookEditorFocused && notebookType == 'extended-wolfram-notebook'"
+                "when": "(notebookEditorFocused || editorTextFocus) && notebookType == 'extended-wolfram-notebook'"
             },
             {
                 "command": "wolfram.openDialogSubsession",
@@ -765,6 +773,16 @@
                 "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook' && !wolframInEscapeMode && !suggestWidgetVisible"
             },
             {
+                "command": "wolfram.cursorUp",
+                "key": "up",
+                "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook' && !wolframInEscapeMode && !suggestWidgetVisible"
+            },
+            {
+                "command": "wolfram.cursorDown",
+                "key": "down",
+                "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook' && !wolframInEscapeMode && !suggestWidgetVisible"
+            },
+            {
                 "command": "wolfram.navLeft",
                 "key": "left",
                 "when": "notebookEditorFocused && !editorTextFocus && !inputFocus && notebookType == 'extended-wolfram-notebook'"
@@ -772,6 +790,16 @@
             {
                 "command": "wolfram.navRight",
                 "key": "right",
+                "when": "notebookEditorFocused && !editorTextFocus && !inputFocus && notebookType == 'extended-wolfram-notebook'"
+            },
+            {
+                "command": "wolfram.navLeft",
+                "key": "up",
+                "when": "notebookEditorFocused && !editorTextFocus && !inputFocus && notebookType == 'extended-wolfram-notebook'"
+            },
+            {
+                "command": "wolfram.navRight",
+                "key": "down",
                 "when": "notebookEditorFocused && !editorTextFocus && !inputFocus && notebookType == 'extended-wolfram-notebook'"
             },
             {
@@ -848,8 +876,8 @@
             },
             {
                 "command": "wolfram.restartKernel",
-                "key": "ctrl+. ,",
-                "mac": "cmd+. ,",
+                "key": "ctrl+shift+r",
+                "mac": "cmd+shift+r",
                 "when": "(notebookEditorFocused || editorTextFocus) && notebookType == 'extended-wolfram-notebook'"
             }
         ],
@@ -907,21 +935,60 @@
                 "description": "Wolfram Language expert with live kernel access. Reads your notebook, evaluates expressions, edits cells, and debugs code.",
                 "isSticky": true,
                 "commands": [
+                    { "name": "run",     "description": "Run cells in the notebook and report results" },
+                    { "name": "explain", "description": "Explain what the code in the notebook does" },
+                    { "name": "debug",   "description": "Debug errors and fix issues in the notebook" },
+                    { "name": "insert",  "description": "Insert new cells into the notebook" }
+                ],
+                "disambiguation": [
                     {
-                        "name": "run",
-                        "description": "Run cells in the notebook and report results"
+                        "category": "wolfram_direct",
+                        "description": "Direct Wolfram Language evaluation, lookup, or cell manipulation",
+                        "examples": [
+                            "Evaluate this expression",
+                            "What does FoldList do?",
+                            "Run cell 5",
+                            "Insert this code",
+                            "Look up NDSolve options"
+                        ]
+                    }
+                ]
+            },
+            {
+                "id": "wolfbook.team",
+                "fullName": "Wolfteam — Collaborative Research Assistant",
+                "name": "wolfteam",
+                "description": "Plan and execute calculations together. Thinks out loud, asks at decision points, tracks progress with a to-do list.",
+                "isSticky": true,
+                "commands": [
+                    { "name": "plan",     "description": "Plan a multi-step calculation" },
+                    { "name": "check",    "description": "Sanity-check the current result" },
+                    { "name": "summarise","description": "Summarise the calculation so far" },
+                    { "name": "clean",   "description": "Clean up notebook: remove failed cells, reorder" },
+                    { "name": "export",  "description": "Export successful calculation path as clean cells" },
+                    { "name": "back",    "description": "Go back to a previous step or try alternative approach" }
+                ],
+                "disambiguation": [
+                    {
+                        "category": "collaborative_calculation",
+                        "description": "Multi-step calculations that benefit from planning and discussion",
+                        "examples": [
+                            "Help me compute the Ricci tensor for this metric",
+                            "Let's derive the equations of motion",
+                            "I want to set up a perturbation expansion",
+                            "Can we work through this integral step by step?",
+                            "Let's figure out why this result doesn't simplify"
+                        ]
                     },
                     {
-                        "name": "explain",
-                        "description": "Explain what the code in the notebook does"
-                    },
-                    {
-                        "name": "debug",
-                        "description": "Debug errors and fix issues in the notebook"
-                    },
-                    {
-                        "name": "insert",
-                        "description": "Insert new cells into the notebook"
+                        "category": "notebook_review",
+                        "description": "Reviewing, checking, or reorganising notebook calculations",
+                        "examples": [
+                            "Does this result look right?",
+                            "Summarise what we've computed so far",
+                            "Clean up the notebook and remove dead ends",
+                            "Go back to before we tried that substitution"
+                        ]
                     }
                 ]
             }
@@ -1496,13 +1563,101 @@
                     },
                     "required": ["query"]
                 }
+            },
+            {
+                "name": "wolfteam_proposePlan",
+                "displayName": "Propose Calculation Plan",
+                "modelDescription": "Call this tool when you have formulated a multi-step calculation plan and need the user to approve it before you begin executing. Pass the plan summary and list of steps. The user will see the plan in a confirmation dialog and click Allow to approve, or Deny to reject. Do NOT execute any steps until this tool returns successfully.",
+                "tags": ["wolfteam"],
+                "canBeReferencedInPrompt": false,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "planSummary": {
+                            "type": "string",
+                            "description": "One-paragraph summary of what the plan will accomplish"
+                        },
+                        "steps": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Ordered list of steps to execute"
+                        }
+                    },
+                    "required": ["planSummary", "steps"]
+                }
+            },
+            {
+                "name": "wolfteam_askDecision",
+                "displayName": "Ask User Decision",
+                "modelDescription": "Call this tool when you reach a conceptual decision point — a choice of gauge, coordinate system, ansatz, expansion strategy, or any fork where the user's physics expertise should guide the direction. Present the question, the available options, and a default. The user can edit the selectedOption parameter before approving. Do NOT guess — always call this tool at genuine decision points.",
+                "tags": ["wolfteam"],
+                "canBeReferencedInPrompt": false,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "question": {
+                            "type": "string",
+                            "description": "The decision question"
+                        },
+                        "options": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Available choices (2-5 options)"
+                        },
+                        "defaultOption": {
+                            "type": "string",
+                            "description": "Your recommended default choice"
+                        },
+                        "selectedOption": {
+                            "type": "string",
+                            "description": "The user's selected option — user can edit this before clicking Allow"
+                        },
+                        "context": {
+                            "type": "string",
+                            "description": "Brief context for why this decision matters"
+                        }
+                    },
+                    "required": ["question", "options", "defaultOption"]
+                }
+            },
+            {
+                "name": "wolfteam_checkpoint",
+                "displayName": "Progress Checkpoint",
+                "modelDescription": "Call this tool after completing a significant calculation step to show the user the intermediate result and what comes next. The user clicks Allow to continue or Deny to pause and inspect. Use between major steps, not after every trivial evaluation.",
+                "tags": ["wolfteam"],
+                "canBeReferencedInPrompt": false,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "stepCompleted": {
+                            "type": "string",
+                            "description": "What was just completed"
+                        },
+                        "result": {
+                            "type": "string",
+                            "description": "The key result or output (keep concise)"
+                        },
+                        "nextStep": {
+                            "type": "string",
+                            "description": "What will be done next if user approves"
+                        }
+                    },
+                    "required": ["stepCompleted", "result", "nextStep"]
+                }
             }
         ],
         "configurationDefaults": {
+            "wolfram.editor.globalSymbolColor": "#333333",
+            "workbench.colorCustomizations": {
+                "editor.wordHighlightBackground": "#3399ff18",
+                "editor.wordHighlightStrongBackground": "#3399ff28",
+                "editor.wordHighlightBorder": "#3399ff40",
+                "editor.wordHighlightStrongBorder": "#3399ff55"
+            },
             "editor.tokenColorCustomizations": {
                 "textMateRules": [
                     {
-                        "scope": "symbol.unrecognized.wolfram",
+                        "scope": "symbol.unrecognized",
                         "settings": { "foreground": "#336699" }
                     }
                 ]
