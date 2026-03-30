@@ -269,6 +269,7 @@ async function checkoutExecutionQueue(self) {
         // loop's _subAutoLock prevents new subAuto calls from piling on.
         if (self._subAutoLock) {
             scrollLog('[checkout] waiting for pending subAuto to drain...');
+            self.writeDebugLog(`[CHECKOUT] cell ${currentExecution.execution.cell.index} | subAuto drain wait start`);
             try {
                 await Promise.race([
                     self._subAutoLock,
@@ -276,11 +277,13 @@ async function checkoutExecutionQueue(self) {
                 ]);
             } catch (_) {}
             scrollLog('[checkout] subAuto drain done | lock still held:', !!self._subAutoLock);
+            self.writeDebugLog(`[CHECKOUT] cell ${currentExecution.execution.cell.index} | subAuto drain done | lock held: ${!!self._subAutoLock}`);
         }
 
         // ---- Syntax check on full cell text (non-blocking, non-fatal) ----
         // sub() has higher priority than evaluate() — runs before queued evaluate() calls.
         // Dynamic idle-path now uses subWhenIdle() (not sub()), so no mutex needed.
+        self.writeDebugLog(`[CHECKOUT] cell ${currentExecution.execution.cell.index} | syntax check start`);
         try {
             const syntaxResult = await self.session.sub(
                 "VsCodeSyntaxCheck[" + JSON.stringify(code) + "]"
@@ -297,12 +300,14 @@ async function checkoutExecutionQueue(self) {
 
         const _coT0 = Date.now();
         scrollLog('[checkout] VsCodeSetImgDir start | cell', currentExecution.execution.cell.index);
+        self.writeDebugLog(`[CHECKOUT] cell ${currentExecution.execution.cell.index} | VsCodeSetImgDir start`);
         try {
             await self.session.evaluate(
                 `VsCodeSetImgDir["${self.escapeWL(imgDir)}", "${self.escapeWL(imgRel)}"]`,
                 { interactive: false, rejectDialog: true }
             );
             scrollLog('[checkout] VsCodeSetImgDir done | dt=', Date.now() - _coT0, 'ms');
+            self.writeDebugLog(`[CHECKOUT] cell ${currentExecution.execution.cell.index} | VsCodeSetImgDir done | dt=${Date.now() - _coT0}ms`);
         } catch (imgDirErr) {
             self.writeDebugLog(`[CHECKOUT] VsCodeSetImgDir failed (non-fatal): ${imgDirErr.message}`);
         }
@@ -314,12 +319,14 @@ async function checkoutExecutionQueue(self) {
         // the Dynamic widget loop spins in the 15-cycle backoff forever.
         // This runs before _evalDispatched=true so Dynamic loops cannot interrupt it.
         scrollLog('[checkout] interrupt handler reinstall start | cell', currentExecution.execution.cell.index);
+        self.writeDebugLog(`[CHECKOUT] cell ${currentExecution.execution.cell.index} | interrupt handler reinstall start`);
         try {
             await self.session.evaluate(
                 'Quiet[Internal`AddHandler["Interrupt", Function[Null, Dialog[]]]]',
                 { interactive: false, rejectDialog: true }
             );
             scrollLog('[checkout] interrupt handler reinstalled at cell start | dt=', Date.now() - _coT0, 'ms');
+            self.writeDebugLog(`[CHECKOUT] cell ${currentExecution.execution.cell.index} | interrupt handler done | dt=${Date.now() - _coT0}ms`);
         } catch (hdlrErr) {
             self.writeDebugLog(`[CHECKOUT] interrupt handler reinstall failed (non-fatal): ${hdlrErr.message}`);
         }
@@ -365,6 +372,7 @@ async function checkoutExecutionQueue(self) {
         // _dispatchEpoch increments per sub-expression (inside the for loop) so that
         // LiveEvaluations counts individual sub-expression dispatches, not cell-level.
         scrollLog('[checkout] _evalDispatched = true | cell', currentExecution.execution.cell.index, '| cellEpoch (pre-cell)', self._cellEpoch);
+        self.writeDebugLog(`[CHECKOUT] cell ${currentExecution.execution.cell.index} | _evalDispatched = true`);
 
         // ---- Evaluate each sub-expression one by one ----
         // Each goes through the interactive kernel main loop → gets its own
@@ -416,6 +424,7 @@ async function checkoutExecutionQueue(self) {
 
             const { text: subExpr, startLine: _subStartLine, endLine: _subEndLine } = subExprs[i];
             scrollLog('[checkout] sub', i, '/', subExprs.length, 'start | cell', currentExecution.execution.cell.index, '| expr:', subExpr.slice(0, 60));
+            self.writeDebugLog(`[CHECKOUT] cell ${currentExecution.execution.cell.index} | sub ${i}/${subExprs.length} start | expr: ${subExpr.slice(0, 80)}`);
 
             // ---- Skip Dynamic[...] — bypass kernel entirely ----
             // Dynamic slots are rendered by the widget loop; we never send
@@ -427,13 +436,12 @@ async function checkoutExecutionQueue(self) {
                 const _dynInnerText = subExpr.slice('Dynamic['.length, -1);
                 const _dynPlaceholder = new vscode.NotebookCellOutput([
                     vscode.NotebookCellOutputItem.text(
-                        '<div style="color:#888;font-style:italic;font-size:12px;padding:4px 0;">' +
-                        'Waiting for computation…</div>',
+                        '<div data-dynamic="1"></div>',
                         'x-application/wolfram-language-html'
                     ),
                     // TODO-1g: initial text/plain so Copilot knows which Dynamic expression this slot holds
                     vscode.NotebookCellOutputItem.text(
-                        '(* Dynamic[' + _dynInnerText + '] — waiting for computation *)', 'text/plain'
+                        '(* Dynamic[' + _dynInnerText + '] *)', 'text/plain'
                     )
                 ]);
                 if (currentExecution.hasOutput) {
@@ -488,6 +496,78 @@ async function checkoutExecutionQueue(self) {
                     const _nbFsPath = _execCell.notebook.uri.fsPath;
                     const _nbDir    = path.dirname(_nbFsPath);
                     await handleWBExport(_wbem[1] || null, _nbDir, _nbFsPath, currentExecution);
+                    continue;
+                }
+            }
+
+            // ---- Handle WBPrompt["prompt"] / WBPrompt["prompt", "wolfbook"->True/False] ----
+            // Never sent to the kernel.
+            // wolfbook->True  (default): routes through @wolfbook agent.
+            // wolfbook->False           : sends the prompt as plain Copilot chat.
+            {
+                const _wbpm = /^WBPrompt\["((?:[^"\\]|\\.)*)" *(?:, *"wolfbook" *-> *(True|False) *)?\]$/.exec(subExpr.trim());
+                if (_wbpm) {
+                    const { handleWBPrompt } = require('./wb-prompt');
+                    const _execCell = currentExecution.execution.cell;
+                    const _useWolfbook = _wbpm[2] !== 'False'; // default true
+                    await handleWBPrompt(_wbpm[1], _useWolfbook, currentExecution, _execCell);
+                    continue;
+                }
+            }
+
+            // ---- WB* syntax-error diagnostics ----
+            // If an expression starts with a known WB prefix but didn't match any
+            // valid pattern above, show a helpful error instead of silently falling
+            // through to the kernel (which would return a meaningless symbol error).
+            {
+                const _wbDiag = {
+                    WBInclude: {
+                        usage: [
+                            'WBInclude["path/to/file.wl"]',
+                        ],
+                        notes: 'Inserts the contents of a .wl / .m / .wls / .nb file as new cells immediately after this cell.',
+                    },
+                    WBExport: {
+                        usage: [
+                            'WBExport[]',
+                            'WBExport["path/to/output.nb"]',
+                        ],
+                        notes: 'Saves the current notebook as a Mathematica .nb file. Without an argument, saves alongside the .wb file.',
+                    },
+                    WBPrompt: {
+                        usage: [
+                            'WBPrompt["your task description"]',
+                            'WBPrompt["your task description", "wolfbook"->True]',
+                            'WBPrompt["your task description", "wolfbook"->False]',
+                        ],
+                        notes: [
+                            '"wolfbook"->True  (default) — routes the prompt through the @wolfbook agent, which has live kernel access and can insert cells.',
+                            '"wolfbook"->False — sends the raw prompt to plain Copilot chat.',
+                        ].join('<br>'),
+                    },
+                };
+                const _wbKey = Object.keys(_wbDiag).find(k => subExpr.trim().startsWith(k + '['));
+                if (_wbKey) {
+                    const _d = _wbDiag[_wbKey];
+                    const _usageHtml = _d.usage.map(u =>
+                        `<code style="background:#f4f4f4;padding:1px 4px;border-radius:3px;font-size:12px;">${u.replace(/</g,'&lt;')}</code>`
+                    ).join('<br>');
+                    const _html =
+                        `<div style="font-size:12px;padding:6px 0;">` +
+                        `<span style="color:#c00;font-weight:bold;">\u26A0 ${_wbKey}: syntax error</span><br><br>` +
+                        `<b>Valid usage:</b><br>${_usageHtml}<br><br>` +
+                        `<span style="color:#555;">${_d.notes}</span></div>`;
+                    const _plain = `${_wbKey} syntax error.\nValid usage:\n${_d.usage.join('\n')}\n${_d.notes.replace(/<br>/g,'\n').replace(/<[^>]+>/g,'')}`;
+                    const _out = new vscode.NotebookCellOutput([
+                        vscode.NotebookCellOutputItem.text(_html, 'x-application/wolfram-language-html'),
+                        vscode.NotebookCellOutputItem.text(_plain, 'text/plain'),
+                    ]);
+                    if (currentExecution.hasOutput) {
+                        await currentExecution.execution.appendOutput(_out);
+                    } else {
+                        currentExecution.hasOutput = true;
+                        await currentExecution.execution.replaceOutput(_out);
+                    }
                     continue;
                 }
             }
@@ -646,6 +726,7 @@ async function checkoutExecutionQueue(self) {
                 // when hasOnDialogBegin=false — no hang, no legacy loop entered.
             });
             scrollLog('[checkout] sub', i, 'done | dt=', Date.now() - _subT0, 'ms | aborted:', r.aborted, '| outputName:', r.outputName || '(none)');
+            self.writeDebugLog(`[CHECKOUT] cell ${currentExecution.execution.cell.index} | sub ${i} done | dt=${Date.now() - _subT0}ms | aborted: ${r.aborted}`);
 
             const lineN = r.cellIndex;
             if (i === 0 && lineN > 0) firstLineNum = lineN;
@@ -862,6 +943,7 @@ async function checkoutExecutionQueue(self) {
         }
 
         scrollLog('[checkout] sub-expr loop done | cell', currentExecution.execution.cell.index, '| total dt=', Date.now() - _coT0, 'ms | anyAborted:', anyAborted);
+        self.writeDebugLog(`[CHECKOUT] cell ${currentExecution.execution.cell.index} | loop done | dt=${Date.now() - _coT0}ms | aborted: ${anyAborted}`);
 
         if (firstLineNum > 0) currentExecution.execution.executionOrder = firstLineNum;
 
@@ -962,6 +1044,7 @@ async function checkoutExecutionQueue(self) {
         // _putAllOutputs calls in the widget switch to createNotebookCellExecution.
         if (_dynEarlyRef) { _dynEarlyRef.active = false; _dynEarlyRef = null; }
         scrollLog('[checkout-end] _evalDispatched = false | execution.end() done');
+        self.writeDebugLog(`[CHECKOUT] cell ${execCell.index} | execution.end() done | aborted: ${anyAborted} | messages: ${anyMessages}`);
 
         // Force-close any Dialog[] that a Dynamic widget cycle may have left open
         // when the main evaluation finished mid-cycle. isDialogOpen can be stale,
@@ -1079,98 +1162,60 @@ async function checkoutExecutionQueue(self) {
         }
 
         // ---- Refine mode: restore selection + edit mode + cursor AFTER execution.end() ----
-        // execution.end() may cause VS Code to emit post-execution selection events.
-        // setTimeout(0) runs after those events.
+        // execution.end() causes VS Code to exit edit mode and advance selection to N+1.
+        // We restore at t=150ms (after all post-execution processing) + retry at t=400ms.
+        // showTextDocument on the cell URI enters edit mode WITHOUT scrolling the viewport
+        // (we omit the `selection` option and restore cursor manually afterward).
         if (_wasRefine) {
             scrollLog('[refine-post-end] scheduling restore for cell', _refineIdx);
-            setTimeout(() => {
-                // 1. Restore notebook cell selection (no viewport movement)
-                scrollLog('[refine-post-end t=0] restoring selection to cell', _refineIdx);
-                self._restoreSelection(_refineIdx, _refineNb);
 
-                // 2. Enter edit mode via showTextDocument — targets the cell's
-                //    TextDocument URI directly, bypassing the notebook.cell.edit
-                //    command which internally calls focusNotebookCell →
-                //    revealInViewAtTop and unconditionally scrolls the viewport.
-                //    showTextDocument enters edit mode without the automatic
-                //    revealRange that `selection` in ShowOptions would trigger.
-                //    We restore the cursor manually on the returned editor so
-                //    that setting .selection on an already-focused doc does NOT
-                //    call revealRange and does NOT scroll the viewport.
+            const _doRefineRestore = (delay, label) => {
                 setTimeout(() => {
-                    scrollLog('[refine-post-end t=30] entering edit mode via showTextDocument on cell', _refineIdx);
+                    scrollLog('[refine-post-end]', label, '| cell', _refineIdx);
                     try {
+                        // Always fix notebook selection first
+                        self._restoreSelection(_refineIdx, _refineNb);
+
+                        if (!_savedCursor) {
+                            scrollLog('[refine-post-end]', label, 'no saved cursor — staying in command mode');
+                            return;
+                        }
+
                         const _editCell = _refineNb.cellAt(_refineIdx);
 
-                        // If no cursor was saved, the user was in command mode when
-                        // Shift+Enter was pressed (activeTextEditor was null at that time).
-                        // In that case, stay in command mode after execution — do NOT call
-                        // showTextDocument, which would scroll the viewport via revealRange.
-                        if (!_savedCursor) {
-                            scrollLog('[refine-post-end t=30] _savedCursor is null (command mode) — skipping showTextDocument, staying in command mode');
+                        // If already in edit mode on this cell, just restore cursor
+                        const _ae = vscode.window.activeTextEditor;
+                        if (_ae && _ae.document.uri.toString() === _editCell.document.uri.toString()) {
+                            _ae.selection = _savedCursor;
+                            scrollLog('[refine-post-end]', label, 'already in edit mode — cursor restored');
                             return;
                         }
 
-                        // If the active text editor is already this cell's document,
-                        // don't call showTextDocument at all — it would call revealRange
-                        // internally even without a `selection` option, scrolling the viewport.
-                        // Just restore the cursor directly on the active editor.
-                        const _activeEd = vscode.window.activeTextEditor;
-                        if (_activeEd && _activeEd.document.uri.toString() === _editCell.document.uri.toString()) {
-                            scrollLog('[refine-post-end t=30] cell already active editor — skipping showTextDocument, restoring cursor only');
-                            if (_savedCursor && _activeEd) {
-                                _activeEd.selection = _savedCursor;
-                                scrollLog('[refine-post-end] cursor restored on already-active editor');
-                            }
-                            return;
-                        }
-
-                        const _showOpts = {
+                        // Enter edit mode via showTextDocument (no selection → no revealRange scroll).
+                        // Then restore cursor manually on the returned editor.
+                        scrollLog('[refine-post-end]', label, 'calling showTextDocument on cell', _refineIdx);
+                        vscode.window.showTextDocument(_editCell.document, {
                             preview: false,
                             viewColumn: vscode.ViewColumn.Active,
-                            // NOTE: `selection` is intentionally omitted here.
-                            // Passing `selection` to showTextDocument causes VS Code to call
-                            // revealRange internally, which scrolls the viewport to show the
-                            // cursor — exactly what Refine mode must NOT do.
-                            // Instead we set ed.selection manually after the promise resolves;
-                            // mutating .selection on an already-focused TextEditor does not
-                            // trigger revealRange and therefore does not move the viewport.
-                        };
-                        scrollLog('[refine-post-end t=30] showTextDocument (no selection option) — cursor will be set manually');
-                        vscode.window.showTextDocument(_editCell.document, _showOpts).then(
-                            (ed) => {
-                                // Restore cursor without scrolling: set .selection directly on
-                                // the already-open editor (does NOT call revealRange).
-                                if (_savedCursor && ed) {
-                                    ed.selection = _savedCursor;
-                                    scrollLog('[refine-post-end] cursor restored manually —',
-                                        `anchor(${_savedCursor.anchor.line},${_savedCursor.anchor.character})`,
-                                        `active(${_savedCursor.active.line},${_savedCursor.active.character})`);
-                                } else {
-                                    scrollLog('[refine-post-end] showTextDocument resolved — edit mode entered (no saved cursor)');
-                                }
-                            },
-                            e => {
-                                // Fallback: showTextDocument may fail for some cell URI schemes.
-                                // Fall back to notebook.cell.edit + manual cursor restore.
-                                scrollLog('[refine-post-end] showTextDocument error:', e?.message,
-                                          '— falling back to notebook.cell.edit');
-                                vscode.commands.executeCommand('notebook.cell.edit').then(() => {
-                                    if (_savedCursor && _savedCursorUri) {
-                                        const txtEd = vscode.window.activeTextEditor;
-                                        if (txtEd && txtEd.document.uri.toString() === _savedCursorUri) {
-                                            txtEd.selection = _savedCursor;
-                                            scrollLog('[refine-post-end] fallback cursor restored');
-                                        }
-                                    }
-                                }, () => {});
+                        }).then(ed => {
+                            if (_savedCursor && ed) {
+                                ed.selection = _savedCursor;
+                                scrollLog('[refine-post-end]', label, 'cursor restored —',
+                                    `anchor(${_savedCursor.anchor.line},${_savedCursor.anchor.character})`,
+                                    `active(${_savedCursor.active.line},${_savedCursor.active.character})`);
                             }
-                        );
+                        }, e => {
+                            scrollLog('[refine-post-end]', label, 'showTextDocument error:', e?.message);
+                        });
                     } catch (e) {
-                        scrollLog('[refine-post-end] showTextDocument exception:', e?.message);
+                        scrollLog('[refine-post-end]', label, 'error:', e?.message);
                     }
-                }, 30);
-            }, 0);
+                }, delay);
+            };
+
+            _doRefineRestore(150, 't=150');
+            // Retry in case first attempt was overridden by lingering VS Code events
+            _doRefineRestore(400, 't=400');
         }
 
     } catch (err) {

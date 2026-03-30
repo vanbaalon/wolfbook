@@ -16,15 +16,13 @@ const { scrollLog } = require('../utils/dev-logger');
 
 // Format options presented to the user
 const FORMAT_OPTIONS = [
-    { label: '$(symbol-misc) Auto',              value: 'Auto',      description: 'Automatic (SVG for graphics, MathML for expressions)' },
-    { label: '$(symbol-string) LaTeX',           value: 'WLLatex',   description: 'LaTeX rendered with KaTeX' },
+    { label: '$(symbol-string) LaTeX',           value: 'WLLatex',   description: 'LaTeX rendered with KaTeX (BTL)' },
     { label: '$(code) Source (InputForm)',        value: 'WLLatexSrc',description: 'Raw LaTeX / InputForm source' },
     { label: '$(file-media) SVG',                value: 'SVGSrc',    description: 'SVG image' },
     { label: '$(file-media) SVG (transparent)',   value: 'SVGT',      description: 'SVG text (non-rasterized)' },
-    { label: '$(symbol-misc) MathML',            value: 'MathML',    description: 'Native MathML markup' },
 ];
 
-let _currentFormat = 'Auto';
+let _currentFormat = 'WLLatex';
 let _statusBarItem = null;
 let _watchPanel    = null;   // WatchPanelProvider instance (set by register())
 let _inFlight      = false;
@@ -461,6 +459,51 @@ function addSelectionToWatch() {
 
 // ── Public registration ─────────────────────────────────────────────────
 
+/**
+ * docLookup — evaluate `symbolName::usage` through the same idle-path +
+ * subkernel render pipeline as eval-sel (so user-defined and package symbols
+ * work), rendered with WLLatex (BTL) and displayed in the Watch panel's
+ * eval-sel section.  Falls back to rawMarkdown when the kernel is unavailable.
+ */
+async function docLookup(ctrl, symbolName, watchPanel, fallbackMd) {
+    if (!ctrl?.session) {
+        if (fallbackMd) watchPanel.showHoverDoc(fallbackMd, symbolName);
+        return;
+    }
+
+    // Evaluate Information[symbolName] directly — same as a normal input cell.
+    // Information returns InformationData[<|...|>] which has FormatValues producing
+    // the full InterpretationBox. VsCodeRenderExpr/BTL on the subkernel handles it
+    // perfectly without any additional wrapper.
+    const expr = 'Information[' + symbolName + ']';
+    watchPanel.evalSelSpinner(expr);
+
+    // Force WLLatex format for doc rendering regardless of user's current setting
+    const savedFormat = _currentFormat;
+    _currentFormat = 'WLLatex';
+    try {
+        const evalResult = await _evalViaIdlePath(ctrl, expr);
+        if (!evalResult) { watchPanel.evalSelError('No result from kernel.', expr); return; }
+
+        const { html, notebookDir, openFilePath } = await _renderResult(ctrl, evalResult.val, expr, evalResult.txt);
+        if (html) {
+            const docUrl = 'https://reference.wolfram.com/language/ref/' + encodeURIComponent(symbolName) + '.html';
+            const htmlWithLink = html +
+                '<div style="margin-top:8px;font-size:0.82em;opacity:0.7">' +
+                '<a href="' + docUrl + '" style="color:var(--vscode-textLink-foreground);text-decoration:none">' +
+                '&#128366; Wolfram Documentation</a></div>';
+            watchPanel.evalSelUpdate(htmlWithLink, expr, 'WLLatex', notebookDir, openFilePath);
+        } else {
+            watchPanel.evalSelError('Render returned no HTML.', expr);
+        }
+    } catch (err) {
+        scrollLog('[doc-lookup] ERROR:', err.message);
+        watchPanel.evalSelError(err.message, expr);
+    } finally {
+        _currentFormat = savedFormat;
+    }
+}
+
 function register(context, getController, watchPanel) {
     _watchPanel = watchPanel;
     _createStatusBar(context);
@@ -478,4 +521,4 @@ function register(context, getController, watchPanel) {
     scrollLog('[eval-sel] registered');
 }
 
-module.exports = { register };
+module.exports = { register, docLookup };

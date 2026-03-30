@@ -70,6 +70,39 @@ mathematicaformatResult[expr_] := Module[{boxes, svgStr, mathmlStr},
     Return[<|"type" -> "input-form", "data" -> ToString[expr, InputForm]|>]
 ];
 
+(* ===== Expand \!\(\*BoxExpr\) inline LinearSyntax in usage strings ===== *)
+(* WL ::usage messages embed box expressions as \!\(\*BoxExpr\) in the string   *)
+(* value (prefix = 6 chars \!\(\* , suffix = 2 chars \) ).  MakeBoxes on such  *)
+(* a plain String returns it as a quoted-string box, which BTL can only wrap in *)
+(* \text{} — the inline notation comes through as literal characters.  This     *)
+(* function splits the string at those boundaries and reassembles as a RowBox  *)
+(* mixing plain text strings and real box expressions, so BTL renders them.    *)
+expandInlineBoxes[str_String] :=
+  Module[{parts},
+    (* Fast path: no inline notation present *)
+    If[!StringContainsQ[str, "\!\("], Return[str]];
+    (* Split at \!\(\*BoxExpr\) boundaries.
+       Delimiters are PUA chars: \! = U+F781, \( = U+F789, \* = U+F788, \) = U+F780.
+       Prefix is 3 chars, suffix is 1 char. *)
+    parts = StringSplit[str,
+      x : ("\!" ~~ "\(" ~~ "\*" ~~ Shortest[___] ~~ "\)") :>
+        Quiet[Check[
+          ToExpression[StringDrop[StringDrop[x, 3], -1], InputForm],
+          x  (* keep as string on any parse failure *)
+        ]]
+    ];
+    (* If all parts are still strings, nothing changed *)
+    If[AllTrue[parts, StringQ], Return[str]];
+    RowBox[parts]
+  ];
+expandInlineBoxes[other_] := other;
+
+(* Wrap expandInlineBoxes result so MakeBoxes passes it through unchanged *)
+prepareExprForBoxes[expr_] :=
+  Module[{e2 = expandInlineBoxes[expr]},
+    If[Head[e2] === RowBox, RawBoxes[e2], e2]
+  ];
+
 (* ===== Internal render dispatcher ===== *)
 (* Check recursively whether expr contains any renderable graphic,
    regardless of nesting (e.g. Labeled[Plot[...]], Style[Graphics[...]] etc.) *)

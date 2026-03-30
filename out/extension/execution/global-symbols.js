@@ -25,7 +25,11 @@ let _symbols    = [];      // cached Names["Global`*"] list from last execution
 // ── Config helpers ──────────────────────────────────────────────────────────
 
 function _getColor() {
-    return (vscode.workspace.getConfiguration('wolfram').get('editor.globalSymbolColor') || '').trim();
+    const v = (vscode.workspace.getConfiguration('wolfram').get('editor.globalSymbolColor') || '').trim();
+    // Empty string means "use default"; set to 'off' or 'none' to explicitly disable.
+    if (!v) return '#333333';
+    if (v === 'off' || v === 'none') return '';
+    return v;
 }
 
 /** Return (or create) the decoration type for the given color string. */
@@ -170,10 +174,11 @@ async function updateAll(ctrl) {
     try {
         // subWhenIdle() runs only when the kernel is fully idle — safe for background queries,
         // never races with evaluate() or Dynamic widget sub() calls.
-        // Only include symbols that actually have a value set (OwnValues, DownValues, etc.)
-        // so unset Global` symbols (e.g. loop variables, pattern names) are not coloured.
+        // Include symbols that have any definition: OwnValues (variables),
+        // DownValues (functions), SubValues, or UpValues.
+        // Use ToExpression[..., HoldComplete] to avoid premature evaluation of symbols.
         const result = await ctrl.session.subWhenIdle(
-            '"GLOBALNAMES:"<>StringRiffle[StringReplace[Select[Names["Global`*"],ToExpression["ValueQ[Global`"<>#<>"]"]&],"Global`"->""],","]'
+            '"GLOBALNAMES:"<>StringRiffle[StringReplace[Select[Names["Global`*"],Function[nm,ToExpression["ValueQ[Global`"<>nm<>"]||DownValues[Global`"<>nm<>"]=!={}||SubValues[Global`"<>nm<>"]=!={}||UpValues[Global`"<>nm<>"]=!={}"]]],"Global`"->""],","]'
         );
         console.log('[global-symbols] sub result type:', result?.type, '| value prefix:', typeof result?.value === 'string' ? result.value.slice(0, 80) : result?.value);
         // result is WExpr: { type: "string", value: "GLOBALNAMES:x,y,..." }

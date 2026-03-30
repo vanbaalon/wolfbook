@@ -583,6 +583,8 @@ class DebugController {
             onDialogBegin: () => { this._onDialogBegin().catch(e => console.error('[debug] onDialogBegin error:', e)); },
             onDialogEnd:   () => { /* kernel exited dialog — loop continues */ },
             onPrint: line => {
+                // Suppress internal scheduling noise — same filter as checkout.js
+                if (line.startsWith('Still waiting for a safe time to evaluate $Inspector')) return;
                 const text = line.replace(/\\012/g, '\n');
                 if (this._watchPanel) this._watchPanel.log('[Print] ' + text.split('\n')[0]);
                 const newHtml = '<pre class="vscode-wolfram-print-output">' + escapeHtml(text) + '</pre>';

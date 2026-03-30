@@ -328,6 +328,22 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
     const snapOutputs = Array.from(cell.outputs);
     self._dynCells.set(cellUri, { cell, outputs: snapOutputs });
 
+    const _applyDynamicOutputs = async (outputs) => {
+        try {
+            const exe = self._controller.createNotebookCellExecution(cell);
+            exe.start(Date.now());
+            await exe.replaceOutput(outputs);
+            exe.end(true, Date.now());
+        } catch (_) {
+            // Fallback: workspace edit (no spinner but less reliable)
+            try {
+                const edit = new vscode.WorkspaceEdit();
+                edit.set(cell.notebook.uri, [vscode.NotebookEdit.updateCellOutputs(cell.index, outputs)]);
+                await vscode.workspace.applyEdit(edit);
+            } catch (_2) {}
+        }
+    };
+
     scrollLog('[dyn] cell loop start | slots:', dynExprs.map(d => d.slotIndex).join(','), '| epoch:', epoch);
 
     // Expiry limits: take the most restrictive value across all Dynamic slots.
@@ -421,7 +437,7 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
                'margin-right:6px;font-style:italic;">' + label + '</span>';
     };
 
-    // Update all Dynamic slot outputs in a single createNotebookCellExecution call.
+    // Update all Dynamic slot outputs in one notebook edit.
     // htmlBySlot: { slotIndex: htmlString } — slots absent from the map keep their current output.
     const _putAllOutputs = async (htmlBySlot, status) => {
         // Guard: if the session epoch changed (kernel restarted), do not write
@@ -441,7 +457,7 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
                     const html = htmlBySlot[de.slotIndex] || null;
                     const body = html
                         ? '<div class="wl-output-content">' + html + '</div>'
-                        : '<div style="color:#888;font-style:italic;font-size:12px;padding:4px 0;">Waiting for computation…</div>';
+                        : '';
                     const newItem = vscode.NotebookCellOutputItem.text(
                         '<div data-dynamic="1" data-epoch="' + epoch + '">'
                         + '<div style="display:flex;align-items:center;padding:2px 0 4px;">'
@@ -451,7 +467,7 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
                     // TODO-1g: expose Dynamic current value to Copilot as text/plain
                     const _dynPlainEarly = html
                         ? (_output.extractPlainText(html, 'Dynamic[' + de.dynInner + '] =', false, cell.document.getText()) || ('(* Dynamic[' + de.dynInner + '] *)'))
-                        : ('(* Dynamic[' + de.dynInner + '] — waiting for computation *)');
+                        : ('(* Dynamic[' + de.dynInner + '] *)');
                     const newPlainItem = vscode.NotebookCellOutputItem.text(_dynPlainEarly, 'text/plain');
                     try {
                         await ownedExec.exec.replaceOutputItems([newItem, newPlainItem], snapOutputs[de.slotIndex]);
@@ -459,8 +475,6 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
                 }
                 return;
             }
-            const exe = self._controller.createNotebookCellExecution(cell);
-            exe.start(t);
             const snap = snapOutputs.slice();
             for (let i = 0; i < dynExprs.length; i++) {
                 const de = dynExprs[i];
@@ -478,11 +492,11 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
                 const html = htmlBySlot[de.slotIndex] || null;
                 const body = html
                     ? '<div class="wl-output-content">' + html + '</div>'
-                    : '<div style="color:#888;font-style:italic;font-size:12px;padding:4px 0;">Waiting for computation…</div>';
+                    : '';
                 // TODO-1g: expose Dynamic current value to Copilot as text/plain
                 const _dynPlain = html
                     ? (_output.extractPlainText(html, 'Dynamic[' + de.dynInner + '] =', false, cell.document.getText()) || ('(* Dynamic[' + de.dynInner + '] *)'))
-                    : ('(* Dynamic[' + de.dynInner + '] — waiting for computation *)');
+                    : ('(* Dynamic[' + de.dynInner + '] *)');
                 const out = new vscode.NotebookCellOutput([
                     vscode.NotebookCellOutputItem.text(
                         '<div data-dynamic="1" data-epoch="' + epoch + '">'
@@ -498,8 +512,7 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
             for (let i = 0; i < snap.length; i++) snapOutputs[i] = snap[i];
             if (self._dynCells && self._dynCells.has(cellUri))
                 self._dynCells.get(cellUri).outputs = snap;
-            await exe.replaceOutput(snap);
-            exe.end(true, t);
+            await _applyDynamicOutputs(snap);
         } catch (e) { scrollLog('[dyn] _putAllOutputs error:', e.message); }
     };
 
@@ -533,19 +546,18 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
             ]);
             for (let _ii = 0; _ii < snap.length; _ii++) snapOutputs[_ii] = snap[_ii];
             if (self._dynCells?.has(cellUri)) self._dynCells.get(cellUri).outputs = snap;
-            const _cExe = self._controller.createNotebookCellExecution(cell);
-            _cExe.start(Date.now()); await _cExe.replaceOutput(snap); _cExe.end(true, Date.now());
+            await _applyDynamicOutputs(snap);
         } catch (_) {}
     };
 
-    // Show initial paused badge — the widget is alive,
-    // the runLoop starts polling via subAuto() in 250ms.
+    // Show the badge immediately, but do not render a grey waiting body.
+    // The first subAuto() attempt starts almost immediately.
     _putAllOutputs({}, 'paused');
 
     // ---- Register Dynamic expressions with C++ registry ----
     // Dynamic slot updates use subAuto() which auto-routes:
     //   idle  → subWhenIdle (immediate)
-    //   busy  → Dialog[] inline eval via ScheduledTask
+    //   busy  → inline dialog evaluation driven by the C++ timer thread
     // C++ registry also provides live-watch (__watch__) and eval-selection
     // (__evalsel__) piggyback via getDynamicResults().
     if (self.session?.registerDynamic) {
@@ -556,9 +568,8 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
             self.session.registerDynamic(cellUri + ':' + de.slotIndex,
                 'VsCodeDynExportValue["' + escaped + '"]');
         }
-        // Enable ScheduledTask so Dialog[] fires during busy evals.
-        // subAuto's busy path evaluates inline inside Dialog[] cycles.
-        try { self.session.setDynamicInterval(300); } catch (_) {}
+        // Busy-path Dynamic polling is driven by the C++ timer thread.
+        try { self.session.setDynamicInterval(150); } catch (_) {}
     }
 
     const runLoop = async () => {
@@ -592,12 +603,7 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
                     }
                     // Clear cell output so stale Dynamic content doesn't linger
                     // after kernel restart — don't rely on launchKernel timing.
-                    try {
-                        const _exitExe = self._controller.createNotebookCellExecution(cell);
-                        _exitExe.start(Date.now());
-                        await _exitExe.replaceOutput([]);
-                        _exitExe.end(true, Date.now());
-                    } catch (_) {}
+                    try { await _applyDynamicOutputs([]); } catch (_) {}
                 }
                 return;
             }
@@ -697,11 +703,10 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
             // ---- Unified subAuto() path ----
             // Poll Dynamic values via subAuto() which auto-routes:
             //   idle  → subWhenIdle (immediate)
-            //   busy  → Dialog[] inline eval via ScheduledTask
+            //   busy  → Dialog[] inline eval driven by the C++ timer thread
             // Dynamic values update continuously, even during busy evals.
             // Also skip while isAborting — subAuto() enqueues into autoExprQueue_,
-            // which makes C++ choose the slow dynAutoMode BEGINDLGPKT path on the
-            // next ScheduledTask cycle instead of the fast safety fallback (<100ms).
+            // which can still delay abort completion if requests keep piling up.
             // With pending entries each cycle takes up to ~5.5s, chaining across
             // the full 17s abort-retry window and preventing abort from resolving.
             //
@@ -718,16 +723,13 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
             // desynchronises the packet stream.
             const _setupRunning = self.executionQueue.queue.length > 0
                 && self.executionQueue.queue[0].started && !self._evalDispatched;
-            // Post-eval cooldown: after a cell evaluation ends (especially one
-            // that used Dialog-based busy-path subAuto during Do/Pause loops),
-            // C++ may still be draining stale Dialog packets.  Calling subAuto
-            // idle-path during that window corrupts the WSTP link permanently.
-            // Wait 3 seconds after _evalDispatched goes false.
+            // Keep only a short cooldown after the main eval ends so the first
+            // idle-path subAuto refresh appears quickly while the link settles.
             const _postEvalCooldown = self._evalEndedAt
-                && (Date.now() - self._evalEndedAt) < 3000;
+                && (Date.now() - self._evalEndedAt) < 400;
             if (!self._abortPending && !self.isAborting
                     && !self._subAutoLock && !_setupRunning && !_postEvalCooldown
-                    && (Date.now() - (self._dynLastIdleRender || 0)) > 1000) {
+                    && (Date.now() - (self._dynLastIdleRender || 0)) > 250) {
                 self._dynLastIdleRender = Date.now();
                 const scale = Number(self.config?.get?.('imageScale') ?? 0.8) || 0.8;
                 const idlePending = {};
@@ -737,6 +739,7 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
                     const escaped = de.dynInner.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
                     const expr = 'VsCodeDynExportValue["' + escaped + '"]';
                     dynLog('DYN-SUB | cycle', cycle, '| slot', de.slotIndex);
+                    self.writeDebugLog(`[DYN] subAuto start | cycle ${cycle} | slot ${de.slotIndex} | expr: ${expr.slice(0, 60)}`);
                     const _cppPromise = self.session.subAuto(expr);
                     self._subAutoLock = _cppPromise;
                     _cppPromise.finally(() => {
@@ -748,6 +751,7 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
                             new Promise((_, rej) => setTimeout(() => rej(new Error('dyn-sub timeout')), 8000)),
                             state._cancelPromise
                         ]);
+                        self.writeDebugLog(`[DYN] subAuto done | cycle ${cycle} | slot ${de.slotIndex} | type: ${res?.type}`);
                         if (!state.active) break;
                         const _rv = res?.value;
                         if (typeof _rv === 'string' && _rv.startsWith('WLVAL:FILE:')) {
@@ -758,6 +762,7 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
                         }
                     } catch (_subErr) {
                         dynLog('DYN-SUB-ERR | cycle', cycle, '| slot', de.slotIndex, '|', _subErr.message);
+                        self.writeDebugLog(`[DYN] subAuto ERROR | cycle ${cycle} | slot ${de.slotIndex} | ${_subErr.message}`);
                     }
                 }
                 if (Object.keys(idlePending).length > 0) {
@@ -848,7 +853,7 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
                 _lastBadgeTickTime = Date.now();
                 await _putAllOutputs(htmlBySlot, 'live');
             }
-            if (state.active) await new Promise(r => setTimeout(r, 300));
+            if (state.active) await new Promise(r => setTimeout(r, 150));
         }
     };
 
@@ -870,13 +875,9 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
                 try { self.session?.setDynAutoMode?.(false); } catch (_) {}
                 try { self.session?.setDynamicInterval?.(0); } catch (_) {}
             }
-            try {
-                const _errExe = self._controller.createNotebookCellExecution(cell);
-                _errExe.start(Date.now());
-                _errExe.replaceOutput([]).then(() => _errExe.end(true, Date.now())).catch(() => { try { _errExe.end(true, Date.now()); } catch(_){} });
-            } catch (_) {}
+            try { _applyDynamicOutputs([]).catch(() => {}); } catch (_) {}
         }
-    }), 250);
+    }), 50);
 }
 
 module.exports = {

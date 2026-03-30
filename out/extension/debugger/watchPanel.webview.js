@@ -192,6 +192,14 @@
             // null/empty → clear inline override, fall back to CSS var (sidebar bg)
             document.body.style.backgroundColor = msg.color || '';
         }
+        else if (msg.command === 'hoverDoc') {
+            var hoverDocSection = document.getElementById('hover-doc-section');
+            var hoverDocSymbol  = document.getElementById('hover-doc-symbol');
+            var hoverDocContent = document.getElementById('hover-doc-content');
+            if (hoverDocSymbol)  hoverDocSymbol.textContent  = msg.symbol || '';
+            if (hoverDocContent) hoverDocContent.innerHTML   = msg.html   || '';
+            if (hoverDocSection) { hoverDocSection.style.display = 'block'; hoverDocSection.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+        }
     });
 
     // ── Add watch ──────────────────────────────────────────────────────────
@@ -379,6 +387,17 @@
                 e.preventDefault();
                 vscode.postMessage({ command: 'openFile', path: a.getAttribute('data-open-file') });
             }
+        });
+    }
+
+    // ── Hover doc clear button ──────────────────────────────────────────────
+    var hoverDocSection = document.getElementById('hover-doc-section');
+    var hoverDocClear   = document.getElementById('hover-doc-clear');
+    if (hoverDocClear) {
+        hoverDocClear.addEventListener('click', function() {
+            if (hoverDocSection) hoverDocSection.style.display = 'none';
+            var c = document.getElementById('hover-doc-content');
+            if (c) c.innerHTML = '';
         });
     }
 

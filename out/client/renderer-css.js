@@ -43,9 +43,9 @@ pre.vscode-wolfram-text-output, pre.vscode-wolfram-tex-source {
   background: #1e1e1e;
   color: #d4d4d4;
   border: 1px solid rgba(80,80,80,0.5);
-  border-radius: 3px; padding: 6px 10px 6px 3.2em;
-  white-space: pre-wrap; overflow-wrap: break-word; line-height: 1.5; margin: 2px 0; }
-.wl-line-gutter { position:absolute;left:0;top:0;bottom:0;width:2.5em;padding:6px 3px 6px 0;
+  border-radius: 3px; padding: 3px 10px 3px 3.2em;
+  white-space: pre-wrap; overflow-wrap: break-word; line-height: 1.5; margin: 0; }
+.wl-line-gutter { position:absolute;left:0;top:0;bottom:0;width:2.5em;padding:3px 3px 3px 0;
   text-align:right;color:rgba(180,180,180,0.5);font-size:0.82em;line-height:1.5;
   user-select:none;pointer-events:none;overflow:hidden;background:#1e1e1e;
   font-family:var(--vscode-editor-font-family,Consolas,monospace); }
@@ -55,10 +55,11 @@ pre.vscode-wolfram-text-output, pre.vscode-wolfram-tex-source {
   100% { outline:2px solid rgba(218,165,32,0);outline-offset:1px; }
 }
 button.wl-nb-default-fmt { animation:wl-fmt-flash 1.5s ease-out forwards; }
+button[data-fmt-key]:hover { opacity:0.9 !important; }
 img.vscode-wolfram-svg-output, img.vscode-wolfram-png-output { background: transparent; }
 .vscode-wolfram-svg-output > svg > rect:first-child { fill: none !important; }
 div.mathml-output { overflow-x:auto; }
-div.vscode-wolfram-tex-output { overflow-x:auto; padding: 4px 0; }
+div.vscode-wolfram-tex-output { overflow-x:auto; padding: 1px 0; }
 /* Inline syntax highlight tokens */
 .wl-hl-str  { color: #ce9178; }
 .wl-hl-cmt  { color: #6a9955; font-style: italic; }

@@ -380,16 +380,7 @@ class WolframNotebookKernel {
         this._controller.executeHandler = this.execute.bind(this);
         this.extensionPath = this.thisExtension?.extensionPath || "";
 
-        // ---- Log all notebook selection/focus changes ----
-        // This captures VS Code's auto-advance to the next cell after Shift+Enter
-        // as well as any manual navigation — visible in DevTools console + scroll log file.
-        vscode.window.onDidChangeNotebookEditorSelection(event => {
-            const ed  = event.notebookEditor;
-            const sel = event.selections;
-            const indices = sel.map(r => `${r.start}-${r.end}`).join(', ');
-            scrollLog('[sel-change] →', indices,
-                      '| nb:', ed.notebook.uri.fsPath.split('/').pop());
-        });
+
 
         // ---- Auto-GC when cells are deleted from any wolfram notebook ----
         // Runs _cleanupImgDir for the affected notebook so pasted/rendered images

@@ -49,11 +49,18 @@ function applySyntaxErrorDecorations(self, cell, ranges) {
     );
     if (!editor) return;
 
-    // Pulsing animation
+    // Pulsing animation.
+    // Stop when cellDecorations no longer has this key — this happens when
+    // clearSyntaxErrorDecorations() is called (e.g. re-evaluate, abort, kernel
+    // restart).  Also guard every setDecorations call with try/catch: if the
+    // editor is disposed between pulses (e.g. the notebook cell was closed while
+    // the idlesub syntax-check result came back), VS Code throws "Editor is not
+    // a valid editor" which must not propagate as an uncaught timer exception.
     let pulseCount = 0;
     const pulse = () => {
+        if (!self.cellDecorations.has(cellKey)) return; // cancelled
         if (pulseCount >= 6) {
-            editor.setDecorations(self.syntaxErrorDecoration, ranges);
+            try { editor.setDecorations(self.syntaxErrorDecoration, ranges); } catch (_) {}
             return;
         }
         const dt = vscode.window.createTextEditorDecorationType({
@@ -62,7 +69,7 @@ function applySyntaxErrorDecorations(self, cell, ranges) {
             borderRadius: "3px",
             isWholeLine: false,
         });
-        editor.setDecorations(dt, ranges);
+        try { editor.setDecorations(dt, ranges); } catch (_) {}
         pulseCount++;
         setTimeout(() => { dt.dispose(); pulse(); }, 200);
     };
@@ -71,11 +78,11 @@ function applySyntaxErrorDecorations(self, cell, ranges) {
 
 function clearSyntaxErrorDecorations(self, cell) {
     const cellKey = cell.document.uri.toString();
-    self.cellDecorations.delete(cellKey);
+    self.cellDecorations.delete(cellKey); // stops any running pulse() animation
     const editor = vscode.window.visibleTextEditors.find(
         e => e.document.uri.toString() === cellKey
     );
-    if (editor) editor.setDecorations(self.syntaxErrorDecoration, []);
+    if (editor) { try { editor.setDecorations(self.syntaxErrorDecoration, []); } catch (_) {} }
 }
 
 // ---- Runtime kernel-message line highlighting (pink/rose whole-line) ----

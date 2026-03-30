@@ -1454,19 +1454,38 @@ class GetKernelStateTool {
 
         // Build a single-line WL expression that:
         //   — lists all symbols matching the pattern
-        //   — shows OwnValue (direct value) or rule-count for DownValues/UpValues
-        //   — truncates long values to 150 chars
+        //   — shows OwnValue (direct value) for variables
+        //   — shows actual DownValues definitions for functions (first 3, truncated)
+        //   — shows UpValues/SubValues rule counts
+        //   — truncates long values to 150 chars per line
         //   — skips symbols with no definitions at all (pure name slots)
         const wlExpr = [
             `Block[{$wbS$=Sort[Names["${safePattern}"]],`,
-            `$wbFmt$=Function[s,Block[{$wbSym$=Symbol[s]},`,
+            `$wbTrunc$=Function[{str,maxLen},If[StringLength[str]>maxLen,StringTake[str,maxLen]<>"...",str]],`,
+            `$wbFmt$=Function[s,Block[{$wbSym$=Symbol[s],$wbDV$,$wbSV$,$wbUV$,$wbParts$={}},`,
             `Which[`,
+            // OwnValues: show the value
             `OwnValues[$wbSym$]=!={},`,
             `With[{v=s<>" = "<>ToString[$wbSym$,InputForm]},`,
-            `If[StringLength[v]>150,StringTake[v,150]<>"...",v]`,
+            `$wbTrunc$[v,150]`,
             `],`,
-            `DownValues[$wbSym$]=!={}||UpValues[$wbSym$]=!={},`,
-            `s<>" := <"<>ToString[Length[DownValues[$wbSym$]]+Length[UpValues[$wbSym$]]]<>" rule(s)>",`,
+            // DownValues: show first 3 rules as actual definitions
+            `(($wbDV$=DownValues[$wbSym$])=!={})||`,
+            `(($wbSV$=SubValues[$wbSym$])=!={})||`,
+            `(($wbUV$=UpValues[$wbSym$])=!={}),`,
+            `Block[{$wbLines$={}},`,
+            `If[$wbDV$=!={}&&$wbDV$=!=$Failed,`,
+            `$wbLines$=Join[$wbLines$,Map[$wbTrunc$[ToString[#,InputForm],150]&,Take[$wbDV$,UpTo[3]]]];`,
+            `If[Length[$wbDV$]>3,$wbLines$=Append[$wbLines$,"  ... and "<>ToString[Length[$wbDV$]-3]<>" more rule(s)"]]`,
+            `];`,
+            `If[$wbSV$=!={}&&$wbSV$=!=$Failed,`,
+            `$wbLines$=Append[$wbLines$,"  + "<>ToString[Length[$wbSV$]]<>" SubValue rule(s)"]`,
+            `];`,
+            `If[$wbUV$=!={}&&$wbUV$=!=$Failed,`,
+            `$wbLines$=Append[$wbLines$,"  + "<>ToString[Length[$wbUV$]]<>" UpValue rule(s)"]`,
+            `];`,
+            `StringJoin[Riffle[$wbLines$,"\\n"]]`,
+            `],`,
             `True,Nothing`,
             `]]]},`,
             `If[$wbS$==={},"(no symbols matching ${safePattern})",`,
@@ -2558,6 +2577,356 @@ class EvaluateAndInsertTool {
 }
 
 // ---------------------------------------------------------------------------
+// ReadFileTool — read any workspace file (text)
+// ---------------------------------------------------------------------------
+class ReadFileTool {
+    async prepareInvocation(options, _token) {
+        return { invocationMessage: `Read file: ${options.input?.path || ''}` };
+    }
+
+    async invoke(options, _token) {
+        const filePath = options.input?.path;
+        if (!filePath) return new vscode.LanguageModelToolResult([
+            new vscode.LanguageModelTextPart('path parameter is required.')]);
+
+        // Resolve relative paths against workspace root
+        let resolved = filePath;
+        if (!path.isAbsolute(resolved)) {
+            const wsf = vscode.workspace.workspaceFolders;
+            if (wsf && wsf.length > 0) resolved = path.join(wsf[0].uri.fsPath, resolved);
+        }
+
+        try {
+            const content = fs.readFileSync(resolved, 'utf8');
+            const maxChars = Math.min(content.length, 80000);
+            const truncated = content.length > maxChars;
+            return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(
+                    (truncated ? content.slice(0, maxChars) + '\n[… truncated]' : content))
+            ]);
+        } catch (e) {
+            return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(`Error reading file: ${e.message}`)]);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WriteFileTool — overwrite or create a workspace file (text)
+// ---------------------------------------------------------------------------
+class WriteFileTool {
+    async prepareInvocation(options, _token) {
+        return { invocationMessage: `Write file: ${options.input?.path || ''}` };
+    }
+
+    async invoke(options, _token) {
+        const filePath = options.input?.path;
+        const content  = options.input?.content;
+        if (!filePath) return new vscode.LanguageModelToolResult([
+            new vscode.LanguageModelTextPart('path parameter is required.')]);
+        if (content === undefined) return new vscode.LanguageModelToolResult([
+            new vscode.LanguageModelTextPart('content parameter is required.')]);
+
+        let resolved = filePath;
+        if (!path.isAbsolute(resolved)) {
+            const wsf = vscode.workspace.workspaceFolders;
+            if (wsf && wsf.length > 0) resolved = path.join(wsf[0].uri.fsPath, resolved);
+        }
+
+        try {
+            fs.mkdirSync(path.dirname(resolved), { recursive: true });
+            fs.writeFileSync(resolved, content, 'utf8');
+            return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(`Written ${content.length} chars to ${resolved}`)]);
+        } catch (e) {
+            return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(`Error writing file: ${e.message}`)]);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RunTerminalTool — run a shell command and return stdout/stderr
+// ---------------------------------------------------------------------------
+class RunTerminalTool {
+    async prepareInvocation(options, _token) {
+        return { invocationMessage: `Run: ${(options.input?.command || '').slice(0, 80)}` };
+    }
+
+    async invoke(options, _token) {
+        const command = options.input?.command;
+        if (!command) return new vscode.LanguageModelToolResult([
+            new vscode.LanguageModelTextPart('command parameter is required.')]);
+
+        const timeoutMs = Math.min(
+            Math.max(1000, Number(options.input?.timeoutSeconds || 30) * 1000), 120000);
+
+        // Resolve cwd: prefer explicit cwd, then workspace root, then HOME
+        let cwd = options.input?.cwd;
+        if (!cwd || !path.isAbsolute(cwd)) {
+            const wsf = vscode.workspace.workspaceFolders;
+            cwd = (wsf && wsf.length > 0) ? wsf[0].uri.fsPath : (process.env.HOME || '/tmp');
+        }
+
+        return new Promise(resolve => {
+            const child = require('child_process').exec(
+                command, { cwd, timeout: timeoutMs, maxBuffer: 1024 * 512 },
+                (err, stdout, stderr) => {
+                    const parts = [];
+                    if (stdout) parts.push('STDOUT:\n' + stdout.slice(0, 40000));
+                    if (stderr) parts.push('STDERR:\n' + stderr.slice(0, 10000));
+                    if (err && !stdout && !stderr) parts.push('Error: ' + err.message);
+                    if (parts.length === 0) parts.push('(no output)');
+                    resolve(new vscode.LanguageModelToolResult([
+                        new vscode.LanguageModelTextPart(parts.join('\n'))]));
+                });
+            // child_process.exec already handles timeout via the option above
+        });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ListFilesTool — list files in the workspace (recursive, with glob filter)
+// ---------------------------------------------------------------------------
+class ListFilesTool {
+    async prepareInvocation(options, _token) {
+        const root = options.input?.path || '.';
+        return { invocationMessage: `List files in: ${root}` };
+    }
+
+    async invoke(options, _token) {
+        // Resolve base directory
+        const inputPath = options.input?.path || '';
+        const wsf = vscode.workspace.workspaceFolders;
+        const wsRoot = wsf && wsf.length > 0 ? wsf[0].uri.fsPath : (process.env.HOME || '/');
+
+        let base = inputPath
+            ? (path.isAbsolute(inputPath) ? inputPath : path.join(wsRoot, inputPath))
+            : wsRoot;
+
+        if (!fs.existsSync(base)) {
+            return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(`Path not found: ${base}`)]);
+        }
+
+        const ext    = options.input?.ext;          // e.g. '.tex' or 'tex' — filter by extension
+        const depth  = Math.min(Number(options.input?.depth) || 4, 8); // max recursion depth
+        const maxFiles = 500;
+        const results = [];
+
+        const walk = (dir, d) => {
+            if (d > depth || results.length >= maxFiles) return;
+            let entries;
+            try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+            for (const e of entries) {
+                if (e.name.startsWith('.')) continue;   // skip hidden
+                const fullPath = path.join(dir, e.name);
+                const rel = path.relative(wsRoot, fullPath);
+                if (e.isDirectory()) {
+                    results.push(rel + '/');
+                    walk(fullPath, d + 1);
+                } else {
+                    if (!ext || e.name.endsWith(ext.startsWith('.') ? ext : '.' + ext))
+                        results.push(rel);
+                }
+                if (results.length >= maxFiles) break;
+            }
+        };
+        walk(base, 0);
+
+        const truncated = results.length >= maxFiles;
+        const out = results.join('\n') + (truncated ? '\n[truncated at 500 entries]' : '');
+        return new vscode.LanguageModelToolResult([
+            new vscode.LanguageModelTextPart(out || '(empty directory)')]);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Wolfteam interaction tools — inline user consultation via confirmations
+// ---------------------------------------------------------------------------
+
+class ProposePlanTool {
+    async prepareInvocation(options, _token) {
+        const { planSummary } = options.input;
+        return {
+            invocationMessage: `📋 Plan: ${(planSummary || '').slice(0, 80)}`,
+        };
+    }
+
+    async invoke(options, _token) {
+        const { planSummary, steps } = options.input;
+        const stepItems = (steps || []).map((s, i) => ({ label: `  ${i + 1}. ${s}`, kind: vscode.QuickPickItemKind.Default }));
+
+        const choice = await vscode.window.showQuickPick([
+            { label: '$(check) Approve', description: 'Proceed with this plan', value: 'approve' },
+            { label: '$(edit) Approve with modifications', description: 'Add directions before proceeding', value: 'approve_note' },
+            { label: '$(close) Reject', description: 'Try a different approach', value: 'reject' },
+            { label: '$(comment) Reject with feedback', description: 'Explain what to change', value: 'reject_note' },
+        ], {
+            title: planSummary,
+            placeHolder: (steps || []).map((s, i) => `${i + 1}. ${s}`).join('  •  ').slice(0, 120),
+            ignoreFocusOut: true,
+        });
+
+        if (!choice) {
+            return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart('User closed the dialog without choosing. Ask if they want to continue or try a different approach.'),
+            ]);
+        }
+
+        if (choice.value === 'approve') {
+            const n = (steps || []).length;
+            return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(`Plan approved. ${n} steps to execute. Proceed with step 1.`),
+            ]);
+        }
+
+        if (choice.value === 'approve_note' || choice.value === 'reject_note') {
+            const isApprove = choice.value === 'approve_note';
+            const note = await vscode.window.showInputBox({
+                title: isApprove ? 'Modifications before proceeding' : 'Feedback on the plan',
+                prompt: isApprove
+                    ? 'What changes would you like before proceeding?'
+                    : 'What should be different about this approach?',
+                ignoreFocusOut: true,
+            });
+            if (note === undefined) {
+                // user cancelled the input box — treat as plain approve/reject
+                return new vscode.LanguageModelToolResult([
+                    new vscode.LanguageModelTextPart(isApprove
+                        ? `Plan approved. Proceed with step 1.`
+                        : `Plan rejected. Propose a different approach.`),
+                ]);
+            }
+            return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(isApprove
+                    ? `Plan approved with modifications: "${note}". Incorporate these changes and proceed.`
+                    : `Plan rejected. User feedback: "${note}". Revise the plan accordingly and propose again.`),
+            ]);
+        }
+
+        // reject
+        return new vscode.LanguageModelToolResult([
+            new vscode.LanguageModelTextPart('Plan rejected. Propose a different approach.'),
+        ]);
+    }
+}
+
+class AskDecisionTool {
+    async prepareInvocation(options, _token) {
+        const { question } = options.input;
+        return {
+            invocationMessage: `❓ ${question}`,
+        };
+    }
+
+    async invoke(options, _token) {
+        const { question, options: opts, defaultOption, context } = options.input;
+
+        const items = (opts || []).map(o => ({
+            label: o === defaultOption ? `$(star) ${o}` : o,
+            description: o === defaultOption ? 'recommended' : '',
+            value: o,
+        }));
+        items.push({ label: '$(edit) Other…', description: 'Enter a custom answer', value: '__custom__' });
+
+        const choice = await vscode.window.showQuickPick(items, {
+            title: question,
+            placeHolder: context || 'Choose an option',
+            ignoreFocusOut: true,
+        });
+
+        if (!choice) {
+            return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(`User closed the dialog without choosing. Use the default "${defaultOption}" or re-ask if needed.`),
+            ]);
+        }
+
+        if (choice.value === '__custom__') {
+            const custom = await vscode.window.showInputBox({
+                title: question,
+                prompt: 'Enter your custom answer',
+                ignoreFocusOut: true,
+            });
+            const answer = custom !== undefined ? custom : defaultOption;
+            return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(`User chose custom answer: "${answer}". Proceed accordingly.`),
+            ]);
+        }
+
+        return new vscode.LanguageModelToolResult([
+            new vscode.LanguageModelTextPart(`User chose: "${choice.value}" for the question "${question}". Proceed accordingly.`),
+        ]);
+    }
+}
+
+class CheckpointTool {
+    async prepareInvocation(options, _token) {
+        const { stepCompleted, nextStep } = options.input;
+        return {
+            invocationMessage: `✅ ${stepCompleted} → Next: ${(nextStep || '').slice(0, 60)}`,
+        };
+    }
+
+    async invoke(options, _token) {
+        const { stepCompleted, result, nextStep } = options.input;
+        const resultPreview = (result || '').slice(0, 150);
+
+        const choice = await vscode.window.showQuickPick([
+            { label: '$(check) Continue', description: nextStep, value: 'continue' },
+            { label: '$(comment) Continue with a note', description: 'Add directions before the next step', value: 'continue_note' },
+            { label: '$(debug-pause) Pause', description: 'Inspect results — I\'ll tell you what to do next', value: 'pause' },
+            { label: '$(refresh) Change approach', description: 'Try something different for this step', value: 'change' },
+        ], {
+            title: `✅ ${stepCompleted}`,
+            placeHolder: resultPreview,
+            ignoreFocusOut: true,
+        });
+
+        if (!choice) {
+            return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(`User closed the dialog. Step "${stepCompleted}" is done. Summarise the result and wait for further instructions.`),
+            ]);
+        }
+
+        if (choice.value === 'continue') {
+            return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(`User confirmed. Step "${stepCompleted}" complete. Proceed with: ${nextStep}`),
+            ]);
+        }
+
+        if (choice.value === 'continue_note') {
+            const note = await vscode.window.showInputBox({
+                title: 'Additional directions',
+                prompt: 'What should be done differently or additionally in the next step?',
+                ignoreFocusOut: true,
+            });
+            const noteText = note ? `User note: "${note}". ` : '';
+            return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(`User confirmed with directions. ${noteText}Step "${stepCompleted}" complete. Incorporate the note and proceed with: ${nextStep}`),
+            ]);
+        }
+
+        if (choice.value === 'pause') {
+            return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(`User wants to pause and inspect. Summarise the result of "${stepCompleted}" clearly — key values, what was found — then stop and wait for the user's next message.`),
+            ]);
+        }
+
+        // change approach
+        const feedback = await vscode.window.showInputBox({
+            title: 'Change approach',
+            prompt: 'What should be different?',
+            ignoreFocusOut: true,
+        });
+        const feedbackText = feedback ? `User feedback: "${feedback}".` : '';
+        return new vscode.LanguageModelToolResult([
+            new vscode.LanguageModelTextPart(`User wants to change approach for this step. ${feedbackText} Reconsider the plan and propose an alternative.`),
+        ]);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Registration helper — called from extension.js activate()
 // ---------------------------------------------------------------------------
 
@@ -2584,7 +2953,14 @@ function registerTools(context, getController, debugCtrl) {
         { name: 'wolfbook_abortEvaluation',      impl: new AbortEvaluationTool(getController) },
         { name: 'wolfbook_kernelCrashLog',       impl: new KernelCrashLogTool() },
         { name: 'wolfbook_debugCell',            impl: new DebugCellTool(getController, debugCtrl) },
-        { name: 'wolfbook_searchCells',           impl: new SearchCellsTool() },
+        { name: 'wolfbook_searchCells',          impl: new SearchCellsTool() },
+        { name: 'wolfbook_readFile',             impl: new ReadFileTool() },
+        { name: 'wolfbook_writeFile',            impl: new WriteFileTool() },
+        { name: 'wolfbook_runTerminal',          impl: new RunTerminalTool() },
+        { name: 'wolfbook_listFiles',            impl: new ListFilesTool() },
+        { name: 'wolfteam_proposePlan',          impl: new ProposePlanTool() },
+        { name: 'wolfteam_askDecision',          impl: new AskDecisionTool() },
+        { name: 'wolfteam_checkpoint',           impl: new CheckpointTool() },
     ];
 
     for (const { name, impl } of tools) {
@@ -2598,85 +2974,8 @@ function registerTools(context, getController, debugCtrl) {
 // @wolfbook chat participant
 // ---------------------------------------------------------------------------
 
-const WOLFBOOK_SYSTEM_PROMPT = `You are **@wolfbook**, a Wolfram Language expert agent embedded inside a VS Code notebook.
-
-## CRITICAL: You MUST use tools — do not answer from memory alone
-- **Before answering any question about the notebook**, call \`#wolfbookContext\` to read the actual cells and outputs.
-- **Before writing or editing any code**, call \`#wolfbookContext\` to see what is already defined.
-- **Never describe what you would do** — use the tools to actually do it.
-- If the user asks you to run something, use \`#wolfbookRunAll\` or \`#wolfbookRun\`.
-- If the user asks you to add code, use \`#wolfbookInsertMany\` (2+ cells) or \`#wolfbookInsert\`.
-- If the user asks about a symbol, use \`#wolfbookLookup\` or \`#wolfbookEval\`.
-
-## Available tools
-| Tool | Use when |
-|------|----------|
-| \`#wolfbookContext\` | Read all cells + outputs — call this FIRST for any notebook question |
-| \`#wolfbookEval\` | Run a WL expression and get the result immediately |
-| \`#wolfbookLookup\` | Look up usage, options, docs for any symbol |
-| \`#wolfbookWebHelp\` | Fetch full Wolfram reference page for a built-in |
-| \`#wolfbookInsertMany\` | Add 2+ cells in one operation (preferred over \`#wolfbookInsert\`) |
-| \`#wolfbookInsert\` | Add a single cell |
-| \`#wolfbookEdit\` | Replace source of existing cell; set evaluate:true to run immediately |
-| \`#wolfbookRun\` | Execute an existing cell (Shift+Enter equivalent) |
-| \`#wolfbookRunAll\` | Run a range of cells sequentially, get per-cell output |
-| \`#wolfbookDelete\` | Delete cells (content saved for recovery) |
-| \`#wolfbookRestore\` | List or re-insert recently deleted cells |
-| \`#wolfbookMove\` | Move a cell to a different position |
-| \`#wolfbookState\` | List all user-defined symbols + current values |
-| \`#wolfbookSaveNotebook\` | Save notebook to disk |
-| \`#wolfbookDebug\` | Step-through debugger: analyze, start, step, breakpoints, watch |
-| \`#wolfbookRestart\` | Restart kernel (clears all definitions) |
-| \`#wolfbookAbort\` | Interrupt a running evaluation |
-| \`#wolfbookSwitch\` | List open notebooks or switch active notebook |
-| \`#wolfbookCrashLog\` | Read kernel debug/crash logs |
-| \`#wolfbookFindPkg\` | Discover packages on Paclet Server + GitHub; result includes ready-to-run \`PacletInstall[]\` commands and GitHub install workflow — run them via \`#wolfbookEval\` with \`timeoutSeconds:120\` |
-| \`#wolfbookEvalInsert\` | Evaluate expression; if clean (no errors / output matches expected), append it as a new code cell — combines test + insert in one step |
-| \`#wolfbookSearch\` | Search notebook cells for a pattern — returns matching cell numbers and previews |
-
-## Wolfram Language essentials
-- \`f[x_] := x^2\` — SetDelayed for function defs (evaluates at call time, not definition time)
-- \`f[x_] = expr\` — Set; use only when expr is already fully numeric/symbolic
-- \`Module[{vars}, body]\` — local variables; never leak into Global\`
-- More specific patterns must come before general: \`f[0]:=…\` before \`f[n_]:=…\`
-- \`NumericQ[Pi]\` is True; \`NumberQ[Pi]\` is False — use NumericQ for "has numeric value"
-- Protected symbols (Pi, E, I, True, False, etc.) cannot be assigned
-- Trailing \`;\` suppresses output; missing it causes unwanted output in multi-statement cells
-- Use \`Association\` (not Rule lists) for structured data; \`Lookup\`, \`KeySelect\`, etc.
-- For numerical work: set \`WorkingPrecision\`, use \`SetPrecision\`/\`Rationalize\`
-
-## #wolfbookEval pitfall — multiLine:false
-- **CRITICAL**: in single-expression mode (multiLine:false, the default), **newline-separated
-  subexpressions are treated as multiplication** by the kernel (\`Times\`), NOT as sequential
-  statements. \`a\nb\` evaluates to \`a*b\`, not first \`a\` then \`b\`.
-- Always join multi-statement code with **semicolons** (\`a; b; c\`) in single-expression mode,
-  or set \`multiLine:true\` to fire each line as a separate evaluation.
-
-## #wolfbookRun success vs. output
-- A cell that **defines functions** (e.g. \`f[x_]:=x^2\`) or uses trailing \`;\` naturally produces
-  **no output** — the tool will say "(no output — definition or suppressed expression)".
-  This is **correct and expected** — it does NOT mean the cell failed.
-- Check for \`⚠ Kernel messages\` in the result: if present, the kernel emitted warnings or
-  errors. Treat these as failures and fix the cell before proceeding.
-- To verify a definition took effect, call \`#wolfbookEval\` (e.g. \`?f\`) or \`#wolfbookState\`.
-
-## Cell kinds
-- \`kind:"code"\` — Wolfram Language, evaluated by kernel
-- \`kind:"markdown"\` — text, headings (\`#\`/\`##\`/\`###\`), LaTeX (\`$E=mc^2$\`) — never sent to kernel
-
-## Long-running cells
-- \`#wolfbookRun\` default timeout = **30 s**; \`#wolfbookRunAll\` default = **120 s**.
-- Both accept a \`timeoutSeconds\` parameter — increase it when the computation is expected to be slow.
-- If the tool returns "timed out … execution may still be running", **the kernel is still busy**.
-  - To stop it: call \`#wolfbookAbort\` immediately.
-  - To wait longer: call \`#wolfbookRun\` again with a larger \`timeoutSeconds\`.
-- Never leave a timed-out cell silently — always abort or retry so the kernel is not left stuck.
-
-## Response style
-- Concise and precise. Match WL's terse style.
-- When fixing a bug: one sentence of diagnosis, then the fix.
-- Prefer \`#wolfbookInsertMany\` over multiple \`#wolfbookInsert\` calls.
-`;
+const WOLFBOOK_SYSTEM_PROMPT = fs.readFileSync(
+    path.join(__dirname, 'wolfbook-system-prompt.md'), 'utf8');
 
 function registerChatParticipant(context, getController) {
     // Guard: chat API may not be available in older VS Code versions
@@ -2857,4 +3156,258 @@ function registerChatParticipant(context, getController) {
     context.subscriptions.push(participant);
 }
 
-module.exports = { registerTools, registerChatParticipant, buildTranscript, clearEvalLog };
+// ---------------------------------------------------------------------------
+// inferMode — determine result mode from tool call history (no LLM self-reporting)
+// ---------------------------------------------------------------------------
+function inferMode(toolNames, hadErrors) {
+    if (hadErrors) return 'error';
+    if (toolNames.length === 0) return 'idle';
+    if (toolNames.some(n => n && n.startsWith('wolfbook'))) return 'reviewing';
+    return 'idle';
+}
+
+// ---------------------------------------------------------------------------
+// registerWolfteamParticipant — @wolfteam collaborative research partner
+// ---------------------------------------------------------------------------
+function registerWolfteamParticipant(context, getController) {
+    if (!vscode.chat || !vscode.chat.createChatParticipant) return;
+
+    // Load system prompt once at registration time
+    let WOLFTEAM_SYSTEM_PROMPT;
+    try {
+        WOLFTEAM_SYSTEM_PROMPT = fs.readFileSync(
+            path.join(__dirname, 'wolfteam-system-prompt.md'), 'utf8');
+    } catch {
+        WOLFTEAM_SYSTEM_PROMPT = 'You are Wolfteam, a collaborative Wolfram Language research partner.';
+    }
+
+    const participant = vscode.chat.createChatParticipant('wolfbook.team', async (request, ctx, stream, token) => {
+
+        // ── Clear stale Copilot Edits state on fresh conversation ───────────
+        if (ctx.history.length === 0) {
+            for (const ed of vscode.window.visibleNotebookEditors) {
+                if (ed.notebook.notebookType === 'extended-wolfram-notebook' && ed.notebook.isDirty) {
+                    try { await vscode.workspace.save(ed.notebook.uri); } catch (_) {}
+                }
+            }
+            try { await vscode.commands.executeCommand('chatEditing.acceptAllFiles'); } catch (_) {}
+        }
+
+        // ── Kernel / notebook state header ──────────────────────────────────
+        const controller = getController?.();
+        const stateLines = [];
+        if (controller) {
+            const busy = controller._evalDispatched ? ' (currently evaluating)' : '';
+            stateLines.push(`Kernel: ${controller.kernelStatusString || 'unknown'}${busy}`);
+            if (controller._dynCells?.size > 0) stateLines.push(`Dynamic widgets active: ${controller._dynCells.size}`);
+        } else {
+            stateLines.push('Kernel: not connected');
+        }
+        const editor = vscode.window.activeNotebookEditor || vscode.window.visibleNotebookEditors[0];
+        if (editor) {
+            const nb     = editor.notebook;
+            const nbName = nb.uri.fsPath.split('/').pop();
+            let codeN = 0, mdN = 0;
+            for (let i = 0; i < nb.cellCount; i++) {
+                nb.cellAt(i).kind === vscode.NotebookCellKind.Code ? codeN++ : mdN++;
+            }
+            stateLines.push(`Active notebook: ${nbName} — ${nb.cellCount} cells (${codeN} code, ${mdN} markdown)`);
+            stateLines.push('Call #wolfbookContext to read the notebook contents before answering questions about it.');
+        } else {
+            stateLines.push('No notebook is currently open.');
+        }
+
+        // ── Slash command overlay ────────────────────────────────────────────
+        const cmdOverlays = {
+            plan:     '\n\n## Task focus\nPresent a numbered plan for the requested calculation. Wait for the user to explicitly approve before executing anything.',
+            check:    '\n\n## Task focus\nSanity-check the current results: dimensional consistency, symmetry properties, special limits, unexpected zeros or sign errors.',
+            summarise:'\n\n## Task focus\nSummarise what has been computed so far, the key results, and what was tried and abandoned.',
+            clean:    '\n\n## Task focus\nClean up the notebook: remove failed/scratch cells, reorder cells for narrative flow, tidy outputs.',
+            export:   '\n\n## Task focus\nProduce a clean minimal ordered cell sequence that reproduces the key results, removing scaffolding.',
+            back:     '\n\n## Task focus\nIdentify the last decision branch point in the notebook. Delete cells created after that branch on the abandoned path. Resume from that point with the alternative approach.',
+        };
+        const cmdOverlay = cmdOverlays[request.command] || '';
+
+        // ── Build system message ─────────────────────────────────────────────
+        const sysMsg = WOLFTEAM_SYSTEM_PROMPT + cmdOverlay +
+            '\n\n## Current state\n' + stateLines.join('\n');
+
+        const messages = [vscode.LanguageModelChatMessage.User(sysMsg)];
+
+        // ── Thread conversation history ──────────────────────────────────────
+        for (const turn of ctx.history) {
+            if (turn instanceof vscode.ChatResponseTurn) {
+                const md = turn.response
+                    .filter(p => p instanceof vscode.ChatResponseMarkdownPart)
+                    .map(p => p.value.value).join('');
+                if (md) messages.push(vscode.LanguageModelChatMessage.Assistant(md));
+            } else if (turn instanceof vscode.ChatRequestTurn) {
+                messages.push(vscode.LanguageModelChatMessage.User(turn.prompt));
+            }
+        }
+        messages.push(vscode.LanguageModelChatMessage.User(request.prompt));
+
+        // ── Model selection ──────────────────────────────────────────────────
+        let model = request.model;
+        if (!model) {
+            const models = await vscode.lm.selectChatModels({ family: 'gpt-4o' });
+            model = models[0];
+        }
+        if (!model) {
+            stream.markdown('No language model available. Make sure GitHub Copilot is active.');
+            return { metadata: { mode: 'idle' } };
+        }
+
+        // ── Tool set (full wolfbook set + new file/terminal tools) ───────────
+        const toolNames = [
+            'wolfbook_switchNotebook',
+            'wolfbook_getNotebookContext', 'wolfbook_evaluateExpression', 'wolfbook_evaluateAndInsert',
+            'wolfbook_lookupSymbol', 'wolfbook_getSymbolWebHelp',
+            'wolfbook_insertCell', 'wolfbook_insertCells',
+            'wolfbook_deleteCell', 'wolfbook_restoreDeletedCells',
+            'wolfbook_moveCell', 'wolfbook_editCell', 'wolfbook_runCell',
+            'wolfbook_runAllCells', 'wolfbook_getKernelState',
+            'wolfbook_findPackage', 'wolfbook_saveNotebook',
+            'wolfbook_restartKernel', 'wolfbook_abortEvaluation',
+            'wolfbook_kernelCrashLog', 'wolfbook_debugCell',
+            'wolfbook_searchCells',
+            'wolfbook_readFile', 'wolfbook_writeFile', 'wolfbook_runTerminal', 'wolfbook_listFiles',
+            // Interaction tools — inline confirmations for plan approval and decisions
+            'wolfteam_proposePlan', 'wolfteam_askDecision', 'wolfteam_checkpoint',
+        ];
+        const tools = vscode.lm.tools.filter(t => toolNames.includes(t.name));
+        const options = {
+            justification: 'Wolfteam collaborative agent needs tool access to operate on the notebook and kernel.',
+            tools,
+        };
+
+        // ── Agentic loop ─────────────────────────────────────────────────────
+        const teamTurns = ctx.history.filter(h => h instanceof vscode.ChatResponseTurn).length;
+        let rounds = 0;
+        const MAX_ROUNDS = 50;
+        const allToolNames = [];
+        const toolCallRounds = []; // [{name, input}] per round — for contextual follow-ups
+        let hadErrors = false;
+        let resultMetadata = { mode: 'idle', turnCount: teamTurns + 1 };
+
+        while (rounds++ < MAX_ROUNDS && !token.isCancellationRequested) {
+            const response = await model.sendRequest(messages, options, token);
+
+            const toolCalls = [];
+            const textParts = [];
+
+            for await (const part of response.stream) {
+                if (part instanceof vscode.LanguageModelTextPart) {
+                    textParts.push(part.value);
+                } else if (part instanceof vscode.LanguageModelToolCallPart) {
+                    toolCalls.push(part);
+                }
+            }
+
+            const fullText = textParts.join('');
+
+            if (toolCalls.length === 0) {
+                // Final response — stream directly (no STATUS tag to strip)
+                if (fullText) stream.markdown(fullText);
+                resultMetadata = { mode: inferMode(allToolNames, hadErrors), turnCount: teamTurns + 1, toolCallRounds };
+                break;
+            }
+
+            // Intermediate response — stream directly
+            if (fullText) stream.markdown(fullText);
+
+            const assistantContent = [];
+            if (fullText) assistantContent.push(new vscode.LanguageModelTextPart(fullText));
+            assistantContent.push(...toolCalls);
+            messages.push(vscode.LanguageModelChatMessage.Assistant(assistantContent));
+
+            const toolResultParts = [];
+            for (const tc of toolCalls) {
+                const label = tc.name.replace('wolfbook_', '#wolfbook').replace('wolfteam_', '#wolfteam');
+                stream.progress(`Using ${label}…`);
+                // wolfteam interaction tools NEED the invocation token so the
+                // confirmation UI renders inline in the chat stream.
+                // wolfbook tools must NOT get it — they make WorkspaceEdits which
+                // would create unwanted Copilot Edits diff noise.
+                const isInteractionTool = tc.name.startsWith('wolfteam_');
+                try {
+                    const result = await vscode.lm.invokeTool(tc.name, {
+                        input: tc.input,
+                        toolInvocationToken: isInteractionTool ? request.toolInvocationToken : undefined,
+                    }, token);
+                    allToolNames.push(tc.name);
+                    toolCallRounds.push({ name: tc.name, input: tc.input });
+                    toolResultParts.push(
+                        new vscode.LanguageModelToolResultPart(tc.callId, result.content)
+                    );
+                } catch (err) {
+                    hadErrors = true;
+                    const isDenial = err.message?.includes('denied') ||
+                                     err.message?.includes('cancelled') ||
+                                     err.code === 'Cancelled';
+                    const msg = isDenial
+                        ? `User declined this action. Ask what they'd like to change or try a different approach.`
+                        : `Tool error: ${err.message}`;
+                    toolResultParts.push(
+                        new vscode.LanguageModelToolResultPart(tc.callId, [
+                            new vscode.LanguageModelTextPart(msg)
+                        ])
+                    );
+                }
+            }
+
+            messages.push(vscode.LanguageModelChatMessage.User(toolResultParts));
+        }
+
+        return { metadata: resultMetadata };
+    });
+
+    // ── Follow-up provider ───────────────────────────────────────────────────
+    participant.followupProvider = {
+        provideFollowups(result, _ctx, _token) {
+            const meta = result.metadata;
+            if (!meta) return [];
+
+            // Find the last checkpoint to extract its nextStep for a contextual follow-up
+            const rounds = meta.toolCallRounds || [];
+            let lastCheckpointNext;
+            for (let i = rounds.length - 1; i >= 0; i--) {
+                if (rounds[i].name === 'wolfteam_checkpoint' && rounds[i].input?.nextStep) {
+                    lastCheckpointNext = rounds[i].input.nextStep;
+                    break;
+                }
+            }
+
+            function trunc(s, n) { return s && s.length > n ? s.slice(0, n - 1) + '…' : s; }
+
+            switch (meta.mode) {
+                case 'reviewing': {
+                    const followups = [];
+                    if (lastCheckpointNext) {
+                        followups.push({ prompt: lastCheckpointNext, label: `→ ${trunc(lastCheckpointNext, 60)}` });
+                    }
+                    followups.push(
+                        { prompt: 'Save the notebook and summarise what we did', label: '💾 Save & summarise' },
+                        { prompt: "Let's work on something else",                label: '🆕 New task' },
+                    );
+                    return followups;
+                }
+                case 'error':
+                    return [
+                        { prompt: 'Try a different approach',  label: '↻ Different approach' },
+                        { prompt: 'Debug this step',           label: '🔍 Debug' },
+                    ];
+                default:
+                    return [
+                        { prompt: "What's currently in my notebook?", label: '📓 Show notebook' },
+                        { prompt: 'Help me with a calculation',        label: '🧮 New calculation' },
+                    ];
+            }
+        },
+    };
+
+    participant.iconPath = vscode.Uri.joinPath(context.extensionUri, 'icons', 'wolfbook_file_icon.png');
+    context.subscriptions.push(participant);
+}
+
+module.exports = { registerTools, registerChatParticipant, registerWolfteamParticipant, buildTranscript, clearEvalLog };

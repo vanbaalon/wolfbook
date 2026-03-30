@@ -183,6 +183,19 @@ export function activate(context) {
             if (msg.type === 'dialog-end') {
                 removeDialogWidget();
             }
+            // ---- Background image (applied to cell-output body) ----
+            if (msg.type === 'bg-image') {
+                let bgStyle = document.querySelector('style[data-wolfram-bg-image]');
+                if (!bgStyle) {
+                    bgStyle = document.createElement('style');
+                    bgStyle.setAttribute('data-wolfram-bg-image', '1');
+                    (document.head || document.documentElement).appendChild(bgStyle);
+                }
+                bgStyle.textContent = msg.dataUrl
+                    ? `body { background-image: url('${msg.dataUrl}'); background-size: cover; background-attachment: fixed; background-position: center; }`
+                    : '';
+                return;
+            }
         });
         // Announce to the extension that this renderer instance is ready to receive
         // kernel-offline / kernel-online messages. The extension will respond with
@@ -586,10 +599,10 @@ export function activate(context) {
             //   TXT | SVG | ∑  (format selectors)
             //   ⊕ ⊖ (MathML zoom, only when MathML)
             //   ↓ Wrap / ↔ Scroll toggle (MathML only)
-            const BTN_BASE = 'padding:1px 6px;font-size:12px;cursor:pointer;line-height:1.5;' +
-                             'background:transparent;border:1px solid rgba(128,128,128,0.3);' +
-                             'border-radius:3px;flex-shrink:0;color:var(--vscode-foreground,inherit);';
-            const BTN_ACTIVE = 'border-color:rgba(128,128,128,0.7);';
+            const BTN_BASE = 'padding:0 3px;font-size:10px;cursor:pointer;line-height:1.3;' +
+                             'background:transparent;border:1px solid rgba(128,128,128,0.2);' +
+                             'border-radius:2px;flex-shrink:0;color:var(--vscode-foreground,inherit);opacity:0.55;';
+            const BTN_ACTIVE = 'border-color:rgba(128,128,128,0.6);opacity:0.9;';
 
             const outputHeaders = element.querySelectorAll('.wl-output-header[data-out-n]');
             console.log('[WolframRenderer] Found', outputHeaders.length, 'output headers for format buttons');
@@ -609,7 +622,7 @@ export function activate(context) {
                 const isGraphics = header.getAttribute('data-output-is-graphics') === '1';
                 const formats = isGraphics
                     ? [['WL', 'InputForm'], ['SVG', 'SVG'], ['TikZ', 'SVGSrc']]
-                    : [['WL', 'InputForm'], ['SVG', 'SVG'], ['SVG.T', 'SVGT'], ['TeX', 'TeX'], ['src', 'TeXSrc'], ['LaTeX', 'WLLatex2'], ['src', 'WLLatexSrc'], ['\u2211', 'MathML']];
+                    : [['WL', 'InputForm'], ['SVG', 'SVG'], ['SVG.T', 'SVGT'], ['TeX', 'TeX'], ['src', 'TeXSrc'], ['LaTeX', 'WLLatex2'], ['src', 'WLLatexSrc']];
                 formats.forEach(([label, fmtKey]) => {
                     const b = document.createElement('button');
                     b.textContent = label;
