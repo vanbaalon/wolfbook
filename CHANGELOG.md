@@ -4,6 +4,17 @@ All notable changes to **Wolfbook** are documented here.
 
 ---
 
+## [2.5.10] - 2026-03-31
+
+### Fixed
+- **Debugger — F11 enters wrong `Do` block** — when a cell contained two or more sibling loops at the same depth (e.g. `Do[…, {i,…}]; Do[…, {j,…}]`), stepping into the second loop highlighted the first loop's body instead.  Root cause: the step-instrumentation counter reset to 1 for every `instrumentBody` call, so both inner loops produced the same `{depth, localStep}` coordinates.  Fixed by threading a single monotonic counter through all recursive `instrumentBody` calls, giving every step in the cell a globally-unique coordinate pair.
+
+- **Debugger — Cmd+Shift+D now toggles the debugger** — pressing Cmd+Shift+D (Ctrl+Shift+D on Windows/Linux) while a debug session is active now stops the debugger, mirroring the same shortcut used to start it.
+
+- **Formatter — `/@` (Map) no longer gains a spurious space** — the `/@` operator was being tokenised as `/` followed by `@`, causing the formatter to insert a space: `f /@ list` → `f / @list`.  The tokeniser now recognises `/@` as a single operator token.
+
+---
+
 ## [2.5.9] - 2026-03-30
 
 ### Added

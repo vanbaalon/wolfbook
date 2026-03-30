@@ -188,10 +188,9 @@ function extractLoopInfo(head, argsStr) {
 // Recursive instrumentation of a body string
 // ─────────────────────────────────────────────────────────────────────────────
 
-function instrumentBody(bodyStr, depth, outerIterVars, baseOffset, originalCode, stepsOut) {
+function instrumentBody(bodyStr, depth, outerIterVars, baseOffset, originalCode, stepsOut, counter = { value: 1 }) {
     const statements = splitAtDepth0(bodyStr, ';');
     const instrParts = [];
-    let localStep = 1;
 
     for (const stmt of statements) {
         const trimmed = stmt.content.trim();
@@ -212,7 +211,8 @@ function instrumentBody(bodyStr, depth, outerIterVars, baseOffset, originalCode,
                 const innerBodyAbsOffset = stmtAbsStart + innerLoop.openBracket + 1 + innerInfo.bodyOffset;
                 const innerInstrBody = instrumentBody(
                     innerInfo.bodyContent, depth + 1, innerIterVars,
-                    innerBodyAbsOffset, originalCode, stepsOut
+                    innerBodyAbsOffset, originalCode, stepsOut,
+                    counter
                 );
                 const preBody  = trimmed.slice(0, innerLoop.openBracket + 1) +
                                  innerArgsStr.slice(0, innerInfo.bodyOffset);
@@ -234,6 +234,8 @@ function instrumentBody(bodyStr, depth, outerIterVars, baseOffset, originalCode,
         const startLC = lineColumnFromOffset(originalCode, stmtAbsStart);
         const endLC   = lineColumnFromOffset(originalCode, Math.min(stmtAbsEnd, originalCode.length));
 
+        const localStep = counter.value++;
+
         stepsOut.push({
             depth, localStep,
             sourceStart: stmtAbsStart, sourceEnd: stmtAbsEnd,
@@ -249,7 +251,6 @@ function instrumentBody(bodyStr, depth, outerIterVars, baseOffset, originalCode,
             `wolfbookDebug$BeforeStep[${depth}, ${localStep}, ${iterVarsExpr}]`,
             `wolfbookDebug$Timed[${depth}, ${localStep}, (${codeToWrap})]`
         );
-        localStep++;
     }
 
     return instrParts.join(';\n');

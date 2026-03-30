@@ -215,6 +215,12 @@ function tokenize(src) {
       i += 2;
       continue;
     }
+    // /@ (Map shorthand — must be checked before single-/ fallthrough)
+    if (ch === '/' && i + 1 < n && src[i + 1] === '@') {
+      tokens.push({ type: T.AT, value: '/@' });
+      i += 2;
+      continue;
+    }
 
     // -> and :>
     if (ch === '-' && i + 1 < n && src[i + 1] === '>') {
