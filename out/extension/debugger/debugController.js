@@ -846,6 +846,10 @@ class DebugController {
                         const html = ctrl._processWLLatexBoxes
                             ? ctrl._processWLLatexBoxes(ctrl._fixImageUris ? ctrl._fixImageUris(rawHtml) : rawHtml)
                             : rawHtml;
+                        // Reset _debugPrintOut so subsequent Print calls from the next
+                        // step create a new output block after this result, not inside
+                        // the existing print block (which would display out of order).
+                        this._debugPrintOut = null;
                         await this._debugExecution.appendOutput(new vscode.NotebookCellOutput([
                             vscode.NotebookCellOutputItem.text(
                                 `<div class="wl-output-block"><div class="wl-output-content">${html}</div></div>`,
