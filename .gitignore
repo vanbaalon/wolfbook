@@ -1,12 +1,13 @@
-# Node
+﻿# Node
 node_modules/
 
+!wllatex-addon/node_modules/
 # Intermediate build artifacts (keep wstp/build/Release/wstp.node)
 wstp/build/Release/*.o
 wstp/build/Release/*.a
 wstp/build/Release/obj.target/
 
-# VSIX packages (build artifacts) — exclude root-level builds but track releases/
+# VSIX packages (build artifacts) â€” exclude root-level builds but track releases/
 *.vsix
 !releases/**/*.vsix
 
