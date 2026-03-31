@@ -6,8 +6,9 @@ wstp/build/Release/*.o
 wstp/build/Release/*.a
 wstp/build/Release/obj.target/
 
-# VSIX packages (build artifacts)
+# VSIX packages (build artifacts) — exclude root-level builds but track releases/
 *.vsix
+!releases/**/*.vsix
 
 # macOS
 .DS_Store

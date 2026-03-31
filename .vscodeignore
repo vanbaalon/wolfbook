@@ -38,7 +38,11 @@ wstp/build/**/*.mk
 wstp/build/Release/.deps/**
 wstp/node_modules/**
 
-# Keep: wstp/build/Release/wstp.node  (the native addon)
+# Windows build: exclude macOS binaries, keep only win32-x64
+wstp/build/Release/wstp.node
+wstp/prebuilt/wstp-darwin-arm64.node
+
+# Keep: wstp/prebuilt/wstp-win32-x64.node  (Windows native addon)
 # Keep: wstp/index.d.ts
 
 # Misc
