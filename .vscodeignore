@@ -38,11 +38,16 @@ wstp/build/**/*.mk
 wstp/build/Release/.deps/**
 wstp/node_modules/**
 
-# Windows build: exclude macOS binaries, keep only win32-x64
+# Windows build: exclude macOS/Linux binaries, keep only win32-x64
 wstp/build/Release/wstp.node
 wstp/prebuilt/wstp-darwin-arm64.node
+wllatex-addon/wolfbook_btl.node
+wllatex-addon/prebuilt/wolfbook_btl-darwin-arm64.node
+wllatex-addon/prebuilt/wolfbook_btl-linux-x64.node
 
-# Keep: wstp/prebuilt/wstp-win32-x64.node  (Windows native addon)
+# Keep: wstp/prebuilt/wstp-win32-x64.node
+# Keep: wllatex-addon/prebuilt/wolfbook_btl-win32-x64.node
+# Keep: wllatex-addon/node_modules/katex  (required by katexPrerender.js)
 # Keep: wstp/index.d.ts
 
 # Misc
