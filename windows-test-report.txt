@@ -1,0 +1,20 @@
+﻿Wolfbook Windows build report
+Generated : 2026-04-01 14:38:23
+WEngine   : 14.2
+
+WEngine 14.2
+  Total   : 73
+  Passed  : 73
+  Skipped : 0 (known Windows issues: 29, 31, 52)
+  Failed  : 0
+
+  Results:
+
+WEngine 14.3
+  Total   : 73
+  Passed  : 73
+  Skipped : 0 (known Windows issues: 29, 31, 52)
+  Failed  : 0
+
+  Results:
+
