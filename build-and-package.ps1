@@ -165,7 +165,10 @@ Pop-Location
 
 # -- Run test suite ---------------------------------------------------------
 if (-not $SkipTests) {
-    foreach ($ver in $AllVersions) {
+    # Only test against the version used to build the binary.
+    # Other installed engines may not be fully compatible with the current OS.
+    $TestVersions = $AllVersions | Where-Object { $_.Name -eq $BuildVersion }
+    foreach ($ver in $TestVersions) {
         $kernel = "$EngineRoot\$($ver.Name)\WolframKernel.exe"
         if (-not (Test-Path $kernel)) { Info "Skipping $($ver.Name) - WolframKernel.exe not found"; continue }
 
@@ -245,14 +248,16 @@ if (-not $SkipTests) {
         Set-Content $testJsPath $testJsOriginal -Encoding UTF8
 
         # Parse results - lines like '  [check] 27. description'
+        # Wrap all results in @() to force arrays - PS returns $null or a single
+        # object (not an array) for 0 or 1 matches, breaking .Count
         $logLines  = Get-Content $logFile
-        $allTests  = $logLines | Where-Object { $_ -match '\s+(\d+)\.' } |
-                     ForEach-Object { $null = $_ -match '\s+(\d+)\.'; [int]$Matches[1] }
-        $failLines = $logLines | Where-Object { $_ -match '\s+(\d+)\.' -and $_ -match [char]0x2717 }
-        $failNums  = $failLines | ForEach-Object { $null = $_ -match '\s+(\d+)\.'; [int]$Matches[1] }
+        $allTests  = @($logLines | Where-Object { $_ -match '\s+(\d+)\.' } |
+                     ForEach-Object { $null = $_ -match '\s+(\d+)\.'; [int]$Matches[1] })
+        $failLines = @($logLines | Where-Object { $_ -match '\s+(\d+)\.' -and $_ -match [char]0x2717 })
+        $failNums  = @($failLines | ForEach-Object { $null = $_ -match '\s+(\d+)\.'; [int]$Matches[1] })
 
-        $realFails = $failNums | Where-Object { $_ -notin $KnownSkipTests }
-        $skipped   = $failNums | Where-Object { $_ -in  $KnownSkipTests }
+        $realFails = @($failNums | Where-Object { $_ -notin $KnownSkipTests })
+        $skipped   = @($failNums | Where-Object { $_ -in  $KnownSkipTests })
         $total     = $allTests.Count
         $passing   = $total - $failNums.Count
 
