@@ -170,9 +170,12 @@ function Pull-Repo([string]$name, [string]$dir, [string]$branch, [string]$baseBr
             Log "ERROR: sync verification failed for $name (HEAD does not contain origin/$baseBranch)"
             return $false
         }
-    } elseif ($remote -and $local -and $remote -ne $local) {
-        Log "ERROR: sync verification failed for $name (local=$local remote=$remote)"
-        return $false
+    } elseif ($remote) {
+        git -C $dir merge-base --is-ancestor $remote HEAD 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Log "ERROR: sync verification failed for $name (local does not contain remote HEAD)"
+            return $false
+        }
     }
 
     Log "  synced $name at $local"
