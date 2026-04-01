@@ -171,24 +171,42 @@ if (-not $SkipTests) {
 
         Step "Test suite against WEngine $($ver.Name)"
 
-        # Save original test.js so we can restore it after patching KERNEL_PATH
+        # Save original test.js so we can restore it after patching
         $testJsPath     = "$WstpNodeDir\tests\test.js"
         $testJsOriginal = Get-Content $testJsPath -Raw
 
-        $escapedPath = $kernel.Replace('\', '\\')
+        # 1) Patch KERNEL_PATH (use doubled backslashes for JS string literal)
+        $escapedPath   = $kernel.Replace('\', '\\')
         $testJsPatched = $testJsOriginal -replace "const KERNEL_PATH = '[^']*';",
                                                   "const KERNEL_PATH = '$escapedPath';"
+
+        # 2) Skip Windows-incompatible tests: 29 & 31 trigger a JLink picker dialog
+        #    (createSubsession uses a different IPC path on Windows that requires
+        #    a user to select a MathLink program), 52 is timing-sensitive.
+        #    Inject an early-return guard at the top of the run() function body.
+        #    The guard reuses the existing testNum() helper already in test.js.
+        $skipSet = ($KnownSkipTests | ForEach-Object { "$_" }) -join ", "
+        $guard   = "if ([" + $skipSet + "].includes(testNum(name))) { console.log('  SKIP ' + name + ' (Windows incompatible)'); skipped++; return; }"
+        # run() opens as: async function run(name, fn, timeoutMs = TEST_TIMEOUT_MS) {
+        $testJsPatched = $testJsPatched -replace `
+            '(async function run\([^)]*\)\s*\{)', `
+            ('$1' + "`n    " + $guard)
+
         Set-Content $testJsPath $testJsPatched -Encoding UTF8
 
         $logFile = Join-Path $WolfbookDir "wstp-test-$($ver.Name).log"
         Push-Location $WstpNodeDir
-        # Run via cmd so stderr+stdout merge happens at cmd level; PS never sees
-        # [diag ...] lines as ErrorRecord objects and NativeCommandError is avoided.
-        cmd /c "node tests\test.js 2>&1" | Tee-Object $logFile
+        # Run entirely inside cmd.exe so no stderr lines ever reach PowerShell's
+        # pipeline and get wrapped as NativeCommandError / ErrorRecord objects.
+        # stdout+stderr are merged by cmd's own 2>&1 redirect into the log file;
+        # we also print live output via 'type' after the run.
+        $logFileEsc = $logFile.Replace('"', '""')
+        cmd /c "node tests\test.js > `"$logFileEsc`" 2>&1"
         $exitCode = $LASTEXITCODE
+        if (Test-Path $logFile) { Get-Content $logFile }
         Pop-Location
 
-        # Restore original test.js (remove our KERNEL_PATH patch)
+        # Restore original test.js
         Set-Content $testJsPath $testJsOriginal -Encoding UTF8
 
         # Parse results - lines like '  [check] 27. description'
