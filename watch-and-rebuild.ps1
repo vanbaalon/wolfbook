@@ -189,7 +189,7 @@ $state = Load-State
 
 $repos = [ordered]@{
     wstp     = @{ Dir = $WstpNodeDir;  Branch = "windows-x64" }
-    wolfbook = @{ Dir = $WolfbookDir;  Branch = "windows-x64"; BaseBranch = "main" }
+    wolfbook = @{ Dir = $WolfbookDir;  Branch = "windows-x64" }
     btl      = @{ Dir = $BtlDir;       Branch = "main" }
 }
 
