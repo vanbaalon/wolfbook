@@ -11,7 +11,10 @@
 
 // Detect developer machine by OS username.  Constant — evaluated once at load.
 const DEV_MODE = (() => {
-    try { return require('os').userInfo().username === 'k0959535'; } catch (_) { return false; }
+    try {
+        const _u = require('os').userInfo().username;
+        return _u === 'k0959535' || _u === 'nikolay';
+    } catch (_) { return false; }
 })();
 
 const SCROLL_DEBUG = DEV_MODE;
@@ -20,6 +23,7 @@ const SCROLL_DEBUG = DEV_MODE;
 // is available (it isn't populated at require() time).
 let _scrollLogPath = null;
 let _dynLogPath    = null;
+let _wstpLogPath   = null;
 
 function _resolveScrollLogPath() {
     if (_scrollLogPath) return _scrollLogPath;
@@ -31,6 +35,7 @@ function _resolveScrollLogPath() {
         const base = extFolder ? extFolder.uri.fsPath : folders[0].uri.fsPath;
         _scrollLogPath = require('path').join(base, 'Temporary Docs', 'wolfbook-extension-debug.log');
         _dynLogPath    = require('path').join(base, 'Temporary Docs', 'wolfbook-dynamic-debug.log');
+        _wstpLogPath   = require('path').join(base, 'Temporary Docs', 'wstp.log');
     } catch (_) {}
     return _scrollLogPath;
 }
@@ -76,13 +81,29 @@ function _hexDump(str, n) {
 }
 
 /**
- * truncateLogs — wipe both debug log files at kernel start so only fresh data
+ * wstpLog — append a WSTP traffic entry to wstp.log (dev machines only).
+ * Each call writes one line: timestamp, direction tag, trimmed expression/result.
+ */
+function wstpLog(...args) {
+    if (!DEV_MODE) return;
+    const msg = args.join(' ');
+    _resolveScrollLogPath();  // ensures _wstpLogPath is set
+    if (_wstpLogPath) {
+        try {
+            require('fs').appendFileSync(_wstpLogPath, '[' + new Date().toISOString() + '] ' + msg + '\n');
+        } catch (_) {}
+    }
+}
+
+/**
+ * truncateLogs — wipe all debug log files at kernel start so only fresh data
  * is visible.  No-op if paths haven't been resolved yet or on non-dev machines.
  */
 function truncateLogs() {
     _resolveScrollLogPath();
     if (_dynLogPath)    try { require('fs').writeFileSync(_dynLogPath,    ''); } catch(_){}
     if (_scrollLogPath) try { require('fs').writeFileSync(_scrollLogPath, ''); } catch(_){}
+    if (_wstpLogPath)   try { require('fs').writeFileSync(_wstpLogPath,   ''); } catch(_){}
 }
 
-module.exports = { DEV_MODE, SCROLL_DEBUG, scrollLog, dynLog, _hexDump, truncateLogs };
+module.exports = { DEV_MODE, SCROLL_DEBUG, scrollLog, dynLog, wstpLog, _hexDump, truncateLogs };

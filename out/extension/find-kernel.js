@@ -36,16 +36,38 @@ class FindKernel {
             "/usr/local/Wolfram/Mathematica/12.1/Executables/WolframKernel",
             "/usr/local/Wolfram/WolframEngine/12.1/Executables/WolframKernel"
         ];
-        this.macKernelPath = [
-            // Wolfram app (numbered versions, e.g. "Wolfram 3.app" = v14.3)
-            "/Applications/Wolfram 3.app/Contents/MacOS/WolframKernel",
-            "/Applications/Wolfram 2.app/Contents/MacOS/WolframKernel",
-            "/Applications/Wolfram.app/Contents/MacOS/WolframKernel",
-            // Standard Mathematica app names
-            "/Applications/Mathematica.app/Contents/MacOS/WolframKernel",
-            // Wolfram Engine — symlink, resolved at runtime in resolveKernel()
-            "/Applications/Wolfram Engine.app/Contents/MacOS/WolframKernel"
-        ];
+        this.macKernelPath = (() => {
+            // Dynamically discover all Wolfram/Mathematica apps in /Applications/.
+            // Handles numbered variants ("Wolfram 3.app", "Wolfram 14.app", etc.) and
+            // sorts them descending by version number so the newest is tried first.
+            const _paths = [];
+            try {
+                const _apps = fs.readdirSync('/Applications')
+                    .filter(e => /^(Wolfram( \d+)?|Wolfram Engine|Mathematica( \d+)?)\.app$/i.test(e))
+                    .sort((a, b) => {
+                        const na = parseInt(a.match(/^Wolfram (\d+)\.app$/i)?.[1] ?? '-1');
+                        const nb = parseInt(b.match(/^Wolfram (\d+)\.app$/i)?.[1] ?? '-1');
+                        if (na >= 0 && nb >= 0) return nb - na;  // both numbered → descending
+                        if (na >= 0) return -1;                  // a numbered → a first
+                        if (nb >= 0) return  1;                  // b numbered → b first
+                        // Neither numbered: prefer Wolfram.app > Mathematica > Wolfram Engine
+                        const _ord = ['Wolfram.app', 'Mathematica.app', 'Wolfram Engine.app'];
+                        return (_ord.indexOf(a) + 1 || 999) - (_ord.indexOf(b) + 1 || 999);
+                    });
+                for (const app of _apps) _paths.push(`/Applications/${app}/Contents/MacOS/WolframKernel`);
+            } catch (_) {}
+            if (_paths.length === 0) {
+                // Fallback if /Applications cannot be scanned
+                _paths.push(
+                    "/Applications/Wolfram 3.app/Contents/MacOS/WolframKernel",
+                    "/Applications/Wolfram 2.app/Contents/MacOS/WolframKernel",
+                    "/Applications/Wolfram.app/Contents/MacOS/WolframKernel",
+                    "/Applications/Mathematica.app/Contents/MacOS/WolframKernel",
+                    "/Applications/Wolfram Engine.app/Contents/MacOS/WolframKernel"
+                );
+            }
+            return _paths;
+        })();
         this.winKernelPath = [
             "C:\\Program Files\\Wolfram Research\\Wolfram\\14.2\\WolframKernel.exe",
             "C:\\Program Files\\Wolfram Research\\Wolfram Engine\\14.2\\WolframKernel.exe",

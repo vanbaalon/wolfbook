@@ -72,8 +72,8 @@ try {
     WstpSession = _addon.WstpSession;
     // Pipe C++ DiagLog messages into the extension debug log.
     if (typeof _addon.setDiagHandler === 'function') {
-        const { scrollLog: _sl } = require('./utils/dev-logger');
-        _addon.setDiagHandler(msg => { _sl('[C++]', msg); });
+        const { scrollLog: _sl, wstpLog: _wl } = require('./utils/dev-logger');
+        _addon.setDiagHandler(msg => { _sl('[C++]', msg); _wl('[C++]', msg); });
     }
 } catch (e) {
     console.error("[Controller] Failed to load wstp.node:", e.message);
@@ -484,6 +484,8 @@ class WolframNotebookKernel {
                             `-- K: ${this._pxPerCppEm.toFixed(1)}  pageWidthEm: ${this._latexPageWidthEm}\n` +
                             `-- divs: ${divsStr || '(none)'}  katexWidths: [${katexStr}]${calibNote}\n`;
                         fs.appendFileSync(logPath, entry);
+                        // Trim btl.log to last 200 lines
+                        try { const _ll = fs.readFileSync(logPath, 'utf8').split('\n'); if (_ll.length > 200) fs.writeFileSync(logPath, _ll.slice(-200).join('\n')); } catch (_) {}
                     }
                 } catch (_) {}
                 return;
@@ -543,6 +545,8 @@ class WolframNotebookKernel {
                             `-- _pxPerCppEm: ${oldK.toFixed(3)} → ${this._pxPerCppEm.toFixed(3)}` +
                             `  _latexPageWidthEm: ${this._latexPageWidthEm}\n`;
                         fs.appendFileSync(logPath, entry);
+                        // Trim btl.log to last 200 lines
+                        try { const _ll = fs.readFileSync(logPath, 'utf8').split('\n'); if (_ll.length > 200) fs.writeFileSync(logPath, _ll.slice(-200).join('\n')); } catch (_) {}
                     }
                 } catch (_) {}
                 return;

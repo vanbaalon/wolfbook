@@ -23,7 +23,7 @@ const vscode = require('vscode');
 const path   = require('path');
 const os     = require('os');
 const fs     = require('fs');
-const { truncateLogs, dynLog, scrollLog } = require('../utils/dev-logger');
+const { truncateLogs, dynLog, scrollLog, wstpLog, DEV_MODE } = require('../utils/dev-logger');
 const _encoding = require('../utils/encoding');
 const { clearEvalLog } = require('../tools/index');
 
@@ -82,6 +82,30 @@ function _appendPid(pid) {
     if (!pids.includes(pid)) {
         pids.push(pid);
         _savePidFile(pids);
+    }
+}
+
+// Wrap a WstpSession instance's key methods with WSTP traffic logging.
+// Only active on dev machines (DEV_MODE).  Shadows prototype methods with
+// own-property async wrappers so every evaluate/sub/subAuto call is logged
+// to wstp.log with direction, timing, and trimmed input/output.
+function _wstpWrap(sess, label) {
+    if (!DEV_MODE) return;
+    for (const m of ['evaluate', 'sub', 'subAuto', 'subWhenIdle']) {
+        if (typeof sess[m] !== 'function') continue;
+        const _orig = sess[m].bind(sess);
+        sess[m] = async function(expr, ...args) {
+            const _t = Date.now();
+            wstpLog(`→ [${label}.${m}]  ${String(expr).slice(0, 200)}`);
+            try {
+                const r = await _orig(expr, ...args);
+                wstpLog(`← [${label}.${m}]  ok  ${Date.now()-_t}ms  ${String(r).slice(0, 200)}`);
+                return r;
+            } catch (e) {
+                wstpLog(`← [${label}.${m}]  ERR  ${Date.now()-_t}ms  ${e.message}`);
+                throw e;
+            }
+        };
     }
 }
 
@@ -234,6 +258,7 @@ async function launchKernel(self, WstpSession) {
         if (typeof self.clearDebugLog === 'function') self.clearDebugLog();
         dynLog('=== KERNEL START ===', new Date().toISOString());
         self.session = new WstpSession(kernelCommand, { interactive: true });
+        _wstpWrap(self.session, 'main');
 
         // Load init.wl via sub() so it runs as a priority batch call and
         // does NOT count as a user evaluation (does not increment $Line).
@@ -360,6 +385,7 @@ function prewarmSubKernel(self, WstpSession) {
     console.log('[subKernel] prewarming…');
     self._subKernelInitPromise = (async () => {
         self._subKernel = new WstpSession(kernelCommand, { interactive: false });
+        _wstpWrap(self._subKernel, 'sub-warm');
         await self._subKernel.sub('Block[{$wolframResourceDir="' + _resDirEscPre + '"},Get["' + _initEscaped + '"]]');
         // Track PID for orphan cleanup
         try {
@@ -409,6 +435,7 @@ async function ensureSubKernel(self, WstpSession, imgDir, imgRel) {
         const _resDirEscEns = path.join(self.extensionPath, 'resources').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
         console.log('[subKernel] launching…');
         self._subKernel = new WstpSession(kernelCommand, { interactive: false });
+        _wstpWrap(self._subKernel, 'sub-ens');
         await self._subKernel.sub('Block[{$wolframResourceDir="' + _resDirEscEns + '"},Get["' + _initEscaped + '"]]');
         await self._subKernel.sub(_setImgDir);
         // Track PID for orphan cleanup

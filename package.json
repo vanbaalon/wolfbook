@@ -3,7 +3,7 @@
     "displayName": "Wolfbook — Wolfram Language Notebook",
     "description": "Interactive Wolfram Language notebook for VS Code. WSTP-backed kernel, MathML/SVG/PNG rendering, Unicode input, LSP diagnostics, and output expansion controls.",
     "publisher": "wolfbook",
-    "version": "2.5.14",
+    "version": "2.5.15",
     "engines": {
         "vscode": "^1.95.0"
     },
