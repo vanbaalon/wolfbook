@@ -46,9 +46,10 @@ param(
 $KnownSkipTests = @(29, 31, 52)
 
 Set-StrictMode -Version Latest
-$ErrorActionPreference = "Stop"
-# Native tools (git, npm, node-gyp) write informational messages to stderr.
-# Use $NativePreference to avoid '$ErrorActionPreference = Stop' aborting on them.
+# Use Continue, not Stop: native tools (git, npm, node-gyp, node) all write
+# informational messages to stderr which PowerShell would mis-treat as
+# terminating errors under Stop mode. All failures are caught via $LASTEXITCODE.
+$ErrorActionPreference = "Continue"
 $env:TERM = "dumb"   # suppress colour codes in some tools
 
 # --------------------------------------------------------------------------
@@ -147,13 +148,11 @@ $env:WSTP_DIR = $SdkPath
 # as a bare positional arg to gyp_main.py, which then fails.
 $env:npm_config_msvs_version = "2022"
 
-$ErrorActionPreference = "Continue"
 npm install 2>&1 | Out-Null
 if ($LASTEXITCODE -ne 0) { Fail "npm install failed in wstp-node" }
 
 Info "Running node-gyp rebuild (this takes ~30s) ..."
 npx node-gyp rebuild 2>&1
-$ErrorActionPreference = "Stop"
 if ($LASTEXITCODE -ne 0) { Fail "node-gyp rebuild failed" }
 
 $Binary = "$WstpNodeDir\build\Release\wstp.node"
@@ -182,13 +181,8 @@ if (-not $SkipTests) {
 
         $logFile = Join-Path $WolfbookDir "wstp-test-$($ver.Name).log"
         Push-Location $WstpNodeDir
-        # Run node with $ErrorActionPreference relaxed so that stderr lines
-        # (diagnostic [diag] output) do not trigger a Stop-mode exception.
-        $prev = $ErrorActionPreference
-        $ErrorActionPreference = "Continue"
         node tests\test.js 2>&1 | Tee-Object $logFile
         $exitCode = $LASTEXITCODE
-        $ErrorActionPreference = $prev
         Pop-Location
 
         # Restore original test.js (remove our KERNEL_PATH patch)
