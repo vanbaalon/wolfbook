@@ -110,7 +110,7 @@ function resolveFormat(self, cell, knownIsGfx, outN) {
 // Post-process HTML from the kernel: if it contains a WLLatex box-placeholder
 // div, decode the boxes, run through the C++ boxToLatex addon, then either
 // KaTeX-prerender (WLLatex) or emit a raw-latex div for webview rendering (WLLatex2).
-function processWLLatexBoxes(self, html, logPath, pageWidthEm = 0) {
+function processWLLatexBoxes(self, html, logPath, pageWidthEm = 0, source = '') {
     // If no logPath was given, try to derive one from the active notebook
     if (!logPath) {
         try {
@@ -152,29 +152,45 @@ function processWLLatexBoxes(self, html, logPath, pageWidthEm = 0) {
         html = html.replace(/<div class="vscode-wolfram-wllatex-boxes" data-boxes-b64="([^"]*)"(?:\s+data-raw-b64="([^"]*)")?\s*>\s*<\/div>/g,
             (_, b64, rawB64) => {
                 const { boxStr, latex, error } = translate(b64);
+                // Apply line-breaking if enabled and we have a container width estimate.
+                const _lineBreakEnabled = self.config?.get('notebook.rendering.lineBreaking') !== false;
+                let latexFinal = latex;
+                let lineBreakStatus = 'disabled';
+                if (_lineBreakEnabled) {
+                    if (!(pageWidthEm > 5)) {
+                        lineBreakStatus = 'skipped (pageWidthEm=' + pageWidthEm + ')';
+                    } else if (!_btlAddon.lineBreakLatex) {
+                        lineBreakStatus = 'unavailable';
+                    } else {
+                        try {
+                            latexFinal = _btlAddon.lineBreakLatex(latex, { pageWidth: pageWidthEm });
+                            lineBreakStatus = latexFinal !== latex ? 'applied' : 'no-change (fits in width)';
+                        } catch (e) {
+                            latexFinal = latex;
+                            lineBreakStatus = 'error: ' + String(e.message || e);
+                        }
+                    }
+                }
                 // Write to btl.log if a log path was supplied (Print/BoxData path only)
                 if (logPath) {
                     try {
+                        const ts = new Date().toISOString();
                         const rawText = rawB64 ? Buffer.from(rawB64, 'base64').toString('utf8') : '';
                         const sep = '='.repeat(72) + '\n';
                         const entry = sep +
+                            ts + (source ? '  [' + source + ']' : '') + '\n' +
                             '-- kernel output --\n' + rawText + '\n' +
                             '-- btl input (cleaned boxes) --\n' + boxStr + '\n' +
                             '-- btl output (latex) --\n' + latex + '\n' +
+                            '-- pageWidthEm: ' + pageWidthEm + '  lineBreak: ' + lineBreakStatus + ' --\n' +
                             (error ? '-- btl error --\n' + error + '\n' : '');
                         fs.mkdirSync(path.dirname(logPath), { recursive: true });
                         fs.appendFileSync(logPath, entry);
                     } catch (_) {}
                 }
                 let rendered;
-                // Apply line-breaking if enabled and we have a container width estimate.
-                const _lineBreakEnabled = self.config?.get('notebook.rendering.lineBreaking') !== false;
-                if (_lineBreakEnabled && pageWidthEm > 20 && _btlAddon.lineBreakLatex) {
-                    try { latex = _btlAddon.lineBreakLatex(latex, { pageWidth: pageWidthEm }); }
-                    catch (_) {}
-                }
                 try {
-                    rendered = _btlPrerenderLatex(latex, true);
+                    rendered = _btlPrerenderLatex(latexFinal, true);
                 } catch (e) {
                     return '<pre class="vscode-wolfram-text-output">WLLatex KaTeX error: ' +
                            _encoding.escapeHtml(String(e.message || e)) + '</pre>';
@@ -183,7 +199,8 @@ function processWLLatexBoxes(self, html, logPath, pageWidthEm = 0) {
                     ? `<div style="color:#e05c4e;font-size:11px;margin:2px 0;">` +
                       `⚠️ boxToLatex error: ${_encoding.escapeHtml(error)}</div>`
                     : '';
-                return '<div class="vscode-wolfram-wllatex-prerendered">' +
+                const lineBrokenAttr = lineBreakStatus === 'applied' ? ' data-line-broken="1"' : '';
+                return `<div class="vscode-wolfram-wllatex-prerendered" data-page-width-em="${pageWidthEm}"${lineBrokenAttr}>` +
                        errorNote + rendered + '</div>';
             });
     }
@@ -192,10 +209,32 @@ function processWLLatexBoxes(self, html, logPath, pageWidthEm = 0) {
         html = html.replace(/<div class="vscode-wolfram-wllatex-boxes-raw" data-boxes-b64="([^"]*)">\s*<\/div>/g,
             (_, b64) => {
                 const { boxStr, latex, error } = translate(b64);
+                // Apply line-breaking in extension host before handing latex to webview
+                const _lineBreakEnabled = self.config?.get('notebook.rendering.lineBreaking') !== false;
+                let latexFinal = latex;
+                let lineBreakStatus = 'disabled';
+                if (_lineBreakEnabled) {
+                    if (!(pageWidthEm > 5)) {
+                        lineBreakStatus = 'skipped (pageWidthEm=' + pageWidthEm + ')';
+                    } else if (!_btlAddon.lineBreakLatex) {
+                        lineBreakStatus = 'unavailable';
+                    } else {
+                        try {
+                            latexFinal = _btlAddon.lineBreakLatex(latex, { pageWidth: pageWidthEm });
+                            lineBreakStatus = latexFinal !== latex ? 'applied' : 'no-change (fits in width)';
+                        } catch (e) {
+                            latexFinal = latex;
+                            lineBreakStatus = 'error: ' + String(e.message || e);
+                        }
+                    }
+                }
                 if (logPath) {
                     try {
+                        const ts = new Date().toISOString();
                         const sep = '='.repeat(72) + '\n';
                         const entry = sep +
+                            ts + (source ? '  [' + source + ']' : '') + '\n' +
+                            '-- pageWidthEm: ' + pageWidthEm + '  lineBreak: ' + lineBreakStatus + ' --\n' +
                             '-- btl input (cleaned boxes) --\n' + boxStr + '\n' +
                             '-- btl output (latex) --\n' + latex + '\n' +
                             (error ? '-- btl error --\n' + error + '\n' : '');
@@ -203,7 +242,7 @@ function processWLLatexBoxes(self, html, logPath, pageWidthEm = 0) {
                         fs.appendFileSync(logPath, entry);
                     } catch (_) {}
                 }
-                const latexB64 = Buffer.from(latex).toString('base64');
+                const latexB64 = Buffer.from(latexFinal).toString('base64');
                 const errorAttr = error ? ` data-btl-error="${_encoding.escapeHtml(error)}"` : '';
                 return `<div class="vscode-wolfram-wllatex-raw-latex" data-latex-b64="${latexB64}"${errorAttr}></div>`;
             });
@@ -213,18 +252,27 @@ function processWLLatexBoxes(self, html, logPath, pageWidthEm = 0) {
         html = html.replace(/<div class="vscode-wolfram-wllatex-boxes-src" data-boxes-b64="([^"]*)">\s*<\/div>/g,
             (_, b64) => {
                 const { boxStr, latex, error } = translate(b64);
+                // Apply the same line-breaking as Mode A so the source stays in sync with rendered output
+                const _lineBreakEnabled = self.config?.get('notebook.rendering.lineBreaking') !== false;
+                let latexFinal = latex;
+                if (_lineBreakEnabled && pageWidthEm > 5 && _btlAddon.lineBreakLatex) {
+                    try { latexFinal = _btlAddon.lineBreakLatex(latex, { pageWidth: pageWidthEm }); } catch (_) {}
+                }
                 if (logPath) {
                     try {
+                        const ts = new Date().toISOString();
                         const sep = '='.repeat(72) + '\n';
                         const entry = sep +
+                            ts + (source ? '  [' + source + ']' : '') + '\n' +
+                            '-- pageWidthEm: ' + pageWidthEm + ' (mode C — src display) --\n' +
                             '-- btl input (cleaned boxes) --\n' + boxStr + '\n' +
-                            '-- btl output (latex) --\n' + latex + '\n' +
+                            '-- btl output (latex) --\n' + latexFinal + '\n' +
                             (error ? '-- btl error --\n' + error + '\n' : '');
                         fs.mkdirSync(path.dirname(logPath), { recursive: true });
                         fs.appendFileSync(logPath, entry);
                     } catch (_) {}
                 }
-                const latexB64 = Buffer.from(latex).toString('base64');
+                const latexB64 = Buffer.from(latexFinal).toString('base64');
                 const errorAttr = error ? ` data-btl-error="${_encoding.escapeHtml(error)}"` : '';
                 return `<div class="vscode-wolfram-wllatex-src-latex" data-latex-b64="${latexB64}"${errorAttr}></div>`;
             });

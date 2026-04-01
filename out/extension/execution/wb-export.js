@@ -1120,6 +1120,99 @@ async function handleHtmlExport(htmlPath, notebookDir, notebookFsPath, currentEx
  * @param {string}       notebookFsPath   — full path of the host notebook file
  * @param {object}       currentExecution — execution descriptor
  */
+// ---------------------------------------------------------------------------
+// .wl / .wls Export — bare Wolfram Language script
+// Code cells → raw source separated by blank lines.
+// Markdown headings → (* ===== Title ===== *) banner comments.
+// Other markdown cells → (* text *) block comments.
+// ---------------------------------------------------------------------------
+function generateWlContent(notebook) {
+    const cells = notebook.getCells().filter(c => !_isWBExportCell(c));
+    const parts = [];
+    for (const cell of cells) {
+        const src = cell.document.getText();
+        const trimmed = src.trim();
+        if (!trimmed) continue;
+
+        if (cell.kind === vscode.NotebookCellKind.Markup) {
+            // Headings → banner comment
+            const h1 = /^#[ \t]+(.+)$/.exec(trimmed);
+            if (h1 && trimmed === h1[0]) {
+                const title = h1[1].trim();
+                const bar = '(* ' + '='.repeat(Math.max(4, 72 - title.length - 7)) + ' ' + title + ' ' + '='.repeat(3) + ' *)';
+                parts.push(bar);
+                continue;
+            }
+            const h2 = /^##[ \t]+(.+)$/.exec(trimmed);
+            if (h2 && trimmed === h2[0]) {
+                const title = h2[1].trim();
+                const bar = '(* --- ' + title + ' --- *)';
+                parts.push(bar);
+                continue;
+            }
+            const h3 = /^###[ \t]+(.+)$/.exec(trimmed);
+            if (h3 && trimmed === h3[0]) {
+                const title = h3[1].trim();
+                parts.push('(* ' + title + ' *)');
+                continue;
+            }
+            // Other markdown: wrap each line in a block comment
+            const lines = trimmed.split('\n').map(l => ' * ' + l).join('\n');
+            parts.push('(*\n' + lines + '\n *)');
+        } else {
+            // Code cell: emit verbatim
+            parts.push(trimmed);
+        }
+    }
+    return parts.join('\n\n') + '\n';
+}
+
+async function handleWlExport(wlPath, notebookDir, notebookFsPath, currentExecution) {
+    const notebook = currentExecution.execution.cell.notebook;
+
+    const showOut = async (html, plain) => {
+        const out = new vscode.NotebookCellOutput([
+            vscode.NotebookCellOutputItem.text(html, 'x-application/wolfram-language-html'),
+            vscode.NotebookCellOutputItem.text(plain, 'text/plain')
+        ]);
+        if (currentExecution.hasOutput) {
+            await currentExecution.execution.appendOutput(out);
+        } else {
+            currentExecution.hasOutput = true;
+            await currentExecution.execution.replaceOutput(out);
+        }
+    };
+
+    let content;
+    try {
+        content = generateWlContent(notebook);
+    } catch (err) {
+        await showOut(
+            `<div style="color:#c00;font-size:12px;padding:4px 0;">❌ WBExport .wl failed: ${_esc(err.message)}</div>`,
+            `WBExport .wl failed: ${err.message}`
+        );
+        return;
+    }
+
+    try {
+        fs.mkdirSync(path.dirname(wlPath), { recursive: true });
+        fs.writeFileSync(wlPath, content, 'utf8');
+    } catch (err) {
+        await showOut(
+            `<div style="color:#c00;font-size:12px;padding:4px 0;">❌ WBExport: could not write file: ${_esc(err.message)}</div>`,
+            `WBExport: could not write file: ${err.message}`
+        );
+        return;
+    }
+
+    const nCode = notebook.getCells().filter(c => c.kind === vscode.NotebookCellKind.Code && !_isWBExportCell(c) && c.document.getText().trim()).length;
+    const relPath = path.relative(notebookDir, wlPath);
+    await showOut(
+        `<div style="color:#090;font-size:12px;padding:4px 0;">✅ WBExport: saved <code>${relPath}</code> (${nCode} code cells)</div>`,
+        `WBExport: saved ${relPath} (${nCode} code cells)`
+    );
+}
+
 async function handleWBExport(outputArg, notebookDir, notebookFsPath, currentExecution) {
     const notebook  = currentExecution.execution.cell.notebook;
     const baseName  = path.basename(notebookFsPath).replace(/\.(wb|evsnb|vsnb)$/i, '');
@@ -1154,6 +1247,14 @@ async function handleWBExport(outputArg, notebookDir, notebookFsPath, currentExe
             ? outputArg
             : path.resolve(notebookDir, outputArg);
         return handleTexExport(texPath, notebookDir, notebookFsPath, currentExecution);
+    }
+
+    // ---- .wl / .wls export: bare Wolfram Language script ----
+    if (outputArg && /\.wls?$/i.test(outputArg)) {
+        const wlPath = path.isAbsolute(outputArg)
+            ? outputArg
+            : path.resolve(notebookDir, outputArg);
+        return handleWlExport(wlPath, notebookDir, notebookFsPath, currentExecution);
     }
 
     // ---- Default: .nb export ----

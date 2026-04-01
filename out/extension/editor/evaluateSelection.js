@@ -3,8 +3,8 @@
  * evaluateSelection.js — Evaluate Selection (Cmd+Shift+E)
  *
  * Evaluates the currently selected text in the editor, works both when
- * the kernel is idle and when it is busy (using the interrupt→Dialog
- * mechanism, same as Dynamic[] / live-watch).
+ * the kernel is idle and when it is busy (using subAuto → Dialog[]
+ * mechanism, same as live-watch — no interrupt, running cell preserved).
  *
  * The result is rendered via VsCodeRenderExpr on the subkernel and
  * displayed inside the Watch panel's "EVAL SELECTION" section.
@@ -126,6 +126,13 @@ async function evaluateSelection(getController) {
             // ── Busy path: interrupt → Dialog → export to .mx ──
             scrollLog('[eval-sel] busy path | dynActive:', dynActive);
             evalResult = await _evalViaBusyPath(ctrl, expr, dynActive);
+            // If the busy path failed (e.g. interrupt aborted the cell instead
+            // of opening a Dialog because onDialogBegin callbacks are not
+            // attached), fall back to the idle path now that the kernel is free.
+            if (!evalResult && !ctrl._evalDispatched) {
+                scrollLog('[eval-sel] busy path returned null, kernel now idle — fallback to idle path');
+                evalResult = await _evalViaIdlePath(ctrl, expr);
+            }
         } else {
             // ── Idle path: normal evaluate → export to .mx ──
             scrollLog('[eval-sel] idle path');
@@ -245,8 +252,11 @@ async function _evalViaBusyPath(ctrl, expr, dynActive) {
         // Piggyback on Dynamic loop by registering a one-shot callback
         return await _evalViaDynamicPiggyback(ctrl, dlgExpr, tmpMx, tmpTxt);
     } else {
-        // Own interrupt → Dialog → dialogEval → exitDialog
-        return await _evalViaOwnInterrupt(ctrl, dlgExpr, tmpMx, tmpTxt);
+        // Use subAuto — evaluates in the main kernel context via Dialog[],
+        // same mechanism as live-watch.  The C++ timer thread handles the
+        // interrupt properly (menuPktPending=true) so the running cell is
+        // NOT aborted.
+        return await _evalViaSubAuto(ctrl, dlgExpr, tmpMx, tmpTxt);
     }
 }
 
@@ -276,50 +286,25 @@ function _evalViaDynamicPiggyback(ctrl, dlgExpr, tmpFile, tmpTxt) {
     });
 }
 
-async function _evalViaOwnInterrupt(ctrl, dlgExpr, tmpFile, tmpTxt) {
+async function _evalViaSubAuto(ctrl, dlgExpr, tmpFile, tmpTxt) {
+    scrollLog('[eval-sel] subAuto path — queuing for main-kernel eval via Dialog');
     try {
-        if (!ctrl._evalDispatched || ctrl._abortPending || ctrl.session.isDialogOpen) {
-            scrollLog('[eval-sel] interrupt guards failed');
-            return null;
-        }
-
-        ctrl.session.closeAllDialogs?.();
-        const sent = ctrl.session.interrupt();
-        scrollLog('[eval-sel] interrupt sent:', sent);
-        if (!sent) { return null; }
-
-        const t1 = Date.now();
-        while (!ctrl.session.isDialogOpen && Date.now() - t1 < 3000)
-            await new Promise(r => setTimeout(r, 25));
-        if (!ctrl.session.isDialogOpen) {
-            scrollLog('[eval-sel] no dialog after interrupt — polling for deferred');
-            const t2 = Date.now();
-            while (Date.now() - t2 < 2000) {
-                await new Promise(r => setTimeout(r, 100));
-                if (ctrl.session.isDialogOpen) break;
-            }
-        }
-        if (!ctrl.session.isDialogOpen) {
-            scrollLog('[eval-sel] no dialog — giving up');
-            return null;
-        }
-
-        scrollLog('[eval-sel] dialog open — evaluating');
         const raw = await Promise.race([
-            ctrl.session.dialogEval(dlgExpr),
-            new Promise((_, rej) => setTimeout(() => rej(new Error('dialogEval timeout')), 10000)),
+            ctrl.session.subAuto(dlgExpr),
+            new Promise((_, rej) => setTimeout(() => rej(new Error('subAuto timeout (15s)')), 15000)),
         ]);
-        scrollLog('[eval-sel] dialogEval result:', raw?.type, String(raw?.value ?? '').slice(0, 80));
-
-        try { await ctrl.session.exitDialog(); } catch (_) {}
-
+        scrollLog('[eval-sel] subAuto result:', raw?.type, String(raw?.value ?? raw?.error ?? '').slice(0, 80));
         if (raw && typeof raw.value === 'string') {
             if (raw.value.startsWith('EVALSEL:LARGE:')) return { large: true, val: raw.value };
             if (raw.value.startsWith('EVALSEL:FILE:'))  return { large: false, val: tmpFile, txt: tmpTxt };
         }
+        if (raw?.error) {
+            scrollLog('[eval-sel] subAuto error:', raw.error);
+        }
         return null;
     } catch (err) {
-        throw err;
+        scrollLog('[eval-sel] subAuto failed:', err.message);
+        return null;
     }
 }
 
@@ -363,7 +348,16 @@ async function _renderResult(ctrl, tmpFile, expr, txtFile) {
     if (renderResult?.result?.type === 'string' && renderResult.result.value) {
         let html = renderResult.result.value;
 
-        if (ctrl._processWLLatexBoxes) html = ctrl._processWLLatexBoxes(html);
+        if (ctrl._processWLLatexBoxes) {
+            // Use the watch panel's own width (side panel is narrower than the notebook).
+            // Convert raw px → C++ em using the same calibrated coefficient as the notebook.
+            // Fall back to 30em (~420px) if the panel hasn't reported its width yet.
+            const panelWidthPx = (_watchPanel && _watchPanel.getWidthPx) ? _watchPanel.getWidthPx() : 0;
+            const effectiveWidth = panelWidthPx > 0
+                ? (ctrl.pxToPageWidthEm ? ctrl.pxToPageWidthEm(panelWidthPx) : Math.round(panelWidthPx / 14))
+                : 30;
+            html = ctrl._processWLLatexBoxes(html, undefined, effectiveWidth, 'watch-panel');
+        }
         if (ctrl._fixImageUris)        html = ctrl._fixImageUris(html);
         scrollLog('[eval-sel] render OK | html length:', html.length);
 

@@ -174,6 +174,12 @@ class WolframNotebookKernel {
         // Container pixel width reported by the renderer webview via 'container-width'
         // messages.  Converted to em and passed to lineBreakLatex when > 0.
         this._latexPageWidthEm = 0;
+        // Proportionality coefficient: how many real rendered px correspond to one
+        // C++ "em" unit used inside lineBreakLatex's width estimator.
+        // Calibrated dynamically: when rendered KaTeX overflows the container,
+        // K is bumped up so the next render uses a smaller pageWidthEm.
+        // Default 19 is measured from KaTeX's actual rendering at default font size.
+        this._pxPerCppEm = 19;
         // Extension context — used to persist per-notebook settings (globalState).
         this._extContext = extContext || null;
 
@@ -407,6 +413,11 @@ class WolframNotebookKernel {
         this._rendererMessaging = vscode.notebooks.createRendererMessaging("wolfram-notebook-renderer");
         this._rendererMessaging.onDidReceiveMessage(async event => {
             const message = event.message;
+            // event.editor is the NotebookEditor the renderer message came from.
+            // Store its notebook URI so btl.log writes use the correct path even
+            // when the user has moved focus to another panel (activeNotebookEditor
+            // would be null in that case).
+            const _eventNbUri = event.editor?.notebook?.uri;
             if (DEV_MODE) this.outputPanel.print(`[Renderer] message: ${JSON.stringify(message)}`);
 
             // Renderer webview just registered its message listener — re-broadcast
@@ -422,9 +433,117 @@ class WolframNotebookKernel {
             }
 
             // Renderer reports its container pixel width — store as em for lineBreakLatex.
-            // VS Code notebooks use 14 px/em body font; we divide by that to get em units.
+            // Divide by the calibrated _pxPerCppEm (starts at 19, self-corrects).
+            // Fill target 0.80: expressions fill ~80% of the visible width.
             if (message.type === 'container-width' && message.widthPx > 0) {
-                this._latexPageWidthEm = Math.round(message.widthPx / 14);
+                this._latexPageWidthEm = Math.floor(message.widthPx * 0.80 / this._pxPerCppEm);
+                return;
+            }
+
+            // Unconditional debug message from the webview after every render.
+            // Logs all measured widths to btl.log so we can diagnose measurement issues.
+            if (message.type === 'render-width-debug') {
+                try {
+                    const _nbUri = _eventNbUri || vscode.window.activeNotebookEditor?.notebook?.uri;
+                    if (_nbUri && _nbUri.scheme === 'file') {
+                        const nbFsPath = _nbUri.fsPath;
+                        const nbBase = path.basename(nbFsPath, path.extname(nbFsPath));
+                        const logPath = path.join(path.dirname(nbFsPath), 'img', nbBase, 'btl.log');
+                        fs.mkdirSync(path.dirname(logPath), { recursive: true });
+                        const divsStr = (message.divs || []).map(d =>
+                            `{pw:${d.pw} lb:${d.lb} rendW:${d.rendW ? d.rendW.toFixed(1) : 0}}`
+                        ).join(' ');
+                        const katexStr = (message.katexWidths || []).join(',');
+
+                        // --- Auto-calibration from overflow ---
+                        // If any rendered KaTeX expression is wider than the container,
+                        // K is too small (pageWidthEm was too large → C++ didn't break enough).
+                        // Bump K so the next render passes a smaller pageWidthEm.
+                        const _cW = message.containerW || 0;
+                        const _kWidths = message.katexWidths || [];
+                        const _maxKatex = _kWidths.length > 0 ? Math.max(..._kWidths) : 0;
+                        let calibNote = '';
+                        if (_cW > 0 && _maxKatex > _cW && this._latexPageWidthEm > 0) {
+                            const oldK = this._pxPerCppEm;
+                            // The expression rendered at _maxKatex px for pageWidthEm em.
+                            // True K ≈ _maxKatex / pageWidthEm.  Direct replacement.
+                            const measuredK = _maxKatex / this._latexPageWidthEm;
+                            this._pxPerCppEm = measuredK;
+                            this._latexPageWidthEm = Math.floor(_cW * 0.80 / this._pxPerCppEm);
+                            calibNote = `  CALIBRATED: K ${oldK.toFixed(1)} → ${this._pxPerCppEm.toFixed(1)}` +
+                                        `  pageWidthEm → ${this._latexPageWidthEm}`;
+                        }
+
+                        const entry =
+                            `${new Date().toISOString()}  [render-width-debug]\n` +
+                            `-- headerW: ${message.headerW || 0}` +
+                            `  preRenderWidth: ${message.preRenderWidth}` +
+                            `  containerW: ${message.containerW}` +
+                            `  windowInnerWidth: ${message.windowInnerWidth}\n` +
+                            `-- K: ${this._pxPerCppEm.toFixed(1)}  pageWidthEm: ${this._latexPageWidthEm}\n` +
+                            `-- divs: ${divsStr || '(none)'}  katexWidths: [${katexStr}]${calibNote}\n`;
+                        fs.appendFileSync(logPath, entry);
+                    }
+                } catch (_) {}
+                return;
+            }
+
+            // Webview reports the rendered pixel width of a line-broken KaTeX expression
+            // together with the pageWidthEm that was used.  Use to update _pxPerCppEm so
+            // that subsequent renders pass a more accurate pageWidth to lineBreakLatex.
+            // Only fired for expressions that were actually line-broken (data-line-broken=1),
+            // so the measurement renderedPx ≈ pageWidthEm * K_true is reliable.
+            if (message.type === 'katex-width-feedback' &&
+                message.renderedPx > 0 && message.pageWidthEm > 0 && message.containerPx > 0) {
+                const oldK = this._pxPerCppEm;
+                let newK;
+                let calibMethod;
+                if (message.overflow) {
+                    // Content overflows: _pxPerCppEm is too small → pageWidthEm was too large →
+                    // C++ didn't break when it should have.
+                    // Scale K up by the overflow factor so the next render passes a smaller
+                    // pageWidthEm and C++ breaks the expression at the correct width.
+                    // Derivation: emEst ≈ containerPx/K_true, rendered at contentPx = emEst*K_true =
+                    // containerPx → emEst ≈ contentPx/K_true.  Setting K_new = K_old*(contentPx/containerPx)
+                    // gives pageWidthEm_new = containerPx/K_new which is < emEst → C++ breaks. ✓
+                    const overflowFactor = message.renderedPx / message.containerPx;
+                    newK = this._pxPerCppEm * overflowFactor;
+                    calibMethod = `overflow×${overflowFactor.toFixed(3)}`;
+                } else {
+                    // Expression was line-broken: renderedPx ≈ pageWidthEm * K_true (exact measurement).
+                    // Slow EMA (α=0.25) — avoids oscillation; converges within ~4 renders.
+                    const measuredK = message.renderedPx / message.pageWidthEm;
+                    newK = 0.75 * this._pxPerCppEm + 0.25 * measuredK;
+                    calibMethod = `EMA(measuredK=${measuredK.toFixed(3)})`;
+                }
+                this._pxPerCppEm = newK;
+                // Immediately update the stored page-width em with the new coefficient
+                this._latexPageWidthEm = Math.floor(message.containerPx * 0.80 / this._pxPerCppEm);
+                // Log calibration event to btl.log so the user can verify convergence
+                try {
+                    // Use event.editor (captured as _eventNbUri) — reliable even when
+                    // focus has moved away from the notebook to another panel.
+                    const _nbUri = _eventNbUri ||
+                        vscode.window.activeNotebookEditor?.notebook?.uri;
+                    if (_nbUri && _nbUri.scheme === 'file') {
+                        const nbFsPath = _nbUri.fsPath;
+                        const nbBase = path.basename(nbFsPath, path.extname(nbFsPath));
+                        const logPath = path.join(path.dirname(nbFsPath), 'img', nbBase, 'btl.log');
+                        fs.mkdirSync(path.dirname(logPath), { recursive: true });
+                        const entry =
+                            `========================================================================\n` +
+                            `${new Date().toISOString()}  [katex-calibration]\n` +
+                            `-- renderedPx: ${message.renderedPx.toFixed(1)}` +
+                            `  pageWidthEm: ${message.pageWidthEm}` +
+                            `  containerPx: ${message.containerPx}` +
+                            `  overflow: ${message.overflow}` +
+                            `  lineBroken: ${message.lineBroken}\n` +
+                            `-- method: ${calibMethod}\n` +
+                            `-- _pxPerCppEm: ${oldK.toFixed(3)} → ${this._pxPerCppEm.toFixed(3)}` +
+                            `  _latexPageWidthEm: ${this._latexPageWidthEm}\n`;
+                        fs.appendFileSync(logPath, entry);
+                    }
+                } catch (_) {}
                 return;
             }
 
@@ -852,8 +971,23 @@ class WolframNotebookKernel {
     // outN: output index within the cell (1-based); pass undefined when not yet known.
     _resolveFormat(cell, knownIsGfx, outN)  { return _output.resolveFormat(this, cell, knownIsGfx, outN); }
 
+    // Convert a pixel width to the C++ em units expected by lineBreakLatex,
+    // using the current calibrated _pxPerCppEm coefficient.
+    pxToPageWidthEm(widthPx) {
+        return widthPx > 0 ? Math.floor(widthPx * 0.80 / this._pxPerCppEm) : 0;
+    }
+
     // Post-process HTML containing WLLatex box placeholders — thin wrapper.
-    _processWLLatexBoxes(html, logPath) { return _output.processWLLatexBoxes(this, html, logPath, this._latexPageWidthEm); }
+    // widthOverride: optional em width to use instead of the notebook's container width
+    // (e.g. pass the watch-panel's own width when rendering for the side panel).
+    // source: optional label written to btl.log ('notebook', 'watch-panel', etc.)
+    _processWLLatexBoxes(html, logPath, widthOverride, source) {
+        let w = (widthOverride !== undefined && widthOverride > 0) ? widthOverride : this._latexPageWidthEm;
+        // Fallback: renderer webview hasn't reported its width yet (first cell run).
+        // Use 80em — a safe notebook width that avoids over-breaking.
+        if (w <= 0) w = 80;
+        return _output.processWLLatexBoxes(this, html, logPath, w, source);
+    }
 
     makeTruncationBanner(outputId, headerText, shortLines = null) { return _output.makeTruncationBanner(this, outputId, headerText, shortLines); }
     async _replaceOutputByUuid(cell, uuid, fullHtml, outN) { return _output.replaceOutputByUuid(this, cell, uuid, fullHtml, outN); }

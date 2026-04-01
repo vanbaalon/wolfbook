@@ -208,16 +208,28 @@ export function activate(context) {
         // every resize so the value stays up-to-date when the user resizes the
         // VS Code window or panel.
         (function _initContainerWidthReporting() {
+            // The most reliable width measurement is the input cell itself.
+            // .cell-bottom-toolbar-container is a VS Code notebook cell DOM element
+            // that lives at the same horizontal extent as the input area and does
+            // NOT expand when wide output is rendered.
+            function _getCellInputWidth() {
+                const el = document.querySelector('.cell-bottom-toolbar-container');
+                if (el) {
+                    const w = el.offsetWidth || el.scrollWidth || 0;
+                    if (w > 0) return w;
+                }
+                return 0;
+            }
             function _reportWidth() {
                 if (!(context && context.postMessage)) return;
-                const el = document.body || document.documentElement;
-                const w = el ? el.clientWidth : 0;
+                const w = _getCellInputWidth();
                 if (w > 0) try { context.postMessage({ type: 'container-width', widthPx: w }); } catch (_) {}
             }
             _reportWidth();
             try {
                 const _ro = new ResizeObserver(_reportWidth);
-                _ro.observe(document.body || document.documentElement);
+                const _target = document.querySelector('.cell-bottom-toolbar-container') || document.body;
+                _ro.observe(_target);
             } catch (_) {}
         })();
     }
@@ -466,9 +478,15 @@ export function activate(context) {
 
             console.log('[WolframRenderer] HTML preview (first 300 chars):', cleanHtml.substring(0, 300));
 
+            // Measure the cell content width BEFORE setting innerHTML.
+            // After innerHTML the element expands to fit wide KaTeX, so this is
+            // the only reliable moment to get the true column width from within
+            // the output iframe (cross-frame DOM access is blocked by VS Code).
+            const _preRenderWidth = element.offsetWidth || element.clientWidth || 0;
+
             // Render HTML content
             element.innerHTML = cleanHtml;
-            console.log('[WolframRenderer] innerHTML assigned — browser layout starting');
+            console.log('[WolframRenderer] innerHTML assigned — pre-render element width was:', _preRenderWidth);
 
             // SCROLL-TIMING: notify extension that DOM has been updated
             if (context && context.postMessage) {
@@ -481,6 +499,94 @@ export function activate(context) {
             requestAnimationFrame(() => {
                 requestAnimationFrame(() => {
                     console.log('[WolframRenderer] render layout COMPLETE — cell height is stable (double-rAF)');
+
+                    // ---- KaTeX width calibration ----
+                    // Measure the true visible content width by finding our own
+                    // .wl-output-header bar (a width:100% flex row inside the output).
+                    // Its getBoundingClientRect().width gives the exact visible column
+                    // width, immune to content overflow.
+                    if (context && context.postMessage) {
+                        const _inputEl = document.querySelector('.cell-bottom-toolbar-container');
+
+                        // Primary measurement: the header bar we inject in every output.
+                        // It's a 100%-width flex div, so its rect width = visible content area.
+                        const _headerEl = element.querySelector('.wl-output-header');
+                        const _headerRect = _headerEl ? _headerEl.getBoundingClientRect() : null;
+                        const _headerW = _headerRect ? Math.round(_headerRect.width) : 0;
+
+                        // Fallback chain: header width → pre-render element width → toolbar
+                        let containerW = _headerW > 0 ? _headerW
+                                       : (_preRenderWidth > 0 ? _preRenderWidth
+                                       : (_inputEl ? (_inputEl.offsetWidth || _inputEl.scrollWidth || 0) : 0));
+
+                        // Measure rendered KaTeX content width — both Mode A (prerendered)
+                        // and Mode B (raw-latex rendered by webview KaTeX).
+                        const _debugDivs = element.querySelectorAll('.vscode-wolfram-wllatex-prerendered[data-page-width-em]');
+                        const _debugEntries = [];
+                        _debugDivs.forEach(div => {
+                            const pw = parseInt(div.getAttribute('data-page-width-em') || '0', 10);
+                            const lb = div.getAttribute('data-line-broken') === '1';
+                            const base = div.querySelector('.katex-display .base') || div.querySelector('.base');
+                            const rendW = base ? base.getBoundingClientRect().width : 0;
+                            _debugEntries.push({ pw, lb, rendW });
+                        });
+                        // Mode B: measure .katex-display widths from raw-latex rendered divs
+                        const _katexDisplays = element.querySelectorAll('.katex-display');
+                        const _katexWidths = [];
+                        _katexDisplays.forEach(kd => {
+                            const base = kd.querySelector('.base');
+                            const w = base ? base.getBoundingClientRect().width : (kd.getBoundingClientRect().width || 0);
+                            _katexWidths.push(Math.round(w));
+                        });
+                        try {
+                            context.postMessage({
+                                type: 'render-width-debug',
+                                containerW: containerW,
+                                headerW: _headerW,
+                                preRenderWidth: _preRenderWidth,
+                                cellInputW: _inputEl ? (_inputEl.offsetWidth || _inputEl.scrollWidth || 0) : -1,
+                                windowInnerWidth: window.innerWidth || 0,
+                                divs: _debugEntries,
+                                katexWidths: _katexWidths,
+                            });
+                        } catch (_) {}
+
+                        // Report the measured container width to the extension host.
+                        // This uses the header bar width (accurate) instead of preRenderWidth.
+                        if (containerW > 0) {
+                            try { context.postMessage({ type: 'container-width', widthPx: containerW }); } catch (_) {}
+                        }
+
+                        // Calibration: only update _pxPerCppEm from reliable measurements.
+                        // Check both Mode A (prerendered) and Mode B (raw-latex) divs.
+                        const _allKatexContainers = [
+                            ..._debugDivs,
+                            ...element.querySelectorAll('.vscode-wolfram-wllatex-raw-latex')
+                        ];
+                        if (containerW > 0 && _allKatexContainers.length > 0) {
+                            _allKatexContainers.forEach(div => {
+                                const pw = parseInt(div.getAttribute('data-page-width-em') || '0', 10);
+                                const lineBroken = div.getAttribute('data-line-broken') === '1';
+                                const katexEl = div.querySelector('.katex-display .base') || div.querySelector('.base') || div.querySelector('.katex');
+                                const renderedW = katexEl ? katexEl.getBoundingClientRect().width : 0;
+                                if (pw > 0 && renderedW > 0) {
+                                    const overflow = renderedW > containerW * 0.95;
+                                    if (lineBroken || overflow) {
+                                        try {
+                                            context.postMessage({
+                                                type: 'katex-width-feedback',
+                                                renderedPx: renderedW,
+                                                pageWidthEm: pw,
+                                                containerPx: containerW,
+                                                overflow: overflow,
+                                                lineBroken: lineBroken,
+                                            });
+                                        } catch (_) {}
+                                    }
+                                }
+                            });
+                        }
+                    }
                 });
             });
 
