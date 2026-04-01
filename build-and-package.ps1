@@ -152,7 +152,8 @@ npm install 2>&1 | Out-Null
 if ($LASTEXITCODE -ne 0) { Fail "npm install failed in wstp-node" }
 
 Info "Running node-gyp rebuild (this takes ~30s) ..."
-npx node-gyp rebuild 2>&1
+# cmd redirect avoids PowerShell treating gyp info/err stderr lines as ErrorRecords
+cmd /c "npx node-gyp rebuild 2>&1"
 if ($LASTEXITCODE -ne 0) { Fail "node-gyp rebuild failed" }
 
 $Binary = "$WstpNodeDir\build\Release\wstp.node"
@@ -181,7 +182,9 @@ if (-not $SkipTests) {
 
         $logFile = Join-Path $WolfbookDir "wstp-test-$($ver.Name).log"
         Push-Location $WstpNodeDir
-        node tests\test.js 2>&1 | Tee-Object $logFile
+        # Run via cmd so stderr+stdout merge happens at cmd level; PS never sees
+        # [diag ...] lines as ErrorRecord objects and NativeCommandError is avoided.
+        cmd /c "node tests\test.js 2>&1" | Tee-Object $logFile
         $exitCode = $LASTEXITCODE
         Pop-Location
 
