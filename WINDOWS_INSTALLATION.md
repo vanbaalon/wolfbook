@@ -1,12 +1,13 @@
 # Wolfbook on Windows — Build, Package, and Install
 
-This guide documents a working Windows flow to:
+This guide documents the full Windows workflow for building the native WSTP
+backend, running the test suite, and packaging/installing the VS Code extension.
 
-1. Compile the native WSTP backend (`wstp.node`) from source
-2. Bundle it into a Windows VSIX
-3. Install and verify Wolfbook locally
+**TL;DR** — if you just want to run everything at once, jump to
+[§ One-command build](#one-command-build).
 
-It is based on a successful end-to-end build on Windows 11.
+It is based on a verified end-to-end build on Windows 11 with Node.js 22 and
+Wolfram Engine 14.2 / 14.3.
 
 ---
 
@@ -54,109 +55,140 @@ Expected layout:
 
 ---
 
-## 3) Set `WSTP_DIR`
+## One-command build
 
-Set `WSTP_DIR` to Wolfram WSTP CompilerAdditions folder.
-
-Example:
+The script `build-and-package.ps1` (in the wolfbook root) automates every step
+below. It auto-detects your Wolfram Engine version, builds wstp.node, runs the
+test suite against every installed kernel, packages the VSIX, and optionally
+installs it into VS Code.
 
 ```powershell
-$env:WSTP_DIR = "C:\Program Files\Wolfram Research\Wolfram\14.2\SystemFiles\Links\WSTP\DeveloperKit\Windows-x86-64\CompilerAdditions"
+# From inside the wolfbook repo:
+Set-ExecutionPolicy -Scope Process Bypass   # allow unsigned scripts this session
+.\build-and-package.ps1 -Install
 ```
 
-The folder must contain:
+Common flags:
 
-- `wstp.h`
-- `wstp64i4s.lib`
+| Flag | Description |
+|---|---|
+| `-Install` | Install the finished VSIX into VS Code automatically |
+| `-SkipTests` | Skip the WSTP test suite (faster, use for quick iteration) |
+| `-WolframEngineVersion 14.2` | Pin a specific engine (default: highest installed) |
+| `-WstpNodeDir <path>` | Override the mathematica-wstp-node clone location |
+
+If `mathematica-wstp-node` is not found at the default sibling path the script
+clones it automatically from GitHub on branch `windows-x64`.
 
 ---
 
-## 4) Build the WSTP backend
+## Manual step-by-step
+
+Follow this section only if you need to debug a specific step or the script
+fails.
+
+### 3) Set `WSTP_DIR`
+
+`WSTP_DIR` must point to the `CompilerAdditions` folder inside the Wolfram
+Engine SDK, which contains `wstp.h` and `wstp64i4s.lib`.
 
 ```powershell
-Set-Location "<parent>\WSTP Backend"
-npm install
-npm run build
+# Replace 14.2 with your engine version
+$env:WSTP_DIR = "C:\Program Files\Wolfram Research\Wolfram Engine\14.2\SystemFiles\Links\WSTP\DeveloperKit\Windows-x86-64\CompilerAdditions"
 ```
+
+### 4) Build the WSTP backend
+
+```powershell
+Set-Location "<parent>\mathematica-wstp-node"
+git checkout windows-x64
+npm install
+npx node-gyp rebuild --msvs_version 2022
+```
+
+Critical notes:
+- `--msvs_version 2022` is required with Visual Studio Build Tools 2022.
+- `WSTP_DIR` must be set before the build; `binding.gyp` reads it directly.
 
 Output binary:
 
 ```text
-<parent>\WSTP Backend\build\Release\wstp.node
+<parent>\mathematica-wstp-node\build\Release\wstp.node
 ```
 
----
+### 5) Run the test suite (optional but recommended)
 
-## 5) Copy binary into Wolfbook
+The test suite verifies evaluation, abort, dialog, Dynamic, and subAuto flows.
 
 ```powershell
-Set-Location "<parent>"
-Copy-Item ".\WSTP Backend\build\Release\wstp.node" ".\wolfbook\wstp\prebuilt\wstp-win32-x64.node" -Force
-Copy-Item ".\WSTP Backend\build\Release\wstp.node" ".\wolfbook\wstp\build\Release\wstp.node" -Force
+Set-Location "<parent>\mathematica-wstp-node"
+# Edit tests\test.js line 1: set KERNEL_PATH to your WolframKernel.exe, using double backslash:
+# const KERNEL_PATH = 'C:\\Program Files\\Wolfram Research\\Wolfram Engine\\14.2\\WolframKernel.exe';
+node tests\test.js
 ```
 
-Both paths are used by the extension loader (prebuilt first, then fallback).
+Expected: all ~71 numbered tests pass. Three tests (29, 31, 52) are known to be
+timing-sensitive on some machines and may occasionally fail — they are not
+blocking for the VSIX build.
 
----
+### 6) Copy binary into Wolfbook
 
-## 6) Build Windows VSIX
+```powershell
+Copy-Item "<parent>\mathematica-wstp-node\build\Release\wstp.node" `
+          "<parent>\wolfbook\wstp\prebuilt\wstp-win32-x64.node" -Force
+```
+
+### 7) Package the VSIX
+
+`wolfbook` ships with pre-compiled JS in `out/` (no TypeScript compilation step
+is needed on Windows). Just install npm dev dependencies so `vsce` is available,
+then package:
 
 ```powershell
 Set-Location "<parent>\wolfbook"
 npm install
-npx --yes @vscode/vsce package --target win32-x64 --allow-missing-repository -o wolfbook-<version>-win32-x64.vsix
+vsce package --no-dependencies
 ```
 
-Example output:
+Output: `wolfbook-<version>.vsix` in the current directory.
 
-```text
-wolfbook-2.2.1-win32-x64.vsix
-```
+> **Note:** `--no-dependencies` is correct here. The `out/` directory is version
+> controlled and `vsce` does not need to bundle `node_modules`.
 
----
-
-## 7) Install locally in VS Code
+### 8) Install locally in VS Code
 
 ```powershell
-code --install-extension .\wolfbook-<version>-win32-x64.vsix
+code --install-extension .\wolfbook-<version>.vsix --force
 ```
 
-Then run **Developer: Reload Window**.
+Then run **Developer: Reload Window** (Ctrl+Shift+P → Reload Window).
 
 ---
 
-## 8) Quick runtime smoke test (optional)
-
-```powershell
-Set-Location "<parent>\wolfbook"
-node -e "const addon=require('./wstp/prebuilt/wstp-win32-x64.node'); const s=new addon.WstpSession('C:/Program Files/Wolfram Research/Wolfram/14.2/WolframKernel.exe',{interactive:true}); s.evaluate('1+1').then(r=>{console.log(r.result.value); s.close();}).catch(e=>{console.error(e); process.exit(1);});"
-```
-
-Expected output:
-
-```text
-2
-```
-
----
-
-## 9) Troubleshooting
+## Troubleshooting
 
 ### `gyp ERR! find VS` / cannot find Visual Studio
 
-- Install VS 2022 Build Tools + C++ workload
-- Restart terminal after installation
+- Install VS 2022 Build Tools + **Desktop development with C++** workload.
+- Restart the terminal after installation.
 
 ### `LNK1181: cannot open input file 'wstp64i4s.lib'`
 
-- `WSTP_DIR` is wrong
-- Re-point `WSTP_DIR` to the exact `CompilerAdditions` directory
+- `WSTP_DIR` is not set or points to the wrong directory.
+- The correct path ends in `\CompilerAdditions` and must contain both
+  `wstp.h` and `wstp64i4s.lib`.
+
+### `SyntaxError: Octal escape sequences are not allowed in strict mode`
+
+- This appears in `tests\test.js` when `KERNEL_PATH` contains un-escaped
+  backslashes (`\1`, `\W`, etc. are treated as octal/escapes in strict mode).
+- Use **double backslash** in the JS string:
+  `'C:\\Program Files\\Wolfram Research\\...'`
 
 ### Winsock/RPC unresolved externals (`WSAGetLastError`, `UuidCreate`, etc.)
 
-- Ensure Windows link libs are present in backend `binding.gyp` for `OS=='win'`:
-  - `ws2_32.lib`
-  - `rpcrt4.lib`
+- Ensure `binding.gyp` lists these libs under `OS=='win'`:
+  `ws2_32.lib`, `rpcrt4.lib`
 
 ### `npx` fails with missing `%APPDATA%\npm`
 
@@ -164,17 +196,49 @@ Expected output:
 New-Item -ItemType Directory -Path "$env:APPDATA\npm" -Force
 ```
 
-### `npm ci` fails in `WSTP Backend` due lockfile drift
+### `npm install` fails with lockfile errors
 
-- Use `npm install` instead of `npm ci` for local build until lockfile is synchronized.
+- Use `npm install` (not `npm ci`) for local builds until the lockfile is
+  synchronized with the upstream repo.
 
 ---
 
-## 10) Release handoff checklist (Windows)
+## C++ platform guard conventions
 
-- `wstp-win32-x64.node` built from current backend source
-- binary copied to `wolfbook/wstp/prebuilt/wstp-win32-x64.node`
-- Windows VSIX packaged with `--target win32-x64`
-- local install and kernel launch smoke-tested
+All Windows-specific code in the C++ addon uses `#ifdef _WIN32` guards. The
+pattern used for the `kill()` shim (POSIX API missing on Windows) is:
 
-This artifact is then ready to share with maintainers for Marketplace release packaging.
+```cpp
+#ifdef _WIN32
+#  include <windows.h>
+#  ifndef SIGTERM
+#    define SIGTERM 15
+#  endif
+#  ifndef SIGKILL
+#    define SIGKILL 9
+#  endif
+// On Windows, kill() doesn't exist — use TerminateProcess instead.
+static int kill(pid_t pid, int /*sig*/) {
+    HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, static_cast<DWORD>(pid));
+    if (!h) return -1;
+    BOOL ok = TerminateProcess(h, 1);
+    CloseHandle(h);
+    return ok ? 0 : -1;
+}
+#endif
+```
+
+Standard headers `<signal.h>` and `<sys/types.h>` are present in the MSVC CRT
+and do not need guards.
+
+---
+
+## Release checklist
+
+- [ ] `wstp-win32-x64.node` built from current `windows-x64` branch source
+- [ ] Binary copied to `wolfbook/wstp/prebuilt/wstp-win32-x64.node`
+- [ ] Test suite passed on at least one kernel (failures logged)
+- [ ] VSIX packaged with `vsce package --no-dependencies`
+- [ ] Local install and kernel tested in VS Code
+- [ ] `wstp-win32-x64.node` committed to wolfbook repo
+- [ ] Both repos pushed to GitHub
