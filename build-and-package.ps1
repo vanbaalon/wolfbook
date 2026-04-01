@@ -45,8 +45,7 @@ param(
 # They are reported as 'skipped' and do not count as failures.
 $KnownSkipTests = @(29, 31, 52)
 
-Set-StrictMode -Version Latest
-# Use Continue, not Stop: native tools (git, npm, node-gyp, node) all write
+# Use Continue throughout: native tools (git, npm, node-gyp, node) all write
 # informational messages to stderr which PowerShell would mis-treat as
 # terminating errors under Stop mode. All failures are caught via $LASTEXITCODE.
 $ErrorActionPreference = "Continue"
@@ -247,23 +246,34 @@ if (-not $SkipTests) {
         # Restore original test.js
         Set-Content $testJsPath $testJsOriginal -Encoding UTF8
 
-        # Parse results - lines like '  [check] 27. description'
-        # Wrap all results in @() to force arrays - PS returns $null or a single
-        # object (not an array) for 0 or 1 matches, breaking .Count
-        $logLines  = Get-Content $logFile
-        $allTests  = @($logLines | Where-Object { $_ -match '\s+(\d+)\.' } |
-                     ForEach-Object { $null = $_ -match '\s+(\d+)\.'; [int]$Matches[1] })
-        $failLines = @($logLines | Where-Object { $_ -match '\s+(\d+)\.' -and $_ -match [char]0x2717 })
-        $failNums  = @($failLines | ForEach-Object { $null = $_ -match '\s+(\d+)\.'; [int]$Matches[1] })
+        # Parse results. Read as UTF-8 so the pass/fail Unicode markers (u+2713/u+2717)
+        # are correctly decoded and can be matched by character code.
+        $logLines  = Get-Content $logFile -Encoding UTF8
 
-        $realFails = @($failNums | Where-Object { $_ -notin $KnownSkipTests })
-        $skipped   = @($failNums | Where-Object { $_ -in  $KnownSkipTests })
-        $total     = $allTests.Count
-        $passing   = $total - $failNums.Count
+        # Count all numbered test lines: '  [mark] 27. description'
+        $total     = ($logLines | Where-Object { $_ -match '\s+\S+\s+(\d+)\.' } | Measure-Object).Count
 
-        $skipMsg = if ($skipped) { " (skipped known-bad: $($skipped -join ', ')  )" } else { "" }
+        # Identify failed tests (✗ = u+2717) and separate real vs known-skip failures
+        $failNums  = [System.Collections.Generic.List[int]]::new()
+        foreach ($line in $logLines) {
+            if ($line -match '\s+\S+\s+(\d+)\.' -and $line -match [char]0x2717) {
+                $null = $line -match '\s+\S+\s+(\d+)\.'
+                $failNums.Add([int]$Matches[1])
+            }
+        }
 
-        if ($realFails) {
+        # Node exit code is the authoritative pass/fail signal.
+        # Text parsing is for reporting; encoding issues can mask fail markers.
+        $hasRealFailure = ($exitCode -ne 0)
+
+        $realFails    = @($failNums | Where-Object { $_ -notin $KnownSkipTests })
+        $skippedNums  = @($failNums | Where-Object { $_ -in  $KnownSkipTests })
+        $failCount    = $failNums.Count
+        $passing      = $total - $failCount
+
+        $skipMsg = if ($skippedNums.Count -gt 0) { " (skipped known-bad: $($skippedNums -join ', ')  )" } else { "" }
+
+        if ($hasRealFailure -or $realFails.Count -gt 0) {
             Write-Host "  WARN  $passing/$total passed, real failures: $($realFails -join ', ')$skipMsg" -ForegroundColor Yellow
             Write-Host "        Log: $logFile" -ForegroundColor Yellow
         } else {
@@ -285,9 +295,7 @@ Ok "Copied to wstp/prebuilt/wstp-win32-x64.node"
 # -- npm install in wolfbook (needed for vsce) ------------------------------
 Step "npm install (wolfbook)"
 Push-Location $WolfbookDir
-$ErrorActionPreference = "Continue"
 npm install 2>&1 | Out-Null
-$ErrorActionPreference = "Stop"
 if ($LASTEXITCODE -ne 0) { Fail "npm install failed in wolfbook" }
 Ok "node_modules ready"
 Pop-Location
@@ -297,9 +305,7 @@ Step "Packaging VSIX (wolfbook $WolfbookVersion)"
 Push-Location $WolfbookDir
 
 $VsixName = "wolfbook-$WolfbookVersion.vsix"
-$ErrorActionPreference = "Continue"
 vsce package --no-dependencies -o $VsixName 2>&1
-$ErrorActionPreference = "Stop"
 if ($LASTEXITCODE -ne 0) { Fail "vsce package failed" }
 
 $VsixPath = Join-Path $WolfbookDir $VsixName
@@ -310,9 +316,7 @@ Pop-Location
 # -- Install into VS Code ---------------------------------------------------
 if ($Install) {
     Step "Installing VSIX into VS Code"
-    $ErrorActionPreference = "Continue"
     code --install-extension $VsixPath --force 2>&1
-    $ErrorActionPreference = "Stop"
     if ($LASTEXITCODE -ne 0) { Fail "code --install-extension failed" }
     Ok "Installed. Run 'Developer: Reload Window' (Ctrl+Shift+P) to activate."
 }
