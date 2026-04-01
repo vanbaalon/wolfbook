@@ -165,12 +165,27 @@ async function showSettingsUI(notebook) {
         });
     }
 
+    // ── Kernel item ───────────────────────────────────────────────────────
+    const currentKernel = (vscode.workspace.getConfiguration('wolfram').get('systemKernel') || 'Automatic');
+    const kernelLabel   = currentKernel === 'Automatic'
+        ? 'Automatic'
+        : require('path').basename(require('path').dirname(require('path').dirname(currentKernel)));  // e.g. "Wolfram 3.app"
+    const kernelItems = [
+        {
+            label:       '$(server-process) Select Kernel…',
+            description: `current: ${kernelLabel}`,
+            value:       '__select_kernel__',
+        },
+    ];
+
     // ── Full list with separators ─────────────────────────────────────────
     const items = [
         { label: 'Background Color', kind: vscode.QuickPickItemKind.Separator },
         ...colorItems,
         { label: 'Background Image', kind: vscode.QuickPickItemKind.Separator },
         ...imageItems,
+        { label: 'Kernel', kind: vscode.QuickPickItemKind.Separator },
+        ...kernelItems,
         { label: '', kind: vscode.QuickPickItemKind.Separator },
         {
             label:       '$(discard) Reset all customizations',
@@ -238,6 +253,9 @@ async function showSettingsUI(notebook) {
     } else if (pick.value === '__bg_image_clear__') {
         await updateNotebookSettings(notebook, { backgroundImagePath: '' });
         vscode.window.showInformationMessage('Background image removed');
+
+    } else if (pick.value === '__select_kernel__') {
+        await vscode.commands.executeCommand('wolfram.selectKernel');
 
     } else if (pick.value === '__reset__') {
         await updateNotebookSettings(notebook, { backgroundColor: '', backgroundImagePath: '' });

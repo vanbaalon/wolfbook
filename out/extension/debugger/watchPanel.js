@@ -34,6 +34,7 @@ class WatchPanelProvider {
         this._lastEvalSel    = null;   // cached eval-selection state {type,html,expr,format} for resend
         this._bgColor        = null;   // hex color, or null = use sidebar default
         this._pendingHoverDoc = null;  // {html, symbol} — resent on next visibility
+        this._widthPx        = 0;     // panel pixel width reported by webview ResizeObserver
     }
 
     // Called by extension.js when registering:
@@ -100,6 +101,8 @@ class WatchPanelProvider {
             } else if (msg.command === 'openFile' && msg.path) {
                 vscode.workspace.openTextDocument(vscode.Uri.file(msg.path))
                     .then(doc => vscode.window.showTextDocument(doc, { preview: false }));
+            } else if (msg.command === 'panelWidth' && msg.widthPx > 0) {
+                this._widthPx = msg.widthPx;
             } else if (msg.command === 'scriptLoaded') {
                 console.log('[wolfbook-watch] ✓ webview script loaded and running');
             } else if (msg.command === 'hoverDocReceived') {
@@ -110,6 +113,9 @@ class WatchPanelProvider {
             }
         });
     }
+
+    /** Returns the panel width in raw pixels, or 0 if unknown. */
+    getWidthPx() { return this._widthPx; }
 
     /** Post a state update to the webview. Called after each Dialog[] pause. */
     update(stepInfo, variables, timing) {

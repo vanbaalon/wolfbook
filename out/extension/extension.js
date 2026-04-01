@@ -61,6 +61,73 @@ function activate(context) {
     context.subscriptions.push(vscode.commands.registerCommand("wolfram.openConfigurations", async () => {
         await vscode.commands.executeCommand("workbench.action.openSettings", "@ext:wolfbook.wolfbook");
     }));
+
+    // ── Select Kernel command ──────────────────────────────────────────────
+    context.subscriptions.push(vscode.commands.registerCommand("wolfram.selectKernel", async () => {
+        const { FindKernel } = require('./find-kernel');
+        const finder = new FindKernel();
+        const kernels = finder.discoverKernels();
+        const config = vscode.workspace.getConfiguration("wolfram", null);
+        const current = config.get("systemKernel", "Automatic");
+
+        const items = [];
+        // "Automatic" option
+        items.push({
+            label: '$(sparkle) Automatic',
+            description: kernels.length > 0 ? `→ ${kernels[0].label}` : '',
+            detail: 'Use the first detected kernel',
+            _path: 'Automatic',
+            picked: current === 'Automatic'
+        });
+        // Each discovered kernel
+        for (const k of kernels) {
+            const isCurrent = current === k.path;
+            items.push({
+                label: `${isCurrent ? '$(check) ' : ''}${k.label}`,
+                description: k.description,
+                detail: k.path,
+                _path: k.path,
+                picked: isCurrent
+            });
+        }
+        // Browse option
+        items.push({
+            label: '$(folder-opened) Browse…',
+            description: '',
+            detail: 'Choose a custom kernel executable',
+            _path: '__browse__'
+        });
+
+        const pick = await vscode.window.showQuickPick(items, {
+            title: 'Select Wolfram Kernel',
+            placeHolder: 'Choose a kernel (current: ' + (current === 'Automatic' ? 'Automatic' : current) + ')',
+            matchOnDetail: true
+        });
+        if (!pick) return;
+
+        let selectedPath = pick._path;
+        if (selectedPath === '__browse__') {
+            const uris = await vscode.window.showOpenDialog({
+                canSelectFiles: true,
+                canSelectFolders: false,
+                canSelectMany: false,
+                title: 'Select Wolfram Kernel Executable',
+                openLabel: 'Select Kernel'
+            });
+            if (!uris || uris.length === 0) return;
+            selectedPath = uris[0].fsPath;
+        }
+
+        await config.update("systemKernel", selectedPath, vscode.ConfigurationTarget.Global);
+        const action = await vscode.window.showInformationMessage(
+            `Kernel set to: ${selectedPath}. Restart kernel to apply.`,
+            'Restart Kernel'
+        );
+        if (action === 'Restart Kernel') {
+            await vscode.commands.executeCommand('wolfram.restartKernel');
+        }
+    }));
+
     // Register settings command early — before kernel guard, so it works even without a kernel
     (0, notebook_settings_1.registerNotebookSettings)(context);
     console.log('[Extension] Notebook settings registered (early)');

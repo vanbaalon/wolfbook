@@ -401,5 +401,20 @@
         });
     }
 
+    // Report panel width so the extension host can pass an accurate pageWidth
+    // to lineBreakLatex.  The watch panel is narrower than the notebook editor.
+    (function _initPanelWidthReporting() {
+        function _reportWidth() {
+            const el = document.body || document.documentElement;
+            const w = el ? el.clientWidth : 0;
+            if (w > 0) try { vscode.postMessage({ command: 'panelWidth', widthPx: w }); } catch (_) {}
+        }
+        _reportWidth();
+        try {
+            const _ro = new ResizeObserver(_reportWidth);
+            _ro.observe(document.body || document.documentElement);
+        } catch (_) {}
+    })();
+
     vscode.postMessage({ command: 'scriptLoaded' });
 })();
