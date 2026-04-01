@@ -330,13 +330,25 @@ async function _renderResult(ctrl, tmpFile, expr, txtFile) {
 
     scrollLog('[eval-sel] render | format:', format, '| scale:', scale, '| tmpFile:', tmpFile);
 
-    const subKern = await ctrl._ensureSubKernel(imgDir, imgRel);
-
     const _tmpPathWL = tmpFile.replace(/\\/g, '/');
     const renderExpr = 'VsCodeRenderExpr[Import["' + _tmpPathWL + '"],"' + format + '",' + scale + ']';
-    scrollLog('[eval-sel] subkernel eval:', renderExpr.slice(0, 120));
 
-    const renderResult = await subKern.evaluate(renderExpr, { interactive: false });
+    let renderResult;
+    try {
+        const subKern = await ctrl._ensureSubKernel(imgDir, imgRel);
+        scrollLog('[eval-sel] subkernel eval:', renderExpr.slice(0, 120));
+        renderResult = await subKern.evaluate(renderExpr, { interactive: false });
+    } catch (subErr) {
+        // Subkernel unavailable (e.g. Wolfram Engine single-kernel license).
+        // VsCodeRenderExpr is loaded on the main kernel too (via init.wl),
+        // so fall back to main kernel sub() which doesn't require a second process.
+        scrollLog('[eval-sel] subkernel failed (' + subErr.message + ') — falling back to main kernel sub()');
+        ctrl._subKernel = null;
+        ctrl._subKernelReady = false;
+        ctrl._subKernelInitPromise = null;
+        const wexpr = await ctrl.session.sub(renderExpr);
+        renderResult = { result: wexpr };
+    }
 
     // Clean up temp file
     try { fs.unlinkSync(tmpFile); } catch (_) {}

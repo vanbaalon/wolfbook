@@ -351,6 +351,7 @@ function prewarmSubKernel(self, WstpSession) {
     if (self._subKernel && self._subKernelReady)  return; // already warm
     if (self._subKernelInitPromise)               return; // already warming
     if (!WstpSession)                             return; // addon unavailable
+    if (self._subKernelUnavailable)               return; // known single-kernel license
     const kernelCommand    = self.findKernel.resolveKernel();
     let kernelInitPath     = path.join(self.extensionPath, 'resources', 'init.wl');
     if (process.platform === 'win32') kernelInitPath = kernelInitPath.replace(/\\/g, '/');
@@ -372,6 +373,12 @@ function prewarmSubKernel(self, WstpSession) {
         self._subKernelInitPromise = null;
         self._subKernel = null;
         self._subKernelReady = false;
+        // If the failure looks like a WSTP link-dead error (WEngine single-kernel license),
+        // mark unavailable so subsequent calls fast-reject instead of retrying.
+        if (/send|WSTP|link|failed to open|EvaluatePacket/i.test(e.message)) {
+            self._subKernelUnavailable = true;
+            console.warn('[subKernel] marking unavailable — will fall back to main kernel for rendering');
+        }
     });
 }
 
@@ -381,6 +388,7 @@ function prewarmSubKernel(self, WstpSession) {
 // - If prewarmSubKernel() already ran, this only sets imgDir (fast path).
 async function ensureSubKernel(self, WstpSession, imgDir, imgRel) {
     const _setImgDir = 'VsCodeSetImgDir["' + _encoding.escapeWL(imgDir) + '", "' + _encoding.escapeWL(imgRel) + '"]';
+    if (self._subKernelUnavailable) throw new Error('subkernel unavailable (single-kernel license)');
     if (self._subKernel && self._subKernelReady) {
         try { await self._subKernel.sub(_setImgDir); } catch (_) {}
         return self._subKernel;
@@ -410,7 +418,16 @@ async function ensureSubKernel(self, WstpSession, imgDir, imgRel) {
         } catch(_) {}
         self._subKernelReady = true;
         console.log('[subKernel] ready');
-    })();
+    })().catch(e => {
+        self._subKernelInitPromise = null;
+        self._subKernel = null;
+        self._subKernelReady = false;
+        if (/send|WSTP|link|failed to open|EvaluatePacket/i.test(e.message)) {
+            self._subKernelUnavailable = true;
+            console.warn('[subKernel] ensureSubKernel: marking unavailable —', e.message);
+        }
+        throw e;
+    });
     await self._subKernelInitPromise;
     return self._subKernel;
 }

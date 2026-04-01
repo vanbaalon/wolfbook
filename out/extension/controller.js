@@ -105,6 +105,7 @@ class WolframNotebookKernel {
         this._subKernel = null;
         this._subKernelReady = false;
         this._subKernelInitPromise = null;
+        this._subKernelUnavailable = false; // set when all retry attempts fail (e.g. single-kernel license)
         this._abortPending   = false;
         // True only between executionQueue.start() and executionQueue.end().
         // Guards interrupt() so it is never sent while the kernel is queued-but-idle.
