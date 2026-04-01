@@ -194,16 +194,51 @@ if (-not $SkipTests) {
 
         Set-Content $testJsPath $testJsPatched -Encoding UTF8
 
-        $logFile = Join-Path $WolfbookDir "wstp-test-$($ver.Name).log"
+        $logFile    = Join-Path $WolfbookDir "wstp-test-$($ver.Name).log"
+        $stderrFile = Join-Path $WolfbookDir "wstp-test-$($ver.Name).err"
+        Remove-Item $logFile,$stderrFile -ErrorAction SilentlyContinue
         Push-Location $WstpNodeDir
-        # Run entirely inside cmd.exe so no stderr lines ever reach PowerShell's
-        # pipeline and get wrapped as NativeCommandError / ErrorRecord objects.
-        # stdout+stderr are merged by cmd's own 2>&1 redirect into the log file;
-        # we also print live output via 'type' after the run.
-        $logFileEsc = $logFile.Replace('"', '""')
-        cmd /c "node tests\test.js > `"$logFileEsc`" 2>&1"
-        $exitCode = $LASTEXITCODE
-        if (Test-Path $logFile) { Get-Content $logFile }
+
+        # Start node with stdout/stderr redirected to files so PowerShell never
+        # sees its output as ErrorRecord objects (no NativeCommandError).
+        $proc = Start-Process -FilePath node -ArgumentList "tests\test.js" `
+                    -NoNewWindow -PassThru `
+                    -RedirectStandardOutput $logFile `
+                    -RedirectStandardError  $stderrFile
+
+        # Poll the log file and print new non-diag lines as they appear (live output)
+        $printedLines = 0
+        while (-not $proc.HasExited) {
+            Start-Sleep -Milliseconds 400
+            if (Test-Path $logFile) {
+                $lines = Get-Content $logFile
+                if ($lines.Count -gt $printedLines) {
+                    $lines[$printedLines..($lines.Count - 1)] |
+                        Where-Object { $_ -notmatch '^\[diag' -and $_ -match '\S' } |
+                        ForEach-Object { Write-Host "    $_" }
+                    $printedLines = $lines.Count
+                }
+            }
+        }
+        # Flush any remaining lines after process exits
+        if (Test-Path $logFile) {
+            $lines = Get-Content $logFile
+            if ($lines.Count -gt $printedLines) {
+                $lines[$printedLines..($lines.Count - 1)] |
+                    Where-Object { $_ -notmatch '^\[diag' -and $_ -match '\S' } |
+                    ForEach-Object { Write-Host "    $_" }
+            }
+        }
+
+        $exitCode = $proc.ExitCode
+
+        # Append any notable stderr (skip pure diag noise) into the log
+        if (Test-Path $stderrFile) {
+            $errLines = Get-Content $stderrFile | Where-Object { $_ -notmatch '^\[diag' -and $_ -match '\S' }
+            if ($errLines) { $errLines | Add-Content $logFile }
+            Remove-Item $stderrFile
+        }
+
         Pop-Location
 
         # Restore original test.js
