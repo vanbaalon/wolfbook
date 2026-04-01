@@ -217,13 +217,26 @@ async function openDialogSubsession(self) {
         let _renderHtml  = null;
         let _renderError = null;
         try {
-            const _subKern = await self._ensureSubKernel(_subImgDir, _subImgRel);
+            let _subKernForRender;
+            try {
+                _subKernForRender = await self._ensureSubKernel(_subImgDir, _subImgRel);
+            } catch (_subStartErr) {
+                // Subkernel unavailable (e.g. single-kernel license) — fall back to main kernel.
+                scrollLog('[subsession-render] subkernel launch failed (' + _subStartErr.message + ') — falling back to main kernel sub()');
+                self._subKernel = null; self._subKernelReady = false; self._subKernelInitPromise = null;
+            }
             // Import the .mx file — binary WL expression, no encoding issues.
             const _subExpr = 'VsCodeRenderExpr[Import["' + _dlgTmpFile +
                 '"], "' + _dlgFormat + '", ' + _dlgScale + ']';
             scrollLog('[subsession-render] tmp file:', _dlgTmpFile);
             scrollLog('[subsession-render] VsCodeRenderExpr call:', _subExpr);
-            const _renderResult = await _subKern.evaluate(_subExpr, { interactive: false });
+            let _renderResult;
+            if (_subKernForRender) {
+                _renderResult = await _subKernForRender.evaluate(_subExpr, { interactive: false });
+            } else {
+                const _wexpr = await self.session.sub(_subExpr);
+                _renderResult = { result: _wexpr };
+            }
             scrollLog('[subsession-render] result type:', _renderResult?.result?.type,
                       '| value length:', _renderResult?.result?.value?.length ?? 'n/a',
                       '| messages:', JSON.stringify(_renderResult?.messages ?? []));
@@ -767,14 +780,26 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
                 }
                 if (Object.keys(idlePending).length > 0) {
                     let _anyChanged = false;
+                    let _subKernForDyn = null;
                     try {
-                        const _subKern = await self._ensureSubKernel(imgDir, imgRel);
+                        _subKernForDyn = await self._ensureSubKernel(imgDir, imgRel);
+                    } catch (_subStartErr) {
+                        // Subkernel unavailable — Dynamic rendering falls back to main kernel sub().
+                        dynLog('DYN-SUBKERN-UNAVAIL | cycle', cycle, '|', _subStartErr.message);
+                        self._subKernel = null; self._subKernelReady = false; self._subKernelInitPromise = null;
+                    }
+                    try {
                         for (const [slotIdxStr, tmpFile] of Object.entries(idlePending)) {
                             const slotIdx = Number(slotIdxStr);
                             const fileEsc = tmpFile.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
                             const renderExpr = 'Module[{dynVal=Import["' + fileEsc + '"]},VsCodeRenderExpr[dynVal,"Auto",' + scale + ']]';
                             try {
-                                const renderRes = await _subKern.sub(renderExpr);
+                                let renderRes;
+                                if (_subKernForDyn) {
+                                    renderRes = await _subKernForDyn.sub(renderExpr);
+                                } else {
+                                    renderRes = await self.session.sub(renderExpr);
+                                }
                                 const htmlStr = renderRes?.value;
                                 if (typeof htmlStr === 'string' && htmlStr.length > 0) {
                                     dynLog('DYN-RENDER-OK | cycle', cycle, '| slot', slotIdx,
