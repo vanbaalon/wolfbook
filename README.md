@@ -436,8 +436,8 @@ A complete reference for all keyboard shortcuts in Wolfbook notebooks (`.evsnb`)
 
 - [Wolfram Mathematica](https://www.wolfram.com/mathematica/) or [Wolfram Engine](https://www.wolfram.com/engine/) installed locally
 - VS Code 1.95+
-- The bespoke **WSTP connector** (`wstp.node`) — a native Node.js addon that connects directly to the Wolfram kernel via the WSTP protocol. Prebuilt for **macOS Apple Silicon** (arm64) and **Windows x64** (from v2.3.0). Intel Mac (x64) is not currently supported.
-- The bespoke **wolfbook-btl** addon (`wolfbook_btl.node`) — a native C++ addon that translates Wolfram `TraditionalForm` box structures to LaTeX. Prebuilt for **macOS Apple Silicon**, **Windows x64**, and **Linux x64**.
+- The bespoke **WSTP connector** (`wstp.node`) — a native Node.js addon that connects directly to the Wolfram kernel via the WSTP protocol. Prebuilt for **macOS Apple Silicon** (arm64), **macOS Intel** (x64), and **Windows x64**.
+- The bespoke **wolfbook-btl** addon (`wolfbook_btl.node`) — a native C++ addon that translates Wolfram `TraditionalForm` box structures to LaTeX. Prebuilt for **macOS Apple Silicon**, **macOS Intel**, **Windows x64**, and **Linux x64**.
 - **Wolfram Engine** is fully supported. On machines where the Engine licence allows only a single concurrent kernel process, Wolfbook automatically falls back to rendering via the main kernel instead of launching a second one — Evaluate Selection and Dynamic widgets both work correctly.
 
 Both native addons are bundled inside the `.vsix` so no separate build step is needed.

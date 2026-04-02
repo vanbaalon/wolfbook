@@ -335,8 +335,13 @@ class WatchPanelProvider {
         // Inline KaTeX CSS with font URLs replaced by base64 data URIs.
         // Same approach as wb-export.js — guarantees fonts load regardless of
         // webview CSP or relative-URL resolution issues.
-        const katexCssPath = path.join(__dirname, '../../../wllatex-addon/node_modules/katex/dist/katex.min.css');
-        const katexFontsDir = path.join(__dirname, '../../../wllatex-addon/node_modules/katex/dist/fonts');
+        const _katexBase = (() => {
+            const primary  = path.join(__dirname, '../../../node_modules/katex/dist');
+            const fallback = path.join(__dirname, '../../../wllatex-addon/node_modules/katex/dist');
+            return _fs.existsSync(path.join(primary, 'katex.min.css')) ? primary : fallback;
+        })();
+        const katexCssPath  = path.join(_katexBase, 'katex.min.css');
+        const katexFontsDir = path.join(_katexBase, 'fonts');
         const _fs = require('fs');
         let katexCssInline = '';
         try {

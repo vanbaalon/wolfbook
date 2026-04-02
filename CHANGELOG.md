@@ -4,6 +4,13 @@ All notable changes to **Wolfbook** are documented here.
 
 ---
 
+## [2.6.1] - 2026-04-02
+
+### Fixed
+- **KaTeX CSS/fonts in packaged VSIX** — `katex` is now declared as a runtime dependency (`package.json`), so it is included in the packaged extension. The PDF export (`wb-export.js`) and the watch panel (`watchPanel.js`) now look for KaTeX assets in `node_modules/katex/dist/` first, with an automatic fallback to `wllatex-addon/node_modules/katex/dist/` for older local-dev layouts. This resolves `_btlPrerenderLatex is not a function` and missing-font errors in VSIX installs.
+
+---
+
 ## [2.6.0] - 2026-04-02
 
 ### Added

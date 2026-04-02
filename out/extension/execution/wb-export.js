@@ -281,12 +281,19 @@ function generatePdfHtml(notebook, notebookDir) {
     const cells = notebook.getCells().filter(c => !_isWBExportCell(c));
 
     // ---- Collect KaTeX CSS ----
+    // Prefer the root node_modules location (packaged VSIX), fall back to
+    // wllatex-addon/node_modules (local dev layout).
     let katexCss = '';
     try {
-        const katexCssPath = path.join(__dirname, '../../../wllatex-addon/node_modules/katex/dist/katex.min.css');
+        const _katexBase = (() => {
+            const primary  = path.join(__dirname, '../../../node_modules/katex/dist');
+            const fallback = path.join(__dirname, '../../../wllatex-addon/node_modules/katex/dist');
+            return require('fs').existsSync(path.join(primary, 'katex.min.css')) ? primary : fallback;
+        })();
+        const katexCssPath = path.join(_katexBase, 'katex.min.css');
         katexCss = fs.readFileSync(katexCssPath, 'utf8');
         // Replace font URLs with inline data URIs
-        const fontsDir = path.join(__dirname, '../../../wllatex-addon/node_modules/katex/dist/fonts');
+        const fontsDir = path.join(_katexBase, 'fonts');
         katexCss = katexCss.replace(/url\(fonts\/([^)]+)\)/g, (match, fontFile) => {
             try {
                 const fontPath = path.join(fontsDir, fontFile);
