@@ -1449,9 +1449,9 @@ function activate(context) {
                 // Return stub: clickable 📖 that shows full doc in the Watch panel
                 const cmdArg = encodeURIComponent(JSON.stringify([cacheKey]));
                 const md = new vscode.MarkdownString(
-                    `[📖](command:wolfram.expandHoverDoc?${cmdArg})`
+                    `[📖](command:wolfbook.expandHoverDoc?${cmdArg})`
                 );
-                md.isTrusted = { enabledCommands: ['wolfram.expandHoverDoc'] };
+                md.isTrusted = { enabledCommands: ['wolfbook.expandHoverDoc'] };
                 return new vscode.Hover(md);
             }
         }

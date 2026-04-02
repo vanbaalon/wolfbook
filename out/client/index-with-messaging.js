@@ -1071,7 +1071,17 @@ export function activate(context) {
             const rawLatexDivs = element.querySelectorAll('div.vscode-wolfram-wllatex-raw-latex[data-latex-b64]');
             if (rawLatexDivs.length > 0) {
                 const renderRawWithKatex = (katex) => {
-                    rawLatexDivs.forEach(div => {
+                    // Re-query for fresh (non-stale) refs: if VS Code called renderOutputItem
+                    // again on the same element (e.g. due to a second format-switch click while
+                    // CDN KaTeX was still loading), the original rawLatexDivs NodeList may point
+                    // to detached DOM nodes. Re-querying ensures we always render the live divs.
+                    // The `data-katex-rendered` guard prevents double-rendering in the rare case
+                    // where a stale poll callback fires after a fresh renderRawWithKatex call.
+                    const liveDivs = element.querySelectorAll(
+                        'div.vscode-wolfram-wllatex-raw-latex[data-latex-b64]:not([data-katex-rendered])');
+                    if (liveDivs.length === 0) return;
+                    liveDivs.forEach(div => {
+                        div.setAttribute('data-katex-rendered', '1');
                         const btlError = div.getAttribute('data-btl-error');
                         let latex = '';
                         try { latex = atob(div.getAttribute('data-latex-b64') || ''); } catch(e) {}

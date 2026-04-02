@@ -1,9 +1,9 @@
 {
     "name": "wolfbook",
-    "displayName": "Wolfbook — Wolfram Language Notebook",
-    "description": "Interactive Wolfram Language notebook for VS Code. WSTP-backed kernel, MathML/SVG/PNG rendering, Unicode input, LSP diagnostics, and output expansion controls.",
+    "displayName": "Wolfbook — AI-Friendly Wolfram Language Notebook",
+    "description": "AI-friendly Wolfram Language notebook for VS Code. WSTP kernel, KaTeX rendering with adaptive line-breaking, Unicode input, LSP diagnostics, and AI-readable outputs for GitHub Copilot.",
     "publisher": "wolfbook",
-    "version": "2.6.3",
+    "version": "2.6.4",
     "engines": {
         "vscode": "^1.95.0"
     },
@@ -145,7 +145,7 @@
                     "scope": "user",
                     "type": "string",
                     "default": "Automatic",
-                    "markdownDescription": "Path to the Wolfram kernel executable, or `Automatic` to use the first detected installation. Run the **Wolfram: Select Kernel** command (`wolfram.selectKernel`) to pick from all detected kernels.",
+                    "markdownDescription": "Path to the Wolfram kernel executable, or `Automatic` to use the first detected installation. Run the **Wolfbook: Select Kernel** command (`wolfbook.selectKernel`) to pick from all detected kernels.",
                     "order": 0
                 },
                 "wolfram.advanced.lsp.ServerLogDirectory": {

@@ -206,7 +206,9 @@ function processWLLatexBoxes(self, html, logPath, pageWidthEm = 0, source = '', 
                       `⚠️ boxToLatex error: ${_encoding.escapeHtml(error)}</div>`
                     : '';
                 const lineBrokenAttr = lineBreakStatus === 'applied' ? ' data-line-broken="1"' : '';
-                return `<div class="vscode-wolfram-wllatex-prerendered" data-page-width-em="${pageWidthEm}"${lineBrokenAttr}>` +
+                // Embed data-latex-b64 so extractPlainText and AI tools can read the raw LaTeX
+                const _latexB64ForA = Buffer.from(latexFinal).toString('base64');
+                return `<div class="vscode-wolfram-wllatex-prerendered" data-page-width-em="${pageWidthEm}"${lineBrokenAttr} data-latex-b64="${_latexB64ForA}">` +
                        errorNote + rendered + '</div>';
             });
     }
@@ -251,7 +253,14 @@ function processWLLatexBoxes(self, html, logPath, pageWidthEm = 0, source = '', 
                 }
                 const latexB64 = Buffer.from(latexFinal).toString('base64');
                 const errorAttr = error ? ` data-btl-error="${_encoding.escapeHtml(error)}"` : '';
-                return `<div class="vscode-wolfram-wllatex-raw-latex" data-latex-b64="${latexB64}"${errorAttr}></div>`;
+                // Embed a short readable LaTeX preview as text content so that AI tools
+                // reading the raw HTML see decoded LaTeX rather than an opaque base64 blob.
+                // The webview overwrites this with the KaTeX-rendered DOM when it loads.
+                const _PREVIEW_LEN = 300;
+                const _latexPreview = latexFinal.length > _PREVIEW_LEN
+                    ? _encoding.escapeHtml(latexFinal.substring(0, _PREVIEW_LEN)) + '\u2026'
+                    : _encoding.escapeHtml(latexFinal);
+                return `<div class="vscode-wolfram-wllatex-raw-latex" data-latex-b64="${latexB64}"${errorAttr}>${_latexPreview}</div>`;
             });
     }
     // ---- Mode C: emit src-latex div containing raw LaTeX for source display (WLLatexSrc button) ----
