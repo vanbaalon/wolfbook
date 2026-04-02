@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Automatic rebuild watcher for Wolfbook Windows binaries and VSIX.
 
@@ -56,8 +56,7 @@ param(
 # ============================================================================
 $WolfbookDir  = $PSScriptRoot                           # this script lives in wolfbook/
 $WstpNodeDir  = Join-Path (Split-Path $WolfbookDir -Parent) "mathematica-wstp-node"
-$BtlDir       = Join-Path (Split-Path $WolfbookDir -Parent) "btl"   # optional, skipped if absent
-
+$BtlDir       = ""   # set to local btl repo path if you want to rebuild it
 $EngineRoot   = "C:\Program Files\Wolfram Research\Wolfram Engine"
 $KnownSkipTests = @(29, 31, 52)   # broken on Windows: JLink prompt / timing
 
@@ -117,7 +116,7 @@ function Load-State {
     if (Test-Path $StateFile) {
         try { return Get-Content $StateFile -Raw | ConvertFrom-Json } catch {}
     }
-    return [PSCustomObject]@{ wstp = ""; wolfbook = ""; btl = "" }
+    return [PSCustomObject]@{ wstp = ""; wolfbook = "" }
 }
 function Save-State([PSCustomObject]$s) {
     $s | ConvertTo-Json | Set-Content $StateFile -Encoding UTF8
@@ -128,6 +127,22 @@ function Pull-Repo([string]$dir, [string]$branch) {
     git -C $dir fetch --quiet 2>&1 | Out-Null
     git -C $dir checkout $branch --quiet 2>&1 | Out-Null
     git -C $dir rebase --autostash "origin/$branch" 2>&1 | Out-Null
+}
+function Assert-NodeAbi {
+    # VS Code 1.100-1.113 embeds Node 20.x / ABI 115 (Electron 32.x).
+    # Addons compiled against a different ABI will fail to load with "invalid ELF header".
+    $nodeVer = node --version 2>$null
+    $abi     = node -p "process.versions.modules" 2>$null
+    if ($nodeVer -notmatch '^v20\.') {
+        Log "ERROR: Node $nodeVer detected. Must use Node v20.x (ABI 115) to match VS Code embedded Node."
+        Log "       Switch with: nvm use 20  or install Node 20 from nodejs.org"
+        exit 1
+    }
+    if ($abi -ne '115') {
+        Log "ERROR: Node ABI $abi detected. Expected ABI 115 (Node 20.x)."
+        exit 1
+    }
+    Log "Node ABI OK: $nodeVer / ABI $abi"
 }
 
 # ============================================================================
@@ -141,8 +156,9 @@ $state = Load-State
 $repos = [ordered]@{
     wstp     = @{ Dir = $WstpNodeDir;  Branch = "windows-x64" }
     wolfbook = @{ Dir = $WolfbookDir;  Branch = "main" }
-    btl      = @{ Dir = $BtlDir;       Branch = "main" }
 }
+
+Assert-NodeAbi
 
 $needRebuild = $Force.IsPresent
 $changes     = @()
@@ -332,15 +348,32 @@ LogSection "Packaging VSIX"
 Copy-Item $Binary "$WolfbookDir\wstp\prebuilt\wstp-win32-x64.node" -Force
 Log "Binary copied to wstp/prebuilt/wstp-win32-x64.node"
 
+# ---- Check BTL prebuilt is present ----
+$BtlPrebuilt = "$WolfbookDir\wllatex-addon\prebuilt\wolfbook_btl-win32-x64.node"
+if (-not (Test-Path $BtlPrebuilt)) {
+    Log "ERROR: BTL prebuilt missing: $BtlPrebuilt"
+    Log "       Pull from origin/main or copy from a Mac build."
+    exit 1
+}
+Log "BTL prebuilt OK"
+
+# ---- Ensure katex is installed for watchPanel.js ----
+if (Test-Path "$WolfbookDir\wllatex-addon\package.json") {
+    npm install --prefix "$WolfbookDir\wllatex-addon" --omit=dev 2>&1 | Out-Null
+    Log "wllatex-addon npm install done (katex)"
+} else {
+    Log "WARN: wllatex-addon/package.json not found - KaTeX may not render"
+}
+
 Push-Location $WolfbookDir
 npm install 2>&1 | Out-Null
 
 $WolfbookVersion = ((Get-Content "$WolfbookDir\package.json" -Raw) |
     Select-String '"version"\s*:\s*"([^"]+)"').Matches[0].Groups[1].Value
-$VsixName = "wolfbook-$WolfbookVersion.vsix"
+$VsixName = "wolfbook-$WolfbookVersion-win32-x64.vsix"
 
 $env:npm_config_msvs_version = ""   # clear so vsce doesn't inherit it
-vsce package --no-dependencies -o $VsixName 2>&1 | ForEach-Object { Log "  $_" }
+vsce package --allow-missing-repository --target win32-x64 -o $VsixName 2>&1 | ForEach-Object { Log "  $_" }
 if ($LASTEXITCODE -ne 0) { Log "ERROR: vsce package failed"; Pop-Location; exit 1 }
 $VsixPath = Join-Path $WolfbookDir $VsixName
 Log "VSIX: $VsixPath"
@@ -361,6 +394,7 @@ if (-not $DryRun) {
 
     Push-Location $WolfbookDir
     git add "wstp/prebuilt/wstp-win32-x64.node" "windows-test-report.txt" 2>&1 | Out-Null
+    git add -f $VsixName 2>&1 | Out-Null   # *.vsix is gitignored - force-add
     $commitMsg = "chore(windows): rebuild wstp.node with WEngine $BuildVersion [auto]"
     git commit -m $commitMsg 2>&1 | Out-Null
     if ($LASTEXITCODE -eq 0) {

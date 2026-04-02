@@ -11,9 +11,10 @@
 (* VsCodeRenderExpr rendering (SVG/MathML) — subkernel needs no context for n.   *)
 VsCodeDynExportValue[exprStr_String] := Module[
     {val, tmpFile},
-    (* TimeConstrained guards slow expressions; Check converts $Failed-like returns. *)
+    (* TimeConstrained guards slow expressions. Avoid Check[..,$Failed] here:
+       many harmless messages would otherwise collapse valid values to $Failed. *)
     val = TimeConstrained[
-        Quiet[Check[ToExpression[exprStr], $Failed]],
+        Quiet[ToExpression[exprStr]],
         4, $Failed
     ];
     If[!MatchQ[val, Except[$Failed | $Aborted | HoldComplete[___]]],

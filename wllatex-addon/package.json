@@ -1,0 +1,8 @@
+﻿{
+  "name": "wllatex-addon",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "katex": "^0.16.11"
+  }
+}
