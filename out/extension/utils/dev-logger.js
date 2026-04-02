@@ -82,17 +82,30 @@ function _hexDump(str, n) {
 
 /**
  * wstpLog — append a WSTP traffic entry to wstp.log (dev machines only).
- * Each call writes one line: timestamp, direction tag, trimmed expression/result.
+ * If notebookFsPath is an absolute path, writes to img/<notebook>/wstp.log.
+ * Otherwise writes to global Temporary Docs/wstp.log.
+ * Trims to last 400 lines if the file grows too large.
  */
-function wstpLog(...args) {
+function wstpLog(notebookFsPath, ...args) {
     if (!DEV_MODE) return;
+    const _path = require('path');
     const msg = args.join(' ');
-    _resolveScrollLogPath();  // ensures _wstpLogPath is set
-    if (_wstpLogPath) {
-        try {
-            require('fs').appendFileSync(_wstpLogPath, '[' + new Date().toISOString() + '] ' + msg + '\n');
-        } catch (_) {}
+    let logPath;
+    if (typeof notebookFsPath === 'string' && _path.isAbsolute(notebookFsPath)) {
+        const nbBase = _path.basename(notebookFsPath, _path.extname(notebookFsPath));
+        logPath = _path.join(_path.dirname(notebookFsPath), 'img', nbBase, 'wstp.log');
+    } else {
+        _resolveScrollLogPath();
+        logPath = _wstpLogPath;
     }
+    if (!logPath) return;
+    try {
+        const fs = require('fs');
+        fs.mkdirSync(_path.dirname(logPath), { recursive: true });
+        fs.appendFileSync(logPath, '[' + new Date().toISOString() + '] ' + msg + '\n');
+        const _lines = fs.readFileSync(logPath, 'utf8').split('\n');
+        if (_lines.length > 400) fs.writeFileSync(logPath, _lines.slice(-400).join('\n'));
+    } catch (_) {}
 }
 
 /**

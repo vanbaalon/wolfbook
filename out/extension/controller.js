@@ -59,6 +59,7 @@ const _execution = require('./execution/checkout');
 // Tries wstp/prebuilt/wstp-<platform>-<arch>.node first (bundled prebuilt),
 // then falls back to wstp/build/Release/wstp.node (locally compiled).
 let WstpSession;
+let _addonSyntaxCheck;   // pure-C++ structural syntax check (no kernel needed)
 try {
     const _path = require('path');
     const _fs   = require('fs');
@@ -70,6 +71,9 @@ try {
     const _addonPath = _fs.existsSync(_prebuilt) ? _prebuilt : _fallback;
     const _addon = require(_addonPath);
     WstpSession = _addon.WstpSession;
+    if (typeof _addon.syntaxCheck === 'function') {
+        _addonSyntaxCheck = _addon.syntaxCheck;
+    }
     // Pipe C++ DiagLog messages into the extension debug log.
     if (typeof _addon.setDiagHandler === 'function') {
         const { scrollLog: _sl, wstpLog: _wl } = require('./utils/dev-logger');
@@ -97,16 +101,16 @@ class WolframNotebookKernel {
         // checkoutExecutionQueue() reads + clears this to add the "subsession" badge.
         this._subsessionCellUris = new Set();
 
-        // Sub-kernel: a second WstpSession used exclusively to render results
-        // obtained via dialogEval() on the main kernel. Initialized lazily on
-        // first ⌥⇧↵ with a busy kernel. Reuses init.wl so VsCodeRenderExpr is
-        // available exactly as in normal evaluations.
-        /** @type {import("../../wstp").WstpSession | null} */
-        this._subKernel = null;
-        this._subKernelReady = false;
-        this._subKernelInitPromise = null;
-        this._subKernelUnavailable = false; // set when all retry attempts fail (e.g. single-kernel license)
         this._abortPending   = false;
+        // Main-kernel setup caches:
+        // - _lastMainImgDir/_lastMainImgRel: last VsCodeSetImgDir target pushed to kernel
+        // - _interruptHandlerInstalled: whether Interrupt->Dialog[] handler is known installed
+        this._lastMainImgDir = null;
+        this._lastMainImgRel = null;
+        this._interruptHandlerInstalled = false;
+        // C++ structural syntax checker — set when wstp.node exposes syntaxCheck().
+        // checkout.js uses this instead of sending VsCodeSyntaxCheck to the kernel.
+        this._syntaxCheck = _addonSyntaxCheck || null;
         // True only between executionQueue.start() and executionQueue.end().
         // Guards interrupt() so it is never sent while the kernel is queued-but-idle.
         this._evalDispatched = false;
@@ -484,8 +488,8 @@ class WolframNotebookKernel {
                             `-- K: ${this._pxPerCppEm.toFixed(1)}  pageWidthEm: ${this._latexPageWidthEm}\n` +
                             `-- divs: ${divsStr || '(none)'}  katexWidths: [${katexStr}]${calibNote}\n`;
                         fs.appendFileSync(logPath, entry);
-                        // Trim btl.log to last 200 lines
-                        try { const _ll = fs.readFileSync(logPath, 'utf8').split('\n'); if (_ll.length > 200) fs.writeFileSync(logPath, _ll.slice(-200).join('\n')); } catch (_) {}
+                        // Trim btl.log to last 400 lines
+                        try { const _ll = fs.readFileSync(logPath, 'utf8').split('\n'); if (_ll.length > 400) fs.writeFileSync(logPath, _ll.slice(-400).join('\n')); } catch (_) {}
                     }
                 } catch (_) {}
                 return;
@@ -545,8 +549,8 @@ class WolframNotebookKernel {
                             `-- _pxPerCppEm: ${oldK.toFixed(3)} → ${this._pxPerCppEm.toFixed(3)}` +
                             `  _latexPageWidthEm: ${this._latexPageWidthEm}\n`;
                         fs.appendFileSync(logPath, entry);
-                        // Trim btl.log to last 200 lines
-                        try { const _ll = fs.readFileSync(logPath, 'utf8').split('\n'); if (_ll.length > 200) fs.writeFileSync(logPath, _ll.slice(-200).join('\n')); } catch (_) {}
+                        // Trim btl.log to last 400 lines
+                        try { const _ll = fs.readFileSync(logPath, 'utf8').split('\n'); if (_ll.length > 400) fs.writeFileSync(logPath, _ll.slice(-400).join('\n')); } catch (_) {}
                     }
                 } catch (_) {}
                 return;
@@ -1232,8 +1236,7 @@ class WolframNotebookKernel {
 
     // -----------------------------------------------------------------------
     // Sub-kernel and shutdown — thin wrappers delegating to kernel/lifecycle.js
-    _prewarmSubKernel()                  { _lifecycle.prewarmSubKernel(this, WstpSession); }
-    async _ensureSubKernel(imgDir, imgRel) { return _lifecycle.ensureSubKernel(this, WstpSession, imgDir, imgRel); }
+    _prewarmSubKernel()                  { /* no-op: subkernel removed */ }
     quitKernel()                         { _lifecycle.quitKernel(this); }
 
     // -----------------------------------------------------------------------

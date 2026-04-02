@@ -163,40 +163,44 @@ async function openDialogSubsession(self) {
         )
     ])]);
 
-    // Evaluate cellCode via subAuto, Export result to a .mx file.
-    const _tmpFile = _subImgDir.replace(/\\/g, '/') + '/_subsession_transfer.mx';
-    const _dlgSentExpr = '(Export["' + _tmpFile + '", ToExpression["' +
-        self.escapeWL(cellCode) + '"]]; "' + _tmpFile + '")';
+    // Single subAuto call: evaluate cellCode AND render inline via VsCodeRenderExpr.
+    // No .mx file export/import, no separate subkernel — same pattern as evaluateSelection.
+    const _subImgDirWL = _subImgDir.replace(/\\/g, '/');
+    const _dlgSentExpr =
+        'Block[{wbSS$v},' +
+        'VsCodeSetImgDir["' + _subImgDirWL + '","' + _subImgRel + '"];' +
+        'wbSS$v=ToExpression["' + self.escapeWL(cellCode) + '"];' +
+        'VsCodeRenderExpr[wbSS$v,"' + _dlgFormat + '",' + _dlgScale + ']' +
+        ']';
     scrollLog('[subsession-subAuto] cellCode:', cellCode);
-    scrollLog('[subsession-subAuto] tmp file:', _tmpFile);
-    scrollLog('[subsession-subAuto] sent to subAuto:', _dlgSentExpr);
-    let _dlgTmpFile = null;
+    scrollLog('[subsession-subAuto] sent to subAuto:', _dlgSentExpr.slice(0, 200));
+    let _renderHtmlDirect = null;
     let _dlgEvalError = null;
     try {
         const _dlgWexpr = await Promise.race([
             self.session.subAuto(_dlgSentExpr),
             new Promise((_, rej) => setTimeout(() => rej(new Error('subsession-subAuto timeout (15s)')), 15000))
         ]);
-        scrollLog('[subsession-subAuto] raw WExpr back:', JSON.stringify(_dlgWexpr));
-        const _rawVal = (_dlgWexpr && _dlgWexpr.value) ? String(_dlgWexpr.value) : '';
-        if (_dlgWexpr && (_dlgWexpr.type === 'string' || _dlgWexpr.type === 'symbol') &&
-                !_rawVal.includes('Failed') && !_rawVal.includes('$Failed')) {
-            _dlgTmpFile = _tmpFile;
-            scrollLog('[subsession-subAuto] Export succeeded, using JS path:', _dlgTmpFile);
-        } else if (_dlgWexpr && _dlgWexpr.error) {
+        scrollLog('[subsession-subAuto] result type:', _dlgWexpr?.type, '| len:', String(_dlgWexpr?.value ?? '').length);
+        if (_dlgWexpr?.error) {
             _dlgEvalError = _dlgWexpr.error;
-            scrollLog('[subsession-subAuto] WExpr error:', _dlgEvalError);
+        } else if (_dlgWexpr?.type === 'string' && _dlgWexpr.value) {
+            _renderHtmlDirect = _dlgWexpr.value;
         } else {
-            _dlgEvalError = 'Export returned: ' + JSON.stringify(_dlgWexpr);
-            scrollLog('[subsession-subAuto] Export failed:', _dlgEvalError);
+            _dlgEvalError = 'subAuto returned: ' + JSON.stringify(_dlgWexpr);
         }
     } catch (_err) {
         _dlgEvalError = _err.message;
         scrollLog('[subsession-subAuto] subAuto threw:', _dlgEvalError);
     }
 
-    // Render via the subkernel — full VsCodeRenderExpr pipeline
-    // (SVG/PNG graphics, WLLatex, MathML, etc.) identical to normal evaluation.
+    // Post-process rendered HTML (WLLatex box expansion, image URI fix)
+    if (_renderHtmlDirect) {
+        if (self._processWLLatexBoxes) _renderHtmlDirect = self._processWLLatexBoxes(_renderHtmlDirect);
+        if (self._fixImageUris)        _renderHtmlDirect = self._fixImageUris(_renderHtmlDirect);
+    }
+
+    // Render via inline subAuto — full VsCodeRenderExpr pipeline on the main kernel.
     const _subsBadge =
         '<span style="font-size:9px;color:#e8a020;background:rgba(232,160,32,0.12);' +
         'border:1px solid rgba(232,160,32,0.35);border-radius:3px;padding:1px 5px;' +
@@ -204,7 +208,7 @@ async function openDialogSubsession(self) {
 
     const parts = [];
 
-    if (_dlgEvalError || _dlgTmpFile === null) {
+    if (_dlgEvalError || _renderHtmlDirect === null) {
         const _errMsg = _dlgEvalError || 'dialog eval returned no result';
         parts.push(
             '<div style="display:flex;align-items:baseline;gap:4px;padding:3px 0">' +
@@ -214,78 +218,17 @@ async function openDialogSubsession(self) {
             self.escapeHtml(_errMsg) + '</span></div>'
         );
     } else {
-        let _renderHtml  = null;
-        let _renderError = null;
-        try {
-            let _subKernForRender;
-            try {
-                _subKernForRender = await self._ensureSubKernel(_subImgDir, _subImgRel);
-            } catch (_subStartErr) {
-                // Subkernel unavailable (e.g. single-kernel license) — fall back to main kernel.
-                scrollLog('[subsession-render] subkernel launch failed (' + _subStartErr.message + ') — falling back to main kernel sub()');
-                self._subKernel = null; self._subKernelReady = false; self._subKernelInitPromise = null;
-            }
-            // Import the .mx file — binary WL expression, no encoding issues.
-            const _subExpr = 'VsCodeRenderExpr[Import["' + _dlgTmpFile +
-                '"], "' + _dlgFormat + '", ' + _dlgScale + ']';
-            scrollLog('[subsession-render] tmp file:', _dlgTmpFile);
-            scrollLog('[subsession-render] VsCodeRenderExpr call:', _subExpr);
-            let _renderResult;
-            if (_subKernForRender) {
-                _renderResult = await _subKernForRender.evaluate(_subExpr, { interactive: false });
-            } else {
-                const _wexpr = await self.session.sub(_subExpr);
-                _renderResult = { result: _wexpr };
-            }
-            scrollLog('[subsession-render] result type:', _renderResult?.result?.type,
-                      '| value length:', _renderResult?.result?.value?.length ?? 'n/a',
-                      '| messages:', JSON.stringify(_renderResult?.messages ?? []));
-            // Clean up temp file regardless of render result.
-            try { require('fs').unlinkSync(_dlgTmpFile); } catch (_) {}
-            if (_renderResult && _renderResult.result &&
-                    _renderResult.result.type === 'string' && _renderResult.result.value) {
-                _renderHtml = self._processWLLatexBoxes(
-                    self._fixImageUris(_renderResult.result.value)
-                );
-            } else {
-                _renderError = 'subkernel render returned no HTML — result: ' +
-                    JSON.stringify(_renderResult?.result);
-                scrollLog('[subsession-render] NO HTML:', _renderError);
-            }
-        } catch (_re) {
-            _renderError = _re.message;
-            scrollLog('[subsession-render] threw:', _renderError);
-        }
-
         const _headerLabel =
             _subsBadge +
             '<span style="font-size:10px;color:#888;margin-right:8px;">Out=</span>';
-
-        if (_renderHtml) {
-            const _headerRow =
-                '<div class="wl-output-header" style="display:flex;align-items:center;' +
-                'gap:6px;width:100%;min-height:22px;" data-session-epoch="' + self._sessionEpoch + '">' +
-                _headerLabel + '</div>';
-            parts.push(
-                '<div class="wl-output-block">' + _headerRow +
-                '<div class="wl-output-content">' + _renderHtml + '</div></div>'
-            );
-        } else {
-            // Subkernel render failed — InputForm text fallback.
-            const _errNote = _renderError
-                ? '<div style="color:#FFA500;font-size:11px;margin:0 0 2px;">Render failed (' +
-                  self.escapeHtml(_renderError) + ') — showing InputForm</div>'
-                : '';
-            parts.push(
-                '<div style="padding:3px 0">' +
-                '<div style="display:flex;align-items:baseline;gap:4px;margin-bottom:2px;">' +
-                _headerLabel + '</div>' +
-                _errNote +
-                '<pre class="vscode-wolfram-text-output" style="white-space:pre-wrap;' +
-                'overflow-wrap:break-word;margin:0;">' +
-                self.escapeHtml('(tmp file: ' + (_dlgTmpFile || 'none') + ')') + '</pre></div>'
-            );
-        }
+        const _headerRow =
+            '<div class="wl-output-header" style="display:flex;align-items:center;' +
+            'gap:6px;width:100%;min-height:22px;" data-session-epoch="' + self._sessionEpoch + '">' +
+            _headerLabel + '</div>';
+        parts.push(
+            '<div class="wl-output-block">' + _headerRow +
+            '<div class="wl-output-content">' + _renderHtmlDirect + '</div></div>'
+        );
     }
 
     await execution.replaceOutput([new vscode.NotebookCellOutput([
@@ -331,10 +274,6 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
         snapOutputs.length = 0;
         for (const o of src) snapOutputs.push(o);
     };
-
-    // Prewarm the render subkernel as soon as the first Dynamic widget is registered
-    // so init.wl is already loaded by the time the first Dialog render happens.
-    self._prewarmSubKernel();
 
     // Snapshot of all cell outputs (preserves static-slot outputs across updates).
     if (!self._dynCells) self._dynCells = new Map();
@@ -745,12 +684,17 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
                     && (Date.now() - (self._dynLastIdleRender || 0)) > 250) {
                 self._dynLastIdleRender = Date.now();
                 const scale = Number(self.config?.get?.('imageScale') ?? 0.8) || 0.8;
-                const idlePending = {};
+                let _anyChanged = false;
                 for (const de of dynExprs) {
                     if (!state.active || self._sessionEpoch !== epoch) break;
                     if (_slotExpired[dynExprs.indexOf(de)]) continue;
                     const escaped = de.dynInner.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-                    const expr = 'VsCodeDynExportValue["' + escaped + '"]';
+                    // Single-hop Dynamic update: evaluate + render in one subAuto call.
+                    // Avoids temp-file export/import and avoids subkernel render roundtrip.
+                    const expr =
+                        'Module[{dynVal=TimeConstrained[Quiet[Check[ToExpression["' + escaped + '"],$Failed]],4,$Failed]},' +
+                        'If[!MatchQ[dynVal,Except[$Failed|$Aborted|HoldComplete[___]]],"",VsCodeRenderExpr[dynVal,"Auto",' + scale + ']]' +
+                        ']';
                     dynLog('DYN-SUB | cycle', cycle, '| slot', de.slotIndex);
                     self.writeDebugLog(`[DYN] subAuto start | cycle ${cycle} | slot ${de.slotIndex} | expr: ${expr.slice(0, 60)}`);
                     const _cppPromise = self.session.subAuto(expr);
@@ -766,63 +710,27 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
                         ]);
                         self.writeDebugLog(`[DYN] subAuto done | cycle ${cycle} | slot ${de.slotIndex} | type: ${res?.type}`);
                         if (!state.active) break;
-                        const _rv = res?.value;
-                        if (typeof _rv === 'string' && _rv.startsWith('WLVAL:FILE:')) {
-                            const tmpFile = _rv.slice('WLVAL:FILE:'.length)
-                                .replace(/\\012/g, '').replace(/\\015/g, '')
-                                .replace(/[^a-zA-Z0-9/_.-]/g, '');
-                            idlePending[de.slotIndex] = tmpFile;
+                        const htmlStr = res?.value;
+                        if (typeof htmlStr === 'string' && htmlStr.length > 0) {
+                            dynLog('DYN-RENDER-OK | cycle', cycle, '| slot', de.slotIndex,
+                                   '| htmlLen:', htmlStr.length,
+                                   '| changed:', htmlStr !== lastHtmlBySlot[de.slotIndex]);
+                            if (htmlStr !== lastHtmlBySlot[de.slotIndex]) {
+                                lastHtmlBySlot[de.slotIndex] = htmlStr;
+                                htmlBySlot[de.slotIndex] = self._processWLLatexBoxes(self._fixImageUris(htmlStr));
+                                _anyChanged = true;
+                            }
+                        } else {
+                            dynLog('DYN-RENDER-EMPTY | cycle', cycle, '| slot', de.slotIndex);
                         }
                     } catch (_subErr) {
                         dynLog('DYN-SUB-ERR | cycle', cycle, '| slot', de.slotIndex, '|', _subErr.message);
                         self.writeDebugLog(`[DYN] subAuto ERROR | cycle ${cycle} | slot ${de.slotIndex} | ${_subErr.message}`);
                     }
                 }
-                if (Object.keys(idlePending).length > 0) {
-                    let _anyChanged = false;
-                    let _subKernForDyn = null;
-                    try {
-                        _subKernForDyn = await self._ensureSubKernel(imgDir, imgRel);
-                    } catch (_subStartErr) {
-                        // Subkernel unavailable — Dynamic rendering falls back to main kernel sub().
-                        dynLog('DYN-SUBKERN-UNAVAIL | cycle', cycle, '|', _subStartErr.message);
-                        self._subKernel = null; self._subKernelReady = false; self._subKernelInitPromise = null;
-                    }
-                    try {
-                        for (const [slotIdxStr, tmpFile] of Object.entries(idlePending)) {
-                            const slotIdx = Number(slotIdxStr);
-                            const fileEsc = tmpFile.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-                            const renderExpr = 'Module[{dynVal=Import["' + fileEsc + '"]},VsCodeRenderExpr[dynVal,"Auto",' + scale + ']]';
-                            try {
-                                let renderRes;
-                                if (_subKernForDyn) {
-                                    renderRes = await _subKernForDyn.sub(renderExpr);
-                                } else {
-                                    renderRes = await self.session.sub(renderExpr);
-                                }
-                                const htmlStr = renderRes?.value;
-                                if (typeof htmlStr === 'string' && htmlStr.length > 0) {
-                                    dynLog('DYN-RENDER-OK | cycle', cycle, '| slot', slotIdx,
-                                           '| htmlLen:', htmlStr.length,
-                                           '| changed:', htmlStr !== lastHtmlBySlot[slotIdx]);
-                                    if (htmlStr !== lastHtmlBySlot[slotIdx]) {
-                                        lastHtmlBySlot[slotIdx] = htmlStr;
-                                        htmlBySlot[slotIdx] = self._processWLLatexBoxes(self._fixImageUris(htmlStr));
-                                        _anyChanged = true;
-                                    }
-                                }
-                            } catch (_) {
-                            } finally {
-                                try { require('fs').unlinkSync(tmpFile); } catch (_) {}
-                            }
-                        }
-                    } catch (_subErr) {
-                        dynLog('DYN-SUBKERN-ERR | cycle', cycle, '|', _subErr.message);
-                    }
-                    if (_anyChanged) {
-                        _lastBadgeTickTime = Date.now();
-                        await _putAllOutputs(htmlBySlot, 'live');
-                    }
+                if (_anyChanged) {
+                    _lastBadgeTickTime = Date.now();
+                    await _putAllOutputs(htmlBySlot, 'live');
                 }
             }
 

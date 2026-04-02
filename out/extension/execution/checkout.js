@@ -5,7 +5,7 @@
 const vscode  = require('vscode');
 const path    = require('path');
 const fs      = require('fs');
-const { scrollLog } = require('../utils/dev-logger');
+const { scrollLog, wstpLog } = require('../utils/dev-logger');
 const _output = require('../output/renderer');
 
 async function checkoutExecutionQueue(self) {
@@ -281,13 +281,24 @@ async function checkoutExecutionQueue(self) {
         }
 
         // ---- Syntax check on full cell text (non-blocking, non-fatal) ----
-        // sub() has higher priority than evaluate() — runs before queued evaluate() calls.
-        // Dynamic idle-path now uses subWhenIdle() (not sub()), so no mutex needed.
+        // Use the C++ syntaxCheck() when available (zero kernel round-trip).
+        // Falls back to VsCodeSyntaxCheck via sub() if the addon is older.
         self.writeDebugLog(`[CHECKOUT] cell ${currentExecution.execution.cell.index} | syntax check start`);
         try {
-            const syntaxResult = await self.session.sub(
-                "VsCodeSyntaxCheck[" + JSON.stringify(code) + "]"
-            );
+            let syntaxResult;
+            if (self._syntaxCheck) {
+                // Synchronous C++ structural check — no kernel needed
+                const _nbp = vscode.window.activeNotebookEditor?.notebook.uri?.fsPath;
+                const _t0 = Date.now();
+                wstpLog(_nbp, `→ [syntaxCheck]  ${code.slice(0, 200)}`);
+                const _scVal = self._syntaxCheck(code);
+                wstpLog(_nbp, `← [syntaxCheck]  ok  ${Date.now()-_t0}ms  ${_scVal.slice(0, 200)}`);
+                syntaxResult = { type: 'string', value: _scVal };
+            } else {
+                syntaxResult = await self.session.sub(
+                    "VsCodeSyntaxCheck[" + JSON.stringify(code) + "]"
+                );
+            }
             if (syntaxResult && syntaxResult.type === "string" && syntaxResult.value) {
                 const syntaxJson = JSON.parse(syntaxResult.value);
                 if (syntaxJson.errors && syntaxJson.errors.length > 0) {
@@ -299,36 +310,46 @@ async function checkoutExecutionQueue(self) {
         }
 
         const _coT0 = Date.now();
-        scrollLog('[checkout] VsCodeSetImgDir start | cell', currentExecution.execution.cell.index);
-        self.writeDebugLog(`[CHECKOUT] cell ${currentExecution.execution.cell.index} | VsCodeSetImgDir start`);
-        try {
-            await self.session.evaluate(
-                `VsCodeSetImgDir["${self.escapeWL(imgDir)}", "${self.escapeWL(imgRel)}"]`,
-                { interactive: false, rejectDialog: true }
-            );
-            scrollLog('[checkout] VsCodeSetImgDir done | dt=', Date.now() - _coT0, 'ms');
-            self.writeDebugLog(`[CHECKOUT] cell ${currentExecution.execution.cell.index} | VsCodeSetImgDir done | dt=${Date.now() - _coT0}ms`);
-        } catch (imgDirErr) {
-            self.writeDebugLog(`[CHECKOUT] VsCodeSetImgDir failed (non-fatal): ${imgDirErr.message}`);
+        const _imgDirChanged = (self._lastMainImgDir !== imgDir) || (self._lastMainImgRel !== imgRel);
+        if (_imgDirChanged) {
+            scrollLog('[checkout] VsCodeSetImgDir start | cell', currentExecution.execution.cell.index);
+            self.writeDebugLog(`[CHECKOUT] cell ${currentExecution.execution.cell.index} | VsCodeSetImgDir start`);
+            try {
+                await self.session.evaluate(
+                    `VsCodeSetImgDir["${self.escapeWL(imgDir)}", "${self.escapeWL(imgRel)}"]`,
+                    { interactive: false, rejectDialog: true }
+                );
+                self._lastMainImgDir = imgDir;
+                self._lastMainImgRel = imgRel;
+                scrollLog('[checkout] VsCodeSetImgDir done | dt=', Date.now() - _coT0, 'ms');
+                self.writeDebugLog(`[CHECKOUT] cell ${currentExecution.execution.cell.index} | VsCodeSetImgDir done | dt=${Date.now() - _coT0}ms`);
+            } catch (imgDirErr) {
+                self.writeDebugLog(`[CHECKOUT] VsCodeSetImgDir failed (non-fatal): ${imgDirErr.message}`);
+            }
+        } else {
+            self.writeDebugLog(`[CHECKOUT] cell ${currentExecution.execution.cell.index} | VsCodeSetImgDir skipped (unchanged)`);
         }
 
-        // Reinstall interrupt handler unconditionally before each cell run.
-        // A previous abort() (user-triggered or internal) clears the kernel's
-        // Internal`AddHandler["Interrupt",...] registration.  Without reinstalling
-        // here, every interrupt in the new run silently returns "no dialog" and
-        // the Dynamic widget loop spins in the 15-cycle backoff forever.
-        // This runs before _evalDispatched=true so Dynamic loops cannot interrupt it.
-        scrollLog('[checkout] interrupt handler reinstall start | cell', currentExecution.execution.cell.index);
-        self.writeDebugLog(`[CHECKOUT] cell ${currentExecution.execution.cell.index} | interrupt handler reinstall start`);
-        try {
-            await self.session.evaluate(
-                'Quiet[Internal`AddHandler["Interrupt", Function[Null, Dialog[]]]]',
-                { interactive: false, rejectDialog: true }
-            );
-            scrollLog('[checkout] interrupt handler reinstalled at cell start | dt=', Date.now() - _coT0, 'ms');
-            self.writeDebugLog(`[CHECKOUT] cell ${currentExecution.execution.cell.index} | interrupt handler done | dt=${Date.now() - _coT0}ms`);
-        } catch (hdlrErr) {
-            self.writeDebugLog(`[CHECKOUT] interrupt handler reinstall failed (non-fatal): ${hdlrErr.message}`);
+        // Install interrupt handler only when needed (first run after launch/restart,
+        // or after an abort, which clears handler registration in the kernel).
+        // This still runs before _evalDispatched=true so Dynamic loops cannot interrupt it.
+        const _needInterruptInstall = !self._interruptHandlerInstalled;
+        if (_needInterruptInstall) {
+            scrollLog('[checkout] interrupt handler reinstall start | cell', currentExecution.execution.cell.index);
+            self.writeDebugLog(`[CHECKOUT] cell ${currentExecution.execution.cell.index} | interrupt handler reinstall start`);
+            try {
+                await self.session.evaluate(
+                    'Quiet[Internal`AddHandler["Interrupt", Function[Null, Dialog[]]]]',
+                    { interactive: false, rejectDialog: true }
+                );
+                self._interruptHandlerInstalled = true;
+                scrollLog('[checkout] interrupt handler reinstalled at cell start | dt=', Date.now() - _coT0, 'ms');
+                self.writeDebugLog(`[CHECKOUT] cell ${currentExecution.execution.cell.index} | interrupt handler done | dt=${Date.now() - _coT0}ms`);
+            } catch (hdlrErr) {
+                self.writeDebugLog(`[CHECKOUT] interrupt handler reinstall failed (non-fatal): ${hdlrErr.message}`);
+            }
+        } else {
+            self.writeDebugLog(`[CHECKOUT] cell ${currentExecution.execution.cell.index} | interrupt handler reinstall skipped (already installed)`);
         }
 
         let firstLineNum  = 0;

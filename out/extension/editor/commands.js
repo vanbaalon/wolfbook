@@ -218,6 +218,7 @@ function abortEvaluation(self) {
         self.isAborting     = false;
         self._abortPending  = false;
         self._evalDispatched = false;
+        self._interruptHandlerInstalled = false;
         self.executionQueue.clear();
         scrollLog('[abort] force-reset on second abort press');
         return;
@@ -235,6 +236,7 @@ function abortEvaluation(self) {
         self.writeDebugLog(`[ABORT] doAbort fired | dt=${Date.now()-_abortT0}ms | queueLen=${self.executionQueue.queueLength()} | started=${self.executionQueue.queue[0]?.started}`);
         self._abortPending = false;
         self._evalDispatched = false;
+        self._interruptHandlerInstalled = false;
         self._cellEpoch     = ((self._cellEpoch || 0) + 1) & 0xFFFFFF;
         self._dispatchEpoch = (self._dispatchEpoch + 1) & 0xFFFFFF;
         // Reset any other flags that can get stuck
@@ -325,6 +327,9 @@ function restartKernel(self) {
     self._abortPending          = false;
     self.isAborting              = false;
     self._evalDispatched         = false;
+    self._interruptHandlerInstalled = false;
+    self._lastMainImgDir         = null;
+    self._lastMainImgRel         = null;
     self._refineGuardActive     = false;
     self._dialogPrintCollector  = null;
     self._cellEpoch             = ((self._cellEpoch || 0) + 1) & 0xFFFFFF;

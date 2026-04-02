@@ -4,6 +4,19 @@ All notable changes to **Wolfbook** are documented here.
 
 ---
 
+## [2.6.0] - 2026-04-02
+
+### Added
+- **Syntax check before Evaluate Selection** — selections are validated by the C++ `syntaxCheck` export before being sent to the kernel.  Invalid expressions (e.g. `1+3+d(`) are rejected immediately with an inline error annotation; no kernel round-trip occurs.
+- **`syntaxCheck` visible in wstp.log** — the synchronous C++ syntax check now emits `→ [syntaxCheck]` / `← [syntaxCheck] ok Xms` log entries, matching the format used by all other WSTP calls.
+
+### Changed
+- **Evaluate Selection — single `subAuto` call** — the previous two-step pipeline (export result to a `.mx` file on the main kernel, then import and render on a separate sub-process) is replaced by a single `subAuto` call that evaluates and renders inline via `VsCodeRenderExpr`.  The C++ layer automatically selects the idle or busy-kernel path.
+- **Sub-process subkernel removed** — the second `WolframKernel` process that was started eagerly at kernel launch for rendering is no longer used.  All rendering now runs on the main kernel.  This saves ~150 MB RAM per session and eliminates a ~1–2 s startup delay.
+- **Subsession rendering** — the `⌥⇧↵` subsession output render uses a single inline `subAuto` call instead of exporting to a `.mx` file and rendering on the sub-process.
+
+---
+
 ## [2.5.10] - 2026-03-31
 
 ### Fixed

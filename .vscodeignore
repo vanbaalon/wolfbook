@@ -24,6 +24,7 @@ CHANGELOG.md
 DEVELOPMENT_GUIDE.md
 HowToBuild.md
 QUICK_REFERENCE.md
+RELEASE_GUIDE.md
 
 # WSTP build intermediaries — keep only the .node binary
 wstp/binding.gyp

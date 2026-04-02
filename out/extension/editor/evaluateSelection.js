@@ -6,8 +6,12 @@
  * the kernel is idle and when it is busy (using subAuto → Dialog[]
  * mechanism, same as live-watch — no interrupt, running cell preserved).
  *
- * The result is rendered via VsCodeRenderExpr on the subkernel and
- * displayed inside the Watch panel's "EVAL SELECTION" section.
+ * A single subAuto call sends a WL expression that evaluates the selection
+ * AND renders the result inline via VsCodeRenderExpr.  C++ decides whether
+ * to use the idle path (EvaluatePacket) or the busy path (Dialog[]).
+ * No .mx file export/import, no separate sub-warm render step.
+ *
+ * The rendered HTML is displayed inside the Watch panel's "EVAL SELECTION" section.
  */
 const vscode = require('vscode');
 const path   = require('path');
@@ -88,6 +92,20 @@ async function evaluateSelection(getController) {
     const ctrl = getController();
     if (!ctrl?.session) { vscode.window.showWarningMessage('No kernel. Launch the kernel first.'); return; }
 
+    // ── Syntax check before sending to kernel ──
+    try {
+        const syntaxRaw = ctrl._syntaxCheck
+            ? ctrl._syntaxCheck(expr)
+            : JSON.stringify({ errors: (_validateWLSyntax(expr) ? [{ message: _validateWLSyntax(expr) }] : []) });
+        const syntaxJson = JSON.parse(syntaxRaw);
+        if (syntaxJson.errors && syntaxJson.errors.length > 0) {
+            const msg = syntaxJson.errors[0].message || 'Syntax error';
+            scrollLog('[eval-sel] syntax error — rejected:', msg);
+            vscode.window.showErrorMessage('Syntax error in selection: ' + msg);
+            return;
+        }
+    } catch (_) { /* non-fatal: proceed if check itself fails */ }
+
     // Block during an active debug session — kernel is paused in Dialog[]
     if (ctrl._active) {
         vscode.window.showInformationMessage('Evaluate Selection is disabled during a debug session.');
@@ -114,48 +132,69 @@ async function evaluateSelection(getController) {
     scrollLog('[eval-sel] start | expr:', expr.slice(0, 100), '| format:', _currentFormat);
 
     try {
-        // A cell is considered busy if it is actively dispatched to the kernel
-        // (_evalDispatched=true while the cell code is running) OR if cells are
-        // queued waiting.  Using queue.length alone misses the currently-running cell.
-        const kernelBusy = !!(ctrl._evalDispatched || (ctrl.executionQueue?.queue?.length > 0 && !ctrl._abortPending));
-        const dynActive  = !!(ctrl._dynamicWidgets?.size > 0);
+        const format = _currentFormat;
+        const scale  = Number(ctrl.config?.get('imageScale') || 0.8);
 
-        let evalResult = null;
-
-        if (kernelBusy) {
-            // ── Busy path: interrupt → Dialog → export to .mx ──
-            scrollLog('[eval-sel] busy path | dynActive:', dynActive);
-            evalResult = await _evalViaBusyPath(ctrl, expr, dynActive);
-            // If the busy path failed (e.g. interrupt aborted the cell instead
-            // of opening a Dialog because onDialogBegin callbacks are not
-            // attached), fall back to the idle path now that the kernel is free.
-            if (!evalResult && !ctrl._evalDispatched) {
-                scrollLog('[eval-sel] busy path returned null, kernel now idle — fallback to idle path');
-                evalResult = await _evalViaIdlePath(ctrl, expr);
-            }
+        // Compute imgDir for raster images (SVG/PNG outputs from VsCodeRenderExpr)
+        const nbEditor = vscode.window.activeNotebookEditor;
+        let imgDir, imgRel, notebookDir;
+        if (nbEditor) {
+            const nbPath = nbEditor.notebook.uri.fsPath;
+            const nbBase = path.basename(nbPath, path.extname(nbPath));
+            notebookDir  = path.dirname(nbPath);
+            imgDir  = path.join(notebookDir, 'img', nbBase);
+            imgRel  = 'img/' + nbBase;
         } else {
-            // ── Idle path: normal evaluate → export to .mx ──
-            scrollLog('[eval-sel] idle path');
-            evalResult = await _evalViaIdlePath(ctrl, expr);
+            notebookDir = null;
+            imgDir  = path.join(require('os').tmpdir(), 'wolfbook_evalsel_img');
+            imgRel  = imgDir;
         }
+        try { fs.mkdirSync(imgDir, { recursive: true }); } catch (_) {}
 
-        if (!evalResult) {
+        const imgDirWL  = imgDir.replace(/\\/g, '/');
+        const imgRelWL  = imgRel.replace(/\\/g, '/');
+        const tmpTxt    = path.join(require('os').tmpdir(), 'wl_evalsel_' + Date.now() + '.txt');
+        const txtPathWL = tmpTxt.replace(/\\/g, '/');
+        const LEAF_LIMIT = 50000;
+        const BYTE_LIMIT = 200000;
+
+        // Single subAuto call — C++ decides idle (EvaluatePacket) vs busy
+        // (EnterTextPacket inside Dialog[]) automatically.
+        // VsCodeRenderExpr runs on the main kernel inline, returning HTML directly.
+        // No .mx file export/import, no separate sub-warm render step.
+        const wlExpr =
+            'Block[{wbES$v,wbBC$v,wbLC$v},' +
+            'VsCodeSetImgDir["' + imgDirWL + '","' + imgRelWL + '"];' +
+            'wbES$v=(' + expr + ');' +
+            'wbBC$v=ByteCount[wbES$v];wbLC$v=LeafCount[wbES$v];' +
+            'Export["' + txtPathWL + '",ToString[wbES$v,InputForm],"Text"];' +
+            'If[wbBC$v>' + BYTE_LIMIT + '||wbLC$v>' + LEAF_LIMIT + ',' +
+            '"EVALSEL:LARGE:' + txtPathWL + ':"<>ToString[wbLC$v]<>":"<>ToString[wbBC$v],' +
+            'VsCodeRenderExpr[wbES$v,"' + format + '",' + scale + ']' +
+            ']]';
+
+        scrollLog('[eval-sel] subAuto | format:', format, '| expr:', expr.slice(0, 100));
+        const raw = await Promise.race([
+            ctrl.session.subAuto(wlExpr),
+            new Promise((_, rej) => setTimeout(() => rej(new Error('subAuto timeout (30s)')), 30000)),
+        ]);
+        scrollLog('[eval-sel] subAuto result:', raw?.type, String(raw?.value ?? raw?.error ?? '').slice(0, 100));
+
+        if (!raw || raw.type !== 'string' || !raw.value) {
             _watchPanel.evalSelError('Evaluation returned no result.', expr);
             return;
         }
 
-        // ── Large result: main kernel detected it; skip the subkernel renderer ──
-        if (evalResult.large) {
-            // evalResult.val = "EVALSEL:LARGE:/path/to/file.txt:leafCount:byteCount"
-            const body       = evalResult.val.slice('EVALSEL:LARGE:'.length);
+        const val = raw.value;
+
+        // ── Large result ──
+        if (val.startsWith('EVALSEL:LARGE:')) {
+            const body       = val.slice('EVALSEL:LARGE:'.length);
             const lastColon2 = body.lastIndexOf(':');
             const byteCount  = parseInt(body.slice(lastColon2 + 1)) || 0;
             const lastColon1 = body.lastIndexOf(':', lastColon2 - 1);
             const leafCount  = parseInt(body.slice(lastColon1 + 1, lastColon2)) || 0;
             const txtPath    = body.slice(0, lastColon1);
-            const notebookDir = vscode.window.activeNotebookEditor
-                ? path.dirname(vscode.window.activeNotebookEditor.notebook.uri.fsPath)
-                : null;
             const skel =
                 '<div style="color:var(--vscode-descriptionForeground);font-size:0.9em;' +
                 'padding:6px 8px;background:var(--vscode-editorWidget-background,' +
@@ -164,18 +203,39 @@ async function evaluateSelection(getController) {
                 Math.round(byteCount / 1024) + '\u202fKB).<br>' +
                 'Use the \u29c9 button above to open as InputForm text.' +
                 '</div>';
-            scrollLog('[eval-sel] large result | leafCount:', leafCount, '| byteCount:', byteCount, '| saved to:', txtPath);
-            _watchPanel.evalSelUpdate(skel, expr, _currentFormat, notebookDir, txtPath);
+            scrollLog('[eval-sel] large result | leafCount:', leafCount, '| byteCount:', byteCount);
+            _watchPanel.evalSelUpdate(skel, expr, format, notebookDir, txtPath);
             return;
         }
 
-        // ── Render via subkernel ──
-        const { html, notebookDir, openFilePath } = await _renderResult(ctrl, evalResult.val, expr, evalResult.txt);
-        if (html) {
-            _watchPanel.evalSelUpdate(html, expr, _currentFormat, notebookDir, openFilePath);
-        } else {
-            _watchPanel.evalSelError('Render returned no HTML.', expr);
+        // ── Rendered HTML ──
+        // SVG is compact; raise the HTML size limit for it.
+        const HTML_SIZE_LIMIT = (format === 'SVG' || format === 'SVGT') ? 500_000 : 60_000;
+        let html = val;
+
+        if (ctrl._processWLLatexBoxes) {
+            const panelWidthPx = (_watchPanel && _watchPanel.getWidthPx) ? _watchPanel.getWidthPx() : 0;
+            const effectiveWidth = panelWidthPx > 0
+                ? (ctrl.pxToPageWidthEm ? ctrl.pxToPageWidthEm(panelWidthPx) : Math.round(panelWidthPx / 14))
+                : 30;
+            html = ctrl._processWLLatexBoxes(html, undefined, effectiveWidth, 'watch-panel');
         }
+        if (ctrl._fixImageUris) html = ctrl._fixImageUris(html);
+        scrollLog('[eval-sel] render OK | html length:', html.length);
+
+        if (html.length > HTML_SIZE_LIMIT) {
+            const skel = '<div style="color:var(--vscode-descriptionForeground);font-size:0.9em;' +
+                'padding:6px 8px;background:var(--vscode-editorWidget-background,' +
+                'rgba(0,0,0,0.1));border-radius:3px;">' +
+                '&#9888; Result too large to display inline (' + Math.round(html.length / 1024) + '\u202fKB of HTML).<br>' +
+                'Use the \u29c9 button above to open as InputForm text.' +
+                '</div>';
+            scrollLog('[eval-sel] large HTML | txt file:', tmpTxt);
+            _watchPanel.evalSelUpdate(skel, expr, format, notebookDir, tmpTxt);
+            return;
+        }
+
+        _watchPanel.evalSelUpdate(html, expr, format, notebookDir, tmpTxt);
     } catch (err) {
         scrollLog('[eval-sel] ERROR:', err.message);
         _watchPanel.evalSelError(err.message, expr);
@@ -193,203 +253,6 @@ async function evaluateSelection(getController) {
             } catch (_) {}
         }
     }
-}
-
-async function _evalViaIdlePath(ctrl, expr) {
-    // Evaluate expr directly (no ToExpression — avoids escaping issues with
-    // multiline code, quotes, backslashes etc.), export result to .mx.
-    // Size check happens here on the main kernel so we never involve the subkernel
-    // for large expressions (the subkernel renders via HTML, so a sentinel string
-    // returned from it would be rendered as HTML text, not returned raw).
-    const tmpMx  = path.join(require('os').tmpdir(), 'wl_evalsel_' + Date.now() + '.mx');
-    const tmpTxt = tmpMx.replace(/\.mx$/, '.txt');
-    const mxPath  = tmpMx.replace(/\\/g, '/');
-    const txtPath = tmpTxt.replace(/\\/g, '/');
-    const LEAF_LIMIT = 50000;
-    const BYTE_LIMIT = 200000;
-    // Always export InputForm text — even for small results — so the ⧉ button
-    // always opens a readable .txt file rather than HTML.
-    const wlExpr =
-        'Block[{wbEvalSel$,wbBC$,wbLC$},' +
-        'wbEvalSel$=(' + expr + ');' +
-        'wbBC$=ByteCount[wbEvalSel$];wbLC$=LeafCount[wbEvalSel$];' +
-        'Export["' + txtPath + '",ToString[wbEvalSel$,InputForm],"Text"];' +
-        'If[wbBC$>' + BYTE_LIMIT + '||wbLC$>' + LEAF_LIMIT + ',' +
-        '"EVALSEL:LARGE:' + txtPath + ':"<>ToString[wbLC$]<>":"<>ToString[wbBC$],' +
-        'Export["' + mxPath + '",wbEvalSel$];' +
-        '"EVALSEL:FILE:' + mxPath + '"' +
-        ']]';
-
-    scrollLog('[eval-sel] idle evaluate:', wlExpr.slice(0, 200));
-    const result = await ctrl.session.evaluate(wlExpr, { interactive: false });
-    const val = result?.result?.value;
-    scrollLog('[eval-sel] idle result:', String(val).slice(0, 100));
-
-    if (typeof val === 'string' && val.startsWith('EVALSEL:LARGE:')) return { large: true, val };
-    if (typeof val === 'string' && val.startsWith('EVALSEL:FILE:'))  return { large: false, val: tmpMx, txt: tmpTxt };
-    return null;
-}
-
-async function _evalViaBusyPath(ctrl, expr, dynActive) {
-    const tmpMx  = path.join(require('os').tmpdir(), 'wl_evalsel_' + Date.now() + '.mx');
-    const tmpTxt = tmpMx.replace(/\.mx$/, '.txt');
-    const mxPath  = tmpMx.replace(/\\/g, '/');
-    const txtPath = tmpTxt.replace(/\\/g, '/');
-    const LEAF_LIMIT = 50000;
-    const BYTE_LIMIT = 200000;
-    const dlgExpr =
-        'Block[{wbEvalSel$,wbBC$,wbLC$},' +
-        'wbEvalSel$=(' + expr + ');' +
-        'wbBC$=ByteCount[wbEvalSel$];wbLC$=LeafCount[wbEvalSel$];' +
-        'Export["' + txtPath + '",ToString[wbEvalSel$,InputForm],"Text"];' +
-        'If[wbBC$>' + BYTE_LIMIT + '||wbLC$>' + LEAF_LIMIT + ',' +
-        '"EVALSEL:LARGE:' + txtPath + ':"<>ToString[wbLC$]<>":"<>ToString[wbBC$],' +
-        'Export["' + mxPath + '",wbEvalSel$];' +
-        '"EVALSEL:FILE:' + mxPath + '"' +
-        ']]';
-
-    if (dynActive) {
-        // Piggyback on Dynamic loop by registering a one-shot callback
-        return await _evalViaDynamicPiggyback(ctrl, dlgExpr, tmpMx, tmpTxt);
-    } else {
-        // Use subAuto — evaluates in the main kernel context via Dialog[],
-        // same mechanism as live-watch.  The C++ timer thread handles the
-        // interrupt properly (menuPktPending=true) so the running cell is
-        // NOT aborted.
-        return await _evalViaSubAuto(ctrl, dlgExpr, tmpMx, tmpTxt);
-    }
-}
-
-function _evalViaDynamicPiggyback(ctrl, dlgExpr, tmpFile, tmpTxt) {
-    return new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
-            ctrl._evalSelectionCallback = null;
-            ctrl._evalSelectionExpr = null;
-            reject(new Error('Dynamic piggyback timed out (15s)'));
-        }, 15000);
-
-        ctrl._evalSelectionExpr = dlgExpr;
-        ctrl._evalSelectionCallback = (raw) => {
-            clearTimeout(timeout);
-            ctrl._evalSelectionCallback = null;
-            ctrl._evalSelectionExpr = null;
-            scrollLog('[eval-sel] piggyback result type:', raw?.type, '| val:', String(raw?.value ?? '').slice(0, 80));
-            if (raw && typeof raw.value === 'string') {
-                if (raw.value.startsWith('EVALSEL:LARGE:')) resolve({ large: true, val: raw.value });
-                else if (raw.value.startsWith('EVALSEL:FILE:')) resolve({ large: false, val: tmpFile, txt: tmpTxt });
-                else resolve(null);
-            } else {
-                resolve(null);
-            }
-        };
-        scrollLog('[eval-sel] registered piggyback callback, waiting for Dynamic loop...');
-    });
-}
-
-async function _evalViaSubAuto(ctrl, dlgExpr, tmpFile, tmpTxt) {
-    scrollLog('[eval-sel] subAuto path — queuing for main-kernel eval via Dialog');
-    try {
-        const raw = await Promise.race([
-            ctrl.session.subAuto(dlgExpr),
-            new Promise((_, rej) => setTimeout(() => rej(new Error('subAuto timeout (15s)')), 15000)),
-        ]);
-        scrollLog('[eval-sel] subAuto result:', raw?.type, String(raw?.value ?? raw?.error ?? '').slice(0, 80));
-        if (raw && typeof raw.value === 'string') {
-            if (raw.value.startsWith('EVALSEL:LARGE:')) return { large: true, val: raw.value };
-            if (raw.value.startsWith('EVALSEL:FILE:'))  return { large: false, val: tmpFile, txt: tmpTxt };
-        }
-        if (raw?.error) {
-            scrollLog('[eval-sel] subAuto error:', raw.error);
-        }
-        return null;
-    } catch (err) {
-        scrollLog('[eval-sel] subAuto failed:', err.message);
-        return null;
-    }
-}
-
-async function _renderResult(ctrl, tmpFile, expr, txtFile) {
-    // Get notebook path for image directory
-    const nbEditor = vscode.window.activeNotebookEditor;
-    let imgDir, imgRel, notebookDir;
-    if (nbEditor) {
-        const nbPath = nbEditor.notebook.uri.fsPath;
-        const nbBase = path.basename(nbPath, path.extname(nbPath));
-        notebookDir = path.dirname(nbPath);
-        imgDir = path.join(notebookDir, 'img', nbBase);
-        imgRel = 'img/' + nbBase;
-    } else {
-        notebookDir = null;
-        imgDir = path.join(require('os').tmpdir(), 'wolfbook_evalsel_img');
-        imgRel = imgDir;
-    }
-    try { fs.mkdirSync(imgDir, { recursive: true }); } catch (_) {}
-
-    const format = _currentFormat;
-    const scale  = Number(ctrl.config?.get('imageScale') || 0.8);
-
-    scrollLog('[eval-sel] render | format:', format, '| scale:', scale, '| tmpFile:', tmpFile);
-
-    const _tmpPathWL = tmpFile.replace(/\\/g, '/');
-    const renderExpr = 'VsCodeRenderExpr[Import["' + _tmpPathWL + '"],"' + format + '",' + scale + ']';
-
-    let renderResult;
-    try {
-        const subKern = await ctrl._ensureSubKernel(imgDir, imgRel);
-        scrollLog('[eval-sel] subkernel eval:', renderExpr.slice(0, 120));
-        renderResult = await subKern.evaluate(renderExpr, { interactive: false });
-    } catch (subErr) {
-        // Subkernel unavailable (e.g. Wolfram Engine single-kernel license).
-        // VsCodeRenderExpr is loaded on the main kernel too (via init.wl),
-        // so fall back to main kernel sub() which doesn't require a second process.
-        scrollLog('[eval-sel] subkernel failed (' + subErr.message + ') — falling back to main kernel sub()');
-        ctrl._subKernel = null;
-        ctrl._subKernelReady = false;
-        ctrl._subKernelInitPromise = null;
-        const wexpr = await ctrl.session.sub(renderExpr);
-        renderResult = { result: wexpr };
-    }
-
-    // Clean up temp file
-    try { fs.unlinkSync(tmpFile); } catch (_) {}
-
-    // SVG is compact XML and renders fast in webviews; raise the limit for it.
-    // MathML for large expressions (Range[500] etc.) is verbose and causes sluggishness.
-    const HTML_SIZE_LIMIT = (format === 'SVG' || format === 'svg') ? 500_000 : 60_000;
-
-    if (renderResult?.result?.type === 'string' && renderResult.result.value) {
-        let html = renderResult.result.value;
-
-        if (ctrl._processWLLatexBoxes) {
-            // Use the watch panel's own width (side panel is narrower than the notebook).
-            // Convert raw px → C++ em using the same calibrated coefficient as the notebook.
-            // Fall back to 30em (~420px) if the panel hasn't reported its width yet.
-            const panelWidthPx = (_watchPanel && _watchPanel.getWidthPx) ? _watchPanel.getWidthPx() : 0;
-            const effectiveWidth = panelWidthPx > 0
-                ? (ctrl.pxToPageWidthEm ? ctrl.pxToPageWidthEm(panelWidthPx) : Math.round(panelWidthPx / 14))
-                : 30;
-            html = ctrl._processWLLatexBoxes(html, undefined, effectiveWidth, 'watch-panel');
-        }
-        if (ctrl._fixImageUris)        html = ctrl._fixImageUris(html);
-        scrollLog('[eval-sel] render OK | html length:', html.length);
-
-        // Large HTML: the rendered output is too big for the sidebar; skip it and
-        // link the InputForm .txt file instead (already written by the main kernel).
-        if (html.length > HTML_SIZE_LIMIT) {
-            const skel = '<div style="color:var(--vscode-descriptionForeground);font-size:0.9em;' +
-                'padding:6px 8px;background:var(--vscode-editorWidget-background,' +
-                'rgba(0,0,0,0.1));border-radius:3px;">' +
-                '&#9888; Result too large to display inline (' + Math.round(html.length / 1024) + '\u202fKB of HTML).<br>' +
-                'Use the \u29c9 button above to open as InputForm text.' +
-                '</div>';
-            scrollLog('[eval-sel] large HTML | txt file:', txtFile);
-            return { html: skel, notebookDir, openFilePath: txtFile || null };
-        }
-
-        return { html, notebookDir, openFilePath: txtFile || null };
-    }
-    scrollLog('[eval-sel] render returned no string:', JSON.stringify(renderResult?.result)?.slice(0, 200));
-    return { html: null, notebookDir, openFilePath: txtFile || null };
 }
 
 // ── WL syntax validation ────────────────────────────────────────────────
@@ -479,34 +342,55 @@ async function docLookup(ctrl, symbolName, watchPanel, fallbackMd) {
 
     // Evaluate Information[symbolName] directly — same as a normal input cell.
     // Information returns InformationData[<|...|>] which has FormatValues producing
-    // the full InterpretationBox. VsCodeRenderExpr/BTL on the subkernel handles it
-    // perfectly without any additional wrapper.
+    // the full InterpretationBox. VsCodeRenderExpr/BTL handles it perfectly.
     const expr = 'Information[' + symbolName + ']';
     watchPanel.evalSelSpinner(expr);
 
-    // Force WLLatex format for doc rendering regardless of user's current setting
-    const savedFormat = _currentFormat;
-    _currentFormat = 'WLLatex';
-    try {
-        const evalResult = await _evalViaIdlePath(ctrl, expr);
-        if (!evalResult) { watchPanel.evalSelError('No result from kernel.', expr); return; }
+    const scale   = Number(ctrl.config?.get('imageScale') || 0.8);
+    const tmpTxt  = path.join(require('os').tmpdir(), 'wl_evalsel_' + Date.now() + '.txt');
+    const txtPathWL = tmpTxt.replace(/\\/g, '/');
+    const LEAF_LIMIT = 50000;
+    const BYTE_LIMIT = 200000;
 
-        const { html, notebookDir, openFilePath } = await _renderResult(ctrl, evalResult.val, expr, evalResult.txt);
-        if (html) {
-            const docUrl = 'https://reference.wolfram.com/language/ref/' + encodeURIComponent(symbolName) + '.html';
-            const htmlWithLink = html +
-                '<div style="margin-top:8px;font-size:0.82em;opacity:0.7">' +
-                '<a href="' + docUrl + '" style="color:var(--vscode-textLink-foreground);text-decoration:none">' +
-                '&#128366; Wolfram Documentation</a></div>';
-            watchPanel.evalSelUpdate(htmlWithLink, expr, 'WLLatex', notebookDir, openFilePath);
-        } else {
-            watchPanel.evalSelError('Render returned no HTML.', expr);
+    const wlExpr =
+        'Block[{wbES$v,wbBC$v,wbLC$v},' +
+        'wbES$v=(' + expr + ');' +
+        'wbBC$v=ByteCount[wbES$v];wbLC$v=LeafCount[wbES$v];' +
+        'Export["' + txtPathWL + '",ToString[wbES$v,InputForm],"Text"];' +
+        'If[wbBC$v>' + BYTE_LIMIT + '||wbLC$v>' + LEAF_LIMIT + ',' +
+        '"EVALSEL:LARGE:' + txtPathWL + ':"<>ToString[wbLC$v]<>":"<>ToString[wbBC$v],' +
+        'VsCodeRenderExpr[wbES$v,"WLLatex",' + scale + ']' +
+        ']]';
+
+    try {
+        const raw = await ctrl.session.subAuto(wlExpr);
+        if (!raw || raw.type !== 'string' || !raw.value) {
+            watchPanel.evalSelError('No result from kernel.', expr);
+            return;
         }
+        let html = raw.value;
+        if (html.startsWith('EVALSEL:LARGE:')) {
+            watchPanel.evalSelError('Documentation result too large.', expr);
+            return;
+        }
+        if (ctrl._processWLLatexBoxes) {
+            const panelWidthPx = (watchPanel && watchPanel.getWidthPx) ? watchPanel.getWidthPx() : 0;
+            const effectiveWidth = panelWidthPx > 0
+                ? (ctrl.pxToPageWidthEm ? ctrl.pxToPageWidthEm(panelWidthPx) : Math.round(panelWidthPx / 14))
+                : 30;
+            html = ctrl._processWLLatexBoxes(html, undefined, effectiveWidth, 'watch-panel');
+        }
+        if (ctrl._fixImageUris) html = ctrl._fixImageUris(html);
+
+        const docUrl = 'https://reference.wolfram.com/language/ref/' + encodeURIComponent(symbolName) + '.html';
+        const htmlWithLink = html +
+            '<div style="margin-top:8px;font-size:0.82em;opacity:0.7">' +
+            '<a href="' + docUrl + '" style="color:var(--vscode-textLink-foreground);text-decoration:none">' +
+            '&#128366; Wolfram Documentation</a></div>';
+        watchPanel.evalSelUpdate(htmlWithLink, expr, 'WLLatex', null, tmpTxt);
     } catch (err) {
         scrollLog('[doc-lookup] ERROR:', err.message);
         watchPanel.evalSelError(err.message, expr);
-    } finally {
-        _currentFormat = savedFormat;
     }
 }
 

@@ -85,28 +85,52 @@ function _appendPid(pid) {
     }
 }
 
-// Wrap a WstpSession instance's key methods with WSTP traffic logging.
-// Only active on dev machines (DEV_MODE).  Shadows prototype methods with
-// own-property async wrappers so every evaluate/sub/subAuto call is logged
-// to wstp.log with direction, timing, and trimmed input/output.
+// Wrap a WstpSession in a Proxy that records all WSTP method calls to wstp.log.
+// Returns the proxy — callers MUST assign the return value.
+// Uses a Proxy instead of Object.defineProperty so it works even when the
+// underlying native-addon object has non-configurable / non-writable properties.
+// The active notebook path is looked up dynamically on each call so it is always
+// current even if no notebook was open when the session was created.
 function _wstpWrap(sess, label) {
-    if (!DEV_MODE) return;
-    for (const m of ['evaluate', 'sub', 'subAuto', 'subWhenIdle']) {
-        if (typeof sess[m] !== 'function') continue;
-        const _orig = sess[m].bind(sess);
-        sess[m] = async function(expr, ...args) {
-            const _t = Date.now();
-            wstpLog(`→ [${label}.${m}]  ${String(expr).slice(0, 200)}`);
-            try {
-                const r = await _orig(expr, ...args);
-                wstpLog(`← [${label}.${m}]  ok  ${Date.now()-_t}ms  ${String(r).slice(0, 200)}`);
-                return r;
-            } catch (e) {
-                wstpLog(`← [${label}.${m}]  ERR  ${Date.now()-_t}ms  ${e.message}`);
-                throw e;
+    if (!DEV_MODE) return sess;
+    const _METHODS = ['evaluate', 'sub', 'subAuto', 'subWhenIdle'];
+    return new Proxy(sess, {
+        get(target, prop, receiver) {
+            // Important for native addon objects: use the real target as receiver.
+            // Using the Proxy as receiver can trigger "Illegal invocation".
+            const val = Reflect.get(target, prop, target);
+            if (_METHODS.includes(prop) && typeof val === 'function') {
+                return async function(expr, ...args) {
+                    const _t = Date.now();
+                    // Look up active notebook path dynamically — may change between calls
+                    let _nbp;
+                    try {
+                        const _ed = vscode.window.activeNotebookEditor ||
+                            vscode.window.visibleNotebookEditors.find(
+                                e => e.notebook.notebookType === 'extended-wolfram-notebook'
+                            );
+                        _nbp = _ed?.notebook.uri?.fsPath;
+                    } catch (_) {}
+                    wstpLog(_nbp, `→ [${label}.${prop}]  ${String(expr).slice(0, 200)}`);
+                    try {
+                        const r = await val.call(target, expr, ...args);
+                        let _rs;
+                        try { _rs = JSON.stringify(r); } catch (_) { _rs = String(r); }
+                        wstpLog(_nbp, `← [${label}.${prop}]  ok  ${Date.now()-_t}ms  ${_rs.slice(0, 200)}`);
+                        return r;
+                    } catch (e) {
+                        wstpLog(_nbp, `← [${label}.${prop}]  ERR  ${Date.now()-_t}ms  ${e.message}`);
+                        throw e;
+                    }
+                };
             }
-        };
-    }
+            // Keep native-addon method `this` bound to the real target.
+            // Without this, calls like registerDynamic/getDynamicResults can
+            // run with `this=Proxy` and silently fail.
+            if (typeof val === 'function') return val.bind(target);
+            return val;
+        }
+    });
 }
 
 function applyKernelOfflineUI(self) {
@@ -249,6 +273,9 @@ async function launchKernel(self, WstpSession) {
             self._dynCells.clear();
         }
         self._abortPending   = false;
+        self._lastMainImgDir = null;
+        self._lastMainImgRel = null;
+        self._interruptHandlerInstalled = false;
         // Clear per-output registries — Out[N] values don't survive a kernel restart,
         // so any format-switch buttons referencing them must become inert.
         self._outputRegistry.clear();
@@ -257,8 +284,7 @@ async function launchKernel(self, WstpSession) {
         truncateLogs();
         if (typeof self.clearDebugLog === 'function') self.clearDebugLog();
         dynLog('=== KERNEL START ===', new Date().toISOString());
-        self.session = new WstpSession(kernelCommand, { interactive: true });
-        _wstpWrap(self.session, 'main');
+        self.session = _wstpWrap(new WstpSession(kernelCommand, { interactive: true }), 'main');
 
         // Load init.wl via sub() so it runs as a priority batch call and
         // does NOT count as a user evaluation (does not increment $Line).
@@ -340,11 +366,6 @@ async function launchKernel(self, WstpSession) {
         scrollLog('[launchKernel] resolved — calling checkoutExecutionQueue | queue:', self.executionQueue.queueLength());
         self.checkoutExecutionQueue();
 
-        // Prewarm the sub-kernel immediately so it's ready for both Cmd+Shift+E
-        // (evaluateSelection SVG/MathML rendering) and Dynamic widget rendering.
-        // Fire-and-forget — main kernel is already running so this doesn't block cells.
-        setTimeout(() => { try { prewarmSubKernel(self, WstpSession); } catch(_) {} }, 500);
-
         // Background-prewarm on the MAIN kernel via subWhenIdle() so it runs only
         // when the kernel is idle and never blocks user cell evaluation:
         //  1) SVG/typesetting pipeline — eliminates the 2-4s lag on first Plot output
@@ -366,115 +387,24 @@ async function launchKernel(self, WstpSession) {
 }
 
 // ---------------------------------------------------------------------------
-// Sub-kernel (used for Dynamic widget SVG rendering in a separate process)
+// (sub-process subkernel removed — rendering runs on main kernel via subAuto)
 
-// _prewarmSubKernel — fire-and-forget: start the subkernel and load init.wl
-// as soon as the first Dynamic widget is registered, so the first real render
-// doesn't pay the cold-start penalty (~1–2 s for a new WstpSession + init.wl).
-// ensureSubKernel() will reuse _subKernelInitPromise and just set imgDir.
-function prewarmSubKernel(self, WstpSession) {
-    if (self._subKernel && self._subKernelReady)  return; // already warm
-    if (self._subKernelInitPromise)               return; // already warming
-    if (!WstpSession)                             return; // addon unavailable
-    if (self._subKernelUnavailable)               return; // known single-kernel license
-    const kernelCommand    = self.findKernel.resolveKernel();
-    let kernelInitPath     = path.join(self.extensionPath, 'resources', 'init.wl');
-    if (process.platform === 'win32') kernelInitPath = kernelInitPath.replace(/\\/g, '/');
-    const _initEscaped = kernelInitPath.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-    const _resDirEscPre = path.join(self.extensionPath, 'resources').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-    console.log('[subKernel] prewarming…');
-    self._subKernelInitPromise = (async () => {
-        self._subKernel = new WstpSession(kernelCommand, { interactive: false });
-        _wstpWrap(self._subKernel, 'sub-warm');
-        await self._subKernel.sub('Block[{$wolframResourceDir="' + _resDirEscPre + '"},Get["' + _initEscaped + '"]]');
-        // Track PID for orphan cleanup
-        try {
-            const _spid = await self._subKernel.sub('$ProcessID');
-            if (_spid?.type === 'integer' && typeof _spid.value === 'number') _appendPid(_spid.value);
-        } catch(_) {}
-        self._subKernelReady = true;
-        console.log('[subKernel] prewarm complete (ready for imgDir)');
-    })().catch(e => {
-        console.warn('[subKernel] prewarm failed:', e.message);
-        self._subKernelInitPromise = null;
-        self._subKernel = null;
-        self._subKernelReady = false;
-        // If the failure looks like a WSTP link-dead error (WEngine single-kernel license),
-        // mark unavailable so subsequent calls fast-reject instead of retrying.
-        if (/send|WSTP|link|failed to open|EvaluatePacket/i.test(e.message)) {
-            self._subKernelUnavailable = true;
-            console.warn('[subKernel] marking unavailable — will fall back to main kernel for rendering');
-        }
-    });
-}
+function prewarmSubKernel(self, WstpSession) { /* no-op: subkernel removed */ }
 
-// ensureSubKernel — lazily boot a second kernel for subsession rendering.
-// - Loads the same init.wl so VsCodeRenderExpr is available.
-// - Updates VsCodeSetImgDir on every call so SVG files land in the right place.
-// - If prewarmSubKernel() already ran, this only sets imgDir (fast path).
-async function ensureSubKernel(self, WstpSession, imgDir, imgRel) {
-    const _setImgDir = 'VsCodeSetImgDir["' + _encoding.escapeWL(imgDir) + '", "' + _encoding.escapeWL(imgRel) + '"]';
-    if (self._subKernelUnavailable) throw new Error('subkernel unavailable (single-kernel license)');
-    if (self._subKernel && self._subKernelReady) {
-        try { await self._subKernel.sub(_setImgDir); } catch (_) {}
-        return self._subKernel;
-    }
-    if (self._subKernelInitPromise) {
-        await self._subKernelInitPromise;
-        if (self._subKernel && self._subKernelReady) {
-            try { await self._subKernel.sub(_setImgDir); } catch (_) {}
-            return self._subKernel;
-        }
-    }
-    self._subKernelInitPromise = (async () => {
-        if (!WstpSession) throw new Error('wstp.node addon not available — cannot start subkernel');
-        const kernelCommand = self.findKernel.resolveKernel();
-        let kernelInitPath = path.join(self.extensionPath, 'resources', 'init.wl');
-        if (process.platform === 'win32') kernelInitPath = kernelInitPath.replace(/\\/g, '/');
-        const _initEscaped = kernelInitPath.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-        const _resDirEscEns = path.join(self.extensionPath, 'resources').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-        console.log('[subKernel] launching…');
-        self._subKernel = new WstpSession(kernelCommand, { interactive: false });
-        _wstpWrap(self._subKernel, 'sub-ens');
-        await self._subKernel.sub('Block[{$wolframResourceDir="' + _resDirEscEns + '"},Get["' + _initEscaped + '"]]');
-        await self._subKernel.sub(_setImgDir);
-        // Track PID for orphan cleanup
-        try {
-            const _spidE = await self._subKernel.sub('$ProcessID');
-            if (_spidE?.type === 'integer' && typeof _spidE.value === 'number') _appendPid(_spidE.value);
-        } catch(_) {}
-        self._subKernelReady = true;
-        console.log('[subKernel] ready');
-    })().catch(e => {
-        self._subKernelInitPromise = null;
-        self._subKernel = null;
-        self._subKernelReady = false;
-        if (/send|WSTP|link|failed to open|EvaluatePacket/i.test(e.message)) {
-            self._subKernelUnavailable = true;
-            console.warn('[subKernel] ensureSubKernel: marking unavailable —', e.message);
-        }
-        throw e;
-    });
-    await self._subKernelInitPromise;
-    return self._subKernel;
-}
+async function ensureSubKernel(self, WstpSession, imgDir, imgRel) { throw new Error('subkernel removed'); }
 
 // ---------------------------------------------------------------------------
 // Kernel shutdown
 
 function quitKernel(self) {
     console.log('[quitKernel] closing session');
-    // Close subkernel first (it has no queue to drain).
-    if (self._subKernel) {
-        try { self._subKernel.close(); } catch (_) {}
-        self._subKernel = null;
-        self._subKernelReady = false;
-        self._subKernelInitPromise = null;
-    }
     if (self.session) {
         try { self.session.close(); } catch (_) {}
         self.session = undefined;
     }
+    self._lastMainImgDir = null;
+    self._lastMainImgRel = null;
+    self._interruptHandlerInstalled = false;
     // Clean exit — remove the PID file so the next launch doesn't try to kill
     // processes that are already gone.
     _clearPidFile();
@@ -489,7 +419,6 @@ module.exports = {
     launchKernel,
     quitKernel,
     prewarmSubKernel,
-    ensureSubKernel,
     applyKernelOfflineUI,
     clearKernelOfflineUI,
 };

@@ -109,6 +109,11 @@ Check[Get[FileNameJoin[{$wolframResourceDir, "render-html.wl"}]],
    controller.js also updates $PageWidth after launch so the user-configured
    value takes effect without a kernel restart. *)
 $PageWidth = 156;
+(* Prevent EnterTextPacket (Dialog/busy-path subAuto) from inserting
+   OutputForm line-continuation escapes (\\\012 \012>) into long strings.
+   The WSTP output stream defaults to PageWidth→78; setting it to Infinity
+   ensures busy-path results are byte-identical to idle-path ones. *)
+SetOptions[$Output, PageWidth -> Infinity];
 Unprotect[Print];
 Print[args___] /; !TrueQ[$inPrintPatch] :=
     Block[{$inPrintPatch = True},

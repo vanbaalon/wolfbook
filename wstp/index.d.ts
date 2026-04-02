@@ -429,3 +429,23 @@ export class WstpReader {
  *            or `null` / `undefined` to clear a previously-set handler.
  */
 export function setDiagHandler(fn: ((msg: string) => void) | null | undefined): void;
+
+/**
+ * Pure C++ structural syntax checker — no kernel required.
+ *
+ * Checks bracket / brace / paren matching, unclosed string literals, and
+ * unclosed (possibly nested) `(* ... *)` comments.  Runs synchronously on
+ * the calling thread; there is no async overhead.
+ *
+ * Returns a JSON string in the same format as the WL `VsCodeSyntaxCheck`
+ * function so existing error-display code needs no changes:
+ *
+ * ```json
+ * {"errors":[]}
+ * {"errors":[{"message":"Unclosed '['","line":3,"column":5}]}
+ * ```
+ *
+ * @param code  Wolfram Language source text (UTF-8).
+ * @returns     JSON string `{"errors":[...]}`.
+ */
+export function syntaxCheck(code: string): string;
