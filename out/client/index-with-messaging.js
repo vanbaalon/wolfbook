@@ -93,6 +93,23 @@ export function activate(context) {
     // Map of uuid -> { button, origHTML } for open-text buttons awaiting reply
     const openTextPending = new Map();
 
+    // Match tester/webview KaTeX behavior and avoid expansion-limit failures
+    // on very large formulas emitted by BTL.
+    const KATEX_RENDER_OPTIONS = {
+        displayMode: true,
+        throwOnError: false,
+        output: 'html',
+        trust: false,
+        strict: false,
+        maxExpand: 100000,
+        macros: {
+            '\\dd': '\\mathrm{d}',
+            '\\R': '\\mathbb{R}',
+            '\\C': '\\mathbb{C}',
+            '\\N': '\\mathbb{N}',
+        },
+    };
+
     // Listen for replies from the extension (open-text-done / open-text-error / session-changed / kernel-offline / kernel-online)
     if (context && context.onDidReceiveMessage) {
         context.onDidReceiveMessage(msg => {
@@ -994,10 +1011,7 @@ export function activate(context) {
                     texDivs.forEach(div => {
                         const raw = div.getAttribute('data-tex-src') || '';
                         try {
-                            div.innerHTML = katex.renderToString(raw, {
-                                displayMode: true, throwOnError: false,
-                                output: 'html', trust: false
-                            });
+                            div.innerHTML = katex.renderToString(raw, KATEX_RENDER_OPTIONS);
                         } catch(e) {
                             div.textContent = raw;
                         }
@@ -1068,10 +1082,7 @@ export function activate(context) {
                             : '';
                         let rendered = '';
                         try {
-                            rendered = katex.renderToString(latex, {
-                                displayMode: true, throwOnError: false,
-                                output: 'html', trust: false
-                            });
+                            rendered = katex.renderToString(latex, KATEX_RENDER_OPTIONS);
                         } catch(e) {
                             rendered = '<pre style="color:#e05c4e;">KaTeX error: ' + esc(String(e.message||e)) + '</pre>';
                         }

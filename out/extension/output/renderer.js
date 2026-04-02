@@ -110,7 +110,7 @@ function resolveFormat(self, cell, knownIsGfx, outN) {
 // Post-process HTML from the kernel: if it contains a WLLatex box-placeholder
 // div, decode the boxes, run through the C++ boxToLatex addon, then either
 // KaTeX-prerender (WLLatex) or emit a raw-latex div for webview rendering (WLLatex2).
-function processWLLatexBoxes(self, html, logPath, pageWidthEm = 0, source = '') {
+function processWLLatexBoxes(self, html, logPath, pageWidthEm = 0, source = '', lineBreakOpts = null) {
     // If no logPath was given, try to derive one from the active notebook
     if (!logPath) {
         try {
@@ -132,6 +132,11 @@ function processWLLatexBoxes(self, html, logPath, pageWidthEm = 0, source = '') 
                 '<pre class="vscode-wolfram-text-output">WLLatex: addon not available.\n' +
                 'Build VSCodeWolfbookLaTeX first:\n  cd ~/Dropbox/MY/Programming/VSCodeWolfbookLaTeX && ./build.sh</pre>');
     }
+    const lbOpts = (lineBreakOpts && typeof lineBreakOpts === 'object')
+        ? { ...lineBreakOpts }
+        : { pageWidth: pageWidthEm };
+    if (!(lbOpts.pageWidth > 0)) lbOpts.pageWidth = pageWidthEm;
+    const lbOptsText = JSON.stringify(lbOpts);
     // Helper: run boxToLatex and return { latex, error }
     const translate = (b64) => {
         try {
@@ -163,7 +168,7 @@ function processWLLatexBoxes(self, html, logPath, pageWidthEm = 0, source = '') 
                         lineBreakStatus = 'unavailable';
                     } else {
                         try {
-                            latexFinal = _btlAddon.lineBreakLatex(latex, { pageWidth: pageWidthEm });
+                            latexFinal = _btlAddon.lineBreakLatex(latex, lbOpts);
                             lineBreakStatus = latexFinal !== latex ? 'applied' : 'no-change (fits in width)';
                         } catch (e) {
                             latexFinal = latex;
@@ -182,7 +187,8 @@ function processWLLatexBoxes(self, html, logPath, pageWidthEm = 0, source = '') 
                             '-- kernel output --\n' + rawText + '\n' +
                             '-- btl input (cleaned boxes) --\n' + boxStr + '\n' +
                             '-- btl output (latex) --\n' + latex + '\n' +
-                            '-- pageWidthEm: ' + pageWidthEm + '  lineBreak: ' + lineBreakStatus + ' --\n' +
+                            '-- pageWidthEm: ' + pageWidthEm + '  lineBreak: ' + lineBreakStatus +
+                            '  opts: ' + lbOptsText + ' --\n' +
                             (error ? '-- btl error --\n' + error + '\n' : '');
                         fs.mkdirSync(path.dirname(logPath), { recursive: true });
                         fs.appendFileSync(logPath, entry);
@@ -220,7 +226,7 @@ function processWLLatexBoxes(self, html, logPath, pageWidthEm = 0, source = '') 
                         lineBreakStatus = 'unavailable';
                     } else {
                         try {
-                            latexFinal = _btlAddon.lineBreakLatex(latex, { pageWidth: pageWidthEm });
+                            latexFinal = _btlAddon.lineBreakLatex(latex, lbOpts);
                             lineBreakStatus = latexFinal !== latex ? 'applied' : 'no-change (fits in width)';
                         } catch (e) {
                             latexFinal = latex;
@@ -234,7 +240,8 @@ function processWLLatexBoxes(self, html, logPath, pageWidthEm = 0, source = '') 
                         const sep = '='.repeat(72) + '\n';
                         const entry = sep +
                             ts + (source ? '  [' + source + ']' : '') + '\n' +
-                            '-- pageWidthEm: ' + pageWidthEm + '  lineBreak: ' + lineBreakStatus + ' --\n' +
+                            '-- pageWidthEm: ' + pageWidthEm + '  lineBreak: ' + lineBreakStatus +
+                            '  opts: ' + lbOptsText + ' --\n' +
                             '-- btl input (cleaned boxes) --\n' + boxStr + '\n' +
                             '-- btl output (latex) --\n' + latex + '\n' +
                             (error ? '-- btl error --\n' + error + '\n' : '');
@@ -256,7 +263,7 @@ function processWLLatexBoxes(self, html, logPath, pageWidthEm = 0, source = '') 
                 const _lineBreakEnabled = self.config?.get('notebook.rendering.lineBreaking') !== false;
                 let latexFinal = latex;
                 if (_lineBreakEnabled && pageWidthEm > 5 && _btlAddon.lineBreakLatex) {
-                    try { latexFinal = _btlAddon.lineBreakLatex(latex, { pageWidth: pageWidthEm }); } catch (_) {}
+                    try { latexFinal = _btlAddon.lineBreakLatex(latex, lbOpts); } catch (_) {}
                 }
                 if (logPath) {
                     try {
@@ -264,7 +271,7 @@ function processWLLatexBoxes(self, html, logPath, pageWidthEm = 0, source = '') 
                         const sep = '='.repeat(72) + '\n';
                         const entry = sep +
                             ts + (source ? '  [' + source + ']' : '') + '\n' +
-                            '-- pageWidthEm: ' + pageWidthEm + ' (mode C — src display) --\n' +
+                            '-- pageWidthEm: ' + pageWidthEm + ' (mode C — src display)  opts: ' + lbOptsText + ' --\n' +
                             '-- btl input (cleaned boxes) --\n' + boxStr + '\n' +
                             '-- btl output (latex) --\n' + latexFinal + '\n' +
                             (error ? '-- btl error --\n' + error + '\n' : '');

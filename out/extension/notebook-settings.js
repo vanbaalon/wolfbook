@@ -82,7 +82,7 @@ const notebookSettingsStore = new Map();
 
 function registerNotebookSettings(context) {
     context.subscriptions.push(
-        vscode.commands.registerCommand('wolfram.notebookSettings', async () => {
+        vscode.commands.registerCommand('wolfbook.notebookSettings', async () => {
             // Short delay so toolbar-click focus returns to notebook before QuickPick opens
             await new Promise(resolve => setTimeout(resolve, 150));
             try {
@@ -255,7 +255,7 @@ async function showSettingsUI(notebook) {
         vscode.window.showInformationMessage('Background image removed');
 
     } else if (pick.value === '__select_kernel__') {
-        await vscode.commands.executeCommand('wolfram.selectKernel');
+        await vscode.commands.executeCommand('wolfbook.selectKernel');
 
     } else if (pick.value === '__reset__') {
         await updateNotebookSettings(notebook, { backgroundColor: '', backgroundImagePath: '' });

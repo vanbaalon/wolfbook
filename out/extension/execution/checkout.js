@@ -838,8 +838,12 @@ async function checkoutExecutionQueue(self) {
                         const outLabel =
                             `${_subsBadge}<span style="font-size:10px;color:#888;margin-right:8px;">${r.outputName}</span>`;
 
-                        // Detect skeleton (Short[] applied kernel-side) OR raw truncation
-                        const isSkeleton = html.includes('data-wolfram-is-skeleton');
+                        // Detect skeleton only when BOTH metadata and explicit skeleton markers exist.
+                        // Short[] is atom-based, so sometimes no Left/RightSkeleton appears even for large atom counts.
+                        const _skeletonMarkerRe = /(\\\[LeftSkeleton\]|\\\[RightSkeleton\]|LeftSkeleton|RightSkeleton|\uF764|\uF765|&#xF764;|&#xF765;)/;
+                        const hasSkeletonMarkers = _skeletonMarkerRe.test(renderResult.result.value || '') ||
+                            _skeletonMarkerRe.test(html || '');
+                        const isSkeleton = html.includes('data-wolfram-is-skeleton') && hasSkeletonMarkers;
                         // Always generate a unique outputId — needed by format-switch buttons
                         // on ALL outputs (not only truncated ones).
                         const outputId = (self._outputIdCounter++).toString();

@@ -60,6 +60,11 @@ img.vscode-wolfram-svg-output, img.vscode-wolfram-png-output { background: trans
 .vscode-wolfram-svg-output > svg > rect:first-child { fill: none !important; }
 div.mathml-output { overflow-x:auto; }
 div.vscode-wolfram-tex-output { overflow-x:auto; padding: 1px 0; }
+div.vscode-wolfram-wllatex-prerendered,
+div.vscode-wolfram-wllatex-raw-latex,
+div.vscode-wolfram-tex-output {
+  margin: 0.1em 0;
+}
 /* Inline syntax highlight tokens */
 .wl-hl-str  { color: #ce9178; }
 .wl-hl-cmt  { color: #6a9955; font-style: italic; }

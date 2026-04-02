@@ -3,7 +3,7 @@
     "displayName": "Wolfbook — Wolfram Language Notebook",
     "description": "Interactive Wolfram Language notebook for VS Code. WSTP-backed kernel, MathML/SVG/PNG rendering, Unicode input, LSP diagnostics, and output expansion controls.",
     "publisher": "wolfbook",
-    "version": "2.6.2",
+    "version": "2.6.3",
     "engines": {
         "vscode": "^1.95.0"
     },
@@ -30,11 +30,11 @@
     },
     "activationEvents": [
         "onLanguage:wolfram",
-        "onCommand:wolfram.OpenNotebook",
-        "onCommand:wolfram.DownloadWolframEngine",
+        "onCommand:wolfbook.OpenNotebook",
+        "onCommand:wolfbook.DownloadWolframEngine",
         "onCommand:createWolframScriptTerminal",
-        "onCommand:wolfram.openConfigurations",
-        "onCommand:wolfram.launchKernel",
+        "onCommand:wolfbook.openConfigurations",
+        "onCommand:wolfbook.launchKernel",
         "onView:wolfbook.watchPanel"
     ],
     "main": "./out/extension/extension.js",
@@ -235,6 +235,40 @@
                     "description": "Automatically wrap long mathematical expressions (WLLatex mode) across multiple lines based on the notebook container width.",
                     "order": 4
                 },
+                "wolfram.notebook.rendering.lineBreaking.baseFontSizePx": {
+                    "type": "number",
+                    "default": 16,
+                    "minimum": 8,
+                    "description": "Base font size in pixels used by line-break iteration when pageWidthPx is provided.",
+                    "order": 4
+                },
+                "wolfram.notebook.rendering.lineBreaking.indentStep": {
+                    "type": "integer",
+                    "default": 2,
+                    "minimum": 0,
+                    "description": "Indentation step (in spaces) used after line breaks.",
+                    "order": 4
+                },
+                "wolfram.notebook.rendering.lineBreaking.maxDelimDepth": {
+                    "type": "integer",
+                    "default": 2,
+                    "minimum": 1,
+                    "description": "Maximum recursion depth for delimiter-internal line breaking.",
+                    "order": 4
+                },
+                "wolfram.notebook.rendering.lineBreaking.maxIterations": {
+                    "type": "integer",
+                    "default": 5,
+                    "minimum": 1,
+                    "description": "Maximum refinement iterations when pixel-width line breaking is enabled.",
+                    "order": 4
+                },
+                "wolfram.notebook.rendering.lineBreaking.compact": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Use compact multiline layout in line-broken output.",
+                    "order": 4
+                },
                 "wolfbook.formatter.pageLength": {
                     "type": "integer",
                     "default": 150,
@@ -334,15 +368,15 @@
         ],
         "commands": [
             {
-                "command": "wolfram.OpenNotebook",
+                "command": "wolfbook.OpenNotebook",
                 "title": "Open in System Editor"
             },
             {
-                "command": "wolfram.registerFileTypes",
+                "command": "wolfbook.registerFileTypes",
                 "title": "Wolfbook: Register .wb / .evsnb / .vsnb File Types with Finder (macOS)"
             },
             {
-                "command": "wolfram.DownloadWolframEngine",
+                "command": "wolfbook.DownloadWolframEngine",
                 "title": "Wolfram Language: Download Wolfram Engine"
             },
             {
@@ -350,35 +384,35 @@
                 "title": "Wolfram Language: Start Wolfram in Terminal"
             },
             {
-                "command": "wolfram.launchKernel",
+                "command": "wolfbook.launchKernel",
                 "title": "Wolfram Language: Launch Default Kernel"
             },
             {
-                "command": "wolfram.openConfigurations",
+                "command": "wolfbook.openConfigurations",
                 "title": "Wolfram Language: Open Configurations"
             },
             {
-                "command": "wolfram.selectKernel",
+                "command": "wolfbook.selectKernel",
                 "title": "Wolfram: Select Kernel"
             },
             {
-                "command": "wolfram.abortEvaluation",
+                "command": "wolfbook.abortEvaluation",
                 "title": "Abort",
                 "shortTitle": "",
                 "icon": "$(debug-stop)"
             },
             {
-                "command": "wolfram.openDialogSubsession",
+                "command": "wolfbook.openDialogSubsession",
                 "title": "Wolfram: Open Dialog Subsession on Live Kernel"
             },
             {
-                "command": "wolfram.restartKernel",
+                "command": "wolfbook.restartKernel",
                 "title": "Restart",
                 "shortTitle": "",
                 "icon": "$(debug-restart)"
             },
             {
-                "command": "wolfram.convertToUnicode",
+                "command": "wolfbook.convertToUnicode",
                 "title": "Wolfram Language: Convert Selection to Unicode"
             },
             {
@@ -406,33 +440,33 @@
                 "title": "Wolfbook: Test Selection Range (debug)"
             },
             {
-                "command": "wolfram.setOutputFormatImage",
+                "command": "wolfbook.setOutputFormatImage",
                 "title": "Output: Image (PNG)",
                 "icon": "$(file-media)"
             },
             {
-                "command": "wolfram.setOutputFormatHTML",
+                "command": "wolfbook.setOutputFormatHTML",
                 "title": "Output: HTML",
                 "icon": "$(symbol-color)"
             },
             {
-                "command": "wolfram.setOutputFormatMathML",
+                "command": "wolfbook.setOutputFormatMathML",
                 "title": "Output: MathML",
                 "icon": "$(symbol-misc)"
             },
             {
-                "command": "wolfram.setOutputFormatInputForm",
+                "command": "wolfbook.setOutputFormatInputForm",
                 "title": "Output: InputForm",
                 "icon": "$(symbol-text)"
             },
             {
-                "command": "wolfram.notebookSettings",
+                "command": "wolfbook.notebookSettings",
                 "title": "Notebook Settings",
                 "shortTitle": "Settings",
                 "icon": "$(settings-gear)"
             },
             {
-                "command": "wolfram.expandHoverDoc",
+                "command": "wolfbook.expandHoverDoc",
                 "title": "Wolfram: Show Full Documentation (expand hover)"
             },
             {
@@ -512,41 +546,41 @@
                 "title": "Wolfbook: Toggle Auto Enter Edit Mode"
             },
             {
-                "command": "wolfram.clearCellOutput",
+                "command": "wolfbook.clearCellOutput",
                 "title": "Clear Output",
                 "icon": "$(clear-all)"
             },
             {
-                "command": "wolfram.expandTruncatedOutput",
+                "command": "wolfbook.expandTruncatedOutput",
                 "title": "Expand Truncated Output",
                 "icon": "$(unfold)"
             },
             {
-                "command": "wolfram.executeCell",
+                "command": "wolfbook.executeCell",
                 "title": "Wolfram: Execute Cell"
             },
             {
-                "command": "wolfram.pasteImageCell",
+                "command": "wolfbook.pasteImageCell",
                 "title": "Wolfram: Paste Image as Cell (with prompt)",
                 "icon": "$(file-media)"
             },
             {
-                "command": "wolfram.pasteImageCellBelow",
+                "command": "wolfbook.pasteImageCellBelow",
                 "title": "Paste Image as Cell",
                 "icon": "$(file-media)"
             },
             {
-                "command": "wolfram.evalMode.auto",
+                "command": "wolfbook.evalMode.auto",
                 "title": "Eval: Auto",
                 "icon": "$(symbol-misc)"
             },
             {
-                "command": "wolfram.evalMode.advance",
+                "command": "wolfbook.evalMode.advance",
                 "title": "Eval: Advance",
                 "icon": "$(arrow-down)"
             },
             {
-                "command": "wolfram.evalMode.refine",
+                "command": "wolfbook.evalMode.refine",
                 "title": "Eval: Refine",
                 "icon": "$(sync)"
             }
@@ -555,14 +589,14 @@
             "explorer/context": [
                 {
                     "when": "resourceExtname == .nb || resourceExtname == .m || resourceExtname == .wl || resourceExtname == .wls || resourceExtname == .cdf",
-                    "command": "wolfram.OpenNotebook",
+                    "command": "wolfbook.OpenNotebook",
                     "group": "navigation"
                 }
             ],
             "editor/context": [
                 {
                     "when": "resourceExtname == .nb || resourceExtname == .m || resourceExtname == .wl || resourceExtname == .wls || resourceExtname == .cdf",
-                    "command": "wolfram.OpenNotebook",
+                    "command": "wolfbook.OpenNotebook",
                     "group": "navigation"
                 },
                 {
@@ -598,7 +632,7 @@
             ],
             "commandPalette": [
                 {
-                    "command": "wolfram.OpenNotebook",
+                    "command": "wolfbook.OpenNotebook",
                     "when": "false"
                 },
                 {
@@ -606,57 +640,57 @@
                     "when": "false"
                 },
                 {
-                    "command": "wolfram.DownloadWolframEngine"
+                    "command": "wolfbook.DownloadWolframEngine"
                 }
             ],
             "notebook/toolbar": [
                 {
-                    "command": "wolfram.evalMode.auto",
+                    "command": "wolfbook.evalMode.auto",
                     "when": "notebookType == extended-wolfram-notebook && wolframEvalMode == 'auto'",
                     "group": "wolframMode@1"
                 },
                 {
-                    "command": "wolfram.evalMode.advance",
+                    "command": "wolfbook.evalMode.advance",
                     "when": "notebookType == extended-wolfram-notebook && wolframEvalMode == 'advance'",
                     "group": "wolframMode@1"
                 },
                 {
-                    "command": "wolfram.evalMode.refine",
+                    "command": "wolfbook.evalMode.refine",
                     "when": "notebookType == extended-wolfram-notebook && wolframEvalMode == 'refine'",
                     "group": "wolframMode@1"
                 },
                 {
-                    "command": "wolfram.abortEvaluation",
+                    "command": "wolfbook.abortEvaluation",
                     "when": "(notebookType == wolfram-notebook || notebookType == extended-wolfram-notebook) && wolframKernelActive",
                     "group": "navigation@-2"
                 },
                 {
-                    "command": "wolfram.restartKernel",
+                    "command": "wolfbook.restartKernel",
                     "when": "(notebookType == wolfram-notebook || notebookType == extended-wolfram-notebook) && wolframKernelActive",
                     "group": "navigation@-1"
                 },
                 {
-                    "command": "wolfram.setOutputFormatImage",
+                    "command": "wolfbook.setOutputFormatImage",
                     "when": "notebookType == extended-wolfram-notebook && config.wolfram.notebook.rendering.outputFormat != 'Image'",
                     "group": "wolframOutput@1"
                 },
                 {
-                    "command": "wolfram.setOutputFormatHTML",
+                    "command": "wolfbook.setOutputFormatHTML",
                     "when": "notebookType == extended-wolfram-notebook && config.wolfram.notebook.rendering.outputFormat != 'HTML'",
                     "group": "wolframOutput@2"
                 },
                 {
-                    "command": "wolfram.setOutputFormatMathML",
+                    "command": "wolfbook.setOutputFormatMathML",
                     "when": "notebookType == extended-wolfram-notebook && config.wolfram.notebook.rendering.outputFormat != 'MathML'",
                     "group": "wolframOutput@3"
                 },
                 {
-                    "command": "wolfram.setOutputFormatInputForm",
+                    "command": "wolfbook.setOutputFormatInputForm",
                     "when": "notebookType == extended-wolfram-notebook && config.wolfram.notebook.rendering.outputFormat != 'InputForm'",
                     "group": "wolframOutput@4"
                 },
                 {
-                    "command": "wolfram.notebookSettings",
+                    "command": "wolfbook.notebookSettings",
                     "when": "notebookType == extended-wolfram-notebook",
                     "group": "navigation@10"
                 },
@@ -703,12 +737,12 @@
                     "group": "inline@0"
                 },
                 {
-                    "command": "wolfram.clearCellOutput",
+                    "command": "wolfbook.clearCellOutput",
                     "when": "notebookType == extended-wolfram-notebook && notebookCellHasOutputs",
                     "group": "inline@1"
                 },
                 {
-                    "command": "wolfram.expandTruncatedOutput",
+                    "command": "wolfbook.expandTruncatedOutput",
                     "when": "notebookType == extended-wolfram-notebook && notebookCellHasOutputs",
                     "group": "inline@2"
                 }
@@ -722,7 +756,7 @@
             ],
             "notebook/cell/between": [
                 {
-                    "command": "wolfram.pasteImageCellBelow",
+                    "command": "wolfbook.pasteImageCellBelow",
                     "when": "notebookType == extended-wolfram-notebook",
                     "group": "navigation"
                 }
@@ -740,29 +774,29 @@
                 "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook' && !wolframInEscapeMode && !suggestWidgetVisible"
             },
             {
-                "command": "wolfram.pasteImageCellBelow",
+                "command": "wolfbook.pasteImageCellBelow",
                 "key": "ctrl+v",
                 "mac": "cmd+v",
                 "when": "notebookEditorFocused && !editorTextFocus && !inputFocus && notebookType == 'extended-wolfram-notebook'"
             },
             {
-                "command": "wolfram.pasteImageCell",
+                "command": "wolfbook.pasteImageCell",
                 "key": "ctrl+shift+v",
                 "mac": "cmd+shift+v",
                 "when": "notebookEditorFocused && notebookType == 'extended-wolfram-notebook'"
             },
             {
-                "command": "wolfram.abortEvaluation",
+                "command": "wolfbook.abortEvaluation",
                 "key": "cmd+.",
                 "when": "(notebookEditorFocused || editorTextFocus) && notebookType == 'extended-wolfram-notebook'"
             },
             {
-                "command": "wolfram.openDialogSubsession",
+                "command": "wolfbook.openDialogSubsession",
                 "key": "alt+shift+enter",
                 "when": "notebookEditorFocused && notebookType == 'extended-wolfram-notebook'"
             },
             {
-                "command": "wolfram.executeCell",
+                "command": "wolfbook.executeCell",
                 "key": "shift+enter",
                 "when": "notebookEditorFocused && !notebookEditorTabFocused && notebookType == 'extended-wolfram-notebook'"
             },
@@ -772,47 +806,47 @@
                 "when": "resourceExtname == .nb || resourceExtname == .m || resourceExtname == .wl || resourceExtname == .wls || resourceExtname == .cdf"
             },
             {
-                "command": "wolfram.escapeKey",
+                "command": "wolfbook.escapeKey",
                 "key": "escape",
                 "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook' && (!suggestWidgetVisible || wolframInEscapeMode)"
             },
             {
-                "command": "wolfram.cursorLeft",
+                "command": "wolfbook.cursorLeft",
                 "key": "left",
                 "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook' && !wolframInEscapeMode && !suggestWidgetVisible"
             },
             {
-                "command": "wolfram.cursorRight",
+                "command": "wolfbook.cursorRight",
                 "key": "right",
                 "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook' && !wolframInEscapeMode && !suggestWidgetVisible"
             },
             {
-                "command": "wolfram.cursorUp",
+                "command": "wolfbook.cursorUp",
                 "key": "up",
                 "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook' && !wolframInEscapeMode && !suggestWidgetVisible"
             },
             {
-                "command": "wolfram.cursorDown",
+                "command": "wolfbook.cursorDown",
                 "key": "down",
                 "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook' && !wolframInEscapeMode && !suggestWidgetVisible"
             },
             {
-                "command": "wolfram.navLeft",
+                "command": "wolfbook.navLeft",
                 "key": "left",
                 "when": "notebookEditorFocused && !editorTextFocus && !inputFocus && notebookType == 'extended-wolfram-notebook'"
             },
             {
-                "command": "wolfram.navRight",
+                "command": "wolfbook.navRight",
                 "key": "right",
                 "when": "notebookEditorFocused && !editorTextFocus && !inputFocus && notebookType == 'extended-wolfram-notebook'"
             },
             {
-                "command": "wolfram.navLeft",
+                "command": "wolfbook.navLeft",
                 "key": "up",
                 "when": "notebookEditorFocused && !editorTextFocus && !inputFocus && notebookType == 'extended-wolfram-notebook'"
             },
             {
-                "command": "wolfram.navRight",
+                "command": "wolfbook.navRight",
                 "key": "down",
                 "when": "notebookEditorFocused && !editorTextFocus && !inputFocus && notebookType == 'extended-wolfram-notebook'"
             },
@@ -895,7 +929,7 @@
                 "when": "(editorTextFocus || notebookEditorFocused) && notebookType == 'extended-wolfram-notebook'"
             },
             {
-                "command": "wolfram.restartKernel",
+                "command": "wolfbook.restartKernel",
                 "key": "ctrl+shift+r",
                 "mac": "cmd+shift+r",
                 "when": "(notebookEditorFocused || editorTextFocus) && notebookType == 'extended-wolfram-notebook'"

@@ -139,7 +139,7 @@ function registerUnicodeReplacer(context, extensionPath) {
     context.subscriptions.push(changeDisposable);
 
     // Register command for manual conversion of selection
-    const commandDisposable = vscode.commands.registerCommand('wolfram.convertToUnicode', () => {
+    const commandDisposable = vscode.commands.registerCommand('wolfbook.convertToUnicode', () => {
         const editor = vscode.window.activeTextEditor;
         if (!editor) {
             return;

@@ -11,6 +11,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.FindKernel = void 0;
 const vscode = require("vscode");
 const fs = require('fs');
+const path = require('path');
 class FindKernel {
     constructor() {
         this.linuxKernelPath = [
@@ -68,28 +69,45 @@ class FindKernel {
             }
             return _paths;
         })();
-        this.winKernelPath = [
-            "C:\\Program Files\\Wolfram Research\\Wolfram\\14.2\\WolframKernel.exe",
-            "C:\\Program Files\\Wolfram Research\\Wolfram Engine\\14.2\\WolframKernel.exe",
-            "C:\\Program Files\\Wolfram Research\\Wolfram\\14.1\\WolframKernel.exe",
-            "C:\\Program Files\\Wolfram Research\\Wolfram Engine\\14.1\\WolframKernel.exe",
-            "C:\\Program Files\\Wolfram Research\\Mathematica\\14.0\\WolframKernel.exe",
-            "C:\\Program Files\\Wolfram Research\\Wolfram Engine\\14.0\\WolframKernel.exe",
-            "C:\\Program Files\\Wolfram Research\\Mathematica\\13.3\\WolframKernel.exe",
-            "C:\\Program Files\\Wolfram Research\\Wolfram Engine\\13.3\\WolframKernel.exe",
-            "C:\\Program Files\\Wolfram Research\\Mathematica\\13.2\\WolframKernel.exe",
-            "C:\\Program Files\\Wolfram Research\\Wolfram Engine\\13.2\\WolframKernel.exe",
-            "C:\\Program Files\\Wolfram Research\\Mathematica\\13.1\\WolframKernel.exe",
-            "C:\\Program Files\\Wolfram Research\\Wolfram Engine\\13.1\\WolframKernel.exe",
-            "C:\\Program Files\\Wolfram Research\\Mathematica\\13.0\\WolframKernel.exe",
-            "C:\\Program Files\\Wolfram Research\\Wolfram Engine\\13.0\\WolframKernel.exe",
-            "C:\\Program Files\\Wolfram Research\\Mathematica\\12.3\\WolframKernel.exe",
-            "C:\\Program Files\\Wolfram Research\\Wolfram Engine\\12.3\\WolframKernel.exe",
-            "C:\\Program Files\\Wolfram Research\\Mathematica\\12.2\\WolframKernel.exe",
-            "C:\\Program Files\\Wolfram Research\\Wolfram Engine\\12.2\\WolframKernel.exe",
-            "C:\\Program Files\\Wolfram Research\\Mathematica\\12.1\\WolframKernel.exe",
-            "C:\\Program Files\\Wolfram Research\\Wolfram Engine\\12.1\\WolframKernel.exe"
-        ];
+        this.winKernelPath = (() => {
+            const _paths = [];
+            const _vendorDirs = [
+                "C:\\Program Files\\Wolfram Research\\Wolfram",
+                "C:\\Program Files\\Wolfram Research\\Wolfram Engine",
+                "C:\\Program Files\\Wolfram Research\\Mathematica",
+            ];
+            const _verToNum = (v) => {
+                const parts = String(v || '').split('.').map(x => parseInt(x, 10));
+                const a = Number.isFinite(parts[0]) ? parts[0] : 0;
+                const b = Number.isFinite(parts[1]) ? parts[1] : 0;
+                const c = Number.isFinite(parts[2]) ? parts[2] : 0;
+                return a * 1e6 + b * 1e3 + c;
+            };
+            for (const base of _vendorDirs) {
+                try {
+                    if (!fs.existsSync(base)) continue;
+                    const entries = fs.readdirSync(base, { withFileTypes: true })
+                        .filter(e => e.isDirectory())
+                        .map(e => e.name)
+                        .sort((a, b) => _verToNum(b) - _verToNum(a));
+                    for (const ver of entries) {
+                        _paths.push(path.join(base, ver, 'WolframKernel.exe'));
+                    }
+                }
+                catch (_) { }
+            }
+            // Fallback list if directory scan fails entirely.
+            if (_paths.length === 0) {
+                _paths.push(
+                    "C:\\Program Files\\Wolfram Research\\Wolfram\\14.3\\WolframKernel.exe",
+                    "C:\\Program Files\\Wolfram Research\\Wolfram Engine\\14.3\\WolframKernel.exe",
+                    "C:\\Program Files\\Wolfram Research\\Mathematica\\14.3\\WolframKernel.exe",
+                    "C:\\Program Files\\Wolfram Research\\Wolfram\\14.2\\WolframKernel.exe",
+                    "C:\\Program Files\\Wolfram Research\\Wolfram Engine\\14.2\\WolframKernel.exe"
+                );
+            }
+            return _paths;
+        })();
     }
     resolveKernel() {
         const config = vscode.workspace.getConfiguration("wolfram", null);

@@ -169,7 +169,7 @@ function registerEscapeMode(context, extensionPath) {
     // Second press: commit the alias if found, or cancel if no match.
     // The suggestWidgetVisible guard in the keybinding ensures Escape still
     // closes the autocomplete popup normally before reaching this command.
-    const escapeKeyCommand = vscode.commands.registerCommand('wolfram.escapeKey', async () => {
+    const escapeKeyCommand = vscode.commands.registerCommand('wolfbook.escapeKey', async () => {
         const editor = vscode.window.activeTextEditor;
         if (!editor) return;
 

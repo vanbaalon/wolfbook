@@ -54,16 +54,16 @@ function activate(context) {
     const _hoverDocCache = new Map();  // key → full vscode.Hover
 
     // Setup the menu
-    context.subscriptions.push(vscode_1.commands.registerCommand('wolfram.OpenNotebook', (name) => { if (name) {
+    context.subscriptions.push(vscode_1.commands.registerCommand('wolfbook.OpenNotebook', (name) => { if (name) {
         open(name.fsPath);
     } }));
-    context.subscriptions.push(vscode_1.commands.registerCommand('wolfram.DownloadWolframEngine', onDownloadWolframEngine));
-    context.subscriptions.push(vscode.commands.registerCommand("wolfram.openConfigurations", async () => {
+    context.subscriptions.push(vscode_1.commands.registerCommand('wolfbook.DownloadWolframEngine', onDownloadWolframEngine));
+    context.subscriptions.push(vscode.commands.registerCommand("wolfbook.openConfigurations", async () => {
         await vscode.commands.executeCommand("workbench.action.openSettings", "@ext:wolfbook.wolfbook");
     }));
 
     // ── Select Kernel command ──────────────────────────────────────────────
-    context.subscriptions.push(vscode.commands.registerCommand("wolfram.selectKernel", async () => {
+    context.subscriptions.push(vscode.commands.registerCommand("wolfbook.selectKernel", async () => {
         const { FindKernel } = require('./find-kernel');
         const finder = new FindKernel();
         const kernels = finder.discoverKernels();
@@ -124,7 +124,7 @@ function activate(context) {
             'Restart Kernel'
         );
         if (action === 'Restart Kernel') {
-            await vscode.commands.executeCommand('wolfram.restartKernel');
+            await vscode.commands.executeCommand('wolfbook.restartKernel');
         }
     }));
 
@@ -471,14 +471,14 @@ function activate(context) {
         are same as mainKernel, these kernels will also be missing. So no point of going further.
         Show error message here.
     */
+    let kernelAvailable = true;
     if (mainKernel === "kernel-not-found") {
-        vscode.window.showErrorMessage("Kernel is not found in the default location. Either change \"System Kernel\" in the configuration or " + download_WEngine_MDString.value);
-        return;
+        vscode.window.showWarningMessage("Kernel is not found in the default location. Either change \"System Kernel\" in the configuration or " + download_WEngine_MDString.value);
+        kernelAvailable = false;
     }
-    ;
-    if (!fs.existsSync(mainKernel)) {
-        vscode.window.showErrorMessage("Kernel executable path does not exist: " + mainKernel + ". Either change \"System Kernel\" in the configuration or " + download_WEngine_MDString.value);
-        return;
+    else if (!fs.existsSync(mainKernel)) {
+        vscode.window.showWarningMessage("Kernel executable path does not exist: " + mainKernel + ". Either change \"System Kernel\" in the configuration or " + download_WEngine_MDString.value);
+        kernelAvailable = false;
     }
     // Add Terminal
     let terminalKernel = mainKernel;
@@ -487,6 +487,10 @@ function activate(context) {
     }
     ;
     context.subscriptions.push(vscode_1.commands.registerCommand('createWolframScriptTerminal', () => {
+        if (!kernelAvailable) {
+            vscode.window.showWarningMessage("Kernel is not available. Configure \"System Kernel\" first.");
+            return;
+        }
         // Reads systemKernel configuration value, and resolve the kernel
         // For defaulkt value, it will resolve to the actual path
         // For any kernel path is given in the configuration, it will be used
@@ -497,7 +501,7 @@ function activate(context) {
     let nbKernelenabled = config.get("notebook.kernelEnabled", true);
     let controller = new controller_1.WolframNotebookKernel(context);
     _activeController = controller;  // expose for deactivate()
-    if (nbKernelenabled) {
+    if (nbKernelenabled && kernelAvailable) {
         controller.launchKernel();
     }
     // Register Copilot language model tools (Phase 4)
@@ -507,13 +511,13 @@ function activate(context) {
     // Register @wolfteam collaborative chat participant
     _tools.registerWolfteamParticipant(context, () => controller);
     ;
-    context.subscriptions.push(vscode_1.commands.registerCommand("wolfram.launchKernel", () => {
+    context.subscriptions.push(vscode_1.commands.registerCommand("wolfbook.launchKernel", () => {
         if (nbKernelenabled) {
             client.outputChannel.appendLine("Launching Wolfram Kernel");
             controller.launchKernel();
         }
     }));
-    context.subscriptions.push(vscode_1.commands.registerCommand("wolfram.abortEvaluation", () => {
+    context.subscriptions.push(vscode_1.commands.registerCommand("wolfbook.abortEvaluation", () => {
         // If a debug session is active, let it handle the abort — it exits Dialog[]
         // gracefully before aborting so the kernel is fully released.
         if (_debugCtrl.isActive) {
@@ -526,13 +530,13 @@ function activate(context) {
         // stuck true, _liveWatchInFlight stuck, stale _evalQueue promises).
         _debugCtrl.resetAllState();
     }));
-    context.subscriptions.push(vscode_1.commands.registerCommand("wolfram.openDialogSubsession", () => {
+    context.subscriptions.push(vscode_1.commands.registerCommand("wolfbook.openDialogSubsession", () => {
         controller.openDialogSubsession();
     }));
-    context.subscriptions.push(vscode_1.commands.registerCommand("wolfram.pasteImageCell", (args) => {
+    context.subscriptions.push(vscode_1.commands.registerCommand("wolfbook.pasteImageCell", (args) => {
         controller.pasteImageAsCell(args || {});
     }));
-    context.subscriptions.push(vscode_1.commands.registerCommand("wolfram.pasteImageCellBelow", () => {
+    context.subscriptions.push(vscode_1.commands.registerCommand("wolfbook.pasteImageCellBelow", () => {
         controller.pasteImageAsCell({ insertBelow: true });
     }));
     // Auto-format status bar toggle — mirrors wolfbook.formatter.autoFormat setting.
@@ -587,7 +591,7 @@ function activate(context) {
         await new Promise(r => setTimeout(r, 50));
         await vscode.commands.executeCommand('notebook.cell.edit');
     }));
-    context.subscriptions.push(vscode_1.commands.registerCommand("wolfram.restartKernel", () => {
+    context.subscriptions.push(vscode_1.commands.registerCommand("wolfbook.restartKernel", () => {
         // Hard-reset all debugger state before restarting kernel
         _debugCtrl.resetAllState();
         controller.restartKernel();
@@ -601,7 +605,7 @@ function activate(context) {
     // when execution starts (before any output exists — inherited Jupyter behaviour).
     // We intercept Shift+Enter here instead, so the scroll only fires after first output.
     // console.log('[scroll] notebook.cell.execute auto-scroll') ← original built-in, bypassed here
-    context.subscriptions.push(vscode_1.commands.registerCommand("wolfram.executeCell", async () => {
+    context.subscriptions.push(vscode_1.commands.registerCommand("wolfbook.executeCell", async () => {
         console.log('[scroll] Shift+Enter detected — evaluation triggered, waiting for first output');
 
         // ---- Save cursor position NOW — before VS Code's Shift+Enter processing
@@ -675,36 +679,36 @@ function activate(context) {
     }));
 
     // Eval mode toggle commands — cycle: auto → advance → refine → auto
-    context.subscriptions.push(vscode_1.commands.registerCommand("wolfram.evalMode.auto", () => {
+    context.subscriptions.push(vscode_1.commands.registerCommand("wolfbook.evalMode.auto", () => {
         controller.setEvalMode('advance');  // auto was active → switch to advance
     }));
-    context.subscriptions.push(vscode_1.commands.registerCommand("wolfram.evalMode.advance", () => {
+    context.subscriptions.push(vscode_1.commands.registerCommand("wolfbook.evalMode.advance", () => {
         controller.setEvalMode('refine');   // advance was active → switch to refine
     }));
-    context.subscriptions.push(vscode_1.commands.registerCommand("wolfram.evalMode.refine", () => {
+    context.subscriptions.push(vscode_1.commands.registerCommand("wolfbook.evalMode.refine", () => {
         controller.setEvalMode('auto');     // refine was active → reset to auto
     }));
 
     // Format switching commands
-    context.subscriptions.push(vscode_1.commands.registerCommand("wolfram.setOutputFormatImage", async () => {
+    context.subscriptions.push(vscode_1.commands.registerCommand("wolfbook.setOutputFormatImage", async () => {
         console.log('[Extension] Setting output format to Image');
         await vscode.workspace.getConfiguration('wolfram').update('notebook.rendering.outputFormat', 'Image', vscode.ConfigurationTarget.Workspace);
         vscode.window.showInformationMessage('Output format set to Image (PNG)');
         console.log('[Extension] Config updated, current value:', vscode.workspace.getConfiguration('wolfram').get('notebook.rendering.outputFormat'));
     }));
-    context.subscriptions.push(vscode_1.commands.registerCommand("wolfram.setOutputFormatHTML", async () => {
+    context.subscriptions.push(vscode_1.commands.registerCommand("wolfbook.setOutputFormatHTML", async () => {
         console.log('[Extension] Setting output format to HTML');
         await vscode.workspace.getConfiguration('wolfram').update('notebook.rendering.outputFormat', 'HTML', vscode.ConfigurationTarget.Workspace);
         vscode.window.showInformationMessage('Output format set to HTML');
         console.log('[Extension] Config updated, current value:', vscode.workspace.getConfiguration('wolfram').get('notebook.rendering.outputFormat'));
     }));
-    context.subscriptions.push(vscode_1.commands.registerCommand("wolfram.setOutputFormatMathML", async () => {
+    context.subscriptions.push(vscode_1.commands.registerCommand("wolfbook.setOutputFormatMathML", async () => {
         console.log('[Extension] Setting output format to MathML');
         await vscode.workspace.getConfiguration('wolfram').update('notebook.rendering.outputFormat', 'MathML', vscode.ConfigurationTarget.Workspace);
         vscode.window.showInformationMessage('Output format set to MathML');
         console.log('[Extension] Config updated, current value:', vscode.workspace.getConfiguration('wolfram').get('notebook.rendering.outputFormat'));
     }));
-    context.subscriptions.push(vscode_1.commands.registerCommand("wolfram.setOutputFormatInputForm", async () => {
+    context.subscriptions.push(vscode_1.commands.registerCommand("wolfbook.setOutputFormatInputForm", async () => {
         console.log('[Extension] Setting output format to InputForm');
         await vscode.workspace.getConfiguration('wolfram').update('notebook.rendering.outputFormat', 'InputForm', vscode.ConfigurationTarget.Workspace);
         vscode.window.showInformationMessage('Output format set to InputForm');
@@ -712,7 +716,7 @@ function activate(context) {
     }));
     
     // Clear cell output command
-    context.subscriptions.push(vscode_1.commands.registerCommand("wolfram.clearCellOutput", async (cell) => {
+    context.subscriptions.push(vscode_1.commands.registerCommand("wolfbook.clearCellOutput", async (cell) => {
         console.log('[Extension] Clear cell output command triggered');
         
         // If cell is not provided (e.g., command palette), try to get from active editor
@@ -739,7 +743,7 @@ function activate(context) {
     }));
     
     // Expand truncated output command
-    context.subscriptions.push(vscode_1.commands.registerCommand("wolfram.expandTruncatedOutput", async (args) => {
+    context.subscriptions.push(vscode_1.commands.registerCommand("wolfbook.expandTruncatedOutput", async (args) => {
         console.log('[Extension] ========================================');
         console.log('[Extension] Expand truncated output command triggered!');
         console.log('[Extension] Args received:', JSON.stringify(args));
@@ -829,7 +833,7 @@ function activate(context) {
     // Left:  enter the nearest code cell ABOVE the current selection, cursor at END.
     // Right: enter the nearest code cell BELOW the current selection, cursor at START.
     //        If no code cell exists below — create one and start editing.
-    context.subscriptions.push(vscode.commands.registerCommand('wolfram.navLeft', async () => {
+    context.subscriptions.push(vscode.commands.registerCommand('wolfbook.navLeft', async () => {
         const editor = vscode.window.activeNotebookEditor;
         if (!editor) return;
         const nb       = editor.notebook;
@@ -857,7 +861,7 @@ function activate(context) {
         await vscode.commands.executeCommand('notebook.focusPreviousCell');
     }));
 
-    context.subscriptions.push(vscode.commands.registerCommand('wolfram.navRight', async () => {
+    context.subscriptions.push(vscode.commands.registerCommand('wolfbook.navRight', async () => {
         const editor = vscode.window.activeNotebookEditor;
         if (!editor) return;
         const nb      = editor.notebook;
@@ -895,7 +899,7 @@ function activate(context) {
     let lastUpTime    = 0;
     let lastDownTime  = 0;
 
-    context.subscriptions.push(vscode.commands.registerCommand('wolfram.cursorLeft', async () => {
+    context.subscriptions.push(vscode.commands.registerCommand('wolfbook.cursorLeft', async () => {
         const now = Date.now();
         const isRepeat = (now - lastLeftTime) < ARROW_REPEAT_MS;
         lastLeftTime = now;
@@ -910,7 +914,7 @@ function activate(context) {
         await vscode.commands.executeCommand('cursorLeft');
     }));
 
-    context.subscriptions.push(vscode.commands.registerCommand('wolfram.cursorRight', async () => {
+    context.subscriptions.push(vscode.commands.registerCommand('wolfbook.cursorRight', async () => {
         const now = Date.now();
         const isRepeat = (now - lastRightTime) < ARROW_REPEAT_MS;
         lastRightTime = now;
@@ -926,7 +930,7 @@ function activate(context) {
         await vscode.commands.executeCommand('cursorRight');
     }));
 
-    context.subscriptions.push(vscode.commands.registerCommand('wolfram.cursorUp', async () => {
+    context.subscriptions.push(vscode.commands.registerCommand('wolfbook.cursorUp', async () => {
         const now = Date.now();
         const isRepeat = (now - lastUpTime) < ARROW_REPEAT_MS;
         lastUpTime = now;
@@ -940,7 +944,7 @@ function activate(context) {
         await vscode.commands.executeCommand('cursorUp');
     }));
 
-    context.subscriptions.push(vscode.commands.registerCommand('wolfram.cursorDown', async () => {
+    context.subscriptions.push(vscode.commands.registerCommand('wolfbook.cursorDown', async () => {
         const now = Date.now();
         const isRepeat = (now - lastDownTime) < ARROW_REPEAT_MS;
         lastDownTime = now;
@@ -957,7 +961,7 @@ function activate(context) {
 
     // Hover doc expand command: triggered when user clicks the 📖 stub in a hover.
     // Sends raw Markdown to the Watch panel webview; marked+KaTeX renders it there.
-    context.subscriptions.push(vscode.commands.registerCommand('wolfram.expandHoverDoc', async (cacheKey) => {
+    context.subscriptions.push(vscode.commands.registerCommand('wolfbook.expandHoverDoc', async (cacheKey) => {
         if (!cacheKey) return;
         // Extract fallback Markdown from LSP cache (used only when kernel is off)
         const cached = _hoverDocCache.get(cacheKey);
@@ -1140,7 +1144,7 @@ function activate(context) {
     // Command palette: "Wolfbook: Register File Types with Finder" — runnable any time.
     if (process.platform === 'darwin') {
         context.subscriptions.push(
-            vscode.commands.registerCommand('wolfram.registerFileTypes', _runFileAssoc)
+            vscode.commands.registerCommand('wolfbook.registerFileTypes', _runFileAssoc)
         );
     }
 
