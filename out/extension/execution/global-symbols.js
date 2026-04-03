@@ -12,6 +12,7 @@
 const vscode = require('vscode');
 const { wlNameToUTF, CODE_TO_NAME } = require('../namedchars');
 const { decodeWolframOctal } = require('../utils/encoding');
+const configCompat = require('../config-compat');
 
 /** Decode WSTP \:XXXX hex escapes (e.g. \:03B1 → α) */
 function decodeWolframHex(s) {
@@ -25,7 +26,7 @@ let _symbols    = [];      // cached Names["Global`*"] list from last execution
 // ── Config helpers ──────────────────────────────────────────────────────────
 
 function _getColor() {
-    const v = (vscode.workspace.getConfiguration('wolfram').get('editor.globalSymbolColor') || '').trim();
+    const v = (configCompat.getSetting('editor.globalSymbolColor', '') || '').trim();
     // Empty string means "use default"; set to 'off' or 'none' to explicitly disable.
     if (!v) return '#333333';
     if (v === 'off' || v === 'none') return '';
@@ -234,7 +235,7 @@ function register(context) {
 
         // Recreate decoration type and re-apply when the color setting changes.
         vscode.workspace.onDidChangeConfiguration((e) => {
-            if (e.affectsConfiguration('wolfram.editor.globalSymbolColor')) {
+            if (configCompat.affectsSetting(e, 'editor.globalSymbolColor')) {
                 if (_decorType) { _decorType.dispose(); _decorType = null; _colorCfg = null; }
                 _applyToAllEditors();
             }

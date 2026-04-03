@@ -56,15 +56,15 @@ function updateEvalModeStatusBar(self) {
     if (m === 'refine') {
         self._evalModeStatusBar.text    = '$(sync) WL: Refine';
         self._evalModeStatusBar.tooltip = 'Eval mode: Refine — no scroll, stay on cell for iteration. Click to reset to Auto.';
-        self._evalModeStatusBar.command = 'wolfram.evalMode.auto';
+        self._evalModeStatusBar.command = 'wolfbook.evalMode.auto';
     } else if (m === 'advance') {
         self._evalModeStatusBar.text    = '$(arrow-down) WL: Advance';
         self._evalModeStatusBar.tooltip = 'Eval mode: Advance — scroll to output, move to next cell. Click to force Refine.';
-        self._evalModeStatusBar.command = 'wolfram.evalMode.refine';
+        self._evalModeStatusBar.command = 'wolfbook.evalMode.refine';
     } else {
         self._evalModeStatusBar.text    = '$(symbol-misc) WL: Auto';
         self._evalModeStatusBar.tooltip = 'Eval mode: Auto — changed cell → Refine, unchanged → Advance. Click to force Advance.';
-        self._evalModeStatusBar.command = 'wolfram.evalMode.advance';
+        self._evalModeStatusBar.command = 'wolfbook.evalMode.advance';
     }
 }
 

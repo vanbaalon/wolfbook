@@ -15,6 +15,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.NotebookConfig = void 0;
 const vscode = require("vscode");
+const configCompat = require("./config-compat");
 class NotebookConfig {
     constructor() {
         // private config: vscode.WorkspaceConfiguration;
@@ -28,16 +29,16 @@ class NotebookConfig {
     }
     onDidChange(callback) {
         this.disposables.push(vscode.workspace.onDidChangeConfiguration(e => {
-            if (e.affectsConfiguration("wolfram")) {
+            if (e.affectsConfiguration("wolfbook") || e.affectsConfiguration("wolfram")) {
                 callback(this);
             }
         }));
     }
     get(configName) {
-        return vscode.workspace.getConfiguration("wolfram").get(configName);
+        return configCompat.getSetting(configName);
     }
     async update(configName, value, configurationTarget) {
-        return await vscode.workspace.getConfiguration("wolfram").update(configName, value, configurationTarget);
+        return await configCompat.updateSetting(configName, value, configurationTarget);
     }
     getKernelRelatedConfigs() {
         const configNames = [
@@ -45,10 +46,9 @@ class NotebookConfig {
             "notebook.rendering.imageScalingFactor",
             "notebook.rendering.outputFormat"
         ];
-        const renderingConfig = vscode.workspace.getConfiguration("wolfram");
         let config = {};
         configNames.forEach(name => {
-            config[name.split('.').pop()] = renderingConfig.get(name);
+            config[name.split('.').pop()] = configCompat.getSetting(name);
         });
         console.log('[NotebookConfig] Kernel configs:', config);
         return config;

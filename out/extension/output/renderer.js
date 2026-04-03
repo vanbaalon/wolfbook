@@ -158,7 +158,8 @@ function processWLLatexBoxes(self, html, logPath, pageWidthEm = 0, source = '', 
             (_, b64, rawB64) => {
                 const { boxStr, latex, error } = translate(b64);
                 // Apply line-breaking if enabled and we have a container width estimate.
-                const _lineBreakEnabled = self.config?.get('notebook.rendering.lineBreaking') !== false;
+                const _lineBreakEnabled = (self.config?.get('notebook.rendering.lineBreakingEnabled')
+                    ?? self.config?.get('notebook.rendering.lineBreaking')) !== false;
                 let latexFinal = latex;
                 let lineBreakStatus = 'disabled';
                 if (_lineBreakEnabled) {
@@ -218,7 +219,8 @@ function processWLLatexBoxes(self, html, logPath, pageWidthEm = 0, source = '', 
             (_, b64) => {
                 const { boxStr, latex, error } = translate(b64);
                 // Apply line-breaking in extension host before handing latex to webview
-                const _lineBreakEnabled = self.config?.get('notebook.rendering.lineBreaking') !== false;
+                const _lineBreakEnabled = (self.config?.get('notebook.rendering.lineBreakingEnabled')
+                    ?? self.config?.get('notebook.rendering.lineBreaking')) !== false;
                 let latexFinal = latex;
                 let lineBreakStatus = 'disabled';
                 if (_lineBreakEnabled) {
@@ -269,7 +271,8 @@ function processWLLatexBoxes(self, html, logPath, pageWidthEm = 0, source = '', 
             (_, b64) => {
                 const { boxStr, latex, error } = translate(b64);
                 // Apply the same line-breaking as Mode A so the source stays in sync with rendered output
-                const _lineBreakEnabled = self.config?.get('notebook.rendering.lineBreaking') !== false;
+                const _lineBreakEnabled = (self.config?.get('notebook.rendering.lineBreakingEnabled')
+                    ?? self.config?.get('notebook.rendering.lineBreaking')) !== false;
                 let latexFinal = latex;
                 if (_lineBreakEnabled && pageWidthEm > 5 && _btlAddon.lineBreakLatex) {
                     try { latexFinal = _btlAddon.lineBreakLatex(latex, lbOpts); } catch (_) {}

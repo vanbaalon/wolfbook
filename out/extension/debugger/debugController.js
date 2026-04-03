@@ -42,6 +42,7 @@ function _bpLinesToKernelSteps(lines, steps) {
  *     → query all timings → apply timing decorations → clear yellow highlight
  */
 const vscode = require('vscode');
+const configCompat = require('../config-compat');
 const path   = require('path');
 const fs     = require('fs');
 const { scrollLog } = require('../utils/dev-logger');
@@ -837,9 +838,9 @@ class DebugController {
                 const cellForFmt = this._cell;
                 const fmt = (ctrl._resolveFormat && cellForFmt)
                     ? ctrl._resolveFormat(cellForFmt)
-                    : (vscode.workspace.getConfiguration('wolfram').get('notebook.rendering.outputFormat') || 'Auto');
+                    : (configCompat.getSetting('notebook.rendering.outputFormat', 'Auto') || 'Auto');
                 const scale = Number(ctrl.config?.get?.('imageScale') ??
-                    vscode.workspace.getConfiguration('wolfram').get('imageScale') ?? 0.8);
+                    configCompat.getSetting('imageScale', 0.8) ?? 0.8);
                 try {
                     const renderWexpr = await this._queuedDialogEval(
                         `wolfbookDebug$RenderStep[0, ${prevTimingStep}, "${fmt}", ${scale}]`);
@@ -954,9 +955,9 @@ class DebugController {
                 const cellForFmt = this._cell || finishedCell;
                 const format = (ctrl._resolveFormat && cellForFmt)
                     ? ctrl._resolveFormat(cellForFmt)
-                    : (vscode.workspace.getConfiguration('wolfram').get('notebook.rendering.outputFormat') || 'Auto');
+                    : (configCompat.getSetting('notebook.rendering.outputFormat', 'Auto') || 'Auto');
                 const scale  = Number(ctrl.config?.get?.('imageScale') ??
-                    vscode.workspace.getConfiguration('wolfram').get('imageScale') ?? 0.8);
+                    configCompat.getSetting('imageScale', 0.8) ?? 0.8);
                 scrollLog('[wolfbook-debug] _finishDebug: calling VsCodeRender[', evalResult.cellIndex, '] format=', format);
                 const renderResult = await ctrl.session.evaluate(
                     `VsCodeRender[${evalResult.cellIndex}, "${format}", ${scale}]`,
@@ -1008,9 +1009,9 @@ class DebugController {
                     const cellForFmt = this._cell || finishedCell;
                     const fmt = (ctrl._resolveFormat && cellForFmt)
                         ? ctrl._resolveFormat(cellForFmt)
-                        : (vscode.workspace.getConfiguration('wolfram').get('notebook.rendering.outputFormat') || 'Auto');
+                        : (configCompat.getSetting('notebook.rendering.outputFormat', 'Auto') || 'Auto');
                     const scale = Number(ctrl.config?.get?.('imageScale') ??
-                        vscode.workspace.getConfiguration('wolfram').get('imageScale') ?? 0.8);
+                        configCompat.getSetting('imageScale', 0.8) ?? 0.8);
                     const rw = await ctrl.session.evaluate(
                         `wolfbookDebug$RenderStep[0, ${step.localStep}, "${fmt}", ${scale}]`,
                         { interactive: false, rejectDialog: true });

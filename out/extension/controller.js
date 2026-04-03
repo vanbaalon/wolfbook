@@ -20,6 +20,7 @@ const ui_items_1       = require("./ui-items");
 const notebook_config_1 = require("./notebook-config");
 const notebook_kernel_1 = require("./notebook-kernel");
 const find_kernel_1    = require("./find-kernel");
+const configCompat = require("./config-compat");
 
 // ---- WolfbookLaTeX: C++ box→LaTeX addon (loaded lazily by output/renderer) ----
 // Paths kept here for reference; actual loading is in output/renderer.js.
@@ -85,7 +86,7 @@ try {
 
 class WolframNotebookKernel {
     constructor(extContext) {
-        this.notebookConfig = vscode.workspace.getConfiguration("wolfram", null);
+        this.notebookConfig = configCompat.getConfiguration();
         this._id                 = "wolfram-notebook-kernel";
         this._label              = "Wolfram Kernel";
         this._supportedLanguages = ["wolfram"];

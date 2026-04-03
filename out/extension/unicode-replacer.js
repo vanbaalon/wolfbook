@@ -5,6 +5,7 @@ exports.registerUnicodeReplacer = void 0;
 const vscode = require("vscode");
 const fs = require("fs");
 const path = require("path");
+const configCompat = require("./config-compat");
 
 // Load Unicode mappings
 let unicodeMappings = null;
@@ -45,8 +46,7 @@ function registerUnicodeReplacer(context, extensionPath) {
     // Listen for text changes in the active editor
     const changeDisposable = vscode.workspace.onDidChangeTextDocument(event => {
         // Check if auto-replacement is enabled
-        const config = vscode.workspace.getConfiguration('wolfram');
-        const autoReplaceEnabled = config.get('editor.autoReplaceUnicode', true);
+        const autoReplaceEnabled = configCompat.getSetting('editor.autoReplaceUnicode', true);
         
         if (!autoReplaceEnabled) {
             return;

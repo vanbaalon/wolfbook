@@ -4,6 +4,19 @@ All notable changes to **Wolfbook** are documented here.
 
 ---
 
+## [2.6.7] - 2026-04-03
+
+### Fixed
+- **LSP startup on macOS with Wolfram Engine symlink paths** — when the configured kernel resolved to `Wolfram Player.app` (which cannot run LSP in stdio mode), Wolfbook now falls back to a stdio-capable kernel path for LSP startup. This resolves repeated `couldn't create connection to server` crashes caused by Player-kernel process exit.
+
+### Changed
+- **LSP launch path selection** — notebook/WSTP kernel resolution and LSP kernel resolution are now treated separately so the notebook path can remain unchanged while LSP uses a compatible executable.
+
+### Docs
+- Added **AI-driven AILSP architecture plan** in `dev/AI_LSP_PLAN.md`, including a first-run metadata indexing strategy that avoids bundling Wolfram data files in the extension package.
+
+---
+
 ## [2.6.1] - 2026-04-02
 
 ### Fixed

@@ -26,6 +26,7 @@ const _scrollMgr = require("./scroll/manager");
 const notebook_settings_1 = require("./notebook-settings");
 const vscode_1 = require("vscode");
 const node_1 = require("vscode-languageclient/node");
+const configCompat = require('./config-compat');
 const _tools = require('./tools/index');
 const { wlSanitizeForLSP } = require('./namedchars');
 
@@ -37,7 +38,7 @@ let client;
 let wolframTmpDir;
 let kernel_initialized = false;
 let implicitTokensDecorationType = vscode.window.createTextEditorDecorationType({});
-function activate(context) {
+async function activate(context) {
     // Show a loading indicator while the extension activates
     const _loadingStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 1000);
     _loadingStatus.text = '$(loading~spin) Wolfbook loading…';
@@ -47,7 +48,52 @@ function activate(context) {
     // or after 8s safety timeout
     const _loadingTimeout = setTimeout(_dismissLoading, 8000);
 
-    const config = vscode.workspace.getConfiguration("wolfram", null);
+    await configCompat.migrateLegacySettings([
+        'evalMode',
+        'lsp.serverEnabled',
+        'notebook.kernelEnabled',
+        'editor.autoReplaceUnicode',
+        'timeout_warning_enabled',
+        'systemKernel',
+        'advanced.lsp.ServerLogDirectory',
+        'advanced.notebook.logDirectory',
+        'advanced.lsp.command',
+        'lsp.implicitTokens',
+        'lsp.semanticTokens',
+        'lsp.ignoreUnicodeCharacters',
+        'editor.globalSymbolColor',
+        'notebook.rendering.invertBrightnessInDarkThemes',
+        'notebook.rendering.imageScalingFactor',
+        'notebook.rendering.outputFormat',
+        'notebook.rendering.lineBreaking.baseFontSizePx',
+        'notebook.rendering.lineBreaking.indentStep',
+        'notebook.rendering.lineBreaking.maxDelimDepth',
+        'notebook.rendering.lineBreaking.maxIterations',
+        'notebook.rendering.lineBreaking.compact',
+        'notebook.textOutput.pageWidth',
+        'notebook.print.pageWidth',
+        'notebook.customCSS'
+    ]);
+    const _legacyLineBreaking = vscode.workspace.getConfiguration('wolfram').inspect('notebook.rendering.lineBreaking');
+    const _newLineBreaking = vscode.workspace.getConfiguration('wolfbook').inspect('notebook.rendering.lineBreakingEnabled');
+    const _hasNewLineBreaking = _newLineBreaking && (
+        _newLineBreaking.workspaceFolderValue !== undefined
+        || _newLineBreaking.workspaceValue !== undefined
+        || _newLineBreaking.globalValue !== undefined
+    );
+    if (!_hasNewLineBreaking && _legacyLineBreaking) {
+        if (_legacyLineBreaking.workspaceFolderValue !== undefined) {
+            await vscode.workspace.getConfiguration('wolfbook').update('notebook.rendering.lineBreakingEnabled', _legacyLineBreaking.workspaceFolderValue, vscode.ConfigurationTarget.WorkspaceFolder);
+        }
+        if (_legacyLineBreaking.workspaceValue !== undefined) {
+            await vscode.workspace.getConfiguration('wolfbook').update('notebook.rendering.lineBreakingEnabled', _legacyLineBreaking.workspaceValue, vscode.ConfigurationTarget.Workspace);
+        }
+        if (_legacyLineBreaking.globalValue !== undefined) {
+            await vscode.workspace.getConfiguration('wolfbook').update('notebook.rendering.lineBreakingEnabled', _legacyLineBreaking.globalValue, vscode.ConfigurationTarget.Global);
+        }
+    }
+
+    const config = configCompat.getConfiguration();
 
     // Hoisted here so wolfram.expandHoverDoc command (registered below) can close over it
     // even though the LSP client (which populates it) is set up later.
@@ -67,8 +113,7 @@ function activate(context) {
         const { FindKernel } = require('./find-kernel');
         const finder = new FindKernel();
         const kernels = finder.discoverKernels();
-        const config = vscode.workspace.getConfiguration("wolfram", null);
-        const current = config.get("systemKernel", "Automatic");
+        const current = configCompat.getSetting("systemKernel", "Automatic");
 
         const items = [];
         // "Automatic" option
@@ -118,7 +163,7 @@ function activate(context) {
             selectedPath = uris[0].fsPath;
         }
 
-        await config.update("systemKernel", selectedPath, vscode.ConfigurationTarget.Global);
+        await configCompat.updateSetting("systemKernel", selectedPath, vscode.ConfigurationTarget.Global);
         const action = await vscode.window.showInformationMessage(
             `Kernel set to: ${selectedPath}. Restart kernel to apply.`,
             'Restart Kernel'
@@ -692,27 +737,27 @@ function activate(context) {
     // Format switching commands
     context.subscriptions.push(vscode_1.commands.registerCommand("wolfbook.setOutputFormatImage", async () => {
         console.log('[Extension] Setting output format to Image');
-        await vscode.workspace.getConfiguration('wolfram').update('notebook.rendering.outputFormat', 'Image', vscode.ConfigurationTarget.Workspace);
+        await configCompat.updateSetting('notebook.rendering.outputFormat', 'Image', vscode.ConfigurationTarget.Workspace);
         vscode.window.showInformationMessage('Output format set to Image (PNG)');
-        console.log('[Extension] Config updated, current value:', vscode.workspace.getConfiguration('wolfram').get('notebook.rendering.outputFormat'));
+        console.log('[Extension] Config updated, current value:', configCompat.getSetting('notebook.rendering.outputFormat'));
     }));
     context.subscriptions.push(vscode_1.commands.registerCommand("wolfbook.setOutputFormatHTML", async () => {
         console.log('[Extension] Setting output format to HTML');
-        await vscode.workspace.getConfiguration('wolfram').update('notebook.rendering.outputFormat', 'HTML', vscode.ConfigurationTarget.Workspace);
+        await configCompat.updateSetting('notebook.rendering.outputFormat', 'HTML', vscode.ConfigurationTarget.Workspace);
         vscode.window.showInformationMessage('Output format set to HTML');
-        console.log('[Extension] Config updated, current value:', vscode.workspace.getConfiguration('wolfram').get('notebook.rendering.outputFormat'));
+        console.log('[Extension] Config updated, current value:', configCompat.getSetting('notebook.rendering.outputFormat'));
     }));
     context.subscriptions.push(vscode_1.commands.registerCommand("wolfbook.setOutputFormatMathML", async () => {
         console.log('[Extension] Setting output format to MathML');
-        await vscode.workspace.getConfiguration('wolfram').update('notebook.rendering.outputFormat', 'MathML', vscode.ConfigurationTarget.Workspace);
+        await configCompat.updateSetting('notebook.rendering.outputFormat', 'MathML', vscode.ConfigurationTarget.Workspace);
         vscode.window.showInformationMessage('Output format set to MathML');
-        console.log('[Extension] Config updated, current value:', vscode.workspace.getConfiguration('wolfram').get('notebook.rendering.outputFormat'));
+        console.log('[Extension] Config updated, current value:', configCompat.getSetting('notebook.rendering.outputFormat'));
     }));
     context.subscriptions.push(vscode_1.commands.registerCommand("wolfbook.setOutputFormatInputForm", async () => {
         console.log('[Extension] Setting output format to InputForm');
-        await vscode.workspace.getConfiguration('wolfram').update('notebook.rendering.outputFormat', 'InputForm', vscode.ConfigurationTarget.Workspace);
+        await configCompat.updateSetting('notebook.rendering.outputFormat', 'InputForm', vscode.ConfigurationTarget.Workspace);
         vscode.window.showInformationMessage('Output format set to InputForm');
-        console.log('[Extension] Config updated, current value:', vscode.workspace.getConfiguration('wolfram').get('notebook.rendering.outputFormat'));
+        console.log('[Extension] Config updated, current value:', configCompat.getSetting('notebook.rendering.outputFormat'));
     }));
     
     // Clear cell output command
@@ -1242,6 +1287,10 @@ function activate(context) {
     if (!enabled) {
         return;
     }
+    // Resolve the LSP kernel separately: the WSTP kernel may be the Wolfram Engine
+    // Player which doesn't support stdio mode. resolveLSPKernel() falls back to
+    // the first stdio-capable kernel found on this machine (e.g. Wolfram 3.app).
+    const lspKernel = extensionKernel.resolveLSPKernel();
     let lspcommand = config.get("advanced.lsp.command", ["lspKernel"]);
     let lspLog = config.get("advanced.lsp.ServerLogDirectory", "Off");
     // Set lspcommand to use standalone LSP app.
@@ -1250,7 +1299,7 @@ function activate(context) {
         // No log directory is to be used
         if (lspLog == "Off") {
             lspcommand = [
-                mainKernel,
+                lspKernel,
                 "-noinit",
                 "-noprompt",
                 "-nopaclet",
@@ -1263,7 +1312,7 @@ function activate(context) {
         // log directory is a folder location, use that as the log folder
         else {
             lspcommand = [
-                mainKernel,
+                lspKernel,
                 "-noinit",
                 "-noprompt",
                 "-nopaclet",

@@ -12,6 +12,7 @@ exports.FindKernel = void 0;
 const vscode = require("vscode");
 const fs = require('fs');
 const path = require('path');
+const configCompat = require("./config-compat");
 class FindKernel {
     constructor() {
         this.linuxKernelPath = [
@@ -110,8 +111,7 @@ class FindKernel {
         })();
     }
     resolveKernel() {
-        const config = vscode.workspace.getConfiguration("wolfram", null);
-        let kernel = config.get("systemKernel", "Automatic");
+        let kernel = configCompat.getSetting("systemKernel", "Automatic");
         // kernel is the default value, so resolve to an actual path
         if (kernel == "Automatic") {
             kernel = this.getOSKernelPath();
@@ -124,6 +124,25 @@ class FindKernel {
             try { kernel = fs.realpathSync(kernel); } catch (_) {}
         }
         return kernel;
+    }
+    /**
+     * Resolves the kernel to use for the LSP server (stdio transport).
+     * The Wolfram Engine Player kernel (used for WSTP) does not support stdio
+     * mode and exits immediately when run with -run. When the resolved WSTP
+     * kernel is the Player, we fall back to the first stdio-capable kernel
+     * found in the standard OS search paths (e.g. Wolfram 3.app on macOS).
+     */
+    resolveLSPKernel() {
+        const wstp = this.resolveKernel();
+        // If the WSTP kernel is the Wolfram Engine Player, it cannot be used for
+        // LSP's stdio transport. Search for a stdio-capable fallback.
+        if (wstp && wstp.includes('Wolfram Player.app')) {
+            const fallback = this.getOSKernelPath();
+            if (fallback && fallback !== 'kernel-not-found') {
+                return fallback;
+            }
+        }
+        return wstp;
     }
     getOSKernelPath() {
         let possibleKernelPaths;

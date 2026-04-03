@@ -13,6 +13,8 @@ Rendering symbolic math and graphics uses a bespoke **wolfbook-btl** (Box-to-LaT
 > Author: Nikolay Gromov — [nikolay.gromov@kcl.ac.uk](mailto:nikolay.gromov@kcl.ac.uk)  
 > License: Apache 2.0 (see [LICENSE.txt](LICENSE.txt))
 
+> Latest release: **v2.6.7** (2026-04-03). See [CHANGELOG.md](CHANGELOG.md) for release notes.
+
 ---
 
 ## 🤖 GitHub Copilot Integration

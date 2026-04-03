@@ -3,7 +3,7 @@
     "displayName": "Wolfbook — AI-Friendly Wolfram Language Notebook",
     "description": "AI-friendly Wolfram Language notebook for VS Code. WSTP kernel, KaTeX rendering with adaptive line-breaking, Unicode input, LSP diagnostics, and AI-readable outputs for GitHub Copilot.",
     "publisher": "wolfbook",
-    "version": "2.6.4",
+    "version": "2.6.7",
     "engines": {
         "vscode": "^1.95.0"
     },
@@ -94,9 +94,9 @@
         ],
         "configuration": {
             "type": "object",
-            "title": "Wolfram",
+            "title": "Wolfbook",
             "properties": {
-                "wolfram.evalMode": {
+                "wolfbook.evalMode": {
                     "scope": "workspace",
                     "type": "string",
                     "enum": [
@@ -113,56 +113,56 @@
                     "description": "Post-evaluation scroll and focus behaviour. Auto detects whether the cell changed since last run.",
                     "order": 0
                 },
-                "wolfram.lsp.serverEnabled": {
+                "wolfbook.lsp.serverEnabled": {
                     "scope": "resource",
                     "type": "boolean",
                     "default": true,
                     "description": "Enables the Wolfram LSP server",
                     "order": 1
                 },
-                "wolfram.notebook.kernelEnabled": {
+                "wolfbook.notebook.kernelEnabled": {
                     "scope": "resource",
                     "type": "boolean",
                     "default": false,
                     "description": "Enables Notebook Evaluation",
                     "order": 1
                 },
-                "wolfram.editor.autoReplaceUnicode": {
+                "wolfbook.editor.autoReplaceUnicode": {
                     "scope": "resource",
                     "type": "boolean",
                     "default": true,
                     "description": "Automatically replace \\[Name] with Unicode characters as you type",
                     "order": 1
                 },
-                "wolfram.timeout_warning_enabled": {
+                "wolfbook.timeout_warning_enabled": {
                     "scope": "resource",
                     "type": "boolean",
                     "default": true,
                     "description": "Enables the timeout warning if the kernel does not start after 15 seconds",
                     "order": 2
                 },
-                "wolfram.systemKernel": {
+                "wolfbook.systemKernel": {
                     "scope": "user",
                     "type": "string",
                     "default": "Automatic",
                     "markdownDescription": "Path to the Wolfram kernel executable, or `Automatic` to use the first detected installation. Run the **Wolfbook: Select Kernel** command (`wolfbook.selectKernel`) to pick from all detected kernels.",
                     "order": 0
                 },
-                "wolfram.advanced.lsp.ServerLogDirectory": {
+                "wolfbook.advanced.lsp.ServerLogDirectory": {
                     "scope": "user",
                     "type": "string",
                     "default": "Off",
                     "description": "Directory for the Wolfram LSP server log",
                     "order": 5
                 },
-                "wolfram.advanced.notebook.logDirectory": {
+                "wolfbook.advanced.notebook.logDirectory": {
                     "scope": "user",
                     "type": "string",
                     "default": "Off",
                     "description": "Directory for the notebook log",
                     "order": 5
                 },
-                "wolfram.advanced.lsp.command": {
+                "wolfbook.advanced.lsp.command": {
                     "scope": "user",
                     "type": "array",
                     "default": [
@@ -171,47 +171,47 @@
                     "description": "Command to start the Wolfram LSP server",
                     "order": 5
                 },
-                "wolfram.lsp.implicitTokens": {
+                "wolfbook.lsp.implicitTokens": {
                     "scope": "user",
                     "type": "array",
                     "default": [],
                     "description": "Experimental option for the Wolfram LSP server",
                     "order": 3
                 },
-                "wolfram.lsp.semanticTokens": {
+                "wolfbook.lsp.semanticTokens": {
                     "scope": "user",
                     "type": "boolean",
                     "default": false,
                     "description": "Experimental option for the Wolfram LSP server",
                     "order": 3
                 },
-                "wolfram.lsp.ignoreUnicodeCharacters": {
+                "wolfbook.lsp.ignoreUnicodeCharacters": {
                     "scope": "user",
                     "type": "boolean",
                     "default": true,
                     "description": "Ignore Unicode characters in LSP diagnostics (e.g., Greek letters like α, β, γ)",
                     "order": 3
                 },
-                "wolfram.editor.globalSymbolColor": {
+                "wolfbook.editor.globalSymbolColor": {
                     "scope": "window",
                     "type": "string",
                     "default": "#333333",
                     "description": "Color applied to Global` symbols that have a value (set variables). Unset symbols use #336699 blue via the 'symbol.unrecognized' TM scope. Leave empty or set to 'off' to disable.",
                     "order": 3
                 },
-                "wolfram.notebook.rendering.invertBrightnessInDarkThemes": {
+                "wolfbook.notebook.rendering.invertBrightnessInDarkThemes": {
                     "type": "boolean",
                     "default": true,
                     "description": "When an expression is evaluated, this option specifies whether the brightness of the images in the output should be inverted in dark and high contrast themes. ",
                     "order": 4
                 },
-                "wolfram.notebook.rendering.imageScalingFactor": {
+                "wolfbook.notebook.rendering.imageScalingFactor": {
                     "type": "number",
                     "default": 0.8,
                     "description": "Controls image output size",
                     "order": 4
                 },
-                "wolfram.notebook.rendering.outputFormat": {
+                "wolfbook.notebook.rendering.outputFormat": {
                     "type": "string",
                     "enum": [
                         "Image",
@@ -229,41 +229,41 @@
                     "description": "Output rendering format",
                     "order": 4
                 },
-                "wolfram.notebook.rendering.lineBreaking": {
+                "wolfbook.notebook.rendering.lineBreakingEnabled": {
                     "type": "boolean",
                     "default": true,
                     "description": "Automatically wrap long mathematical expressions (WLLatex mode) across multiple lines based on the notebook container width.",
                     "order": 4
                 },
-                "wolfram.notebook.rendering.lineBreaking.baseFontSizePx": {
+                "wolfbook.notebook.rendering.lineBreaking.baseFontSizePx": {
                     "type": "number",
                     "default": 16,
                     "minimum": 8,
                     "description": "Base font size in pixels used by line-break iteration when pageWidthPx is provided.",
                     "order": 4
                 },
-                "wolfram.notebook.rendering.lineBreaking.indentStep": {
+                "wolfbook.notebook.rendering.lineBreaking.indentStep": {
                     "type": "integer",
                     "default": 2,
                     "minimum": 0,
                     "description": "Indentation step (in spaces) used after line breaks.",
                     "order": 4
                 },
-                "wolfram.notebook.rendering.lineBreaking.maxDelimDepth": {
+                "wolfbook.notebook.rendering.lineBreaking.maxDelimDepth": {
                     "type": "integer",
                     "default": 2,
                     "minimum": 1,
                     "description": "Maximum recursion depth for delimiter-internal line breaking.",
                     "order": 4
                 },
-                "wolfram.notebook.rendering.lineBreaking.maxIterations": {
+                "wolfbook.notebook.rendering.lineBreaking.maxIterations": {
                     "type": "integer",
                     "default": 5,
                     "minimum": 1,
                     "description": "Maximum refinement iterations when pixel-width line breaking is enabled.",
                     "order": 4
                 },
-                "wolfram.notebook.rendering.lineBreaking.compact": {
+                "wolfbook.notebook.rendering.lineBreaking.compact": {
                     "type": "boolean",
                     "default": false,
                     "description": "Use compact multiline layout in line-broken output.",
@@ -289,21 +289,21 @@
                     "description": "Automatically format the current cell when Enter is pressed (new line). Disabled by default.",
                     "order": 4
                 },
-                "wolfram.notebook.textOutput.pageWidth": {
+                "wolfbook.notebook.textOutput.pageWidth": {
                     "type": "integer",
                     "default": 100,
                     "minimum": 40,
                     "description": "Maximum line width when exporting notebook output to a text (.wls) file via 'Open as text'",
                     "order": 5
                 },
-                "wolfram.notebook.print.pageWidth": {
+                "wolfbook.notebook.print.pageWidth": {
                     "type": "integer",
                     "default": 156,
                     "minimum": 40,
                     "description": "Kernel $PageWidth for Print[] output (characters per line). Default 156 = 2× the Mathematica default of 78.",
                     "order": 6
                 },
-                "wolfram.notebook.customCSS": {
+                "wolfbook.notebook.customCSS": {
                     "type": "object",
                     "default": {},
                     "description": "Custom CSS settings for notebooks",
@@ -671,22 +671,22 @@
                 },
                 {
                     "command": "wolfbook.setOutputFormatImage",
-                    "when": "notebookType == extended-wolfram-notebook && config.wolfram.notebook.rendering.outputFormat != 'Image'",
+                    "when": "notebookType == extended-wolfram-notebook && config.wolfbook.notebook.rendering.outputFormat != 'Image'",
                     "group": "wolframOutput@1"
                 },
                 {
                     "command": "wolfbook.setOutputFormatHTML",
-                    "when": "notebookType == extended-wolfram-notebook && config.wolfram.notebook.rendering.outputFormat != 'HTML'",
+                    "when": "notebookType == extended-wolfram-notebook && config.wolfbook.notebook.rendering.outputFormat != 'HTML'",
                     "group": "wolframOutput@2"
                 },
                 {
                     "command": "wolfbook.setOutputFormatMathML",
-                    "when": "notebookType == extended-wolfram-notebook && config.wolfram.notebook.rendering.outputFormat != 'MathML'",
+                    "when": "notebookType == extended-wolfram-notebook && config.wolfbook.notebook.rendering.outputFormat != 'MathML'",
                     "group": "wolframOutput@3"
                 },
                 {
                     "command": "wolfbook.setOutputFormatInputForm",
-                    "when": "notebookType == extended-wolfram-notebook && config.wolfram.notebook.rendering.outputFormat != 'InputForm'",
+                    "when": "notebookType == extended-wolfram-notebook && config.wolfbook.notebook.rendering.outputFormat != 'InputForm'",
                     "group": "wolframOutput@4"
                 },
                 {
@@ -1812,7 +1812,7 @@
             }
         ],
         "configurationDefaults": {
-            "wolfram.editor.globalSymbolColor": "#333333",
+            "wolfbook.editor.globalSymbolColor": "#333333",
             "workbench.colorCustomizations": {
                 "editor.wordHighlightBackground": "#3399ff18",
                 "editor.wordHighlightStrongBackground": "#3399ff28",

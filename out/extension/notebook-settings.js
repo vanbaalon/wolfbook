@@ -6,6 +6,7 @@ exports.applyNotebookSettings = applyNotebookSettings;
 const vscode = require("vscode");
 const path   = require("path");
 const fs     = require("fs");
+const configCompat = require("./config-compat");
 
 // ── Colour palette ────────────────────────────────────────────────────────────
 const BACKGROUND_COLORS = [
@@ -166,7 +167,7 @@ async function showSettingsUI(notebook) {
     }
 
     // ── Kernel item ───────────────────────────────────────────────────────
-    const currentKernel = (vscode.workspace.getConfiguration('wolfram').get('systemKernel') || 'Automatic');
+    const currentKernel = (configCompat.getSetting('systemKernel', 'Automatic') || 'Automatic');
     const kernelLabel   = currentKernel === 'Automatic'
         ? 'Automatic'
         : require('path').basename(require('path').dirname(require('path').dirname(currentKernel)));  // e.g. "Wolfram 3.app"
