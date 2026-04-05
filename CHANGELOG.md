@@ -4,6 +4,27 @@ All notable changes to **Wolfbook** are documented here.
 
 ---
 
+## [2.6.17] - 2026-04-05
+
+### Fixed
+- **Trig argument spacing** — `\sin(t)` (single bare-letter argument) now renders as `\sin t` instead of the invalid `\sint`. Space is inserted between the LaTeX command and the argument whenever the argument does not begin with `\` (i.e. is a plain letter or digit rather than a Greek symbol or sub-expression). Both `trigOmitParens` (Rule 1) and `trigPowerForm` (Rule 2) cases are fixed. BTL bumped to **v2.1.1**.
+
+### Infrastructure
+- Added `release.sh` — one-command release script that rebuilds BTL, syncs binaries, packages the platform VSIX (`-darwin-arm64.vsix`), pushes both repos, and creates/updates the GitHub Release via the `gh` CLI.
+- GitHub Actions workflow (`release.yml`) updated to opt into **Node.js 24** (`FORCE_JAVASCRIPT_ACTIONS_TO_NODE24`) eliminating the Node 20 deprecation warning/error.
+
+---
+
+## [2.6.16] - 2026-04-05
+
+### Added
+- **Trig style options (`trigOmitParens`, `trigPowerForm`)** — two new rendering preferences, both defaulting to `true`, controllable per-call from JS and globally from VS Code settings (`wolfbook.notebook.rendering.trigOmitParens` / `wolfbook.notebook.rendering.trigPowerForm`).
+  - **`trigOmitParens`**: `\sin(\phi) → \sin\phi` — drops parentheses when the trig argument is a single symbol.
+  - **`trigPowerForm`**: `(\sin\phi)^n → \sin^n\phi` — moves the exponent immediately after the command for the canonical typographic form.
+- Both rules are implemented in the BTL C++ native addon (`box_to_latex.cpp`) and exposed via the `BtlOptions` interface in `wolfbook_btl.d.ts`. BTL bumped to **v2.1.0**.
+
+---
+
 ## [2.6.7] - 2026-04-03
 
 ### Fixed
