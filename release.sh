@@ -60,7 +60,8 @@ fi
 # 5. Pack Extension VSIX
 echo "📦 Packaging Extension VSIX..."
 cd "$EXT_DIR"
-VSIX_FILE="$NAME-$EXT_VERSION.vsix"
+# Platform-specific name for clarify
+VSIX_FILE="$NAME-$EXT_VERSION-darwin-arm64.vsix"
 VSIX_PATH="$VSIX_OUT_DIR/$VSIX_FILE"
 
 # Make sure vsce is available
