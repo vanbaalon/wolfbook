@@ -326,7 +326,7 @@ async function launchKernel(self, WstpSession) {
             if (process.platform === 'win32') _nbDir = _nbDir.replace(/\\/g, '/');
             const _nbDirEsc = _nbDir.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
             await self.session.sub(
-                `Unprotect[NotebookDirectory]; NotebookDirectory[] = "${_nbDirEsc}"; Protect[NotebookDirectory]`
+                `Unprotect[NotebookDirectory]; NotebookDirectory[] = "${_nbDirEsc}"; Protect[NotebookDirectory]; WBDirectory[] = "${_nbDirEsc}"`
             ).catch(() => {});
             console.log('[launchKernel] NotebookDirectory set to:', _nbDir);
         }

@@ -28,7 +28,7 @@ async function handleWBPrompt(promptText, useWolfbook, currentExecution, execCel
     const cellNumber = execCell.index + 1; // 1-based
 
     const fullQuery = useWolfbook
-        ? `@wolfbook ${promptText}. Use the wolfbook_insertCells tool to insert the result as new cell(s) immediately after cell ${cellNumber} in the notebook. Do not just show the result in chat — actually insert it into the notebook.`
+        ? `@wolfbook ${promptText}. Use wolfbook notebook cell tools to apply changes in-notebook: prefer wolfbook_insertCells (pass cells=[{kind,content},...]), and use wolfbook_editCell/wolfbook_moveCell/wolfbook_deleteCell when needed. Insert result cell(s) immediately after cell ${cellNumber}. Do not just show the result in chat — actually apply the notebook edits. Never edit the .wb file directly using file-write tools.`
         : promptText;
 
     const showMsg = async (html, plain) => {

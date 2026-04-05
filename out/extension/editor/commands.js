@@ -219,13 +219,13 @@ function abortEvaluation(self) {
         self._abortPending  = false;
         self._evalDispatched = false;
         self._interruptHandlerInstalled = false;
-        self.executionQueue.clear();
+        self.executionQueue.forceEndAll();
         scrollLog('[abort] force-reset on second abort press');
         return;
     }
     if (!self.session) {
         self.writeDebugLog('[ABORT] no session — just clearing queue');
-        self.executionQueue.clear();
+        self.executionQueue.forceEndAll();
         return;
     }
 
@@ -290,6 +290,11 @@ function abortEvaluation(self) {
                     self.isAborting = false;
                     self.writeDebugLog('[ABORT] all retries exhausted — kernel not responding to abort. Cleared isAborting. User must restart manually if needed.');
                     scrollLog('[abort] all retries exhausted — kernel not responding');
+                    // Force-end all queued executions so cell spinners stop immediately.
+                    // The kernel may still be running, but the VS Code UI must not
+                    // show the animation indefinitely.  If checkout later outputs results
+                    // from the still-running evaluation it will do so silently.
+                    self.executionQueue.forceEndAll();
                     vscode.window.showWarningMessage(
                         'Kernel is not responding to abort (computation may be in a non-interruptible loop). ' +
                         'Either wait for it to finish, or restart the kernel.',
@@ -334,8 +339,11 @@ function restartKernel(self) {
     self._dialogPrintCollector  = null;
     self._cellEpoch             = ((self._cellEpoch || 0) + 1) & 0xFFFFFF;
     self._dispatchEpoch         = (self._dispatchEpoch + 1) & 0xFFFFFF;
-    self.executionQueue.clear();
-    self.writeDebugLog(`[RESTART] all flags reset, queue cleared | dt=${Date.now()-_rstT0}ms`);
+    // Force-end ALL queued executions (including the currently running cell) so
+    // the cell spinners stop immediately.  The checkout loop's error handler will
+    // later call end(id) again but will harmlessly find the item already gone.
+    self.executionQueue.forceEndAll();
+    self.writeDebugLog(`[RESTART] all flags reset, queue force-ended | dt=${Date.now()-_rstT0}ms`);
 
     const hadKernel = !!self.session;
     self.quitKernel();

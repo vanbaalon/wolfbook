@@ -25,29 +25,34 @@ Switch Copilot to **Agent mode** and it gains live access to your running kernel
 
 ### What Copilot can do with Wolfbook
 
+Nine tools can be referenced directly in chat with `#name`; the rest are invoked automatically by the AI agent.
+
+#### Directly referenceable tools (`#name` shorthand)
+
 | Tool | Reference | What Copilot can do |
 |------|-----------|---------------------|
-| � **Switch notebook** | `#wolfbookSwitch` | Lists all open `.wb` notebooks or switches Copilot's target to a specific one — use `action:"list"` to see what's open, `action:"switch"` to change the active notebook |
-| 📋 **Get notebook context** | `#wolfbookContext` | Reads all cells and their outputs — Copilot sees exactly what you've computed; pass `notebook:"file.wb"` to read a different open notebook without switching |
-| ⚡ **Evaluate expression** | `#wolfbookEval` | Runs any Wolfram Language expression in your live kernel and gets the result back |
-| 🔍 **Look up symbol** | `#wolfbookLookup` | Retrieves full usage docs, options table, and a link to the online reference for any symbol — built-in or user-defined |
-| 🌐 **Full web help** | `#wolfbookWebHelp` | Fetches and returns the complete Wolfram reference page for a built-in symbol — examples, details, and all |
-| ➕ **Insert cell** | `#wolfbookInsert` | Adds a new code or markdown cell at any position in your notebook |
-| ➕ **Insert cells (bulk)** | `#wolfbookInsertMany` | Adds multiple cells in a single operation — prefer this over repeated `#wolfbookInsert` calls |
+| 📋 **Get notebook context** | `#wolfbookContext` | Reads all cell sources and outputs for the active notebook. Also: `action:"list"` lists open notebooks, `action:"switch"` changes the active notebook, `action:"save"` saves to disk |
+| ⚡ **Evaluate expression** | `#wolfbookEval` | Runs any Wolfram Language expression in the live kernel and returns the result. Use `multiLine:true` to evaluate a block line-by-line |
+| 🔍 **Look up symbol** | `#wolfbookLookup` | Retrieves usage docs, options table, and an online reference link for any symbol — built-in or user-defined. Add `fetchWeb:true` to fetch the full Wolfram reference page |
+| ➕ **Insert cells** | `#wolfbookInsertCells` | Inserts one or more cells at any position. Pass top-level `kind`+`content` for a single cell, or a `cells:[...]` array for multiple. Use `afterCellId`/`afterCell` + `position:"before"\|"after"` to target precisely. Set `evaluate:true` to run immediately |
 | ✏️ **Edit cell** | `#wolfbookEdit` | Replaces the source of an existing cell in-place; set `evaluate:true` to immediately run the new content and verify the result |
-| ▶️ **Run cell** | `#wolfbookRun` | Executes an existing cell through the normal pipeline (equivalent to Shift+Enter); the result is stored as the cell's output and visible to the user |
-| 🗑️ **Delete cell(s)** | `#wolfbookDelete` | Removes one or more cells from the notebook; pass `cellNumber` for a single cell or `cellNumbers` (array) for multiple — deleted content is saved to `ai_deleted_cells.md` for recovery |
-| ↩️ **Restore deleted cells** | `#wolfbookRestore` | Lists or re-inserts recently deleted cells from `ai_deleted_cells.md`; use `action:"list"` to see what was removed, `action:"restore"` to re-insert the last N cells at any position |
-| ↕️ **Move cell** | `#wolfbookMove` | Moves a cell from one position to another atomically (delete + re-insert in one edit); use `toPosition:0` to move to the beginning |
-| ▶️ **Run all cells** | `#wolfbookRunAll` | Executes a range of cells sequentially, waiting for each to finish; returns per-cell status and output — ideal for clean-run validation after a kernel restart |
-| 🔎 **Kernel state** | `#wolfbookState` | Lists all user-defined symbols matching a context pattern, showing their current values or rule counts — use this to understand what is already defined before writing code |
-| 💾 **Save notebook** | `#wolfbookSaveNotebook` | Saves the active notebook to disk — call this after a batch of insertions, edits, or deletions to persist the changes |
-| 📦 **Find package** | `#wolfbookFindPkg` | Searches for Wolfram Language packages simultaneously on the Wolfram Paclet Server (via `PacletFindRemote` in the live kernel) and on GitHub — returns results with star counts and descriptions |
-| 📅 **Restart kernel** | `#wolfbookRestart` | Restarts the Wolfram kernel with a confirmation dialog — clears all definitions and resets the session |
-| ⏹️ **Abort evaluation** | `#wolfbookAbort` | Interrupts the currently running evaluation — equivalent to the Abort button in the toolbar |
-| 🐛 **Debug session** | `#wolfbookDebug` | Full AI control of the step-through debugger: analyze cell structure, start/stop sessions, step over/into/out, set and remove breakpoints, and manage the Watch Panel variable list — see [AI-controlled Debugging](#ai-controlled-debugging) below |
-| 🟥 **Kernel crash log** | `#wolfbookCrashLog` | Reads `img/<notebookName>/wolfram-kernel-debug.log` and/or macOS crash reports in `~/Library/Logs/DiagnosticReports/` to diagnose kernel crashes and unexpected disconnections |
-| 🔍 **Search cells** | `#wolfbookSearch` | Search notebook cells by text, regex, and/or kind (code/markdown) — returns matching cell numbers, content previews, and output summaries; useful for locating definitions in large notebooks |
+| ▶️ **Run cell(s)** | `#wolfbookRun` | Executes a cell (by `cellId` or `cellNumber`) or a range of cells (`startCell`/`endCell`). Set `stopOnError:true` (default) to halt on the first error in range mode |
+| 🗑️ **Delete cell(s)** | `#wolfbookDelete` | Removes one or more cells; deleted content is saved to `ai_deleted_cells.md` for recovery — pass `cellId`/`cellIds` (preferred) or `cellNumber`/`cellNumbers` |
+| 🔍 **Search cells** | `#wolfbookSearch` | Finds cells by text or regex, optionally filtered by kind (`"code"`/`"markdown"`). Returns cell numbers, CellId values, and source previews |
+| 🔎 **Kernel state** | `#wolfbookState` | Lists all symbols matching a context pattern (default `Global\`*`) with their current values or rule counts — call this before writing code to avoid naming conflicts |
+
+#### AI-invoked tools (used automatically, no `#` shorthand)
+
+| Tool | What Copilot can do |
+|------|---------------------|
+| ↩️ **Restore deleted cells** (`wolfbook_restoreDeletedCells`) | Lists or re-inserts recently deleted cells from `ai_deleted_cells.md`; use `action:"list"` to see what was removed, `action:"restore"` to re-insert |
+| ↕️ **Move cell** (`wolfbook_moveCell`) | Moves a cell atomically (delete + re-insert); use `toPosition:0` to move to beginning, or `afterCellId` for stable targeting |
+| 💾 **Kernel control** (`wolfbook_kernelControl`) | `action:"restart"` restarts the kernel (clears all state, shows confirmation); `action:"abort"` interrupts the current evaluation |
+| 📦 **Find package** (`wolfbook_findPackage`) | Searches simultaneously on the Wolfram Paclet Server and GitHub — returns install commands for each result |
+| 🐛 **Debug session** (`wolfbook_debugCell`) | Full AI control of the step-through debugger: analyze, start/stop, step over/into/out, breakpoints, Watch Panel — see [AI-controlled Debugging](#ai-controlled-debugging) |
+| 🟥 **Kernel crash log** (`wolfbook_kernelCrashLog`) | Reads `img/<notebookName>/wolfram-kernel-debug.log` and macOS crash reports to diagnose kernel crashes |
+| 📄 **File operations** (`wolfbook_fileOps`) | `action:"read"` reads a file, `action:"write"` creates/overwrites a file, `action:"list"` lists directory contents with optional `ext` and `depth` filters |
+| 🖥️ **Run terminal** (`wolfbook_runTerminal`) | Runs a shell command and returns stdout/stderr (builds, tests, scripts, git, LaTeX workflows) |
 
 ### How to activate
 
@@ -127,6 +132,14 @@ You can also reference tools directly in your prompt:
 - `#wolfbookSaveNotebook` — persist the notebook to disk
 - `#wolfbookDebug` — control the step-through debugger (analyze, start, step, breakpoints, watch list)
 - `#wolfbookSearch` — search cells by text/regex/kind; returns matching cell numbers and content previews
+- `#wolfbookReadFile` — read text files in the workspace (absolute or relative paths)
+- `#wolfbookWriteFile` — write/create text files in the workspace (for non-notebook files)
+- `#wolfbookRunTerminal` — run shell commands with stdout/stderr capture
+- `#wolfbookListFiles` — list files recursively with optional extension/depth filtering
+
+Notebook safety rule for AI workflows:
+- Never modify `.wb` notebook JSON directly via `#wolfbookWriteFile`.
+- For notebook changes, always use notebook cell tools (`#wolfbookInsert`, `#wolfbookInsertMany`, `#wolfbookEdit`, `#wolfbookDelete`, `#wolfbookMove`, `#wolfbookRun`).
 
 ### Kernel safety
 

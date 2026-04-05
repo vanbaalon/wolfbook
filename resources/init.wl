@@ -108,12 +108,20 @@ Check[Get[FileNameJoin[{$wolframResourceDir, "render-html.wl"}]],
    wolfram.notebook.print.pageWidth package.json default.
    controller.js also updates $PageWidth after launch so the user-configured
    value takes effect without a kernel restart. *)
-$PageWidth = 156;
 (* Prevent EnterTextPacket (Dialog/busy-path subAuto) from inserting
    OutputForm line-continuation escapes (\\\012 \012>) into long strings.
    The WSTP output stream defaults to PageWidth→78; setting it to Infinity
-   ensures busy-path results are byte-identical to idle-path ones. *)
+   ensures busy-path results are byte-identical to idle-path ones.
+   IMPORTANT: SetOptions[$Output] is done FIRST, then $PageWidth is set
+   explicitly below.  This order matters: on some Mathematica versions
+   SetOptions[$Output, PageWidth->Infinity] also updates $PageWidth, so the
+   explicit assignment must come after to ensure Short[] keeps working. *)
 SetOptions[$Output, PageWidth -> Infinity];
+(* Restore $PageWidth to a finite value so Short[expr, n] abbreviates
+   correctly.  lifecycle.js will later override this to the user-configured
+   value (notebook.print.pageWidth).  $PageWidth and $Output's PageWidth
+   are independent once $PageWidth is set explicitly here. *)
+$PageWidth = 78;
 Unprotect[Print];
 Print[args___] /; !TrueQ[$inPrintPatch] :=
     Block[{$inPrintPatch = True},

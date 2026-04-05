@@ -63,8 +63,12 @@ function registerUnicodeReplacer(context, extensionPath) {
         const isNotebookCell = doc.uri.scheme === 'vscode-notebook-cell';
         const isWolframFile = doc.languageId === 'wolfram';
         const isVsnbFile = doc.fileName && (doc.fileName.endsWith('.vsnb') || doc.fileName.endsWith('.evsnb'));
+        const isWlsFile = doc.fileName && doc.fileName.endsWith('.wls');
         
         if (!isNotebookCell && !isWolframFile && !isVsnbFile) {
+            return;
+        }
+        if (isWlsFile) {
             return;
         }
 

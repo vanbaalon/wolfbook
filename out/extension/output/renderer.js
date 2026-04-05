@@ -138,12 +138,16 @@ function processWLLatexBoxes(self, html, logPath, pageWidthEm = 0, source = '', 
     if (!(lbOpts.pageWidth > 0)) lbOpts.pageWidth = pageWidthEm;
     const lbOptsText = JSON.stringify(lbOpts);
     // Helper: run boxToLatex and return { latex, error }
+    const btlOpts = {
+        trigOmitParens: self.config?.get('notebook.rendering.trigOmitParens') !== false,
+        trigPowerForm:  self.config?.get('notebook.rendering.trigPowerForm')  !== false,
+    };
     const translate = (b64) => {
         try {
             let boxStr = Buffer.from(b64, 'base64').toString('utf8');
             // Convert all Unicode chars + \|XXXX hex escapes to \[Name] for BTL
             boxStr = wlUTFtoNames(boxStr);
-            const result = _btlAddon.boxToLatex(boxStr);
+            const result = _btlAddon.boxToLatex(boxStr, btlOpts);
             // boxToLatex returns { latex, error } per README
             if (result && typeof result === 'object') return { boxStr, latex: result.latex, error: result.error || null };
             // Older build that returned a plain string
@@ -258,11 +262,11 @@ function processWLLatexBoxes(self, html, logPath, pageWidthEm = 0, source = '', 
                 // Embed a short readable LaTeX preview as text content so that AI tools
                 // reading the raw HTML see decoded LaTeX rather than an opaque base64 blob.
                 // The webview overwrites this with the KaTeX-rendered DOM when it loads.
-                const _PREVIEW_LEN = 300;
+                const _PREVIEW_LEN = 1200;
                 const _latexPreview = latexFinal.length > _PREVIEW_LEN
                     ? _encoding.escapeHtml(latexFinal.substring(0, _PREVIEW_LEN)) + '\u2026'
                     : _encoding.escapeHtml(latexFinal);
-                return `<div class="vscode-wolfram-wllatex-raw-latex" data-latex-b64="${latexB64}"${errorAttr}>${_latexPreview}</div>`;
+                return `<div class="vscode-wolfram-wllatex-raw-latex" data-latex-b64="${latexB64}" data-latex-preview="${_latexPreview}" data-latex-chars="${latexFinal.length}"${errorAttr}>${_latexPreview}</div>`;
             });
     }
     // ---- Mode C: emit src-latex div containing raw LaTeX for source display (WLLatexSrc button) ----
@@ -421,12 +425,32 @@ function extractPlainText(html, outName, isGfx, cellSource) {
     if (isGfx) {
         return `(* output: graphics *)\n${cellSource || ''}`;
     }
-    // All WLLatex variants embed data-latex-b64 (Modes A/B/C of processWLLatexBoxes)
+    // Prefer compact explicit preview metadata when available (Mode B raw-latex div).
+    const previewMatch = html.match(/data-latex-preview="([\s\S]*?)"(?:\s|>)/);
+    if (previewMatch) {
+        const preview = previewMatch[1]
+            .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+            .replace(/\s+/g, ' ').trim();
+        if (preview) {
+            const nMatch = html.match(/data-latex-chars="(\d+)"/);
+            const nInfo = nMatch ? ` [latex chars: ${nMatch[1]}]` : '';
+            return `${outName} ${preview}${nInfo}`;
+        }
+    }
+
+    // Fallback for all WLLatex variants: decode data-latex-b64 when preview metadata is absent.
     const latexMatch = html.match(/data-latex-b64="([^"]+)"/);
     if (latexMatch) {
         try {
             const latex = Buffer.from(latexMatch[1], 'base64').toString('utf8');
-            if (latex.trim()) return `${outName} ${latex}`;
+            if (latex.trim()) {
+                const MAX = 1200;
+                const trimmed = latex.trim();
+                if (trimmed.length > MAX) {
+                    return `${outName} ${trimmed.slice(0, MAX)}… [latex truncated: ${trimmed.length} chars total]`;
+                }
+                return `${outName} ${trimmed}`;
+            }
         } catch (_) {}
     }
     // Kernel message/warning output — may be <div> (single short) or <details> (long/grouped).

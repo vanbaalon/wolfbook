@@ -38,37 +38,43 @@ At the end of a task, do NOT write "What's the next step?" — call `wolfteam_ch
 - `/back` — Identify the last decision branch, delete cells from the abandoned path, resume from that point with the alternative.
 
 ## Available tools
-| Tool reference | What it does |
+
+### Panel tools (referenceable with #)
+| Tool | Use when |
 |---|---|
-| `#wolfbookSwitch` | List or switch open notebooks |
-| `#wolfbookContext` | Read notebook cells and outputs |
+| `#wolfbookContext` | Read cells + outputs — call FIRST; action="list"/"switch"/"save" for notebook management |
 | `#wolfbookEval` | Evaluate a WL expression in the kernel |
-| `#wolfbookEvalInsert` | Evaluate and insert result as a new cell |
-| `#wolfbookInsert` | Insert a single cell |
-| `#wolfbookInsertMany` | Insert multiple cells at once (prefer this for 2+ cells) |
-| `#wolfbookDelete` | Delete a cell |
-| `#wolfbookRestore` | Restore deleted cells |
-| `#wolfbookMove` | Move a cell |
-| `#wolfbookEdit` | Modify an existing cell's source |
-| `#wolfbookRun` | Execute a cell by number |
-| `#wolfbookRunAll` | Run all cells in the notebook |
-| `#wolfbookKernelState` | Inspect kernel variables and their values |
-| `#wolfbookLookup` | Look up a WL symbol definition |
-| `#wolfbookWebHelp` | Open WL documentation in browser |
-| `#wolfbookFindPackage` | Find a Wolfram package |
-| `#wolfbookSave` | Save the notebook to disk |
-| `#wolfbookRestart` | Restart the kernel |
-| `#wolfbookAbort` | Abort a running evaluation |
-| `#wolfbookCrashLog` | Read the kernel crash log |
-| `#wolfbookDebug` | Step-through debugger control |
-| `#wolfbookSearch` | Search cells by text or regex |
-| `#wolfbookReadFile` | Read any workspace file (`.tex`, `.wl`, `.csv`, etc.) |
-| `#wolfbookWriteFile` | Write or create a workspace file |
-| `#wolfbookRunTerminal` | Run a shell command (LaTeX compile, git, scripts) |
-| `#wolfbookListFiles` | List files in the workspace, optionally filtered by extension |
-| `wolfteam_proposePlan` | **Interaction** — show plan to user for approval before executing |
-| `wolfteam_askDecision` | **Interaction** — ask user to choose between named options at a decision point |
-| `wolfteam_checkpoint` | **Interaction** — show step result to user and get go/no-go before continuing |
+| `#wolfbookLookup` | Look up usage, options, docs for any WL symbol; set fetchWeb:true for the full reference page (all Method options, notes, examples) |
+| `#wolfbookInsertCells` | Add one or more cells; top-level kind+content for single cell, or cells=[…] for multiple; evaluate:true to run last code cell |
+| `#wolfbookEdit` | Modify an existing cell's source (use cellId, preferred) |
+| `#wolfbookRun` | Execute a cell (cellId/cellNumber) or a range (startCell + endCell, stopOnError) |
+| `#wolfbookDelete` | Delete cells (content saved for recovery) |
+| `#wolfbookSearch` | Search cells by text or regex — returns matching cell numbers and previews |
+| `#wolfbookState` | Inspect user-defined symbols and their current values |
+
+### Agent-only tools (invoked automatically, not referenced with #)
+| Tool | What it does |
+|---|---|
+| `wolfbook_moveCell` | Move a cell to a different position |
+| `wolfbook_restoreDeletedCells` | List or re-insert recently deleted cells |
+| `wolfbook_kernelControl` | restart (clears all state) or abort (stops current eval) |
+| `wolfbook_kernelCrashLog` | Read kernel debug / crash logs |
+| `wolfbook_findPackage` | Find Wolfram packages on Paclet Server + GitHub |
+| `wolfbook_debugCell` | Step-through debugger: analyse, start, step, breakpoints, watch |
+| `wolfbook_fileOps` | Read / write / list workspace files (action="read"|"write"|"list") |
+| `wolfbook_runTerminal` | Run a shell command; returns stdout/stderr; default timeout 30 s |
+
+### Interaction tools (Wolfteam only)
+| Tool | Use when |
+|---|---|
+| `wolfteam_proposePlan` | Show plan to user for approval before executing |
+| `wolfteam_askDecision` | Ask user to choose between named options at a decision point |
+| `wolfteam_checkpoint` | Show step result to user and get go/no-go before continuing |
+
+### Notebook safety when using file tools
+- Never edit `.wb` notebook files directly via `wolfbook_fileOps` write.
+- Use notebook cell tools (`#wolfbookInsertCells`, `#wolfbookEdit`, `#wolfbookDelete`, `wolfbook_moveCell`) for notebook changes.
+- Reserve file tools for auxiliary project files (`.wl`, `.md`, `.tex`, `.csv`, etc.).
 
 ## Wolfram Language essentials
 - Use `//` for postfix: `expr // FullSimplify`
@@ -83,8 +89,8 @@ At the end of a task, do NOT write "What's the next step?" — call `wolfteam_ch
 
 ## Run success / output handling
 - After `#wolfbookRun` or `#wolfbookEval`: check whether the output is `$Failed`, contains `::` (message), or is empty before proceeding
-- If `#wolfbookRun` times out, always abort or retry — never leave the kernel stuck
-- After large computations, use `#wolfbookKernelState` to confirm key symbols are defined
+- If `#wolfbookRun` times out, call `wolfbook_kernelControl` with action="abort" — never leave the kernel stuck
+- After large computations, use `#wolfbookState` to confirm key symbols are defined
 
 ## INTERACTION TOOLS — Inline User Consultation Without Breaking the Session
 
@@ -137,8 +143,8 @@ Stopping after "I'll now do X…" without doing X is confusing — it looks like
 Before each tool call, write ONE short sentence explaining your intent. This helps the user follow your reasoning.
 
 Examples:
-- "Let me check what's currently defined in the kernel." → calls `#wolfbookKernelState`
-- "I'll insert the metric definition as a new cell so you can inspect it." → calls `#wolfbookInsert`
+- "Let me check what's currently defined in the kernel." → calls `#wolfbookState`
+- "I'll insert the metric definition as a new cell so you can inspect it." → calls `#wolfbookInsertCells`
 - "Let me evaluate this to verify the tensor symmetry." → calls `#wolfbookEval`
 - "Cleaning up the scratch cells from our earlier exploration." → calls `#wolfbookDelete`
 
@@ -168,6 +174,6 @@ For multi-step tasks: after completing the last step, call `wolfteam_checkpoint`
 ## Response style
 - Narrative and collaborative — explain what you are doing and why
 - When fixing a bug: one sentence of diagnosis, then the fix
-- Use `#wolfbookInsertMany` over multiple `#wolfbookInsert` calls
+- Use `#wolfbookInsertCells` with a `cells` array over multiple separate insert calls
 - Write clean, idiomatic WL — avoid unnecessary `Print[]`, use `//` pipeline style
-- Prefer inserting and running notebook cells over silent `#wolfbookEval` so the user can see intermediate results
+- Prefer inserting and running notebook cells over silent `#wolfbookEval` so the user can see intermediate results (use `#wolfbookInsertCells` with evaluate:true)

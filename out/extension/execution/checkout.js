@@ -970,6 +970,16 @@ async function checkoutExecutionQueue(self) {
         scrollLog('[checkout] sub-expr loop done | cell', currentExecution.execution.cell.index, '| total dt=', Date.now() - _coT0, 'ms | anyAborted:', anyAborted);
         self.writeDebugLog(`[CHECKOUT] cell ${currentExecution.execution.cell.index} | loop done | dt=${Date.now() - _coT0}ms | aborted: ${anyAborted}`);
 
+        // Race condition: abort fired just as the last sub finished naturally.
+        // r.aborted=false (kernel completed before SIGINT took effect), so the
+        // abort-packet path never cleared isAborting.  Clear it now so the retry
+        // timers in commands.js abort() don't send SIGINTs to the idle kernel
+        // (which would trigger the interrupt→Dialog[] handler on a resting kernel).
+        if (self.isAborting && !anyAborted) {
+            self.writeDebugLog(`[CHECKOUT] cell ${currentExecution.execution.cell.index} | computation beat the abort — clearing isAborting to stop retry SIGINTs`);
+            self.isAborting = false;
+        }
+
         if (firstLineNum > 0) currentExecution.execution.executionOrder = firstLineNum;
 
         if (!currentExecution.hasOutput) {

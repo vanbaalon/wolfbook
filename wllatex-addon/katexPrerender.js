@@ -27,6 +27,7 @@ const BASE_OPTIONS = { output: 'html', // suppress katex-mathml layer; keep only
     errorColor: '#cc0000',
     trust: false,
     strict: false, // required for \textcolor and non-standard commands
+    maxExpand: 5000, // default is 1000; increase for complex Mathematica output
     macros: {
         '\\dd': '\\mathrm{d}', // differential d
         '\\R': '\\mathbb{R}', // shorthand blackboard R
