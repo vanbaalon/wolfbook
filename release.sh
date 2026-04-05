@@ -86,15 +86,16 @@ else
 fi
 
 # 7. Create GitHub Release
-echo "🎁 Creating GitHub Release v$EXT_VERSION..."
+echo "🎁 Updating GitHub Release v$EXT_VERSION..."
 if command -v gh &> /dev/null; then
-    # Create tag and release with VSIX attached
-    # --generate-notes automatically creates changelog from commits
+    # Delete existing vsix if any (to replace with clearly named one)
+    gh release upload "v$EXT_VERSION" "$VSIX_PATH" --clobber --repo "vanbaalon/wolfbook" || \
     gh release create "v$EXT_VERSION" "$VSIX_PATH" \
         --title "v$EXT_VERSION" \
-        --notes "Release v$EXT_VERSION — Includes BTL v$BTL_VERSION (native arm64)" \
+        --notes "Release v$EXT_VERSION — Includes BTL v$BTL_VERSION (native darwin-arm64)" \
         --repo "vanbaalon/wolfbook"
-    echo "   ✅ GitHub Release created: https://github.com/vanbaalon/wolfbook/releases/tag/v$EXT_VERSION"
+    
+    echo "   ✅ GitHub Release updated: https://github.com/vanbaalon/wolfbook/releases/tag/v$EXT_VERSION"
 else
     echo "⚠️  'gh' CLI not found. Skipping automatic release creation."
     echo "Manual step: Upload $VSIX_PATH to GitHub Releases"
