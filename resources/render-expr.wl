@@ -1,6 +1,28 @@
 (* Wolfbook: rendering helpers and VsCodeRenderExpr dispatcher *)
 (* Extracted from init.wl (Round 9 refactor). *)
 
+(* ===== WBVersion[] — returns a formatted version summary ===== *)
+WBVersion[] := Module[{extV, btlV, wstpV, wlV, rows},
+    extV  = $getKernelConfig["wolfbookVersion",  "unknown"];
+    btlV  = $getKernelConfig["wolfbookBtlVersion",  "unknown"];
+    wstpV = $getKernelConfig["wolfbookWstpVersion", "unknown"];
+    wlV   = $Version;
+    rows  = {
+        {"Wolfbook extension", extV},
+        {"BTL (box-to-LaTeX)", btlV},
+        {"WSTP addon",         wstpV},
+        {"Mathematica kernel", wlV}
+    };
+    "<table style=\"border-collapse:collapse;font-family:monospace;font-size:13px;\">" <>
+    StringJoin[Map[
+        Function[row,
+            "<tr><td style=\"padding:2px 14px 2px 0;color:var(--vscode-descriptionForeground,#888);\">"
+            <> row[[1]] <> "</td><td style=\"padding:2px 0;\"><b>" <> row[[2]] <> "</b></td></tr>"
+        ],
+        rows
+    ]] <> "</table>"
+];
+
 (* ===== Helpers ===== *)
 makeWrapButton[label_String, uuid_String, action_String] :=
     "<button class=\"vscode-wolfram-btn\" data-uuid=\"" <> uuid <>
@@ -109,7 +131,7 @@ prepareExprForBoxes[expr_] :=
 graphicsQ[expr_] := !FreeQ[expr,
     _Graphics | _Graphics3D | _Graph | _GeoGraphics | _Legended | _Image | _Image3D];
 
-VsCodeRenderExpr[expr_, format_String, scale_?NumericQ] :=
+VsCodeRenderExpr[expr_, format_String, scale_?NumericQ, searchPat_String:""] :=
  Block[{$RecursionLimit = 100000, $IterationLimit = 400000},
   Module[
     {fmt, svgStr, svgStart, pngData, pngStr, mathmlStr, html, mathStart,
@@ -124,6 +146,82 @@ VsCodeRenderExpr[expr_, format_String, scale_?NumericQ] :=
        Explicit WL/InputForm/SVGSrc choices are left untouched. *)
     If[graphicsQ[expr] && MemberQ[{"WLLatex", "WLLatex2", "WLLatexSrc", "SVGT", "MathML", "TeX", "TeXSrc"}, fmt],
         fmt = "SVG"];
+
+    (* ---- InformationDataGrid path: ?*pattern* search results ---- *)
+    (* InformationDataGrid[{ctx -> {sym,...}, ...}, expanded_] is what the kernel
+       returns for ?*pattern* wildcard searches.  MakeBoxes on it requires a front
+       end (DynamicModuleBox / FEPrivate) and produces nothing useful when rendered
+       headlessly.  Instead we extract the symbol list directly and emit clickable
+       HTML badges so the user can click any name to open its full documentation in
+       the Watch panel (via the existing wolfbook.expandHoverDoc / docLookup pipeline). *)
+    If[Head[expr] === InformationDataGrid,
+        Module[{groups, totalCount, ctxHtml, symHtml, badgeStyle, groupStyle,
+                groupLabelStyle, wrapStyle, headerStyle, litPat},
+            groups = If[Length[expr] >= 1 && ListQ[expr[[1]]], expr[[1]], {}];
+            totalCount = Total[Length[Last[#]] & /@ groups];
+            (* Extract the literal search string from the glob pattern, e.g. "*Sin*" -> "Sin".
+               Using StringCases+Except instead of StringReplace because "*" in WL string rules
+               is treated as a wildcard (matches the whole string), not a literal asterisk. *)
+            litPat = StringJoin[StringCases[searchPat, Except["*"]..]];
+            badgeStyle =
+                "display:inline-block;padding:1px 7px;margin:2px 3px;" <>
+                "border:1px solid rgba(128,128,128,0.35);border-radius:3px;" <>
+                "font-size:12px;cursor:pointer;font-family:monospace;" <>
+                "background:transparent;color:var(--vscode-foreground,inherit);" <>
+                "transition:background 0.15s;";
+            groupStyle = "margin:6px 0 10px;";
+            groupLabelStyle =
+                "font-size:11px;color:var(--vscode-descriptionForeground,#888);" <>
+                "margin-bottom:4px;";
+            wrapStyle = "display:flex;flex-wrap:wrap;";
+            headerStyle =
+                "font-size:12px;color:var(--vscode-descriptionForeground,#999);" <>
+                "margin-bottom:8px;";
+            ctxHtml = StringJoin[
+                Map[
+                    Function[rule,
+                        Module[{ctx, syms, ctxShort, symBadges},
+                            {ctx, syms} = {First[rule], Last[rule]};
+                            ctxShort = StringReplace[ctx, "`" -> ""];
+                            symBadges = StringJoin[
+                                Map[
+                                    Function[sym,
+                                        Module[{symHtml},
+                                            symHtml = If[litPat =!= "",
+                                                StringReplace[sym, litPat ->
+                                                    "<mark style=\"background:rgba(100,170,255,0.35);color:inherit;border-radius:2px;padding:0 1px;\">" <> litPat <> "</mark>", 1],
+                                                sym
+                                            ];
+                                            "<button class=\"wl-info-grid-symbol\" " <>
+                                            "data-action=\"doc-lookup\" " <>
+                                            "data-symbol=\"" <> sym <> "\" " <>
+                                            "style=\"" <> badgeStyle <> "\">" <>
+                                            symHtml <> "</button>"
+                                        ]
+                                    ],
+                                    syms
+                                ]
+                            ];
+                            "<div style=\"" <> groupStyle <> "\">" <>
+                            "<div style=\"" <> groupLabelStyle <> "\">" <> ctxShort <> "</div>" <>
+                            "<div style=\"" <> wrapStyle <> "\">" <> symBadges <> "</div>" <>
+                            "</div>"
+                        ]
+                    ],
+                    groups
+                ]
+            ];
+            Return[
+                "<div class=\"vscode-wolfram-info-grid\" style=\"padding:4px 2px;\">" <>
+                "<div style=\"" <> headerStyle <> "\">" <>
+                ToString[totalCount] <> " matching symbol" <>
+                If[totalCount === 1, "", "s"] <>
+                " &mdash; click to view documentation</div>" <>
+                ctxHtml <>
+                "</div>"
+            ]
+        ]
+    ];
 
     (* ---- WLLatex path: TraditionalForm boxes → C++ boxToLatex addon → KaTeX HTML ---- *)
     If[fmt === "WLLatex",

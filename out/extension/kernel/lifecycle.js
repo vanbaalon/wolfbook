@@ -220,7 +220,107 @@ function _toGrayscaleHex(hex) {
 }
 
 // ---------------------------------------------------------------------------
-// Main kernel launch
+// Keepalive heartbeat
+//
+// Problem: after a long period of inactivity (hours to a day) the WolframKernel
+// process can become unresponsive for several reasons:
+//   1. macOS App Nap: macOS moves background processes into a low-power "nap"
+//      state after ~10 minutes of no user-visible activity; the WolframKernel
+//      child process can be suspended entirely, making the WSTP link go silent.
+//   2. OS-level socket/pipe buffer drain: an idle full-duplex pipe can be
+//      reclaimed by the OS on memory-pressure events.
+//   3. WolframKernel memory OOM or crash: the process dies silently; the extension
+//      never knows because there is no "onClose" event on the WstpSession.
+//
+// Fix: a periodic lightweight subWhenIdle('Null') ping keeps the WSTP pipe warm,
+// exercises the kernel's main loop (preventing deep suspension), and provides
+// real liveness detection.  If the ping fails or isOpen flips to false, the
+// extension automatically relaunches the kernel and notifies the user.
+//
+// Additionally, on macOS we call `caffeinate -i` on the WolframKernel process
+// or simply disable App Nap via NSProcessInfo — both are OS-level mechanisms
+// that tell macOS "this process should not be suspended".  The approach used
+// here is a cross-platform background `subWhenIdle` heartbeat with auto-relaunch.
+
+const _KEEPALIVE_INTERVAL_MS = 3 * 60 * 1000;  // 3 minutes
+const _KEEPALIVE_TIMEOUT_MS = 15 * 1000;        // 15 second ping timeout
+
+// Per-controller keepalive timer handle.  Stored on `self` so quitKernel
+// can stop it.  We use a plain `setInterval` (not rescheduled setTimeout)
+// so VS Code's event loop keeps running without cascading micro-delays.
+function _startKeepalive(self, WstpSession) {
+    _stopKeepalive(self);  // safety: never double-schedule
+    self._keepaliveTimer = setInterval(async () => {
+        if (!self.session) return;
+
+        // Fast path: check isOpen without sending anything.
+        // isOpen → false means kernel process has already died.
+        if (!self.session.isOpen) {
+            scrollLog('[keepalive] session.isOpen = false — kernel died, relaunching');
+            clearInterval(self._keepaliveTimer);
+            self._keepaliveTimer = null;
+            vscode.window.showWarningMessage(
+                'Wolfram kernel stopped (connection lost). Relaunching…',
+                'Dismiss'
+            );
+            _lifecycle_relaunch(self, WstpSession);
+            return;
+        }
+
+        // If the kernel is currently busy (user evaluation in flight) skip the
+        // ping entirely — we don't want to push subWhenIdle onto a busy queue.
+        // The busy path itself keeps the pipe alive; we only care about the idle case.
+        if (!self.session.isReady) return;
+
+        // Send a lightweight ping via subWhenIdle so it never interrupts evaluation.
+        // Uses the timeout option so a hung/suspended kernel is detected promptly.
+        try {
+            await self.session.subWhenIdle('Null', { timeout: _KEEPALIVE_TIMEOUT_MS });
+            scrollLog('[keepalive] ping OK');
+        } catch (err) {
+            const reason = String(err && err.message || err);
+            scrollLog('[keepalive] ping failed:', reason, '— relaunching kernel');
+            clearInterval(self._keepaliveTimer);
+            self._keepaliveTimer = null;
+            vscode.window.showWarningMessage(
+                'Wolfram kernel became unresponsive. Relaunching… (' + reason + ')',
+                'Dismiss'
+            );
+            _lifecycle_relaunch(self, WstpSession);
+        }
+    }, _KEEPALIVE_INTERVAL_MS);
+}
+
+function _stopKeepalive(self) {
+    if (self._keepaliveTimer) {
+        clearInterval(self._keepaliveTimer);
+        self._keepaliveTimer = null;
+    }
+}
+
+// Auto-relaunch: close the dead session cleanly then call launchKernel.
+// Runs on a microtask so the caller (setInterval callback) can return first.
+async function _lifecycle_relaunch(self, WstpSession) {
+    // Close the stale session object so its resources are freed
+    try { if (self.session) self.session.close(); } catch (_) {}
+    self.session = undefined;
+    self.kernelStatusString = 'unresolved';
+    vscode.commands.executeCommand('setContext', 'wolframKernelActive', false);
+    applyKernelOfflineUI(self);
+    // Warn the user before relaunching — all kernel variables will be lost
+    const choice = await vscode.window.showWarningMessage(
+        'The Wolfram kernel has stopped responding and will be restarted. All kernel variables and definitions will be lost.',
+        'Restart Now',
+        'Cancel'
+    );
+    if (choice !== 'Restart Now') {
+        scrollLog('[lifecycle] Auto-relaunch cancelled by user.');
+        return;
+    }
+    await launchKernel(self, WstpSession);
+}
+
+
 
 async function launchKernel(self, WstpSession) {
     console.log('[launchKernel] entering (WSTP)');
@@ -307,6 +407,38 @@ async function launchKernel(self, WstpSession) {
             await self.session.sub(`$setKernelConfig["${k}", ${vStr}]`).catch(() => {});
         }
 
+        // Push extension + addon version strings so WBVersion[] can report them
+        {
+            const _pkgPath = require('path').join(self.extensionPath, 'package.json');
+            let _extVer = 'unknown';
+            try { _extVer = require(_pkgPath).version; } catch (_) {}
+
+            // Read BTL version from the already-loaded addon (if available)
+            let _btlVer = 'unknown';
+            try {
+                const _btlAddonPath = require('path').join(self.extensionPath, 'wllatex-addon', 'wolfbook_btl.node');
+                const _btlAddon = require(_btlAddonPath);
+                if (typeof _btlAddon.version === 'string') _btlVer = _btlAddon.version;
+            } catch (_) {}
+
+            // Read WSTP addon version (already loaded as WstpSession's parent module)
+            let _wstpVer = 'unknown';
+            try {
+                const _wstpFs   = require('fs');
+                const _wstpPath = require('path');
+                const _wstpPlat = process.platform, _wstpArch = process.arch;
+                const _wstpDir  = _wstpPath.join(self.extensionPath, 'wstp');
+                const _wstpPre  = _wstpPath.join(_wstpDir, 'prebuilt', `wstp-${_wstpPlat}-${_wstpArch}.node`);
+                const _wstpFb   = _wstpPath.join(_wstpDir, 'build', 'Release', 'wstp.node');
+                const _wstpAddon = require(_wstpFs.existsSync(_wstpPre) ? _wstpPre : _wstpFb);
+                if (typeof _wstpAddon.version === 'string') _wstpVer = _wstpAddon.version;
+            } catch (_) {}
+
+            await self.session.sub(`$setKernelConfig["wolfbookVersion", "${_extVer}"]`).catch(() => {});
+            await self.session.sub(`$setKernelConfig["wolfbookBtlVersion", "${_btlVer}"]`).catch(() => {});
+            await self.session.sub(`$setKernelConfig["wolfbookWstpVersion", "${_wstpVer}"]`).catch(() => {});
+        }
+
         // Set $PageWidth so Print[] / OutputForm wraps at the configured width
         // instead of the default 78 characters.  Two times the default (156)
         // avoids most wrapping while keeping ASCII-art power notation readable.
@@ -348,6 +480,30 @@ async function launchKernel(self, WstpSession) {
             if (_pidExpr?.type === 'integer' && typeof _pidExpr.value === 'number') {
                 _appendPid(_pidExpr.value);
                 scrollLog('[launchKernel] kernel PID registered:', _pidExpr.value);
+
+                // macOS App Nap prevention: launch `caffeinate -w <pid>` as a companion
+                // process.  caffeinate holds a "user-activity assertion" tied to the
+                // WolframKernel PID; macOS will not put the kernel into low-power
+                // nap mode for as long as caffeinate is alive.  The companion process
+                // exits automatically if WolframKernel dies (the -w flag waits for the
+                // target PID).  It is also tracked so quitKernel() can kill it.
+                if (process.platform === 'darwin') {
+                    try {
+                        const _cp = require('child_process');
+                        const _caffPid = _pidExpr.value;
+                        if (self._caffeinateProc) {
+                            try { self._caffeinateProc.kill(); } catch (_) {}
+                        }
+                        self._caffeinateProc = _cp.spawn(
+                            'caffeinate', ['-i', '-w', String(_caffPid)],
+                            { detached: false, stdio: 'ignore' }
+                        );
+                        self._caffeinateProc.on('error', () => {}); // ignore ENOENT
+                        scrollLog('[launchKernel] caffeinate -i -w', _caffPid, 'started (App Nap disabled)');
+                    } catch (_) {
+                        scrollLog('[launchKernel] caffeinate spawn failed (non-fatal)');
+                    }
+                }
             }
         } catch(_) {}
 
@@ -378,6 +534,11 @@ async function launchKernel(self, WstpSession) {
                 'Quiet[Needs["CodeParser`"]]; $hasCodeParser=True; Null'
             ).catch(() => {});
         }
+
+        // Start keepalive heartbeat: pings kernel every 3 minutes via subWhenIdle.
+        // Prevents macOS App Nap suspension; auto-relaunches if the kernel dies.
+        _startKeepalive(self, WstpSession);
+        scrollLog('[launchKernel] keepalive started (interval:', _KEEPALIVE_INTERVAL_MS / 1000, 's)');
     } catch (err) {
         console.error(`[launchKernel] error: ${err.message}`);
         vscode.window.showErrorMessage(`Failed to launch Wolfram kernel: ${err.message}`);
@@ -398,6 +559,15 @@ async function ensureSubKernel(self, WstpSession, imgDir, imgRel) { throw new Er
 
 function quitKernel(self) {
     console.log('[quitKernel] closing session');
+    // Stop keepalive heartbeat before closing the session so no ping fires
+    // after close() and triggers a spurious relaunch.
+    _stopKeepalive(self);
+    // Kill caffeinate companion (macOS App Nap guard) — it would exit on its own
+    // when WolframKernel dies, but it's cleaner to kill it explicitly here.
+    if (self._caffeinateProc) {
+        try { self._caffeinateProc.kill(); } catch (_) {}
+        self._caffeinateProc = null;
+    }
     if (self.session) {
         try { self.session.close(); } catch (_) {}
         self.session = undefined;

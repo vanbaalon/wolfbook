@@ -162,6 +162,10 @@ async function evaluateSelection(getController) {
         // (EnterTextPacket inside Dialog[]) automatically.
         // VsCodeRenderExpr runs on the main kernel inline, returning HTML directly.
         // No .mx file export/import, no separate sub-warm render step.
+        // If the expression is a ?pattern Information query, extract the pattern
+        // and pass it to VsCodeRenderExpr so it can highlight matches in the grid.
+        const _infoPatMatch = expr.trim().match(/^\?(\S+)/);
+        const _infoPat = _infoPatMatch ? '"' + _infoPatMatch[1].replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"' : '""';
         const wlExpr =
             'Block[{wbES$v,wbBC$v,wbLC$v},' +
             'VsCodeSetImgDir["' + imgDirWL + '","' + imgRelWL + '"];' +
@@ -170,7 +174,7 @@ async function evaluateSelection(getController) {
             'Export["' + txtPathWL + '",ToString[wbES$v,InputForm],"Text"];' +
             'If[wbBC$v>' + BYTE_LIMIT + '||wbLC$v>' + LEAF_LIMIT + ',' +
             '"EVALSEL:LARGE:' + txtPathWL + ':"<>ToString[wbLC$v]<>":"<>ToString[wbBC$v],' +
-            'VsCodeRenderExpr[wbES$v,"' + format + '",' + scale + ']' +
+            'VsCodeRenderExpr[wbES$v,"' + format + '",' + scale + ',' + _infoPat + ']' +
             ']]';
 
         scrollLog('[eval-sel] subAuto | format:', format, '| expr:', expr.slice(0, 100));

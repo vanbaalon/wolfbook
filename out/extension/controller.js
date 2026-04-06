@@ -804,6 +804,19 @@ class WolframNotebookKernel {
                           message.h !== undefined ? ('| scrollH:' + message.h) : '');
             }
 
+            // ---- InformationDataGrid symbol badge click → open docs in Watch panel ----
+            // Renderer posts { type: 'doc-lookup', symbol: 'Sin' } when user clicks a
+            // symbol badge in ?*pattern* search results.  We delegate to the same
+            // wolfbook.expandHoverDoc command used by hover-tooltip 📖 links.
+            if (message.type === 'doc-lookup' && message.symbol) {
+                try {
+                    await vscode.commands.executeCommand('wolfbook.expandHoverDoc', message.symbol);
+                } catch (err) {
+                    scrollLog('[doc-lookup] executeCommand error:', err.message);
+                }
+                return;
+            }
+
             // ---- Dialog subsystem messages ----
             if (message.type === 'dialog-eval-request' && message.expr !== undefined) {
                 const rid = message.requestId;

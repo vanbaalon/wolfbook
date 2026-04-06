@@ -735,6 +735,30 @@ export function activate(context) {
                 }
             });
             
+            // ---- InformationDataGrid symbol badges (doc-lookup) ----
+            // Emitted by render-expr.wl for ?*pattern* wildcard searches.
+            // Each badge has data-action="doc-lookup" data-symbol="Sin".
+            // Clicking sends doc-lookup to the extension host which calls
+            // wolfbook.expandHoverDoc → evalSel.docLookup → Watch panel.
+            const docLookupBtns = element.querySelectorAll('button[data-action="doc-lookup"]');
+            docLookupBtns.forEach(btn => {
+                btn.addEventListener('mouseenter', () => {
+                    btn.style.background = 'rgba(128,128,128,0.18)';
+                });
+                btn.addEventListener('mouseleave', () => {
+                    btn.style.background = 'transparent';
+                });
+                btn.addEventListener('click', (e) => {
+                    e.preventDefault(); e.stopPropagation();
+                    const symbol = btn.getAttribute('data-symbol');
+                    if (!symbol) return;
+                    if (context && context.postMessage) {
+                        try { context.postMessage({ type: 'doc-lookup', symbol }); }
+                        catch (err) { console.error('[WolframRenderer] doc-lookup postMessage error:', err); }
+                    }
+                });
+            });
+
             // ---- Format + zoom buttons for each output header ----
             // Each .wl-output-header[data-out-n] gets a button group:
             //   TXT | SVG | ∑  (format selectors)

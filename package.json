@@ -3,7 +3,7 @@
   "displayName": "Wolfbook \u2014 AI-Friendly Wolfram Language Notebook",
   "description": "AI-friendly Wolfram Language notebook for VS Code. WSTP kernel, KaTeX rendering with adaptive line-breaking, Unicode input, LSP diagnostics, and AI-readable outputs for GitHub Copilot.",
   "publisher": "wolfbook",
-  "version": "2.6.17",
+  "version": "2.6.20",
   "engines": {
     "vscode": "^1.95.0"
   },
