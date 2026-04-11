@@ -2,26 +2,15 @@
 (* Extracted from init.wl (Round 9 refactor). *)
 
 (* ===== WBVersion[] — returns a formatted version summary ===== *)
-WBVersion[] := Module[{extV, btlV, wstpV, wlV, rows},
-    extV  = $getKernelConfig["wolfbookVersion",  "unknown"];
-    btlV  = $getKernelConfig["wolfbookBtlVersion",  "unknown"];
-    wstpV = $getKernelConfig["wolfbookWstpVersion", "unknown"];
-    wlV   = $Version;
-    rows  = {
-        {"Wolfbook extension", extV},
-        {"BTL (box-to-LaTeX)", btlV},
-        {"WSTP addon",         wstpV},
-        {"Mathematica kernel", wlV}
-    };
-    "<table style=\"border-collapse:collapse;font-family:monospace;font-size:13px;\">" <>
-    StringJoin[Map[
-        Function[row,
-            "<tr><td style=\"padding:2px 14px 2px 0;color:var(--vscode-descriptionForeground,#888);\">"
-            <> row[[1]] <> "</td><td style=\"padding:2px 0;\"><b>" <> row[[2]] <> "</b></td></tr>"
-        ],
-        rows
-    ]] <> "</table>"
-];
+WBVersion[] := (
+    Print["Wolfbook extension : ", $getKernelConfig["wolfbookVersion",      "unknown"],
+          "  (installed: ", $getKernelConfig["wolfbookBuildDate",    "unknown"], ")"];
+    Print["BTL (box-to-LaTeX) : ", $getKernelConfig["wolfbookBtlVersion",   "unknown"],
+          "  (built: ", $getKernelConfig["wolfbookBtlBuildDate", "unknown"], ")"];
+    Print["WSTP addon         : ", $getKernelConfig["wolfbookWstpVersion",  "unknown"],
+          "  (built: ", $getKernelConfig["wolfbookWstpBuildDate","unknown"], ")"];
+    Print["Mathematica kernel : ", $Version];
+);
 
 (* ===== Helpers ===== *)
 makeWrapButton[label_String, uuid_String, action_String] :=
@@ -135,7 +124,8 @@ VsCodeRenderExpr[expr_, format_String, scale_?NumericQ, searchPat_String:""] :=
  Block[{$RecursionLimit = 100000, $IterationLimit = 400000},
   Module[
     {fmt, svgStr, svgStart, pngData, pngStr, mathmlStr, html, mathStart,
-     rasImg, rasData, rasStr, rasFname, rasFpath, texStr},
+     rasImg, rasData, rasStr, rasFname, rasFpath, texStr,
+     fname, fpath, hashStr},
     fmt = If[format === "Auto",
              If[UseSvgQ[] && graphicsQ[expr], "SVG", "MathML"],
              format];
@@ -312,14 +302,11 @@ VsCodeRenderExpr[expr_, format_String, scale_?NumericQ, searchPat_String:""] :=
                         Return["<img class=\"vscode-wolfram-png-output\" data-wl-img=\"" <>
                                rasFpath <> "\" src=\"" <>
                                $wolframImgRelPrefix <> "/" <> rasFname <> "\"/>"]]]
-                    ,
-                rasData = Quiet[Check[ExportString[rasImg, "PNG"], $Failed]];
-                If[StringQ[rasData],
-                    rasStr = StringReplace[Quiet[ExportString[rasData, "Base64"]], WhitespaceCharacter -> ""];
-                    If[StringQ[rasStr] && StringLength[rasStr] > 20,
-                        Return["<img class=\"vscode-wolfram-png-output\" src=\"data:image/png;base64," <>
-                               rasStr <> "\"/>"]]]
             ];
+            (* No imgDir set — cannot save image file *)
+            If[ImageQ[rasImg],
+                Return["<pre class=\"vscode-wolfram-text-output\">Image dir not configured — cannot render graphics.</pre>"]]
+            ;
             fmt = "MathML"  (* Rasterize fallback *)
         ]
     ];
@@ -327,7 +314,7 @@ VsCodeRenderExpr[expr_, format_String, scale_?NumericQ, searchPat_String:""] :=
     (* ---- SVG path: Graphics → SVG/PNG vector; non-graphics → Rasterize → PNG ---- *)
     If[fmt === "SVG",
         If[graphicsQ[expr],
-            svgStr = Quiet[CheckAbort[Check[TimeConstrained[ExportString[expr, "SVG", Background -> None], 15, $Failed], $Failed], $Failed]];
+            svgStr = Quiet[CheckAbort[Check[TimeConstrained[ExportString[expr, "SVG", Background -> None], 10, $Failed], $Failed], $Failed]];
             (* ExportString prepends <?xml...> and <!DOCTYPE...> before <svg.
                Strip everything before the first <svg so the browser gets clean SVG.
                Also strip newlines: WSTP transmits them as literal \012 escape sequences
@@ -339,44 +326,35 @@ VsCodeRenderExpr[expr_, format_String, scale_?NumericQ, searchPat_String:""] :=
                 svgStr = StringDelete[svgStr, "\n" | "\r"];
                 svgStr = vscodeStripSVGFonts[svgStr]
             ];
+            (* SVG succeeded — save to file. Falls through to PNG only if SVG timed out. *)
             If[StringQ[svgStr] && StringContainsQ[svgStr, "<svg"],
                 If[$wolframImgDir =!= "" && StringLength[$wolframImgDir] > 0,
-                    (* File-based: save SVG, embed via relative src path.
-                       Use a content-hash filename so that identical renders
-                       reuse the same file instead of creating a new UUID copy. *)
-                    Module[{fname, fpath, hashStr},
-                        hashStr = IntegerString[Hash[svgStr], 36];
-                        fname = "wl_" <> hashStr <> ".svg";
-                        fpath = FileNameJoin[{$wolframImgDir, fname}];
-                        If[!FileExistsQ[fpath], Quiet[Export[fpath, svgStr, "String"]]];
-                        Return["<img class=\"vscode-wolfram-svg-output\" data-wl-img=\"" <>
-                               fpath <> "\" src=\"" <>
-                               $wolframImgRelPrefix <> "/" <> fname <> "\"/>"]],
-                    (* Fallback: inline SVG with font stripping *)
-                    Return["<div class=\"vscode-wolfram-svg-output\">" <> svgStr <> "</div>"]
+                    (* Save SVG file. Return here exits VsCodeRenderExpr (outer Module). *)
+                    hashStr = IntegerString[Hash[svgStr], 36];
+                    fname = "wl_" <> hashStr <> ".svg";
+                    fpath = FileNameJoin[{$wolframImgDir, fname}];
+                    If[!FileExistsQ[fpath], Quiet[Export[fpath, svgStr, "String"]]];
+                    Return["<img class=\"vscode-wolfram-svg-output\" data-wl-img=\"" <>
+                           fpath <> "\" src=\"" <>
+                           $wolframImgRelPrefix <> "/" <> fname <> "\"/>"]
                 ]
             ];
-            (* SVG failed — PNG fallback.
-               Use a hash of the expression as filename to deduplicate renders. *)
+            (* SVG timed out (>10s) — PNG fallback at the same ImageSize so it looks the same. *)
             If[$wolframImgDir =!= "" && StringLength[$wolframImgDir] > 0,
-                Module[{fname, fpath, hashStr},
-                    hashStr = IntegerString[Hash[expr], 36];
-                    fname = "wl_" <> hashStr <> ".png";
-                    fpath = FileNameJoin[{$wolframImgDir, fname}];
-                    If[!FileExistsQ[fpath],
-                        Quiet[CheckAbort[Export[fpath, expr, "PNG", Background -> None], $Failed]]];
-                    If[FileExistsQ[fpath],
-                        Return["<img class=\"vscode-wolfram-png-output\" data-wl-img=\"" <>
-                               fpath <> "\" src=\"" <>
-                               $wolframImgRelPrefix <> "/" <> fname <> "\"/>"]]]
+                hashStr = IntegerString[Hash[expr], 36];
+                fname = "wl_" <> hashStr <> ".png";
+                fpath = FileNameJoin[{$wolframImgDir, fname}];
+                If[!FileExistsQ[fpath],
+                    Quiet[CheckAbort[Export[fpath, expr, "PNG",
+                        Background -> None, ImageSize -> Automatic, ImageResolution -> 144], $Failed]]];
+                If[FileExistsQ[fpath],
+                    Return["<img class=\"vscode-wolfram-png-output\" data-wl-img=\"" <>
+                           fpath <> "\" src=\"" <>
+                           $wolframImgRelPrefix <> "/" <> fname <> "\"/>"]
+                ]
             ];
-            (* Inline PNG base64 fallback (no $wolframImgDir) *)
-            pngData = Quiet[CheckAbort[Check[TimeConstrained[ExportString[expr, "PNG", Background -> None], 15, $Failed], $Failed], $Failed]];
-            If[StringQ[pngData],
-                pngStr = StringReplace[Quiet[ExportString[pngData, "Base64"]], WhitespaceCharacter -> ""];
-                If[StringQ[pngStr] && StringLength[pngStr] > 20,
-                    Return["<img class=\"vscode-wolfram-png-output\" src=\"data:image/png;base64," <>
-                           pngStr <> "\"/>"]]]
+            (* No imgDir — cannot render graphics without an image directory *)
+            Return["<pre class=\"vscode-wolfram-text-output\">Image dir not configured — cannot render graphics.</pre>"]
         ,
             (* Non-Graphics SVG: Rasterize the typeset expression to PNG *)
             rasImg = Quiet[CheckAbort[Check[TimeConstrained[Rasterize[expr, ImageResolution -> 144, Background -> None], 15, $Failed], $Failed], $Failed]];
@@ -390,12 +368,8 @@ VsCodeRenderExpr[expr_, format_String, scale_?NumericQ, searchPat_String:""] :=
                         Return["<img class=\"vscode-wolfram-png-output\" data-wl-img=\"" <>
                                rasFpath <> "\" src=\"" <>
                                $wolframImgRelPrefix <> "/" <> rasFname <> "\"/>"]]];
-                rasData = Quiet[Check[ExportString[rasImg, "PNG"], $Failed]];
-                If[StringQ[rasData],
-                    rasStr = StringReplace[Quiet[ExportString[rasData, "Base64"]], WhitespaceCharacter -> ""];
-                    If[StringQ[rasStr] && StringLength[rasStr] > 20,
-                        Return["<img class=\"vscode-wolfram-png-output\" src=\"data:image/png;base64," <>
-                               rasStr <> "\"/>"]]]
+                (* No imgDir — cannot save rasterized image *)
+                Return["<pre class=\"vscode-wolfram-text-output\">Image dir not configured — cannot render graphics.</pre>"]
             ]
         ];
         (* All SVG/PNG/Rasterize attempts failed — fall through to MathML *)
@@ -490,3 +464,9 @@ VsCodeRenderExpr[expr_, format_String, scale_?NumericQ, searchPat_String:""] :=
  ] (* end Module *)
 ]; (* end Block *)
 
+(* ===== Protect all wolfbook render-expr symbols from ClearAll["Global`*"] ===== *)
+Protect[
+    WBVersion, makeWrapButton, UseSvgQ, cleanMathML, vscodeStripSVGFonts,
+    expandAllTemplateBoxes, mathematicaformatResult, expandInlineBoxes,
+    prepareExprForBoxes, graphicsQ, VsCodeRenderExpr
+];

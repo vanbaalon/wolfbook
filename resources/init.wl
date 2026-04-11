@@ -26,6 +26,11 @@ Quiet[Module[{files, now},
     Do[If[AbsoluteTime[FileDate[f]] < now - 7*86400, DeleteFile[f]], {f, files}]
 ]];
 
+(* ===== WBDirectory ===== *)
+(* Set by extension.js at kernel launch and on every active-notebook switch.      *)
+(* Default is ""; extension.js is the only authoritative source of the path.     *)
+WBDirectory[] = "";
+
 (* ===== Per-notebook image directory ===== *)
 (* Set by controller before each cell execution via VsCodeSetImgDir.              *)
 (* SVG/PNG outputs are written as individual files; embedded via relative src=    *)
@@ -34,8 +39,10 @@ $wolframImgDir      = "";   (* absolute path — used for file I/O and GC       
 $wolframImgRelPrefix = "";  (* relative prefix, e.g. "img/MyNotebook"            *)
 
 VsCodeSetImgDir[dir_String, relPrefix_String] := Module[{},
+    Unprotect[$wolframImgDir, $wolframImgRelPrefix];
     $wolframImgDir       = dir;
     $wolframImgRelPrefix = relPrefix;
+    Protect[$wolframImgDir, $wolframImgRelPrefix];
     If[StringLength[dir] > 0 && !DirectoryQ[$wolframImgDir],
         Quiet[CreateDirectory[$wolframImgDir, CreateIntermediateDirectories -> True]]];
     Null
@@ -117,14 +124,23 @@ Check[Get[FileNameJoin[{$wolframResourceDir, "render-html.wl"}]],
    SetOptions[$Output, PageWidth->Infinity] also updates $PageWidth, so the
    explicit assignment must come after to ensure Short[] keeps working. *)
 SetOptions[$Output, PageWidth -> Infinity];
-(* Restore $PageWidth to a finite value so Short[expr, n] abbreviates
+(* Restore System`$PageWidth to a finite value so Short[expr, n] abbreviates
    correctly.  lifecycle.js will later override this to the user-configured
    value (notebook.print.pageWidth).  $PageWidth and $Output's PageWidth
-   are independent once $PageWidth is set explicitly here. *)
-$PageWidth = 78;
+   are independent once $PageWidth is set explicitly here.
+   Use fully-qualified System`$PageWidth so it is unambiguous regardless of
+   the current $Context.  Protect[] prevents ClearAll["Global`*"] or user
+   code from wiping the value. *)
+Unprotect[System`$PageWidth];
+System`$PageWidth = 78;
+Protect[System`$PageWidth];
+(* $inPrintPatch lives in a private wolfbook context so ClearAll["Global`*"]
+   cannot wipe it and accidentally cause infinite recursion in Print[]. *)
+If[!MemberQ[$ContextPath, "WolfbookPrivate`"],
+    PrependTo[$ContextPath, "WolfbookPrivate`"]];
 Unprotect[Print];
-Print[args___] /; !TrueQ[$inPrintPatch] :=
-    Block[{$inPrintPatch = True},
+Print[args___] /; !TrueQ[WolfbookPrivate`$inPrintPatch] :=
+    Block[{WolfbookPrivate`$inPrintPatch = True},
         WriteString[$Output,
             StringJoin[Function[arg,
                 (* BoxData[_] from CellPrint-fallback / OGRe-style packages:
@@ -132,7 +148,8 @@ Print[args___] /; !TrueQ[$inPrintPatch] :=
                    quoted strings — required by the C++ boxToLatex parser. *)
                 If[MatchQ[arg, _BoxData],
                     "BoxData[" <> ToString[First[arg], InputForm] <> "]",
-                    ToString[arg, OutputForm, PageWidth -> $PageWidth]
+                    If[StringQ[arg], arg,
+                        ToString[arg, InputForm]]
                 ]
             ] /@ {args}] <> "\n"
         ]
@@ -216,3 +233,11 @@ VsCodeSymbolMarkdown[symName_String, longForm_: True] :=
         HoldFirst]
     ];
 
+(* ===== Protect all wolfbook init symbols from ClearAll["Global`*"] ===== *)
+Protect[
+    $logDir, $logPath, logWrite, logWriteFile, logError,
+    $wolframOutputTempDir, $wolframImgDir, $wolframImgRelPrefix,
+    VsCodeSetImgDir, VsCodeCleanupImgDir,
+    $hasCodeParser, $config, $setKernelConfig, $getKernelConfig,
+    WBDirectory, VsCodeSymbolMarkdown
+];

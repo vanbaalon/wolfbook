@@ -360,3 +360,10 @@ VsCodeRenderLast[format_String, scale_?NumericQ] :=
 
 VsCodeRenderLast[] := VsCodeRenderLast["Auto", 0.8];
 
+(* ===== Protect all wolfbook API symbols from ClearAll["Global`*"] ===== *)
+Protect[
+    VsCodeDynExportValue, VsCodeRender, VsCodeRenderFull, VsCodeOpenAsText,
+    VsCodeSyntaxCheck, VsCodeSplitCode, VsCodeEvalWrapper, VsCodeRenderNth,
+    VsCodeRenderLast,
+    $vsCodeLastResult, $vsCodeLastResultList, $vsCodeLastStatuses
+];

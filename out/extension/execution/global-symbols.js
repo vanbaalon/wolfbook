@@ -98,9 +98,39 @@ function _commentRanges(text) {
     return ranges;
 }
 
-function _inComment(idx, ranges) {
+/**
+ * Returns [start, end) ranges for all WL string literals, honouring \" escapes.
+ * Skips over comment spans so a " inside (* ... *) doesn't open a string.
+ */
+function _stringRanges(text, commentSpans) {
+    const ranges = [];
+    let i = 0;
+    while (i < text.length) {
+        // Skip comment regions — their " must not open a string
+        const inCmt = commentSpans.find(([s, e]) => i >= s && i < e);
+        if (inCmt) { i = inCmt[1]; continue; }
+        if (text[i] === '"') {
+            const start = i++;
+            while (i < text.length && text[i] !== '"') {
+                if (text[i] === '\\' && i + 1 < text.length) i++; // skip escaped char
+                i++;
+            }
+            if (i < text.length) i++; // consume closing "
+            ranges.push([start, i]);
+        } else {
+            i++;
+        }
+    }
+    return ranges;
+}
+
+function _inSpan(idx, ranges) {
     for (const [s, e] of ranges) if (idx >= s && idx < e) return true;
     return false;
+}
+
+function _inComment(idx, ranges) {
+    return _inSpan(idx, ranges);
 }
 
 // ── Decoration application ──────────────────────────────────────────────────
@@ -114,6 +144,7 @@ function _applyToEditor(editor, decor) {
     try {
         const text         = editor.document.getText();
         const commentSpans = _commentRanges(text);
+        const stringSpans  = _stringRanges(text, commentSpans);
         const ranges = [];
         // WL identifiers: letters (incl. Unicode \u0080+), digits, $ and _.
         // Use custom word-boundary lookaround so Greek letters are matched correctly.
@@ -128,7 +159,8 @@ function _applyToEditor(editor, decor) {
             const re = new RegExp(boundary + pattern + boundaryR, 'g');
             let m;
             while ((m = re.exec(text)) !== null) {
-                if (_inComment(m.index, commentSpans)) continue;  // skip symbols inside (* ... *)
+                if (_inComment(m.index, commentSpans)) continue;  // skip inside (* ... *)
+                if (_inSpan(m.index, stringSpans))  continue;      // skip inside "..."
                 const start = editor.document.positionAt(m.index);
                 const end   = editor.document.positionAt(m.index + m[0].length);
                 ranges.push(new vscode.Range(start, end));

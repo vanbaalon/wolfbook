@@ -4,6 +4,69 @@ All notable changes to **Wolfbook** are documented here.
 
 ---
 
+## [2.6.26] - 2026-04-11
+
+### Changed
+- **Kernel restart no longer blocks in Bypass Approvals mode** — previously, restarting the kernel always popped up a confirmation dialog even when VS Code's "Bypass Approvals" setting was active. The restart now shows a descriptive message in the tool call strip (so you can still see it happening and cancel if needed) but auto-approves when bypass is on. Use `action:"abort"` to interrupt a stuck evaluation without restarting.
+
+---
+
+## [2.6.25] - 2026-04-11
+
+### Added — Copilot / AI tools
+
+- **Kernel checkpoint & restore** — two new actions on the `wolfbook_kernelControl` tool:
+  - `action:"checkpoint"` saves all your current Global definitions to a `.mx` file (`/tmp/wolfbook-checkpoint-*.mx`). Fast and non-destructive — cell outputs are unaffected. Pass an optional `tag` (e.g. `tag:"before-refactor"`) to label it.
+  - `action:"restore"` reloads the most recent checkpoint (or a specific file via `path`), clearing the current state first. This is the notebook equivalent of a git stash — create a safe rollback point before risky refactors, then restore if something goes wrong.
+
+- **`outputForm` parameter for Evaluate Expression** — ask Copilot to evaluate and return the result in a specific format:
+  - `outputForm:"Short"` — gives a truncated preview of very large expressions
+  - `outputForm:"TeXForm"` — returns the LaTeX representation (handy when writing markdown math)
+  - `outputForm:"MatrixForm"` / `outputForm:"TableForm"` — structured display for matrices and tables
+  - Default (omitted): full symbolic result in InputForm
+
+- **Edit Cell diff summary** — when Copilot edits a cell, the response now includes a compact diff showing which lines were added or removed (up to 5 lines shown). Makes it easy to verify what changed without reading the whole cell.
+
+- **`newContent` accepted as alias for `content` in Edit Cell** — models that prefer `newContent` as the parameter name now work without any extra prompting.
+
+### Changed
+- **Default evaluation timeout raised from 10 s → 30 s** — more headroom for symbolic computations that take a moment to settle. You can still override with `timeoutSeconds` for very long-running work.
+
+---
+
+## [2.6.21] - 2026-04-10
+
+### Fixed — Copilot / AI tools
+
+- **MultiLine evaluation no longer produces "Incomplete expression" errors** — when Copilot uses `multiLine:true` mode in Evaluate Expression, each block of code is now split by a proper Wolfram Language parser (tracking bracket depth, strings, and nested comments) rather than naively on newlines. Multi-line constructs like `Module[...]` spread across several lines are now handled correctly and submitted as a single statement.
+
+- **Syntax highlighting no longer colours symbols inside strings** — variable names inside `"..."` strings were incorrectly highlighted as user-defined symbols. The highlighter now correctly skips both string literals and `(* ... *)` comments.
+
+- **KaTeX validation on AI-inserted markdown** — when Copilot inserts or edits a markdown cell, the math (`$...$` and `$$...$$`) is now validated before the edit is committed. Any LaTeX errors are reported back to the agent so it can fix the formula immediately rather than leaving broken math in the cell.
+
+### Changed
+- **Insert Cells now evaluates automatically** — when Copilot inserts new code cells, the last cell is evaluated immediately by default. Pass `evaluate:false` to insert without running.
+- **Newly inserted cells get a brief blue highlight** — a one-second glow animation marks every cell Copilot inserts, making it easy to spot the new content in a long notebook.
+- **All AI cell edits and insertions are logged** — `img/<notebook>/ai_eval_log.md` now records not just kernel evaluations but also every cell the AI edits or inserts, giving a complete audit trail of Copilot's changes.
+
+---
+
+## [2.6.20] - 2026-04-06
+
+### Added
+- **`WBVersion[]` diagnostic command** — evaluate `WBVersion[]` in any notebook cell to print a formatted version summary of all Wolfbook components:
+  - Wolfbook extension version + install date (from `package.json` mtime)
+  - BTL (box-to-LaTeX) C++ addon version + build date (embedded at compile time)
+  - WSTP native addon version + build date (embedded at compile time)
+  - Mathematica/Wolfram Engine kernel version (`$Version`)
+
+  Output appears as plain `Print[]` lines in the cell output, bypassing all rendering pipelines.
+
+### Infrastructure
+- **Build-time date stamping** — `BTL` and `WSTP` native addons now embed their build date (UTC `YYYY-MM-DD`) in the binary alongside the version string, exported as `buildDate`. The BTL `build.sh` writes `build_version.h` with both `WOLFBOOK_BTL_VERSION` and `WOLFBOOK_BTL_BUILD_DATE`; the WSTP `build.sh` passes `-DWSTP_ADDON_BUILD_DATE` directly to `clang++`. The extension derives its date from the `package.json` file modification time.
+
+---
+
 ## [2.6.17] - 2026-04-05
 
 ### Fixed

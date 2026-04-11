@@ -3,7 +3,7 @@
   "displayName": "Wolfbook \u2014 AI-Friendly Wolfram Language Notebook",
   "description": "AI-friendly Wolfram Language notebook for VS Code. WSTP kernel, KaTeX rendering with adaptive line-breaking, Unicode input, LSP diagnostics, and AI-readable outputs for GitHub Copilot.",
   "publisher": "wolfbook",
-  "version": "2.6.20",
+  "version": "2.6.29",
   "engines": {
     "vscode": "^1.95.0"
   },
@@ -35,7 +35,9 @@
     "onCommand:createWolframScriptTerminal",
     "onCommand:wolfbook.openConfigurations",
     "onCommand:wolfbook.launchKernel",
-    "onView:wolfbook.watchPanel"
+    "onView:wolfbook.watchPanel",
+    "onCustomEditor:wolfbook.slideEditor",
+    "onLanguage:wslide"
   ],
   "main": "./out/extension/extension.js",
   "icon": "images/icon.png",
@@ -83,6 +85,21 @@
           ".wb"
         ],
         "configuration": "./wolfram.language-configuration.json"
+      },
+      {
+        "id": "wslide",
+        "aliases": [
+          "Wolfbook Slides",
+          "wslide"
+        ],
+        "extensions": [
+          ".wslide"
+        ],
+        "configuration": "./wolfram.language-configuration.json",
+        "icon": {
+          "light": "./icons/wslide-light.svg",
+          "dark": "./icons/wslide-dark.svg"
+        }
       }
     ],
     "grammars": [
@@ -90,6 +107,11 @@
         "language": "wolfram",
         "scopeName": "source.wolfram",
         "path": "./syntaxes/wolfram.tmLanguage.json"
+      },
+      {
+        "language": "wslide",
+        "scopeName": "source.json.wslide",
+        "path": "./syntaxes/wslide.tmLanguage.json"
       }
     ],
     "configuration": {
@@ -1105,9 +1127,10 @@
                 "read",
                 "list",
                 "switch",
-                "save"
+                "save",
+                "summary"
               ],
-              "description": "Operation to perform: 'read' (default) returns notebook contents, 'list' lists open notebooks, 'switch' activates a notebook, 'save' saves to disk."
+              "description": "Operation to perform: 'read' (default) returns full notebook contents, 'list' lists open notebooks, 'switch' activates a notebook, 'save' saves to disk, 'summary' returns a compact one-line-per-cell overview (alias for read+brief=true)."
             },
             "notebook": {
               "type": "string",
@@ -1120,6 +1143,10 @@
             "endCell": {
               "type": "number",
               "description": "Optional: 1-based cell number to end at (inclusive). Defaults to the last cell. Use with startCell to read a specific range."
+            },
+            "brief": {
+              "type": "boolean",
+              "description": "If true, return a compact one-line-per-cell summary (number, kind, first line, output preview) instead of full source and outputs. Faster for large notebooks when you only need to locate a cell."
             }
           }
         }
@@ -1128,7 +1155,7 @@
         "name": "wolfbook_evaluateExpression",
         "displayName": "Wolfbook: Evaluate Expression",
         "toolReferenceName": "wolfbookEval",
-        "modelDescription": "Evaluates a Wolfram Language expression in the active notebook's live kernel and returns the result as InputForm text. CRITICAL \u2014 multi-expression pitfall: passing multiple lines WITHOUT semicolons in single-expression mode (multiLine:false) causes the kernel to interpret newline-separated subexpressions as Times[...] multiplication, NOT as sequential statements \u2014 always use explicit semicolons (;) between statements, or set multiLine:true. Set multiLine:true to evaluate each non-empty line as a separate, independent expression \u2014 results are labeled Out[1]=, Out[2]=, etc.; lines ending with ; are evaluated silently. State accumulates across lines. Do not use for long-running computations.",
+        "modelDescription": "Evaluates a Wolfram Language expression in the active notebook's live kernel and returns the result as InputForm text. CRITICAL \u2014 multi-expression pitfall: passing multiple lines WITHOUT semicolons in single-expression mode (multiLine:false) causes the kernel to interpret newline-separated subexpressions as Times[...] multiplication, NOT as sequential statements \u2014 always use explicit semicolons (;) between statements, or set multiLine:true. Set multiLine:true to evaluate each non-empty line as a separate, independent expression \u2014 results are labeled Out[1]=, Out[2]=, etc.; lines ending with ; are evaluated silently. State accumulates across lines. Use outputForm to control the result format: 'Short' for truncated previews of large expressions, 'TeXForm' for LaTeX, 'MatrixForm'/'TableForm' for structured display. Default timeout is 30 s. Do not use for long-running computations.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
@@ -1139,7 +1166,12 @@
             },
             "timeoutSeconds": {
               "type": "number",
-              "description": "Maximum seconds to wait for result (default: 10)."
+              "description": "Maximum seconds to wait for result (default: 30)."
+            },
+            "outputForm": {
+              "type": "string",
+              "enum": ["Short", "TeXForm", "MatrixForm", "TableForm"],
+              "description": "Wrap the result in the chosen form before returning. 'Short' truncates large expressions (useful for previewing), 'TeXForm' returns LaTeX, 'MatrixForm'/'TableForm' for matrices/tables. Default: InputForm."
             },
             "multiLine": {
               "type": "boolean",
@@ -1178,7 +1210,7 @@
         "name": "wolfbook_insertCells",
         "displayName": "Wolfbook: Insert Cells",
         "toolReferenceName": "wolfbookInsertCells",
-        "modelDescription": "Insert one or more cells into the notebook. For a SINGLE cell: pass top-level 'kind' ('code' or 'markdown') and 'content'. For MULTIPLE cells: pass a 'cells' array of {kind, content} objects that will be inserted as a contiguous block. Use 'position' ('before'|'after', default 'after') and 'afterCellId' (preferred) or 'afterCell' (1-based number) to control placement. Set 'evaluate': true to automatically run the last inserted code cell immediately after insertion. Avoid inserting large duplicate blocks \u2014 use wolfbook_editCell to update existing cells.",
+        "modelDescription": "Insert one or more cells into the notebook. For a SINGLE cell: pass top-level 'kind' ('code' or 'markdown') and 'content'. For MULTIPLE cells: pass a 'cells' array of {kind, content} objects that will be inserted as a contiguous block. Use 'position' ('before'|'after', default 'after') and 'afterCellId' (preferred) or 'afterCell' (1-based number) to control placement. The last inserted code cell is evaluated automatically by default (evaluate defaults to true); pass evaluate:false to insert without running. Avoid inserting large duplicate blocks \u2014 use wolfbook_editCell to update existing cells.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
@@ -1238,7 +1270,7 @@
             },
             "evaluate": {
               "type": "boolean",
-              "description": "If true, automatically evaluate the last inserted code cell after insertion. Defaults to false."
+              "description": "If true (default), automatically evaluate the last inserted code cell after insertion. Defaults to true for code cells; pass false to insert without evaluating."
             },
             "timeoutSeconds": {
               "type": "number",
@@ -1251,7 +1283,7 @@
         "name": "wolfbook_editCell",
         "displayName": "Wolfbook: Edit Cell",
         "toolReferenceName": "wolfbookEdit",
-        "modelDescription": "Replaces the source code of an existing cell in the active Wolfram notebook. Use this to fix bugs, update expressions, or refine output formatting in cells that have already been inserted. Call wolfbook_getNotebookContext first to get CellId values and current source. Prefer cellId over cellNumber because numeric positions shift after structural edits. Set evaluate:true to immediately run the updated content in the kernel and confirm the result. IMPORTANT: the content string must be syntactically correct Wolfram Language exactly as it should appear in the cell. Do NOT add extra blank lines between statements just to look pretty \u2014 write multi-statement code as a compact block.",
+        "modelDescription": "Replaces the source code of an existing cell in the active Wolfram notebook. REQUIRED: you must provide cellId (preferred, stable across reorders) or cellNumber (1-based). Call wolfbook_getNotebookContext first to get CellId values. Set evaluate:true to run the updated content immediately. IMPORTANT: pass real newlines in the content string — do not use literal \\n sequences; use an actual multi-line string in your JSON call. The content must be syntactically correct Wolfram Language. Accepts 'newContent' as an alias for 'content'. Returns a diff summary showing lines added/removed.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
@@ -1298,7 +1330,7 @@
         "name": "wolfbook_runCell",
         "displayName": "Wolfbook: Run Cell(s)",
         "toolReferenceName": "wolfbookRun",
-        "modelDescription": "Execute cells in the notebook. SINGLE CELL MODE: provide 'cellId' (stable identifier, preferred) or 'cellNumber' (1-based). RANGE MODE: omit cellId/cellNumber and provide 'startCell' and 'endCell' (1-based, inclusive) to execute a contiguous block of code cells. Set 'stopOnError': true (default) to halt on first error in range mode. Returns cell output after execution. Use wolfbook_getKernelState first if you're unsure of kernel readiness.",
+        "modelDescription": "Execute cells in the notebook. SINGLE CELL MODE: provide 'cellId' (stable identifier, preferred) or 'cellNumber' (1-based) — the cell is re-run with its existing source. There is no 'code' parameter; to run different code use wolfbook_evaluateExpression or first edit the cell with wolfbook_editCell. RANGE MODE: omit cellId/cellNumber and provide 'startCell' and 'endCell' to execute a block of cells. Set 'stopOnError':true (default) to halt on first error. Returns cell output after execution.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
@@ -1326,6 +1358,10 @@
             "timeoutSeconds": {
               "type": "number",
               "description": "Maximum seconds to wait for evaluation. Defaults to 30."
+            },
+            "errorsOnly": {
+              "type": "boolean",
+              "description": "Range mode: if true, only include cells that produced kernel messages/warnings in the output. Cells with no messages are silently skipped. Default false."
             }
           }
         }
@@ -1550,7 +1586,7 @@
         "displayName": "Wolfbook: Kernel Control",
         "toolReferenceName": "wolfbookKernelControl",
         "canBeReferencedInPrompt": true,
-        "modelDescription": "Low-level kernel control. action='restart': restart the Wolfram Language kernel (clears all definitions and memory \u2014 use only when the kernel is stuck or crashed). action='abort': abort the currently running evaluation without restarting (safe to use when a cell is hung). Check wolfbook_getKernelState first to confirm the kernel state before acting.",
+        "modelDescription": "Kernel lifecycle control. action='restart': restart the Wolfram Language kernel (clears all definitions and memory \u2014 use only when stuck or crashed). action='abort': abort the currently running evaluation without restarting (safe when a cell is hung). action='checkpoint': save a snapshot of all Global` definitions to a temp .mx file (fast, safe, non-destructive). action='restore': reload a previous checkpoint \u2014 ClearAll Global` then Get the .mx file. Use checkpoint/restore to create safe rollback points before risky refactors. Check wolfbook_getKernelState first to confirm kernel state before acting.",
         "inputSchema": {
           "type": "object",
           "required": [
@@ -1561,9 +1597,19 @@
               "type": "string",
               "enum": [
                 "restart",
-                "abort"
+                "abort",
+                "checkpoint",
+                "restore"
               ],
-              "description": "'restart' to restart the kernel (destructive \u2014 clears all state). 'abort' to stop the current evaluation."
+              "description": "'restart' to restart the kernel (destructive \u2014 clears all state). 'abort' to stop the current evaluation. 'checkpoint' to save all Global` definitions to a .mx file. 'restore' to reload Global` state from a previous checkpoint."
+            },
+            "tag": {
+              "type": "string",
+              "description": "Optional label for the checkpoint file (e.g. 'before-refactor'). Only used with action='checkpoint'."
+            },
+            "path": {
+              "type": "string",
+              "description": "Path to a specific .mx checkpoint file to restore. Only used with action='restore'. If omitted, restores the most recent checkpoint from this session."
             }
           }
         }
@@ -1742,7 +1788,7 @@
       },
       {
         "name": "wolfteam_proposePlan",
-        "displayName": "Propose Calculation Plan",
+        "displayName": "Wolfteam: Propose Plan",
         "toolReferenceName": "wolfteamPlan",
         "modelDescription": "Call this tool when you have formulated a multi-step calculation plan and need the user to approve it before you begin executing. Pass the plan summary and list of steps. The user will see the plan in a confirmation dialog and click Allow to approve, or Deny to reject. Do NOT execute any steps until this tool returns successfully.",
         "tags": [
@@ -1772,7 +1818,7 @@
       },
       {
         "name": "wolfteam_askDecision",
-        "displayName": "Ask User Decision",
+        "displayName": "Wolfteam: Ask Decision",
         "toolReferenceName": "wolfteamDecision",
         "modelDescription": "Call this tool when you reach a conceptual decision point \u2014 a choice of gauge, coordinate system, ansatz, expansion strategy, or any fork where the user's physics expertise should guide the direction. Present the question, the available options, and a default. The user can edit the selectedOption parameter before approving. Do NOT guess \u2014 always call this tool at genuine decision points.",
         "tags": [
@@ -1815,7 +1861,7 @@
       },
       {
         "name": "wolfteam_checkpoint",
-        "displayName": "Progress Checkpoint",
+        "displayName": "Wolfteam: Checkpoint",
         "toolReferenceName": "wolfteamCheckpoint",
         "modelDescription": "Call this tool after completing a significant calculation step to show the user the intermediate result and what comes next. The user clicks Allow to continue or Deny to pause and inspect. Use between major steps, not after every trivial evaluation.",
         "tags": [
@@ -1843,6 +1889,555 @@
             "result",
             "nextStep"
           ]
+        }
+      },
+      {
+        "name": "wolfslide_getContext",
+        "displayName": "Wolfslide: Get Deck Context",
+        "toolReferenceName": "wolfslideContext",
+        "canBeReferencedInPrompt": true,
+        "modelDescription": "Returns full deck context: open files, current theme, available theme presets, renderer capabilities (KaTeX math, fragmentOrder animation, eval blocks, CSS color classes), and best-practice tips. ALWAYS call this first before creating or editing slides \u2014 it tells you everything the renderer supports. Use the 'file' parameter to target a specific open .wslide file.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "file": {
+              "type": "string",
+              "description": "Optional: filename or path of the .wslide file to target. Defaults to the active slide editor."
+            }
+          }
+        }
+      },
+      {
+        "name": "wolfslide_listSlides",
+        "displayName": "Wolfslide: List Slides",
+        "toolReferenceName": "wolfslideList",
+        "canBeReferencedInPrompt": true,
+        "modelDescription": "Returns a rich multi-line text summary of all slides in the deck. Each slide entry includes: index, id, label, hidden status, step count (animation fragments), character count, and an indented ASCII block tree showing block types, content excerpts, and image ALT/src info. Use this for a fast overview before calling wolfslide_getSlide on specific slides. Use the 'file' parameter to target a specific open .wslide file.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "file": {
+              "type": "string",
+              "description": "Optional: filename or path of the .wslide file to target. Defaults to the active slide editor."
+            }
+          }
+        }
+      },
+      {
+        "name": "wolfslide_getSlide",
+        "displayName": "Wolfslide: Get Slide",
+        "toolReferenceName": "wolfslideGetSlide",
+        "canBeReferencedInPrompt": true,
+        "modelDescription": "Returns the full block tree for a single slide given its 1-based index or id.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "slideIndex": {
+              "type": "number",
+              "description": "1-based slide index."
+            },
+            "slideId": {
+              "type": "string",
+              "description": "Slide id (alternative to slideIndex)."
+            }
+          }
+        }
+      },
+      {
+        "name": "wolfslide_insertSlide",
+        "displayName": "Wolfslide: Insert Slide",
+        "toolReferenceName": "wolfslideInsert",
+        "canBeReferencedInPrompt": true,
+        "modelDescription": "Inserts a single slide. For inserting many slides at once, prefer wolfslide_bulkInsert. Content nodes support: KaTeX math via $...$ (inline) and $$...$$ (display); fragmentOrder:N for step-by-step animation; CSS classes .gl .te .ro .mu .bl .re .cy for colored text (via <span class='gl'>text</span>). Set slide.background to match your theme. If afterIndex is omitted, appends at the end.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "afterIndex": {
+              "type": "number",
+              "description": "Insert after this 1-based index. 0 = prepend."
+            },
+            "slide": {
+              "type": "object",
+              "description": "Slide object. Required fields: label. Optional: background, layout, children, gap, padding."
+            }
+          },
+          "required": [
+            "slide"
+          ]
+        }
+      },
+      {
+        "name": "wolfslide_editSlide",
+        "displayName": "Wolfslide: Edit Slide",
+        "toolReferenceName": "wolfslideEdit",
+        "canBeReferencedInPrompt": true,
+        "modelDescription": "Replaces top-level properties of a slide (label, background, layout, gap, padding, hidden, children). Only keys present in the patch are updated. To rewrite a slide's block tree, pass the complete children array. Content supports KaTeX math ($...$, $$...$$) and fragmentOrder:N animation. CSS color classes: .gl .te .ro .mu .bl .re .cy.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "slideIndex": {
+              "type": "number",
+              "description": "1-based slide index."
+            },
+            "slideId": {
+              "type": "string",
+              "description": "Slide id (alternative to slideIndex)."
+            },
+            "patch": {
+              "type": "object",
+              "description": "Object with fields to update on the slide."
+            }
+          },
+          "required": [
+            "patch"
+          ]
+        }
+      },
+      {
+        "name": "wolfslide_deleteSlide",
+        "displayName": "Wolfslide: Delete Slide",
+        "toolReferenceName": "wolfslideDelete",
+        "canBeReferencedInPrompt": true,
+        "modelDescription": "Removes a slide by 1-based index or id.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "slideIndex": {
+              "type": "number"
+            },
+            "slideId": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      {
+        "name": "wolfslide_moveSlide",
+        "displayName": "Wolfslide: Move Slide",
+        "toolReferenceName": "wolfslideMove",
+        "canBeReferencedInPrompt": true,
+        "modelDescription": "Moves a slide to a new position. toIndex is 1-based (the desired final position).",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "slideIndex": {
+              "type": "number",
+              "description": "Current 1-based index."
+            },
+            "slideId": {
+              "type": "string"
+            },
+            "toIndex": {
+              "type": "number",
+              "description": "Target 1-based index. Use 1 to move to the first position. Using 0 is treated the same as 1."
+            }
+          },
+          "required": [
+            "toIndex"
+          ]
+        }
+      },
+      {
+        "name": "wolfslide_undo",
+        "displayName": "Wolfslide: Undo",
+        "toolReferenceName": "wolfslideUndo",
+        "canBeReferencedInPrompt": true,
+        "modelDescription": "Triggers undo in the active .wslide editor, reverting the last change. Useful after making a mistake. Optionally specify docUri to target a specific file.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "docUri": {
+              "type": "string",
+              "description": "Optional URI of the .wslide file to undo in. Defaults to the active editor."
+            }
+          }
+        }
+      },
+      {
+        "name": "wolfslide_saveFile",
+        "displayName": "Wolfslide: Save File",
+        "toolReferenceName": "wolfslideSave",
+        "canBeReferencedInPrompt": true,
+        "modelDescription": "Persists the current deck to disk. Call after editing slides to ensure changes are saved.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {}
+        }
+      },
+      {
+        "name": "wolfslide_exportHtml",
+        "displayName": "Wolfslide: Export HTML",
+        "toolReferenceName": "wolfslideExport",
+        "canBeReferencedInPrompt": true,
+        "modelDescription": "Exports the deck as a standalone Reveal.js HTML file (images inlined as data URIs). Returns the path of the exported file.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "outputPath": {
+              "type": "string",
+              "description": "Optional output file path. Defaults to <deckName>.html next to the .wslide file."
+            }
+          }
+        }
+      },
+      {
+        "name": "wolfslide_insertEvalBlock",
+        "displayName": "Wolfslide: Insert Eval Block",
+        "toolReferenceName": "wolfslideInsertEval",
+        "canBeReferencedInPrompt": true,
+        "modelDescription": "Inserts a Mathematica evaluable block on a slide. Graphics (Plot, Graphics, etc.) render as crisp SVG; symbolic expressions (Integrate, Series, etc.) render as beautifully typeset LaTeX via KaTeX; fallback is PNG. Auto-evaluates immediately by default. Use this for computed plots, formulas, diagrams, or any dynamic Wolfram Language output in presentations.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "slideIndex": {
+              "type": "integer",
+              "description": "1-based slide number."
+            },
+            "slideId": {
+              "type": "string",
+              "description": "Slide id (alternative to slideIndex)."
+            },
+            "input": {
+              "type": "string",
+              "description": "Mathematica expression to evaluate (e.g. \"Plot[Sin[x], {x, 0, 2Pi}]\")."
+            },
+            "parentBlockId": {
+              "type": "string",
+              "description": "Optional parent container block id to insert into."
+            },
+            "position": {
+              "type": "integer",
+              "description": "0-based position within parent. Default: append."
+            },
+            "w": {
+              "type": "integer",
+              "description": "Image width in pixels for rasterization. Default: 800."
+            },
+            "h": {
+              "type": "integer",
+              "description": "Optional fixed height."
+            },
+            "autoRun": {
+              "type": "boolean",
+              "description": "Auto-evaluate immediately. Default: true."
+            },
+            "docUri": {
+              "type": "string",
+              "description": "Document URI (multi-editor)."
+            }
+          },
+          "required": [
+            "input"
+          ]
+        }
+      },
+      {
+        "name": "wolfslide_runEvalBlock",
+        "displayName": "Wolfslide: Run Eval Block",
+        "toolReferenceName": "wolfslideRunEval",
+        "canBeReferencedInPrompt": true,
+        "modelDescription": "Evaluates (or re-evaluates) an existing eval block on a slide. Optionally updates the input expression before running. Graphics produce SVG, symbolic math produces LaTeX (KaTeX), with PNG fallback. Returns the evaluation result type (svg/latex/image/text/error).",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "slideIndex": {
+              "type": "integer",
+              "description": "1-based slide number."
+            },
+            "slideId": {
+              "type": "string",
+              "description": "Slide id (alternative to slideIndex)."
+            },
+            "blockId": {
+              "type": "string",
+              "description": "The eval block's id."
+            },
+            "input": {
+              "type": "string",
+              "description": "Optional new Mathematica expression. If omitted, re-runs the existing input."
+            },
+            "docUri": {
+              "type": "string",
+              "description": "Document URI (multi-editor)."
+            }
+          },
+          "required": [
+            "blockId"
+          ]
+        }
+      },
+      {
+        "name": "wolfslide_setTheme",
+        "displayName": "Wolfslide: Set Theme",
+        "toolReferenceName": "wolfslideTheme",
+        "canBeReferencedInPrompt": true,
+        "modelDescription": "Sets the deck's color theme from a preset or custom values. Presets: 'academic-light' (white/navy, formal), 'dark-modern' (dark/gold/teal, tech), 'dark-navy' (deep navy/blue), 'solarized-dark' (warm dark), 'high-contrast' (black/neon), 'warm-cream' (light warm). Also updates slide backgrounds to match. Call wolfslide_getContext to see all presets with descriptions. For custom themes, pass a theme object with keys: navy, blue, cyan, accent, editorCSS.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "preset": {
+              "type": "string",
+              "description": "Preset name: 'academic-light', 'dark-modern', 'dark-navy', 'solarized-dark', 'high-contrast', 'warm-cream'."
+            },
+            "theme": {
+              "type": "object",
+              "description": "Custom theme object with color keys: navy, blue, cyan, accent, editorCSS. Used when preset is not specified."
+            },
+            "defaultBackground": {
+              "type": "string",
+              "description": "Background color to apply to all slides that currently have default backgrounds."
+            },
+            "applyBackground": {
+              "type": "boolean",
+              "description": "Whether to update slide backgrounds to match the preset. Default: true."
+            },
+            "docUri": {
+              "type": "string",
+              "description": "Document URI (multi-editor)."
+            }
+          }
+        }
+      },
+      {
+        "name": "wolfslide_bulkInsert",
+        "displayName": "Wolfslide: Bulk Insert Slides",
+        "toolReferenceName": "wolfslideBulk",
+        "canBeReferencedInPrompt": true,
+        "modelDescription": "Inserts multiple slides in one call \u2014 use this when building a presentation from scratch instead of calling insertSlide repeatedly. Accepts an array of slide objects, an optional theme (preset name or object), and optional meta. Content nodes support: KaTeX math via $...$ / $$...$$; fragmentOrder:N for animation; CSS color classes .gl .te .ro .mu .bl .re .cy; eval blocks for Mathematica-generated graphics. Tip: call wolfslide_getContext first to see theme presets and renderer capabilities.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "slides": {
+              "type": "array",
+              "description": "Array of slide objects. Each slide: {label, background, layout, gap, padding, children:[...blocks]}. Block types: text, heading, image, list, container, code, eval, arrow, raw, box.",
+              "items": {
+                "type": "object"
+              }
+            },
+            "afterIndex": {
+              "type": "number",
+              "description": "Insert after this 1-based index. 0 = prepend. Default: append at end."
+            },
+            "theme": {
+              "description": "Theme preset name (string) or custom theme object to apply to the deck."
+            },
+            "meta": {
+              "type": "object",
+              "description": "Deck metadata to set, e.g. {title: 'My Talk', author: 'Name'}."
+            },
+            "docUri": {
+              "type": "string",
+              "description": "Document URI (multi-editor)."
+            }
+          },
+          "required": [
+            "slides"
+          ]
+        }
+      },
+      {
+        "name": "wolfbook_getCellOutput",
+        "displayName": "Wolfbook: Cell Output",
+        "toolReferenceName": "wolfbookCellOutput",
+        "modelDescription": "Read the current text/plain output of a single notebook cell without re-running it. Returns the result and any kernel messages shown below the cell.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "cellId": {
+              "type": "string",
+              "description": "Stable CellId of the cell (preferred over cellNumber)."
+            },
+            "cellNumber": {
+              "type": "number",
+              "description": "1-based cell number. Use cellId when available."
+            }
+          }
+        }
+      },
+      {
+        "name": "wolfbook_validateSyntax",
+        "displayName": "Wolfbook: Validate Syntax",
+        "toolReferenceName": "wolfbookValidate",
+        "modelDescription": "Check Wolfram Language syntax in one or more cells using the kernel's SyntaxQ. Returns a list of cells with syntax errors. Falls back to offline bracket-matching when the kernel is not running.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "cellNumber": {
+              "type": "number",
+              "description": "Check a single cell by 1-based number. Omit to check all cells (or use startCell/endCell for a range)."
+            },
+            "startCell": {
+              "type": "number",
+              "description": "Range: first cell to check (inclusive, 1-based)."
+            },
+            "endCell": {
+              "type": "number",
+              "description": "Range: last cell to check (inclusive, 1-based). Defaults to last cell."
+            }
+          }
+        }
+      },
+      {
+        "name": "wolfbook_latex",
+        "displayName": "LaTeX: Build & Manage",
+        "toolReferenceName": "wolfbookLatex",
+        "modelDescription": "LaTeX workflow tool: save .tex files, compile to PDF via latexmk, and parse compilation errors. Actions: 'save' writes .tex to disk, 'compile' runs latexmk, 'errors' parses the .log for errors/warnings, 'build' does save→compile→errors in one call. Requires latexmk (TeX Live / MacTeX).",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "required": ["action"],
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": ["save", "compile", "errors", "build"],
+              "description": "save: write .tex to disk. compile: run latexmk. errors: parse .log for errors. build: save + compile + return errors."
+            },
+            "path": {
+              "type": "string",
+              "description": "Path to .tex file (absolute or relative to notebook dir)."
+            },
+            "content": {
+              "type": "string",
+              "description": "LaTeX source content (required for 'save' and 'build' actions)."
+            },
+            "engine": {
+              "type": "string",
+              "enum": ["pdflatex", "xelatex", "lualatex"],
+              "description": "LaTeX engine. Default: pdflatex."
+            },
+            "timeoutSeconds": {
+              "type": "number",
+              "description": "Compilation timeout in seconds. Default: 60."
+            }
+          }
+        }
+      },
+      {
+        "name": "wolfslide_searchSlides",
+        "displayName": "Wolfslide: Search Slides",
+        "toolReferenceName": "wolfslideSearch",
+        "canBeReferencedInPrompt": true,
+        "modelDescription": "Full-text search across all slides in the deck. Matches block content, alt text, image sources, and labels. Returns matching slides with block-level previews.",
+        "inputSchema": {
+          "type": "object",
+          "required": ["query"],
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "Text to search for (case-insensitive)."
+            },
+            "docUri": {
+              "type": "string",
+              "description": "Optional: target a specific open .wslide file."
+            }
+          }
+        }
+      },
+      {
+        "name": "wolfslide_block",
+        "displayName": "Wolfslide: Block Operations",
+        "toolReferenceName": "wolfslideBlock",
+        "canBeReferencedInPrompt": true,
+        "modelDescription": "Manage blocks (text, images, code, containers) within a slide. Actions: 'insert' a new block, 'edit' block properties, 'delete' a block, or 'move' a block to a new position or parent container. Use wolfslide_getSlide first to see block ids.",
+        "inputSchema": {
+          "type": "object",
+          "required": ["action"],
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": ["insert", "edit", "delete", "move"],
+              "description": "insert: add a new block. edit: patch block properties. delete: remove a block. move: relocate a block."
+            },
+            "slideId": {
+              "type": "string",
+              "description": "Target slide id."
+            },
+            "slideIndex": {
+              "type": "number",
+              "description": "1-based slide index (alternative to slideId)."
+            },
+            "blockId": {
+              "type": "string",
+              "description": "Target block ID (required for edit/delete/move)."
+            },
+            "block": {
+              "type": "object",
+              "description": "Block object to insert (required for 'insert'). Include type, content, etc."
+            },
+            "updates": {
+              "type": "object",
+              "description": "Properties to patch on the block (for 'edit')."
+            },
+            "parentBlockId": {
+              "type": "string",
+              "description": "Insert/move into a container block."
+            },
+            "position": {
+              "type": "number",
+              "description": "Position index for insert/move."
+            },
+            "newParentId": {
+              "type": "string",
+              "description": "Destination parent for 'move' action."
+            },
+            "newPosition": {
+              "type": "number",
+              "description": "Destination position for 'move' action."
+            },
+            "docUri": {
+              "type": "string",
+              "description": "Optional: target a specific open .wslide file."
+            }
+          }
+        }
+      },
+      {
+        "name": "wolfslide_advanced",
+        "displayName": "Wolfslide: Advanced Operations",
+        "toolReferenceName": "wolfslideAdvanced",
+        "canBeReferencedInPrompt": true,
+        "modelDescription": "Advanced slide operations. Actions: 'duplicate' deep-copies a slide (new ids assigned), 'check' audits the entire deck for issues (empty slides, missing alt-text, fragment gaps, duplicate labels), 'reorderFragments' sets animation step order on a slide, 'measure' returns rendered block sizes and detects overflow.",
+        "inputSchema": {
+          "type": "object",
+          "required": ["action"],
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": ["duplicate", "check", "reorderFragments", "measure"],
+              "description": "duplicate: copy a slide. check: audit deck for issues. reorderFragments: set animation order. measure: get rendered block sizes."
+            },
+            "slideId": {
+              "type": "string",
+              "description": "Target slide id (for duplicate/reorderFragments/measure)."
+            },
+            "slideIndex": {
+              "type": "number",
+              "description": "1-based slide index (alternative to slideId)."
+            },
+            "order": {
+              "type": "array",
+              "description": "Fragment order array for 'reorderFragments'. Each entry: blockId string or {blockId, step} object.",
+              "items": {
+                "oneOf": [
+                  { "type": "string" },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "blockId": { "type": "string" },
+                      "step": { "type": "number" }
+                    },
+                    "required": ["blockId"]
+                  }
+                ]
+              }
+            },
+            "docUri": {
+              "type": "string",
+              "description": "Optional: target a specific open .wslide file."
+            }
+          }
         }
       }
     ],
@@ -2468,7 +3063,19 @@
           "icon": "media/wolfbook-debug.svg"
         }
       ]
-    }
+    },
+    "customEditors": [
+      {
+        "viewType": "wolfbook.slideEditor",
+        "displayName": "Wolfbook Slide Editor",
+        "selector": [
+          {
+            "filenamePattern": "*.wslide"
+          }
+        ],
+        "priority": "default"
+      }
+    ]
   },
   "scripts": {
     "vscode:prepublish": "echo 'Skipping compile - using existing build'",

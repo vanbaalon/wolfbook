@@ -132,3 +132,10 @@ renderInputForm[boxes_]:=Module[{text},
   (* Wrap in pre tag to preserve formatting and whitespace *)
   StringJoin["<div class=\"wexpr\"><pre style=\"font-family:monospace;white-space:pre-wrap;\">",text,"</pre></div>"]
 ]
+
+(* ===== Protect all wolfbook render symbols from ClearAll["Global`*"] ===== *)
+Protect[
+    $statestack, $inheritedStyle, inheritedStyleNames,
+    handleStyles, renderWrapper, rasterizeAsImage,
+    renderHTMLimage, renderImage, renderHTML, renderMathML, renderInputForm
+];

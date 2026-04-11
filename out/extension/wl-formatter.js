@@ -384,6 +384,13 @@ function tokenize(src) {
       continue;
     }
 
+    // ++ -- (Increment/Decrement — unary, no surrounding spaces)
+    if ((ch === '+' || ch === '-') && i + 1 < n && src[i + 1] === ch) {
+      tokens.push({ type: T.OTHER, value: ch + ch });
+      i += 2;
+      continue;
+    }
+
     // ── Everything else (single char operators: + - * / ^ ! ~ ? ' etc) ──
     tokens.push({ type: T.OTHER, value: ch });
     i++;
@@ -539,6 +546,9 @@ function format(src, opts) {
     if (b.type === T.AMP) return false;
     // No space between word and ' (Derivative)
     if (b.type === T.OTHER && b.value === "'") return false;
+    // No space around ++ -- (Increment/Decrement/PreIncrement/PreDecrement)
+    if (a.type === T.OTHER && (a.value === '++' || a.value === '--')) return false;
+    if (b.type === T.OTHER && (b.value === '++' || b.value === '--')) return false;
     // Space around + -
     if ((a.value === '+' || a.value === '-') && a.type === T.OTHER) {
       // Could be unary: after open bracket or after comma/semi

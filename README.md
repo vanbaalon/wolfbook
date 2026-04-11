@@ -13,7 +13,7 @@ Rendering symbolic math and graphics uses a bespoke **wolfbook-btl** (Box-to-LaT
 > Author: Nikolay Gromov — [nikolay.gromov@kcl.ac.uk](mailto:nikolay.gromov@kcl.ac.uk)  
 > License: Apache 2.0 (see [LICENSE.txt](LICENSE.txt))
 
-> Latest release: **v2.6.17** (2026-04-05). See [CHANGELOG.md](CHANGELOG.md) for release notes.
+> Latest release: **v2.6.26** (2026-04-11). See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 ---
 
@@ -32,7 +32,7 @@ Nine tools can be referenced directly in chat with `#name`; the rest are invoked
 | Tool | Reference | What Copilot can do |
 |------|-----------|---------------------|
 | 📋 **Get notebook context** | `#wolfbookContext` | Reads all cell sources and outputs for the active notebook. Also: `action:"list"` lists open notebooks, `action:"switch"` changes the active notebook, `action:"save"` saves to disk |
-| ⚡ **Evaluate expression** | `#wolfbookEval` | Runs any Wolfram Language expression in the live kernel and returns the result. Use `multiLine:true` to evaluate a block line-by-line |
+| ⚡ **Evaluate expression** | `#wolfbookEval` | Runs any Wolfram Language expression in the live kernel and returns the result. Use `multiLine:true` to evaluate a block line-by-line. Add `outputForm:"Short"` for a truncated preview, `outputForm:"TeXForm"` for LaTeX output, or `outputForm:"MatrixForm"`/`"TableForm"` for structured display |
 | 🔍 **Look up symbol** | `#wolfbookLookup` | Retrieves usage docs, options table, and an online reference link for any symbol — built-in or user-defined. Add `fetchWeb:true` to fetch the full Wolfram reference page |
 | ➕ **Insert cells** | `#wolfbookInsertCells` | Inserts one or more cells at any position. Pass top-level `kind`+`content` for a single cell, or a `cells:[...]` array for multiple. Use `afterCellId`/`afterCell` + `position:"before"\|"after"` to target precisely. Set `evaluate:true` to run immediately |
 | ✏️ **Edit cell** | `#wolfbookEdit` | Replaces the source of an existing cell in-place; set `evaluate:true` to immediately run the new content and verify the result |
@@ -47,7 +47,7 @@ Nine tools can be referenced directly in chat with `#name`; the rest are invoked
 |------|---------------------|
 | ↩️ **Restore deleted cells** (`wolfbook_restoreDeletedCells`) | Lists or re-inserts recently deleted cells from `ai_deleted_cells.md`; use `action:"list"` to see what was removed, `action:"restore"` to re-insert |
 | ↕️ **Move cell** (`wolfbook_moveCell`) | Moves a cell atomically (delete + re-insert); use `toPosition:0` to move to beginning, or `afterCellId` for stable targeting |
-| 💾 **Kernel control** (`wolfbook_kernelControl`) | `action:"restart"` restarts the kernel (clears all state, shows confirmation); `action:"abort"` interrupts the current evaluation |
+| 💾 **Kernel control** (`wolfbook_kernelControl`) | `action:"restart"` restarts the kernel (clears all state); `action:"abort"` interrupts the current evaluation; `action:"checkpoint"` saves all your definitions to a snapshot file; `action:"restore"` reloads a previous snapshot — useful as a rollback point before risky edits |
 | 📦 **Find package** (`wolfbook_findPackage`) | Searches simultaneously on the Wolfram Paclet Server and GitHub — returns install commands for each result |
 | 🐛 **Debug session** (`wolfbook_debugCell`) | Full AI control of the step-through debugger: analyze, start/stop, step over/into/out, breakpoints, Watch Panel — see [AI-controlled Debugging](#ai-controlled-debugging) |
 | 🟥 **Kernel crash log** (`wolfbook_kernelCrashLog`) | Reads `img/<notebookName>/wolfram-kernel-debug.log` and macOS crash reports to diagnose kernel crashes |
@@ -105,6 +105,9 @@ Examples:
 "Move cell 5 to after cell 12 — it belongs with that section"
 "Run all cells from cell 3 to cell 20 and show me which ones fail"
 "Restart the kernel then run all cells to verify the notebook runs clean from top to bottom"
+"Save a kernel checkpoint before refactoring, then restore it if something breaks"
+"Run all cells from 1 to 40, show me only the errors"
+"Evaluate the matrix M using MatrixForm so I can see the layout"
 "Search for a Wolfram package for working with cluster algebras"
 "Check the kernel crash log — the kernel just died unexpectedly"
 "What symbols have I defined so far? Show me the kernel state."
@@ -191,6 +194,29 @@ WBInclude["/abs/path/to/library.nb"]   (* absolute path *)
 - A `## Included: filename.nb` markdown header is inserted first, then all converted cells, immediately after the `WBInclude` cell.
 - The `WBInclude` expression itself is **never sent to the kernel** — it is intercepted by the extension.
 - All temporary files are created in the system temp directory and cleaned up automatically.
+
+---
+
+### WBVersion — version diagnostics
+
+Evaluate `WBVersion[]` in any code cell to print a formatted summary of all running Wolfbook component versions:
+
+```wolfram
+WBVersion[]
+```
+
+Sample output (plain `Print[]` lines in the cell output):
+
+```
+Wolfbook extension : 2.6.20  (installed: 2026-04-06)
+BTL (box-to-LaTeX) : 2.2.3   (built: 2026-04-06)
+WSTP addon         : 1.1.3   (built: 2026-04-06)
+Mathematica kernel : 14.1.0 for Mac OS X ARM (64-bit) (January 2, 2024)
+```
+
+- **Extension version** — read from `package.json`; the install date is the mtime of that file (changes on each VSIX update).
+- **BTL / WSTP build date** — embedded at C++ compile time; reflects when the binary was built, independent of when the extension was installed.
+- Output bypasses all rendering pipelines (no LaTeX/HTML processing) and always appears as readable plain text even for complex kernel configurations.
 
 ---
 
@@ -444,6 +470,20 @@ A complete reference for all keyboard shortcuts in Wolfbook notebooks (`.evsnb`)
 | **Jump to cell below / create new** (command mode) | `→` | `→` |
 
 > All notebook-specific shortcuts are active only when a wolfbook `.evsnb` file is open.
+
+---
+
+## 🖼 Wolfbook Slides (`.wslide`)
+
+Wolfbook includes a full slide-deck editor for `.wslide` files — a presentation format designed for scientific talks with LaTeX math, fragment animations, and GitHub Copilot integration.
+
+See **[WSLIDE_README.md](WSLIDE_README.md)** for the complete reference, including:
+- File format and JSON schema
+- All block types (heading, text, image, list, container, arrow, raw HTML)
+- Canvas coordinate system and positioning model
+- Animation (fragment step) system
+- Presentation mode and HTML export
+- AI Copilot tools (`wolfslide_*`) with example prompts and ASCII layout output format
 
 ---
 

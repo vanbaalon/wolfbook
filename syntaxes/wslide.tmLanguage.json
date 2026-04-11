@@ -1,0 +1,44 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Wolfbook Slides",
+  "scopeName": "source.json.wslide",
+  "fileTypes": ["wslide"],
+  "patterns": [
+    { "include": "#wslide-keys" },
+    { "include": "source.json" }
+  ],
+  "repository": {
+    "wslide-keys": {
+      "patterns": [
+        {
+          "comment": "Top-level deck structure keys",
+          "match": "\"(formatVersion|meta|theme|slides|id|label|background|layout|children|elements|padding|gap)\"\\s*(?=:)",
+          "captures": {
+            "1": { "name": "keyword.other.wslide" }
+          }
+        },
+        {
+          "comment": "Block type values",
+          "match": "\"(container|heading|text|image|list|math|box|raw|arrow|title|part)\"",
+          "captures": {
+            "1": { "name": "support.constant.wslide" }
+          }
+        },
+        {
+          "comment": "Block property keys",
+          "match": "\"(type|content|html|src|alt|items|ordered|level|fontSize|color|flex|w|h|x|y|style|className|fragmentOrder|mathSrc|fit|position|offset|dx|dy|strokeWidth|x0|y0|x1|y1|mx|my)\"\\s*(?=:)",
+          "captures": {
+            "1": { "name": "variable.other.wslide" }
+          }
+        },
+        {
+          "comment": "Meta/theme keys",
+          "match": "\"(title|created|navy|blue|cyan|accent|editorCSS)\"\\s*(?=:)",
+          "captures": {
+            "1": { "name": "entity.name.tag.wslide" }
+          }
+        }
+      ]
+    }
+  }
+}

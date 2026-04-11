@@ -681,6 +681,12 @@ async function checkoutExecutionQueue(self) {
                     // is emitted by $Inspector[] / the ScheduledTask mechanism when
                     // it can't find a safe evaluation window and is not user output.
                     if (line.startsWith('Still waiting for a safe time to evaluate $Inspector')) return;
+                    // Suppress the MathLink interrupt menu prompt that Mathematica emits
+                    // as TEXTPKT output when ParallelEvaluate/ParallelKernels trigger
+                    // a MathLink-level interrupt on a sub-kernel connection. This is
+                    // internal kernel communication noise, not user-visible output.
+                    if (line.includes('Your options are:') &&
+                        (line.includes('interrupt') || line.includes('abort') || line.includes('continue'))) return;
                     printLineQueue.push(line);
                     if (!printFlushPending) {
                         printFlushPending = true;
@@ -861,7 +867,9 @@ async function checkoutExecutionQueue(self) {
                         self._outputRegistry.set(outputId,
                             { cell: execCell, outN: lineN, subIdx: i, outName: r.outputName, format: _effectiveFmt, isGfx: _isGfx });
                         const headerRow = `<div class="wl-output-header" style="display:flex;align-items:center;gap:6px;width:100%;min-height:22px;" data-session-epoch="${self._sessionEpoch}" data-output-id="${outputId}" data-out-n="${lineN}" data-sub-idx="${i}" data-output-format="${_effectiveFmt}" data-output-is-graphics="${_isGfx ? '1' : '0'}">${outLabel}</div>`;
-                        if (html.length > maxLen || isSkeleton) {                                const _oid = outputId;
+                        // Graphics outputs are <img src="file.svg/png"/> — tiny HTML that
+                        // never needs truncation; applying it would corrupt the tag.
+                        if (!_isGfx && (html.length > maxLen || isSkeleton)) {                                const _oid = outputId;
                             // For raw truncation: clip at maxLen
                             const displayHtml = html.length > maxLen
                                 ? html.substring(0, maxLen)

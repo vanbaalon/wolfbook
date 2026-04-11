@@ -556,6 +556,18 @@ async function activate(context) {
     // Register @wolfteam collaborative chat participant
     _tools.registerWolfteamParticipant(context, () => controller);
     ;
+    // Update WBDirectory[] and NotebookDirectory[] whenever the active notebook changes
+    function _updateKernelNotebookDir(ed) {
+        if (!ed || ed.notebook?.notebookType !== 'extended-wolfram-notebook') return;
+        if (controller.kernelStatusString !== 'resolved') return;
+        let _nbDir = require('path').dirname(ed.notebook.uri.fsPath);
+        if (process.platform === 'win32') _nbDir = _nbDir.replace(/\\/g, '/');
+        const _esc = _nbDir.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+        controller.session?.sub(
+            `Unprotect[NotebookDirectory]; NotebookDirectory[] = "${_esc}"; Protect[NotebookDirectory]; WBDirectory[] = "${_esc}"`
+        ).catch(() => {});
+    }
+    context.subscriptions.push(vscode_1.window.onDidChangeActiveNotebookEditor(ed => _updateKernelNotebookDir(ed)));
     context.subscriptions.push(vscode_1.commands.registerCommand("wolfbook.launchKernel", () => {
         if (nbKernelenabled) {
             client.outputChannel.appendLine("Launching Wolfram Kernel");
@@ -1586,6 +1598,21 @@ async function activate(context) {
             activeEditor.setDecorations(implicitTokensDecorationType, opts);
         });
     });
+
+    // Register the .wslide custom editor provider
+    const slideEditorProvider_1 = require('./slideEditorProvider');
+    const slideProvider = new slideEditorProvider_1.SlideEditorProvider(context);
+    slideProvider.setGetController(() => controller);
+    context.subscriptions.push(
+        vscode.window.registerCustomEditorProvider(
+            'wolfbook.slideEditor',
+            slideProvider,
+            {
+                webviewOptions: { retainContextWhenHidden: true },
+                supportsMultipleEditorsPerDocument: false,
+            }
+        )
+    );
 
     // Dismiss the loading indicator now that activation is complete
     clearTimeout(_loadingTimeout);

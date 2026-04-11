@@ -243,18 +243,23 @@ function _toGrayscaleHex(hex) {
 // here is a cross-platform background `subWhenIdle` heartbeat with auto-relaunch.
 
 const _KEEPALIVE_INTERVAL_MS = 3 * 60 * 1000;  // 3 minutes
-const _KEEPALIVE_TIMEOUT_MS = 15 * 1000;        // 15 second ping timeout
 
 // Per-controller keepalive timer handle.  Stored on `self` so quitKernel
 // can stop it.  We use a plain `setInterval` (not rescheduled setTimeout)
 // so VS Code's event loop keeps running without cascading micro-delays.
+//
+// NOTE: the subWhenIdle ping with a hard timeout was removed because it caused
+// false restarts during long-running calculations: if the kernel became briefly
+// "idle" between sub-evaluations the ping would queue, then time out 15 s later
+// and trigger an unnecessary restart.  The only restart that happens now is when
+// session.isOpen flips to false — i.e. the kernel process has actually died.
 function _startKeepalive(self, WstpSession) {
     _stopKeepalive(self);  // safety: never double-schedule
-    self._keepaliveTimer = setInterval(async () => {
+    self._keepaliveTimer = setInterval(() => {
         if (!self.session) return;
 
-        // Fast path: check isOpen without sending anything.
-        // isOpen → false means kernel process has already died.
+        // Check isOpen without sending anything.
+        // isOpen → false means the kernel process has actually died.
         if (!self.session.isOpen) {
             scrollLog('[keepalive] session.isOpen = false — kernel died, relaunching');
             clearInterval(self._keepaliveTimer);
@@ -264,30 +269,8 @@ function _startKeepalive(self, WstpSession) {
                 'Dismiss'
             );
             _lifecycle_relaunch(self, WstpSession);
-            return;
         }
-
-        // If the kernel is currently busy (user evaluation in flight) skip the
-        // ping entirely — we don't want to push subWhenIdle onto a busy queue.
-        // The busy path itself keeps the pipe alive; we only care about the idle case.
-        if (!self.session.isReady) return;
-
-        // Send a lightweight ping via subWhenIdle so it never interrupts evaluation.
-        // Uses the timeout option so a hung/suspended kernel is detected promptly.
-        try {
-            await self.session.subWhenIdle('Null', { timeout: _KEEPALIVE_TIMEOUT_MS });
-            scrollLog('[keepalive] ping OK');
-        } catch (err) {
-            const reason = String(err && err.message || err);
-            scrollLog('[keepalive] ping failed:', reason, '— relaunching kernel');
-            clearInterval(self._keepaliveTimer);
-            self._keepaliveTimer = null;
-            vscode.window.showWarningMessage(
-                'Wolfram kernel became unresponsive. Relaunching… (' + reason + ')',
-                'Dismiss'
-            );
-            _lifecycle_relaunch(self, WstpSession);
-        }
+        // No ping sent — avoids any risk of interfering with long evaluations.
     }, _KEEPALIVE_INTERVAL_MS);
 }
 
@@ -414,15 +397,16 @@ async function launchKernel(self, WstpSession) {
             try { _extVer = require(_pkgPath).version; } catch (_) {}
 
             // Read BTL version from the already-loaded addon (if available)
-            let _btlVer = 'unknown';
+            let _btlVer = 'unknown', _btlDate = 'unknown';
             try {
                 const _btlAddonPath = require('path').join(self.extensionPath, 'wllatex-addon', 'wolfbook_btl.node');
                 const _btlAddon = require(_btlAddonPath);
-                if (typeof _btlAddon.version === 'string') _btlVer = _btlAddon.version;
+                if (typeof _btlAddon.version === 'string')   _btlVer  = _btlAddon.version;
+                if (typeof _btlAddon.buildDate === 'string') _btlDate = _btlAddon.buildDate;
             } catch (_) {}
 
             // Read WSTP addon version (already loaded as WstpSession's parent module)
-            let _wstpVer = 'unknown';
+            let _wstpVer = 'unknown', _wstpDate = 'unknown';
             try {
                 const _wstpFs   = require('fs');
                 const _wstpPath = require('path');
@@ -431,12 +415,20 @@ async function launchKernel(self, WstpSession) {
                 const _wstpPre  = _wstpPath.join(_wstpDir, 'prebuilt', `wstp-${_wstpPlat}-${_wstpArch}.node`);
                 const _wstpFb   = _wstpPath.join(_wstpDir, 'build', 'Release', 'wstp.node');
                 const _wstpAddon = require(_wstpFs.existsSync(_wstpPre) ? _wstpPre : _wstpFb);
-                if (typeof _wstpAddon.version === 'string') _wstpVer = _wstpAddon.version;
+                if (typeof _wstpAddon.version === 'string')   _wstpVer  = _wstpAddon.version;
+                if (typeof _wstpAddon.buildDate === 'string') _wstpDate = _wstpAddon.buildDate;
             } catch (_) {}
 
-            await self.session.sub(`$setKernelConfig["wolfbookVersion", "${_extVer}"]`).catch(() => {});
-            await self.session.sub(`$setKernelConfig["wolfbookBtlVersion", "${_btlVer}"]`).catch(() => {});
-            await self.session.sub(`$setKernelConfig["wolfbookWstpVersion", "${_wstpVer}"]`).catch(() => {});
+            // Extension install date from package.json mtime
+            let _extDate = 'unknown';
+            try { _extDate = new Date(require('fs').statSync(_pkgPath).mtimeMs).toISOString().slice(0, 10); } catch (_) {}
+
+            await self.session.sub(`$setKernelConfig["wolfbookVersion",      "${_extVer}"]`).catch(() => {});
+            await self.session.sub(`$setKernelConfig["wolfbookBuildDate",    "${_extDate}"]`).catch(() => {});
+            await self.session.sub(`$setKernelConfig["wolfbookBtlVersion",   "${_btlVer}"]`).catch(() => {});
+            await self.session.sub(`$setKernelConfig["wolfbookBtlBuildDate", "${_btlDate}"]`).catch(() => {});
+            await self.session.sub(`$setKernelConfig["wolfbookWstpVersion",  "${_wstpVer}"]`).catch(() => {});
+            await self.session.sub(`$setKernelConfig["wolfbookWstpBuildDate","${_wstpDate}"]`).catch(() => {});
         }
 
         // Set $PageWidth so Print[] / OutputForm wraps at the configured width
@@ -446,13 +438,18 @@ async function launchKernel(self, WstpSession) {
         // Update $PageWidth so the Print[] override in init.wl picks up the
         // user-configured value (init.wl sets the default of 156 at launch;
         // this call overrides it with whatever the workspace setting says).
-        await self.session.sub(`$PageWidth = ${printPageWidth}`).catch(() => {});
+        await self.session.sub(`Unprotect[System\`$PageWidth]; System\`$PageWidth = ${printPageWidth}; Protect[System\`$PageWidth]`).catch(() => {});
 
-        // Set NotebookDirectory[] to the directory of the currently active wolfram
+        // Set NotebookDirectory[] / WBDirectory[] to the directory of the active wolfram
         // notebook so that Get["relative/path"] and friends work as expected.
-        const _wolframNbEditor = vscode.window.visibleNotebookEditors.find(
-            ed => ed.notebook.notebookType === 'extended-wolfram-notebook'
-        );
+        // Prefer activeNotebookEditor; fall back to first visible wolfram notebook.
+        const _wolframNbEditor =
+            (vscode.window.activeNotebookEditor?.notebook?.notebookType === 'extended-wolfram-notebook'
+                ? vscode.window.activeNotebookEditor
+                : null) ||
+            vscode.window.visibleNotebookEditors.find(
+                ed => ed.notebook.notebookType === 'extended-wolfram-notebook'
+            );
         if (_wolframNbEditor) {
             let _nbDir = path.dirname(_wolframNbEditor.notebook.uri.fsPath);
             if (process.platform === 'win32') _nbDir = _nbDir.replace(/\\/g, '/');
