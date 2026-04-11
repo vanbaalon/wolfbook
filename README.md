@@ -25,7 +25,7 @@ Switch Copilot to **Agent mode** and it gains live access to your running kernel
 
 ### What Copilot can do with Wolfbook
 
-Nine tools can be referenced directly in chat with `#name`; the rest are invoked automatically by the AI agent.
+Ten tools can be referenced directly in chat with `#name`; the rest are invoked automatically by the AI agent.
 
 #### Directly referenceable tools (`#name` shorthand)
 
@@ -40,6 +40,7 @@ Nine tools can be referenced directly in chat with `#name`; the rest are invoked
 | 🗑️ **Delete cell(s)** | `#wolfbookDelete` | Removes one or more cells; deleted content is saved to `ai_deleted_cells.md` for recovery — pass `cellId`/`cellIds` (preferred) or `cellNumber`/`cellNumbers` |
 | 🔍 **Search cells** | `#wolfbookSearch` | Finds cells by text or regex, optionally filtered by kind (`"code"`/`"markdown"`). Returns cell numbers, CellId values, and source previews |
 | 🔎 **Kernel state** | `#wolfbookState` | Lists all symbols matching a context pattern (default `Global\`*`) with their current values or rule counts — call this before writing code to avoid naming conflicts |
+| 📚 **Paper search** | `#wolfbookPaper` | Search academic papers (HEP/math/physics) via INSPIRE-HEP with arXiv fallback. Five actions: `action:"search"` finds papers by `title`, `author`, `abstract`, arXiv ID or INSPIRE texkey; `action:"bibtex"` returns a BibTeX `@article` record; `action:"bibitem"` returns a LaTeX `\bibitem`; `action:"references"` lists all papers cited by a paper (add `includeContexts:true` for Semantic Scholar citation snippets); `action:"citations"` lists papers that cite a paper with citation context sentences. Results include INSPIRE citation counts and ar5iv HTML links. Accepts arXiv IDs in both new (`2103.15840`) and old (`hep-th/0212208`) formats, INSPIRE texkeys (`Gromov:2013pga`), or plain INSPIRE record IDs. Primary source: INSPIRE-HEP; falls back to arXiv API for non-HEP papers. |
 
 #### AI-invoked tools (used automatically, no `#` shorthand)
 
@@ -112,6 +113,9 @@ Examples:
 "Check the kernel crash log — the kernel just died unexpectedly"
 "What symbols have I defined so far? Show me the kernel state."
 "Save the notebook after making these edits"
+"Search for recent papers on quantum spectral curve by Gromov and get their BibTeX"
+"Get the bibitem for arXiv:hep-th/0212208 and list all papers it cites"
+"Find papers on SO(6) Heisenberg spin chain, then get citation contexts for the most cited one"
 "List all open notebooks and switch to prototype.wb"
 "Analyze the step structure of cell 4, set a breakpoint at line 6, then step through it"
 "Add x and i to the watch list, then debug cell 3 and tell me what goes wrong"
@@ -137,6 +141,7 @@ You can also reference tools directly in your prompt:
 - `#wolfbookSearch` — search cells by text/regex/kind; returns matching cell numbers and content previews
 - `#wolfbookReadFile` — read text files in the workspace (absolute or relative paths)
 - `#wolfbookWriteFile` — write/create text files in the workspace (for non-notebook files)
+- `#wolfbookPaper` — search academic papers on INSPIRE-HEP/arXiv; retrieve BibTeX/bibitem records, reference lists, and citation contexts
 - `#wolfbookRunTerminal` — run shell commands with stdout/stderr capture
 - `#wolfbookListFiles` — list files recursively with optional extension/depth filtering
 

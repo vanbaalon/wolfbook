@@ -295,8 +295,8 @@ async function checkoutExecutionQueue(self) {
                 wstpLog(_nbp, `← [syntaxCheck]  ok  ${Date.now()-_t0}ms  ${_scVal.slice(0, 200)}`);
                 syntaxResult = { type: 'string', value: _scVal };
             } else {
-                syntaxResult = await self.session.sub(
-                    "VsCodeSyntaxCheck[" + JSON.stringify(code) + "]"
+                syntaxResult = await self.session.evaluate(
+                    "VsCodeSyntaxCheck[" + JSON.stringify(code) + "]", { interactive: false }
                 );
             }
             if (syntaxResult && syntaxResult.type === "string" && syntaxResult.value) {

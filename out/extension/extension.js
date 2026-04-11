@@ -563,8 +563,9 @@ async function activate(context) {
         let _nbDir = require('path').dirname(ed.notebook.uri.fsPath);
         if (process.platform === 'win32') _nbDir = _nbDir.replace(/\\/g, '/');
         const _esc = _nbDir.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-        controller.session?.sub(
-            `Unprotect[NotebookDirectory]; NotebookDirectory[] = "${_esc}"; Protect[NotebookDirectory]; WBDirectory[] = "${_esc}"`
+        controller.session?.evaluate(
+            `Unprotect[NotebookDirectory, WBDirectory]; NotebookDirectory[] = "${_esc}"; Protect[NotebookDirectory]; WBDirectory[] = "${_esc}"; Protect[WBDirectory]`,
+            { interactive: false }
         ).catch(() => {});
     }
     context.subscriptions.push(vscode_1.window.onDidChangeActiveNotebookEditor(ed => _updateKernelNotebookDir(ed)));

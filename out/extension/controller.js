@@ -845,7 +845,7 @@ class WolframNotebookKernel {
                 const cfg = config.getKernelRelatedConfigs();
                 for (const [k, v] of Object.entries(cfg)) {
                     const vStr = typeof v === "string" ? `"${v}"` : String(v);
-                    this.session.sub(`$setKernelConfig["${k}", ${vStr}]`).catch(() => {});
+                    this.session.evaluate(`$setKernelConfig["${k}", ${vStr}]`, { interactive: false }).catch(() => {});
                 }
             }
         });

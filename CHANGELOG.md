@@ -4,6 +4,20 @@ All notable changes to **Wolfbook** are documented here.
 
 ---
 
+## [2.6.27] - 2026-04-11
+
+### Added — Paper search tool (`#wolfbookPaper`)
+- **`wolfbook_paperSearch` now returns citation counts** — INSPIRE-HEP citation counts included in every `search` result (`citations` field).
+- **Old-format arXiv IDs fully supported** — pre-2007 legacy IDs like `hep-th/0212208` are now resolved via the INSPIRE `/api/arxiv/<id>` endpoint directly, not via `find eprint` query, giving reliable lookups that the query path could not guarantee.
+- **Freeform INSPIRE query syntax** — the `query` parameter now accepts raw INSPIRE query strings beginning with `find` (e.g. `find a Gromov and t "Bethe ansatz"`); they are forwarded as-is without double-prefixing.
+- **Reference labels always populated** — reference lists fall back to sequential numbering (`1`, `2`, …) when the API omits a label, so no entry is ever `null`.
+
+### Changed
+- **`package.json` tool `modelDescription`** — updated to describe all five actions, citation counts, both arXiv ID formats, and the `query` freeform syntax.
+- **README** — `wolfbook_paperSearch` added to the tool table, quick-reference list, and example prompts section; tool count updated from Nine to Ten.
+
+---
+
 ## [2.6.26] - 2026-04-11
 
 ### Changed

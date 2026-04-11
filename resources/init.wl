@@ -88,7 +88,7 @@ $config = <|
     "autoOpenMessages"   -> False
 |>;
 
-$setKernelConfig[name_String, value_] := ($config[name] = value; Null);
+$setKernelConfig[name_String, value_] := (Unprotect[$config]; $config[name] = value; Protect[$config]; Null);
 $getKernelConfig[name_String]           := Lookup[$config, name, Missing["NotFound", name]];
 $getKernelConfig[name_String, default_] := Lookup[$config, name, default];
 

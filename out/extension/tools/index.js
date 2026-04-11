@@ -8,6 +8,7 @@ const https  = require("https");
 const fs     = require("fs");
 const path   = require("path");
 const { decodeWstpText } = require('../utils/encoding');
+const paperSearch = require('./paperSearch');
 
 // ---------------------------------------------------------------------------
 // Shared: append an entry to the evaluation log next to the active notebook
@@ -4757,6 +4758,130 @@ class WolfslideAdvancedTool {
     }
 }
 
+// ---------------------------------------------------------------------------
+// wolfbook_paperSearch — search academic papers via INSPIRE-HEP / arXiv / Semantic Scholar
+// ---------------------------------------------------------------------------
+
+class PaperSearchTool {
+    async prepareInvocation(options, _token) {
+        const action = options.input?.action || 'search';
+        const id = options.input?.identifier || options.input?.title || '';
+        return { invocationMessage: `Paper ${action}: ${id}`.slice(0, 120) };
+    }
+
+    async invoke(options, _token) {
+        const action = options.input?.action || 'search';
+        try {
+            switch (action) {
+                case 'search':     return await this._search(options);
+                case 'bibtex':     return await this._bibtex(options);
+                case 'bibitem':    return await this._bibitem(options);
+                case 'references': return await this._references(options);
+                case 'citations':  return await this._citations(options);
+                default:
+                    return this._result(`Unknown action "${action}". Use: search, bibtex, bibitem, references, citations.`);
+            }
+        } catch (e) {
+            return this._result(`Error: ${e.message}`);
+        }
+    }
+
+    async _search(options) {
+        const params = {};
+        if (options.input?.title)      params.title    = options.input.title;
+        if (options.input?.author)     params.author   = options.input.author;
+        if (options.input?.abstract)   params.abstract = options.input.abstract;
+        if (options.input?.identifier) {
+            const id = options.input.identifier;
+            if (/^\d{4}\.\d{4,5}/.test(id) || /^[a-z-]+\/\d+/.test(id)) params.eprint = id;
+            else if (/^[A-Za-z]+:\d{4}[a-z]{2,}$/.test(id)) params.texkey = id;
+            else params.query = id;
+        }
+        if (options.input?.query) params.query = options.input.query;
+
+        const maxResults = Math.min(options.input?.maxResults || 5, 20);
+        const includeAbstract = options.input?.includeAbstract !== false;
+
+        const { source, papers } = await paperSearch.searchPapers(params, maxResults);
+        if (papers.length === 0) return this._result(`No papers found (searched ${source}).`);
+
+        const formatter = includeAbstract ? paperSearch.formatPaperFull : paperSearch.formatPaperShort;
+        const lines = [`**${papers.length} result(s) from ${source}:**\n`];
+        papers.forEach((p, i) => lines.push(formatter(p, i + 1)));
+
+        return this._result(lines.join('\n\n'));
+    }
+
+    async _bibtex(options) {
+        const id = options.input?.identifier;
+        if (!id) return this._result('Error: provide an identifier (arXiv ID, texkey, or INSPIRE ID).');
+        const bib = await paperSearch.getInspireBibtex(id);
+        return this._result('```bibtex\n' + bib.trim() + '\n```');
+    }
+
+    async _bibitem(options) {
+        const id = options.input?.identifier;
+        if (!id) return this._result('Error: provide an identifier (arXiv ID, texkey, or INSPIRE ID).');
+        const latex = await paperSearch.getInspireLatexUS(id);
+        return this._result('```latex\n' + latex.trim() + '\n```');
+    }
+
+    async _references(options) {
+        const id = options.input?.identifier;
+        if (!id) return this._result('Error: provide an identifier (arXiv ID, texkey, or INSPIRE ID).');
+
+        const includeContexts = !!options.input?.includeContexts;
+        let contextMap = {};
+
+        const refs = await paperSearch.getInspireReferences(id);
+
+        if (includeContexts) {
+            const arxivId = /^\d{4}\.\d{4,5}/.test(id) ? id : null;
+            if (arxivId) {
+                try {
+                    const ctxs = await paperSearch.getReferenceContexts(arxivId, 50);
+                    for (const c of ctxs) {
+                        if (c.arxivId) contextMap[c.arxivId] = c.contexts;
+                    }
+                } catch (_) { /* S2 rate limited — continue without contexts */ }
+            }
+        }
+
+        if (refs.length === 0) return this._result('No references found.');
+
+        const lines = [`**${refs.length} reference(s):**\n`];
+        refs.forEach((r, i) => {
+            lines.push(paperSearch.formatReference(r, i + 1));
+            if (includeContexts && r.arxivEprint && contextMap[r.arxivEprint]) {
+                for (const ctx of contextMap[r.arxivEprint]) {
+                    lines.push(`    > ${ctx}`);
+                }
+            }
+        });
+
+        return this._result(lines.join('\n'));
+    }
+
+    async _citations(options) {
+        const id = options.input?.identifier;
+        if (!id) return this._result('Error: provide an arXiv ID.');
+
+        const limit = Math.min(options.input?.maxResults || 10, 50);
+        const ctxs = await paperSearch.getCitationContexts(id, limit);
+
+        if (ctxs.length === 0) return this._result('No citation data found (Semantic Scholar may not have this paper).');
+
+        const lines = [`**${ctxs.length} citing paper(s) with context:**\n`];
+        ctxs.forEach((c, i) => lines.push(paperSearch.formatCitationContext(c, i + 1)));
+
+        return this._result(lines.join('\n\n'));
+    }
+
+    _result(text) {
+        return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(text)]);
+    }
+}
+
 function registerTools(context, getController, debugCtrl) {
     const tools = [
         // Core notebook tools (visible in chat panel)
@@ -4781,6 +4906,7 @@ function registerTools(context, getController, debugCtrl) {
         { name: 'wolfbook_debugCell',          impl: new DebugCellTool(getController, debugCtrl) },
         { name: 'wolfbook_fileOps',            impl: new FileOpsTool() },
         { name: 'wolfbook_runTerminal',        impl: new RunTerminalTool() },
+        { name: 'wolfbook_paperSearch',        impl: new PaperSearchTool() },
         // Wolfteam tools
         { name: 'wolfteam_proposePlan',        impl: new ProposePlanTool() },
         { name: 'wolfteam_askDecision',        impl: new AskDecisionTool() },
@@ -4938,6 +5064,7 @@ function registerChatParticipant(context, getController) {
             'wolfbook_kernelControl', 'wolfbook_kernelCrashLog',
             'wolfbook_findPackage', 'wolfbook_debugCell',
             'wolfbook_fileOps', 'wolfbook_runTerminal',
+            'wolfbook_paperSearch',
             'wolfbook_saveLatex', 'wolfbook_compileLatex', 'wolfbook_getLatexErrors',
         ];
         const tools = vscode.lm.tools.filter(t => toolNames.includes(t.name));
@@ -5144,6 +5271,7 @@ function registerWolfteamParticipant(context, getController) {
             'wolfbook_kernelControl', 'wolfbook_kernelCrashLog',
             'wolfbook_findPackage', 'wolfbook_debugCell',
             'wolfbook_fileOps', 'wolfbook_runTerminal',
+            'wolfbook_paperSearch',
             'wolfbook_saveLatex', 'wolfbook_compileLatex', 'wolfbook_getLatexErrors',
             // Wolfteam interaction tools — inline confirmations
             'wolfteam_proposePlan', 'wolfteam_askDecision', 'wolfteam_checkpoint',

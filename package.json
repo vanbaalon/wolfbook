@@ -3,7 +3,7 @@
   "displayName": "Wolfbook \u2014 AI-Friendly Wolfram Language Notebook",
   "description": "AI-friendly Wolfram Language notebook for VS Code. WSTP kernel, KaTeX rendering with adaptive line-breaking, Unicode input, LSP diagnostics, and AI-readable outputs for GitHub Copilot.",
   "publisher": "wolfbook",
-  "version": "2.6.30",
+  "version": "2.6.31",
   "engines": {
     "vscode": "^1.95.0"
   },
@@ -1784,6 +1784,55 @@
           "required": [
             "command"
           ]
+        }
+      },
+      {
+        "name": "wolfbook_paperSearch",
+        "displayName": "Wolfbook: Paper Search",
+        "toolReferenceName": "wolfbookPaper",
+        "modelDescription": "Search academic papers (HEP/math/physics) via INSPIRE-HEP with arXiv fallback. Five actions: (1) 'search' — find papers by title, author, abstract, arXiv ID, INSPIRE texkey, or freeform query; results include title, authors, year, INSPIRE citation count, abstract, ar5iv HTML link, and INSPIRE URL. (2) 'bibtex' — fetch a full BibTeX @article record from INSPIRE. (3) 'bibitem' — fetch a LaTeX \\bibitem record (INSPIRE latex-us format). (4) 'references' — list all papers cited BY a paper from INSPIRE (34+ entries typical); add includeContexts:true to also fetch from Semantic Scholar the exact sentences in which each reference is cited. (5) 'citations' — list papers that CITE a given paper, with citation context sentences from Semantic Scholar. Identifier formats accepted: new arXiv IDs ('2103.15840'), old arXiv IDs ('hep-th/0212208'), INSPIRE texkeys ('Gromov:2013pga'), or numeric INSPIRE record IDs. arXiv IDs are resolved via the INSPIRE /api/arxiv/<id> endpoint for reliable lookup. Falls back to arXiv API search for non-HEP papers. Use this tool any time you need to find, cite, or survey academic papers.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": ["search", "bibtex", "bibitem", "references", "citations"],
+              "description": "Action to perform. Default: 'search'."
+            },
+            "title": {
+              "type": "string",
+              "description": "Search by paper title (for 'search' action)."
+            },
+            "author": {
+              "type": "string",
+              "description": "Search by author name (for 'search' action). Use 'Lastname' or 'Lastname, Firstname'."
+            },
+            "abstract": {
+              "type": "string",
+              "description": "Search in abstract text (for 'search' action)."
+            },
+            "identifier": {
+              "type": "string",
+              "description": "arXiv ID (e.g. '2103.15840'), INSPIRE texkey (e.g. 'Gromov:2014caa'), or INSPIRE record ID. Used for search (by ID), bibtex, bibitem, references, citations."
+            },
+            "query": {
+              "type": "string",
+              "description": "Freeform INSPIRE search query (advanced). Combined with title/author/abstract if both provided."
+            },
+            "includeAbstract": {
+              "type": "boolean",
+              "description": "Include abstracts in search results. Default: true."
+            },
+            "includeContexts": {
+              "type": "boolean",
+              "description": "For 'references' action: also fetch citation contexts from Semantic Scholar showing HOW each reference is used in the text. Default: false."
+            },
+            "maxResults": {
+              "type": "number",
+              "description": "Maximum number of results (default: 5 for search, 10 for citations, max 20/50)."
+            }
+          }
         }
       },
       {

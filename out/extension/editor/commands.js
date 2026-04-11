@@ -151,7 +151,7 @@ async function pasteImageAsCell(self, args = {}) {
             self.outputPanel.print('[PasteImage] kernel available — using Wolfram Export/Import');
             const wlSrc = self.escapeWL(tmpPng);
             const wlDst = self.escapeWL(dstPath);
-            const exportResult = await self.session.sub(`Export["${wlDst}", Import["${wlSrc}"]]`);
+            const exportResult = await self.session.evaluate(`Export["${wlDst}", Import["${wlSrc}"]]`, { interactive: false });
             self.outputPanel.print('[PasteImage] Wolfram export result: ' + JSON.stringify(exportResult));
         } else {
             self.outputPanel.print('[PasteImage] kernel not running — using direct file copy');

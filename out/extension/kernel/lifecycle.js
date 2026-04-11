@@ -378,8 +378,8 @@ async function launchKernel(self, WstpSession) {
         const _resDir = path.join(self.extensionPath, 'resources');
         const _resDirEsc = _resDir.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
         const _initEsc = kernelInitPath.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-        const initExpr = await self.session.sub(
-            `Block[{\$wolframResourceDir="${_resDirEsc}"},Get["${_initEsc}"]]`
+        const initExpr = await self.session.evaluate(
+            `Block[{\$wolframResourceDir="${_resDirEsc}"},Get["${_initEsc}"]]`, { interactive: false }
         );
         console.log(`[launchKernel] init.wl loaded, result=${JSON.stringify(initExpr)}`);
 
@@ -387,7 +387,7 @@ async function launchKernel(self, WstpSession) {
         const cfg = self.config.getKernelRelatedConfigs();
         for (const [k, v] of Object.entries(cfg)) {
             const vStr = typeof v === "string" ? `"${v}"` : String(v);
-            await self.session.sub(`$setKernelConfig["${k}", ${vStr}]`).catch(() => {});
+            await self.session.evaluate(`$setKernelConfig["${k}", ${vStr}]`, { interactive: false }).catch(() => {});
         }
 
         // Push extension + addon version strings so WBVersion[] can report them
@@ -423,12 +423,12 @@ async function launchKernel(self, WstpSession) {
             let _extDate = 'unknown';
             try { _extDate = new Date(require('fs').statSync(_pkgPath).mtimeMs).toISOString().slice(0, 10); } catch (_) {}
 
-            await self.session.sub(`$setKernelConfig["wolfbookVersion",      "${_extVer}"]`).catch(() => {});
-            await self.session.sub(`$setKernelConfig["wolfbookBuildDate",    "${_extDate}"]`).catch(() => {});
-            await self.session.sub(`$setKernelConfig["wolfbookBtlVersion",   "${_btlVer}"]`).catch(() => {});
-            await self.session.sub(`$setKernelConfig["wolfbookBtlBuildDate", "${_btlDate}"]`).catch(() => {});
-            await self.session.sub(`$setKernelConfig["wolfbookWstpVersion",  "${_wstpVer}"]`).catch(() => {});
-            await self.session.sub(`$setKernelConfig["wolfbookWstpBuildDate","${_wstpDate}"]`).catch(() => {});
+            await self.session.evaluate(`$setKernelConfig["wolfbookVersion",      "${_extVer}"]`, { interactive: false }).catch(() => {});
+            await self.session.evaluate(`$setKernelConfig["wolfbookBuildDate",    "${_extDate}"]`, { interactive: false }).catch(() => {});
+            await self.session.evaluate(`$setKernelConfig["wolfbookBtlVersion",   "${_btlVer}"]`, { interactive: false }).catch(() => {});
+            await self.session.evaluate(`$setKernelConfig["wolfbookBtlBuildDate", "${_btlDate}"]`, { interactive: false }).catch(() => {});
+            await self.session.evaluate(`$setKernelConfig["wolfbookWstpVersion",  "${_wstpVer}"]`, { interactive: false }).catch(() => {});
+            await self.session.evaluate(`$setKernelConfig["wolfbookWstpBuildDate","${_wstpDate}"]`, { interactive: false }).catch(() => {});
         }
 
         // Set $PageWidth so Print[] / OutputForm wraps at the configured width
@@ -438,7 +438,7 @@ async function launchKernel(self, WstpSession) {
         // Update $PageWidth so the Print[] override in init.wl picks up the
         // user-configured value (init.wl sets the default of 156 at launch;
         // this call overrides it with whatever the workspace setting says).
-        await self.session.sub(`Unprotect[System\`$PageWidth]; System\`$PageWidth = ${printPageWidth}; Protect[System\`$PageWidth]`).catch(() => {});
+        await self.session.evaluate(`Unprotect[System\`$PageWidth]; System\`$PageWidth = ${printPageWidth}; Protect[System\`$PageWidth]`, { interactive: false }).catch(() => {});
 
         // Set NotebookDirectory[] / WBDirectory[] to the directory of the active wolfram
         // notebook so that Get["relative/path"] and friends work as expected.
@@ -454,8 +454,8 @@ async function launchKernel(self, WstpSession) {
             let _nbDir = path.dirname(_wolframNbEditor.notebook.uri.fsPath);
             if (process.platform === 'win32') _nbDir = _nbDir.replace(/\\/g, '/');
             const _nbDirEsc = _nbDir.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-            await self.session.sub(
-                `Unprotect[NotebookDirectory]; NotebookDirectory[] = "${_nbDirEsc}"; Protect[NotebookDirectory]; WBDirectory[] = "${_nbDirEsc}"`
+            await self.session.evaluate(
+                `Unprotect[NotebookDirectory, WBDirectory]; NotebookDirectory[] = "${_nbDirEsc}"; Protect[NotebookDirectory]; WBDirectory[] = "${_nbDirEsc}"; Protect[WBDirectory]`, { interactive: false }
             ).catch(() => {});
             console.log('[launchKernel] NotebookDirectory set to:', _nbDir);
         }
@@ -473,7 +473,7 @@ async function launchKernel(self, WstpSession) {
 
         // Track PID so we can kill the process if VS Code crashes before quitKernel()
         try {
-            const _pidExpr = await self.session.sub('$ProcessID');
+            const _pidExpr = await self.session.evaluate('$ProcessID', { interactive: false });
             if (_pidExpr?.type === 'integer' && typeof _pidExpr.value === 'number') {
                 _appendPid(_pidExpr.value);
                 scrollLog('[launchKernel] kernel PID registered:', _pidExpr.value);
