@@ -43,15 +43,21 @@ VsCodeRender[outN_Integer, format_String, scale_?NumericQ] := Module[
     (* --- Size check: only for non-graphics expressions.
        LeafCount is the primary guard: it directly predicts MathML complexity.
        Range[500] has LeafCount=501 but ByteCount~4KB — ByteCount alone misses it.
-       Graphics/SVG outputs are always passed through fully (no skeleton). *)
+       Graphics/SVG outputs are always passed through fully (no skeleton).
+       NOTE: We use Shallow[], NOT Short[].  Short is a front-end display hint;
+       in a headless kernel it wraps the FULL boxes in a TagBox and does nothing.
+       Shallow actually truncates at the kernel level, producing \[LeftSkeleton]..\[RightSkeleton]
+       skeleton markers that BTL renders as <<N>>. *)
     If[!graphicsQ[expr],
         limitBytes = $getKernelConfig["outputSizeLimit", 1000] * 1024;
         bc  = ByteCount[expr];
         lc  = LeafCount[expr];
         If[bc > limitBytes || lc > 1000,
-            shortLines  = Max[3, Min[20, Round[lc / 50] + 3]];
-            displayExpr = Short[expr, shortLines];
-            isSkeleton  = True,
+            (* Breadth = show ~20 elements at each level initially.
+               Depth = Infinity so nested structures are visible. *)
+            Module[{breadth = Max[5, Min[20, Round[lc / 50] + 3]]},
+                displayExpr = Shallow[expr, {Infinity, breadth}];
+                isSkeleton  = True],
         (* else *)
             displayExpr = expr],
     (* graphicsQ: always render full, no skeleton *)
@@ -183,6 +189,34 @@ VsCodeRenderFull[outN_Integer]               := VsCodeRenderFull[outN, "Auto", 0
 (* Overload: direct expression (for non-standard results) *)
 VsCodeRender[expr_, format_String, scale_?NumericQ] :=
     VsCodeRenderExpr[expr, format, scale];
+
+(* ---- VsCodeRenderShallow: progressive expansion for the +… button. ----
+   Uses Shallow[Out[N], {Infinity, breadth}] to show `breadth` elements at
+   each nesting level.  Returns a JSON string:
+     {"html":"...", "hasSkeleton":true/false}
+   hasSkeleton=False means the expression is now fully displayed and the
+   JS layer should remove the truncation banner. *)
+VsCodeRenderShallow[outN_Integer, breadth_Integer, format_String, scale_?NumericQ] := Module[
+    {expr, displayExpr, html, boxes, boxStr, hasSkeleton},
+    expr = Quiet[Out[outN]];
+    If[Head[expr] === Out || expr === $Failed,
+        Return["{\"html\":\"<pre class=\\\"vscode-wolfram-text-output\\\">No output</pre>\",\"hasSkeleton\":false}"]  ];
+    If[expr === Null, Return["{\"html\":\"\",\"hasSkeleton\":false}"] ];
+    displayExpr = Shallow[expr, {Infinity, breadth}];
+    (* Detect if Shallow had any effect by checking for skeleton chars in the boxes *)
+    boxes  = Quiet[Check[MakeBoxes[displayExpr, TraditionalForm], $Failed]];
+    boxStr = If[boxes =!= $Failed, ToString[boxes, InputForm], ""];
+    hasSkeleton = StringContainsQ[boxStr, "\[LeftSkeleton]"];
+    html = CheckAbort[
+        Quiet[VsCodeRenderExpr[displayExpr, format, scale]],
+        "<pre class=\"vscode-wolfram-text-output\">Rendering aborted</pre>"
+    ];
+    If[!StringQ[html], html = "<pre class=\"vscode-wolfram-text-output\">Rendering failed</pre>"];
+    (* Return JSON with html and hasSkeleton flag.
+       ExportString[..., "JSON"] safely escapes all special chars. *)
+    ExportString[<|"html" -> html, "hasSkeleton" -> hasSkeleton|>, "JSON", "Compact" -> True]
+];
+VsCodeRenderShallow[outN_Integer, breadth_Integer] := VsCodeRenderShallow[outN, breadth, "Auto", 0.8];
 
 (* Convenience overloads with defaults *)
 VsCodeRender[outN_Integer]                   := VsCodeRender[outN, "Auto", 0.8];
@@ -362,7 +396,8 @@ VsCodeRenderLast[] := VsCodeRenderLast["Auto", 0.8];
 
 (* ===== Protect all wolfbook API symbols from ClearAll["Global`*"] ===== *)
 Protect[
-    VsCodeDynExportValue, VsCodeRender, VsCodeRenderFull, VsCodeOpenAsText,
+    VsCodeDynExportValue, VsCodeRender, VsCodeRenderFull, VsCodeRenderShallow,
+    VsCodeOpenAsText,
     VsCodeSyntaxCheck, VsCodeSplitCode, VsCodeEvalWrapper, VsCodeRenderNth,
     VsCodeRenderLast,
     $vsCodeLastResult, $vsCodeLastResultList, $vsCodeLastStatuses

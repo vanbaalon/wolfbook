@@ -110,7 +110,6 @@ function katexHeadAssets(forPdf) {
 function exportDeck(deck) {
     const title      = deck.meta?.title || 'Presentation';
     const sections   = (deck.slides || []).filter(s => !s.hidden).map(slideToHTML).join('\n');
-    const customCSS  = deck.theme?.editorCSS || '';
     const navy   = deck.theme?.navy   || '#0a244a';
     const blue   = deck.theme?.blue   || '#0064b4';
     const cyan   = deck.theme?.cyan   || '#009ac8';
@@ -127,9 +126,14 @@ function exportDeck(deck) {
 ${katexHeadAssets()}
 <style>
 :root{--navy:${navy};--blue:${blue};--cyan:${cyan};--accent:${accent};--slidebg:#fafcff;}
-.reveal,.reveal *{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif!important;box-sizing:border-box;}
-.reveal{font-size:36px;color:var(--navy);}
-.reveal .slides section{padding:0!important;margin:0!important;top:0!important;text-align:left;overflow:hidden;}
+html,body{margin:0;padding:0;background:#000;}
+.reveal,.reveal *:not(.katex):not(.katex *){font-family:'Helvetica Neue',Helvetica,Arial,sans-serif!important;box-sizing:border-box;}
+.reveal{font-size:36px;color:var(--navy);background:#000!important;}
+.reveal-viewport{background:#000!important;}
+.reveal .slide-background{display:none!important;}
+.reveal .slides section{padding:0!important;margin:0!important;top:0!important;text-align:left;overflow:hidden;width:1920px;height:1080px;}
+.reveal .slides section .slide-inner{width:1920px;height:1080px;overflow:hidden;}
+.eval-block svg{max-width:100%;height:auto;display:block;}
 .reveal .slides section h1,.reveal .slides section h2,.reveal .slides section h3,
 .reveal .slides section h4,.reveal .slides section h5,.reveal .slides section h6{
   text-transform:none!important;letter-spacing:normal!important;font-weight:700;margin:0;padding:0;}
@@ -138,7 +142,6 @@ ${katexHeadAssets()}
 .reveal .slides section ul,.reveal .slides section ol{margin:0;padding-left:1.4em;text-align:left;}
 .reveal .slides section p{margin:0;}
 .reveal .slides section *{line-height:inherit;}
-${customCSS}
 .wslide-canvas{position:relative;width:1920px;height:1080px;}
 .wel{position:absolute;box-sizing:border-box;}
 </style>
@@ -147,6 +150,8 @@ ${customCSS}
 <div class="reveal"><div class="slides">
 ${sections}
 </div></div>
+<button id="fs-btn" style="position:fixed;top:12px;right:12px;z-index:9999;padding:8px 18px;font-size:14px;font-weight:600;background:rgba(0,0,0,.7);color:#fff;border:1px solid rgba(255,255,255,.3);border-radius:6px;cursor:pointer;font-family:sans-serif;backdrop-filter:blur(4px);" onclick="document.documentElement.requestFullscreen?document.documentElement.requestFullscreen():document.documentElement.webkitRequestFullscreen&&document.documentElement.webkitRequestFullscreen();this.style.display='none'">▶ Present</button>
+<script>document.addEventListener('fullscreenchange',function(){if(!document.fullscreenElement)document.getElementById('fs-btn').style.display='block';});</script>
 <script src="https://cdn.jsdelivr.net/npm/reveal.js@5/dist/reveal.js"></script>
 <script>Reveal.initialize({hash:true,slideNumber:'c/t',width:1920,height:1080,margin:0.04,minScale:0.1,maxScale:2,transition:'none',center:false,controls:true,progress:true});</script>
 </body>
@@ -156,7 +161,9 @@ ${sections}
 // ── Slide → <section> ─────────────────────────────────────────────────────
 
 function slideToHTML(slide) {
-    const bg = slide.background ? ` data-background-color="${escapeAttr(slide.background)}"` : '';
+    // Apply background as inline style on the inner wrapper (not data-background)
+    // so it doesn't bleed beyond the 1920x1080 slide area.
+    const bgStyle = slide.background ? `background:${slide.background};` : '';
 
     // v2 format: block tree (children[])
     if (slide.children) {
@@ -169,12 +176,12 @@ function slideToHTML(slide) {
         const gap     = slide.gap != null ? `gap:${slide.gap}px;` : '';
         const flexDir = layout === 'row' ? 'row' : layout === 'free' ? '' : 'column';
         const layoutCSS = layout === 'free'
-            ? `position:relative;width:1920px;height:1080px;${padding}`
-            : `display:flex;flex-direction:${flexDir};${gap}${padding}width:1920px;height:1080px;`;
+            ? `position:relative;width:1920px;height:1080px;${bgStyle}${padding}`
+            : `display:flex;flex-direction:${flexDir};${gap}${padding}width:1920px;height:1080px;${bgStyle}`;
         const notesHtml = slide.notes ? `\n<aside class="notes">${escapeAttr(slide.notes)}</aside>` : '';
         const resolvedTransition = slide.transition === 'random' ? ['fade','slide','convex','concave','zoom'][Math.floor(Math.random() * 5)] : slide.transition;
         const transition = resolvedTransition ? ` data-transition="${escapeAttr(resolvedTransition)}"` : '';
-        return `<section${sectionClass}${bg}${transition}>\n<div style="${layoutCSS}">\n${inner}\n</div>${notesHtml}\n</section>`;
+        return `<section${sectionClass}${transition}>\n<div class="slide-inner" style="${layoutCSS}">\n${inner}\n</div>${notesHtml}\n</section>`;
     }
 
     // v1 format: elements[]
@@ -183,12 +190,11 @@ function slideToHTML(slide) {
         elements[0].x === 0 && elements[0].y === 0 &&
         elements[0].w === 1920 && elements[0].h === 1080) {
         const sectionClass = slide.background === '#0a244a'
-            ? (slide.label === 'Title' ? ' class="title-slide"' : ' class="part-slide"')
-            : slide.background === '#fffce6' ? ' class="breaking"' : '';
-        return `<section${sectionClass}${bg}>\n${elements[0].html || ''}\n</section>`;
+            ? ' class="title-slide"' : slide.background === '#fffce6' ? ' class="breaking"' : '';
+        return `<section${sectionClass}>\n<div class="slide-inner" style="width:1920px;height:1080px;overflow:hidden;${bgStyle}">${elements[0].html || ''}</div>\n</section>`;
     }
     const elems = elements.map(elToHTML).join('\n  ');
-    return `<section${bg}>\n  <div class="wslide-canvas">\n  ${elems}\n  </div>\n</section>`;
+    return `<section>\n  <div class="wslide-canvas" style="${bgStyle}">\n  ${elems}\n  </div>\n</section>`;
 }
 
 // ── v2 block → HTML ───────────────────────────────────────────────────────
@@ -301,7 +307,7 @@ function blockToHTML(block) {
             let inner = '';
             if (block.output) {
                 if (block.output.type === 'svg' && block.output.data) {
-                    inner = `<div style="padding:8px;">${block.output.data}</div>`;
+                    inner = `<div style="padding:8px;overflow:hidden;">${block.output.data}</div>`;
                 } else if (block.output.type === 'latex' && block.output.html) {
                     inner = `<div style="padding:16px 20px;color:#c9d1d9;overflow-x:auto;">${block.output.html}</div>`;
                 } else if (block.output.type === 'image' && block.output.data) {
@@ -311,7 +317,7 @@ function blockToHTML(block) {
                     inner = `<pre style="margin:0;padding:16px 20px;font-family:monospace;font-size:14px;white-space:pre-wrap;color:#e0e0e0;">${escaped}</pre>`;
                 }
             }
-            return `<div class="eval-block${fragClass}${cls}" style="border-radius:6px;overflow:hidden;background:#0d1117;${style}"${fragAttr}>${inner}</div>`;
+            return `<div class="eval-block${fragClass}${cls}" style="border-radius:6px;overflow:hidden;background:${block.evalBg || 'transparent'};${style}"${fragAttr}>${inner}</div>`;
         }
         default:
             return `<div class="${fragClass.trim()}${cls}"${styleAttr}${fragAttr}>${block.content || ''}</div>`;
@@ -403,7 +409,6 @@ module.exports = { exportDeck, exportDeckPdf };
 function exportDeckPdf(deck, deckDir) {
     _pdfDeckDir = deckDir || null;
     const title      = deck.meta?.title || 'Presentation';
-    const customCSS  = deck.theme?.editorCSS || '';
     const navy   = deck.theme?.navy   || '#0a244a';
     const blue   = deck.theme?.blue   || '#0064b4';
     const cyan   = deck.theme?.cyan   || '#009ac8';
@@ -436,6 +441,8 @@ body{background:#888;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;}
 .slide-page{
   position:relative;width:1920px;height:1080px;overflow:hidden;
   background:#fafcff;
+  font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;
+  font-size:36px;color:var(--navy);
   transform-origin:top left;
 }
 /* All img elements: constrain to their container, never overflow */
@@ -447,7 +454,6 @@ p{margin:0;}
 h1,h2,h3,h4,h5,h6{margin:0;padding:0;font-weight:700;text-transform:none;letter-spacing:normal;}
 h2{background:var(--navy);color:#fff;padding:14px 36px;font-size:1.1em;width:100%;}
 .hidden-step{visibility:hidden;}
-${customCSS}
 /* When Chrome headless renders via --print-to-pdf it uses @media print */
 @media print{
   body{background:none;}
@@ -636,7 +642,7 @@ function blockToHTMLAtStep(block, step) {
         case 'eval': {
             let inner = '';
             if (block.output) {
-                if      (block.output.type === 'svg'   && block.output.data) inner = `<div style="padding:8px;">${block.output.data}</div>`;
+                if      (block.output.type === 'svg'   && block.output.data) inner = `<div style="padding:8px;overflow:hidden;">${block.output.data}</div>`;
                 else if (block.output.type === 'latex'  && block.output.html) inner = `<div style="padding:16px 20px;">${block.output.html}</div>`;
                 else if (block.output.type === 'image'  && block.output.data) inner = `<img src="${escapeAttr(block.output.data)}" style="max-width:100%;max-height:100%;display:block;object-fit:contain;">`;
                 else if (block.output.type === 'text'   && block.output.text) {
@@ -644,7 +650,7 @@ function blockToHTMLAtStep(block, step) {
                     inner = `<pre style="margin:0;padding:16px 20px;font-family:monospace;font-size:14px;white-space:pre-wrap;">${esc}</pre>`;
                 }
             }
-            return `<div class="eval-block${cls}" style="border-radius:6px;overflow:hidden;background:#0d1117;${style}">${inner}</div>`;
+            return `<div class="eval-block${cls}" style="border-radius:6px;overflow:hidden;background:${block.evalBg || 'transparent'};${style}">${inner}</div>`;
         }
         default:
             return `<div class="${cls.trim()}"${styleAttr}>${block.content || ''}</div>`;

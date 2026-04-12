@@ -3,7 +3,7 @@
   "displayName": "Wolfbook \u2014 AI-Friendly Wolfram Language Notebook",
   "description": "AI-friendly Wolfram Language notebook for VS Code. WSTP kernel, KaTeX rendering with adaptive line-breaking, Unicode input, LSP diagnostics, and AI-readable outputs for GitHub Copilot.",
   "publisher": "wolfbook",
-  "version": "2.6.31",
+  "version": "2.6.34",
   "engines": {
     "vscode": "^1.95.0"
   },
@@ -2481,6 +2481,104 @@
                   }
                 ]
               }
+            },
+            "docUri": {
+              "type": "string",
+              "description": "Optional: target a specific open .wslide file."
+            }
+          }
+        }
+      },
+      {
+        "name": "wolfslide_imageAsset",
+        "displayName": "Wolfslide: Image Asset Manager",
+        "toolReferenceName": "wolfslideImage",
+        "canBeReferencedInPrompt": true,
+        "modelDescription": "Manage image assets for the active .wslide deck. Image files live in img/<deckName>.wslide/ next to the .wslide file. Each image can have a sidecar annotation file (.ann.json) with description, source, and tags. Actions: 'list' — show all images with sizes, dimensions, which slides use them, and any annotation; 'info' — full details + ready-to-paste block JSON for one image; 'copy' — import an external image file into the deck folder (returns the relative src path and a ready-to-use block snippet); 'delete' — remove an image (warns if still referenced by a block, use force:true to override); 'rename' — rename a file AND automatically update all block src references in the deck; 'annotate' — write/update description, source, tags for an image (stored in .ann.json sidecar beside the image); 'insert' — copy an image AND immediately insert an image block into a slide in one combined call. Block src format: \"img/<deckName>.wslide/<filename>\". Always use this tool to add images — never construct src paths manually.",
+        "inputSchema": {
+          "type": "object",
+          "required": ["action"],
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": ["list", "info", "copy", "delete", "rename", "annotate", "insert"],
+              "description": "list: all images. info: details for one file. copy: import external file. delete: remove file. rename: rename + update refs. annotate: set description/source/tags. insert: copy + add block to slide."
+            },
+            "filename": {
+              "type": "string",
+              "description": "Target filename within the deck's img/ folder (e.g. 'spectrum_plot.png'). Used by: info, delete, rename, annotate, insert."
+            },
+            "srcPath": {
+              "type": "string",
+              "description": "Absolute path to the source file on disk. Used by: copy, insert."
+            },
+            "newName": {
+              "type": "string",
+              "description": "New filename for action:'rename'."
+            },
+            "annotation": {
+              "description": "String (description) or object {description, source, tags[]} to save as .ann.json sidecar. Used by: copy, insert, annotate.",
+              "oneOf": [
+                { "type": "string" },
+                {
+                  "type": "object",
+                  "properties": {
+                    "description": { "type": "string", "description": "Human-readable description of the image." },
+                    "source": { "type": "string", "description": "Where the image came from (URL, file, tool, etc.)." },
+                    "tags": { "type": "array", "items": { "type": "string" }, "description": "Searchable tags." }
+                  }
+                }
+              ]
+            },
+            "description": {
+              "type": "string",
+              "description": "Image description text for action:'annotate'."
+            },
+            "source": {
+              "type": "string",
+              "description": "Image source provenance for action:'annotate'."
+            },
+            "tags": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Tags array for action:'annotate'."
+            },
+            "slideIndex": {
+              "type": "number",
+              "description": "1-based slide index to insert the image block into. Used by: insert."
+            },
+            "slideId": {
+              "type": "string",
+              "description": "Slide id (alternative to slideIndex). Used by: insert."
+            },
+            "targetBlockId": {
+              "type": "string",
+              "description": "If provided, the image block is appended as a child of this container block (for insertion into nested layouts). Used by: insert."
+            },
+            "w": {
+              "type": "number",
+              "description": "Display width in pixels for the inserted image block. Defaults to image's native width (capped at 1600)."
+            },
+            "h": {
+              "type": "number",
+              "description": "Display height in pixels for the inserted image block. Defaults to image's native height (capped at 900)."
+            },
+            "fit": {
+              "type": "string",
+              "enum": ["contain", "cover"],
+              "description": "Object-fit mode for the inserted image block. Default: 'contain'."
+            },
+            "style": {
+              "type": "object",
+              "description": "Optional CSS style object for the inserted image block."
+            },
+            "fragmentOrder": {
+              "type": "number",
+              "description": "Animation step for the inserted image block."
+            },
+            "force": {
+              "type": "boolean",
+              "description": "For action:'delete' — delete even if the image is still referenced by slide blocks."
             },
             "docUri": {
               "type": "string",

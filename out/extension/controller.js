@@ -655,21 +655,36 @@ class WolframNotebookKernel {
                 const info = this.truncatedOutputCells.get(outputId);
                 const regInfo = this._outputRegistry.get(outputId);
                 if (!info || !regInfo) return;
-                const newShortLines = (info.shortLines || 20) + 20;
-                info.shortLines = newShortLines;
+                // Progressive expansion: increase breadth by 20 each click.
+                // Uses Shallow[expr, {Infinity, breadth}] which actually truncates
+                // at the kernel level (Short[] is a front-end hint that does nothing headlessly).
+                const newBreadth = (info.shallowBreadth || 20) + 20;
+                info.shallowBreadth = newBreadth;
                 this.truncatedOutputCells.set(outputId, info);
                 const fmt2 = regInfo.format || this._resolveFormat(info.cell, regInfo?.isGfx);
                 const scale2 = Number(this.config.get('imageScale') || 0.8);
                 try {
                     const moreResult = await this.session.evaluate(
-                        `Module[{e=Short[Out[${info.outN}],${newShortLines}]},VsCodeRenderExpr[e,"${fmt2}",${scale2}]]`,
+                        `VsCodeRenderShallow[${info.outN},${newBreadth},"${fmt2}",${scale2}]`,
                         { interactive: false }
                     );
                     if (moreResult?.result?.type === 'string' && moreResult.result.value) {
-                        const moreHtml = this._fixImageUris(moreResult.result.value);
-                        const bannerLabel2 = `&#128230; Large output &#8212; Short[&#8230;,${newShortLines}] (click Full for complete)`;
-                        const bannerHtml2 = this.makeTruncationBanner(outputId, bannerLabel2, newShortLines);
-                        await this._replaceOutputById(info.cell, outputId, moreHtml, info.outN, regInfo.outName, fmt2, bannerHtml2);
+                        let parsed;
+                        try { parsed = JSON.parse(moreResult.result.value); }
+                        catch (_) { parsed = null; }
+                        if (parsed && parsed.html) {
+                            const moreHtml = this._processWLLatexBoxes(this._fixImageUris(parsed.html));
+                            if (parsed.hasSkeleton) {
+                                // Still truncated — show updated banner with +… button
+                                const bannerLabel2 = `&#128230; Large output &#8212; Shallow[&#8230;,${newBreadth}] (click Full for complete)`;
+                                const bannerHtml2 = this.makeTruncationBanner(outputId, bannerLabel2, newBreadth);
+                                await this._replaceOutputById(info.cell, outputId, moreHtml, info.outN, regInfo.outName, fmt2, bannerHtml2);
+                            } else {
+                                // Fully expanded — no more skeleton, remove banner entirely
+                                await this._replaceOutputById(info.cell, outputId, moreHtml, info.outN, regInfo.outName, fmt2, '');
+                                this.truncatedOutputCells.delete(outputId);
+                            }
+                        }
                     }
                 } catch (moreErr) {
                     vscode.window.showWarningMessage(`Expand more failed: ${moreErr.message}`);

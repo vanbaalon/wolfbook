@@ -137,67 +137,140 @@ function processWLLatexBoxes(self, html, logPath, pageWidthEm = 0, source = '', 
         : { pageWidth: pageWidthEm };
     if (!(lbOpts.pageWidth > 0)) lbOpts.pageWidth = pageWidthEm;
     const lbOptsText = JSON.stringify(lbOpts);
-    // Helper: run boxToLatex and return { latex, error }
+    const _maxMatrixRows = Number(self.config?.get('notebook.rendering.maxMatrixRows') ?? 100);
+    // Add maxRows to lbOpts if not already supplied by _getLineBreakOptions
+    if (!('maxRows' in lbOpts)) lbOpts.maxRows = _maxMatrixRows;
     const btlOpts = {
         trigOmitParens: self.config?.get('notebook.rendering.trigOmitParens') !== false,
         trigPowerForm:  self.config?.get('notebook.rendering.trigPowerForm')  !== false,
+        maxRows: _maxMatrixRows > 0 ? _maxMatrixRows : 0,
     };
+    // Pager store: maps pagerId → {type, data, opts} for server-side page serving.
+    // Populated here, read by renderPageForPager() when client requests a page.
+    if (!self._pagerStore) self._pagerStore = new Map();
+    const _genPageId = () => 'pg-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
     const translate = (b64) => {
         try {
             let boxStr = Buffer.from(b64, 'base64').toString('utf8');
             // Convert all Unicode chars + \|XXXX hex escapes to \[Name] for BTL
             boxStr = wlUTFtoNames(boxStr);
-            const result = _btlAddon.boxToLatex(boxStr, btlOpts);
-            // boxToLatex returns { latex, error } per README
-            if (result && typeof result === 'object') return { boxStr, latex: result.latex, error: result.error || null };
+            const result = _btlAddon.boxToLatex(boxStr, {...btlOpts, requestedPage: 0});
+            // boxToLatex returns { latex, totalPages?, error } per new API
+            if (result && typeof result === 'object') return { boxStr, latex: result.latex, totalPages: result.totalPages || 1, error: result.error || null };
             // Older build that returned a plain string
-            return { boxStr, latex: String(result), error: null };
+            return { boxStr, latex: String(result), totalPages: 1, error: null };
         } catch (e) {
-            return { boxStr: '(decode failed)', latex: '', error: String(e.message || e) };
+            return { boxStr: '(decode failed)', latex: '', totalPages: 1, error: String(e.message || e) };
         }
     };
     // ---- Mode A: pre-render in extension host (LaTeX button) ----
     if (hasPrerendered) {
         html = html.replace(/<div class="vscode-wolfram-wllatex-boxes" data-boxes-b64="([^"]*)"(?:\s+data-raw-b64="([^"]*)")?\s*>\s*<\/div>/g,
             (_, b64, rawB64) => {
-                const { boxStr, latex, error } = translate(b64);
+                const { boxStr, latex, totalPages, error } = translate(b64);
                 // Apply line-breaking if enabled and we have a container width estimate.
                 const _lineBreakEnabled = (self.config?.get('notebook.rendering.lineBreakingEnabled')
                     ?? self.config?.get('notebook.rendering.lineBreaking')) !== false;
+                // Helper: optional line-break on a single latex string — no paging within a page
+                const lbOptsNoPaging = { ...lbOpts, maxRows: 0 };
+                const applyLineBreak = (ltx) => {
+                    if (!_lineBreakEnabled || !(pageWidthEm > 5) || !_btlAddon.lineBreakLatex) return ltx;
+                    try {
+                        const r = _btlAddon.lineBreakLatex(ltx, lbOptsNoPaging);
+                        return (r && typeof r === 'object') ? (r.result || ltx) : String(r);
+                    } catch (_) { return ltx; }
+                };
+                const _btnStyle = 'padding:1px 7px;font-size:12px;cursor:pointer;background:transparent;' +
+                    'border:1px solid rgba(128,128,128,0.3);border-radius:3px;' +
+                    'color:var(--vscode-foreground,inherit);line-height:1.5;user-select:none;';
+                const _labelStyle = 'font-size:11px;color:var(--vscode-descriptionForeground,#888);min-width:60px;text-align:center;';
+                const _buildNavBar = (N, rowsLabel) =>
+                    `<div class="wl-matrix-pager-bar" style="display:flex;align-items:center;gap:6px;margin-top:4px;padding:2px 0;">` +
+                    `<button data-action="prev-page" style="${_btnStyle}" title="Previous page" disabled>&#9664;</button>` +
+                    `<span class="wl-matrix-page-label" style="${_labelStyle}">1\u202f/\u202f${N}</span>` +
+                    `<button data-action="next-page" style="${_btnStyle}" title="Next page">&#9654;</button>` +
+                    `<span style="font-size:10px;color:var(--vscode-descriptionForeground,#888);">(${N}\u202fpages, ${rowsLabel})</span>` +
+                    `</div>`;
+
+                // ---- Paged output handling (BTL split matrix into pages) ----
+                if (totalPages > 1) {
+                    // Server-side pager: store box data, send only page 0 to client.
+                    // Client requests other pages via 'output-page-request' message.
+                    const pagerId = _genPageId();
+                    self._pagerStore.set(pagerId, { type: 'matrix', boxStr, btlOpts });
+                    const p0Latex = applyLineBreak(latex);
+                    let p0Rendered;
+                    try { p0Rendered = _btlPrerenderLatex(p0Latex, true); }
+                    catch (e) { p0Rendered = `<span style="color:#e05c4e;">KaTeX: ${_encoding.escapeHtml(String(e.message || e))}</span>`; }
+                    const errorNote = error ? `<div style="color:#e05c4e;font-size:11px;margin:2px 0;">\u26a0\ufe0f boxToLatex error: ${_encoding.escapeHtml(error)}</div>` : '';
+                    if (logPath) {
+                        try {
+                            const ts = new Date().toISOString();
+                            const rawText = rawB64 ? Buffer.from(rawB64, 'base64').toString('utf8') : '';
+                            const sep = '='.repeat(72) + '\n';
+                            fs.mkdirSync(path.dirname(logPath), { recursive: true });
+                            fs.appendFileSync(logPath, sep + ts + (source ? '  [' + source + ']' : '') + '  [PAGED: ' + totalPages + ' pages]\n' +
+                                '-- kernel output --\n' + rawText + '\n' +
+                                '-- btl input (cleaned boxes) --\n' + boxStr + '\n' +
+                                '-- btl output (latex page 1/' + totalPages + ') --\n' + p0Latex + '\n' +
+                                (error ? '-- btl error --\n' + error + '\n' : ''));
+                        } catch (_) {}
+                    }
+                    const _latexB64ForPager = Buffer.from(p0Latex).toString('base64');
+                    return `<div class="vscode-wolfram-wllatex-prerendered wl-matrix-pager" data-current-page="0" data-page-count="${totalPages}" data-pager-id="${pagerId}" data-page-width-em="${pageWidthEm}" data-latex-b64="${_latexB64ForPager}">` +
+                           errorNote + `<div class="wl-matrix-page">${p0Rendered}</div>` + _buildNavBar(totalPages, _maxMatrixRows + '\u202frows/page') + '</div>';
+                }
+
+                // ---- Single-page output ----
                 let latexFinal = latex;
                 let lineBreakStatus = 'disabled';
-                if (_lineBreakEnabled) {
-                    if (!(pageWidthEm > 5)) {
-                        lineBreakStatus = 'skipped (pageWidthEm=' + pageWidthEm + ')';
-                    } else if (!_btlAddon.lineBreakLatex) {
-                        lineBreakStatus = 'unavailable';
-                    } else {
-                        try {
-                            latexFinal = _btlAddon.lineBreakLatex(latex, lbOpts);
-                            lineBreakStatus = latexFinal !== latex ? 'applied' : 'no-change (fits in width)';
-                        } catch (e) {
-                            latexFinal = latex;
-                            lineBreakStatus = 'error: ' + String(e.message || e);
-                        }
+                let lbTotalPages = 1;
+                if (_lineBreakEnabled && pageWidthEm > 5 && _btlAddon.lineBreakLatex) {
+                    try {
+                        const lbr = _btlAddon.lineBreakLatex(latex, lbOpts);
+                        if (lbr && typeof lbr === 'object') {
+                            latexFinal = lbr.result || latex;
+                            lbTotalPages = lbr.totalPages || 1;
+                        } else { latexFinal = String(lbr); }
+                        lineBreakStatus = lbTotalPages > 1
+                            ? 'paged: ' + lbTotalPages + ' pages'
+                            : latexFinal !== latex ? 'applied' : 'no-change (fits in width)';
+                    } catch (e) {
+                        latexFinal = latex;
+                        lineBreakStatus = 'error: ' + String(e.message || e);
                     }
+                } else if (!_lineBreakEnabled) {
+                    lineBreakStatus = 'disabled';
+                } else if (!(pageWidthEm > 5)) {
+                    lineBreakStatus = 'skipped (pageWidthEm=' + pageWidthEm + ')';
+                } else {
+                    lineBreakStatus = 'unavailable';
                 }
-                // Write to btl.log if a log path was supplied (Print/BoxData path only)
                 if (logPath) {
                     try {
                         const ts = new Date().toISOString();
                         const rawText = rawB64 ? Buffer.from(rawB64, 'base64').toString('utf8') : '';
                         const sep = '='.repeat(72) + '\n';
-                        const entry = sep +
-                            ts + (source ? '  [' + source + ']' : '') + '\n' +
+                        fs.mkdirSync(path.dirname(logPath), { recursive: true });
+                        fs.appendFileSync(logPath, sep + ts + (source ? '  [' + source + ']' : '') + '\n' +
                             '-- kernel output --\n' + rawText + '\n' +
                             '-- btl input (cleaned boxes) --\n' + boxStr + '\n' +
                             '-- btl output (latex) --\n' + latex + '\n' +
-                            '-- pageWidthEm: ' + pageWidthEm + '  lineBreak: ' + lineBreakStatus +
-                            '  opts: ' + lbOptsText + ' --\n' +
-                            (error ? '-- btl error --\n' + error + '\n' : '');
-                        fs.mkdirSync(path.dirname(logPath), { recursive: true });
-                        fs.appendFileSync(logPath, entry);
+                            '-- pageWidthEm: ' + pageWidthEm + '  lineBreak: ' + lineBreakStatus + '  opts: ' + JSON.stringify(lbOpts) + ' --\n' +
+                            (error ? '-- btl error --\n' + error + '\n' : ''));
                     } catch (_) {}
+                }
+                // lb-paging: lineBreakLatex produced multiple pages — server-side pager
+                if (lbTotalPages > 1) {
+                    const pagerId = _genPageId();
+                    self._pagerStore.set(pagerId, { type: 'lb', latex, lbOpts });
+                    let p0Rendered;
+                    try { p0Rendered = _btlPrerenderLatex(latexFinal, true); }
+                    catch (e) { p0Rendered = `<span style="color:#e05c4e;">KaTeX: ${_encoding.escapeHtml(String(e.message || e))}</span>`; }
+                    const errorNote = error ? `<div style="color:#e05c4e;font-size:11px;margin:2px 0;">\u26a0\ufe0f boxToLatex error: ${_encoding.escapeHtml(error)}</div>` : '';
+                    const _lbB64 = Buffer.from(latexFinal).toString('base64');
+                    return `<div class="vscode-wolfram-wllatex-prerendered wl-matrix-pager" data-current-page="0" data-page-count="${lbTotalPages}" data-pager-id="${pagerId}" data-page-width-em="${pageWidthEm}" data-latex-b64="${_lbB64}">` +
+                           errorNote + `<div class="wl-matrix-page">${p0Rendered}</div>` + _buildNavBar(lbTotalPages, _maxMatrixRows + '\u202flines/page') + '</div>';
                 }
                 let rendered;
                 try {
@@ -207,11 +280,9 @@ function processWLLatexBoxes(self, html, logPath, pageWidthEm = 0, source = '', 
                            _encoding.escapeHtml(String(e.message || e)) + '</pre>';
                 }
                 const errorNote = error
-                    ? `<div style="color:#e05c4e;font-size:11px;margin:2px 0;">` +
-                      `⚠️ boxToLatex error: ${_encoding.escapeHtml(error)}</div>`
+                    ? `<div style="color:#e05c4e;font-size:11px;margin:2px 0;">\u26a0\ufe0f boxToLatex error: ${_encoding.escapeHtml(error)}</div>`
                     : '';
-                const lineBrokenAttr = lineBreakStatus === 'applied' ? ' data-line-broken="1"' : '';
-                // Embed data-latex-b64 so extractPlainText and AI tools can read the raw LaTeX
+                const lineBrokenAttr = (lineBreakStatus === 'applied' || lineBreakStatus.startsWith('paged')) ? ' data-line-broken="1"' : '';
                 const _latexB64ForA = Buffer.from(latexFinal).toString('base64');
                 return `<div class="vscode-wolfram-wllatex-prerendered" data-page-width-em="${pageWidthEm}"${lineBrokenAttr} data-latex-b64="${_latexB64ForA}">` +
                        errorNote + rendered + '</div>';
@@ -234,7 +305,8 @@ function processWLLatexBoxes(self, html, logPath, pageWidthEm = 0, source = '', 
                         lineBreakStatus = 'unavailable';
                     } else {
                         try {
-                            latexFinal = _btlAddon.lineBreakLatex(latex, lbOpts);
+                            const lbr = _btlAddon.lineBreakLatex(latex, lbOpts);
+                            latexFinal = (lbr && typeof lbr === 'object') ? (lbr.result || latex) : String(lbr);
                             lineBreakStatus = latexFinal !== latex ? 'applied' : 'no-change (fits in width)';
                         } catch (e) {
                             latexFinal = latex;
@@ -279,7 +351,10 @@ function processWLLatexBoxes(self, html, logPath, pageWidthEm = 0, source = '', 
                     ?? self.config?.get('notebook.rendering.lineBreaking')) !== false;
                 let latexFinal = latex;
                 if (_lineBreakEnabled && pageWidthEm > 5 && _btlAddon.lineBreakLatex) {
-                    try { latexFinal = _btlAddon.lineBreakLatex(latex, lbOpts); } catch (_) {}
+                    try {
+                        const lbr = _btlAddon.lineBreakLatex(latex, lbOpts);
+                        latexFinal = (lbr && typeof lbr === 'object') ? (lbr.result || latex) : String(lbr);
+                    } catch (_) {}
                 }
                 if (logPath) {
                     try {
@@ -471,6 +546,37 @@ function extractPlainText(html, outName, isGfx, cellSource) {
 }
 
 // ---------------------------------------------------------------------------
+// Render one page for a server-side pager entry.
+// Called from controller.js when the client posts 'output-page-request'.
+// Returns rendered KaTeX HTML for the requested page, or null on failure.
+function renderPageForPager(self, pagerId, page) {
+    if (!self._pagerStore) return null;
+    const entry = self._pagerStore.get(pagerId);
+    if (!entry) return null;
+    const _btlAddon = _loadAddon();
+    if (!_btlAddon) return null;
+    let pageLatex = '';
+    try {
+        if (entry.type === 'lb') {
+            const lbr = _btlAddon.lineBreakLatex(entry.latex, { ...entry.lbOpts, requestedPage: page });
+            pageLatex = (lbr && typeof lbr === 'object' && lbr.result) ? lbr.result : String(lbr || '');
+        } else if (entry.type === 'matrix') {
+            const result = _btlAddon.boxToLatex(entry.boxStr, { ...entry.btlOpts, requestedPage: page });
+            if (result && typeof result === 'object') pageLatex = result.latex || '';
+            else pageLatex = String(result || '');
+        }
+    } catch (e) {
+        return `<span style="color:#e05c4e;">BTL error (page ${page}): ${_encoding.escapeHtml(String(e.message || e))}</span>`;
+    }
+    if (!pageLatex) return `<span style="color:#888;">(empty page)</span>`;
+    try {
+        return _btlPrerenderLatex(pageLatex, true);
+    } catch (e) {
+        return `<span style="color:#e05c4e;">KaTeX error: ${_encoding.escapeHtml(String(e.message || e))}</span>`;
+    }
+}
+
+// ---------------------------------------------------------------------------
 
 module.exports = {
     EXPR_ONLY_FMTS,
@@ -481,4 +587,5 @@ module.exports = {
     replaceOutputByUuid,
     replaceOutputById,
     extractPlainText,
+    renderPageForPager,
 };

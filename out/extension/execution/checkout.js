@@ -844,12 +844,11 @@ async function checkoutExecutionQueue(self) {
                         const outLabel =
                             `${_subsBadge}<span style="font-size:10px;color:#888;margin-right:8px;">${r.outputName}</span>`;
 
-                        // Detect skeleton only when BOTH metadata and explicit skeleton markers exist.
-                        // Short[] is atom-based, so sometimes no Left/RightSkeleton appears even for large atom counts.
-                        const _skeletonMarkerRe = /(\\\[LeftSkeleton\]|\\\[RightSkeleton\]|LeftSkeleton|RightSkeleton|\uF764|\uF765|&#xF764;|&#xF765;)/;
-                        const hasSkeletonMarkers = _skeletonMarkerRe.test(renderResult.result.value || '') ||
-                            _skeletonMarkerRe.test(html || '');
-                        const isSkeleton = html.includes('data-wolfram-is-skeleton') && hasSkeletonMarkers;
+                        // Detect skeleton: VsCodeRender sets data-wolfram-is-skeleton="1" when
+                        // Shallow[] was applied.  We trust this flag alone — the skeleton chars
+                        // (\[LeftSkeleton] U+F761, \[RightSkeleton] U+F762) are inside the
+                        // base64-encoded WLLatex box blob and invisible to regex on the HTML string.
+                        const isSkeleton = html.includes('data-wolfram-is-skeleton');
                         // Always generate a unique outputId — needed by format-switch buttons
                         // on ALL outputs (not only truncated ones).
                         const outputId = (self._outputIdCounter++).toString();
@@ -870,10 +869,47 @@ async function checkoutExecutionQueue(self) {
                         // Graphics outputs are <img src="file.svg/png"/> — tiny HTML that
                         // never needs truncation; applying it would corrupt the tag.
                         if (!_isGfx && (html.length > maxLen || isSkeleton)) {                                const _oid = outputId;
-                            // For raw truncation: clip at maxLen
-                            const displayHtml = html.length > maxLen
-                                ? html.substring(0, maxLen)
-                                : html;
+                            // For raw truncation: clip at a safe HTML boundary near maxLen
+                            let displayHtml;
+                            if (html.length > maxLen) {
+                                // Find the last closing tag before maxLen to avoid clipping mid-tag/mid-KaTeX
+                                let cutAt = maxLen;
+                                // Search backwards from maxLen for the last </span> or </div>
+                                const searchFrom = html.substring(0, maxLen);
+                                const lastClose = Math.max(
+                                    searchFrom.lastIndexOf('</span>'),
+                                    searchFrom.lastIndexOf('</div>'),
+                                    searchFrom.lastIndexOf('</td>'),
+                                    searchFrom.lastIndexOf('</tr>')
+                                );
+                                if (lastClose > maxLen * 0.5) {
+                                    cutAt = lastClose + (searchFrom.substring(lastClose).match(/^<\/\w+>/) || [''])[0].length;
+                                }
+                                displayHtml = html.substring(0, cutAt);
+                                // Close any unclosed tags to prevent DOM corruption
+                                const openTags = [];
+                                const tagRe = /<\/?([a-zA-Z][a-zA-Z0-9]*)[^>]*\/?>/g;
+                                let m2;
+                                while ((m2 = tagRe.exec(displayHtml)) !== null) {
+                                    const full = m2[0];
+                                    if (full.endsWith('/>')) continue; // self-closing
+                                    const tagName = m2[1].toLowerCase();
+                                    if (full.startsWith('</')) {
+                                        // closing tag — pop matching open
+                                        for (let j = openTags.length - 1; j >= 0; j--) {
+                                            if (openTags[j] === tagName) { openTags.splice(j, 1); break; }
+                                        }
+                                    } else {
+                                        openTags.push(tagName);
+                                    }
+                                }
+                                // Close remaining open tags in reverse order
+                                for (let j = openTags.length - 1; j >= 0; j--) {
+                                    displayHtml += `</${openTags[j]}>`;
+                                }
+                            } else {
+                                displayHtml = html;
+                            }
                             // Build banner label
                             let bannerLabel;
                             if (isSkeleton) {
@@ -889,7 +925,7 @@ async function checkoutExecutionQueue(self) {
                             html = `<div class="wl-output-block">${headerRow}<div class="wl-output-content">${displayHtml}</div></div>` +
                                    self.makeTruncationBanner(outputId, bannerLabel);
                             self.truncatedOutputCells.set(_oid,
-                                { cell: currentExecution.execution.cell, outN: lineN, shortLines: 20, isSkeleton });
+                                { cell: currentExecution.execution.cell, outN: lineN, shallowBreadth: 20, isSkeleton });
                             self.writeDebugLog(
                                 `[CHECKOUT] ${isSkeleton ? 'Skeleton' : 'Truncated'} output OutN=${lineN} OutputID=${_oid}`);
                         } else {

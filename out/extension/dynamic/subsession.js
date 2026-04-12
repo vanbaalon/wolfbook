@@ -17,6 +17,8 @@ for (let i = 0; i < s.length; i++) {
     const ch = s[i];
     if (inStr) { if (ch === '\\') i++; else if (ch === '"') inStr = false; }
     else if (ch === '"') { inStr = true; }
+    else if (ch === '<' && i + 1 < s.length && s[i + 1] === '|') { depth++; i++; }
+    else if (ch === '|' && i + 1 < s.length && s[i + 1] === '>') { depth--; i++; }
     else if ('[({'.includes(ch)) depth++;
     else if ('])}'.includes(ch)) depth--;
     else if (ch === ',' && depth === 0) { parts.push(s.slice(start, i).trim()); start = i + 1; }
@@ -37,6 +39,10 @@ for (let i = 0; i < code.length; i++) {
         else if (ch === '"') inStr = false;
     } else if (ch === '"') {
         inStr = true;
+    } else if (ch === '<' && i + 1 < code.length && code[i + 1] === '|') {
+        depth++; i++; // <| Association open
+    } else if (ch === '|' && i + 1 < code.length && code[i + 1] === '>') {
+        depth--; i++; // |> Association close
     } else if ('[({'.includes(ch)) {
         depth++;
     } else if ('])}'.includes(ch)) {

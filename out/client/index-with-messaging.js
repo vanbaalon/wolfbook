@@ -759,6 +759,42 @@ export function activate(context) {
                 });
             });
 
+            // ---- Matrix pager: prev/next page navigation (pure client-side DOM) ----
+            const matrixPagers = element.querySelectorAll('.wl-matrix-pager[data-page-count]');
+            matrixPagers.forEach(pager => {
+                const N = parseInt(pager.getAttribute('data-page-count') || '1', 10);
+                if (N <= 1) return;
+                const pages = pager.querySelectorAll('.wl-matrix-page');
+                const label = pager.querySelector('.wl-matrix-page-label');
+                const prevBtn = pager.querySelector('button[data-action="prev-page"]');
+                const nextBtn = pager.querySelector('button[data-action="next-page"]');
+
+                const goTo = (i) => {
+                    const cur = parseInt(pager.getAttribute('data-current-page') || '0', 10);
+                    if (i < 0 || i >= N || i === cur) return;
+                    if (pages[cur]) pages[cur].style.display = 'none';
+                    if (pages[i])   pages[i].style.display = '';
+                    pager.setAttribute('data-current-page', String(i));
+                    if (label) label.textContent = `${i + 1}\u202f/\u202f${N}`;
+                    if (prevBtn) prevBtn.disabled = i === 0;
+                    if (nextBtn) nextBtn.disabled = i === N - 1;
+                };
+
+                if (prevBtn) {
+                    prevBtn.disabled = true; // starts on page 0
+                    prevBtn.addEventListener('click', (e) => {
+                        e.preventDefault(); e.stopPropagation();
+                        goTo(parseInt(pager.getAttribute('data-current-page') || '0', 10) - 1);
+                    });
+                }
+                if (nextBtn) {
+                    nextBtn.addEventListener('click', (e) => {
+                        e.preventDefault(); e.stopPropagation();
+                        goTo(parseInt(pager.getAttribute('data-current-page') || '0', 10) + 1);
+                    });
+                }
+            });
+
             // ---- Format + zoom buttons for each output header ----
             // Each .wl-output-header[data-out-n] gets a button group:
             //   TXT | SVG | ∑  (format selectors)

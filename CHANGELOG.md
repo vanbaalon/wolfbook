@@ -4,6 +4,46 @@ All notable changes to **Wolfbook** are documented here.
 
 ---
 
+## [2.6.29] - 2026-04-11
+
+### Added — `wolfslide_imageAsset` tool
+
+Full image asset lifecycle management for `.wslide` decks. Seven actions in one tool:
+
+- **`list`** — shows all images in `img/<deckName>.wslide/` with file size, pixel dimensions, which slides reference each image, and annotation preview. Flags unused files.
+- **`info`** — full details for one image plus a ready-to-paste image block JSON snippet.
+- **`copy`** — imports an external file into the deck's `img/` folder and returns the canonical `src` path and a ready-to-use block definition. Accepts an optional `annotation` to write provenance at copy time.
+- **`delete`** — removes an image file; warns if still referenced by any block (use `force:true` to override).
+- **`rename`** — renames the file **and** automatically patches all `src` references in the deck JSON in one atomic operation.
+- **`annotate`** — writes or updates a `.ann.json` sidecar file beside the image with `description`, `source`, and `tags` fields.
+- **`insert`** — combines copy + block insertion in one call: imports the file, writes optional annotation, and adds an `image` block to the specified slide (with correct `src`, inferred dimensions, `alt`, `fit`).
+
+Annotation sidecars (`<filename>.ann.json`) survive renames and never pollute the deck JSON.
+
+### Updated — `wslide-agent.instructions.md`
+
+Expanded "Images" section with `wolfslide_imageAsset` quick-reference, block JSON structure, and step-by-step workflows for adding Wolfram Language plots.
+
+---
+
+## [2.6.28] - 2026-04-11
+
+### Fixed — Wolfslide tools (from CERN-deck feedback)
+
+- **`wolfslide_setTheme` warns on unknown parameters** — if an unknown key (e.g. `overrides`, a common mistake) is passed, the tool now returns a clear error message listing valid parameters and refusing to apply the call. Previously unknown keys were silently ignored, causing intended theme/CSS changes to be discarded without warning.
+
+- **`wolfslide_getContext` returns full `editorCSS`** — was truncated to 120 characters, making it impossible for the agent to verify what CSS was actually saved after a `setTheme` call. Now the entire `editorCSS` string is included (with character count), so the agent can diff it against its intent.
+
+- **Block IDs in ASCII slide diagram** — `wolfslide_getSlide` ASCII output now annotates every block with its short ID (e.g. `#xcgxoe34`). Previously block IDs were only visible in the raw JSON section, requiring the agent to correlate ASCII position with JSON manually.
+
+- **Getting-started guide on new (empty) decks** — `wolfslide_getContext` now detects when the active deck has 0 slides and appends a comprehensive onboarding section covering: theme setup, `bulkInsert` JSON structure examples, layout rules (explicit px heights), inline-style discipline, fragments, math, images, eval blocks, editing workflow, and a common-mistakes table.
+
+### Added
+
+- **`wslide-agent.instructions.md`** (user-level Copilot instructions) — an `.instructions.md` file with `applyTo: "**/*.wslide"` frontmatter is installed in the user prompts folder. Copilot automatically injects it whenever a `.wslide` file is active, providing the agent with complete tool reference, JSON examples, and pitfall table without requiring the user to prompt for it.
+
+---
+
 ## [2.6.27] - 2026-04-11
 
 ### Added — Paper search tool (`#wolfbookPaper`)

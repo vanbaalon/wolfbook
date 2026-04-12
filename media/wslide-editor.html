@@ -54,16 +54,26 @@ button.tb.danger  { border-color: var(--accent); color: var(--accent); }
 #main { flex: 1; display: flex; min-height: 0; }
 
 /* ── Slide list ──────────────────────────────────────────────────────── */
-#slide-list { width: var(--slides-w); min-width: var(--slides-w); background: var(--panel); border-right: 1px solid var(--border); overflow-y: auto; display: flex; flex-direction: column; }
+#slide-list { width: var(--slides-w); min-width: var(--slides-w); background: var(--panel); border-right: 1px solid var(--border); overflow-y: auto; display: flex; flex-direction: column; transition: border-color .2s, box-shadow .2s; }
+#slide-list.context-active { border-right: 2px solid var(--cyan); box-shadow: inset -3px 0 8px rgba(0,154,200,.25); }
 #slide-list-header { padding: 8px 10px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); flex-shrink: 0; position: sticky; top: 0; z-index: 5; background: var(--panel); }
 .slide-thumb { padding: 8px; cursor: pointer; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; user-select: none; }
 .slide-thumb:hover  { background: rgba(255,255,255,.05); }
 .slide-thumb.active { background: rgba(0,154,200,.18); border-left: 3px solid var(--cyan); }
+.slide-thumb.multi-selected { background: rgba(0,154,200,.10); border-left: 3px solid rgba(0,154,200,.5); }
+/* Context menu */
+.ctx-menu { position: fixed; z-index: 9999; background: #1e2233; border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 8px 24px rgba(0,0,0,.6); padding: 4px 0; min-width: 160px; font-size: 12px; }
+.ctx-menu-item { padding: 6px 16px; cursor: pointer; color: var(--text); display: flex; justify-content: space-between; align-items: center; }
+.ctx-menu-item:hover { background: rgba(0,154,200,.2); }
+.ctx-menu-item.disabled { color: var(--muted); pointer-events: none; }
+.ctx-menu-sep { height: 1px; background: var(--border); margin: 4px 0; }
+.ctx-menu-item .shortcut { color: var(--muted); font-size: 10px; margin-left: 16px; }
 .thumb-num  { font-size: 10px; color: var(--muted); min-width: 20px; text-align: right; }
 .thumb-preview { width: 140px; height: 79px; border: 1px solid var(--border); background: #fafcff; border-radius: 2px; overflow: hidden; position: relative; flex-shrink: 0; }
 
 /* ── Canvas area ─────────────────────────────────────────────────────── */
-#canvas-area { flex: 1; overflow: auto; display: flex; align-items: flex-start; justify-content: flex-start; padding: 24px; background: #161a26; position: relative; }
+#canvas-area { flex: 1; overflow: auto; display: flex; align-items: flex-start; justify-content: flex-start; padding: 24px; background: #161a26; position: relative; transition: box-shadow .2s; }
+#canvas-area.context-active { box-shadow: inset 0 0 0 2px var(--cyan), inset 0 0 12px rgba(0,154,200,.15); }
 #slide-canvas { width: 1920px; height: 1080px; background: #fafcff; position: relative; flex-shrink: 0; transform-origin: top left; overflow: hidden; }
 #slide-canvas.drag-over { outline: 3px dashed var(--cyan); }
 
@@ -95,7 +105,7 @@ button.tb.danger  { border-color: var(--accent); color: var(--accent); }
 #inline-editor-modebar { display: flex; align-items: center; background: #141926; border-bottom: 1px solid var(--border); padding: 3px 8px; gap: 6px; flex-shrink: 0; }
 #inline-editor-modebar button { background: transparent; border: 1px solid transparent; color: var(--muted); cursor: pointer; padding: 2px 10px; border-radius: 3px; font-size: 11px; }
 #inline-editor-modebar button.active { background: rgba(0,154,200,.2); border-color: var(--cyan); color: var(--text); }
-#inline-editor-ce { flex:1; min-height: 80px; max-height: 340px; border: none; padding: 10px 14px; font-size: 15px; line-height: 1.5; outline: none; overflow-y: auto; box-sizing: border-box; white-space: pre-wrap; cursor: text; }
+#inline-editor-ce { flex:1; min-height: 80px; max-height: 340px; border: none; padding: 10px 14px; font-size: 15px; line-height: 1.5; outline: none; overflow-y: auto; box-sizing: border-box; white-space: pre-wrap; cursor: text; color: #e8e8e8 !important; background: #1a2035; }
 #inline-editor-ce:empty::before { content: attr(data-placeholder); color: rgba(128,128,128,.5); pointer-events: none; }
 #inline-editor-panel textarea { width: 100%; display: block; flex-shrink: 0; min-height: 120px; height: 200px; background: #1a2035; color: #e8e8e8; border: none; padding: 10px 14px; font-family: 'SF Mono', Menlo, Monaco, 'Courier New', monospace; font-size: 13px; line-height: 1.5; resize: vertical; outline: none; box-sizing: border-box; overflow: auto; }
 #inline-editor-panel textarea::placeholder { color: rgba(255,255,255,.3); }
@@ -166,9 +176,9 @@ button.tb.danger  { border-color: var(--accent); color: var(--accent); }
 .code-block code[class*="language-"], .code-block pre[class*="language-"] { color: inherit; background: none !important; font-family: inherit; }
 .code-block .code-lang { position: absolute; top: 4px; right: 10px; font-size: 10px; color: var(--muted); text-transform: uppercase; pointer-events: none; }
 /* ── Eval block ──────────────────────────────────────────────────────────── */
-.eval-block { position: relative; border: 1px solid rgba(255,255,255,.1); border-radius: 6px; overflow: hidden; min-height: 60px; background: #0d1117; }
-.eval-block .eval-output { width: 100%; display: flex; align-items: center; justify-content: center; }
-.eval-block .eval-output img { max-width: 100%; max-height: 100%; display: block; }
+.eval-block { position: relative; border: 1px solid rgba(255,255,255,.1); border-radius: 6px; overflow: hidden; min-height: 60px; }
+.eval-block .eval-output { width: 100%; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+.eval-block .eval-output img { max-width: 100%; max-height: 100%; display: block; object-fit: contain; }
 .eval-block .eval-svg-output { padding: 8px; }
 .eval-block .eval-svg-output svg { max-width: 100%; height: auto; display: block; }
 .eval-block .eval-latex-output { padding: 16px 20px; color: #c9d1d9; overflow-x: auto; }
@@ -181,6 +191,20 @@ button.tb.danger  { border-color: var(--accent); color: var(--accent); }
 .eval-block .eval-spinner { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,.5); font-size: 13px; color: var(--cyan); z-index: 5; }
 .eval-block .eval-spinner::after { content: '⟳ Evaluating…'; animation: eval-spin 1.2s linear infinite; }
 @keyframes eval-spin { 0%,100% { opacity: 1; } 50% { opacity: .4; } }
+/* ── Slide content typography (built-in defaults) ─────────────────────── */
+.slide-content { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 36px; line-height: 1.4; color: #1a1a2e; }
+.slide-content h1 { font-size: 64px; font-weight: 700; line-height: 1.15; margin: 0 0 16px; }
+.slide-content h2 { font-size: 48px; font-weight: 700; line-height: 1.2; margin: 0 0 12px; }
+.slide-content h3 { font-size: 40px; font-weight: 600; line-height: 1.25; margin: 0 0 10px; }
+.slide-content h4 { font-size: 34px; font-weight: 600; line-height: 1.3; margin: 0 0 8px; }
+.slide-content p  { margin: 0 0 12px; }
+.slide-content ul, .slide-content ol { margin: 0 0 12px; padding-left: 1.2em; }
+.slide-content li { margin-bottom: 6px; }
+.slide-content a { color: var(--blue); text-decoration: underline; }
+.slide-content img { max-width: 100%; }
+.slide-content .two-col { display: flex; gap: 40px; }
+.slide-content .two-col > * { flex: 1; }
+
 /* ── Hidden slide thumbnails ── */
 .slide-thumb.hidden-slide .thumb-preview { opacity: 0.35; filter: grayscale(60%); }
 .thumb-hidden-x { position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#888;font-size:22px;font-weight:700;pointer-events:none;z-index:2; }
@@ -376,6 +400,7 @@ button.tb.danger  { border-color: var(--accent); color: var(--accent); }
           <h3>Eval (Mathematica)</h3>
           <button class="inline-btn primary" id="btn-edit-eval">Edit Input…</button>
           <button class="inline-btn" id="btn-run-eval" style="color:var(--cyan);">▶ Run</button>
+          <div class="prop-row"><label>BG</label><input type="color" id="p-eval-bg" value="#0d1117"><button class="inline-btn" id="btn-eval-bg-clear" style="font-size:9px;padding:1px 5px;">Clear</button></div>
           <div id="eval-status" style="font-size:9px;color:var(--muted);margin-top:2px;"></div>
         </div>
         <div class="prop-group" id="arrow-props" style="display:none;">
@@ -536,6 +561,7 @@ window.addEventListener('message', e => {
         requestAnimationFrame(() => {
             deck = msg.deck;
             deckName = msg.deckName;
+            if (_ensureBlockIds(deck)) markDirty();  // auto-fix missing IDs
             dirty = false;
             _lastSnapshot = JSON.parse(JSON.stringify(deck));
             undoStack = []; redoStack = [];
@@ -691,10 +717,55 @@ let _inlineEditDom = null;   // DOM element of the block being edited
 let _inlineEditPanel = null; // the editor panel element
 let _savedRange = null;       // selection range saved before toolbar color picker
 let _clipboard = null;        // internal block clipboard {block: deepClone}
-let _slideClipboard = null;   // whole-slide clipboard for Cmd+C/V on slide panel
+let _slideClipboard = null;   // array of slides for Cmd+C/V on slide panel (always array or null)
 let _suppressNextPaste = false; // set by Cmd+V keydown so paste event is skipped
 let _slideListFocused = false; // true = last click was in the slide-panel sidebar
 let selectedBlockIds = new Set(); // full set for multi-selection (always includes selectedBlockId)
+let _selectedSlideIdxs = new Set(); // multi-slide selection (always includes slideIdx when focused)
+
+// ── Context indicator ────────────────────────────────────────────────────
+function updateContextIndicator() {
+  const sl = document.getElementById('slide-list');
+  const ca = document.getElementById('canvas-area');
+  if (_slideListFocused) {
+    sl.classList.add('context-active');
+    ca.classList.remove('context-active');
+  } else if (selectedBlockId) {
+    sl.classList.remove('context-active');
+    ca.classList.add('context-active');
+  } else {
+    sl.classList.remove('context-active');
+    ca.classList.remove('context-active');
+  }
+}
+
+// ── Context menu helper ──────────────────────────────────────────────────
+let _ctxMenu = null;
+function dismissCtxMenu() { if (_ctxMenu) { _ctxMenu.remove(); _ctxMenu = null; } }
+function showCtxMenu(x, y, items) {
+  dismissCtxMenu();
+  const menu = document.createElement('div');
+  menu.className = 'ctx-menu';
+  items.forEach(item => {
+    if (item === '---') { const sep = document.createElement('div'); sep.className = 'ctx-menu-sep'; menu.appendChild(sep); return; }
+    const row = document.createElement('div');
+    row.className = 'ctx-menu-item' + (item.disabled ? ' disabled' : '');
+    const label = document.createElement('span'); label.textContent = item.label;
+    row.appendChild(label);
+    if (item.shortcut) { const sc = document.createElement('span'); sc.className = 'shortcut'; sc.textContent = item.shortcut; row.appendChild(sc); }
+    if (!item.disabled) row.addEventListener('click', () => { dismissCtxMenu(); item.action(); });
+    menu.appendChild(row);
+  });
+  document.body.appendChild(menu);
+  // Keep in viewport
+  const rect = menu.getBoundingClientRect();
+  if (x + rect.width > window.innerWidth) x = window.innerWidth - rect.width - 4;
+  if (y + rect.height > window.innerHeight) y = window.innerHeight - rect.height - 4;
+  menu.style.left = x + 'px'; menu.style.top = y + 'px';
+  _ctxMenu = menu;
+}
+document.addEventListener('click', dismissCtxMenu);
+document.addEventListener('keydown', e => { if (e.key === 'Escape') dismissCtxMenu(); }, true);
 
 // ── Undo / redo ──────────────────────────────────────────────────────────
 let undoStack = [], redoStack = [];
@@ -718,6 +789,21 @@ let scale = 1;
 // UTILITIES
 // ════════════════════════════════════════════════════════════════════════
 function uid() { return Math.random().toString(36).slice(2, 10) + Date.now().toString(36); }
+
+// Ensure every block (and nested children/items) has an `id`. Missing IDs break
+// selection, ASDW navigation, and DOM lookups. Mutates in place, returns true if any were added.
+function _ensureBlockIds(deck) {
+  let added = false;
+  function walk(obj) {
+    if (!obj || typeof obj !== 'object') return;
+    if (Array.isArray(obj)) { obj.forEach(walk); return; }
+    if (obj.type && !obj.id) { obj.id = uid(); added = true; }
+    if (obj.children) walk(obj.children);
+    if (obj.items) walk(obj.items);
+  }
+  (deck?.slides || []).forEach(s => { if (!s.id) { s.id = uid(); added = true; } walk(s.children); });
+  return added;
+}
 
 /** Deep-clone a block tree, assigning fresh IDs to every node */
 function deepCloneBlock(block) {
@@ -1106,8 +1192,12 @@ function migrateDeck(deck) {
 // RENDERING — build DOM from block tree
 // ════════════════════════════════════════════════════════════════════════
 
+// editorCSS is NO LONGER read from the .wslide file for the editor DOM.
+// The extension provides built-in slide-content typography (see <style> above).
+// Theme colour variables (--navy, --blue, etc.) still come from the file via getThemeVarsCSS().
+// For sandboxed iframes (raw blocks), deck.theme.editorCSS is passed directly.
 function getSlideCSS() {
-  return deck?.theme?.editorCSS || deck?.theme?.css || '';
+  return '';
 }
 
 function getThemeVarsCSS() {
@@ -1132,10 +1222,10 @@ function renderSlide() {
   const slide = deck.slides[slideIdx];
   canvasEl.style.background = slide.background || '#fafcff';
 
-  // Inject theme CSS variables + slide CSS
+  // Inject theme CSS variables (colour vars from the file — safe).
   const styleEl = document.createElement('style');
   styleEl.className = 'theme-css';
-  styleEl.textContent = getThemeVarsCSS() + '\n' + getSlideCSS();
+  styleEl.textContent = getThemeVarsCSS();
   canvasEl.appendChild(styleEl);
 
   // Slide content wrapper
@@ -1406,6 +1496,7 @@ function renderCode(block) {
 function renderEval(block) {
   const dom = document.createElement('div');
   dom.className = 'eval-block';
+  dom.style.background = block.evalBg || 'transparent';
   const out = block.output;
   if (out && out.type === 'svg' && out.data) {
     // SVG graphics — render inline
@@ -1469,7 +1560,7 @@ function renderRaw(block) {
   iframe.style.cssText = 'width:100%;height:100%;border:none;';
   iframe.setAttribute('allowtransparency', 'true');
   const bg = deck?.slides[slideIdx]?.background || '#fafcff';
-  const css = getSlideCSS();
+  const css = deck?.theme?.editorCSS || deck?.theme?.css || '';
   iframe.srcdoc = buildRawSrcdoc(block.html || '', bg, css);
   dom.appendChild(iframe);
   // Click catcher over iframe
@@ -1752,7 +1843,9 @@ function attachBlockEvents(dom, block, slide) {
 function selectBlock(id) {
   selectedBlockId = id;
   selectedBlockIds = new Set(id ? [id] : []);
+  _slideListFocused = false;
   renderSlide();
+  updateContextIndicator();
 }
 
 // Lightweight select — swaps CSS classes without a full DOM rebuild.
@@ -1769,6 +1862,8 @@ function _selectBlockFast(id, newDom) {
   const wasUnselected = selectedBlockId !== id;
   selectedBlockId = id;
   selectedBlockIds = new Set(id ? [id] : []);
+  _slideListFocused = false;
+  updateContextIndicator();
   if (newDom && wasUnselected) {
     newDom.classList.add('selected');
     addResizeHandles(newDom);
@@ -2198,11 +2293,66 @@ function hideRichToolbar() {
 // ── Canvas background click = deselect ───────────────────────────────────
 canvasEl.addEventListener('pointerdown', () => {
   _slideListFocused = false;
+  updateContextIndicator();
   if (selectedBlockId || selectedBlockIds.size > 0) {
     selectedBlockId = null;
     selectedBlockIds = new Set();
     renderSlide();
+    updateContextIndicator();
   }
+});
+
+// ── Canvas context menu (right-click) ────────────────────────────────────
+canvasEl.addEventListener('contextmenu', e => {
+  e.preventDefault();
+  const items = [];
+  if (selectedBlockId) {
+    items.push(
+      { label: 'Copy', shortcut: '⌘C', action() { const b = getSelectedBlock(); if (b) { _clipboard = deepCloneBlock(b); setStatus('Copied ✓'); } }},
+      { label: 'Cut', shortcut: '⌘X', action() {
+        const slide = deck?.slides[slideIdx]; if (!slide) return;
+        const found = findBlock(selectedBlockId, slide); if (!found) return;
+        _clipboard = deepCloneBlock(found.block);
+        found.parent[found.key].splice(found.index, 1);
+        selectedBlockId = null; selectedBlockIds = new Set();
+        setStatus('Cut ✓'); renderAll(); markDirty();
+      }},
+      { label: 'Paste', shortcut: '⌘V', disabled: !_clipboard, action() {
+        const slide = deck?.slides[slideIdx]; if (!slide) return;
+        const pasted = deepCloneBlock(_clipboard);
+        const found = findBlock(selectedBlockId, slide);
+        if (found) { found.parent[found.key].splice(found.index + 1, 0, pasted); }
+        else { if (!slide.children) slide.children = []; slide.children.push(pasted); }
+        selectedBlockId = pasted.id; renderAll(); markDirty(); setStatus('Pasted ✓');
+      }},
+      '---',
+      { label: 'Duplicate', shortcut: '⌘D', action() {
+        const slide = deck?.slides[slideIdx]; if (!slide) return;
+        const found = findBlock(selectedBlockId, slide); if (!found) return;
+        const dup = deepCloneBlock(found.block);
+        found.parent[found.key].splice(found.index + 1, 0, dup);
+        selectedBlockId = dup.id; renderAll(); markDirty(); setStatus('Duplicated ✓');
+      }},
+      '---',
+      { label: 'Delete', shortcut: '⌫', action() {
+        const slide = deck?.slides[slideIdx]; if (!slide) return;
+        const found = findBlock(selectedBlockId, slide); if (!found) return;
+        found.parent[found.key].splice(found.index, 1);
+        selectedBlockId = null; selectedBlockIds = new Set(); renderAll(); markDirty();
+      }}
+    );
+  } else {
+    items.push(
+      { label: 'Paste', shortcut: '⌘V', disabled: !_clipboard, action() {
+        const slide = deck?.slides[slideIdx]; if (!slide) return;
+        const pasted = deepCloneBlock(_clipboard);
+        if (!slide.children) slide.children = [];
+        slide.children.push(pasted);
+        selectedBlockId = pasted.id; renderAll(); markDirty(); setStatus('Pasted ✓');
+      }}
+    );
+  }
+  showCtxMenu(e.clientX, e.clientY, items);
 });
 
 // ── Commit inline edit when clicking outside the editor panel & toolbar ──
@@ -2242,6 +2392,8 @@ function updatePropsPanel() {
   document.getElementById('geom-props').style.display = block.type === 'arrow' ? 'none' : 'flex';
   // Sync eval status
   if (block.type === 'eval') {
+    const bgInput = document.getElementById('p-eval-bg');
+    if (bgInput) bgInput.value = block.evalBg || '#0d1117';
     const st = document.getElementById('eval-status');
     if (st) {
       if (block._evaluating) st.textContent = 'Evaluating…';
@@ -2882,6 +3034,7 @@ function buildPresBlock(block) {
     case 'eval': {
       dom = document.createElement('div');
       dom.className = 'eval-block';
+      dom.style.background = block.evalBg || 'transparent';
       if (block.output) {
         if (block.output.type === 'svg' && block.output.data) {
           const wrap = document.createElement('div');
@@ -2917,7 +3070,7 @@ function buildPresBlock(block) {
       const iframe = document.createElement('iframe');
       iframe.style.cssText = 'width:100%;height:100%;border:none;pointer-events:none;';
       const bg = deck?.slides[presSlideIdx]?.background || '#fafcff';
-      const css = getSlideCSS();
+      const css = deck?.theme?.editorCSS || deck?.theme?.css || '';
       iframe.srcdoc = buildRawSrcdoc(block.html || '', bg, css);
       dom.appendChild(iframe);
       break;
@@ -2997,7 +3150,7 @@ function populatePanel(panel, sIdx) {
   panel.style.background = slide.background || '#fafcff';
 
   const styleEl = document.createElement('style');
-  styleEl.textContent = getThemeVarsCSS() + '\n' + getSlideCSS();
+  styleEl.textContent = getThemeVarsCSS();
   panel.appendChild(styleEl);
 
   const contentDiv = document.createElement('div');
@@ -3280,7 +3433,7 @@ function renderThumbContent(preview, slide) {
   inner.style.background = slide.background || '#fafcff';
 
   const styleEl = document.createElement('style');
-  styleEl.textContent = getThemeVarsCSS() + '\n' + getSlideCSS();
+  styleEl.textContent = getThemeVarsCSS();
   inner.appendChild(styleEl);
 
   const contentDiv = document.createElement('div');
@@ -3313,7 +3466,7 @@ function renderThumbs() {
     // Fast path: structure unchanged — update classes and state in-place, no DOM rebuild
     Array.from(existing).forEach((div, i) => {
       const slide = deck.slides[i];
-      const cls = 'slide-thumb' + (i === slideIdx ? ' active' : '') + (slide.hidden ? ' hidden-slide' : '');
+      const cls = 'slide-thumb' + (i === slideIdx ? ' active' : (_selectedSlideIdxs.has(i) ? ' multi-selected' : '')) + (slide.hidden ? ' hidden-slide' : '');
       if (div.className !== cls) div.className = cls;
       const preview = div.querySelector('.thumb-preview');
       if (preview) {
@@ -3352,7 +3505,7 @@ function renderThumbs() {
   let _dragSrcIdx = null;
   deck.slides.forEach((slide, i) => {
     const div = document.createElement('div');
-    div.className = 'slide-thumb' + (i === slideIdx ? ' active' : '') + (slide.hidden ? ' hidden-slide' : '');
+    div.className = 'slide-thumb' + (i === slideIdx ? ' active' : (_selectedSlideIdxs.has(i) ? ' multi-selected' : '')) + (slide.hidden ? ' hidden-slide' : '');
     div.draggable = true;
     const numSpan = document.createElement('span');
     numSpan.className = 'thumb-num'; numSpan.textContent = i + 1;
@@ -3377,7 +3530,58 @@ function renderThumbs() {
     });
     preview.appendChild(hideBtn);
     div.appendChild(numSpan); div.appendChild(preview);
-    div.addEventListener('click', () => selectSlide(i));
+    div.addEventListener('click', e => selectSlide(i, { shift: e.shiftKey, meta: e.metaKey || e.ctrlKey }));
+    // Right-click context menu for slides
+    div.addEventListener('contextmenu', e => {
+      e.preventDefault(); e.stopPropagation();
+      // If right-clicked slide is not in selection, switch to it (single select)
+      if (!_selectedSlideIdxs.has(i)) selectSlide(i);
+      else { slideIdx = i; _slideListFocused = true; renderAll(); updateContextIndicator(); }
+      const idxs = [..._selectedSlideIdxs].sort((a, b) => a - b);
+      const multi = idxs.length > 1;
+      const n = idxs.length;
+      const _fi = b => { if (b.id) b.id = uid(); (b.children || []).forEach(_fi); (b.items || []).forEach(it => { if (it.id) it.id = uid(); (it.children || []).forEach(_fi); }); };
+      showCtxMenu(e.clientX, e.clientY, [
+        { label: multi ? `Copy ${n} Slides` : 'Copy Slide', shortcut: '⌘C', action() {
+          _slideClipboard = idxs.map(k => JSON.parse(JSON.stringify(deck.slides[k])));
+          setStatus(multi ? `${n} slides copied ✓` : 'Slide copied ✓');
+        }},
+        { label: multi ? `Cut ${n} Slides` : 'Cut Slide', shortcut: '⌘X', disabled: deck.slides.length - n < 1, action() {
+          _slideClipboard = idxs.map(k => JSON.parse(JSON.stringify(deck.slides[k])));
+          for (let k = idxs.length - 1; k >= 0; k--) deck.slides.splice(idxs[k], 1);
+          slideIdx = Math.min(idxs[0], deck.slides.length - 1);
+          _selectedSlideIdxs = new Set([slideIdx]);
+          renderAll(); markDirty(); setStatus(multi ? `${n} slides cut ✓` : 'Slide cut ✓');
+        }},
+        { label: _slideClipboard ? (_slideClipboard.length > 1 ? `Paste ${_slideClipboard.length} Slides` : 'Paste Slide') : 'Paste Slide', shortcut: '⌘V', disabled: !_slideClipboard, action() {
+          const insertAt = slideIdx + 1;
+          const pastedSlides = _slideClipboard.map(s => { const p = JSON.parse(JSON.stringify(s)); p.id = uid(); (p.children || []).forEach(_fi); return p; });
+          deck.slides.splice(insertAt, 0, ...pastedSlides);
+          slideIdx = insertAt + pastedSlides.length - 1;
+          _selectedSlideIdxs = new Set(); for (let k = insertAt; k < insertAt + pastedSlides.length; k++) _selectedSlideIdxs.add(k);
+          renderAll(); markDirty(); setStatus(pastedSlides.length > 1 ? `${pastedSlides.length} slides pasted ✓` : 'Slide pasted ✓');
+        }},
+        '---',
+        { label: multi ? `Duplicate ${n} Slides` : 'Duplicate Slide', shortcut: '⌘D', action() {
+          const dups = idxs.map(k => { const d = JSON.parse(JSON.stringify(deck.slides[k])); d.id = uid(); (d.children || []).forEach(_fi); return d; });
+          // Insert after last selected
+          const insertAt = idxs[idxs.length - 1] + 1;
+          deck.slides.splice(insertAt, 0, ...dups);
+          slideIdx = insertAt + dups.length - 1;
+          _selectedSlideIdxs = new Set(); for (let k = insertAt; k < insertAt + dups.length; k++) _selectedSlideIdxs.add(k);
+          renderAll(); markDirty(); setStatus(multi ? `${n} slides duplicated ✓` : 'Slide duplicated ✓');
+        }},
+        ...(!multi ? [{ label: slide.hidden ? 'Show Slide' : 'Hide Slide', action() { slide.hidden = !slide.hidden; renderThumbs(); markDirty(); }}] : []),
+        '---',
+        { label: multi ? `Delete ${n} Slides` : 'Delete Slide', action() {
+          if (deck.slides.length - n < 1) return;
+          for (let k = idxs.length - 1; k >= 0; k--) deck.slides.splice(idxs[k], 1);
+          slideIdx = Math.min(idxs[0], deck.slides.length - 1);
+          _selectedSlideIdxs = new Set([slideIdx]);
+          selectedBlockId = null; selectedBlockIds = new Set(); renderAll(); markDirty(); setStatus(multi ? `${n} slides deleted ✓` : 'Slide deleted ✓');
+        }, disabled: deck.slides.length - n < 1 },
+      ]);
+    });
     // Drag-and-drop reorder
     div.addEventListener('dragstart', e => {
       _dragSrcIdx = i;
@@ -3419,12 +3623,35 @@ function renderThumbs() {
   });
 }
 
-function selectSlide(i) {
+function selectSlide(i, opts) {
   if (!deck) return;
+  const shift = opts?.shift || false;
+  const meta  = opts?.meta  || false;
   _slideListFocused = true;
-  slideIdx = Math.max(0, Math.min(i, deck.slides.length - 1));
+  i = Math.max(0, Math.min(i, deck.slides.length - 1));
+  if (shift) {
+    // Range select from slideIdx to i
+    const lo = Math.min(slideIdx, i), hi = Math.max(slideIdx, i);
+    _selectedSlideIdxs = new Set();
+    for (let k = lo; k <= hi; k++) _selectedSlideIdxs.add(k);
+    slideIdx = i;
+  } else if (meta) {
+    // Toggle individual
+    if (_selectedSlideIdxs.has(i) && _selectedSlideIdxs.size > 1) {
+      _selectedSlideIdxs.delete(i);
+      if (i === slideIdx) slideIdx = [..._selectedSlideIdxs][0];
+    } else {
+      _selectedSlideIdxs.add(i);
+      slideIdx = i;
+    }
+  } else {
+    // Normal click — single select
+    slideIdx = i;
+    _selectedSlideIdxs = new Set([i]);
+  }
   selectedBlockId = null; selectedBlockIds = new Set();
   renderAll();
+  updateContextIndicator();
 }
 
 // ── Canvas scaling ───────────────────────────────────────────────────────
@@ -3942,6 +4169,14 @@ document.getElementById('p-arrow-sw').addEventListener('input', () => {
 });
 
 // ── Eval block props ─────────────────────────────────────────────────────
+document.getElementById('p-eval-bg').addEventListener('input', e => {
+  const b = selectedBlock(); if (!b || b.type !== 'eval') return;
+  b.evalBg = e.target.value; renderSlide(); markDirty();
+});
+document.getElementById('btn-eval-bg-clear').addEventListener('click', () => {
+  const b = selectedBlock(); if (!b || b.type !== 'eval') return;
+  delete b.evalBg; renderSlide(); markDirty();
+});
 document.getElementById('btn-edit-eval').addEventListener('click', () => {
   const block = getSelectedBlock(); if (!block || block.type !== 'eval') return;
   openEvalEditor(block);
@@ -4384,16 +4619,31 @@ document.addEventListener('keydown', e => {
     }
   }
 
-  // ── Delete / Backspace → delete selected block(s)
-  if ((e.key === 'Delete' || e.key === 'Backspace') && (selectedBlockId || selectedBlockIds.size > 0)) {
-    e.preventDefault();
-    const slide = deck.slides[slideIdx]; if (!slide) return;
-    const delIds = selectedBlockIds.size > 1 ? [...selectedBlockIds] : (selectedBlockId ? [selectedBlockId] : []);
-    const founds = delIds.map(id => findBlock(id, slide)).filter(Boolean);
-    founds.sort((a, b) => b.index - a.index);
-    founds.forEach(({ parent, key, index }) => parent[key].splice(index, 1));
-    selectedBlockId = null; selectedBlockIds = new Set(); renderAll(); markDirty();
-    return;
+  // ── Delete / Backspace → context-aware: slide panel = delete slide(s), canvas = delete block(s)
+  if (e.key === 'Delete' || e.key === 'Backspace') {
+    if (_slideListFocused) {
+      e.preventDefault();
+      const idxs = [..._selectedSlideIdxs].sort((a, b) => a - b);
+      if (idxs.length === 0) idxs.push(slideIdx);
+      if (!deck || deck.slides.length - idxs.length < 1) return; // keep at least 1
+      for (let k = idxs.length - 1; k >= 0; k--) deck.slides.splice(idxs[k], 1);
+      slideIdx = Math.min(idxs[0], deck.slides.length - 1);
+      _selectedSlideIdxs = new Set([slideIdx]);
+      selectedBlockId = null; selectedBlockIds = new Set();
+      renderAll(); markDirty();
+      setStatus(idxs.length === 1 ? 'Slide deleted ✓' : `${idxs.length} slides deleted ✓`);
+      return;
+    }
+    if (selectedBlockId || selectedBlockIds.size > 0) {
+      e.preventDefault();
+      const slide = deck.slides[slideIdx]; if (!slide) return;
+      const delIds = selectedBlockIds.size > 1 ? [...selectedBlockIds] : (selectedBlockId ? [selectedBlockId] : []);
+      const founds = delIds.map(id => findBlock(id, slide)).filter(Boolean);
+      founds.sort((a, b) => b.index - a.index);
+      founds.forEach(({ parent, key, index }) => parent[key].splice(index, 1));
+      selectedBlockId = null; selectedBlockIds = new Set(); renderAll(); markDirty();
+      return;
+    }
   }
 
   // ── Enter → start editing the selected block
@@ -4466,12 +4716,23 @@ document.addEventListener('keydown', e => {
     return;
   }
 
-  // ── Cmd+C → context-aware copy: sidebar=whole slide, canvas=selected block
+  // ── Cmd+A → select all slides (when slide panel focused)
+  if ((e.ctrlKey || e.metaKey) && e.key === 'a' && _slideListFocused) {
+    e.preventDefault();
+    _selectedSlideIdxs = new Set();
+    for (let k = 0; k < deck.slides.length; k++) _selectedSlideIdxs.add(k);
+    renderThumbs();
+    return;
+  }
+
+  // ── Cmd+C → context-aware copy: sidebar=whole slide(s), canvas=selected block
   if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
     if (_slideListFocused) {
-      if (deck?.slides[slideIdx]) {
-        _slideClipboard = JSON.parse(JSON.stringify(deck.slides[slideIdx]));
-        setStatus('Slide copied ✓');
+      const idxs = [..._selectedSlideIdxs].sort((a, b) => a - b);
+      if (idxs.length === 0 && deck?.slides[slideIdx]) { idxs.push(slideIdx); }
+      if (idxs.length > 0) {
+        _slideClipboard = idxs.map(i => JSON.parse(JSON.stringify(deck.slides[i])));
+        setStatus(idxs.length === 1 ? 'Slide copied ✓' : `${idxs.length} slides copied ✓`);
       }
     } else if (selectedBlockId) {
       const block = getSelectedBlock();
@@ -4480,44 +4741,81 @@ document.addEventListener('keydown', e => {
     return;
   }
 
-  // ── Cmd+X → cut selected block
-  if ((e.ctrlKey || e.metaKey) && e.key === 'x' && selectedBlockId) {
-    const slide = deck?.slides[slideIdx]; if (!slide) return;
-    const found = findBlock(selectedBlockId, slide); if (!found) return;
-    _clipboard = deepCloneBlock(found.block);
-    found.parent[found.key].splice(found.index, 1);
-    selectedBlockId = null; selectedBlockIds = new Set();
-    setStatus('Cut ✓');
-    renderAll(); markDirty();
-    return;
+  // ── Cmd+X → context-aware cut: sidebar=slide(s), canvas=block
+  if ((e.ctrlKey || e.metaKey) && e.key === 'x') {
+    if (_slideListFocused) {
+      const idxs = [..._selectedSlideIdxs].sort((a, b) => a - b);
+      if (idxs.length === 0 && deck?.slides[slideIdx]) { idxs.push(slideIdx); }
+      if (idxs.length > 0 && deck.slides.length - idxs.length >= 1) {
+        _slideClipboard = idxs.map(i => JSON.parse(JSON.stringify(deck.slides[i])));
+        // Remove from highest index first to preserve indices
+        for (let k = idxs.length - 1; k >= 0; k--) deck.slides.splice(idxs[k], 1);
+        slideIdx = Math.min(idxs[0], deck.slides.length - 1);
+        _selectedSlideIdxs = new Set([slideIdx]);
+        renderAll(); markDirty();
+        setStatus(idxs.length === 1 ? 'Slide cut ✓' : `${idxs.length} slides cut ✓`);
+      }
+      return;
+    }
+    if (selectedBlockId) {
+      const slide = deck?.slides[slideIdx]; if (!slide) return;
+      const found = findBlock(selectedBlockId, slide); if (!found) return;
+      _clipboard = deepCloneBlock(found.block);
+      found.parent[found.key].splice(found.index, 1);
+      selectedBlockId = null; selectedBlockIds = new Set();
+      setStatus('Cut ✓');
+      renderAll(); markDirty();
+      return;
+    }
   }
 
-  // ── Cmd+D → duplicate selected block
-  if ((e.ctrlKey || e.metaKey) && e.key === 'd' && selectedBlockId) {
+  // ── Cmd+D → duplicate selected slide(s) or block
+  if ((e.ctrlKey || e.metaKey) && e.key === 'd') {
     e.preventDefault();
-    const slide = deck?.slides[slideIdx]; if (!slide) return;
-    const found = findBlock(selectedBlockId, slide); if (!found) return;
-    const dup = deepCloneBlock(found.block);
-    found.parent[found.key].splice(found.index + 1, 0, dup);
-    selectedBlockId = dup.id;
-    setStatus('Duplicated ✓');
-    renderAll(); markDirty();
-    return;
+    if (_slideListFocused) {
+      const idxs = [..._selectedSlideIdxs].sort((a, b) => a - b);
+      if (idxs.length === 0) idxs.push(slideIdx);
+      const _fi = b => { if (b.id) b.id = uid(); (b.children || []).forEach(_fi); (b.items || []).forEach(it => { if (it.id) it.id = uid(); (it.children || []).forEach(_fi); }); };
+      const dups = idxs.map(k => { const d = JSON.parse(JSON.stringify(deck.slides[k])); d.id = uid(); (d.children || []).forEach(_fi); return d; });
+      const insertAt = idxs[idxs.length - 1] + 1;
+      deck.slides.splice(insertAt, 0, ...dups);
+      slideIdx = insertAt + dups.length - 1;
+      _selectedSlideIdxs = new Set(); for (let k = insertAt; k < insertAt + dups.length; k++) _selectedSlideIdxs.add(k);
+      renderAll(); markDirty();
+      setStatus(dups.length === 1 ? 'Slide duplicated ✓' : `${dups.length} slides duplicated ✓`);
+      return;
+    }
+    if (selectedBlockId) {
+      const slide = deck?.slides[slideIdx]; if (!slide) return;
+      const found = findBlock(selectedBlockId, slide); if (!found) return;
+      const dup = deepCloneBlock(found.block);
+      found.parent[found.key].splice(found.index + 1, 0, dup);
+      selectedBlockId = dup.id;
+      setStatus('Duplicated ✓');
+      renderAll(); markDirty();
+      return;
+    }
   }
 
-  // ── Cmd+V → context-aware paste: sidebar=whole slide, canvas=block
+  // ── Cmd+V → context-aware paste: sidebar=whole slide(s), canvas=block
   if ((e.ctrlKey || e.metaKey) && e.key === 'v' && _slideListFocused && _slideClipboard) {
     e.preventDefault();
     _suppressNextPaste = true;
     setTimeout(() => { _suppressNextPaste = false; }, 80);
-    const pasted = JSON.parse(JSON.stringify(_slideClipboard));
-    pasted.id = uid();
     const _fi = b => { if (b.id) b.id = uid(); (b.children || []).forEach(_fi); (b.items || []).forEach(item => { if (item.id) item.id = uid(); (item.children || []).forEach(_fi); }); };
-    (pasted.children || []).forEach(_fi);
-    deck.slides.splice(slideIdx + 1, 0, pasted);
-    slideIdx += 1;
+    const insertAt = slideIdx + 1;
+    const pastedSlides = _slideClipboard.map(s => {
+      const p = JSON.parse(JSON.stringify(s));
+      p.id = uid();
+      (p.children || []).forEach(_fi);
+      return p;
+    });
+    deck.slides.splice(insertAt, 0, ...pastedSlides);
+    slideIdx = insertAt + pastedSlides.length - 1;
+    _selectedSlideIdxs = new Set();
+    for (let k = insertAt; k < insertAt + pastedSlides.length; k++) _selectedSlideIdxs.add(k);
     renderAll(); markDirty();
-    setStatus('Slide pasted ✓');
+    setStatus(pastedSlides.length === 1 ? 'Slide pasted ✓' : `${pastedSlides.length} slides pasted ✓`);
     setTimeout(() => { thumbsCont.children[slideIdx]?.scrollIntoView({ block: 'nearest' }); }, 50);
     return;
   }
