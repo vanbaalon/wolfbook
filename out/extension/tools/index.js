@@ -5773,23 +5773,38 @@ function registerTools(context, getController, debugCtrl) {
         { name: 'wolfslide_imageAsset',      impl: new WolfslideImageAssetTool() },
         { name: 'wolfslide_insertEvalBlock', impl: new WolfslideInsertEvalBlockTool(getController) },
         { name: 'wolfslide_runEvalBlock',    impl: new WolfslideRunEvalBlockTool(getController) },
-        // Shadow VS Code's built-in notebook tools to prevent them being used on .wb files.
-        // Returning an error forces the model to use the correct wolfbook_* tools instead.
+        // Shadow VS Code's built-in notebook tools — only redirects when a Wolfbook notebook is active.
+        // For other notebook types (Python, Jupyter) the model should use the built-in tools directly;
+        // we return a neutral pass-through message so Copilot falls back to its own handling.
         { name: 'edit_notebook_file', impl: {
-            prepareInvocation: () => ({ invocationMessage: 'Redirecting to wolfbook tools…' }),
-            invoke: () => new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
-                'ERROR: Do NOT use edit_notebook_file on Wolfbook (.wb/.evsnb) notebooks. ' +
-                'Use wolfbook_insertCells (with evaluate:true to auto-run), wolfbook_editCell, ' +
-                'wolfbook_deleteCell, or wolfbook_moveCell instead. ' +
-                'These tools handle the custom Wolfbook cell format correctly and support live kernel evaluation.'
-            )]),
+            prepareInvocation: () => ({ invocationMessage: 'Checking notebook type…' }),
+            invoke: () => {
+                const nb = vscode.window.activeNotebookEditor?.notebook;
+                const isWolfbook = nb && /\.(wb|evsnb|vsnb)$/.test(nb.uri.fsPath);
+                if (!isWolfbook) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
+                    'This is not a Wolfbook notebook — use the standard edit_notebook_file tool directly.'
+                )]);
+                return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
+                    'ERROR: Do NOT use edit_notebook_file on Wolfbook (.wb/.evsnb) notebooks. ' +
+                    'Use wolfbook_insertCells (with evaluate:true to auto-run), wolfbook_editCell, ' +
+                    'wolfbook_deleteCell, or wolfbook_moveCell instead. ' +
+                    'These tools handle the custom Wolfbook cell format correctly and support live kernel evaluation.'
+                )]);
+            },
         }},
         { name: 'run_notebook_cell', impl: {
-            prepareInvocation: () => ({ invocationMessage: 'Redirecting to wolfbook tools…' }),
-            invoke: () => new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
-                'ERROR: Do NOT use run_notebook_cell on Wolfbook (.wb/.evsnb) notebooks. ' +
-                'Use wolfbook_runCell (by cellId or cellNumber) or wolfbook_insertCells with evaluate:true instead.'
-            )]),
+            prepareInvocation: () => ({ invocationMessage: 'Checking notebook type…' }),
+            invoke: () => {
+                const nb = vscode.window.activeNotebookEditor?.notebook;
+                const isWolfbook = nb && /\.(wb|evsnb|vsnb)$/.test(nb.uri.fsPath);
+                if (!isWolfbook) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
+                    'This is not a Wolfbook notebook — use the standard run_notebook_cell tool directly.'
+                )]);
+                return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
+                    'ERROR: Do NOT use run_notebook_cell on Wolfbook (.wb/.evsnb) notebooks. ' +
+                    'Use wolfbook_runCell (by cellId or cellNumber) or wolfbook_insertCells with evaluate:true instead.'
+                )]);
+            },
         }},
     ];
 
