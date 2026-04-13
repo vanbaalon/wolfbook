@@ -1320,18 +1320,6 @@
           },
           "required": [
             "content"
-          ],
-          "anyOf": [
-            {
-              "required": [
-                "cellNumber"
-              ]
-            },
-            {
-              "required": [
-                "cellId"
-              ]
-            }
           ]
         }
       },
@@ -1410,29 +1398,7 @@
               "type": "boolean",
               "description": "If true (default), save deleted cell content to ai_deleted_cells.md before removing."
             }
-          },
-          "anyOf": [
-            {
-              "required": [
-                "cellNumber"
-              ]
-            },
-            {
-              "required": [
-                "cellId"
-              ]
-            },
-            {
-              "required": [
-                "cellNumbers"
-              ]
-            },
-            {
-              "required": [
-                "cellIds"
-              ]
-            }
-          ]
+          }
         }
       },
       {
@@ -1512,37 +1478,7 @@
               "type": "string",
               "description": "Stable CellId of the target cell to move after. Preferred over toPosition for multi-step reordering."
             }
-          },
-          "allOf": [
-            {
-              "anyOf": [
-                {
-                  "required": [
-                    "cellNumber"
-                  ]
-                },
-                {
-                  "required": [
-                    "cellId"
-                  ]
-                }
-              ]
-            },
-            {
-              "anyOf": [
-                {
-                  "required": [
-                    "toPosition"
-                  ]
-                },
-                {
-                  "required": [
-                    "afterCellId"
-                  ]
-                }
-              ]
-            }
-          ]
+          }
         }
       },
       {
@@ -1567,18 +1503,7 @@
               "description": "How many recent deletions to list or restore (default: 10 for list, 1 for restore)."
             },
             "insertPosition": {
-              "description": "Where to insert restored cells: \"end\" (default) or a 1-based cell number N (inserts after Cell N). Use 0 to insert before Cell 1.",
-              "oneOf": [
-                {
-                  "type": "string",
-                  "enum": [
-                    "end"
-                  ]
-                },
-                {
-                  "type": "number"
-                }
-              ]
+              "description": "Where to insert restored cells: \"end\" (default) or a 1-based cell number N (inserts after Cell N). Use 0 to insert before Cell 1."
             },
             "afterCellId": {
               "type": "string",
@@ -2063,7 +1988,9 @@
         "modelDescription": "Returns {width, height, format} for a PNG, JPEG, or WebP image given a local file path or http/https URL. Only reads the first 512 bytes (Range header for URLs). Use this before inserting an image block to get correct w/h values — required because image style.maxHeight/maxWidth only constrain the wrapper div, not the image itself, without explicit w/h on the block.",
         "inputSchema": {
           "type": "object",
-          "required": ["src"],
+          "required": [
+            "src"
+          ],
           "properties": {
             "src": {
               "type": "string",
@@ -2684,32 +2611,7 @@
               "description": "New filename for action:'rename'."
             },
             "annotation": {
-              "description": "String (description) or object {description, source, tags[]} to save as .ann.json sidecar. Used by: copy, insert, annotate.",
-              "oneOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "object",
-                  "properties": {
-                    "description": {
-                      "type": "string",
-                      "description": "Human-readable description of the image."
-                    },
-                    "source": {
-                      "type": "string",
-                      "description": "Where the image came from (URL, file, tool, etc.)."
-                    },
-                    "tags": {
-                      "type": "array",
-                      "items": {
-                        "type": "string"
-                      },
-                      "description": "Searchable tags."
-                    }
-                  }
-                }
-              ]
+              "description": "String (description) or object {description, source, tags[]} to save as .ann.json sidecar. Used by: copy, insert, annotate."
             },
             "description": {
               "type": "string",
