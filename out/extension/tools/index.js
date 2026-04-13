@@ -5773,6 +5773,24 @@ function registerTools(context, getController, debugCtrl) {
         { name: 'wolfslide_imageAsset',      impl: new WolfslideImageAssetTool() },
         { name: 'wolfslide_insertEvalBlock', impl: new WolfslideInsertEvalBlockTool(getController) },
         { name: 'wolfslide_runEvalBlock',    impl: new WolfslideRunEvalBlockTool(getController) },
+        // Shadow VS Code's built-in notebook tools to prevent them being used on .wb files.
+        // Returning an error forces the model to use the correct wolfbook_* tools instead.
+        { name: 'edit_notebook_file', impl: {
+            prepareInvocation: () => ({ invocationMessage: 'Redirecting to wolfbook tools…' }),
+            invoke: () => new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
+                'ERROR: Do NOT use edit_notebook_file on Wolfbook (.wb/.evsnb) notebooks. ' +
+                'Use wolfbook_insertCells (with evaluate:true to auto-run), wolfbook_editCell, ' +
+                'wolfbook_deleteCell, or wolfbook_moveCell instead. ' +
+                'These tools handle the custom Wolfbook cell format correctly and support live kernel evaluation.'
+            )]),
+        }},
+        { name: 'run_notebook_cell', impl: {
+            prepareInvocation: () => ({ invocationMessage: 'Redirecting to wolfbook tools…' }),
+            invoke: () => new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
+                'ERROR: Do NOT use run_notebook_cell on Wolfbook (.wb/.evsnb) notebooks. ' +
+                'Use wolfbook_runCell (by cellId or cellNumber) or wolfbook_insertCells with evaluate:true instead.'
+            )]),
+        }},
     ];
 
     for (const { name, impl } of tools) {
