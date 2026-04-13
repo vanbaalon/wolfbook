@@ -398,7 +398,7 @@ function escapeAttr(s) {
         .replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-module.exports = { exportDeck, exportDeckPdf };
+module.exports = { exportDeck, exportDeckPdf, slideToHTML };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PDF-frames export  —  print-ready HTML: one page per animation step

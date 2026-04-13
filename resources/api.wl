@@ -53,9 +53,9 @@ VsCodeRender[outN_Integer, format_String, scale_?NumericQ] := Module[
         bc  = ByteCount[expr];
         lc  = LeafCount[expr];
         If[bc > limitBytes || lc > 1000,
-            (* Breadth = show ~20 elements at each level initially.
+            (* Breadth = 500 elements at each level initially; +... steps by +500.
                Depth = Infinity so nested structures are visible. *)
-            Module[{breadth = Max[5, Min[20, Round[lc / 50] + 3]]},
+            Module[{breadth = 500},
                 displayExpr = Shallow[expr, {Infinity, breadth}];
                 isSkeleton  = True],
         (* else *)
@@ -191,30 +191,37 @@ VsCodeRender[expr_, format_String, scale_?NumericQ] :=
     VsCodeRenderExpr[expr, format, scale];
 
 (* ---- VsCodeRenderShallow: progressive expansion for the +… button. ----
-   Uses Shallow[Out[N], {Infinity, breadth}] to show `breadth` elements at
-   each nesting level.  Returns a JSON string:
-     {"html":"...", "hasSkeleton":true/false}
-   hasSkeleton=False means the expression is now fully displayed and the
-   JS layer should remove the truncation banner. *)
+   Identical pipeline to VsCodeRender but uses Shallow[Out[N], {Infinity, breadth}].
+   Returns a plain HTML string exactly like VsCodeRender — no JSON wrapping.
+   When the expression is still truncated the returned HTML contains
+   data-wolfram-is-skeleton="1" so JS can show the +… banner again. *)
 VsCodeRenderShallow[outN_Integer, breadth_Integer, format_String, scale_?NumericQ] := Module[
-    {expr, displayExpr, html, boxes, boxStr, hasSkeleton},
+    {expr, displayExpr, html, hasSkeleton},
     expr = Quiet[Out[outN]];
     If[Head[expr] === Out || expr === $Failed,
-        Return["{\"html\":\"<pre class=\\\"vscode-wolfram-text-output\\\">No output</pre>\",\"hasSkeleton\":false}"]  ];
-    If[expr === Null, Return["{\"html\":\"\",\"hasSkeleton\":false}"] ];
+        Return["<pre class=\"vscode-wolfram-text-output\">No output at Out[" <> ToString[outN] <> "]</pre>"]];
+    If[expr === Null, Return[""]];
     displayExpr = Shallow[expr, {Infinity, breadth}];
-    (* Detect if Shallow had any effect by checking for skeleton chars in the boxes *)
-    boxes  = Quiet[Check[MakeBoxes[displayExpr, TraditionalForm], $Failed]];
-    boxStr = If[boxes =!= $Failed, ToString[boxes, InputForm], ""];
-    hasSkeleton = StringContainsQ[boxStr, "\[LeftSkeleton]"];
+    (* hasSkeleton: determine whether Shallow[] actually truncated the expression.
+       NOTE: FreeQ[Shallow[expr,spec], _Skeleton] is ALWAYS False in a headless kernel —
+       Shallow[] is a formatting wrapper that does NOT evaluate to expose Skeleton[N]
+       atoms in the kernel expression (skeleton appears only in the MakeBoxes result).
+       Instead we compare LeafCount[expr]-1 (total atoms minus the outer head) to breadth:
+       if the expression has more atoms than the current breadth limit it is still being
+       truncated by Shallow[].  This is conservative: for a few deeply-nested structures
+       the banner may linger one extra expansion step, but it is never falsely omitted. *)
+    hasSkeleton = !AtomQ[expr] && (LeafCount[expr] - 1 > breadth);
     html = CheckAbort[
         Quiet[VsCodeRenderExpr[displayExpr, format, scale]],
         "<pre class=\"vscode-wolfram-text-output\">Rendering aborted</pre>"
     ];
     If[!StringQ[html], html = "<pre class=\"vscode-wolfram-text-output\">Rendering failed</pre>"];
-    (* Return JSON with html and hasSkeleton flag.
-       ExportString[..., "JSON"] safely escapes all special chars. *)
-    ExportString[<|"html" -> html, "hasSkeleton" -> hasSkeleton|>, "JSON", "Compact" -> True]
+    (* Same wrapper as VsCodeRender so JS can detect skeleton and atom count *)
+    If[hasSkeleton,
+        "<div data-wolfram-is-skeleton=\"1\" data-wolfram-atom-count=\"" <>
+        ToString[LeafCount[expr]] <> "\">" <> html <> "</div>",
+        html
+    ]
 ];
 VsCodeRenderShallow[outN_Integer, breadth_Integer] := VsCodeRenderShallow[outN, breadth, "Auto", 0.8];
 

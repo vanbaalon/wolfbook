@@ -82,7 +82,7 @@ $config = <|
     "imageScale"         -> 0.8,
     "useSVG"             -> True,
     "showPrint"          -> True,
-    "maxOutputLength"    -> 100000,
+    "maxOutputLength"    -> 1000000,
     "outputSizeLimit"    -> 1000,  (* KB of ByteCount; expressions larger than this use Short[] for display *)
     "truncatedTooltip"   -> "Output truncated. Click \"Expand Inline\" to render in full.",
     "autoOpenMessages"   -> False
@@ -167,8 +167,14 @@ Protect[Print];
 Off[Interrupt::dgbgn]; Off[Interrupt::dgend];
 Quiet[Internal`AddHandler["Interrupt", Function[{}, Dialog[]]]];
 
-(* SVG/typesetting pipeline and CodeParser are prewarmed in the background by
-   lifecycle.js via subWhenIdle() after the kernel is declared ready.          *)
+(* SVG/typesetting pipeline prewarm — runs synchronously during kernel init so
+   the first user Plot[] renders instantly.
+   ExportString["SVG"] on a headless kernel cold-starts MathematicaServer, an
+   internal Wolfram rendering subprocess.  This takes ~4-5s the very first time.
+   Graphics[{}] is NOT sufficient — a real Plot[] call is needed to fully warm
+   the subprocess.  We run this here so the delay is absorbed into kernel startup
+   (which users expect to take a moment) rather than appearing on first Plot.   *)
+Quiet[CheckAbort[ExportString[Plot[1,{x,0,1},Axes->False,Frame->False],"SVG"], Null]];
 
 logWrite["init.wl loaded (WSTP mode, no ZMQ)"];
 

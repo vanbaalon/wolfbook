@@ -519,19 +519,6 @@ async function launchKernel(self, WstpSession) {
         scrollLog('[launchKernel] resolved — calling checkoutExecutionQueue | queue:', self.executionQueue.queueLength());
         self.checkoutExecutionQueue();
 
-        // Background-prewarm on the MAIN kernel via subWhenIdle() so it runs only
-        // when the kernel is idle and never blocks user cell evaluation:
-        //  1) SVG/typesetting pipeline — eliminates the 2-4s lag on first Plot output
-        //  2) CodeParser` package      — eliminates lag on first syntax check
-        // Both were previously loaded synchronously inside init.wl, adding 3-5s to
-        // every kernel startup.  Now init.wl returns immediately and these run later.
-        if (self.session?.subWhenIdle) {
-            self.session.subWhenIdle(
-                'Quiet[CheckAbort[ExportString[Graphics[{}],"SVG"],Null]];' +
-                'Quiet[Needs["CodeParser`"]]; $hasCodeParser=True; Null'
-            ).catch(() => {});
-        }
-
         // Start keepalive heartbeat: pings kernel every 3 minutes via subWhenIdle.
         // Prevents macOS App Nap suspension; auto-relaunches if the kernel dies.
         _startKeepalive(self, WstpSession);

@@ -183,7 +183,7 @@ class SlideEditorProvider {
         };
 
         let deck = _parseDeck(document.getText());
-        const entry = { deck, webviewPanel, document, saving: false };
+        const entry = { deck, webviewPanel, document, saving: false, currentSlideIndex: 0 };
         this._panels.set(docKey, entry);
 
         webviewPanel.webview.html = this._buildHtml(webviewPanel.webview, document);
@@ -367,6 +367,11 @@ class SlideEditorProvider {
                     } catch (err) {
                         vscode.window.showErrorMessage(`PDF export failed: ${err.message}`);
                     }
+                    break;
+                }
+
+                case 'slideChange': {
+                    entry.currentSlideIndex = msg.slideIndex ?? 0;
                     break;
                 }
 
@@ -572,45 +577,95 @@ class SlideEditorProvider {
     // Wolfslide tool API  (called by tools/index.js wolfslide handlers)
     // =========================================================================
 
-    /** Current deck for the active (or specified) editor. */
-    getDeck(docUriStr) {
-        const e = docUriStr ? this._panels.get(docUriStr) : this.getActiveEntry();
-        return e ? JSON.parse(JSON.stringify(e.deck)) : null;
+    /**
+     * Find an open TextDocument for a .wslide file, falling back to any open one.
+     * Used when _panels doesn't have the entry (custom editor not yet resolved).
+     * Handles URI key mismatches (percent-encoding, different path formats).
+     */
+    _findTextDoc(docUriStr) {
+        const allWslide = vscode.workspace.textDocuments.filter(d => d.uri.fsPath.endsWith('.wslide'));
+        if (!docUriStr) return allWslide[0] ?? null;
+        // Exact URI string match
+        let doc = allWslide.find(d => d.uri.toString() === docUriStr);
+        if (doc) return doc;
+        // fsPath match — handles percent-encoding differences and file:// vs vscode-file:// schemes
+        try {
+            const wantPath = vscode.Uri.parse(docUriStr).fsPath;
+            doc = allWslide.find(d => d.uri.fsPath === wantPath);
+        } catch (_) {}
+        return doc ?? null;
     }
 
-    /** Replace the deck, save to file, refresh webview. */
-    async applyDeck(newDeck, docUriStr) {
-        const e = docUriStr ? this._panels.get(docUriStr) : this.getActiveEntry();
-        if (!e) throw new Error('No active .wslide editor found');
+    /**
+     * Resolve a panel entry, with TextDocument fallback for when the custom
+     * editor webview hasn't been resolved yet (e.g. after extension host reload).
+     * Returns { e, document } where e may be null if only the TextDoc fallback is available.
+     */
+    _resolveEntry(docUriStr) {
+        // 1. Try exact key match in _panels
+        let e = docUriStr ? this._panels.get(docUriStr) : this.getActiveEntry();
+        if (e) return { e, document: e.document };
+        // 2. URI encoding mismatch: try fsPath match within _panels
+        if (docUriStr) {
+            try {
+                const wantPath = vscode.Uri.parse(docUriStr).fsPath;
+                for (const [, entry] of this._panels) {
+                    if (entry.document.uri.fsPath === wantPath) return { e: entry, document: entry.document };
+                }
+            } catch (_) {}
+        }
+        // 3. TextDocument fallback: custom editor not yet resolved but file is open
+        const textDoc = this._findTextDoc(docUriStr);
+        return textDoc ? { e: null, document: textDoc } : { e: null, document: null };
+    }
 
-        e.saving = true;
+    /** Current deck for the active (or specified) editor. */
+    getDeck(docUriStr) {
+        const { e, document } = this._resolveEntry(docUriStr);
+        if (e) return JSON.parse(JSON.stringify(e.deck));
+        // TextDocument fallback: parse the raw JSON from the open file
+        return document ? _parseDeck(document.getText()) : null;
+    }
+
+    /** Replace the deck, save to file, refresh webview (if resolved). */
+    async applyDeck(newDeck, docUriStr) {
+        const { e, document } = this._resolveEntry(docUriStr);
+        if (!document) throw new Error('No active .wslide editor found');
+
+        if (e) e.saving = true;
         try {
-            e.deck = newDeck;
+            if (e) e.deck = newDeck;
             const text = JSON.stringify(newDeck, (k, v) => k.startsWith('_') ? undefined : v, 2);
             const edit = new vscode.WorkspaceEdit();
             edit.replace(
-                e.document.uri,
-                new vscode.Range(0, 0, e.document.lineCount, 0),
+                document.uri,
+                new vscode.Range(0, 0, document.lineCount, 0),
                 text
             );
             await vscode.workspace.applyEdit(edit);
-            await e.document.save();
-            // Rewrite img/ paths → webview URIs before sending to the webview,
-            // otherwise images appear as "not found" when the AI edits slides.
-            const deckForWebview = _rewriteDeckImgPaths(
-                newDeck,
-                path.dirname(e.document.uri.fsPath),
-                e.webviewPanel.webview
-            );
-            e.webviewPanel.webview.postMessage({ cmd: 'deckUpdate', deck: deckForWebview, source: 'copilot' });
+            await document.save();
+            // Send live update to the webview only if it has been resolved
+            if (e) {
+                const deckForWebview = _rewriteDeckImgPaths(
+                    newDeck,
+                    path.dirname(document.uri.fsPath),
+                    e.webviewPanel.webview
+                );
+                e.webviewPanel.webview.postMessage({ cmd: 'deckUpdate', deck: deckForWebview, source: 'copilot' });
+            }
         } finally {
-            e.saving = false;
+            if (e) e.saving = false;
         }
     }
 
-    /** List all open .wslide document URIs. */
+    /** List all open .wslide document URIs (panels + unresolved TextDocuments). */
     listOpenEditors() {
-        return [...this._panels.keys()];
+        const inPanels = new Set(this._panels.keys());
+        // Also surface any .wslide TextDocuments not yet resolved as custom editors
+        const fromTextDocs = vscode.workspace.textDocuments
+            .filter(d => d.uri.fsPath.endsWith('.wslide') && !inPanels.has(d.uri.toString()))
+            .map(d => d.uri.toString());
+        return [...inPanels, ...fromTextDocs];
     }
 
     /** Request rendered measurements from the webview for a specific slide. */

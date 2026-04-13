@@ -394,8 +394,13 @@ VsCodeRenderExpr[expr_, format_String, scale_?NumericQ, searchPat_String:""] :=
 
     (* ---- InputForm / plain text path ---- *)
     If[fmt === "InputForm",
-        Module[{s},
-            s = ToString[expr, InputForm];
+        Module[{s, innerExpr},
+            (* If VsCodeRender/VsCodeRenderShallow wrapped the display expression in
+               Shallow[...] for truncation, unwrap it: ToString[Shallow[e,spec],InputForm]
+               prints "Shallow[{...},spec]" which is wrong — the user expects the
+               truncated content without the Shallow head. *)
+            innerExpr = If[Head[expr] === Shallow, First[expr], expr];
+            s = ToString[innerExpr, InputForm];
             (* Decode WL \:XXXX unicode escape sequences produced by InputForm *)
             s = StringReplace[s, "\\:" ~~ h:RegularExpression["[0-9a-fA-F]{4}"] :>
                     FromCharacterCode[FromDigits[h, 16]]];

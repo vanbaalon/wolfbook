@@ -197,19 +197,25 @@ async function checkoutExecutionQueue(self) {
                 }
                 if (ch === '"')                    { inStr = true;  current += ch; i++; }
                 else if (ch === "(" && next === "*") { cDepth = 1; current += ch + next; i += 2; }
+                else if (ch === "<" && next === "|") { depth++; current += ch + next; i += 2; }  // <| Association open
+                else if (ch === "|" && next === ">") { depth--; current += ch + next; i += 2; }  // |> Association close
                 else if (ch === "(" || ch === "[" || ch === "{") { depth++; current += ch; i++; }
                 else if (ch === ")" || ch === "]" || ch === "}") { depth--; current += ch; i++; }
                 else if ((ch === "\n" || ch === "\r") && depth === 0 && cDepth === 0) {
                     // potential split point
                     const t = current.trim();
                     // Keep lines together when current ends with a continuation operator
-                    const endsWithOp = t.length > 0 && /[+\-*\/=]$/.test(t);
-                    // Peek at first non-whitespace char of the next line
+                    const endsWithOp = t.length > 0 && /(&&|\|\||->|:>|\/\/\.|\/\/|\/\/@|\/@|@@|<>|~~|;;|\^:=|:=|\+=|-=|\*=|\/=|=\.|[+\-*\/=,&|~@?])$/.test(t);
+                    // Peek at first non-whitespace char(s) of the next line
                     let peekPos = i + 1;
                     if (ch === '\r' && next === '\n') peekPos = i + 2;
                     while (peekPos < code.length && (code[peekPos] === ' ' || code[peekPos] === '\t')) peekPos++;
-                    const peekCh = peekPos < code.length ? code[peekPos] : '';
-                    const startsWithOp = t.length > 0 && peekCh.length > 0 && '=+-*/'.includes(peekCh);
+                    const peekCh  = peekPos < code.length ? code[peekPos] : '';
+                    const peekTwo = (peekPos + 1 < code.length) ? code.slice(peekPos, peekPos + 2) : peekCh;
+                    const startsWithOp = t.length > 0 && peekCh.length > 0 && (
+                        '=+-*/,|~@?'.includes(peekCh) ||
+                        peekTwo === '&&' || peekTwo === '||' || peekTwo === '->' || peekTwo === ':>' || peekTwo === '//'
+                    );
                     if (endsWithOp || startsWithOp) {
                         // Continuation line — replace newline with space so WL
                         // sees "a + b +c" (one expression), not "a + b\n+c" (two).
@@ -237,7 +243,7 @@ async function checkoutExecutionQueue(self) {
         // Per-cell format override takes precedence over the global setting.
         const format = self._resolveFormat(currentExecution.execution.cell);
         const scale  = Number(self.config.get("imageScale")   || 0.8);
-        const maxLen = Number(self.config.get("maxOutputLength") || 105000);
+        const maxLen = Number(self.config.get("maxOutputLength") || 1000000);
 
         // ---- Set per-notebook image directory in the kernel ----
         // Each notebook gets its own img/ subfolder so SVG/PNG files from
@@ -780,6 +786,11 @@ async function checkoutExecutionQueue(self) {
             // rejectDialog: true ensures any BEGINDLGPKT during render is auto-closed
             // by C++, preventing Pattern-C deadlocks without needing _renderingActive.
             if (r.outputName && lineN > 0) {
+                // Hoist outputId and placeholder-state before try/catch so catch can access them.
+                const outputId = (self._outputIdCounter++).toString();
+                let _placeholderShown = false;
+                let _placeholderAppended = Promise.resolve();
+                let _phTimer = null;
                 try {
                     // Resolve format per sub-expression using stable index i.
                     // knownIsGfx is undefined here (we learn it from the rendered HTML),
@@ -787,13 +798,58 @@ async function checkoutExecutionQueue(self) {
                     // Using i guarantees the saved per-output choice is picked up even when
                     // the global Out[N] counter changed on re-evaluation.
                     const subFmt = self._resolveFormat(execCell, undefined, i);
+
+                    // Build placeholder HTML — only shown after 1 s if render is slow.
+                    // (MathematicaServer cold-start ~4 s on first SVG; subsequent renders are fast.)
+                    const _phOutLabel = `<span style="font-size:10px;color:#888;margin-right:8px;">${r.outputName}</span>`;
+                    const _phHeaderRow = `<div class="wl-output-header" style="display:flex;align-items:center;gap:6px;width:100%;min-height:22px;" data-session-epoch="${self._sessionEpoch}" data-output-id="${outputId}" data-out-n="${lineN}" data-sub-idx="${i}" data-output-format="${subFmt}" data-output-is-graphics="0">${_phOutLabel}</div>`;
+                    const _phHtml = `<div class="wl-output-block">${_phHeaderRow}<div class="wl-output-content"><span style="color:var(--vscode-descriptionForeground,#888);font-style:italic;font-size:12px;">&#8987; Rendering\u2026</span></div></div>`;
+                    const _phOut = new vscode.NotebookCellOutput([vscode.NotebookCellOutputItem.text(_phHtml, "x-application/wolfram-language-html")]);
+                    // Show placeholder only if render takes >1 s — fast renders skip it entirely.
+                    _phTimer = setTimeout(() => {
+                        _placeholderShown = true;
+                        _placeholderAppended = (
+                            currentExecution.hasOutput
+                                ? currentExecution.execution.appendOutput(_phOut)
+                                : currentExecution.execution.replaceOutput(_phOut).then(() => { currentExecution.hasOutput = true; })
+                        );
+                    }, 1000);
+
+                    // Helper: replace the placeholder with real content.
+                    // Fast path (placeholder never shown): uses normal append/replace.
+                    // Slow path (placeholder shown after 1 s): finds by outputId and swaps in-place.
+                    const _replacePlaceholder = async (finalItems) => {
+                        const finalOut = new vscode.NotebookCellOutput(finalItems);
+                        if (_placeholderShown) {
+                            const allOuts = [...execCell.outputs];
+                            const tgtIdx = allOuts.findIndex(o => {
+                                try { return new TextDecoder().decode(o.items[0].data).includes(`data-output-id="${outputId}"`); } catch { return false; }
+                            });
+                            if (tgtIdx !== -1) {
+                                allOuts[tgtIdx] = finalOut;
+                                await currentExecution.execution.replaceOutput(allOuts);
+                            } else {
+                                await currentExecution.execution.appendOutput(finalOut);
+                            }
+                        } else {
+                            if (currentExecution.hasOutput) {
+                                await currentExecution.execution.appendOutput(finalOut);
+                            } else {
+                                await currentExecution.execution.replaceOutput(finalOut);
+                                currentExecution.hasOutput = true;
+                            }
+                        }
+                    };
+
                     scrollLog('[checkout] VsCodeRender start | sub', i, '| lineN', lineN, '| format', subFmt);
                     const _renderT0 = Date.now();
                     const renderResult = await self.session.evaluate(
                         `VsCodeRender[${lineN}, "${subFmt}", ${scale}]`,
                         { interactive: false, rejectDialog: true }
                     );
-                    scrollLog('[checkout] VsCodeRender done | dt=', Date.now() - _renderT0, 'ms | type:', renderResult?.result?.type);
+                    clearTimeout(_phTimer);
+                    await _placeholderAppended;  // ensure placeholder append completes before replacing
+                    scrollLog('[checkout] VsCodeRender done | dt=', Date.now() - _renderT0, 'ms | ph:', _placeholderShown, '| type:', renderResult?.result?.type);
                     // ---- Forward any messages emitted during the render call ----
                     // e.g. $RecursionLimit::reclim from a recursive Format rule.
                     // In the non-interactive render path these were previously silently
@@ -827,12 +883,7 @@ async function checkoutExecutionQueue(self) {
                             vscode.NotebookCellOutputItem.text(renderMsgHtml, "x-application/wolfram-language-html"),
                             vscode.NotebookCellOutputItem.text(renderMsg, "text/plain")
                         ]);
-                        if (currentExecution.hasOutput) {
-                            await currentExecution.execution.appendOutput(msgOut);
-                        } else {
-                            currentExecution.hasOutput = true;
-                            await currentExecution.execution.replaceOutput(msgOut);
-                        }
+                        await currentExecution.execution.appendOutput(msgOut);
                     }
 
                     if (renderResult?.result?.type === "string" && renderResult.result.value) {
@@ -849,9 +900,7 @@ async function checkoutExecutionQueue(self) {
                         // (\[LeftSkeleton] U+F761, \[RightSkeleton] U+F762) are inside the
                         // base64-encoded WLLatex box blob and invisible to regex on the HTML string.
                         const isSkeleton = html.includes('data-wolfram-is-skeleton');
-                        // Always generate a unique outputId — needed by format-switch buttons
-                        // on ALL outputs (not only truncated ones).
-                        const outputId = (self._outputIdCounter++).toString();
+                        // outputId was already allocated above (before rendering).
                         // isGfx: read the authoritative marker embedded by VsCodeRender/VsCodeRenderFull,
                         // NOT from CSS classes — those vary by format (WL/TeX/LaTeX have no image classes).
                         const _isGfx = html.includes('vscode-wolfram-gfx-marker');
@@ -868,10 +917,17 @@ async function checkoutExecutionQueue(self) {
                         const headerRow = `<div class="wl-output-header" style="display:flex;align-items:center;gap:6px;width:100%;min-height:22px;" data-session-epoch="${self._sessionEpoch}" data-output-id="${outputId}" data-out-n="${lineN}" data-sub-idx="${i}" data-output-format="${_effectiveFmt}" data-output-is-graphics="${_isGfx ? '1' : '0'}">${outLabel}</div>`;
                         // Graphics outputs are <img src="file.svg/png"/> — tiny HTML that
                         // never needs truncation; applying it would corrupt the tag.
+                        // BTL-paged outputs already have their content split into pages;
+                        // the full HTML can be large (KaTeX spans) but the user sees only
+                        // page 0. Skip the truncation banner in that case.
+                        const _btlAlreadyPaged = html.includes('wl-matrix-pager');
+                        // Always show the skeleton banner regardless of BTL paging.
+                        // _btlAlreadyPaged only blocks raw HTML clipping (which would corrupt the pager structure).
                         if (!_isGfx && (html.length > maxLen || isSkeleton)) {                                const _oid = outputId;
-                            // For raw truncation: clip at a safe HTML boundary near maxLen
+                            // For raw truncation: clip at a safe HTML boundary near maxLen.
+                            // Skip clipping when BTL already paginated — pager HTML must stay intact.
                             let displayHtml;
-                            if (html.length > maxLen) {
+                            if (!_btlAlreadyPaged && html.length > maxLen) {
                                 // Find the last closing tag before maxLen to avoid clipping mid-tag/mid-KaTeX
                                 let cutAt = maxLen;
                                 // Search backwards from maxLen for the last </span> or </div>
@@ -908,6 +964,7 @@ async function checkoutExecutionQueue(self) {
                                     displayHtml += `</${openTags[j]}>`;
                                 }
                             } else {
+                                // BTL already paged, or within maxLen but is skeleton — show as-is
                                 displayHtml = html;
                             }
                             // Build banner label
@@ -925,7 +982,7 @@ async function checkoutExecutionQueue(self) {
                             html = `<div class="wl-output-block">${headerRow}<div class="wl-output-content">${displayHtml}</div></div>` +
                                    self.makeTruncationBanner(outputId, bannerLabel);
                             self.truncatedOutputCells.set(_oid,
-                                { cell: currentExecution.execution.cell, outN: lineN, shallowBreadth: 20, isSkeleton });
+                                { cell: currentExecution.execution.cell, outN: lineN, shallowBreadth: 500, isSkeleton });
                             self.writeDebugLog(
                                 `[CHECKOUT] ${isSkeleton ? 'Skeleton' : 'Truncated'} output OutN=${lineN} OutputID=${_oid}`);
                         } else {
@@ -936,14 +993,8 @@ async function checkoutExecutionQueue(self) {
                             vscode.NotebookCellOutputItem.text(html, "x-application/wolfram-language-html")
                         ];
                         if (_plainText) _outItems.push(vscode.NotebookCellOutputItem.text(_plainText, "text/plain"));
-                        const outObj = new vscode.NotebookCellOutput(_outItems);
-                        if (currentExecution.hasOutput) {
-                            await currentExecution.execution.appendOutput(outObj);
-                        } else {
-                            scrollLog('[first-output] replaceOutput with real content | dt=', Date.now() - _t0, 'ms | cell', currentExecution.execution.cell.index);
-                            await currentExecution.execution.replaceOutput(outObj);
-                            currentExecution.hasOutput = true;
-                        }
+                        scrollLog('[first-output] replacePlaceholder with real content | dt=', Date.now() - _t0, 'ms | cell', currentExecution.execution.cell.index);
+                        await _replacePlaceholder(_outItems);
                     } else {
                         // Render returned non-string (most likely $Aborted from
                         // $RecursionLimit::reclim caused by a recursive Format rule,
@@ -968,19 +1019,15 @@ async function checkoutExecutionQueue(self) {
                                 `</div>` +
                                 `<pre class="vscode-wolfram-text-output">${self.escapeHtml(fbText)}</pre>` +
                                 `</div></div>`;
-                            const fbOut = new vscode.NotebookCellOutput([
+                            await _replacePlaceholder([
                                 vscode.NotebookCellOutputItem.text(fbHtml, "x-application/wolfram-language-html"),
                                 vscode.NotebookCellOutputItem.text(`${r.outputName} ${fbText}`, "text/plain")
                             ]);
-                            if (currentExecution.hasOutput) {
-                                await currentExecution.execution.appendOutput(fbOut);
-                            } else {
-                                await currentExecution.execution.replaceOutput(fbOut);
-                                currentExecution.hasOutput = true;
-                            }
                         } catch (_) {}
                     }
                 } catch (renderErr) {
+                    clearTimeout(_phTimer);
+                    await _placeholderAppended;
                     self.writeDebugLog(
                         `[CHECKOUT] Render error for sub ${i+1}: ${renderErr.message}`);
                     // InputForm fallback
@@ -995,15 +1042,29 @@ async function checkoutExecutionQueue(self) {
                             const fbHtml =
                                 `<div>${outLabel}<pre class="vscode-wolfram-text-output">` +
                                 self.escapeHtml(fallback.result.value) + '</pre></div>';
-                            const fbOut = new vscode.NotebookCellOutput([
+                            const fbItems = [
                                 vscode.NotebookCellOutputItem.text(fbHtml, "x-application/wolfram-language-html"),
                                 vscode.NotebookCellOutputItem.text(`${r.outputName} ${fallback.result.value}`, "text/plain")
-                            ]);
-                            if (currentExecution.hasOutput) {
-                                await currentExecution.execution.appendOutput(fbOut);
+                            ];
+                            const fbOut = new vscode.NotebookCellOutput(fbItems);
+                            if (_placeholderShown) {
+                                const allOuts = [...execCell.outputs];
+                                const tgtIdx = allOuts.findIndex(o => {
+                                    try { return new TextDecoder().decode(o.items[0].data).includes(`data-output-id="${outputId}"`); } catch { return false; }
+                                });
+                                if (tgtIdx !== -1) {
+                                    allOuts[tgtIdx] = fbOut;
+                                    await currentExecution.execution.replaceOutput(allOuts);
+                                } else {
+                                    await currentExecution.execution.appendOutput(fbOut);
+                                }
                             } else {
-                                await currentExecution.execution.replaceOutput(fbOut);
-                                currentExecution.hasOutput = true;
+                                if (currentExecution.hasOutput) {
+                                    await currentExecution.execution.appendOutput(fbOut);
+                                } else {
+                                    await currentExecution.execution.replaceOutput(fbOut);
+                                    currentExecution.hasOutput = true;
+                                }
                             }
                         }
                     } catch (_) {}

@@ -261,8 +261,11 @@ class WolframNotebookKernel {
                     if (!this._notebookDefaultGfxFormat.has(key) && !this._notebookDefaultExprFormat.has(key)) {
                         const savedGfx  = this._extContext.globalState.get('wolfbook.nbDefaultFmtGfx.'  + key);
                         // Legacy key migration: old single key falls to expr default
-                        const savedExpr = this._extContext.globalState.get('wolfbook.nbDefaultFmtExpr.' + key)
-                                       || this._extContext.globalState.get('wolfbook.nbDefaultFmt.'     + key);
+                        // Also migrate removed formats WLLatex2/WLLatexSrc → WLLatex
+                        const _migrateFmt = f => (f === 'WLLatex2' || f === 'WLLatexSrc') ? 'WLLatex' : f;
+                        const savedExpr = _migrateFmt(
+                            this._extContext.globalState.get('wolfbook.nbDefaultFmtExpr.' + key)
+                            || this._extContext.globalState.get('wolfbook.nbDefaultFmt.'   + key) || '');
                         if (savedGfx)  this._notebookDefaultGfxFormat.set(key, savedGfx);
                         if (savedExpr) this._notebookDefaultExprFormat.set(key, savedExpr);
                         if (savedGfx || savedExpr) {
@@ -281,9 +284,10 @@ class WolframNotebookKernel {
                             const _storeKey = 'wolfbook.perOutputFmt.' + key;
                             const _saved    = this._extContext.globalState.get(_storeKey);
                             if (_saved && typeof _saved === 'object') {
+                                const _mFmt = f => (f === 'WLLatex2' || f === 'WLLatexSrc') ? 'WLLatex' : f;
                                 for (const [_k, _v] of Object.entries(_saved)) {
                                     if (!this._cellOutputFormat.has(_k))
-                                        this._cellOutputFormat.set(_k, _v);
+                                        this._cellOutputFormat.set(_k, _mFmt(_v));
                                 }
                             }
                         } catch (_) {}
@@ -305,8 +309,9 @@ class WolframNotebookKernel {
                                         const fmt    = match[2] ?? match[3];
                                         if (subIdx !== undefined && fmt && fmt !== 'Auto') {
                                             const k = cellUri + ':' + subIdx;
+                                            const _mf = (f => (f === 'WLLatex2' || f === 'WLLatexSrc') ? 'WLLatex' : f)(fmt);
                                             if (!this._cellOutputFormat.has(k))
-                                                this._cellOutputFormat.set(k, fmt);
+                                                this._cellOutputFormat.set(k, _mf);
                                         }
                                     }
                                 } catch (_) {}
@@ -520,10 +525,9 @@ class WolframNotebookKernel {
                     vscode.window.showWarningMessage("Cannot expand: output info not found.");
                     return;
                 }
-                // Hard limits: 3-second render timeout + 100 KB HTML size guard.
-                // MathML for large lists (e.g. Range[500]) is 80-400 KB and freezes
-                // the browser layout engine, so we fall back to plain InputForm text.
-                const RENDER_TIMEOUT_MS = 3000;
+                // Hard limits: 30-second render timeout + 1 MB HTML size guard.
+                // The user explicitly clicked "Full" so they expect a wait.
+                const RENDER_TIMEOUT_MS = 30000;
                 const MAX_HTML_BYTES     = 1024 * 1024;  // 1 MB
                 try {
                     const regInfo = this._outputRegistry.get(message.uuid);
@@ -552,7 +556,7 @@ class WolframNotebookKernel {
                         }
                     } catch (raceErr) {
                         failReason = raceErr.message === 'render-timeout'
-                            ? 'MathML render timed out (> 3 s)'
+                            ? 'Render timed out (> 30 s)'
                             : raceErr.message;
                     }
 
@@ -560,27 +564,20 @@ class WolframNotebookKernel {
                         await this._replaceOutputByUuid(info.cell, message.uuid, htmlVal, info.outN);
                         this.truncatedOutputCells.delete(message.uuid);
                     } else {
-                        // Fall back: plain InputForm text with wrap-friendly pre block
-                        this.writeDebugLog(`[EXPAND] Falling back to InputForm \u2014 reason: ${failReason}`);
-                        const fallback = await this.session.evaluate(
-                            `ToString[Out[${info.outN}], InputForm]`,
-                            { interactive: false }
-                        );
-                        let text = fallback?.result?.type === "string"
-                            ? fallback.result.value
-                            : `(could not retrieve Out[${info.outN}])`;
-                        // Decode WL unicode escapes: \:03B1 -> α  (InputForm emits these)
-                        text = text.replace(/\\:([0-9A-Fa-f]{4})/g,
-                            (_, h) => String.fromCharCode(parseInt(h, 16)));
-                        // Content-only (no Out[N]= label) — _replaceOutputByUuid adds the label
-                        const content =
-                            `<div style="color:#FFA500;font-size:11px;margin:0 0 4px;">${failReason} \u2014 showing plain text</div>` +
-                            `<pre class="vscode-wolfram-text-output" style="white-space:pre-wrap;` +
-                            `overflow-wrap:break-word;font-family:Consolas,monospace;font-size:12px;margin:0;">` +
-                            this.escapeHtml(text) + `</pre>`;
-                        await this._replaceOutputByUuid(info.cell, message.uuid, content, info.outN);
-                        this.truncatedOutputCells.delete(message.uuid);
-                        vscode.window.showWarningMessage(`Expand: ${failReason} \u2014 showing plain text.`);
+                        // Don't fall back to InputForm (dangerous for huge outputs).
+                        // Instead show a warning message and keep the banner with "Open as text file".
+                        this.writeDebugLog(`[EXPAND] Full expansion failed \u2014 reason: ${failReason}`);
+                        const _btnStyle = 'padding:1px 6px;font-size:12px;cursor:pointer;line-height:1.5;' +
+                            'background:transparent;border:1px solid rgba(128,128,128,0.3);' +
+                            'border-radius:3px;color:var(--vscode-foreground,inherit);';
+                        const failBanner =
+                            `<div style="margin-top:3px;padding:4px 8px;display:flex;align-items:center;gap:6px;border-left:2px solid #FFA500;"` +
+                            ` data-truncated-uuid="${message.uuid}" data-session-epoch="${this._sessionEpoch}">` +
+                            `<span style="font-size:11px;color:#FFA500;flex:1;">&#9888; ${this.escapeHtml(failReason)} \u2014 try opening as a text file instead</span>` +
+                            `<button data-action="open-text" style="${_btnStyle}" title="Open as text file">&#128196; Open as text</button>` +
+                            `</div>`;
+                        await this._replaceOutputByUuid(info.cell, message.uuid, failBanner, info.outN);
+                        // Keep the truncatedOutputCells entry so "Open as text" still works.
                     }
                 } catch (err) {
                     vscode.window.showErrorMessage(`Expand failed: ${err.message}`);
@@ -650,44 +647,124 @@ class WolframNotebookKernel {
                     );
                 }
 
+            } else if (message.type === 'open-output-as-text' && message.outputId) {
+                // 📄 txt button in output header — open full expression as text file.
+                // Works for all outputs (truncated or not) via _outputRegistry.
+                const regEntry = this._outputRegistry.get(message.outputId);
+                const truncEntry = this.truncatedOutputCells.get(message.outputId);
+                const txtInfo = regEntry || truncEntry;
+                if (!txtInfo) {
+                    vscode.window.showWarningMessage("Cannot open as text: output info not found.");
+                } else {
+                    try {
+                        const pageWidth = this.config.get("notebook.textOutput.pageWidth") ?? 100;
+                        const pathResult = await this.session.evaluate(
+                            `VsCodeOpenAsText[${txtInfo.outN}, ${pageWidth}]`,
+                            { interactive: false }
+                        );
+                        if (pathResult?.result?.type === "string" && pathResult.result.value) {
+                            const rawPath = String(pathResult.result.value).trim();
+                            let targetUri;
+                            if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(rawPath)) {
+                                targetUri = vscode.Uri.parse(rawPath);
+                            } else {
+                                const expanded = rawPath.startsWith('~/') ? path.join(os.homedir(), rawPath.slice(2)) : rawPath;
+                                targetUri = vscode.Uri.file(path.resolve(expanded));
+                            }
+                            let doc;
+                            try {
+                                doc = await vscode.workspace.openTextDocument(targetUri);
+                            } catch (_) {
+                                const fallback = await this.session.evaluate(`ToString[Out[${txtInfo.outN}], InputForm]`, { interactive: false });
+                                const text = (fallback?.result?.type === 'string' && fallback.result.value) ? fallback.result.value : `(could not retrieve Out[${txtInfo.outN}])`;
+                                doc = await vscode.workspace.openTextDocument({ content: text, language: 'wolfram' });
+                            }
+                            await vscode.window.showTextDocument(doc, { preview: false });
+                        } else {
+                            vscode.window.showWarningMessage("Open as text: kernel returned no path.");
+                        }
+                    } catch (err) {
+                        vscode.window.showErrorMessage(`Open as text failed: ${err.message}`);
+                    }
+                }
+
             } else if (message.type === 'expand-more-output' && message.uuid) {
                 const outputId = message.uuid;
                 const info = this.truncatedOutputCells.get(outputId);
                 const regInfo = this._outputRegistry.get(outputId);
                 if (!info || !regInfo) return;
-                // Progressive expansion: increase breadth by 20 each click.
-                // Uses Shallow[expr, {Infinity, breadth}] which actually truncates
-                // at the kernel level (Short[] is a front-end hint that does nothing headlessly).
-                const newBreadth = (info.shallowBreadth || 20) + 20;
+                // Progressive expansion: increase breadth by 500 each click.
+                const newBreadth = (info.shallowBreadth || 0) + 500;
                 info.shallowBreadth = newBreadth;
                 this.truncatedOutputCells.set(outputId, info);
                 const fmt2 = regInfo.format || this._resolveFormat(info.cell, regInfo?.isGfx);
                 const scale2 = Number(this.config.get('imageScale') || 0.8);
+                const _moreLogPath = this._lastMainImgDir ? path.join(this._lastMainImgDir, 'btl.log') : null;
+                let _moreReplaced = false;
                 try {
+                    // VsCodeRenderShallow returns a plain HTML string just like VsCodeRender —
+                    // no JSON wrapping. data-wolfram-is-skeleton="1" is present when still truncated.
                     const moreResult = await this.session.evaluate(
                         `VsCodeRenderShallow[${info.outN},${newBreadth},"${fmt2}",${scale2}]`,
                         { interactive: false }
                     );
                     if (moreResult?.result?.type === 'string' && moreResult.result.value) {
-                        let parsed;
-                        try { parsed = JSON.parse(moreResult.result.value); }
-                        catch (_) { parsed = null; }
-                        if (parsed && parsed.html) {
-                            const moreHtml = this._processWLLatexBoxes(this._fixImageUris(parsed.html));
-                            if (parsed.hasSkeleton) {
-                                // Still truncated — show updated banner with +… button
-                                const bannerLabel2 = `&#128230; Large output &#8212; Shallow[&#8230;,${newBreadth}] (click Full for complete)`;
-                                const bannerHtml2 = this.makeTruncationBanner(outputId, bannerLabel2, newBreadth);
-                                await this._replaceOutputById(info.cell, outputId, moreHtml, info.outN, regInfo.outName, fmt2, bannerHtml2);
-                            } else {
-                                // Fully expanded — no more skeleton, remove banner entirely
-                                await this._replaceOutputById(info.cell, outputId, moreHtml, info.outN, regInfo.outName, fmt2, '');
-                                this.truncatedOutputCells.delete(outputId);
-                            }
+                        const rawHtml = moreResult.result.value;
+                        // Allow BTL paging — when expand-more produces >maxRows lines,
+                        // the output gets a pager just like the full-expression path.
+                        const moreHtml = this._processWLLatexBoxes(this._fixImageUris(rawHtml), _moreLogPath, null, 'expand-more');
+                        // Check rawHtml (before BTL processing) — the skeleton wrapper div is on the
+                        // outer layer and BTL only replaces the inner wllatex-boxes div, but checking
+                        // rawHtml is more reliable since BTL never sees the outer wrapper.
+                        const hasSkeleton = rawHtml.includes('data-wolfram-is-skeleton');
+                        if (hasSkeleton) {
+                            const bannerLabel2 = `&#128230; Large output &#8212; Shallow[&#8230;,${newBreadth}] (click Full for complete)`;
+                            const bannerHtml2 = this.makeTruncationBanner(outputId, bannerLabel2, newBreadth);
+                            await this._replaceOutputById(info.cell, outputId, moreHtml, info.outN, regInfo.outName, fmt2, bannerHtml2);
+                        } else {
+                            await this._replaceOutputById(info.cell, outputId, moreHtml, info.outN, regInfo.outName, fmt2, '');
+                            this.truncatedOutputCells.delete(outputId);
                         }
+                        _moreReplaced = true;
                     }
                 } catch (moreErr) {
                     vscode.window.showWarningMessage(`Expand more failed: ${moreErr.message}`);
+                } finally {
+                    if (!_moreReplaced) {
+                        try { this._rendererMessaging.postMessage({ type: 'expand-more-reset', uuid: outputId }, event.editor); } catch (_) {}
+                    }
+                }
+
+            } else if (message.type === 'output-page-request') {
+                // Client requests a specific page for a server-side pager.
+                // Render the requested page and postMessage it back as 'output-page-result'.
+                const { pagerId, page } = message;
+                if (pagerId && typeof page === 'number') {
+                    try {
+                        const result = _output.renderPageForPager(this, pagerId, page);
+                        if (result && result.html) {
+                            this._rendererMessaging.postMessage(
+                                { type: 'output-page-result', pagerId, page, html: result.html, latexB64: result.latexB64 || '' },
+                                event.editor
+                            );
+                            // Prefetch adjacent pages into cache while user reads the current page.
+                            // renderPageForPager is idempotent (cached); this just pre-warms the
+                            // BTL parse for N+1 and N-1 so subsequent navigation is instant.
+                            const _pgEntry = this._pagerStore ? this._pagerStore.get(pagerId) : null;
+                            const _pgTotal = _pgEntry ? (_pgEntry.totalPages || 0) : 0;
+                            const _pgCtrl  = this;
+                            if (_pgTotal > 1) {
+                                setImmediate(() => {
+                                    if (page + 1 < _pgTotal) _output.renderPageForPager(_pgCtrl, pagerId, page + 1);
+                                    setImmediate(() => {
+                                        if (page - 1 >= 0) _output.renderPageForPager(_pgCtrl, pagerId, page - 1);
+                                    });
+                                });
+                            }
+                        }
+                    } catch (pgErr) {
+                        if (DEV_MODE) this.outputPanel.print(`[PAGE] render page ${page} for pager ${pagerId} failed: ${pgErr.message}`);
+                    }
                 }
 
             } else if (message.type === "scroll-to-output" && message.outputId) {
@@ -720,6 +797,7 @@ class WolframNotebookKernel {
                 // Format-switch button clicked in renderer: re-render Out[N] in the
                 // requested format and replace the existing cell output in place.
                 const { outputId, newFormat } = message;
+                if (newFormat === 'WLLatexSrc') return; // handled client-side via data-latex-b64
                 const info = this._outputRegistry.get(outputId);
                 if (!info) {
                     if (DEV_MODE) this.outputPanel.print(`[Reformat] outputId ${outputId} not found in registry`);
@@ -742,10 +820,15 @@ class WolframNotebookKernel {
                 }
                 const _rfScale = Number(this.config.get('imageScale') || 0.8);
                 try {
-                    const rfResult = await this.session.evaluate(
-                        `VsCodeRender[${info.outN}, "${newFormat}", ${_rfScale}]`,
-                        { interactive: false }
-                    );
+                    // If the user has expanded via +… (shallowBreadth is set), honour that breadth
+                    // so format-switching does not reset the skeleton back to the auto-small level.
+                    // Otherwise fall through to VsCodeRender's own auto-breadth logic.
+                    const _truncEntry = this.truncatedOutputCells.get(outputId);
+                    const _rfBreadth  = _truncEntry?.shallowBreadth || 0;
+                    const _rfExpr = _rfBreadth
+                        ? `VsCodeRenderShallow[${info.outN},${_rfBreadth},"${newFormat}",${_rfScale}]`
+                        : `VsCodeRender[${info.outN},"${newFormat}",${_rfScale}]`;
+                    const rfResult = await this.session.evaluate(_rfExpr, { interactive: false });
                     // Forward render-time messages (e.g. $RecursionLimit::reclim)
                     for (const rfMsg of (rfResult.messages || [])) {
                         vscode.window.showWarningMessage(`Render message: ${rfMsg}`);
@@ -755,11 +838,11 @@ class WolframNotebookKernel {
                         // Update registry so subsequent switches see the new format
                         info.format = newFormat;
                         this._outputRegistry.set(outputId, info);
-                        // Preserve truncation banner if reformatted output is still a skeleton
-                        const _skeletonMarkerRe = /(\\\[LeftSkeleton\]|\\\[RightSkeleton\]|LeftSkeleton|RightSkeleton|\uF764|\uF765|&#xF764;|&#xF765;)/;
-                        const rfHasSkeletonMarkers = _skeletonMarkerRe.test(rfResult.result.value || '') ||
-                            _skeletonMarkerRe.test(rfHtml || '');
-                        const rfIsSkeleton = rfHtml.includes('data-wolfram-is-skeleton') && rfHasSkeletonMarkers;
+                        // Preserve truncation banner if reformatted output is still a skeleton.
+                        // VsCodeRender sets data-wolfram-is-skeleton="1" on the outer wrapper div;
+                        // after BTL processing skeleton chars are converted to KaTeX HTML and are
+                        // no longer detectable via regex, so rely solely on this attribute.
+                        const rfIsSkeleton = rfHtml.includes('data-wolfram-is-skeleton');
                         let rfBannerHtml = '';
                         if (rfIsSkeleton) {
                             const existingEntry = this.truncatedOutputCells.get(outputId);
@@ -1033,6 +1116,7 @@ class WolframNotebookKernel {
             compact,
             maxDelimDepth,
             maxIterations,
+            maxRows: Number(this.config?.get('notebook.rendering.maxMatrixRows') ?? 100),
         };
     }
 
@@ -1040,8 +1124,8 @@ class WolframNotebookKernel {
     // widthOverride: optional em width to use instead of the notebook's container width
     // (e.g. pass the watch-panel's own width when rendering for the side panel).
     // source: optional label written to btl.log ('notebook', 'watch-panel', etc.)
-    _processWLLatexBoxes(html, logPath, widthOverride, source) {
-        const lineBreakOpts = this._getLineBreakOptions(widthOverride);
+    _processWLLatexBoxes(html, logPath, widthOverride, source, extraOpts) {
+        const lineBreakOpts = { ...this._getLineBreakOptions(widthOverride), ...(extraOpts || {}) };
         return _output.processWLLatexBoxes(this, html, logPath, lineBreakOpts.pageWidth, source, lineBreakOpts);
     }
 

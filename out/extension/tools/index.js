@@ -315,6 +315,15 @@ function buildTranscript(notebook, startCell, endCell, editor) {
     const to      = Math.min(total, endCell || total);
     const isRange = from !== 1 || to !== total;
     lines.push(`# ${title}`);
+
+    // Surface per-notebook copilot instructions stored in metadata
+    const instructions = notebook.metadata?.copilotInstructions;
+    if (instructions && typeof instructions === 'string' && instructions.trim()) {
+        lines.push('');
+        lines.push('<!-- notebook instructions -->' );
+        lines.push(instructions.trim());
+        lines.push('<!-- end notebook instructions -->');
+    }
     const rangeNote = isRange ? ` (showing cells ${from}–${to})` : '';
     lines.push(`Notebook: ${total} cell${total !== 1 ? 's' : ''}${rangeNote}. Cell numbers are 1-based (human-facing), while internal notebook indices are 0-based. Each cell also has a stable cellId for tool operations that move/delete/reorder cells. Prefer cellId over cellNumber after any structural edits. To insert after Cell N, pass position=N to wolfbook_insertCell (position=0 inserts before Cell 1).`);
 
@@ -1154,50 +1163,69 @@ class InsertCellsTool {
                 (c.content || '').trim().length > 80 ? '\u2026' : ''}`);
         });
 
-        // ── evaluate option: run the last inserted code cell ────────────────
+        // ── evaluate option: run all inserted code cells through the notebook ──
         // Default true for code cells (pass evaluate:false to suppress)
         const evaluate = options.input?.evaluate !== false;
         if (evaluate) {
-            // Find the last code cell in the inserted block
-            let lastCodeIdx = -1;
-            for (let i = cells.length - 1; i >= 0; i--) {
-                if ((cells[i].kind || 'code') !== 'markdown') { lastCodeIdx = i; break; }
-            }
-            if (lastCodeIdx >= 0) {
-                const controller = this._getController?.();
-                if (!controller || !controller.session || controller.kernelStatusString !== 'resolved') {
-                    lines.push('\n[evaluate] Kernel is not running — cells inserted but not evaluated.');
-                } else if (controller._evalDispatched) {
-                    lines.push('\n[evaluate] Kernel is busy — cells inserted but not evaluated.');
-                } else {
-                    const evalContent = cells[lastCodeIdx].content || '';
-                    const timeoutSec = Number(options.input?.timeoutSeconds) || 15;
-                    const wlTimeout  = Math.max(1, timeoutSec - 1);
-                    const wrappedExpr =
-                        `Block[{$wbR$}, $wbR$ = TimeConstrained[(${evalContent}), ${wlTimeout}, "$WBTIMEOUT$"]; If[$wbR$ === "$WBTIMEOUT$", "$WBTIMEOUT$", If[StringQ[$wbR$], $wbR$, ToString[$wbR$, InputForm]]]]`;
-                    try {
-                        const result = await Promise.race([
-                            controller.session.evaluate(wrappedExpr, { interactive: false }),
-                            new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), timeoutSec * 1000))
-                        ]);
-                        let evalOut = '';
-                        if (result?.messages?.length) {
-                            evalOut += result.messages.map(m => `[message] ${cleanWrapperFromMsg(m)}`).join('\n') + '\n';
+            const hasCodeCells = cells.some(c => (c.kind || 'code') !== 'markdown');
+            if (hasCodeCells) {
+                const timeoutSec  = Number(options.input?.timeoutSeconds) || 30;
+                const deadline    = Date.now() + timeoutSec * 1000;
+                const decoder     = new util.TextDecoder();
+                const evalResults = [];
+
+                for (let i = 0; i < cells.length; i++) {
+                    if ((cells[i].kind || 'code') === 'markdown') continue;
+                    const idx   = insertIdx + i;
+                    const cell  = notebook.cellAt(idx);
+                    const prevEndTime = cell.executionSummary?.timing?.endTime ?? 0;
+
+                    editor.selection = new vscode.NotebookRange(idx, idx + 1);
+                    await vscode.commands.executeCommand('notebook.cell.execute');
+
+                    const cellDeadline = Math.min(deadline, Date.now() + 300000);
+                    await new Promise(resolve => {
+                        const poll = () => {
+                            const newEnd = notebook.cellAt(idx).executionSummary?.timing?.endTime ?? 0;
+                            if (newEnd > prevEndTime || Date.now() >= cellDeadline) resolve();
+                            else setTimeout(poll, 300);
+                        };
+                        setTimeout(poll, 500);
+                    });
+
+                    const updatedCell = notebook.cellAt(idx);
+                    const timedOut    = (updatedCell.executionSummary?.timing?.endTime ?? 0) <= prevEndTime;
+                    const outs = [];
+                    let hasError = false;
+                    for (const output of updatedCell.outputs) {
+                        const mimes     = output.items.map(it => it.mime);
+                        const plainItem = output.items.find(it => it.mime === 'text/plain');
+                        const isErrSentinel = mimes.includes('x-application/wolfram-language-html') &&
+                                              mimes.includes('application/vnd.code.notebook.error');
+                        if (plainItem) {
+                            try {
+                                const txt = decoder.decode(plainItem.data).trim();
+                                if (txt) {
+                                    outs.push(txt);
+                                    if (isErrSentinel || /\w+::\w+:/.test(txt)) hasError = true;
+                                }
+                            } catch (_) {}
                         }
-                        if (result?.result?.type === 'string' && result.result.value === '$WBTIMEOUT$') {
-                            evalOut += `Timed out after ${wlTimeout}s.`;
-                        } else if (result?.result?.type === 'string' && result.result.value) {
-                            let val = result.result.value.replace(/\\:([0-9A-Fa-f]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
-                            if (val.length > 4096) val = val.slice(0, 4096) + '\n[output truncated]';
-                            evalOut += `Out= ${val}`;
-                        } else {
-                            evalOut += '(no output)';
-                        }
-                        lines.push('\n[evaluate]\n' + evalOut.trim());
-                        appendEvalLog(evalContent, evalOut.trim());
-                    } catch (err) {
-                        lines.push(`\n[evaluate] ${err.message === 'timeout' ? `Timed out after ${timeoutSec}s.` : `Error: ${err.message}`}`);
                     }
+                    const cellTiming    = updatedCell.executionSummary?.timing;
+                    const cellTimingStr = (!timedOut && cellTiming?.startTime && cellTiming?.endTime)
+                        ? ` ${((cellTiming.endTime - cellTiming.startTime) / 1000).toFixed(2)}s` : '';
+                    const status  = timedOut ? '⏱ timeout' : `✓${cellTimingStr}`;
+                    const outStr  = outs.join(' | ').slice(0, 800) || '(no output)';
+                    const cellRef = formatCellRef(idx, updatedCell);
+                    evalResults.push(`${cellRef}: ${status} — ${outStr}`);
+                    appendEvalLog(cells[i].content || '', outStr);
+
+                    if (Date.now() >= deadline) { evalResults.push('(global timeout reached)'); break; }
+                }
+
+                if (evalResults.length) {
+                    lines.push('\n[evaluate]\n' + evalResults.join('\n'));
                 }
             }
         }
@@ -1608,7 +1636,7 @@ class RunCellTool {
             const startCell   = Math.max(1, Number(options.input?.startCell) || 1);
             const endCell     = Math.min(notebook.cellCount, Number(options.input?.endCell) || notebook.cellCount);
             const timeoutSec  = Math.max(10, Number(options.input?.timeoutSeconds) || 120);
-            const stopOnError = options.input?.stopOnError === true;
+            const stopOnError = options.input?.stopOnError !== false;
             const errorsOnly  = options.input?.errorsOnly === true;
 
             if (startCell > endCell || startCell < 1) {
@@ -1680,7 +1708,7 @@ class RunCellTool {
                     results.push(resultLine);
                 }
 
-                if (stopOnError && hasError) { stopped = `stopped at Cell ${n} (stopOnError=true)`; break; }
+                if (stopOnError && hasError) { stopped = `stopped at Cell ${n} — error detected (pass stopOnError:false to continue past errors)`; break; }
             }
 
             const total  = notebook.cellCount;
@@ -3090,7 +3118,15 @@ function _resolveSlide(options) {
         idx = (deck.slides || []).findIndex(s => s.id === slideId);
         if (idx === -1) return { error: `Slide with id="${slideId}" not found. Valid ids: ${deck.slides.map(s => s.id).join(', ')}` };
     } else {
-        idx = (options.input?.slideIndex || 1) - 1;
+        // Accept 'slideNumber' as an alias for 'slideIndex'
+        const raw = options.input?.slideIndex ?? options.input?.slideNumber;
+        if (raw != null) {
+            idx = Number(raw) - 1;
+        } else {
+            // Default to the currently visible slide
+            const activeEntry = docUri ? p._panels?.get(docUri) : p.getActiveEntry();
+            idx = activeEntry?.currentSlideIndex ?? 0;
+        }
     }
     const slide = deck.slides?.[idx];
     if (!slide) return { error: `Slide ${idx + 1} not found (deck has ${deck.slides?.length ?? 0}).` };
@@ -3172,7 +3208,13 @@ function _blockAnno(b) {
     if (b.fragmentOrder != null) parts.push(`⚡step${b.fragmentOrder}`);
     if (b.offset && (b.offset.dx || b.offset.dy))
         parts.push(`@(${b.offset.dx >= 0 ? '+' : ''}${b.offset.dx},${b.offset.dy >= 0 ? '+' : ''}${b.offset.dy})`);
-    if (b.w || b.h) parts.push(`${b.w || '?'}×${b.h || '?'}px`);
+    if (b.w || b.h) {
+        let dimStr = `${b.w || '?'}×${b.h || '?'}px`;
+        // Show style constraints that override w/h visually
+        const mw = b.style?.maxWidth; const mh = b.style?.maxHeight;
+        if (mw || mh) dimStr += ` (capped:${mw ? ' maxW=' + mw : ''}${mh ? ' maxH=' + mh : ''})`;
+        parts.push(dimStr);
+    }
     if (b.type === 'image' && !b.alt) parts.push('⚠NO-ALT');
     return parts.length ? `  [${parts.join(' ')}]` : '';
 }
@@ -3213,9 +3255,11 @@ function _asciiSlide(slide) {
                     ? Math.round(v / totalFlex * innerW)
                     : Math.round(innerW / kids.length))
             );
-            // Fix rounding so columns sum to innerW
+            // Fix rounding so columns sum to innerW; clamp to min 1 to prevent repeat() crash
             const diff = innerW - rawWidths.reduce((a, v) => a + v, 0);
-            rawWidths[rawWidths.length - 1] += diff;
+            rawWidths[rawWidths.length - 1] = Math.max(1, rawWidths[rawWidths.length - 1] + diff);
+            // Clamp all widths to at least 1
+            for (let i = 0; i < rawWidths.length; i++) rawWidths[i] = Math.max(1, rawWidths[i]);
 
             // Collect content lines for each column (max depth 3 levels)
             const colContents = kids.map((k, ci) => {
@@ -3350,8 +3394,23 @@ class WolfslideGetContextTool {
             }
         } catch (_) { /* workspace.findFiles may fail in some environments */ }
 
-        // ── Current theme ────────────────────────────────────────────────
+        // ── Currently visible slide ──────────────────────────────────────
         const activeDeck = activeEntry ? p.getDeck(activeUri) : null;
+        if (activeDeck) {
+            const idx = activeEntry.currentSlideIndex ?? 0;
+            const slide = activeDeck.slides?.[idx];
+            if (slide) {
+                lines.push('');
+                lines.push(`Currently visible slide: ${idx + 1} of ${activeDeck.slides.length} — "${slide.label || '(unlabeled)'}"`);
+                const ascii = _asciiSlide(slide);
+                lines.push('Block tree:');
+                lines.push('```');
+                lines.push(ascii);
+                lines.push('```');
+            }
+        }
+
+        // ── Current theme ────────────────────────────────────────────────
         if (activeDeck) {
             const t = activeDeck.theme || {};
             lines.push('');
@@ -3394,9 +3453,13 @@ class WolfslideGetContextTool {
         lines.push('• Images support: w, h (pixels), fit ("contain"/"cover"), alt (accessibility text).');
         lines.push('• Font size: block.fontSize (number in px). Headings default to ~48px; body to ~28px.');
         lines.push('• Block positioning: default is flow layout. Set position:"absolute", x, y for pixel-precise placement.');
+        lines.push('Inspection workflow: (1) wolfslide_listSlides — overview of all slides with block counts, steps, char counts; pass verbose:true to also get the ASCII block tree for every slide. (2) wolfslide_getSlide — full block tree + raw JSON for one slide; defaults to the currently visible slide when no index given. (3) wolfslide_searchSlides — find blocks by text query, block type, or style property across the whole deck. (4) wolfslide_getSlideHtml — render a single slide to standalone HTML instantly (avoids exporting the full 4MB deck just to check layout).');
         lines.push('• NEVER write JSON directly to .wslide files — always use wolfslide tools to keep the editor in sync.');
         lines.push('• Use eval blocks for computed content: plots, formulas, diagrams — they render as crisp SVG or LaTeX instead of static images.');
         lines.push('• Prefer eval blocks over external image files when the content can be generated by Wolfram Language (e.g., Plot, Graphics, NumberLinePlot).');
+        lines.push('• Image layout contract: the image block\'s w and h properties define the wrapper div size. style.maxHeight / style.maxWidth only constrain the wrapper — without explicit w and h, the image still fills the column. Always set w, h, AND style.maxHeight/maxWidth together, OR just use w and h alone. Use wolfslide_getImageDimensions to get pixel dimensions from a local path or URL before inserting.');
+        lines.push('• fragmentOrder on containers: setting fragmentOrder on a container block animates the entire container as one unit (all children appear/disappear together). Use this for revealing whole column sections at once.');
+        lines.push('• External image URLs (arXiv, web): links work in the editor preview but may be blocked offline or slow to load in exported HTML. Copy images locally with wolfslide_imageAsset({action:"copy",...}) for reliable exports.');
 
         // ── New-deck onboarding ──────────────────────────────────────────
         if (activeDeck && (activeDeck.slides || []).length === 0) {
@@ -3485,6 +3548,7 @@ class WolfslideListSlidesTool {
         const docUri = options.input?.docUri || undefined;
         const deck = p.getDeck(docUri);
         if (!deck) return _slideResult('No deck found.');
+        const verbose = !!options.input?.verbose;
         const lines = (deck.slides || []).map((s, i) => {
             const label   = s.label || s.meta?.title || '';
             const bg      = s.background || '';
@@ -3516,7 +3580,12 @@ class WolfslideListSlidesTool {
             if (noAltImgs.length) warnings.push('no-alt');
             if (topBlocks.length > 10) warnings.push('dense');
             const warnInfo = warnings.length ? `  ⚠${warnings.join(',')}` : '';
-            return `[${i + 1}] id=${s.id}  label="${label}"  bg="${bg}"${hidden}${stepsInfo}${charsInfo}${warnInfo}\n    blocks: ${blockDesc}${imgInfo}`;
+            const summary = `[${i + 1}] id=${s.id}  label="${label}"  bg="${bg}"${hidden}${stepsInfo}${charsInfo}${warnInfo}\n    blocks: ${blockDesc}${imgInfo}`;
+            if (verbose) {
+                const ascii = _asciiSlide(s);
+                return summary + '\n```\n' + ascii + '\n```';
+            }
+            return summary;
         });
         return _slideResult(`${lines.length} slide(s):\n` + lines.join('\n'));
     }
@@ -3524,12 +3593,14 @@ class WolfslideListSlidesTool {
 
 class WolfslideGetSlideTool {
     prepareInvocation(options) {
-        return { invocationMessage: `Getting slide ${options.input?.slideIndex ?? ''}` };
+        const n = options.input?.slideIndex ?? options.input?.slideNumber ?? '?';
+        return { invocationMessage: `Getting slide ${n}` };
     }
     async invoke(options, _token) {
         const p = _getSlideProvider();
         if (!p) return _slideResult('No .wslide editor is open.');
-        const deck = p.getDeck(options.input?.docUri);
+        const docUri = options.input?.docUri;
+        const deck = p.getDeck(docUri);
         if (!deck) return _slideResult('No deck found.');
         let idx;
         const slideId = options.input?.slideId;
@@ -3537,7 +3608,14 @@ class WolfslideGetSlideTool {
             idx = (deck.slides || []).findIndex(s => s.id === slideId);
             if (idx === -1) return _slideResult(`Slide with id="${slideId}" not found. Valid ids: ${deck.slides.map(s => s.id).join(', ')}`);
         } else {
-            idx = (options.input?.slideIndex || 1) - 1;
+            // Accept slideNumber as alias; default to currently visible slide
+            const raw = options.input?.slideIndex ?? options.input?.slideNumber;
+            if (raw != null) {
+                idx = Number(raw) - 1;
+            } else {
+                const activeEntry = docUri ? p._panels?.get(docUri) : p.getActiveEntry();
+                idx = activeEntry?.currentSlideIndex ?? 0;
+            }
         }
         const slide = deck.slides?.[idx];
         if (!slide) return _slideResult(`Slide ${idx + 1} not found (deck has ${deck.slides?.length ?? 0}).`);
@@ -3609,8 +3687,8 @@ class WolfslideEditSlideTool {
         const r = _resolveSlide(options);
         if (!r) return _slideResult('No .wslide editor is open.');
         if (r.error) return _slideResult(r.error);
-        const patch = options.input?.patch;
-        if (!patch || typeof patch !== 'object') return _slideResult('"patch" object is required.');
+        const patch = options.input?.patch || options.input?.updates;
+        if (!patch || typeof patch !== 'object') return _slideResult('"patch" (or "updates") object is required.');
         Object.assign(r.slide, patch);
         _ensureBlockIds(r.slide.children);
         _ensureBlockIds(r.slide.items);
@@ -3711,28 +3789,45 @@ class WolfslideSearchSlidesTool {
         const deck = p.getDeck(options.input?.docUri);
         if (!deck) return _slideResult('No deck found.');
         const query = (options.input?.query || '').toLowerCase().trim();
-        if (!query) return _slideResult('Provide a non-empty search query.');
+        const blockTypeFilter = (options.input?.blockType || '').toLowerCase().trim();
+        const styleKey   = (options.input?.styleKey   || '').trim();
+        const styleValue = (options.input?.styleValue || '').toLowerCase().trim();
+        if (!query && !blockTypeFilter && !styleKey)
+            return _slideResult('Provide at least one of: query, blockType, or styleKey.');
         const results = [];
         (deck.slides || []).forEach((s, i) => {
             const allBlocks = _collectAllBlocks(s);
             const matches = [];
             allBlocks.forEach(b => {
-                const haystack = [
-                    _stripHtml(b.content || ''),
-                    b.alt || '', b.src || '', b.label || '',
-                    ...(b.items || []).map(it => _stripHtml(it.content || '')),
-                ].join(' ').toLowerCase();
-                if (haystack.includes(query)) {
-                    const preview = _stripHtml(b.content || b.alt || (b.items?.[0]?.content) || '').slice(0, 70);
-                    matches.push(`    block id=${b.id} type=${b.type}: "${preview}"`);
+                // Type filter
+                if (blockTypeFilter && (b.type || '').toLowerCase() !== blockTypeFilter) return;
+                // Style key/value filter
+                if (styleKey) {
+                    const styleObj = b.style || {};
+                    const val = (styleObj[styleKey] || '').toString().toLowerCase();
+                    if (!val) return;
+                    if (styleValue && !val.includes(styleValue)) return;
                 }
+                // Text content filter
+                if (query) {
+                    const haystack = [
+                        _stripHtml(b.content || ''),
+                        b.alt || '', b.src || '', b.label || '',
+                        ...(b.items || []).map(it => _stripHtml(it.content || '')),
+                    ].join(' ').toLowerCase();
+                    if (!haystack.includes(query)) return;
+                }
+                const preview = _stripHtml(b.content || b.alt || (b.items?.[0]?.content) || '').slice(0, 70);
+                const styleHint = styleKey ? `  ${styleKey}=${b.style?.[styleKey]}` : '';
+                matches.push(`    block id=${b.id} type=${b.type}${styleHint}: "${preview}"`);
             });
             if (matches.length) {
                 results.push(`[${i + 1}] id=${s.id} label="${s.label || ''}":\n${matches.join('\n')}`);
             }
         });
-        if (!results.length) return _slideResult(`No matches for "${query}" across ${deck.slides.length} slide(s).`);
-        return _slideResult(`Matches for "${query}" in ${results.length} slide(s):\n${results.join('\n')}`);
+        const desc = [query && `text:"${query}"`, blockTypeFilter && `type:${blockTypeFilter}`, styleKey && `style.${styleKey}${styleValue ? '='+styleValue : ''}`].filter(Boolean).join(', ');
+        if (!results.length) return _slideResult(`No matches for [${desc}] across ${deck.slides.length} slide(s).`);
+        return _slideResult(`Matches for [${desc}] in ${results.length} slide(s):\n${results.join('\n')}`);
     }
 }
 
@@ -3753,8 +3848,8 @@ class WolfslideEditBlockTool {
             const allIds = _collectAllBlocks(r.slide).map(b => b.id);
             return _slideResult(`Block "${blockId}" not found on slide ${r.idx + 1}. Valid ids: ${allIds.join(', ')}`);
         }
-        const updates = options.input?.updates;
-        if (!updates || typeof updates !== 'object') return _slideResult('updates object is required.');
+        const updates = options.input?.updates || options.input?.patch;
+        if (!updates || typeof updates !== 'object') return _slideResult('updates (or patch) object is required.');
         _deepMerge(found.block, updates);
         _ensureBlockIds(found.block.children);
         _ensureBlockIds(found.block.items);
@@ -4017,6 +4112,156 @@ class WolfslideMeasureSlideTool {
             return _slideResult(`Measurement failed: ${e.message}`);
         }
     }
+}
+
+// ── Single-slide HTML preview ─────────────────────────────────────────────
+
+class WolfslideGetSlideHtmlTool {
+    prepareInvocation(options) {
+        const n = options.input?.slideIndex ?? options.input?.slideNumber ?? '?';
+        return { invocationMessage: `Rendering slide ${n} to HTML` };
+    }
+    async invoke(options, _token) {
+        const r = _resolveSlide(options);
+        if (!r) return _slideResult('No .wslide editor is open.');
+        if (r.error) return _slideResult(r.error);
+        try {
+            const exporter = require('../slideExporter');
+            const section  = exporter.slideToHTML(r.slide);
+            const t = r.deck.theme || {};
+            const navy   = t.navy   || '#0a244a';
+            const blue   = t.blue   || '#0064b4';
+            const cyan   = t.cyan   || '#009ac8';
+            const accent = t.accent || '#be1e2d';
+            const userCSS = t.editorCSS ? `<style>\n${t.editorCSS}\n</style>` : '';
+            const html = `<!DOCTYPE html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n` +
+                `<title>Slide ${r.idx + 1} — ${(r.slide.label || '').replace(/</g,'&lt;')}</title>\n` +
+                `<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5/dist/reveal.css">\n` +
+                `<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5/dist/theme/white.css">\n` +
+                `<style>\n:root{--navy:${navy};--blue:${blue};--cyan:${cyan};--accent:${accent};}\n` +
+                `html,body{margin:0;padding:0;background:#000;}\n` +
+                `.reveal,.reveal *:not(.katex):not(.katex *){font-family:'Helvetica Neue',Helvetica,Arial,sans-serif!important;box-sizing:border-box;}\n` +
+                `.reveal{font-size:36px;color:var(--navy);background:#000!important;}\n` +
+                `.reveal-viewport{background:#000!important;}\n` +
+                `.reveal .slides section{padding:0!important;margin:0!important;top:0!important;text-align:left;overflow:hidden;width:1920px;height:1080px;}\n` +
+                `.reveal .slides section h1,.reveal .slides section h2,.reveal .slides section h3{text-transform:none!important;font-weight:700;margin:0;padding:0;}\n` +
+                `.reveal .slides section h2{background:var(--navy);color:#fff;padding:14px 36px;font-size:1.1em;width:100%;}\n` +
+                `.reveal .slides section img{border:none!important;box-shadow:none!important;}\n` +
+                `.wslide-canvas{position:relative;width:1920px;height:1080px;}\n.wel{position:absolute;box-sizing:border-box;}\n</style>\n` +
+                `${userCSS}\n</head>\n<body>\n` +
+                `<div class="reveal"><div class="slides">\n${section}\n</div></div>\n` +
+                `<script src="https://cdn.jsdelivr.net/npm/reveal.js@5/dist/reveal.js"></script>\n` +
+                `<script>Reveal.initialize({hash:false,width:1920,height:1080,margin:0.04,minScale:0.1,maxScale:2,transition:'none',center:false,controls:false,progress:false});</script>\n` +
+                `</body>\n</html>`;
+
+            const outputPath = options.input?.outputPath;
+            if (outputPath) {
+                require('fs').writeFileSync(outputPath, html, 'utf8');
+                return _slideResult(`Slide ${r.idx + 1} HTML written to ${outputPath} (${html.length} bytes).`);
+            }
+            return _slideResult(
+                `Slide ${r.idx + 1} "${r.slide.label || ''}" HTML (${html.length} bytes):\n\n` +
+                `\`\`\`html\n${html}\n\`\`\``
+            );
+        } catch (e) {
+            return _slideResult(`HTML render failed: ${e.message}`);
+        }
+    }
+}
+
+// ── Image dimension helper ────────────────────────────────────────────────
+
+class WolfslideGetImageDimensionsTool {
+    prepareInvocation(options) {
+        return { invocationMessage: `Reading image dimensions: ${options.input?.src || ''}` };
+    }
+    async invoke(options, _token) {
+        const src = options.input?.src || '';
+        if (!src) return _slideResult('Error: "src" is required (local path or http/https URL).');
+        try {
+            let buf;
+            if (/^https?:\/\//i.test(src)) {
+                buf = await _fetchImageHeader(src);
+            } else {
+                // Local path — resolve relative to the active deck if not absolute
+                let filePath = src;
+                if (!path.isAbsolute(filePath)) {
+                    const p2 = _getSlideProvider();
+                    const entry = p2 ? p2.getActiveEntry() : null;
+                    if (entry) filePath = path.resolve(path.dirname(entry.document.uri.fsPath), filePath);
+                }
+                const full = require('fs').readFileSync(filePath);
+                buf = Buffer.from(full.slice(0, 64));
+            }
+            const dims = _parseImageHeader(buf);
+            if (!dims) return _slideResult(`Could not determine dimensions for "${src}". Format may be unsupported (supports PNG, JPEG, WebP).`);
+            return _slideResult(JSON.stringify({ src, width: dims.w, height: dims.h, format: dims.fmt }));
+        } catch (e) {
+            return _slideResult(`Error reading image "${src}": ${e.message}`);
+        }
+    }
+}
+
+function _fetchImageHeader(url) {
+    return new Promise((resolve, reject) => {
+        const mod = url.startsWith('https') ? require('https') : require('http');
+        const req = mod.get(url, { headers: { 'Range': 'bytes=0-511', 'User-Agent': 'WolfslideAgent/1.0' } }, res => {
+            const chunks = [];
+            res.on('data', d => chunks.push(d));
+            res.on('end', () => resolve(Buffer.concat(chunks)));
+        });
+        req.on('error', reject);
+        req.setTimeout(8000, () => { req.destroy(); reject(new Error('Timeout reading image header')); });
+    });
+}
+
+function _parseImageHeader(buf) {
+    if (!buf || buf.length < 8) return null;
+    // PNG: magic \x89PNG\r\n\x1a\n, width at bytes 16-19, height at 20-23
+    if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47) {
+        if (buf.length < 24) return null;
+        return { fmt: 'PNG', w: buf.readUInt32BE(16), h: buf.readUInt32BE(20) };
+    }
+    // JPEG: SOI = FF D8, then scan for SOF0/SOF1/SOF2 (FF C0/C1/C2)
+    if (buf[0] === 0xFF && buf[1] === 0xD8) {
+        let i = 2;
+        while (i + 8 < buf.length) {
+            if (buf[i] !== 0xFF) break;
+            const marker = buf[i + 1];
+            const len = buf.readUInt16BE(i + 2);
+            if (marker >= 0xC0 && marker <= 0xC3) {
+                // height at i+5, width at i+7
+                const h = buf.readUInt16BE(i + 5);
+                const w = buf.readUInt16BE(i + 7);
+                return { fmt: 'JPEG', w, h };
+            }
+            i += 2 + len;
+        }
+        return { fmt: 'JPEG', w: null, h: null }; // SOF not in first 512 bytes
+    }
+    // WebP: RIFF????WEBP
+    if (buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 &&
+        buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50) {
+        const tag = buf.slice(12, 16).toString('ascii');
+        if (tag === 'VP8 ' && buf.length >= 30) {
+            const w = (buf.readUInt16LE(26) & 0x3FFF) + 1;
+            const h = (buf.readUInt16LE(28) & 0x3FFF) + 1;
+            return { fmt: 'WebP', w, h };
+        }
+        if (tag === 'VP8L' && buf.length >= 30) {
+            const bits = buf.readUInt32LE(25);
+            const w = (bits & 0x3FFF) + 1;
+            const h = ((bits >> 14) & 0x3FFF) + 1;
+            return { fmt: 'WebP', w, h };
+        }
+        if (tag === 'VP8X' && buf.length >= 30) {
+            const w = (buf[24] | (buf[25] << 8) | (buf[26] << 16)) + 1;
+            const h = (buf[27] | (buf[28] << 8) | (buf[29] << 16)) + 1;
+            return { fmt: 'WebP', w, h };
+        }
+        return { fmt: 'WebP', w: null, h: null };
+    }
+    return null;
 }
 
 class WolfslideExportHtmlTool {
@@ -5254,21 +5499,70 @@ class WolfslideBlockTool {
     }
     async prepareInvocation(options, _token) {
         const action = options.input?.action || '?';
+        if (action === 'bulkEdit') {
+            const n = (options.input?.edits || []).length;
+            return { invocationMessage: `Slide block bulkEdit (${n} edit${n !== 1 ? 's' : ''})` };
+        }
         return { invocationMessage: `Slide block ${action}` };
     }
     async invoke(options, _token) {
         const action = options.input?.action;
         if (!action) {
-            return _slideResult('Error: action is required. Use "insert", "edit", "delete", or "move".');
+            return _slideResult('Error: action is required. Use "insert", "edit", "delete", "move", or "bulkEdit".');
         }
         switch (action) {
-            case 'insert': return this._insert.invoke(options, _token);
-            case 'edit':   return this._edit.invoke(options, _token);
-            case 'delete': return this._delete.invoke(options, _token);
-            case 'move':   return this._move.invoke(options, _token);
+            case 'insert':   return this._insert.invoke(options, _token);
+            case 'edit':     return this._edit.invoke(options, _token);
+            case 'delete':   return this._delete.invoke(options, _token);
+            case 'move':     return this._move.invoke(options, _token);
+            case 'bulkEdit': return this._bulkEdit(options, _token);
             default:
-                return _slideResult(`Unknown action "${action}". Use "insert", "edit", "delete", or "move".`);
+                return _slideResult(`Unknown action "${action}". Use "insert", "edit", "delete", "move", or "bulkEdit".`);
         }
+    }
+    async _bulkEdit(options, _token) {
+        const edits = options.input?.edits;
+        if (!Array.isArray(edits) || edits.length === 0)
+            return _slideResult('Error: edits array is required and must be non-empty.');
+        const p = _getSlideProvider();
+        if (!p) return _slideResult('No .wslide editor is open.');
+        const docUri = options.input?.docUri;
+        const deck = p.getDeck(docUri);
+        if (!deck) return _slideResult('No deck found.');
+        const applied = [];
+        const failed  = [];
+        for (const edit of edits) {
+            const { blockId, updates, patch, slideId, slideIndex } = edit;
+            const mergeProps = updates || patch;
+            if (!blockId || !mergeProps || typeof mergeProps !== 'object') {
+                failed.push(`  missing blockId or updates/patch: ${JSON.stringify(edit).slice(0, 80)}`);
+                continue;
+            }
+            // Resolve slide
+            let slideObj;
+            if (slideId) {
+                slideObj = deck.slides.find(s => s.id === slideId);
+            } else if (slideIndex != null) {
+                slideObj = deck.slides[slideIndex - 1];
+            } else {
+                // Search all slides for the block
+                for (const s of deck.slides) {
+                    if (_findBlockRecursive(blockId, s)) { slideObj = s; break; }
+                }
+            }
+            if (!slideObj) { failed.push(`  block ${blockId}: slide not found`); continue; }
+            const found = _findBlockRecursive(blockId, slideObj);
+            if (!found) { failed.push(`  block ${blockId}: not found on slide "${slideObj.label || slideObj.id}"`); continue; }
+            _deepMerge(found.block, mergeProps);
+            applied.push(`  block ${blockId} on slide "${slideObj.label || slideObj.id}": ${Object.keys(mergeProps).join(', ')}`);
+        }
+        if (applied.length === 0 && failed.length > 0)
+            return _slideResult('All edits failed:\n' + failed.join('\n'));
+        await p.applyDeck(deck, docUri);
+        const lines = [`Applied ${applied.length} / ${edits.length} block edit(s):`];
+        lines.push(...applied);
+        if (failed.length) { lines.push(`Failed ${failed.length}:`); lines.push(...failed); }
+        return _slideResult(lines.join('\n'));
     }
 }
 
@@ -5457,12 +5751,15 @@ function registerTools(context, getController, debugCtrl) {
         { name: 'wolfteam_askDecision',        impl: new AskDecisionTool() },
         { name: 'wolfteam_checkpoint',         impl: new CheckpointTool() },
         // Wolfslide tools
-        { name: 'wolfslide_getContext',  impl: new WolfslideGetContextTool() },
-        { name: 'wolfslide_listSlides',  impl: new WolfslideListSlidesTool() },
-        { name: 'wolfslide_getSlide',    impl: new WolfslideGetSlideTool() },
-        { name: 'wolfslide_insertSlide', impl: new WolfslideInsertSlideTool() },
-        { name: 'wolfslide_editSlide',   impl: new WolfslideEditSlideTool() },
-        { name: 'wolfslide_deleteSlide',    impl: new WolfslideDeleteSlideTool() },
+        { name: 'wolfslide_getContext',      impl: new WolfslideGetContextTool() },
+        { name: 'wolfslide_listSlides',      impl: new WolfslideListSlidesTool() },
+        { name: 'wolfslide_getSlide',        impl: new WolfslideGetSlideTool() },
+        { name: 'wolfslide_getSlideHtml',    impl: new WolfslideGetSlideHtmlTool() },
+        { name: 'wolfslide_getImageDimensions', impl: new WolfslideGetImageDimensionsTool() },
+        { name: 'wolfslide_insertSlide',     impl: new WolfslideInsertSlideTool() },
+        { name: 'wolfslide_editSlide',       impl: new WolfslideEditSlideTool() },
+        { name: 'wolfslide_deleteSlide',     impl: new WolfslideDeleteSlideTool() },
+        { name: 'wolfslide_duplicateSlide',  impl: new WolfslideDuplicateSlideTool() },
         { name: 'wolfslide_moveSlide',       impl: new WolfslideMoveSlideTool() },
         { name: 'wolfslide_searchSlides',    impl: new WolfslideSearchSlidesTool() },
         { name: 'wolfslide_block',           impl: new WolfslideBlockTool() },
@@ -5482,6 +5779,10 @@ function registerTools(context, getController, debugCtrl) {
             context.subscriptions.push(vscode.lm.registerTool(name, impl));
         }
     }
+
+    // Build and return tool map for MCP server use
+    const toolMap = new Map(tools.map(({ name, impl }) => [name, impl]));
+    return toolMap;
 }
 
 // ---------------------------------------------------------------------------

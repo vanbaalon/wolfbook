@@ -550,11 +550,45 @@ async function activate(context) {
         controller.launchKernel();
     }
     // Register Copilot language model tools (Phase 4)
-    _tools.registerTools(context, () => controller, _debugCtrl);
+    const _toolMap = _tools.registerTools(context, () => controller, _debugCtrl);
     // Register @wolfbook chat participant
     _tools.registerChatParticipant(context, () => controller);
     // Register @wolfteam collaborative chat participant
     _tools.registerWolfteamParticipant(context, () => controller);
+
+    // ── Claude Desktop MCP server ──────────────────────────────────────────
+    // Exposes all Wolfram notebook tools to Claude via MCP HTTP/SSE protocol.
+    const { WolframMCPServer, loadMCPSchemas, configureClaudeDesktop } = require('./claude-mcp/server');
+    const _pkgJson   = path.join(context.extensionPath, 'package.json');
+    const _mcpSchema = loadMCPSchemas(_pkgJson);
+    const _mcpServer = new WolframMCPServer(_toolMap, _mcpSchema);
+    _mcpServer.start().then(port => {
+        console.log(`[Wolfbook MCP] Ready — add to Claude Desktop config: http://127.0.0.1:${port}/sse`);
+    }).catch(e => {
+        console.warn('[Wolfbook MCP] Server failed to start:', e.message);
+    });
+    context.subscriptions.push({ dispose: () => _mcpServer.stop() });
+
+    // Command: write wolfbook MCP entry into Claude Desktop config
+    context.subscriptions.push(vscode.commands.registerCommand('wolfbook.configureClaude', async () => {
+        const port = _mcpServer.port;
+        if (!port) {
+            vscode.window.showErrorMessage('Wolfbook MCP server is not running. Try reloading the window.');
+            return;
+        }
+        try {
+            const { configPath } = configureClaudeDesktop(port);
+            const action = await vscode.window.showInformationMessage(
+                `Claude Desktop configured ✓ (port ${port}). Restart Claude Desktop to apply.`,
+                'Open Config File'
+            );
+            if (action === 'Open Config File') {
+                vscode.commands.executeCommand('vscode.open', vscode.Uri.file(configPath));
+            }
+        } catch (e) {
+            vscode.window.showErrorMessage(`Failed to configure Claude Desktop: ${e.message}`);
+        }
+    }));
     ;
     // Update WBDirectory[] and NotebookDirectory[] whenever the active notebook changes
     function _updateKernelNotebookDir(ed) {

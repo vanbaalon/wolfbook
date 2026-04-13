@@ -93,6 +93,11 @@ export function activate(context) {
     // Map of uuid -> { button, origHTML } for open-text buttons awaiting reply
     const openTextPending = new Map();
 
+    // Map of outputId -> detached div containing the saved WLLatex content DOM nodes.
+    // Populated when switching to WLLatexSrc so we can restore client-side (preserving
+    // pager event listeners and the current page) when switching back to WLLatex.
+    const savedWLLatexContent = new Map();
+
     // Match tester/webview KaTeX behavior and avoid expansion-limit failures
     // on very large formulas emitted by BTL.
     const KATEX_RENDER_OPTIONS = {
@@ -161,6 +166,40 @@ export function activate(context) {
             }
             if (msg.type === 'reformat-done') {
                 // scroll handled by controller revealRange — nothing to do in renderer
+            }
+
+            // ---- Server-side pager: update one page of content ----
+            if (msg.type === 'output-page-result' && msg.pagerId) {
+                const pager = document.querySelector('.wl-matrix-pager[data-pager-id="' + msg.pagerId + '"]');
+                if (pager) {
+                    const N = parseInt(pager.getAttribute('data-page-count') || '1', 10);
+                    const page = typeof msg.page === 'number' ? msg.page : 0;
+                    const contentDiv = pager.querySelector('.wl-matrix-page');
+                    if (contentDiv && msg.html) contentDiv.innerHTML = msg.html;
+                    if (msg.latexB64) pager.setAttribute('data-latex-b64', msg.latexB64);
+                    pager.setAttribute('data-current-page', String(page));
+                    // Update all nav bars (top + bottom)
+                    pager.querySelectorAll('.wl-matrix-page-label').forEach(lbl => lbl.textContent  = `${page + 1}\u202f/\u202f${N}`);
+                    pager.querySelectorAll('button[data-action="go-first"]').forEach(btn => btn.disabled = page === 0);
+                    pager.querySelectorAll('button[data-action="prev-page"]').forEach(btn => btn.disabled = page === 0);
+                    pager.querySelectorAll('button[data-action="next-page"]').forEach(btn => btn.disabled = page === N - 1);
+                    pager.querySelectorAll('button[data-action="go-last"]').forEach(btn => btn.disabled = page === N - 1);
+                }
+                return;
+            }
+
+            // ---- Expand-more reset: un-stuck the "Expanding…" button ----
+            if (msg.type === 'expand-more-reset' && msg.uuid) {
+                const banner = document.querySelector('[data-truncated-uuid="' + msg.uuid + '"]');
+                if (banner) {
+                    const btn = banner.querySelector('button[data-action="expand-more"]');
+                    if (btn) {
+                        btn.innerHTML = '&#43;&#8230;';
+                        btn.disabled = false;
+                        btn.style.cssText = btn.style.cssText.replace(/cursor:[^;]+;/g, '').replace(/opacity:[^;]+;/g, '');
+                    }
+                }
+                return;
             }
             if (msg.type === 'nb-default-format') {
                 // Controller restored the saved defaults for this notebook on reopen.
@@ -576,10 +615,7 @@ export function activate(context) {
 
                         // Calibration: only update _pxPerCppEm from reliable measurements.
                         // Check both Mode A (prerendered) and Mode B (raw-latex) divs.
-                        const _allKatexContainers = [
-                            ..._debugDivs,
-                            ...element.querySelectorAll('.vscode-wolfram-wllatex-raw-latex')
-                        ];
+                        const _allKatexContainers = [..._debugDivs];
                         if (containerW > 0 && _allKatexContainers.length > 0) {
                             _allKatexContainers.forEach(div => {
                                 const pw = parseInt(div.getAttribute('data-page-width-em') || '0', 10);
@@ -759,40 +795,55 @@ export function activate(context) {
                 });
             });
 
-            // ---- Matrix pager: prev/next page navigation (pure client-side DOM) ----
+            // ---- Matrix pager: prev/next page navigation (server-side page requests) ----
             const matrixPagers = element.querySelectorAll('.wl-matrix-pager[data-page-count]');
             matrixPagers.forEach(pager => {
                 const N = parseInt(pager.getAttribute('data-page-count') || '1', 10);
                 if (N <= 1) return;
-                const pages = pager.querySelectorAll('.wl-matrix-page');
-                const label = pager.querySelector('.wl-matrix-page-label');
-                const prevBtn = pager.querySelector('button[data-action="prev-page"]');
-                const nextBtn = pager.querySelector('button[data-action="next-page"]');
+                const pagerId = pager.getAttribute('data-pager-id') || '';
+                // There may be two nav bars (top + bottom) — operate on all matching elements.
+                const allLabels  = pager.querySelectorAll('.wl-matrix-page-label');
+                const allFirsts  = pager.querySelectorAll('button[data-action="go-first"]');
+                const allPrevs   = pager.querySelectorAll('button[data-action="prev-page"]');
+                const allNexts   = pager.querySelectorAll('button[data-action="next-page"]');
+                const allLasts   = pager.querySelectorAll('button[data-action="go-last"]');
+                const setAllLabels = (txt)  => allLabels.forEach(el => el.textContent = txt);
+                const setAllPrev   = (dis)  => { allFirsts.forEach(el => el.disabled = dis); allPrevs.forEach(el => el.disabled = dis); };
+                const setAllNext   = (dis)  => { allNexts.forEach(el => el.disabled = dis); allLasts.forEach(el => el.disabled = dis); };
 
                 const goTo = (i) => {
                     const cur = parseInt(pager.getAttribute('data-current-page') || '0', 10);
                     if (i < 0 || i >= N || i === cur) return;
-                    if (pages[cur]) pages[cur].style.display = 'none';
-                    if (pages[i])   pages[i].style.display = '';
-                    pager.setAttribute('data-current-page', String(i));
-                    if (label) label.textContent = `${i + 1}\u202f/\u202f${N}`;
-                    if (prevBtn) prevBtn.disabled = i === 0;
-                    if (nextBtn) nextBtn.disabled = i === N - 1;
+                    if (!pagerId || !context || !context.postMessage) return;
+                    // Disable all buttons while waiting for page content from extension host
+                    setAllPrev(true); setAllNext(true);
+                    setAllLabels(`\u23f3 ${i + 1}\u202f/\u202f${N}`);
+                    try { context.postMessage({ type: 'output-page-request', pagerId, page: i }); }
+                    catch (_) {
+                        // Revert on send failure
+                        setAllLabels(`${cur + 1}\u202f/\u202f${N}`);
+                        setAllPrev(cur === 0); setAllNext(cur === N - 1);
+                    }
                 };
 
-                if (prevBtn) {
-                    prevBtn.disabled = true; // starts on page 0
-                    prevBtn.addEventListener('click', (e) => {
-                        e.preventDefault(); e.stopPropagation();
-                        goTo(parseInt(pager.getAttribute('data-current-page') || '0', 10) - 1);
-                    });
-                }
-                if (nextBtn) {
-                    nextBtn.addEventListener('click', (e) => {
-                        e.preventDefault(); e.stopPropagation();
-                        goTo(parseInt(pager.getAttribute('data-current-page') || '0', 10) + 1);
-                    });
-                }
+                // Start on page 0: prev/first always disabled, register click handlers on all bars
+                setAllPrev(true);
+                allFirsts.forEach(btn => btn.addEventListener('click', (e) => {
+                    e.preventDefault(); e.stopPropagation();
+                    goTo(0);
+                }));
+                allPrevs.forEach(btn => btn.addEventListener('click', (e) => {
+                    e.preventDefault(); e.stopPropagation();
+                    goTo(parseInt(pager.getAttribute('data-current-page') || '0', 10) - 1);
+                }));
+                allNexts.forEach(btn => btn.addEventListener('click', (e) => {
+                    e.preventDefault(); e.stopPropagation();
+                    goTo(parseInt(pager.getAttribute('data-current-page') || '0', 10) + 1);
+                }));
+                allLasts.forEach(btn => btn.addEventListener('click', (e) => {
+                    e.preventDefault(); e.stopPropagation();
+                    goTo(N - 1);
+                }));
             });
 
             // ---- Format + zoom buttons for each output header ----
@@ -818,20 +869,22 @@ export function activate(context) {
                 group.style.cssText = 'display:inline-flex;gap:3px;align-items:center;margin-left:auto;flex-shrink:0;';
 
                 // -- Format buttons --
-                // Graphics outputs (SVG/PNG image): WL | SVG | src (raw SVG XML)
-                // Symbolic outputs: WL | SVG | TeX | src (TeXSrc) | ∑ (MathML)
+                // Graphics outputs (SVG/PNG image): WL | SVG | TikZ
+                // Symbolic outputs: WL | SVG | SVG.T | LaTeX | src | 📄
                 const isGraphics = header.getAttribute('data-output-is-graphics') === '1';
                 const formats = isGraphics
                     ? [['WL', 'InputForm'], ['SVG', 'SVG'], ['TikZ', 'SVGSrc']]
-                    : [['WL', 'InputForm'], ['SVG', 'SVG'], ['SVG.T', 'SVGT'], ['TeX', 'TeX'], ['src', 'TeXSrc'], ['LaTeX', 'WLLatex2'], ['src', 'WLLatexSrc']];
+                    : [['WL', 'InputForm'], ['SVG', 'SVG'], ['SVG.T', 'SVGT'], ['LaTeX', 'WLLatex'],
+                       ...((outFmt === 'WLLatex' || outFmt === 'WLLatexSrc') ? [['src', 'WLLatexSrc']] : []),
+                       ['\u{1F4C4}', 'TXT']];
                 formats.forEach(([label, fmtKey]) => {
                     const b = document.createElement('button');
                     b.textContent = label;
-                    b.title = (fmtKey === 'InputForm'  ? 'Wolfram Language text (InputForm)'
+                    b.title = fmtKey === 'TXT'
+                            ? 'Open full expression as text file'
+                            : (fmtKey === 'InputForm'  ? 'Wolfram Language text (InputForm)'
                             : fmtKey === 'SVG'          ? 'Rasterized image (SVG/PNG)'
                             : fmtKey === 'SVGT'         ? 'Rasterized image — TraditionalForm typesetting'
-                            : fmtKey === 'TeX'          ? 'LaTeX rendered with KaTeX'
-                            : fmtKey === 'TeXSrc'       ? 'LaTeX source (TeXForm)'
                             : fmtKey === 'SVGSrc'       ? 'TikZ (via svg2tikz)'
                             : fmtKey === 'WLLatex2'     ? 'TraditionalForm \u2192 KaTeX (webview rendering)'
                             : fmtKey === 'WLLatexSrc'   ? 'TraditionalForm \u2192 LaTeX source (btl addon)'
@@ -842,6 +895,72 @@ export function activate(context) {
                     b.addEventListener('click', (e) => {
                         e.preventDefault(); e.stopPropagation();
                         if (!outputId) return;
+                        // TXT: open full expression as text file via controller.
+                        if (fmtKey === 'TXT') {
+                            if (context && context.postMessage) {
+                                try { context.postMessage({ type: 'open-output-as-text', outputId }); } catch (_) {}
+                            }
+                            return;
+                        }
+                        // WLLatexSrc: show current page's LaTeX source client-side — no kernel call.
+                        if (fmtKey === 'WLLatexSrc') {
+                            const block2 = header.closest('.wl-output-block');
+                            if (block2) {
+                                const srcEl = block2.querySelector('.wl-matrix-pager[data-latex-b64], .vscode-wolfram-wllatex-prerendered[data-latex-b64]');
+                                let latex = '';
+                                try { latex = srcEl ? atob(srcEl.getAttribute('data-latex-b64') || '') : ''; } catch(_) {}
+                                if (latex) {
+                                    const content = block2.querySelector('.wl-output-content');
+                                    if (content) {
+                                        const pre = document.createElement('pre');
+                                        pre.className = 'vscode-wolfram-tex-source';
+                                        pre.textContent = latex;
+                                        // Move (not clone) DOM children into a detached div so that
+                                        // pager event listeners (prev/next page etc.) are preserved.
+                                        const _detached = document.createElement('div');
+                                        while (content.firstChild) _detached.appendChild(content.firstChild);
+                                        savedWLLatexContent.set(outputId, _detached);
+                                        content.appendChild(pre);
+                                        wrapWithCopy(pre, () => pre.textContent);
+                                        pre.setAttribute('data-hljs-lang', 'latex');
+                                        applyInlineHighlight(pre, 'latex');
+                                        header.setAttribute('data-output-format', 'WLLatexSrc');
+                                        group.querySelectorAll('button[data-fmt-key]').forEach(b2 => {
+                                            b2.style.cssText = BTN_BASE + (b2.getAttribute('data-fmt-key') === 'WLLatexSrc' ? BTN_ACTIVE : '');
+                                        });
+                                    }
+                                    return;
+                                }
+                            }
+                            // No LaTeX data available (current format is not WLLatex).
+                            // Switch to WLLatex first — this populates data-latex-b64 so
+                            // clicking "src" again will work.
+                            if (savedWLLatexContent.has(outputId)) savedWLLatexContent.delete(outputId);
+                            const scrollY0 = window.scrollY || document.documentElement.scrollTop || 0;
+                            if (context && context.postMessage) {
+                                try { context.postMessage({ type: 'reformat-output', outputId, newFormat: 'WLLatex', scrollY: scrollY0 }); } catch (_) {}
+                            }
+                            return;
+                        }
+                        // WLLatex — restore saved content client-side if coming back from WLLatexSrc
+                        // (avoids kernel round-trip and preserves current page + pager listeners).
+                        if (fmtKey === 'WLLatex' && savedWLLatexContent.has(outputId)) {
+                            const _block3 = header.closest('.wl-output-block');
+                            const _content3 = _block3?.querySelector('.wl-output-content');
+                            if (_content3) {
+                                const _saved = savedWLLatexContent.get(outputId);
+                                savedWLLatexContent.delete(outputId);
+                                while (_content3.firstChild) _content3.removeChild(_content3.firstChild);
+                                while (_saved.firstChild) _content3.appendChild(_saved.firstChild);
+                                header.setAttribute('data-output-format', 'WLLatex');
+                                group.querySelectorAll('button[data-fmt-key]').forEach(b2 => {
+                                    b2.style.cssText = BTN_BASE + (b2.getAttribute('data-fmt-key') === 'WLLatex' ? BTN_ACTIVE : '');
+                                });
+                                return;
+                            }
+                        }
+                        // Any other format while WLLatexSrc is showing — discard stale saved state.
+                        if (savedWLLatexContent.has(outputId)) savedWLLatexContent.delete(outputId);
                         const scrollY = window.scrollY || document.documentElement.scrollTop || 0;
                         if (context && context.postMessage) {
                             try { context.postMessage({ type: 'reformat-output', outputId, newFormat: fmtKey, scrollY }); }
@@ -850,6 +969,7 @@ export function activate(context) {
                     });
                     b.addEventListener('dblclick', (e) => {
                         e.preventDefault(); e.stopPropagation();
+                        if (fmtKey === 'TXT') return; // txt is an action button, not a format
                         // Update the appropriate default variable based on output type
                         if (isGraphics) wolframNbDefaultGfxFormat  = fmtKey;
                         else            wolframNbDefaultExprFormat = fmtKey;
@@ -1126,106 +1246,6 @@ export function activate(context) {
                     document.head.appendChild(_klnk);
                 }
             }
-
-            // ---- WLLatex2: render raw-latex divs in the webview via KaTeX ----
-            const rawLatexDivs = element.querySelectorAll('div.vscode-wolfram-wllatex-raw-latex[data-latex-b64]');
-            if (rawLatexDivs.length > 0) {
-                const renderRawWithKatex = (katex) => {
-                    // Re-query for fresh (non-stale) refs: if VS Code called renderOutputItem
-                    // again on the same element (e.g. due to a second format-switch click while
-                    // CDN KaTeX was still loading), the original rawLatexDivs NodeList may point
-                    // to detached DOM nodes. Re-querying ensures we always render the live divs.
-                    // The `data-katex-rendered` guard prevents double-rendering in the rare case
-                    // where a stale poll callback fires after a fresh renderRawWithKatex call.
-                    const liveDivs = element.querySelectorAll(
-                        'div.vscode-wolfram-wllatex-raw-latex[data-latex-b64]:not([data-katex-rendered])');
-                    if (liveDivs.length === 0) return;
-                    liveDivs.forEach(div => {
-                        div.setAttribute('data-katex-rendered', '1');
-                        const btlError = div.getAttribute('data-btl-error');
-                        let latex = '';
-                        try { latex = atob(div.getAttribute('data-latex-b64') || ''); } catch(e) {}
-                        // Error banner from boxToLatex (parse error etc.)
-                        const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-                        const errBanner = btlError
-                            ? `<div style="color:#e05c4e;font-size:11px;margin:0 0 3px;">⚠️ boxToLatex error: ${esc(btlError)}</div>`
-                            : '';
-                        let rendered = '';
-                        try {
-                            rendered = katex.renderToString(latex, KATEX_RENDER_OPTIONS);
-                        } catch(e) {
-                            rendered = '<pre style="color:#e05c4e;">KaTeX error: ' + esc(String(e.message||e)) + '</pre>';
-                        }
-                        div.innerHTML = errBanner + rendered;
-                    });
-                    // ---- Height fix: KaTeX renders async (CDN load), so VS Code may have
-                    // already measured this cell's height as 0 (empty latex divs). Trigger
-                    // a sentinel DOM mutation so VS Code's ResizeObserver re-measures the
-                    // cell with the now-populated KaTeX content, preventing cells from
-                    // stacking on top of each other. ----
-                    requestAnimationFrame(() => {
-                        requestAnimationFrame(() => {
-                            try {
-                                const _d = element.ownerDocument || document;
-                                const sentinel = _d.createElement('div');
-                                sentinel.style.cssText = 'height:0;width:0;overflow:hidden;position:absolute;pointer-events:none;';
-                                element.appendChild(sentinel);
-                                requestAnimationFrame(() => { try { sentinel.remove(); } catch(_) {} });
-                            } catch(_) {}
-                        });
-                    });
-                };
-                if (typeof window !== 'undefined' && window.katex) {
-                    renderRawWithKatex(window.katex);
-                } else {
-                    // Reuse the same KaTeX CDN loading path as the TeX block
-                    const KATEX_VER2 = '0.16.9';
-                    const KATEX_BASE2 = `https://cdn.jsdelivr.net/npm/katex@${KATEX_VER2}/dist/`;
-                    if (!document.querySelector('link[data-katex-css]')) {
-                        const lnk = document.createElement('link');
-                        lnk.rel = 'stylesheet'; lnk.href = KATEX_BASE2 + 'katex.min.css';
-                        lnk.setAttribute('data-katex-css', '1');
-                        document.head.appendChild(lnk);
-                    }
-                    if (document.querySelector('script[data-katex-js]')) {
-                        let tries2 = 0;
-                        const poll2 = setInterval(() => {
-                            if (window.katex || ++tries2 > 50) {
-                                clearInterval(poll2);
-                                if (window.katex) renderRawWithKatex(window.katex);
-                            }
-                        }, 100);
-                    } else {
-                        const scr2 = document.createElement('script');
-                        scr2.src = KATEX_BASE2 + 'katex.min.js'; scr2.setAttribute('data-katex-js', '1');
-                        scr2.onload = () => renderRawWithKatex(window.katex);
-                        document.head.appendChild(scr2);
-                    }
-                }
-            }
-
-            // ---- WLLatexSrc: replace btl-src divs with syntax-highlighted LaTeX source pre ----
-            element.querySelectorAll('div.vscode-wolfram-wllatex-src-latex[data-latex-b64]').forEach(div => {
-                let latex = '';
-                try { latex = atob(div.getAttribute('data-latex-b64') || ''); } catch(e) {}
-                const btlError = div.getAttribute('data-btl-error');
-                const pre = document.createElement('pre');
-                pre.className = 'vscode-wolfram-tex-source';
-                pre.textContent = latex;
-                if (btlError) {
-                    const errNote = document.createElement('div');
-                    errNote.style.cssText = 'color:#e05c4e;font-size:11px;margin:0 0 3px;';
-                    errNote.textContent = '\u26a0\ufe0f boxToLatex error: ' + btlError;
-                    const wrapper = document.createElement('div');
-                    wrapper.appendChild(errNote);
-                    wrapper.appendChild(pre);
-                    div.replaceWith(wrapper);
-                } else {
-                    div.replaceWith(pre);
-                }
-                wrapWithCopy(pre, () => pre.textContent);
-                pre.setAttribute('data-hljs-lang', 'latex');
-            });
 
             // ---- Inline syntax highlighting (no CDN) ----
             element.querySelectorAll('[data-hljs-lang]').forEach(el => {

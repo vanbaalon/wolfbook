@@ -1307,7 +1307,7 @@ function renderBlock(block, slide) {
     if (block.y != null) dom.style.top = block.y + 'px';
   }
   if (block.w != null) dom.style.width = block.w + 'px';
-  if (block.h != null) { dom.style.height = block.h + 'px'; dom.style.minHeight = block.h + 'px'; dom.style.maxHeight = block.h + 'px'; }
+  if (block.h != null) dom.style.height = block.h + 'px';
   if (block.flex) dom.style.flex = block.flex;
   if (block.offset && (block.offset.dx || block.offset.dy)) {
     const tfm = dom.style.transform || '';
@@ -1977,8 +1977,12 @@ function startResize(e, dom, block) {
     block.w = Math.round(w);
     block.h = Math.round(h);
     if (block.position === 'absolute') { block.x = Math.round(x); block.y = Math.round(y); }
+    // Clear auto-fit style constraints so explicit w/h takes full control
+    if (block.style) { delete block.style.maxHeight; delete block.style.maxWidth; }
     dom.style.width = block.w + 'px';
     dom.style.height = block.h + 'px';
+    dom.style.maxHeight = '';
+    dom.style.maxWidth  = '';
     if (block.position === 'absolute') { dom.style.left = block.x + 'px'; dom.style.top = block.y + 'px'; }
     // For image blocks: keep the img filling the container live during the drag
     if (block.type === 'image') {
@@ -3122,7 +3126,7 @@ function buildPresBlock(block) {
     if (block.y != null) dom.style.top = block.y + 'px';
   }
   if (block.w != null) dom.style.width = block.w + 'px';
-  if (block.h != null) { dom.style.height = block.h + 'px'; dom.style.minHeight = block.h + 'px'; dom.style.maxHeight = block.h + 'px'; }
+  if (block.h != null) dom.style.height = block.h + 'px';
   if (block.flex) dom.style.flex = block.flex;
   if (block.offset && (block.offset.dx || block.offset.dy)) {
     dom.style.transform = `translate(${block.offset.dx || 0}px, ${block.offset.dy || 0}px)`;
@@ -3652,6 +3656,7 @@ function selectSlide(i, opts) {
   selectedBlockId = null; selectedBlockIds = new Set();
   renderAll();
   updateContextIndicator();
+  vscodeApi.postMessage({ cmd: 'slideChange', slideIndex: slideIdx });
 }
 
 // ── Canvas scaling ───────────────────────────────────────────────────────
@@ -4869,6 +4874,8 @@ document.addEventListener('keydown', e => {
       else if (e.key === 'ArrowLeft') block.w = Math.max(20, origW - step);
       else if (e.key === 'ArrowDown') block.h = origH + step;
       else if (e.key === 'ArrowUp') block.h = Math.max(20, origH - step);
+      // Clear auto-fit style constraints so explicit w/h takes full control
+      if (block.style) { delete block.style.maxHeight; delete block.style.maxWidth; }
       renderSlide(); markDirty();
     } else {
       // Plain/Shift arrow → nudge all selected blocks

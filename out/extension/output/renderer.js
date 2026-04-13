@@ -57,7 +57,7 @@ function _loadBtlAddon() {
 // ---------------------------------------------------------------------------
 // Output type sets — never return an expr-only format for graphics or vice-versa
 
-const EXPR_ONLY_FMTS = new Set(['WLLatex','WLLatex2','WLLatexSrc','SVGT','MathML','TeX','TeXSrc']);
+const EXPR_ONLY_FMTS = new Set(['WLLatex','SVGT','MathML','TeX','TeXSrc']);
 const GFX_ONLY_FMTS  = new Set(['SVGSrc']);
 
 // ---------------------------------------------------------------------------
@@ -67,7 +67,7 @@ const GFX_ONLY_FMTS  = new Set(['SVGSrc']);
 // outN:        stable 0-based local sub-expression index within the cell (i from the eval loop),
 //              NOT the global Out[N] counter.  Pass undefined when outN is not yet known.
 // knownIsGfx: true/false if already known; undefined = scan registry for last output of this cell.
-// Guarantees: never returns an expression-only format (WLLatex/WLLatex2/MathML/TeX/TeXSrc) for a
+// Guarantees: never returns an expression-only format (WLLatex/MathML/TeX/TeXSrc) for a
 // known-graphics output, and never returns a graphics-only format (SVGSrc) for a known-expression
 // output.  Falls back to 'Auto' (→ SVG for gfx, MathML for expr in the kernel) in those cases.
 function resolveFormat(self, cell, knownIsGfx, outN) {
@@ -97,8 +97,10 @@ function resolveFormat(self, cell, knownIsGfx, outN) {
         fmt = self._notebookDefaultExprFormat.get(nbUri) || '';
     }
     if (!fmt) fmt = String(self.config.get('outputFormat') || 'WLLatex');
+    // Migrate removed formats (WLLatex2 / WLLatexSrc) to WLLatex.
+    if (fmt === 'WLLatex2' || fmt === 'WLLatexSrc') fmt = 'WLLatex';
     // Sanitise: if type is known, never return a format incompatible with it.
-    // WLLatex/WLLatex2 are expression-only; graphics always fall back to 'Auto' (→ SVG).
+    // WLLatex is expression-only; graphics always fall back to 'Auto' (→ SVG).
     if (isGfx === true  && EXPR_ONLY_FMTS.has(fmt)) return 'Auto';
     if (isGfx === false && GFX_ONLY_FMTS.has(fmt))  return 'Auto';
     return fmt;
@@ -109,7 +111,7 @@ function resolveFormat(self, cell, knownIsGfx, outN) {
 
 // Post-process HTML from the kernel: if it contains a WLLatex box-placeholder
 // div, decode the boxes, run through the C++ boxToLatex addon, then either
-// KaTeX-prerender (WLLatex) or emit a raw-latex div for webview rendering (WLLatex2).
+// KaTeX-prerender in extension host (WLLatex / Mode A only).
 function processWLLatexBoxes(self, html, logPath, pageWidthEm = 0, source = '', lineBreakOpts = null) {
     // If no logPath was given, try to derive one from the active notebook
     if (!logPath) {
@@ -123,12 +125,10 @@ function processWLLatexBoxes(self, html, logPath, pageWidthEm = 0, source = '', 
         } catch (_) {}
     }
     const hasPrerendered = html.includes('vscode-wolfram-wllatex-boxes"');
-    const hasRaw         = html.includes('vscode-wolfram-wllatex-boxes-raw"');
-    const hasSrc         = html.includes('vscode-wolfram-wllatex-boxes-src"');
-    if (!hasPrerendered && !hasRaw && !hasSrc) return html;
+    if (!hasPrerendered) return html;
     if (!_loadBtlAddon()) {
         return html
-            .replace(/<div class="vscode-wolfram-wllatex-boxes(-raw|-src)?"[^>]*><\/div>/g,
+            .replace(/<div class="vscode-wolfram-wllatex-boxes"[^>]*><\/div>/g,
                 '<pre class="vscode-wolfram-text-output">WLLatex: addon not available.\n' +
                 'Build VSCodeWolfbookLaTeX first:\n  cd ~/Dropbox/MY/Programming/VSCodeWolfbookLaTeX && ./build.sh</pre>');
     }
@@ -143,7 +143,8 @@ function processWLLatexBoxes(self, html, logPath, pageWidthEm = 0, source = '', 
     const btlOpts = {
         trigOmitParens: self.config?.get('notebook.rendering.trigOmitParens') !== false,
         trigPowerForm:  self.config?.get('notebook.rendering.trigPowerForm')  !== false,
-        maxRows: _maxMatrixRows > 0 ? _maxMatrixRows : 0,
+        // If caller passed maxRows:0 in lbOpts (e.g. expand-more, no-page), honour it here too.
+        maxRows: (lbOpts.maxRows === 0) ? 0 : (_maxMatrixRows > 0 ? _maxMatrixRows : 0),
     };
     // Pager store: maps pagerId → {type, data, opts} for server-side page serving.
     // Populated here, read by renderPageForPager() when client requests a page.
@@ -154,20 +155,25 @@ function processWLLatexBoxes(self, html, logPath, pageWidthEm = 0, source = '', 
             let boxStr = Buffer.from(b64, 'base64').toString('utf8');
             // Convert all Unicode chars + \|XXXX hex escapes to \[Name] for BTL
             boxStr = wlUTFtoNames(boxStr);
-            const result = _btlAddon.boxToLatex(boxStr, {...btlOpts, requestedPage: 0});
-            // boxToLatex returns { latex, totalPages?, error } per new API
-            if (result && typeof result === 'object') return { boxStr, latex: result.latex, totalPages: result.totalPages || 1, error: result.error || null };
+            // allPages:true returns ALL page LaTeX strings in result.pages[]
+            // in a single C++ call — avoids re-parsing the entire box string per page.
+            const result = _btlAddon.boxToLatex(boxStr, {...btlOpts, allPages: true});
+            // boxToLatex returns { latex, totalPages?, pages?[], error } per new API
+            if (result && typeof result === 'object') {
+                const allPageLatex = (Array.isArray(result.pages) && result.pages.length > 1) ? result.pages : null;
+                return { boxStr, latex: result.latex, totalPages: result.totalPages || 1, allPageLatex, error: result.error || null };
+            }
             // Older build that returned a plain string
-            return { boxStr, latex: String(result), totalPages: 1, error: null };
+            return { boxStr, latex: String(result), totalPages: 1, allPageLatex: null, error: null };
         } catch (e) {
-            return { boxStr: '(decode failed)', latex: '', totalPages: 1, error: String(e.message || e) };
+            return { boxStr: '(decode failed)', latex: '', totalPages: 1, allPageLatex: null, error: String(e.message || e) };
         }
     };
     // ---- Mode A: pre-render in extension host (LaTeX button) ----
     if (hasPrerendered) {
         html = html.replace(/<div class="vscode-wolfram-wllatex-boxes" data-boxes-b64="([^"]*)"(?:\s+data-raw-b64="([^"]*)")?\s*>\s*<\/div>/g,
             (_, b64, rawB64) => {
-                const { boxStr, latex, totalPages, error } = translate(b64);
+                const { boxStr, latex, totalPages, allPageLatex, error } = translate(b64);
                 // Apply line-breaking if enabled and we have a container width estimate.
                 const _lineBreakEnabled = (self.config?.get('notebook.rendering.lineBreakingEnabled')
                     ?? self.config?.get('notebook.rendering.lineBreaking')) !== false;
@@ -184,11 +190,13 @@ function processWLLatexBoxes(self, html, logPath, pageWidthEm = 0, source = '', 
                     'border:1px solid rgba(128,128,128,0.3);border-radius:3px;' +
                     'color:var(--vscode-foreground,inherit);line-height:1.5;user-select:none;';
                 const _labelStyle = 'font-size:11px;color:var(--vscode-descriptionForeground,#888);min-width:60px;text-align:center;';
-                const _buildNavBar = (N, rowsLabel) =>
-                    `<div class="wl-matrix-pager-bar" style="display:flex;align-items:center;gap:6px;margin-top:4px;padding:2px 0;">` +
+                const _buildNavBar = (N, rowsLabel, isTop = false) =>
+                    `<div class="wl-matrix-pager-bar" data-session-epoch="${self._sessionEpoch}" style="display:flex;align-items:center;gap:6px;${isTop ? 'margin-bottom:4px' : 'margin-top:4px'};padding:2px 0;">` +
+                    `<button data-action="go-first" style="${_btnStyle}" title="First page" disabled>&#9198;</button>` +
                     `<button data-action="prev-page" style="${_btnStyle}" title="Previous page" disabled>&#9664;</button>` +
                     `<span class="wl-matrix-page-label" style="${_labelStyle}">1\u202f/\u202f${N}</span>` +
                     `<button data-action="next-page" style="${_btnStyle}" title="Next page">&#9654;</button>` +
+                    `<button data-action="go-last" style="${_btnStyle}" title="Last page">&#9197;</button>` +
                     `<span style="font-size:10px;color:var(--vscode-descriptionForeground,#888);">(${N}\u202fpages, ${rowsLabel})</span>` +
                     `</div>`;
 
@@ -217,20 +225,28 @@ function processWLLatexBoxes(self, html, logPath, pageWidthEm = 0, source = '', 
                         } catch (_) {}
                     }
                     const _latexB64ForPager = Buffer.from(p0Latex).toString('base64');
-                    return `<div class="vscode-wolfram-wllatex-prerendered wl-matrix-pager" data-current-page="0" data-page-count="${totalPages}" data-pager-id="${pagerId}" data-page-width-em="${pageWidthEm}" data-latex-b64="${_latexB64ForPager}">` +
-                           errorNote + `<div class="wl-matrix-page">${p0Rendered}</div>` + _buildNavBar(totalPages, _maxMatrixRows + '\u202frows/page') + '</div>';
+                    // Seed page 0 in cache so returning to it is free.
+                    // Store allPageLatex (all page LaTeX strings from a single C++ call)
+                    // so renderPageForPager only needs KaTeX prerender (fast), not boxToLatex re-parse.
+                    const _p0Cache = {};
+                    _p0Cache[0] = { html: p0Rendered, latexB64: _latexB64ForPager };
+                    self._pagerStore.set(pagerId, { type: 'matrix', boxStr, btlOpts, totalPages, allPageLatex, _pageCache: _p0Cache });
+                    return `<div class="vscode-wolfram-wllatex-prerendered wl-matrix-pager" data-session-epoch="${self._sessionEpoch}" data-current-page="0" data-page-count="${totalPages}" data-pager-id="${pagerId}" data-page-width-em="${pageWidthEm}" data-latex-b64="${_latexB64ForPager}">` +
+                           errorNote + _buildNavBar(totalPages, _maxMatrixRows + '\u202frows/page', true) + `<div class="wl-matrix-page">${p0Rendered}</div>` + _buildNavBar(totalPages, _maxMatrixRows + '\u202frows/page') + '</div>';
                 }
 
                 // ---- Single-page output ----
                 let latexFinal = latex;
                 let lineBreakStatus = 'disabled';
                 let lbTotalPages = 1;
+                let lbAllPageLatex = null;
                 if (_lineBreakEnabled && pageWidthEm > 5 && _btlAddon.lineBreakLatex) {
                     try {
-                        const lbr = _btlAddon.lineBreakLatex(latex, lbOpts);
+                        const lbr = _btlAddon.lineBreakLatex(latex, { ...lbOpts, allPages: true });
                         if (lbr && typeof lbr === 'object') {
                             latexFinal = lbr.result || latex;
                             lbTotalPages = lbr.totalPages || 1;
+                            lbAllPageLatex = (Array.isArray(lbr.pages) && lbr.pages.length > 1) ? lbr.pages : null;
                         } else { latexFinal = String(lbr); }
                         lineBreakStatus = lbTotalPages > 1
                             ? 'paged: ' + lbTotalPages + ' pages'
@@ -263,14 +279,17 @@ function processWLLatexBoxes(self, html, logPath, pageWidthEm = 0, source = '', 
                 // lb-paging: lineBreakLatex produced multiple pages — server-side pager
                 if (lbTotalPages > 1) {
                     const pagerId = _genPageId();
-                    self._pagerStore.set(pagerId, { type: 'lb', latex, lbOpts });
                     let p0Rendered;
                     try { p0Rendered = _btlPrerenderLatex(latexFinal, true); }
                     catch (e) { p0Rendered = `<span style="color:#e05c4e;">KaTeX: ${_encoding.escapeHtml(String(e.message || e))}</span>`; }
                     const errorNote = error ? `<div style="color:#e05c4e;font-size:11px;margin:2px 0;">\u26a0\ufe0f boxToLatex error: ${_encoding.escapeHtml(error)}</div>` : '';
                     const _lbB64 = Buffer.from(latexFinal).toString('base64');
+                    // Seed page 0 in cache so returning to it is free.
+                    // Store allPageLatex so renderPageForPager only needs KaTeX, not lineBreakLatex re-run.
+                    const _lbP0Cache = { 0: { html: p0Rendered, latexB64: _lbB64 } };
+                    self._pagerStore.set(pagerId, { type: 'lb', latex, lbOpts, totalPages: lbTotalPages, allPageLatex: lbAllPageLatex, _pageCache: _lbP0Cache });
                     return `<div class="vscode-wolfram-wllatex-prerendered wl-matrix-pager" data-current-page="0" data-page-count="${lbTotalPages}" data-pager-id="${pagerId}" data-page-width-em="${pageWidthEm}" data-latex-b64="${_lbB64}">` +
-                           errorNote + `<div class="wl-matrix-page">${p0Rendered}</div>` + _buildNavBar(lbTotalPages, _maxMatrixRows + '\u202flines/page') + '</div>';
+                           errorNote + _buildNavBar(lbTotalPages, _maxMatrixRows + '\u202flines/page', true) + `<div class="wl-matrix-page">${p0Rendered}</div>` + _buildNavBar(lbTotalPages, _maxMatrixRows + '\u202flines/page') + '</div>';
                 }
                 let rendered;
                 try {
@@ -286,93 +305,6 @@ function processWLLatexBoxes(self, html, logPath, pageWidthEm = 0, source = '', 
                 const _latexB64ForA = Buffer.from(latexFinal).toString('base64');
                 return `<div class="vscode-wolfram-wllatex-prerendered" data-page-width-em="${pageWidthEm}"${lineBrokenAttr} data-latex-b64="${_latexB64ForA}">` +
                        errorNote + rendered + '</div>';
-            });
-    }
-    // ---- Mode B: emit raw-latex div, rendered by webview KaTeX (LaTeX2 button) ----
-    if (hasRaw) {
-        html = html.replace(/<div class="vscode-wolfram-wllatex-boxes-raw" data-boxes-b64="([^"]*)">\s*<\/div>/g,
-            (_, b64) => {
-                const { boxStr, latex, error } = translate(b64);
-                // Apply line-breaking in extension host before handing latex to webview
-                const _lineBreakEnabled = (self.config?.get('notebook.rendering.lineBreakingEnabled')
-                    ?? self.config?.get('notebook.rendering.lineBreaking')) !== false;
-                let latexFinal = latex;
-                let lineBreakStatus = 'disabled';
-                if (_lineBreakEnabled) {
-                    if (!(pageWidthEm > 5)) {
-                        lineBreakStatus = 'skipped (pageWidthEm=' + pageWidthEm + ')';
-                    } else if (!_btlAddon.lineBreakLatex) {
-                        lineBreakStatus = 'unavailable';
-                    } else {
-                        try {
-                            const lbr = _btlAddon.lineBreakLatex(latex, lbOpts);
-                            latexFinal = (lbr && typeof lbr === 'object') ? (lbr.result || latex) : String(lbr);
-                            lineBreakStatus = latexFinal !== latex ? 'applied' : 'no-change (fits in width)';
-                        } catch (e) {
-                            latexFinal = latex;
-                            lineBreakStatus = 'error: ' + String(e.message || e);
-                        }
-                    }
-                }
-                if (logPath) {
-                    try {
-                        const ts = new Date().toISOString();
-                        const sep = '='.repeat(72) + '\n';
-                        const entry = sep +
-                            ts + (source ? '  [' + source + ']' : '') + '\n' +
-                            '-- pageWidthEm: ' + pageWidthEm + '  lineBreak: ' + lineBreakStatus +
-                            '  opts: ' + lbOptsText + ' --\n' +
-                            '-- btl input (cleaned boxes) --\n' + boxStr + '\n' +
-                            '-- btl output (latex) --\n' + latex + '\n' +
-                            (error ? '-- btl error --\n' + error + '\n' : '');
-                        fs.mkdirSync(path.dirname(logPath), { recursive: true });
-                        fs.appendFileSync(logPath, entry);
-                    } catch (_) {}
-                }
-                const latexB64 = Buffer.from(latexFinal).toString('base64');
-                const errorAttr = error ? ` data-btl-error="${_encoding.escapeHtml(error)}"` : '';
-                // Embed a short readable LaTeX preview as text content so that AI tools
-                // reading the raw HTML see decoded LaTeX rather than an opaque base64 blob.
-                // The webview overwrites this with the KaTeX-rendered DOM when it loads.
-                const _PREVIEW_LEN = 1200;
-                const _latexPreview = latexFinal.length > _PREVIEW_LEN
-                    ? _encoding.escapeHtml(latexFinal.substring(0, _PREVIEW_LEN)) + '\u2026'
-                    : _encoding.escapeHtml(latexFinal);
-                return `<div class="vscode-wolfram-wllatex-raw-latex" data-latex-b64="${latexB64}" data-latex-preview="${_latexPreview}" data-latex-chars="${latexFinal.length}"${errorAttr}>${_latexPreview}</div>`;
-            });
-    }
-    // ---- Mode C: emit src-latex div containing raw LaTeX for source display (WLLatexSrc button) ----
-    if (hasSrc) {
-        html = html.replace(/<div class="vscode-wolfram-wllatex-boxes-src" data-boxes-b64="([^"]*)">\s*<\/div>/g,
-            (_, b64) => {
-                const { boxStr, latex, error } = translate(b64);
-                // Apply the same line-breaking as Mode A so the source stays in sync with rendered output
-                const _lineBreakEnabled = (self.config?.get('notebook.rendering.lineBreakingEnabled')
-                    ?? self.config?.get('notebook.rendering.lineBreaking')) !== false;
-                let latexFinal = latex;
-                if (_lineBreakEnabled && pageWidthEm > 5 && _btlAddon.lineBreakLatex) {
-                    try {
-                        const lbr = _btlAddon.lineBreakLatex(latex, lbOpts);
-                        latexFinal = (lbr && typeof lbr === 'object') ? (lbr.result || latex) : String(lbr);
-                    } catch (_) {}
-                }
-                if (logPath) {
-                    try {
-                        const ts = new Date().toISOString();
-                        const sep = '='.repeat(72) + '\n';
-                        const entry = sep +
-                            ts + (source ? '  [' + source + ']' : '') + '\n' +
-                            '-- pageWidthEm: ' + pageWidthEm + ' (mode C — src display)  opts: ' + lbOptsText + ' --\n' +
-                            '-- btl input (cleaned boxes) --\n' + boxStr + '\n' +
-                            '-- btl output (latex) --\n' + latexFinal + '\n' +
-                            (error ? '-- btl error --\n' + error + '\n' : '');
-                        fs.mkdirSync(path.dirname(logPath), { recursive: true });
-                        fs.appendFileSync(logPath, entry);
-                    } catch (_) {}
-                }
-                const latexB64 = Buffer.from(latexFinal).toString('base64');
-                const errorAttr = error ? ` data-btl-error="${_encoding.escapeHtml(error)}"` : '';
-                return `<div class="vscode-wolfram-wllatex-src-latex" data-latex-b64="${latexB64}"${errorAttr}></div>`;
             });
     }
     return html;
@@ -553,27 +485,89 @@ function renderPageForPager(self, pagerId, page) {
     if (!self._pagerStore) return null;
     const entry = self._pagerStore.get(pagerId);
     if (!entry) return null;
-    const _btlAddon = _loadAddon();
+    // Cache hit: return already-rendered page immediately (O(1), no BTL re-parse)
+    if (entry._pageCache && entry._pageCache[page] !== undefined) {
+        return entry._pageCache[page];
+    }
+    _loadBtlAddon();
     if (!_btlAddon) return null;
+    // Derive logPath for btl.log exactly as processWLLatexBoxes does
+    let logPath = null;
+    try {
+        const ed = vscode.window.activeNotebookEditor;
+        if (ed && ed.notebook.uri.scheme === 'file') {
+            const nbFsPath = ed.notebook.uri.fsPath;
+            const nbBase = path.basename(nbFsPath, path.extname(nbFsPath));
+            logPath = path.join(path.dirname(nbFsPath), 'img', nbBase, 'btl.log');
+        }
+    } catch (_) {}
     let pageLatex = '';
+    let btlError = null;
     try {
         if (entry.type === 'lb') {
-            const lbr = _btlAddon.lineBreakLatex(entry.latex, { ...entry.lbOpts, requestedPage: page });
-            pageLatex = (lbr && typeof lbr === 'object' && lbr.result) ? lbr.result : String(lbr || '');
+            // Fast path: allPageLatex has all page LaTeX pre-computed from initial call
+            if (entry.allPageLatex && page >= 0 && page < entry.allPageLatex.length) {
+                pageLatex = entry.allPageLatex[page];
+            } else {
+                // Fallback: re-run lineBreakLatex for the requested page
+                const lbr = _btlAddon.lineBreakLatex(entry.latex, { ...entry.lbOpts, requestedPage: page });
+                pageLatex = (lbr && typeof lbr === 'object' && lbr.result) ? lbr.result : String(lbr || '');
+            }
         } else if (entry.type === 'matrix') {
-            const result = _btlAddon.boxToLatex(entry.boxStr, { ...entry.btlOpts, requestedPage: page });
-            if (result && typeof result === 'object') pageLatex = result.latex || '';
-            else pageLatex = String(result || '');
+            // Fast path: allPageLatex has all page LaTeX strings pre-computed from the
+            // initial boxToLatex call — just index into it (no C++ re-parse needed).
+            if (entry.allPageLatex && page >= 0 && page < entry.allPageLatex.length) {
+                pageLatex = entry.allPageLatex[page];
+            } else {
+                // Fallback: older pager entry without allPageLatex — re-run boxToLatex
+                const result = _btlAddon.boxToLatex(entry.boxStr, { ...entry.btlOpts, requestedPage: page });
+                if (result && typeof result === 'object') {
+                    pageLatex = result.latex || '';
+                    btlError = result.error || null;
+                } else {
+                    pageLatex = String(result || '');
+                }
+            }
         }
     } catch (e) {
-        return `<span style="color:#e05c4e;">BTL error (page ${page}): ${_encoding.escapeHtml(String(e.message || e))}</span>`;
+        btlError = String(e.message || e);
+        if (logPath) {
+            try {
+                const ts = new Date().toISOString();
+                fs.mkdirSync(path.dirname(logPath), { recursive: true });
+                fs.appendFileSync(logPath, '='.repeat(72) + '\n' + ts +
+                    `  [page-request pager=${pagerId} page=${page}/${entry.totalPages||'?'}]\n` +
+                    '-- btl error --\n' + btlError + '\n');
+            } catch (_) {}
+        }
+        return { html: `<span style="color:#e05c4e;">BTL error (page ${page}): ${_encoding.escapeHtml(btlError)}</span>`, latexB64: '' };
     }
-    if (!pageLatex) return `<span style="color:#888;">(empty page)</span>`;
-    try {
-        return _btlPrerenderLatex(pageLatex, true);
-    } catch (e) {
-        return `<span style="color:#e05c4e;">KaTeX error: ${_encoding.escapeHtml(String(e.message || e))}</span>`;
+    if (logPath) {
+        try {
+            const ts = new Date().toISOString();
+            const sep = '='.repeat(72) + '\n';
+            fs.mkdirSync(path.dirname(logPath), { recursive: true });
+            fs.appendFileSync(logPath, sep + ts +
+                `  [page-request type=${entry.type} pager=${pagerId} page=${page}]\n` +
+                '-- btl output (latex) --\n' + pageLatex + '\n' +
+                (btlError ? '-- btl error --\n' + btlError + '\n' : ''));
+        } catch (_) {}
     }
+    const latexB64 = Buffer.from(pageLatex || '').toString('base64');
+    let result;
+    if (!pageLatex) {
+        result = { html: `<span style="color:#888;">(empty page)</span>`, latexB64: '' };
+    } else {
+        try {
+            result = { html: _btlPrerenderLatex(pageLatex, true), latexB64 };
+        } catch (e) {
+            result = { html: `<span style="color:#e05c4e;">KaTeX error: ${_encoding.escapeHtml(String(e.message || e))}</span>`, latexB64 };
+        }
+    }
+    // Cache for instant re-access
+    if (!entry._pageCache) entry._pageCache = {};
+    entry._pageCache[page] = result;
+    return result;
 }
 
 // ---------------------------------------------------------------------------
