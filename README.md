@@ -13,7 +13,7 @@ Rendering symbolic math and graphics uses a bespoke **wolfbook-btl** (Box-to-LaT
 > Author: Nikolay Gromov — [nikolay.gromov@kcl.ac.uk](mailto:nikolay.gromov@kcl.ac.uk)  
 > License: Apache 2.0 (see [LICENSE.txt](LICENSE.txt))
 
-> Latest release: **v2.6.26** (2026-04-11). See [CHANGELOG.md](CHANGELOG.md) for release notes.
+> Latest release: **v2.6.37** (2026-04-13). See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 ---
 
@@ -489,6 +489,44 @@ See **[WSLIDE_README.md](WSLIDE_README.md)** for the complete reference, includi
 - Animation (fragment step) system
 - Presentation mode and HTML export
 - AI Copilot tools (`wolfslide_*`) with example prompts and ASCII layout output format
+
+---
+
+## 🧪 MCP Server — Claude Code, Codex & Claude Desktop *(Experimental)*
+
+Wolfbook exposes all its notebook tools to external AI CLI agents via the **Model Context Protocol (MCP)**. This is configured automatically when the extension activates — no manual steps needed.
+
+### What is configured
+
+The extension writes the wolfbook MCP entry to three config files on startup:
+
+| Client | Config file | Notes |
+|--------|-------------|-------|
+| **Claude Desktop** | `~/Library/Application Support/Claude/claude_desktop_config.json` | macOS only |
+| **Claude Code CLI** | `~/.claude.json` (per workspace) | Project-scoped entry |
+| **Codex CLI** | `~/.codex/config.toml` | Global `[mcp_servers.wolfbook]` |
+
+### How it works
+
+The extension runs a lightweight HTTP/SSE MCP server on a local port (27182–27202). External AI clients connect via a stdio bridge script that is spawned automatically — the bridge polls until VS Code is ready (up to 60 s), so there is no startup timing race.
+
+When Claude Code or Codex starts, it connects to the bridge and gains access to all 45 Wolfbook tools: read notebook cells, evaluate expressions, insert/edit/delete cells, control the kernel, debug, search papers, and more.
+
+### Trigger manual reconfiguration
+
+If the automatic write fails (e.g. config was corrupt), run:
+
+```
+> Wolfbook: Configure Claude & Codex MCP
+```
+
+from the VS Code Command Palette (`⌘⇧P`). This re-writes all three config files and prompts you to restart the AI client.
+
+### Notes
+
+- **Experimental** — MCP tool schema restrictions vary by client; some advanced parameter constraints are stripped to maintain compatibility.
+- **Multi-window**: if multiple VS Code windows are open, the first window to claim port 27182 serves all clients.
+- **New workspaces**: when you open a new folder, its path is automatically added to `~/.claude.json`. Restart Claude Code to pick it up.
 
 ---
 

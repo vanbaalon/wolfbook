@@ -797,10 +797,10 @@ class EvaluateExpressionTool {
             // outputForm: wrap the result in Short/TeXForm/MatrixForm/TableForm before ToString.
             const outputForm = (options.input?.outputForm || '').trim();
             const _wrapForm = (varName) => {
-                if (outputForm === 'Short')      return `ToString[Short[${varName}, 5], InputForm]`;
+                if (outputForm === 'Short')      return `ToString[Short[${varName}, 5], OutputForm]`;
                 if (outputForm === 'TeXForm')     return `ToString[TeXForm[${varName}]]`;
-                if (outputForm === 'MatrixForm')  return `ToString[MatrixForm[${varName}], InputForm]`;
-                if (outputForm === 'TableForm')   return `ToString[TableForm[${varName}], InputForm]`;
+                if (outputForm === 'MatrixForm')  return `ToString[MatrixForm[${varName}], OutputForm]`;
+                if (outputForm === 'TableForm')   return `ToString[TableForm[${varName}], OutputForm]`;
                 return `If[StringQ[${varName}], ${varName}, ToString[${varName}, InputForm]]`;
             };
             const mkWrapped = (expr, wlSec) =>
@@ -884,10 +884,10 @@ class EvaluateExpressionTool {
         const outputForm = (options.input?.outputForm || '').trim();
         const wlTimeout = Math.max(1, timeoutSec - 1);
         const _wrapFormSingle = (varName) => {
-            if (outputForm === 'Short')      return `ToString[Short[${varName}, 5], InputForm]`;
+            if (outputForm === 'Short')      return `ToString[Short[${varName}, 5], OutputForm]`;
             if (outputForm === 'TeXForm')     return `ToString[TeXForm[${varName}]]`;
-            if (outputForm === 'MatrixForm')  return `ToString[MatrixForm[${varName}], InputForm]`;
-            if (outputForm === 'TableForm')   return `ToString[TableForm[${varName}], InputForm]`;
+            if (outputForm === 'MatrixForm')  return `ToString[MatrixForm[${varName}], OutputForm]`;
+            if (outputForm === 'TableForm')   return `ToString[TableForm[${varName}], OutputForm]`;
             return `If[StringQ[${varName}], ${varName}, ToString[${varName}, InputForm]]`;
         };
         const wrappedExpr =
@@ -1450,7 +1450,7 @@ class RestoreDeletedCellsTool {
             const preview    = e.source.trim().slice(0, 100).replace(/\n/g, '\u21b5');
             lines.push(`- Cell ${newCellNum} [${e.kind}] (index ${insertIdx + i}, CellId: ${id}, was Cell ${e.originalCell} at ${e.timestamp}): ${preview}${e.source.trim().length > 100 ? '\u2026' : ''}`);
         }
-        return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(lines.join('\n') + _katexWarningsForCells(cells))]);
+        return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(lines.join('\n') + _katexWarningsForCells(cellDatas))]);
     }
 }
 
@@ -2021,8 +2021,9 @@ class KernelControlTool {
             try {
                 const expr = `ClearAll["Global\`*"]; Get["${restorePath}"]; Length[Names["Global\`*"]]`;
                 const result = await controller.session.evaluate(expr, { interactive: false });
+                const symCount = typeof result === 'object' ? (result?.result ?? result?.value ?? JSON.stringify(result)) : result;
                 return new vscode.LanguageModelToolResult([
-                    new vscode.LanguageModelTextPart(`Kernel state restored from ${restorePath} — ${result} Global\` symbols loaded.`)
+                    new vscode.LanguageModelTextPart(`Kernel state restored from ${restorePath} — ${symCount} Global\` symbols loaded.`)
                 ]);
             } catch (err) {
                 return new vscode.LanguageModelToolResult([

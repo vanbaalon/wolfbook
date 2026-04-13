@@ -211,6 +211,26 @@ class WolframMCPServer {
 // Helpers used by extension.js to build the schema list from package.json
 // ---------------------------------------------------------------------------
 
+/** Recursively strip oneOf/allOf/anyOf from a JSON Schema object.
+ *  Claude's API rejects these (at the top level of input_schema, and Anthropic
+ *  also rejects them inside property definitions).
+ *  We preserve all property descriptions so the model understands the parameters.
+ */
+function sanitizeInputSchema(schema) {
+    if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return schema;
+    // eslint-disable-next-line no-unused-vars
+    const { oneOf, allOf, anyOf, ...rest } = schema;
+    if (rest.properties) {
+        const sanitizedProps = {};
+        for (const [k, v] of Object.entries(rest.properties)) {
+            sanitizedProps[k] = sanitizeInputSchema(v);
+        }
+        rest.properties = sanitizedProps;
+    }
+    if (rest.items) rest.items = sanitizeInputSchema(rest.items);
+    return rest;
+}
+
 /** Load MCP-formatted tool schemas from the extension's package.json.
  *  Converts { name, modelDescription, inputSchema } → MCP { name, description, inputSchema }
  */
@@ -221,7 +241,7 @@ function loadMCPSchemas(packageJsonPath) {
         return lmTools.map(t => ({
             name:        t.name,
             description: t.modelDescription || t.displayName || t.name,
-            inputSchema: t.inputSchema || { type: 'object', properties: {} },
+            inputSchema: sanitizeInputSchema(t.inputSchema || { type: 'object', properties: {} }),
         }));
     } catch (e) {
         console.warn('[Wolfbook MCP] Could not load package.json schemas:', e.message);
@@ -229,41 +249,151 @@ function loadMCPSchemas(packageJsonPath) {
     }
 }
 
-/** Update Claude Desktop and Claude Code config with the wolfbook MCP server URL.
- *  Returns { updated: bool, configPaths: string[] }.
+/** Resolve the Node.js binary to use when spawning the stdio bridge.
+ *  Cannot use process.execPath inside Electron (it's the VS Code binary).
  */
-function configureClaudeDesktop(port) {
-    const home = process.env.HOME || process.env.USERPROFILE || '~';
-    const paths = [
-        path.join(home, 'Library', 'Application Support', 'Claude', 'claude_desktop_config.json'),
-        path.join(home, '.claude', 'settings.json')
-    ];
-    
-    const results = [];
-    for (const configPath of paths) {
-        let config = {};
-        try { 
-            if (fs.existsSync(configPath)) {
-                config = JSON.parse(fs.readFileSync(configPath, 'utf8')); 
-            }
-        } catch { /* parse error */ }
-
-        if (!config.mcpServers) config.mcpServers = {};
-        config.mcpServers.wolfbook = { 
-            url: `http://127.0.0.1:${port}/sse` 
-        };
-
-        try {
-            // Ensure directory exists for ~/.claude/settings.json
-            fs.mkdirSync(path.dirname(configPath), { recursive: true });
-            fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf8');
-            results.push(configPath);
-        } catch (e) {
-            console.warn(`[Wolfbook MCP] Could not write to ${configPath}:`, e.message);
-        }
+function resolveNodeBinary() {
+    // process.versions.electron is set by Electron regardless of platform/binary name
+    if (!process.versions.electron) {
+        return process.execPath;  // already a plain node process
     }
-    
-    return { updated: true, configPaths: results, port };
+    // Inside Electron: look for a 'node' sibling next to the Electron binary
+    const dir = path.dirname(process.execPath);
+    const candidates = [
+        path.join(dir, 'node'),
+        path.join(dir, 'node.exe'),
+    ];
+    for (const c of candidates) {
+        try { fs.accessSync(c, fs.constants.X_OK); return c; } catch {}
+    }
+    // Try to resolve 'node' via PATH using a synchronous shell call
+    try {
+        const { execSync } = require('child_process');
+        const resolved = execSync('which node || where node', { encoding: 'utf8', timeout: 3000 }).trim().split('\n')[0].trim();
+        if (resolved && fs.existsSync(resolved)) return resolved;
+    } catch {}
+    return 'node';  // rely on PATH as last resort
 }
 
-module.exports = { WolframMCPServer, loadMCPSchemas, configureClaudeDesktop };
+/** Update Claude Desktop and Claude Code config with the wolfbook MCP server.
+ *  Uses stdio transport (spawned process) to avoid startup timing race.
+ *  The bridge already tolerates the HTTP server not yet being up (polls 60s),
+ *  so this can be called synchronously at extension activate time — before the
+ *  MCP server even starts.
+ *  Returns { updated: bool, configPaths: string[], nodeBin: string, bridgePath: string }.
+ */
+function configureClaudeDesktop(port, extensionPath) {
+    const home = process.env.HOME || process.env.USERPROFILE || '~';
+    const bridgePath = extensionPath
+        ? path.join(extensionPath, 'out', 'extension', 'claude-mcp', 'stdio-bridge.js')
+        : path.join(__dirname, 'stdio-bridge.js');
+    const nodeBin = resolveNodeBinary();
+    return writeClaudeConfig(bridgePath, nodeBin, home, port);
+}
+
+/** Write wolfbook MCP entry to Claude Desktop config, ~/.claude.json (Claude Code),
+ *  and ~/.codex/config.toml (Codex CLI).
+ *  Exported separately so it can be called before the HTTP server has started.
+ *  @param {string[]} [workspacePaths] - Workspace folder paths to register in ~/.claude.json.
+ *    Pass all vscode.workspace.workspaceFolders paths. If empty, skips ~/.claude.json project entries.
+ */
+function writeClaudeConfig(bridgePath, nodeBin, home, port, workspacePaths) {
+    home = home || process.env.HOME || process.env.USERPROFILE || '~';
+    const mcpEntry = { command: nodeBin, args: [bridgePath] };
+    const results = [];
+
+    // 1. Claude Desktop — flat mcpServers at root
+    const desktopConfigPath = path.join(home, 'Library', 'Application Support', 'Claude', 'claude_desktop_config.json');
+    try {
+        let config = {};
+        try { if (fs.existsSync(desktopConfigPath)) config = JSON.parse(fs.readFileSync(desktopConfigPath, 'utf8')); } catch {}
+        if (!config.mcpServers) config.mcpServers = {};
+        config.mcpServers.wolfbook = mcpEntry;
+        fs.mkdirSync(path.dirname(desktopConfigPath), { recursive: true });
+        fs.writeFileSync(desktopConfigPath, JSON.stringify(config, null, 2), 'utf8');
+        results.push(desktopConfigPath);
+    } catch (e) {
+        console.warn(`[Wolfbook MCP] Could not write to ${desktopConfigPath}:`, e.message);
+    }
+
+    // 2. Claude Code CLI — ~/.claude.json, projects[workspacePath].mcpServers
+    if (workspacePaths && workspacePaths.length > 0) {
+        const claudeJsonPath = path.join(home, '.claude.json');
+        try {
+            let root = {};
+            try { if (fs.existsSync(claudeJsonPath)) root = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf8')); } catch {}
+            if (!root.projects) root.projects = {};
+            for (const wsPath of workspacePaths) {
+                if (!root.projects[wsPath]) root.projects[wsPath] = {};
+                if (!root.projects[wsPath].mcpServers) root.projects[wsPath].mcpServers = {};
+                root.projects[wsPath].mcpServers.wolfbook = { type: 'stdio', command: nodeBin, args: [bridgePath], env: {} };
+            }
+            fs.writeFileSync(claudeJsonPath, JSON.stringify(root, null, 2), 'utf8');
+            results.push(claudeJsonPath);
+        } catch (e) {
+            console.warn(`[Wolfbook MCP] Could not write to ${claudeJsonPath}:`, e.message);
+        }
+    }
+
+    // 3. Codex CLI — ~/.codex/config.toml, [mcp_servers.wolfbook]
+    // Uses a minimal TOML patch: only touches the [mcp_servers.wolfbook] section.
+    const codexConfigPath = path.join(home, '.codex', 'config.toml');
+    try {
+        fs.mkdirSync(path.dirname(codexConfigPath), { recursive: true });
+        let toml = '';
+        try { if (fs.existsSync(codexConfigPath)) toml = fs.readFileSync(codexConfigPath, 'utf8'); } catch {}
+
+        // Build the new mcp_servers.wolfbook block
+        const argsToml = '[' + [bridgePath].map(a => `"${a.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`).join(', ') + ']';
+        const newBlock = `\n[mcp_servers.wolfbook]\ncommand = "${nodeBin.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"\nargs = ${argsToml}\n`;
+
+        // Remove any existing [mcp_servers.wolfbook] section (up to next section header or EOF)
+        toml = toml.replace(/(\n|^)\[mcp_servers\.wolfbook\][\s\S]*?(?=\n\[|\s*$)/g, '');
+        toml = toml.trimEnd() + newBlock;
+
+        fs.writeFileSync(codexConfigPath, toml, 'utf8');
+        results.push(codexConfigPath);
+    } catch (e) {
+        console.warn(`[Wolfbook MCP] Could not write to ${codexConfigPath}:`, e.message);
+    }
+
+    return { updated: true, configPaths: results, port, bridgePath, nodeBin };
+}
+
+/** Check if all configs already have the correct wolfbook entry.
+ *  Returns true when a write is needed.
+ */
+function needsConfigUpdate(bridgePath, nodeBin, workspacePaths) {
+    const home = process.env.HOME || process.env.USERPROFILE || '~';
+
+    // Check Claude Desktop config
+    try {
+        const cfg = JSON.parse(fs.readFileSync(
+            path.join(home, 'Library', 'Application Support', 'Claude', 'claude_desktop_config.json'), 'utf8'));
+        const entry = cfg?.mcpServers?.wolfbook;
+        if (!entry || entry.command !== nodeBin || entry.args?.[0] !== bridgePath) return true;
+    } catch { return true; }
+
+    // Check ~/.claude.json for each workspace path
+    if (workspacePaths && workspacePaths.length > 0) {
+        try {
+            const root = JSON.parse(fs.readFileSync(path.join(home, '.claude.json'), 'utf8'));
+            for (const wsPath of workspacePaths) {
+                const entry = root?.projects?.[wsPath]?.mcpServers?.wolfbook;
+                if (!entry || entry.command !== nodeBin || entry.args?.[0] !== bridgePath) return true;
+            }
+        } catch { return true; }
+    }
+
+    // Check Codex config.toml
+    try {
+        const toml = fs.readFileSync(path.join(home, '.codex', 'config.toml'), 'utf8');
+        // Simple check: both strings must appear in the wolfbook section
+        if (!toml.includes(`command = "${nodeBin}"`)) return true;
+        if (!toml.includes(`"${bridgePath}"`)) return true;
+    } catch { return true; }
+
+    return false;
+}
+
+module.exports = { WolframMCPServer, loadMCPSchemas, configureClaudeDesktop, writeClaudeConfig, needsConfigUpdate, resolveNodeBinary };

@@ -558,22 +558,52 @@ async function activate(context) {
 
     // ── Claude Desktop MCP server ──────────────────────────────────────────
     // Exposes all Wolfram notebook tools to Claude via MCP HTTP/SSE protocol.
-    const { WolframMCPServer, loadMCPSchemas, configureClaudeDesktop } = require('./claude-mcp/server');
+    const { WolframMCPServer, loadMCPSchemas, configureClaudeDesktop, writeClaudeConfig, needsConfigUpdate, resolveNodeBinary } = require('./claude-mcp/server');
     const _pkgJson   = path.join(context.extensionPath, 'package.json');
     const _mcpSchema = loadMCPSchemas(_pkgJson);
     const _mcpServer = new WolframMCPServer(_toolMap, _mcpSchema);
+
+    // ── Eager config write (Fix 3 from diagnostics) ────────────────────────
+    // Write Claude config SYNCHRONOUSLY before yielding to the event loop.
+    // Registers in both Claude Desktop (claude_desktop_config.json) and
+    // Claude Code CLI (~/.claude.json, projects[wsPath].mcpServers) so that
+    // new installs by any user get tools visible immediately without manual steps.
+    // The stdio bridge already tolerates the HTTP server not being up yet.
+    const _getWsPaths = () => (vscode.workspace.workspaceFolders || []).map(f => f.uri.fsPath);
+    {
+        const _bridgePath = path.join(context.extensionPath, 'out', 'extension', 'claude-mcp', 'stdio-bridge.js');
+        const _nodeBin    = resolveNodeBinary();
+        const _wsPaths    = _getWsPaths();
+        if (needsConfigUpdate(_bridgePath, _nodeBin, _wsPaths)) {
+            try {
+                writeClaudeConfig(_bridgePath, _nodeBin, undefined, undefined, _wsPaths);
+                console.log('[Wolfbook MCP] Claude config written eagerly at activate()');
+            } catch (e) {
+                console.warn('[Wolfbook MCP] Eager config write failed:', e.message);
+            }
+        }
+    }
+
+    // Re-register whenever workspace folders change (user opens a new project)
+    context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(() => {
+        const _bridgePath = path.join(context.extensionPath, 'out', 'extension', 'claude-mcp', 'stdio-bridge.js');
+        const _nodeBin    = resolveNodeBinary();
+        const _wsPaths    = _getWsPaths();
+        try { writeClaudeConfig(_bridgePath, _nodeBin, undefined, _mcpServer.port, _wsPaths); } catch {}
+    }));
+
     _mcpServer.start().then(port => {
         console.log(`[Wolfbook MCP] Ready — port ${port}`);
-        // Auto-configure Claude Desktop/Code on first run or re-install
-        const LAST_PORT_KEY = 'wolfbook.lastMcpPort';
-        const lastPort = context.globalState.get(LAST_PORT_KEY);
-        if (lastPort !== port) {
+        // Re-write config if content changed (e.g. bridge path after upgrade)
+        const _bridgePath = path.join(context.extensionPath, 'out', 'extension', 'claude-mcp', 'stdio-bridge.js');
+        const _nodeBin    = resolveNodeBinary();
+        const _wsPaths    = _getWsPaths();
+        if (needsConfigUpdate(_bridgePath, _nodeBin, _wsPaths)) {
             try {
-                configureClaudeDesktop(port);
-                context.globalState.update(LAST_PORT_KEY, port);
-                console.log(`[Wolfbook MCP] Auto-configured Claude (port ${port})`);
+                writeClaudeConfig(_bridgePath, _nodeBin, undefined, port, _wsPaths);
+                console.log(`[Wolfbook MCP] Claude config updated (port ${port})`);
             } catch (e) {
-                console.warn('[Wolfbook MCP] Auto-config failed:', e.message);
+                console.warn('[Wolfbook MCP] Config update failed:', e.message);
             }
         }
     }).catch(e => {
@@ -589,9 +619,12 @@ async function activate(context) {
             return;
         }
         try {
-            const { configPaths } = configureClaudeDesktop(port);
+            const { configPaths, bridgePath } = writeClaudeConfig(
+                path.join(context.extensionPath, 'out', 'extension', 'claude-mcp', 'stdio-bridge.js'),
+                resolveNodeBinary(), undefined, port, _getWsPaths()
+            );
             const action = await vscode.window.showInformationMessage(
-                `Claude configured ✓ (port ${port}, ${configPaths.length} file(s) updated). Restart Claude to apply.`,
+                `Claude configured ✓ (${configPaths.length} file(s) updated, bridge: ${path.basename(bridgePath)}). Restart Claude to apply.`,
                 'Open Claude Code Settings'
             );
             if (action === 'Open Claude Code Settings') {
