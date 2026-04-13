@@ -229,22 +229,41 @@ function loadMCPSchemas(packageJsonPath) {
     }
 }
 
-/** Update Claude Desktop claude_desktop_config.json with the wolfbook MCP server URL.
- *  Returns { updated: bool, configPath: string }.
+/** Update Claude Desktop and Claude Code config with the wolfbook MCP server URL.
+ *  Returns { updated: bool, configPaths: string[] }.
  */
 function configureClaudeDesktop(port) {
-    const configPath = path.join(
-        process.env.HOME || process.env.USERPROFILE || '~',
-        'Library', 'Application Support', 'Claude', 'claude_desktop_config.json'
-    );
-    let config = {};
-    try { config = JSON.parse(fs.readFileSync(configPath, 'utf8')); } catch { /* first time */ }
+    const home = process.env.HOME || process.env.USERPROFILE || '~';
+    const paths = [
+        path.join(home, 'Library', 'Application Support', 'Claude', 'claude_desktop_config.json'),
+        path.join(home, '.claude', 'settings.json')
+    ];
+    
+    const results = [];
+    for (const configPath of paths) {
+        let config = {};
+        try { 
+            if (fs.existsSync(configPath)) {
+                config = JSON.parse(fs.readFileSync(configPath, 'utf8')); 
+            }
+        } catch { /* parse error */ }
 
-    if (!config.mcpServers) config.mcpServers = {};
-    config.mcpServers.wolfbook = { url: `http://127.0.0.1:${port}/sse` };
+        if (!config.mcpServers) config.mcpServers = {};
+        config.mcpServers.wolfbook = { 
+            url: `http://127.0.0.1:${port}/sse` 
+        };
 
-    fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf8');
-    return { updated: true, configPath, port };
+        try {
+            // Ensure directory exists for ~/.claude/settings.json
+            fs.mkdirSync(path.dirname(configPath), { recursive: true });
+            fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf8');
+            results.push(configPath);
+        } catch (e) {
+            console.warn(`[Wolfbook MCP] Could not write to ${configPath}:`, e.message);
+        }
+    }
+    
+    return { updated: true, configPaths: results, port };
 }
 
 module.exports = { WolframMCPServer, loadMCPSchemas, configureClaudeDesktop };

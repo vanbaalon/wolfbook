@@ -563,13 +563,25 @@ async function activate(context) {
     const _mcpSchema = loadMCPSchemas(_pkgJson);
     const _mcpServer = new WolframMCPServer(_toolMap, _mcpSchema);
     _mcpServer.start().then(port => {
-        console.log(`[Wolfbook MCP] Ready — add to Claude Desktop config: http://127.0.0.1:${port}/sse`);
+        console.log(`[Wolfbook MCP] Ready — port ${port}`);
+        // Auto-configure Claude Desktop/Code on first run or re-install
+        const LAST_PORT_KEY = 'wolfbook.lastMcpPort';
+        const lastPort = context.globalState.get(LAST_PORT_KEY);
+        if (lastPort !== port) {
+            try {
+                configureClaudeDesktop(port);
+                context.globalState.update(LAST_PORT_KEY, port);
+                console.log(`[Wolfbook MCP] Auto-configured Claude (port ${port})`);
+            } catch (e) {
+                console.warn('[Wolfbook MCP] Auto-config failed:', e.message);
+            }
+        }
     }).catch(e => {
         console.warn('[Wolfbook MCP] Server failed to start:', e.message);
     });
     context.subscriptions.push({ dispose: () => _mcpServer.stop() });
 
-    // Command: write wolfbook MCP entry into Claude Desktop config
+    // Command: write wolfbook MCP entry into Claude Desktop and Claude Code config
     context.subscriptions.push(vscode.commands.registerCommand('wolfbook.configureClaude', async () => {
         const port = _mcpServer.port;
         if (!port) {
@@ -577,16 +589,17 @@ async function activate(context) {
             return;
         }
         try {
-            const { configPath } = configureClaudeDesktop(port);
+            const { configPaths } = configureClaudeDesktop(port);
             const action = await vscode.window.showInformationMessage(
-                `Claude Desktop configured ✓ (port ${port}). Restart Claude Desktop to apply.`,
-                'Open Config File'
+                `Claude configured ✓ (port ${port}, ${configPaths.length} file(s) updated). Restart Claude to apply.`,
+                'Open Claude Code Settings'
             );
-            if (action === 'Open Config File') {
-                vscode.commands.executeCommand('vscode.open', vscode.Uri.file(configPath));
+            if (action === 'Open Claude Code Settings') {
+                const settingsPath = configPaths.find(p => p.includes('.claude')) || configPaths[0];
+                vscode.commands.executeCommand('vscode.open', vscode.Uri.file(settingsPath));
             }
         } catch (e) {
-            vscode.window.showErrorMessage(`Failed to configure Claude Desktop: ${e.message}`);
+            vscode.window.showErrorMessage(`Failed to configure Claude: ${e.message}`);
         }
     }));
     ;
