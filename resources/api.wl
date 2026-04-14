@@ -350,8 +350,10 @@ VsCodeEvalWrapper[code_String] := Module[
 
     If[n == 0,
         (* Parsing failed — fall back to direct evaluation *)
-        r = Quiet[Check[Catch[ToExpression[code], _,
-                              Function[{$wbThrowVal$, $wbThrowTag$}, $wbThrowVal$]], $Failed]];
+        r = Quiet[Check[
+                Catch[ToExpression[code], _,
+                      Function[{$wbThrowVal$, $wbThrowTag$}, $wbThrowVal$]],
+                $Failed]];
         AppendTo[results, r],
 
         (* Evaluate each top-level expression; stop on $Aborted.
