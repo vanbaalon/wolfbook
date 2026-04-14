@@ -20,6 +20,28 @@ const fs     = require('fs');
 const DEFAULT_PORT  = 27182;
 const PORT_RANGE    = 20;  // try DEFAULT_PORT … DEFAULT_PORT+PORT_RANGE if busy
 
+/**
+ * Probe whether a Wolfbook MCP server is already running on the given port.
+ * Returns the port number if alive, or 0 if not.
+ */
+function probeExistingServer(port = DEFAULT_PORT) {
+    return new Promise(resolve => {
+        const req = http.get(`http://127.0.0.1:${port}/health`, { timeout: 500 }, res => {
+            let body = '';
+            res.on('data', d => { body += d; });
+            res.on('end', () => {
+                try {
+                    const json = JSON.parse(body);
+                    if (json.status === 'ok') { resolve(port); return; }
+                } catch (_) {}
+                resolve(0);
+            });
+        });
+        req.on('error', () => resolve(0));
+        req.on('timeout', () => { req.destroy(); resolve(0); });
+    });
+}
+
 class WolframMCPServer {
     /**
      * @param {Map<string, object>} toolMap   name → tool class instance
@@ -31,10 +53,28 @@ class WolframMCPServer {
         this._sessions = new Map();   // sessionId → http.ServerResponse (SSE)
         this._server  = null;
         this._port    = 0;
+        this._secondary = false;  // true = another window owns the server; we just reuse its port
     }
 
-    /** Start listening. Returns the actual port used. */
+    /** Start listening. Returns the actual port used.
+     *  If a Wolfbook MCP server is already running on DEFAULT_PORT, this window
+     *  becomes a secondary — it reuses the existing port and skips starting a new server.
+     */
     start(port = DEFAULT_PORT) {
+        // First window probe: is the default port already alive?
+        return probeExistingServer(DEFAULT_PORT).then(existingPort => {
+            if (existingPort) {
+                this._port = existingPort;
+                this._secondary = true;
+                console.log(`[Wolfbook MCP] Secondary window — reusing existing server on port ${existingPort}`);
+                return existingPort;
+            }
+            return this._startListening(port);
+        });
+    }
+
+    /** Internal: actually bind to a port. */
+    _startListening(port = DEFAULT_PORT) {
         return new Promise((resolve, reject) => {
             const srv = http.createServer((req, res) => {
                 try { this._handle(req, res); }
@@ -50,7 +90,7 @@ class WolframMCPServer {
                 if (err.code === 'EADDRINUSE' && port < DEFAULT_PORT + PORT_RANGE) {
                     srv.close();
                     this._server = null;
-                    this.start(port + 1).then(resolve, reject);
+                    this._startListening(port + 1).then(resolve, reject);
                 } else {
                     reject(err);
                 }
@@ -59,8 +99,10 @@ class WolframMCPServer {
     }
 
     get port() { return this._port; }
+    get isSecondary() { return this._secondary; }
 
     stop() {
+        if (this._secondary) return Promise.resolve(); // not our server to close
         return new Promise(resolve => {
             if (this._server) this._server.close(() => resolve());
             else resolve();
@@ -396,4 +438,4 @@ function needsConfigUpdate(bridgePath, nodeBin, workspacePaths) {
     return false;
 }
 
-module.exports = { WolframMCPServer, loadMCPSchemas, configureClaudeDesktop, writeClaudeConfig, needsConfigUpdate, resolveNodeBinary };
+module.exports = { WolframMCPServer, loadMCPSchemas, configureClaudeDesktop, writeClaudeConfig, needsConfigUpdate, resolveNodeBinary, probeExistingServer };

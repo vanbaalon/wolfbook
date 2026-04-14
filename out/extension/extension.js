@@ -593,6 +593,10 @@ async function activate(context) {
     }));
 
     _mcpServer.start().then(port => {
+        if (_mcpServer.isSecondary) {
+            console.log(`[Wolfbook MCP] Secondary window — MCP server already running on port ${port}`);
+            return; // config already up-to-date from primary window
+        }
         console.log(`[Wolfbook MCP] Ready — port ${port}`);
         // Re-write config if content changed (e.g. bridge path after upgrade)
         const _bridgePath = path.join(context.extensionPath, 'out', 'extension', 'claude-mcp', 'stdio-bridge.js');
