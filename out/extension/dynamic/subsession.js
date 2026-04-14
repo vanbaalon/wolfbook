@@ -88,7 +88,7 @@ return exprs.map((text, idx) => {
 function wexprToInputForm(expr) {
 if (!expr || typeof expr !== 'object') return String(expr);
 if (expr.error) return '(error: ' + String(expr.error) + ')';
-if (expr.type === 'integer' || expr.type === 'real') return String(expr.value);
+if (expr.type === 'integer' || expr.type === 'real' || expr.type === 'biginteger') return String(expr.value);
 if (expr.type === 'string')
     return '"' + String(expr.value).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
 if (expr.type === 'symbol') return String(expr.value);

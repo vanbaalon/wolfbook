@@ -53,7 +53,7 @@ function _wHead(w)  { return w?.type === 'function' ? (typeof w.head === 'string
 function _wArgs(w)  { return w?.type === 'function' ? (w.args || []) : []; }
 function _wVal(w)   {
     if (!w) return null;
-    if (w.type === 'integer' || w.type === 'real') return w.value;
+    if (w.type === 'integer' || w.type === 'real' || w.type === 'biginteger') return w.value;
     if (w.type === 'string' || w.type === 'symbol') return w.value;
     return null;
 }
@@ -81,7 +81,7 @@ function wexprToJs(w) {
         const [k, v] = args;
         return { key: wexprToJs(k), val: wexprToJs(v) };
     }
-    if (w.type === 'integer' || w.type === 'real') return w.value;
+    if (w.type === 'integer' || w.type === 'real' || w.type === 'biginteger') return w.value;
     if (w.type === 'string') return w.value;
     if (w.type === 'symbol') {
         if (w.value === 'True')     return true;

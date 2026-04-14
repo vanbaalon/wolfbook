@@ -29,7 +29,7 @@ function _bpLinesToKernelSteps(lines, steps) {
 function _wExprString(w) {
     if (!w) return null;
     if (w.type === 'string' || w.type === 'symbol' ||
-        w.type === 'integer' || w.type === 'real') return String(w.value);
+        w.type === 'integer' || w.type === 'real' || w.type === 'biginteger') return String(w.value);
     // List/function head: fall back to head name
     if (w.type === 'function') {
         const h = typeof w.head === 'string' ? w.head : (w.head?.value ?? '');
@@ -487,7 +487,7 @@ class WolframDebugAdapter {
                         let value;
                         if (wexpr?.type === 'string') {
                             value = wexpr.value;
-                        } else if (wexpr?.type === 'integer' || wexpr?.type === 'real' || wexpr?.type === 'symbol') {
+                        } else if (wexpr?.type === 'integer' || wexpr?.type === 'real' || wexpr?.type === 'symbol' || wexpr?.type === 'biginteger') {
                             value = String(wexpr.value);
                         } else {
                             value = _wExprString(wexpr) ?? JSON.stringify(wexpr);
