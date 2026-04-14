@@ -350,13 +350,20 @@ VsCodeEvalWrapper[code_String] := Module[
 
     If[n == 0,
         (* Parsing failed — fall back to direct evaluation *)
-        r = Quiet[Check[ToExpression[code], $Failed]];
+        r = Quiet[Check[Catch[ToExpression[code], _,
+                              Function[{$wbThrowVal$, $wbThrowTag$}, $wbThrowVal$]], $Failed]];
         AppendTo[results, r],
 
-        (* Evaluate each top-level expression; stop on $Aborted *)
+        (* Evaluate each top-level expression; stop on $Aborted.
+           Catch[..., _] handles uncaught Throw[] that escape user code (e.g. from
+           Mathematica's internal Throw/Catch used by Element[x, PositiveReals]
+           expansion): Quiet[] does NOT suppress Throw::nocatch because the message
+           fires at kernel top-level AFTER Quiet has exited.  The caught value is
+           returned as the result so the output is still correct. *)
         Do[
             r = Quiet[Check[
-                    ReleaseHold[Extract[held, {k}, HoldComplete]],
+                    Catch[ReleaseHold[Extract[held, {k}, HoldComplete]], _,
+                          Function[{$wbThrowVal$, $wbThrowTag$}, $wbThrowVal$]],
                     $Failed]];
             AppendTo[results, r];
             If[r === $Aborted, Break[]],

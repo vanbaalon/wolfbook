@@ -55,7 +55,13 @@ If[StringEndsQ[inputFile, ".nb"],
 
   CopyFile[AbsoluteFileName[inputFile], tempNbCopy, OverwriteTarget -> True];
 
-  result = RunProcess[{nbmPath, tempNbCopy}];
+  (* On Windows nb2m is a wolframscript script with a Unix shebang — it cannot
+     be executed directly. Invoke via wolframscript instead. *)
+  nb2mCmd = If[$OperatingSystem === "Windows",
+    {"wolframscript", "-file", nbmPath, tempNbCopy},
+    {nbmPath, tempNbCopy}
+  ];
+  result = RunProcess[nb2mCmd];
   If[result["ExitCode"] != 0,
     (* cleanup *)
     If[FileExistsQ[tempNbCopy], DeleteFile[tempNbCopy]];

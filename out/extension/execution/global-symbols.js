@@ -28,7 +28,12 @@ let _symbols    = [];      // cached Names["Global`*"] list from last execution
 function _getColor() {
     const v = (configCompat.getSetting('editor.globalSymbolColor', '') || '').trim();
     // Empty string means "use default"; set to 'off' or 'none' to explicitly disable.
-    if (!v) return '#333333';
+    if (!v || v === 'auto') {
+        const kind = vscode.window.activeColorTheme && vscode.window.activeColorTheme.kind;
+        // ColorThemeKind: Light=1, Dark=2, HighContrast=3, HighContrastLight=4
+        const isDark = kind === 2 || kind === 3;
+        return isDark ? '#7eb3d4' : '#333333';
+    }
     if (v === 'off' || v === 'none') return '';
     return v;
 }
@@ -271,6 +276,12 @@ function register(context) {
                 if (_decorType) { _decorType.dispose(); _decorType = null; _colorCfg = null; }
                 _applyToAllEditors();
             }
+        }),
+
+        // Re-apply with correct color when VS Code theme changes (dark ↔ light).
+        vscode.window.onDidChangeActiveColorTheme(() => {
+            if (_decorType) { _decorType.dispose(); _decorType = null; _colorCfg = null; }
+            _applyToAllEditors();
         }),
 
         // Cleanup on deactivation.

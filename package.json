@@ -3,7 +3,7 @@
   "displayName": "Wolfbook — AI-Friendly Wolfram Language Notebook",
   "description": "AI-friendly Wolfram Language notebook for VS Code. WSTP kernel, KaTeX rendering with adaptive line-breaking, Unicode input, LSP diagnostics, and AI-readable outputs for GitHub Copilot.",
   "publisher": "wolfbook",
-  "version": "2.6.43",
+  "version": "2.6.46",
   "engines": {
     "vscode": "^1.95.0"
   },
@@ -217,8 +217,8 @@
         "wolfbook.editor.globalSymbolColor": {
           "scope": "window",
           "type": "string",
-          "default": "#333333",
-          "description": "Color applied to Global` symbols that have a value (set variables). Unset symbols use #336699 blue via the 'symbol.unrecognized' TM scope. Leave empty or set to 'off' to disable.",
+          "default": "",
+          "description": "Color applied to Global` context symbols (user-defined variables). Leave empty or set to 'auto' for automatic theme-aware color (#7eb3d4 on dark themes, #333333 on light). Set to 'off' or 'none' to disable. Accepts any CSS color string.",
           "order": 3
         },
         "wolfbook.notebook.rendering.invertBrightnessInDarkThemes": {
@@ -2677,7 +2677,7 @@
       }
     ],
     "configurationDefaults": {
-      "wolfbook.editor.globalSymbolColor": "#333333",
+      "wolfbook.editor.globalSymbolColor": "",
       "workbench.colorCustomizations": {
         "editor.wordHighlightBackground": "#3399ff18",
         "editor.wordHighlightStrongBackground": "#3399ff28",
