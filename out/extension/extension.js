@@ -555,8 +555,18 @@ async function activate(context) {
     let nbKernelenabled = config.get("notebook.kernelEnabled", true);
     let controller = new controller_1.WolframNotebookKernel(context);
     _activeController = controller;  // expose for deactivate()
+    // Refresh watch panel once kernel is fully ready (guards against early eval during init.wl)
+    controller._onKernelReady = () => _debugCtrl.refreshLiveWatch();
     if (nbKernelenabled && kernelAvailable) {
-        controller.launchKernel();
+        controller.launchKernel().then(() => {
+            // Deferred watch refresh: variables now show actual values instead of
+            // "Kernel starting…" placeholders that were blocked during init.wl.
+            if (controller.kernelStatusString === 'resolved') _debugCtrl.refreshLiveWatch();
+        }).catch(() => {}).then(() => {
+            // Deferred watch refresh: variables now show actual values instead of
+            // "Kernel starting…" placeholders that were blocked during init.wl.
+            if (controller.kernelStatusString === 'resolved') _debugCtrl.refreshLiveWatch();
+        }).catch(() => {});
     }
     // Register Copilot language model tools (Phase 4)
     const _toolMap = _tools.registerTools(context, () => controller, _debugCtrl, () => _askPanel);
@@ -657,7 +667,9 @@ async function activate(context) {
         if (process.platform === 'win32') _nbDir = _nbDir.replace(/\\/g, '/');
         const _esc = _nbDir.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
         controller.session?.evaluate(
-            `Unprotect[NotebookDirectory, WBDirectory]; NotebookDirectory[] = "${_esc}"; Protect[NotebookDirectory]; WBDirectory[] = "${_esc}"; Protect[WBDirectory]`,
+            `Unprotect[NotebookDirect.then(() => {
+                if (controller.kernelStatusString === 'resolved') _debugCtrl.refreshLiveWatch();
+            }).catch(() => {})ory, WBDirectory]; NotebookDirectory[] = "${_esc}"; Protect[NotebookDirectory]; WBDirectory[] = "${_esc}"; Protect[WBDirectory]`,
             { interactive: false }
         ).catch(() => {});
     }
@@ -665,7 +677,9 @@ async function activate(context) {
     context.subscriptions.push(vscode_1.commands.registerCommand("wolfbook.launchKernel", () => {
         if (nbKernelenabled) {
             client.outputChannel.appendLine("Launching Wolfram Kernel");
-            controller.launchKernel();
+            controller.launchKernel().then(() => {
+                if (controller.kernelStatusString === 'resolved') _debugCtrl.refreshLiveWatch();
+            }).catch(() => {});
         }
     }));
     context.subscriptions.push(vscode_1.commands.registerCommand("wolfbook.abortEvaluation", () => {

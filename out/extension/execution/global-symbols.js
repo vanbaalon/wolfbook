@@ -13,6 +13,7 @@ const vscode = require('vscode');
 const { wlNameToUTF, CODE_TO_NAME } = require('../namedchars');
 const { decodeWolframOctal } = require('../utils/encoding');
 const configCompat = require('../config-compat');
+const { scrollLog } = require('../utils/dev-logger');
 
 /** Decode WSTP \:XXXX hex escapes (e.g. \:03B1 → α) */
 function decodeWolframHex(s) {
@@ -194,8 +195,7 @@ function _applyToAllEditors() {
  */
 async function updateAll(ctrl) {
     const color = _getColor();
-    try { require('fs').writeFileSync('/tmp/gs_debug.txt', 'ENTRY color=' + JSON.stringify(color) + '\n'); } catch(_) {}
-    console.log('[global-symbols] updateAll | color:', JSON.stringify(color), '| symbols cached:', _symbols.length);
+    scrollLog('[global-symbols] updateAll | color:', JSON.stringify(color), '| symbols cached:', _symbols.length);
     if (!color) {
         // Feature disabled: clear any stale decorations and bail out.
         if (_decorType) {
@@ -207,7 +207,7 @@ async function updateAll(ctrl) {
         return;
     }
 
-    if (!ctrl?.session?.subWhenIdle) { console.log('[global-symbols] updateAll: no session.subWhenIdle'); return; }
+    if (!ctrl?.session?.subWhenIdle) { scrollLog('[global-symbols] updateAll: no session.subWhenIdle'); return; }
 
     try {
         // subWhenIdle() runs only when the kernel is fully idle — safe for background queries,
@@ -218,33 +218,19 @@ async function updateAll(ctrl) {
         const result = await ctrl.session.subWhenIdle(
             '"GLOBALNAMES:"<>StringRiffle[StringReplace[Select[Names["Global`*"],Function[nm,ToExpression["ValueQ[Global`"<>nm<>"]||DownValues[Global`"<>nm<>"]=!={}||SubValues[Global`"<>nm<>"]=!={}||UpValues[Global`"<>nm<>"]=!={}"]]],"Global`"->""],","]'
         );
-        console.log('[global-symbols] sub result type:', result?.type, '| value prefix:', typeof result?.value === 'string' ? result.value.slice(0, 80) : result?.value);
         // result is WExpr: { type: "string", value: "GLOBALNAMES:x,y,..." }
         if (result && result.type === 'string' && typeof result.value === 'string'
                 && result.value.startsWith('GLOBALNAMES:')) {
             const raw = result.value.slice('GLOBALNAMES:'.length);
-            // Debug: dump raw bytes to temp file
-            try {
-                require('fs').writeFileSync('/tmp/gs_debug.txt',
-                    'RAW: ' + JSON.stringify(raw.slice(0, 300)) + '\n');
-            } catch(_) {}
-            // Debug: show raw bytes so we can see exactly what WSTP delivers
-            console.log('[global-symbols] RAW (first 200 chars):', JSON.stringify(raw.slice(0, 200)));
             // Decode all WSTP escape forms: \:XXXX hex, \NNN octal, \[Name]
             const decoded = raw ? wlNameToUTF(decodeWolframOctal(decodeWolframHex(raw))) : '';
-            try {
-                require('fs').appendFileSync('/tmp/gs_debug.txt',
-                    'DECODED: ' + JSON.stringify(decoded.slice(0, 300)) + '\n' +
-                    'SYMBOLS: ' + JSON.stringify(decoded ? decoded.split(',').filter(Boolean) : []) + '\n');
-            } catch(_) {}
-            console.log('[global-symbols] DECODED:', JSON.stringify(decoded.slice(0, 200)));
             _symbols = decoded ? decoded.split(',').filter(Boolean) : [];
-            console.log('[global-symbols] symbols updated, count:', _symbols.length, '| sample:', _symbols.slice(0, 5));
+            scrollLog('[global-symbols] symbols updated, count:', _symbols.length, '| sample:', _symbols.slice(0, 5));
         } else {
-            console.log('[global-symbols] unexpected result, symbols unchanged');
+            scrollLog('[global-symbols] unexpected result — type:', result?.type, '| value prefix:', typeof result?.value === 'string' ? result.value.slice(0, 80) : result?.value);
         }
     } catch (err) {
-        console.log('[global-symbols] sub() error:', err?.message || err);
+        scrollLog('[global-symbols] sub() error:', err?.message || err);
     }
 
     _applyToAllEditors();

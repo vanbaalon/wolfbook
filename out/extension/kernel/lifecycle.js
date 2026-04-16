@@ -470,6 +470,10 @@ async function launchKernel(self, WstpSession) {
         vscode.commands.executeCommand("setContext", "wolframKernelActive", true);
         vscode.window.showInformationMessage("Wolfram kernel launched (WSTP), ready for evaluation.");
         devLog(LOG_CHANNELS.KERNEL, '[launchKernel] kernel ready');
+        // Notify any registered listener (e.g. watch panel deferred refresh)
+        if (typeof self._onKernelReady === 'function') {
+            try { self._onKernelReady(); } catch (_) {}
+        }
 
         // Track PID so we can kill the process if VS Code crashes before quitKernel()
         try {

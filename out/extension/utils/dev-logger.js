@@ -42,8 +42,9 @@ const LOG_CHANNEL_LABELS = {
     SLIDE:     'Slide editor eval',
 };
 
-// Default: all channels ON for dev.  Persisted to a JSON sidecar next to this file.
-const _PREFS_FILE = require('path').join(__dirname, '.dev-log-prefs.json');
+// Default: all channels ON for dev.  Persisted to the user's home directory so
+// the setting survives across version deploys (each new version has a fresh extension folder).
+const _PREFS_FILE = require('path').join(require('os').homedir(), '.wolfbook-dev-log-prefs.json');
 let _enabledMask = _loadMask();
 
 function _allMask() {
@@ -56,7 +57,21 @@ function _loadMask() {
         const raw = require('fs').readFileSync(_PREFS_FILE, 'utf8');
         const v = JSON.parse(raw).mask;
         return (typeof v === 'number') ? v : _allMask();
-    } catch (_) { return _allMask(); }
+    } catch (_) {
+        // New prefs file doesn't exist yet — try to migrate from old location inside
+        // the extension folder (used before v2.6.49).
+        try {
+            const _oldPrefs = require('path').join(__dirname, '.dev-log-prefs.json');
+            const raw = require('fs').readFileSync(_oldPrefs, 'utf8');
+            const v = JSON.parse(raw).mask;
+            if (typeof v === 'number') {
+                // Persist to new stable location so future loads work.
+                _saveMask(v);
+                return v;
+            }
+        } catch (_2) {}
+        return _allMask();
+    }
 }
 
 function _saveMask(mask) {

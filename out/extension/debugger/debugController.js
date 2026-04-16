@@ -327,8 +327,6 @@ class DebugController {
      *  that directly.  In the idle evaluate() path the ReturnPacket payload is also
      *  a WL String (type:'string').  Either way JSON.parse works. */
     _applyWatchWexpr(wl, raw) {
-        scrollLog('[live-watch] _applyWatchWexpr | raw.type:', raw?.type, '| raw.value truthy:', !!raw?.value,
-            '| raw.value repr:', JSON.stringify(String(raw?.value ?? '').slice(0, 120)));
         if (!raw) { scrollLog('[live-watch] _applyWatchWexpr: raw is null/undefined — abort'); return 0; }
         const { decodeWstpText } = require('../utils/encoding');
         let parsed = {};
@@ -341,11 +339,10 @@ class DebugController {
             const decoded = decodeWstpText(raw.value);
             // The decoded string is now proper JSON with real newlines/tabs as whitespace
             // — JSON.parse handles those natively.
-            scrollLog('[live-watch] decoded JSON (first 200):', JSON.stringify(decoded.slice(0, 200)));
             try { parsed = JSON.parse(decoded); }
             catch (e) {
                 parseErr = e.message;
-                // Extract position from error message and dump surrounding chars
+                // Dump diagnostics only on error
                 const posMatch = parseErr.match(/position (\d+)/);
                 if (posMatch) {
                     const pos = parseInt(posMatch[1]);
@@ -356,30 +353,22 @@ class DebugController {
                         '| context:', JSON.stringify(decoded.slice(start, end)),
                         '| ← pos marker at offset', pos - start);
                 }
-                scrollLog('[live-watch] FULL decoded JSON:', JSON.stringify(decoded));
+                scrollLog('[live-watch] JSON parse failed:', parseErr,
+                    '| raw (first 200):', JSON.stringify(decoded.slice(0, 200)));
             }
-            scrollLog('[live-watch] JSON.parse ok:', parseErr == null,
-                '| keys:', Object.keys(parsed).join(', ') || '(none)',
-                parseErr ? '| ERROR: ' + parseErr : '');
         } else if (!raw.value) {
-            scrollLog('[live-watch] _applyWatchWexpr: raw.value is falsy (empty string or missing) — type:', raw.type);
+            scrollLog('[live-watch] _applyWatchWexpr: raw.value is falsy — type:', raw.type);
         } else {
             scrollLog('[live-watch] _applyWatchWexpr: non-string type, using wexprToJs fallback | type:', raw.type);
             // Fallback: WExpr Association (BEGINDLGPKT / future path)
             const j = wexprToJs(raw);
             if (j && typeof j === 'object' && !Array.isArray(j)) parsed = j;
-            scrollLog('[live-watch] wexprToJs result keys:', Object.keys(parsed).join(', ') || '(none)');
         }
         const variables = wl.map(name => {
             const vals = parsed[name];
-            scrollLog('[live-watch] var', JSON.stringify(name),
-                '| found in parsed:', vals != null,
-                '| vals type:', typeof vals,
-                '| vals:', JSON.stringify(vals)?.slice(0, 80));
             if (vals == null) return null;
             const shortVal = (typeof vals === 'object') ? String(vals['short'] ?? '?') : String(vals);
             const fullVal  = (typeof vals === 'object') ? String(vals['full']  ?? '?') : String(vals);
-            scrollLog('[live-watch] var', JSON.stringify(name), '→ shortVal:', JSON.stringify(shortVal), '| fullVal:', JSON.stringify(fullVal));
             return { name, shortVal, fullVal, isWatch: true };
         }).filter(Boolean);
         scrollLog('[live-watch] resolved', variables.length, '/', wl.length,
@@ -400,6 +389,13 @@ class DebugController {
         const ctrl = this._getController();
         if (!ctrl?.session) {
             this._watchPanel.liveUpdate(wl.map(n => ({ name: n, shortVal: '—', fullVal: 'No kernel', isWatch: true })));
+            return;
+        }
+        // Guard: kernel session exists but init.wl hasn't finished yet.
+        // Firing subAuto before the kernel is fully ready causes a MENUPKT
+        // cascade that corrupts the WSTP link and fills logs with 'continue (or c)'.
+        if (ctrl.kernelStatusString !== 'resolved') {
+            this._watchPanel.liveUpdate(wl.map(n => ({ name: n, shortVal: '…', fullVal: 'Kernel starting…', isWatch: true })));
             return;
         }
 

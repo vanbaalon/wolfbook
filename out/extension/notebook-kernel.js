@@ -141,21 +141,22 @@ class ExecutionQueue {
         }
     }
     start(id) {
+        const { scrollLog } = require('./utils/dev-logger');
         const execution = this.find(id);
         if (execution) {
             const cellIdx = execution.execution.cell.index;
             // Guard: don't call .start() again if preVisualStart already triggered it.
             // Record _actualStartTime now so end() can compute the true elapsed duration.
             if (!execution.preVisualStarted) {
-                console.log(`[queue.start] cell ${cellIdx} — calling .start() (no preVisual)`);
+                scrollLog(`[queue.start] cell ${cellIdx} — calling .start() (no preVisual)`);
                 execution.execution.start(Date.now());
             } else {
-                console.log(`[queue.start] cell ${cellIdx} — skipping .start() (preVisual already did it); recording actualStartTime`);
+                scrollLog(`[queue.start] cell ${cellIdx} — skipping .start() (preVisual already did it); recording actualStartTime`);
             }
             execution._actualStartTime = Date.now();
             execution.started = true;
         } else {
-            console.warn('[queue.start] id not found:', id);
+            scrollLog('[queue.start] id not found:', id);
         }
     }
     end(id, succeed) {

@@ -93,6 +93,7 @@ class WolframNotebookKernel {
 
         this.findKernel         = new find_kernel_1.FindKernel();
         this.kernelStatusString = "unresolved";
+        this._onKernelReady     = null;   // optional callback() — called when kernel reaches 'resolved'
         this.extensionPath      = "";
         this.isAborting         = false;
         // Collects Print[] lines emitted inside a Dialog[] subsession.
