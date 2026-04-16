@@ -7,6 +7,7 @@ const vscode = require("vscode");
 const path   = require("path");
 const fs     = require("fs");
 const configCompat = require("./config-compat");
+const { devLog, LOG_CHANNELS, LOG_CHANNEL_LABELS, DEV_MODE, getLogMask, setLogMask } = require('./utils/dev-logger');
 
 // ── Colour palette ────────────────────────────────────────────────────────────
 const BACKGROUND_COLORS = [
@@ -93,7 +94,7 @@ function registerNotebookSettings(context) {
                     (active && active.notebook && active.notebook.notebookType === 'extended-wolfram-notebook' ? active : null) ||
                     notebookEditors.find(e => e.notebook.notebookType === 'extended-wolfram-notebook');
 
-                console.log('[NotebookSettings] active=', active && active.notebook.notebookType, 'found=', !!wolframEditor);
+                devLog(LOG_CHANNELS.EXTENSION, '[NotebookSettings] active=', active && active.notebook.notebookType, 'found=', !!wolframEditor);
                 if (!wolframEditor) {
                     vscode.window.showErrorMessage('No Wolfram notebook is open.');
                     return;
@@ -195,6 +196,36 @@ async function showSettingsUI(notebook) {
         },
     ];
 
+    // ── Developer Logs section (dev machines only) ────────────────────────
+    if (DEV_MODE) {
+        const mask = getLogMask();
+        const devLogItems = Object.entries(LOG_CHANNELS).map(([key, flag]) => {
+            const on = !!(mask & flag);
+            return {
+                label:        (on ? '$(check) ' : '$(circle-slash) ') + LOG_CHANNEL_LABELS[key],
+                description:  on ? 'logging ON' : 'logging OFF',
+                value:        '__devlog_toggle__',
+                _channelKey:  key,
+                _channelFlag: flag,
+                _channelOn:   on,
+            };
+        });
+        items.push(
+            { label: 'Developer Logs', kind: vscode.QuickPickItemKind.Separator },
+            ...devLogItems,
+            {
+                label:       '$(check-all) Enable all log channels',
+                description: 'Turn on every channel',
+                value:       '__devlog_all_on__',
+            },
+            {
+                label:       '$(close-all) Disable all log channels',
+                description: 'Silence all dev logging',
+                value:       '__devlog_all_off__',
+            },
+        );
+    }
+
     const pick = await vscode.window.showQuickPick(items, {
         placeHolder:        'Choose a background setting',
         title:              'Notebook Background Settings',
@@ -262,6 +293,26 @@ async function showSettingsUI(notebook) {
         await updateNotebookSettings(notebook, { backgroundColor: '', backgroundImagePath: '' });
         vscode.window.showInformationMessage('All notebook background customizations reset');
 
+    } else if (pick.value === '__devlog_toggle__') {
+        // Toggle a single channel — xor the flag
+        const newMask = getLogMask() ^ pick._channelFlag;
+        setLogMask(newMask);
+        const state = (newMask & pick._channelFlag) ? 'ON' : 'OFF';
+        vscode.window.showInformationMessage(`Log channel "${LOG_CHANNEL_LABELS[pick._channelKey]}" is now ${state}`);
+        // Reopen the settings UI so the state is visually updated
+        setImmediate(() => showSettingsUI(notebook));
+
+    } else if (pick.value === '__devlog_all_on__') {
+        const allMask = Object.values(LOG_CHANNELS).reduce((a, b) => a | b, 0);
+        setLogMask(allMask);
+        vscode.window.showInformationMessage('All developer log channels enabled');
+        setImmediate(() => showSettingsUI(notebook));
+
+    } else if (pick.value === '__devlog_all_off__') {
+        setLogMask(0);
+        vscode.window.showInformationMessage('All developer log channels disabled');
+        setImmediate(() => showSettingsUI(notebook));
+
     } else {
         // Named palette color
         await updateNotebookSettings(notebook, { backgroundColor: pick.value });
@@ -319,7 +370,7 @@ function createBorderColor(color) {
 async function applyNotebookSettings(notebook) {
     const settings = getNotebookSettings(notebook);
     const uri      = notebook.uri.toString();
-    console.log('[NotebookSettings] Applying settings for:', uri, JSON.stringify(settings));
+    devLog(LOG_CHANNELS.EXTENSION, '[NotebookSettings] Applying settings for:', uri, JSON.stringify(settings));
 
     // 1. Background color via workbench.colorCustomizations
     const config        = vscode.workspace.getConfiguration('workbench');

@@ -45,7 +45,7 @@ const vscode = require('vscode');
 const configCompat = require('../config-compat');
 const path   = require('path');
 const fs     = require('fs');
-const { scrollLog } = require('../utils/dev-logger');
+const { scrollLog, devLog, LOG_CHANNELS } = require('../utils/dev-logger');
 
 // ─── WExpr helpers ────────────────────────────────────────────────────────────
 
@@ -220,6 +220,7 @@ class DebugController {
                 },
             );
             watchPanel.setOnOpenInEditor((name, fullVal) => this._openWatchInEditor(name, fullVal));
+            watchPanel.setOnBecomeVisible(() => { if (!this._active) this.refreshLiveWatch(); });
             // Keep watch panel breakpoint list in sync whenever bps change
             this._bpMgr.setOnChange(() => {
                 watchPanel.updateBreakpoints(this._bpMgr.getAllBreakpoints());
@@ -392,6 +393,7 @@ class DebugController {
 
     async refreshLiveWatch() {
         if (this._active || !this._watchPanel) return;
+        if (!this._watchPanel.isVisible) return;  // panel collapsed — skip kernel eval
         const wl = this._watchPanel.getWatchList();
         if (wl.length === 0) { this._watchPanel.liveUpdate([]); return; }
 
@@ -418,14 +420,10 @@ class DebugController {
         const kernelBusy    = !!(ctrl.executionQueue?.queue?.length > 0 && !ctrl._abortPending);
         const dynActive     = !!(ctrl._dynamicWidgets?.size > 0);
 
-        scrollLog('[live-watch] cycle | busy:', kernelBusy, '| dynActive:', dynActive,
-            '| dispatched:', ctrl._evalDispatched, '| dlgOpen:', ctrl.session.isDialogOpen);
-
         if (kernelBusy && dynActive) {
             // Dynamic loop is running — it will pick up _liveWatchExpr via the
             // C++ registry on the next getDynamicResults() poll cycle (~300 ms).
             // No separate interrupt needed.
-            scrollLog('[live-watch] deferring to Dynamic loop (dynActive) — no interrupt');
             return;
         }
 
@@ -454,12 +452,10 @@ class DebugController {
             if (ctrl._subAutoLock === _cppPromise) ctrl._subAutoLock = null;
         });
         try {
-            scrollLog('[live-watch] subAuto | busy:', kernelBusy);
             const result = await Promise.race([
                 _cppPromise,
                 new Promise((_, rej) => setTimeout(() => rej(new Error('watch-timeout')), 6000))
             ]);
-            scrollLog('[live-watch] subAuto result type:', result?.type);
             this._applyWatchWexpr(wl, result);
             this._liveWatchConsecErrors = 0;  // success — reset counter
         } catch (err) {
@@ -949,7 +945,7 @@ class DebugController {
                            && !lastD0Step?.suppressedOutput
                            && (evalResult?.cellIndex ?? 0) > 0
                            && this._debugExecution && ctrl?.session;
-        console.log('[wolfbook-debug] _finishDebug: canRender=', _canRender);
+        devLog(LOG_CHANNELS.DEBUGGER, '[wolfbook-debug] _finishDebug: canRender=', _canRender);
         if (_canRender) {
             try {
                 const cellForFmt = this._cell || finishedCell;
@@ -1242,12 +1238,12 @@ class DebugController {
     _applyStepHighlight(depth, localStep) {
         const editor = this._getCellEditor();
         if (!editor) {
-            console.log('[wolfbook-debug] _applyStepHighlight: no cell editor found');
+            devLog(LOG_CHANNELS.DEBUGGER, '[wolfbook-debug] _applyStepHighlight: no cell editor found');
             return;
         }
         const step = this._findStep(depth, localStep);
         if (!step) {
-            console.log('[wolfbook-debug] _applyStepHighlight: no step for depth=', depth, 'localStep=', localStep);
+            devLog(LOG_CHANNELS.DEBUGGER, '[wolfbook-debug] _applyStepHighlight: no step for depth=', depth, 'localStep=', localStep);
             editor.setDecorations(this._stepHighlight, []);
             return;
         }
@@ -1255,7 +1251,7 @@ class DebugController {
             step.startLine, step.startChar,
             step.endLine,   Math.max(step.endChar, 0),
         );
-        console.log('[wolfbook-debug] _applyStepHighlight: highlighting lines', step.startLine, '-', step.endLine);
+        devLog(LOG_CHANNELS.DEBUGGER, '[wolfbook-debug] _applyStepHighlight: highlighting lines', step.startLine, '-', step.endLine);
         editor.setDecorations(this._stepHighlight, [range]);
     }
 

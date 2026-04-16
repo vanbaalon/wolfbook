@@ -6,6 +6,7 @@ const vscode = require("vscode");
 const fs = require("fs");
 const path = require("path");
 const configCompat = require("./config-compat");
+const { scrollLog } = require('./utils/dev-logger');
 
 // Load Unicode mappings
 let unicodeMappings = null;
@@ -33,15 +34,12 @@ function loadUnicodeMappings(extensionPath) {
 }
 
 function registerUnicodeReplacer(context, extensionPath) {
-    console.log('[Unicode Replacer] registerUnicodeReplacer called with extensionPath:', extensionPath);
     // Load mappings
     const mappings = loadUnicodeMappings(extensionPath);
     if (!mappings) {
         console.error('[Unicode Replacer] Not activated: mappings failed to load');
         return;
     }
-
-    console.log('[Unicode Replacer] Auto-replacement active on text change');
 
     // Listen for text changes in the active editor
     const changeDisposable = vscode.workspace.onDidChangeTextDocument(event => {
@@ -89,7 +87,7 @@ function registerUnicodeReplacer(context, extensionPath) {
                 continue;
             }
 
-            console.log(`[Unicode Replacer] Text changed in line ${startLine}: "${lineText}"`);
+            scrollLog(`[Unicode Replacer] Text changed in line ${startLine}: "${lineText}"`);
             
             // Get cursor position to avoid replacing patterns we're still typing
             const cursorPos = editor.selection.active.character;
@@ -106,7 +104,7 @@ function registerUnicodeReplacer(context, extensionPath) {
                 
                 // Skip if cursor is inside this pattern (user is still typing)
                 if (cursorPos > matchStart && cursorPos < matchEnd) {
-                    console.log(`[Unicode Replacer] Skipping ${match[0]} - cursor inside at position ${cursorPos}`);
+                    scrollLog(`[Unicode Replacer] Skipping ${match[0]} - cursor inside at position ${cursorPos}`);
                     continue;
                 }
                 
@@ -114,7 +112,7 @@ function registerUnicodeReplacer(context, extensionPath) {
                 const unicodeChar = mappings.get(mathematicaNotation);
                 
                 if (unicodeChar) {
-                    console.log(`[Unicode Replacer] Replacing ${mathematicaNotation} → ${unicodeChar}`);
+                    scrollLog(`[Unicode Replacer] Replacing ${mathematicaNotation} → ${unicodeChar}`);
                     replacements.push({
                         range: new vscode.Range(
                             new vscode.Position(startLine, matchStart),
@@ -128,7 +126,7 @@ function registerUnicodeReplacer(context, extensionPath) {
             
             // Apply all replacements
             if (replacements.length > 0) {
-                console.log(`[Unicode Replacer] Applying ${replacements.length} replacements`);
+                scrollLog(`[Unicode Replacer] Applying ${replacements.length} replacements`);
                 
                 editor.edit(editBuilder => {
                     for (const repl of replacements) {
@@ -209,7 +207,6 @@ function registerUnicodeReplacer(context, extensionPath) {
     );
 
     context.subscriptions.push(changeDisposable, commandDisposable, completionProvider);
-    console.log('Unicode replacer activated');
 }
 
 exports.registerUnicodeReplacer = registerUnicodeReplacer;

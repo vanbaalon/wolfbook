@@ -3,7 +3,7 @@
   "displayName": "Wolfbook — AI-Friendly Wolfram Language Notebook",
   "description": "AI-friendly Wolfram Language notebook for VS Code. WSTP kernel, KaTeX rendering with adaptive line-breaking, Unicode input, LSP diagnostics, and AI-readable outputs for GitHub Copilot.",
   "publisher": "wolfbook",
-  "version": "2.6.47",
+  "version": "2.6.48",
   "engines": {
     "vscode": "^1.95.0"
   },
@@ -36,6 +36,7 @@
     "onCommand:wolfbook.openConfigurations",
     "onCommand:wolfbook.launchKernel",
     "onView:wolfbook.watchPanel",
+    "onView:wolfbook.askSpecialist",
     "onCustomEditor:wolfbook.slideEditor",
     "onLanguage:wslide"
   ],
@@ -979,6 +980,11 @@
           "type": "webview",
           "id": "wolfbook.watchPanel",
           "name": "Watch"
+        },
+        {
+          "type": "webview",
+          "id": "wolfbook.askSpecialist",
+          "name": "Ask Specialist"
         }
       ]
     },
@@ -1881,6 +1887,32 @@
         }
       },
       {
+        "name": "wolfteam_askSpecialist",
+        "displayName": "Wolfteam: Ask Specialist",
+        "toolReferenceName": "wolfteamAsk",
+        "modelDescription": "Call this tool when you need the user's expert input to make a strategic decision — e.g., which paper's conventions to follow, which ansatz to use, which branch of a solution to explore, or which notation to adopt. The question is rendered in Markdown+LaTeX inside the Wolfbook 'Ask Specialist' panel with a blinking background and audio alert so the user notices it. The tool blocks until the user types a reply and submits it. Use this instead of guessing on questions that only the domain expert can answer correctly.",
+        "tags": [
+          "wolfteam"
+        ],
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "question": {
+              "type": "string",
+              "description": "The question to ask the specialist. May contain Markdown formatting and LaTeX math ($ inline, $$ display). Be specific and concrete."
+            },
+            "context": {
+              "type": "string",
+              "description": "Optional background context for the question — e.g., the current approach, relevant equations, or why this decision matters. Rendered above the question."
+            }
+          },
+          "required": [
+            "question"
+          ]
+        }
+      },
+      {
         "name": "wolfslide_getContext",
         "displayName": "Wolfslide: Get Deck Context",
         "toolReferenceName": "wolfslideContext",
@@ -2051,7 +2083,7 @@
         "displayName": "Wolfslide: Edit Slide",
         "toolReferenceName": "wolfslideEdit",
         "canBeReferencedInPrompt": true,
-        "modelDescription": "Replaces top-level properties of a slide (label, background, layout, gap, padding, hidden, children). Only keys present in the patch are updated. To rewrite a slide's block tree, pass the complete children array. Content supports KaTeX math ($...$, $$...$$) and fragmentOrder:N animation. CSS color classes: .gl .te .ro .mu .bl .re .cy.",
+        "modelDescription": "Replaces top-level properties of a slide (label, background, layout, gap, padding, hidden, children). Only keys present in the patch are updated. To rewrite a slide's block tree, pass the complete children array. Merge semantics: in the children array, a block specified as {\"id\":\"...\"}  with no other fields is a no-op stub — the existing block is kept unchanged. Valid block types: container, heading, text, image, list, math, box, raw, code, arrow, eval. Unknown types are silently stored but will not render — a warning is returned. Content supports KaTeX math ($...$, $$...$$) and fragmentOrder:N animation. CSS color classes: .gl .te .ro .mu .bl .re .cy.",
         "inputSchema": {
           "type": "object",
           "properties": {

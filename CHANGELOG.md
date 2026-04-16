@@ -4,6 +4,36 @@ All notable changes to **Wolfbook** are documented here.
 
 ---
 
+## [2.6.47] - 2026-04-16
+
+### Added — `wolfteam_askSpecialist` tool
+
+New team tool that opens a **Ask Specialist** panel in the Wolfbook sidebar, letting the AI agent pause and ask you a domain question before continuing:
+
+- Renders the question (and optional context) with full **Markdown + KaTeX** math.
+- A blinking highlight and a double-beep audio cue (Web Audio API) draw attention when the panel becomes active.
+- Large textarea with `Ctrl+Enter` submit and a **Dismiss** button.
+- Agent blocks until a reply is received — ideal for genuine branch-point decisions that require physics or domain expertise.
+- Panel declared in `package.json` as a `webview` view and retains context when hidden (`retainContextWhenHidden: true`).
+
+### Improved — PDF / HTML export
+
+**Full Markdown rendering** — the hand-rolled line-by-line parser in `generatePdfHtml` is replaced by [`marked`](https://marked.js.org/) (GFM mode). All standard Markdown now exports correctly:
+
+- Tables (`| col |`) — styled headers, alternating row colours, border-collapse.
+- Fenced code blocks (`` ```lang ``) — monospace background, border, padding.
+- Ordered and unordered lists.
+- Blockquotes (left-border rule).
+- Multi-line display math (`$$...$$` spanning several lines).
+
+Math spans are extracted to `\x00MATHn\x00` placeholders before `marked` runs so LaTeX is never mangled, then restored as KaTeX-rendered HTML.
+
+**Theme-aware colours** — background, text, headings, code blocks, table cells, blockquotes, links, and text-output `<pre>` elements now pick up the VS Code active colour theme at export time (`vscode.window.activeColorTheme.kind`). Dark themes produce a full dark-palette export; light themes produce the traditional white export.
+
+**Wolfbook footer** — every exported PDF/HTML ends with a thin separator line, the Wolfbook logo (inlined as a base64 PNG), and "Created with Wolfbook" in small dimmed text, coloured to match the theme.
+
+---
+
 ## [2.6.29] - 2026-04-11
 
 ### Added — `wolfslide_imageAsset` tool

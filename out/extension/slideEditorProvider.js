@@ -3,6 +3,7 @@ const vscode = require('vscode');
 const path   = require('path');
 const fs     = require('fs');
 const { decodeWstpText } = require('./utils/encoding');
+const { devLog, LOG_CHANNELS } = require('./utils/dev-logger');
 
 // ---- BTL (BoxToLatex) addon for eval block LaTeX rendering ----
 const _BTL_DIR = path.join(__dirname, '../../wllatex-addon');
@@ -61,7 +62,7 @@ function _evalBoxesToKaTeX(context, b64boxes, containerWidthPx) {
 
         // Pre-render via KaTeX in Node.js
         const html = _btlPrerenderLatex(latex, true /* displayMode */);
-        console.log('[wslide-eval] BTL → LaTeX length:', latex.length, 'KaTeX HTML length:', html.length);
+        devLog(LOG_CHANNELS.SLIDE, '[wslide-eval] BTL → LaTeX length:', latex.length, 'KaTeX HTML length:', html.length);
         return { type: 'latex', html, latex };
     } catch (e) {
         console.error('[wslide-eval] BTL/KaTeX error:', e.message);
@@ -416,7 +417,7 @@ class SlideEditorProvider {
                         if (this._presOrigCenterLayout !== false) {
                             const zenCfg = vscode.workspace.getConfiguration('zenMode');
                             const restoreVal = (this._presOrigCenterLayout === undefined) ? undefined : this._presOrigCenterLayout;
-                            console.log('[wslide-ext] restoring zenMode.centerLayout to', restoreVal);
+                            devLog(LOG_CHANNELS.SLIDE, '[wslide-ext] restoring zenMode.centerLayout to', restoreVal);
                             // undefined = remove the override (revert to default)
                             zenCfg.update('centerLayout', restoreVal, vscode.ConfigurationTarget.Global);
                         }
@@ -483,19 +484,19 @@ class SlideEditorProvider {
     ]
   ]
 ]`;
-                        console.log('[wslide-eval] Evaluating block', blockId, 'input:', input.slice(0, 80));
+                        devLog(LOG_CHANNELS.SLIDE, '[wslide-eval] Evaluating block', blockId, 'input:', input.slice(0, 80));
                         const evalP = controller.session.evaluate(expr, { interactive: false });
                         const raceTimeout = new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), (timeout + 10) * 1000));
                         const evalResult = await Promise.race([evalP, raceTimeout]);
 
                         // Parse the result — session.evaluate returns {result: {type, value}, messages[]}
-                        console.log('[wslide-eval] Raw result type:', evalResult?.result?.type, 'value length:', evalResult?.result?.value?.length ?? 'N/A');
+                        devLog(LOG_CHANNELS.SLIDE, '[wslide-eval] Raw result type:', evalResult?.result?.type, 'value length:', evalResult?.result?.value?.length ?? 'N/A');
                         if (evalResult?.result?.type === 'abort') {
                             sendResult({ type: 'error', error: 'Evaluation aborted.' });
                             break;
                         }
                         const resultStr = (evalResult?.result?.type === 'string' && evalResult.result.value) ? evalResult.result.value : String(evalResult?.result ?? '');
-                        console.log('[wslide-eval] resultStr prefix:', resultStr.slice(0, 80));
+                        devLog(LOG_CHANNELS.SLIDE, '[wslide-eval] resultStr prefix:', resultStr.slice(0, 80));
                         const now = new Date().toLocaleTimeString();
 
                         if (resultStr.startsWith('SVG:')) {

@@ -10,6 +10,7 @@
  * Registered in extension.js via vscode.debug.registerDebugAdapterDescriptorFactory.
  */
 const vscode = require('vscode');
+const { devLog, LOG_CHANNELS } = require('../utils/dev-logger');
 
 /** Map 0-based bp lines to kernel {depth, localStep} strings using deepest-match. */
 function _bpLinesToKernelSteps(lines, steps) {
@@ -445,7 +446,7 @@ class WolframDebugAdapter {
             return this._sendResponse(req, { result: '', variablesReference: 0 });
         }
 
-        console.log('[wolfbook-dap] evaluate: expr=', expr, '| context=', context,
+        devLog(LOG_CHANNELS.DEBUGGER, '[wolfbook-dap] evaluate: expr=', expr, '| context=', context,
             '| hasIterVars=', !!this._dc._lastStepInfo?.iterVars,
             '| dialogOpen=', this._getController()?.session?.isDialogOpen,
             '| cacheSize=', this._evalCache.size);
@@ -467,7 +468,7 @@ class WolframDebugAdapter {
         // Node.js event loop.  (VS Code Watch panel sends N parallel evaluate
         // requests the moment the debugger pauses — they would otherwise race.)
         if (dialogOpen) {
-            console.log('[wolfbook-dap] evaluate: enqueueing kernel eval for', expr);
+            devLog(LOG_CHANNELS.DEBUGGER, '[wolfbook-dap] evaluate: enqueueing kernel eval for', expr);
             const kernelExpr = context === 'hover'
                 ? `ToString[Short[${expr}, 3], OutputForm]`
                 : `ToString[TimeConstrained[${expr}, 5], OutputForm]`;
@@ -501,7 +502,7 @@ class WolframDebugAdapter {
 
             try {
                 const value = await resultP;
-                console.log('[wolfbook-dap] evaluate: GOT VALUE for', expr, '=', value?.substring?.(0, 80) ?? value);
+                devLog(LOG_CHANNELS.DEBUGGER, '[wolfbook-dap] evaluate: GOT VALUE for', expr, '=', value?.substring?.(0, 80) ?? value);
                 this._evalCache.set(expr, value);
                 this._sendResponse(req, { result: value, variablesReference: 0 });
             } catch (err) {
@@ -512,7 +513,7 @@ class WolframDebugAdapter {
         }
 
         // ── Not paused: serve from cache ────────────────────────────────────────
-        console.log('[wolfbook-dap] evaluate: NOT paused, serving from cache for', expr);
+        devLog(LOG_CHANNELS.DEBUGGER, '[wolfbook-dap] evaluate: NOT paused, serving from cache for', expr);
         const cached = this._evalCache.get(expr);
         if (cached !== undefined) {
             return this._sendResponse(req, { result: cached, variablesReference: 0 });

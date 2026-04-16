@@ -13,7 +13,7 @@ Rendering symbolic math and graphics uses a bespoke **wolfbook-btl** (Box-to-LaT
 > Author: Nikolay Gromov — [nikolay.gromov@kcl.ac.uk](mailto:nikolay.gromov@kcl.ac.uk)  
 > License: Apache 2.0 (see [LICENSE.txt](LICENSE.txt))
 
-> Latest release: **v2.6.37** (2026-04-13). See [CHANGELOG.md](CHANGELOG.md) for release notes.
+> Latest release: **v2.6.47** (2026-04-16). See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 ---
 
@@ -29,18 +29,18 @@ Ten tools can be referenced directly in chat with `#name`; the rest are invoked 
 
 #### Directly referenceable tools (`#name` shorthand)
 
-| Tool | Reference | What Copilot can do |
-|------|-----------|---------------------|
-| 📋 **Get notebook context** | `#wolfbookContext` | Reads all cell sources and outputs for the active notebook. Also: `action:"list"` lists open notebooks, `action:"switch"` changes the active notebook, `action:"save"` saves to disk |
-| ⚡ **Evaluate expression** | `#wolfbookEval` | Runs any Wolfram Language expression in the live kernel and returns the result. Use `multiLine:true` to evaluate a block line-by-line. Add `outputForm:"Short"` for a truncated preview, `outputForm:"TeXForm"` for LaTeX output, or `outputForm:"MatrixForm"`/`"TableForm"` for structured display |
-| 🔍 **Look up symbol** | `#wolfbookLookup` | Retrieves usage docs, options table, and an online reference link for any symbol — built-in or user-defined. Add `fetchWeb:true` to fetch the full Wolfram reference page |
-| ➕ **Insert cells** | `#wolfbookInsertCells` | Inserts one or more cells at any position. Pass top-level `kind`+`content` for a single cell, or a `cells:[...]` array for multiple. Use `afterCellId`/`afterCell` + `position:"before"\|"after"` to target precisely. Set `evaluate:true` to run immediately |
-| ✏️ **Edit cell** | `#wolfbookEdit` | Replaces the source of an existing cell in-place; set `evaluate:true` to immediately run the new content and verify the result |
-| ▶️ **Run cell(s)** | `#wolfbookRun` | Executes a cell (by `cellId` or `cellNumber`) or a range of cells (`startCell`/`endCell`). Set `stopOnError:true` (default) to halt on the first error in range mode |
-| 🗑️ **Delete cell(s)** | `#wolfbookDelete` | Removes one or more cells; deleted content is saved to `ai_deleted_cells.md` for recovery — pass `cellId`/`cellIds` (preferred) or `cellNumber`/`cellNumbers` |
-| 🔍 **Search cells** | `#wolfbookSearch` | Finds cells by text or regex, optionally filtered by kind (`"code"`/`"markdown"`). Returns cell numbers, CellId values, and source previews |
-| 🔎 **Kernel state** | `#wolfbookState` | Lists all symbols matching a context pattern (default `Global\`*`) with their current values or rule counts — call this before writing code to avoid naming conflicts |
-| 📚 **Paper search** | `#wolfbookPaper` | Search academic papers (HEP/math/physics) via INSPIRE-HEP with arXiv fallback. Five actions: `action:"search"` finds papers by `title`, `author`, `abstract`, arXiv ID or INSPIRE texkey; `action:"bibtex"` returns a BibTeX `@article` record; `action:"bibitem"` returns a LaTeX `\bibitem`; `action:"references"` lists all papers cited by a paper (add `includeContexts:true` for Semantic Scholar citation snippets); `action:"citations"` lists papers that cite a paper with citation context sentences. Results include INSPIRE citation counts and ar5iv HTML links. Accepts arXiv IDs in both new (`2103.15840`) and old (`hep-th/0212208`) formats, INSPIRE texkeys (`Gromov:2013pga`), or plain INSPIRE record IDs. Primary source: INSPIRE-HEP; falls back to arXiv API for non-HEP papers. |
+| Tool | Reference | What it does |
+|------|-----------|---------------|
+| 📋 **Get notebook context** | `#wolfbookContext` | Read all cell sources and outputs; list, switch, or save notebooks |
+| ⚡ **Evaluate expression** | `#wolfbookEval` | Run any WL expression in the live kernel; supports `multiLine`, `outputForm` (Short / TeXForm / MatrixForm) |
+| 🔍 **Look up symbol** | `#wolfbookLookup` | Retrieve usage docs, options table, and online reference; add `fetchWeb:true` for the full page |
+| ➕ **Insert cells** | `#wolfbookInsertCells` | Insert one or more cells at any position; set `evaluate:true` to run immediately |
+| ✏️ **Edit cell** | `#wolfbookEdit` | Replace a cell's source in-place; set `evaluate:true` to run and verify the new content |
+| ▶️ **Run cell(s)** | `#wolfbookRun` | Execute a cell or a range of cells; output stored in the notebook |
+| 🗑️ **Delete cell(s)** | `#wolfbookDelete` | Remove cells; sources saved to recovery log for undo |
+| 🔍 **Search cells** | `#wolfbookSearch` | Find cells by text, regex, or kind; returns cell numbers and content previews |
+| 🔎 **Kernel state** | `#wolfbookState` | List all symbols in a context with their current values |
+| 📚 **Paper search** | `#wolfbookPaper` | Search INSPIRE-HEP / arXiv; fetch BibTeX, bibitem, reference lists, and citation contexts |
 
 #### AI-invoked tools (used automatically, no `#` shorthand)
 
@@ -54,6 +54,7 @@ Ten tools can be referenced directly in chat with `#name`; the rest are invoked 
 | 🟥 **Kernel crash log** (`wolfbook_kernelCrashLog`) | Reads `img/<notebookName>/wolfram-kernel-debug.log` and macOS crash reports to diagnose kernel crashes |
 | 📄 **File operations** (`wolfbook_fileOps`) | `action:"read"` reads a file, `action:"write"` creates/overwrites a file, `action:"list"` lists directory contents with optional `ext` and `depth` filters |
 | 🖥️ **Run terminal** (`wolfbook_runTerminal`) | Runs a shell command and returns stdout/stderr (builds, tests, scripts, git, LaTeX workflows) |
+| 💬 **Ask specialist** (`wolfteam_askSpecialist`) | Opens a focused question panel in the sidebar — displays the question with KaTeX math, plays an audio cue, and blocks until the user types a reply |
 
 ### How to activate
 
@@ -173,16 +174,17 @@ WBExport["/absolute/path/out.pdf"]
 
 **All formats:**
 - **Never sent to the kernel** — intercepted by the extension like `WBInclude`.
-- Exported with a **light background** using VS Code Light+ syntax colours.
+- Exported with **theme-aware colours** — dark VS Code themes produce a dark-background export; light themes produce a white-background export.
 - Every graphic output (SVG/PNG) is inlined or copied so exported files have no broken image links.
+- A small **Wolfbook footer** with the logo appears at the end of every exported document.
 
 **Format details:**
 
 | Format | Notes |
 |--------|-------|
 | `.nb` | Headings → `Title`/`Section`/etc.; text → `Text`; code → `Input`. Opens in Mathematica. |
-| `.pdf` | Requires Google Chrome. KaTeX fonts inlined; math renders offline. |
-| `.html` | Fully self-contained: KaTeX CSS+fonts, WL element CSS, and all images embedded as base64 data URIs. |
+| `.pdf` | Requires Google Chrome. KaTeX fonts inlined; math renders offline. Theme-aware background (dark/light). |
+| `.html` | Fully self-contained: KaTeX CSS+fonts, WL element CSS, all images as base64 data URIs. Theme-aware. |
 | `.md` | Code cells become ` ```mathematica ``` ` fenced blocks. Outputs with graphics are extracted to `<name>_images/` and referenced with `![output](...)`. Text outputs become blockquotes. |
 | `.tex` | Full `\documentclass{article}` preamble with `amsmath`, `listings`, `graphicx`, `float`, `hyperref`. Code cells use `lstlisting` with a custom Mathematica language definition. Graphics saved to `<name>_images/` and included with `\includegraphics`. |
 

@@ -25,6 +25,7 @@ class WatchPanelProvider {
         this._onAddWatch     = null;   // callback(name)
         this._onRemoveWatch  = null;   // callback(name)
         this._onRefresh      = null;   // callback() — refresh button
+        this._onBecomeVisible = null;   // callback() — panel expanded/shown
         this._onDebugCommand = null;   // callback(action) — debug control button clicked
         this._onRemoveBp     = null;   // callback(uri, line)
         this._onClearAllBps  = null;   // callback()
@@ -61,6 +62,7 @@ class WatchPanelProvider {
                 if (this._pendingHoverDoc) {
                     webviewView.webview.postMessage({ command: 'hoverDoc', ...this._pendingHoverDoc });
                 }
+                if (this._onBecomeVisible) this._onBecomeVisible();
             }
         });
         // Also send immediately — the panel may already be visible now.
@@ -159,6 +161,7 @@ class WatchPanelProvider {
     }
 
     setOnOpenInEditor(cb) { this._onOpenInEditor = cb || null; }
+    setOnBecomeVisible(cb) { this._onBecomeVisible = cb || null; }
 
     setCallbacks(onAdd, onRemove, onRefresh, onDebugCommand, onRemoveBp, onClearAllBps) {
         this._onAddWatch     = onAdd;
@@ -225,6 +228,9 @@ class WatchPanelProvider {
         if (!this._view) return;
         this._view.webview.postMessage({ command: 'updateBreakpoints', breakpoints: this._lastBpList });
     }
+
+    /** Returns true when the panel webview is currently visible (not collapsed). */
+    get isVisible() { return !!(this._view && this._view.visible); }
 
     /** Send a log line to the panel's log tail. */
     log(text) {

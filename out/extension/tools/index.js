@@ -3054,6 +3054,61 @@ class CheckpointTool {
 }
 
 // ---------------------------------------------------------------------------
+// AskSpecialistTool
+// ---------------------------------------------------------------------------
+
+class AskSpecialistTool {
+    /**
+     * @param {() => import('./askSpecialistPanel').AskSpecialistPanel} getPanel
+     */
+    constructor(getPanel) {
+        this._getPanel = getPanel;
+    }
+
+    async prepareInvocation(options, _token) {
+        const { question } = options.input;
+        return {
+            invocationMessage: `🔔 Asking specialist: ${String(question).slice(0, 80)}${String(question).length > 80 ? '…' : ''}`,
+        };
+    }
+
+    async invoke(options, _token) {
+        const { question, context } = options.input;
+
+        // Focus the Ask Specialist panel so the user sees the blinking panel
+        try {
+            await vscode.commands.executeCommand('wolfbook.askSpecialist.focus');
+        } catch (_) { /* panel may not be visible yet — ask() will buffer the question */ }
+
+        const panel = this._getPanel();
+        if (!panel) {
+            return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(
+                    'Ask Specialist panel is not available. Ask the user directly.'
+                ),
+            ]);
+        }
+
+        const reply = await panel.ask(String(question), context ? String(context) : '');
+
+        if (!reply) {
+            return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(
+                    'The user dismissed the Ask Specialist panel without replying. ' +
+                    'Use your best judgment or re-ask later if the question is critical.'
+                ),
+            ]);
+        }
+
+        return new vscode.LanguageModelToolResult([
+            new vscode.LanguageModelTextPart(
+                `Specialist replied: "${reply}". Incorporate this into your plan and proceed.`
+            ),
+        ]);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Registration helper — called from extension.js activate()
 // ---------------------------------------------------------------------------
 
@@ -3645,11 +3700,24 @@ class WolfslideGetSlideTool {
             }).join('\n')
             : '';
 
+        // Render warnings: unknown types, missing required fields
+        const VALID_BLOCK_TYPES_GS = new Set(['container','heading','text','image','list','math','box','raw','code','arrow','eval']);
+        const renderWarnings = [];
+        _collectAllBlocks(slide).forEach(b => {
+            if (b.type && !VALID_BLOCK_TYPES_GS.has(b.type)) {
+                renderWarnings.push(`block id=${b.id||'?'} has unknown type "${b.type}" — will not render. Valid types: ${[...VALID_BLOCK_TYPES_GS].join(', ')}.`);
+            }
+        });
+        const renderWarnStr = renderWarnings.length
+            ? `\n\n## ⚠ Render Warnings (${renderWarnings.length})\n${renderWarnings.map(w => '  - ' + w).join('\n')}`
+            : '';
+
         const output =
             asciiHeader +
             '```\n' + ascii + '\n```' +
             imgSummary +
             notesSummary +
+            renderWarnStr +
             '\n\n## Raw JSON\n```json\n' + JSON.stringify(slide, null, 2) + '\n```';
         return _slideResult(output);
     }
@@ -3690,12 +3758,46 @@ class WolfslideEditSlideTool {
         if (r.error) return _slideResult(r.error);
         const patch = options.input?.patch || options.input?.updates;
         if (!patch || typeof patch !== 'object') return _slideResult('"patch" (or "updates") object is required.');
-        Object.assign(r.slide, patch);
+
+        // Validate block types and collect warnings
+        const warnings = [];
+        const VALID_BLOCK_TYPES = new Set(['container','heading','text','image','list','math','box','raw','code','arrow','eval']);
+        function _checkBlockTypes(blocks) {
+            if (!Array.isArray(blocks)) return;
+            for (const b of blocks) {
+                if (b && b.type && !VALID_BLOCK_TYPES.has(b.type)) {
+                    warnings.push(`Unknown block type "${b.type}" (id=${b.id||'?'}). Valid types: ${[...VALID_BLOCK_TYPES].join(', ')}.`);
+                }
+                _checkBlockTypes(b.children || b.items || b.elements);
+            }
+        }
+        _checkBlockTypes(patch.children || patch.items || patch.elements);
+
+        // Merge semantics: for children arrays, id-only stubs mean "keep existing block unchanged"
+        function _mergeBlocks(existing, incoming) {
+            if (!Array.isArray(incoming)) return incoming;
+            const existingById = (existing || []).reduce((m, b) => { if (b?.id) m[b.id] = b; return m; }, {});
+            return incoming.map(b => {
+                if (b && b.id && Object.keys(b).length === 1 && existingById[b.id]) {
+                    return existingById[b.id]; // id-only stub — preserve existing
+                }
+                return b;
+            });
+        }
+        const mergedPatch = Object.assign({}, patch);
+        for (const key of ['children', 'items', 'elements']) {
+            if (Array.isArray(patch[key])) {
+                mergedPatch[key] = _mergeBlocks(r.slide[key], patch[key]);
+            }
+        }
+
+        Object.assign(r.slide, mergedPatch);
         _ensureBlockIds(r.slide.children);
         _ensureBlockIds(r.slide.items);
         _ensureBlockIds(r.slide.elements);
         await r.p.applyDeck(r.deck, r.docUri);
-        return _slideResult(`Slide ${r.idx + 1} (id=${r.slide.id}) updated.`);
+        const warningStr = warnings.length ? `\nWarnings:\n${warnings.map(w => `  ⚠ ${w}`).join('\n')}` : '';
+        return _slideResult(`Slide ${r.idx + 1} (id=${r.slide.id}) updated.${warningStr}`);
     }
 }
 
@@ -5722,7 +5824,7 @@ class PaperSearchTool {
     }
 }
 
-function registerTools(context, getController, debugCtrl) {
+function registerTools(context, getController, debugCtrl, getAskPanel) {
     const tools = [
         // Core notebook tools (visible in chat panel)
         { name: 'wolfbook_getNotebookContext', impl: new GetNotebookContextTool() },
@@ -5751,6 +5853,7 @@ function registerTools(context, getController, debugCtrl) {
         { name: 'wolfteam_proposePlan',        impl: new ProposePlanTool() },
         { name: 'wolfteam_askDecision',        impl: new AskDecisionTool() },
         { name: 'wolfteam_checkpoint',         impl: new CheckpointTool() },
+        { name: 'wolfteam_askSpecialist',      impl: new AskSpecialistTool(getAskPanel || (() => null)) },
         // Wolfslide tools
         { name: 'wolfslide_getContext',      impl: new WolfslideGetContextTool() },
         { name: 'wolfslide_listSlides',      impl: new WolfslideListSlidesTool() },
@@ -6292,4 +6395,4 @@ function registerWolfteamParticipant(context, getController) {
     context.subscriptions.push(participant);
 }
 
-module.exports = { registerTools, registerChatParticipant, registerWolfteamParticipant, buildTranscript, clearEvalLog };
+module.exports = { registerTools, registerChatParticipant, registerWolfteamParticipant, buildTranscript, clearEvalLog, AskSpecialistTool };

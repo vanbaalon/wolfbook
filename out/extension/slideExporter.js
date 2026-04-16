@@ -177,7 +177,7 @@ function slideToHTML(slide) {
         const flexDir = layout === 'row' ? 'row' : layout === 'free' ? '' : 'column';
         const layoutCSS = layout === 'free'
             ? `position:relative;width:1920px;height:1080px;${bgStyle}${padding}`
-            : `display:flex;flex-direction:${flexDir};${gap}${padding}width:1920px;height:1080px;${bgStyle}`;
+            : `position:relative;display:flex;flex-direction:${flexDir};${gap}${padding}width:1920px;height:1080px;${bgStyle}`;
         const notesHtml = slide.notes ? `\n<aside class="notes">${escapeAttr(slide.notes)}</aside>` : '';
         const resolvedTransition = slide.transition === 'random' ? ['fade','slide','convex','concave','zoom'][Math.floor(Math.random() * 5)] : slide.transition;
         const transition = resolvedTransition ? ` data-transition="${escapeAttr(resolvedTransition)}"` : '';
@@ -301,7 +301,7 @@ function blockToHTML(block) {
             return `<div class="code-block${fragClass}${cls}" style="${style}"${fragAttr}><pre style="margin:0;"><code${lang}>${escaped}</code></pre></div>`;
         }
         case 'arrow': {
-            return buildArrowSVG(block, `${fragClass.trim()}${cls}`, fragAttr);
+            return buildArrowSVG(block, `${fragClass.trim()}${cls}`, fragAttr, posStyle);
         }
         case 'eval': {
             let inner = '';
@@ -349,7 +349,7 @@ function elToHTML(el) {
  * SVG marker-end="url(#id)" is unreliable in Chrome headless print mode.
  * Instead we compute the arrowhead triangle manually from the bezier tangent.
  */
-function buildArrowSVG(block, cls, extraAttr) {
+function buildArrowSVG(block, cls, extraAttr, extraStyle) {
     const color = block.color || '#be1e2d';
     const sw    = block.strokeWidth || 3;
     const x0 = block.x0 != null ? block.x0 : 300;
@@ -375,7 +375,8 @@ function buildArrowSVG(block, cls, extraAttr) {
     const pts  = `${x1.toFixed(1)},${y1.toFixed(1)} ${b1x.toFixed(1)},${b1y.toFixed(1)} ${b2x.toFixed(1)},${b2y.toFixed(1)}`;
     const clsAttr = cls.trim() ? ` class="${cls.trim()}"` : '';
 
-    return `<div${clsAttr} style="position:absolute;left:0;top:0;width:1920px;height:1080px;pointer-events:none;"${extraAttr}>` +
+    const xtraStyle = extraStyle ? extraStyle : '';
+    return `<div${clsAttr} style="position:absolute;left:0;top:0;width:1920px;height:1080px;pointer-events:none;${xtraStyle}"${extraAttr}>` +
         `<svg width="1920" height="1080" style="position:absolute;left:0;top:0;overflow:visible;">` +
         `<path d="M ${x0} ${y0} Q ${mx} ${my} ${ex.toFixed(1)} ${ey.toFixed(1)}" stroke="${color}" stroke-width="${sw}" fill="none"/>` +
         `<polygon points="${pts}" fill="${color}"/>` +
@@ -523,7 +524,7 @@ function slideToPageHTML(slide, step) {
         contentStyle = `position:relative;width:1920px;height:1080px;${padding}`;
     } else {
         const dir = layout === 'row' ? 'row' : 'column';
-        contentStyle = `display:flex;flex-direction:${dir};${gap}${padding}width:1920px;height:1080px;`;
+        contentStyle = `position:relative;display:flex;flex-direction:${dir};${gap}${padding}width:1920px;height:1080px;`;
     }
 
     const inner = (slide.children || []).map(b => blockToHTMLAtStep(b, step)).join('\n');
@@ -637,7 +638,7 @@ function blockToHTMLAtStep(block, step) {
             return `<div class="code-block${cls}" style="${style}"><pre style="margin:0;"><code${lang}>${esc}</code></pre></div>`;
         }
         case 'arrow': {
-            return buildArrowSVG(block, cls, '');
+            return buildArrowSVG(block, cls, '', style);
         }
         case 'eval': {
             let inner = '';

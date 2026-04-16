@@ -23,7 +23,7 @@ const vscode = require('vscode');
 const path   = require('path');
 const os     = require('os');
 const fs     = require('fs');
-const { truncateLogs, dynLog, scrollLog, wstpLog, DEV_MODE } = require('../utils/dev-logger');
+const { truncateLogs, dynLog, scrollLog, devLog, wstpLog, DEV_MODE, LOG_CHANNELS } = require('../utils/dev-logger');
 const _encoding = require('../utils/encoding');
 const { clearEvalLog } = require('../tools/index');
 
@@ -62,7 +62,7 @@ function _killPid(pid) {
                 try { process.kill(pid, 'SIGKILL'); } catch(_) {}
             }, 1500);
         }
-        console.log('[lifecycle] killed stale kernel PID:', pid);
+        devLog(LOG_CHANNELS.KERNEL, '[lifecycle] killed stale kernel PID:', pid);
     } catch(_) { /* process already gone */ }
 }
 
@@ -306,7 +306,7 @@ async function _lifecycle_relaunch(self, WstpSession) {
 
 
 async function launchKernel(self, WstpSession) {
-    console.log('[launchKernel] entering (WSTP)');
+    devLog(LOG_CHANNELS.KERNEL, '[launchKernel] entering (WSTP)');
 
     // Kill any WolframKernel processes abandoned by a previous VS Code session
     // (crash, SIGKILL of extension host, etc.).
@@ -316,7 +316,7 @@ async function launchKernel(self, WstpSession) {
     if (process.platform === "win32") kernelInitPath = kernelInitPath.replace(/\\/g, "/");
 
     const kernelCommand = self.findKernel.resolveKernel();
-    console.log(`[launchKernel] kernel path: ${kernelCommand}`);
+    devLog(LOG_CHANNELS.KERNEL, `[launchKernel] kernel path: ${kernelCommand}`);
 
     if (!WstpSession) {
         vscode.window.showErrorMessage("wstp.node addon not available — cannot launch kernel.");
@@ -327,7 +327,7 @@ async function launchKernel(self, WstpSession) {
     applyKernelOfflineUI(self);  // make sure UI stays gray during launch
 
     try {
-        console.log('[launchKernel] creating WstpSession…');
+        devLog(LOG_CHANNELS.KERNEL, '[launchKernel] creating WstpSession…');
         // Increment epoch so the renderer knows outputs from this point belong
         // to a fresh session.  Broadcast happens after init.wl loads.
         self._sessionEpoch++;
@@ -374,14 +374,14 @@ async function launchKernel(self, WstpSession) {
         // Pass $wolframResourceDir explicitly via Block so sub-files can be
         // located without relying on $InputFileName (which is unreliable when
         // loaded via EvaluatePacket[ToExpression[...]]).
-        console.log(`[launchKernel] loading init.wl from: ${kernelInitPath}`);
+        devLog(LOG_CHANNELS.KERNEL, `[launchKernel] loading init.wl from: ${kernelInitPath}`);
         const _resDir = path.join(self.extensionPath, 'resources');
         const _resDirEsc = _resDir.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
         const _initEsc = kernelInitPath.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
         const initExpr = await self.session.evaluate(
             `Block[{\$wolframResourceDir="${_resDirEsc}"},Get["${_initEsc}"]]`, { interactive: false }
         );
-        console.log(`[launchKernel] init.wl loaded, result=${JSON.stringify(initExpr)}`);
+        devLog(LOG_CHANNELS.KERNEL, `[launchKernel] init.wl loaded, result=${JSON.stringify(initExpr)}`);
 
         // Push initial config
         const cfg = self.config.getKernelRelatedConfigs();
@@ -457,7 +457,7 @@ async function launchKernel(self, WstpSession) {
             await self.session.evaluate(
                 `Unprotect[NotebookDirectory, WBDirectory]; NotebookDirectory[] = "${_nbDirEsc}"; Protect[NotebookDirectory]; WBDirectory[] = "${_nbDirEsc}"; Protect[WBDirectory]`, { interactive: false }
             ).catch(() => {});
-            console.log('[launchKernel] NotebookDirectory set to:', _nbDir);
+            devLog(LOG_CHANNELS.KERNEL, '[launchKernel] NotebookDirectory set to:', _nbDir);
         }
 
         // Note: the interrupt → Dialog[] handler is installed by init.wl
@@ -469,7 +469,7 @@ async function launchKernel(self, WstpSession) {
         self.kernelStatusString = "resolved";
         vscode.commands.executeCommand("setContext", "wolframKernelActive", true);
         vscode.window.showInformationMessage("Wolfram kernel launched (WSTP), ready for evaluation.");
-        console.log('[launchKernel] kernel ready');
+        devLog(LOG_CHANNELS.KERNEL, '[launchKernel] kernel ready');
 
         // Track PID so we can kill the process if VS Code crashes before quitKernel()
         try {
@@ -542,7 +542,7 @@ async function ensureSubKernel(self, WstpSession, imgDir, imgRel) { throw new Er
 // Kernel shutdown
 
 function quitKernel(self) {
-    console.log('[quitKernel] closing session');
+    devLog(LOG_CHANNELS.KERNEL, '[quitKernel] closing session');
     // Stop keepalive heartbeat before closing the session so no ping fires
     // after close() and triggers a spurious relaunch.
     _stopKeepalive(self);

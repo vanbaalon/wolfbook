@@ -19,6 +19,7 @@ const find_kernel_1 = require("./find-kernel");
 const vscode = require("vscode");
 const controller_1 = require("./controller");
 const { scrollLog } = controller_1;
+const { devLog, LOG_CHANNELS } = require('./utils/dev-logger');
 const serializer_1 = require("./serializer");
 const unicode_replacer_1 = require("./unicode-replacer");
 const escape_mode_1 = require("./escape-mode");
@@ -175,11 +176,12 @@ async function activate(context) {
 
     // Register settings command early — before kernel guard, so it works even without a kernel
     (0, notebook_settings_1.registerNotebookSettings)(context);
-    console.log('[Extension] Notebook settings registered (early)');
+    devLog(LOG_CHANNELS.EXTENSION, '[Extension] Notebook settings registered (early)');
 
     // ── Debugger (Stages 4-7) ── instantiated early so keybindings work immediately
     const { BreakpointManager }    = require('./debugger/breakpointManager');
     const { WatchPanelProvider, VIEW_ID: DBG_VIEW_ID } = require('./debugger/watchPanel');
+    const { AskSpecialistPanel, VIEW_ID: ASK_VIEW_ID } = require('./tools/askSpecialistPanel');
     const { DebugController }      = require('./debugger/debugController');
     const { WolframDebugAdapter }  = require('./debugger/wolframDebugAdapter');
 
@@ -191,6 +193,7 @@ async function activate(context) {
         _bpMgr.addBreakpointAt(bp.location.uri.toString(), bp.location.range.start.line);
     }
     const _watchPanel  = new WatchPanelProvider();
+    const _askPanel    = new AskSpecialistPanel();
     const _debugCtrl   = new DebugController(() => controller, _bpMgr, _watchPanel);
 
     // ── Evaluate Selection ─────────────────────────────────────────────────
@@ -365,7 +368,7 @@ async function activate(context) {
             }
         }));
 
-        console.log('[Extension] WL code formatter registered');
+        devLog(LOG_CHANNELS.EXTENSION, '[Extension] WL code formatter registered');
     } catch (e) {
         console.error('[Extension] WL formatter failed to load, skipping:', e.message);
     }
@@ -373,6 +376,12 @@ async function activate(context) {
     // Register the Watch Panel webview view provider
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider(DBG_VIEW_ID, _watchPanel,
+            { webviewOptions: { retainContextWhenHidden: true } })
+    );
+
+    // Register the Ask Specialist Panel webview view provider
+    context.subscriptions.push(
+        vscode.window.registerWebviewViewProvider(ASK_VIEW_ID, _askPanel,
             { webviewOptions: { retainContextWhenHidden: true } })
     );
 
@@ -473,7 +482,7 @@ async function activate(context) {
         const fullVal    = cached?.full ?? displayed;
         _debugCtrl._openWatchInEditor(label, fullVal);
     }));
-    console.log('[Extension] Debug commands registered (Stages 4-7)');
+    devLog(LOG_CHANNELS.EXTENSION, '[Extension] Debug commands registered (Stages 4-7)');
 
     // ── Breakpoint sync ──────────────────────────────────────────────────────
     // Native SourceBreakpoints (gutter click, F9, Breakpoints panel) are the
@@ -492,7 +501,7 @@ async function activate(context) {
                     const uriStr = uri.toString();
                     const line   = bp.location.range.start.line;
                     _bpMgr.addBreakpointAt(uriStr, line);
-                    console.log('[wolfbook-bp] synced native add at line', line);
+                    devLog(LOG_CHANNELS.DEBUGGER, '[wolfbook-bp] synced native add at line', line);
                 }
                 for (const bp of e.removed) {
                     if (!(bp instanceof vscode.SourceBreakpoint)) continue;
@@ -501,7 +510,7 @@ async function activate(context) {
                     const uriStr = uri.toString();
                     const line   = bp.location.range.start.line;
                     _bpMgr.removeBreakpointLine(uriStr, line);
-                    console.log('[wolfbook-bp] synced native remove at line', line);
+                    devLog(LOG_CHANNELS.DEBUGGER, '[wolfbook-bp] synced native remove at line', line);
                 }
             })
         );
@@ -550,7 +559,7 @@ async function activate(context) {
         controller.launchKernel();
     }
     // Register Copilot language model tools (Phase 4)
-    const _toolMap = _tools.registerTools(context, () => controller, _debugCtrl);
+    const _toolMap = _tools.registerTools(context, () => controller, _debugCtrl, () => _askPanel);
     // Register @wolfbook chat participant
     _tools.registerChatParticipant(context, () => controller);
     // Register @wolfteam collaborative chat participant
@@ -577,7 +586,7 @@ async function activate(context) {
         if (needsConfigUpdate(_bridgePath, _nodeBin, _wsPaths)) {
             try {
                 writeClaudeConfig(_bridgePath, _nodeBin, undefined, undefined, _wsPaths);
-                console.log('[Wolfbook MCP] Claude config written eagerly at activate()');
+                devLog(LOG_CHANNELS.EXTENSION, '[Wolfbook MCP] Claude config written eagerly at activate()');
             } catch (e) {
                 console.warn('[Wolfbook MCP] Eager config write failed:', e.message);
             }
@@ -594,10 +603,10 @@ async function activate(context) {
 
     _mcpServer.start().then(port => {
         if (_mcpServer.isSecondary) {
-            console.log(`[Wolfbook MCP] Secondary window — MCP server already running on port ${port}`);
+            devLog(LOG_CHANNELS.EXTENSION, `[Wolfbook MCP] Secondary window — MCP server already running on port ${port}`);
             return; // config already up-to-date from primary window
         }
-        console.log(`[Wolfbook MCP] Ready — port ${port}`);
+        devLog(LOG_CHANNELS.EXTENSION, `[Wolfbook MCP] Ready — port ${port}`);
         // Re-write config if content changed (e.g. bridge path after upgrade)
         const _bridgePath = path.join(context.extensionPath, 'out', 'extension', 'claude-mcp', 'stdio-bridge.js');
         const _nodeBin    = resolveNodeBinary();
@@ -605,7 +614,7 @@ async function activate(context) {
         if (needsConfigUpdate(_bridgePath, _nodeBin, _wsPaths)) {
             try {
                 writeClaudeConfig(_bridgePath, _nodeBin, undefined, port, _wsPaths);
-                console.log(`[Wolfbook MCP] Claude config updated (port ${port})`);
+                devLog(LOG_CHANNELS.EXTENSION, `[Wolfbook MCP] Claude config updated (port ${port})`);
             } catch (e) {
                 console.warn('[Wolfbook MCP] Config update failed:', e.message);
             }
@@ -748,7 +757,7 @@ async function activate(context) {
     // We intercept Shift+Enter here instead, so the scroll only fires after first output.
     // console.log('[scroll] notebook.cell.execute auto-scroll') ← original built-in, bypassed here
     context.subscriptions.push(vscode_1.commands.registerCommand("wolfbook.executeCell", async () => {
-        console.log('[scroll] Shift+Enter detected — evaluation triggered, waiting for first output');
+        scrollLog('[scroll] Shift+Enter detected — evaluation triggered, waiting for first output');
 
         // ---- Save cursor position NOW — before VS Code's Shift+Enter processing
         // exits edit mode and blurs the cell's text editor.
@@ -833,25 +842,25 @@ async function activate(context) {
 
     // Format switching commands
     context.subscriptions.push(vscode_1.commands.registerCommand("wolfbook.setOutputFormatImage", async () => {
-        console.log('[Extension] Setting output format to Image');
+        devLog(LOG_CHANNELS.EXTENSION, '[Extension] Setting output format to Image');
         await configCompat.updateSetting('notebook.rendering.outputFormat', 'Image', vscode.ConfigurationTarget.Workspace);
         vscode.window.showInformationMessage('Output format set to Image (PNG)');
-        console.log('[Extension] Config updated, current value:', configCompat.getSetting('notebook.rendering.outputFormat'));
+        devLog(LOG_CHANNELS.EXTENSION, '[Extension] Config updated, current value:', configCompat.getSetting('notebook.rendering.outputFormat'));
     }));
     context.subscriptions.push(vscode_1.commands.registerCommand("wolfbook.setOutputFormatHTML", async () => {
-        console.log('[Extension] Setting output format to HTML');
+        devLog(LOG_CHANNELS.EXTENSION, '[Extension] Setting output format to HTML');
         await configCompat.updateSetting('notebook.rendering.outputFormat', 'HTML', vscode.ConfigurationTarget.Workspace);
         vscode.window.showInformationMessage('Output format set to HTML');
-        console.log('[Extension] Config updated, current value:', configCompat.getSetting('notebook.rendering.outputFormat'));
+        devLog(LOG_CHANNELS.EXTENSION, '[Extension] Config updated, current value:', configCompat.getSetting('notebook.rendering.outputFormat'));
     }));
     context.subscriptions.push(vscode_1.commands.registerCommand("wolfbook.setOutputFormatMathML", async () => {
-        console.log('[Extension] Setting output format to MathML');
+        devLog(LOG_CHANNELS.EXTENSION, '[Extension] Setting output format to MathML');
         await configCompat.updateSetting('notebook.rendering.outputFormat', 'MathML', vscode.ConfigurationTarget.Workspace);
         vscode.window.showInformationMessage('Output format set to MathML');
-        console.log('[Extension] Config updated, current value:', configCompat.getSetting('notebook.rendering.outputFormat'));
+        devLog(LOG_CHANNELS.EXTENSION, '[Extension] Config updated, current value:', configCompat.getSetting('notebook.rendering.outputFormat'));
     }));
     context.subscriptions.push(vscode_1.commands.registerCommand("wolfbook.setOutputFormatInputForm", async () => {
-        console.log('[Extension] Setting output format to InputForm');
+        devLog(LOG_CHANNELS.EXTENSION, '[Extension] Setting output format to InputForm');
         await configCompat.updateSetting('notebook.rendering.outputFormat', 'InputForm', vscode.ConfigurationTarget.Workspace);
         vscode.window.showInformationMessage('Output format set to InputForm');
         console.log('[Extension] Config updated, current value:', configCompat.getSetting('notebook.rendering.outputFormat'));
@@ -859,7 +868,7 @@ async function activate(context) {
     
     // Clear cell output command
     context.subscriptions.push(vscode_1.commands.registerCommand("wolfbook.clearCellOutput", async (cell) => {
-        console.log('[Extension] Clear cell output command triggered');
+        devLog(LOG_CHANNELS.EXTENSION, '[Extension] Clear cell output command triggered');
         
         // If cell is not provided (e.g., command palette), try to get from active editor
         if (!cell) {
@@ -881,15 +890,15 @@ async function activate(context) {
         const nbEdit = vscode.NotebookEdit.updateCellOutputs(cell.index, []);
         edit.set(cell.notebook.uri, [nbEdit]);
         await vscode.workspace.applyEdit(edit);
-        console.log('[Extension] Cell output cleared');
+        devLog(LOG_CHANNELS.EXTENSION, '[Extension] Cell output cleared');
     }));
     
     // Expand truncated output command
     context.subscriptions.push(vscode_1.commands.registerCommand("wolfbook.expandTruncatedOutput", async (args) => {
-        console.log('[Extension] ========================================');
-        console.log('[Extension] Expand truncated output command triggered!');
-        console.log('[Extension] Args received:', JSON.stringify(args));
-        console.log('[Extension] Args type:', typeof args);
+        devLog(LOG_CHANNELS.EXTENSION, '[Extension] ========================================');
+        devLog(LOG_CHANNELS.EXTENSION, '[Extension] Expand truncated output command triggered!');
+        devLog(LOG_CHANNELS.EXTENSION, '[Extension] Args received:', JSON.stringify(args));
+        devLog(LOG_CHANNELS.EXTENSION, '[Extension] Args type:', typeof args);
         
         // Extract UUID from command arguments (if provided) or fall back to last truncated
         let uuid = null;
@@ -897,17 +906,17 @@ async function activate(context) {
         if (args && args.uuid) {
             // UUID passed from command: URI link
             uuid = args.uuid;
-            console.log('[Extension] Using UUID from command args:', uuid);
+            devLog(LOG_CHANNELS.EXTENSION, '[Extension] Using UUID from command args:', uuid);
         } else if (controller.lastTruncatedExecution && controller.lastTruncatedExecution.truncatedOutputId) {
             // Fallback to stored UUID (for toolbar button)
             uuid = controller.lastTruncatedExecution.truncatedOutputId;
-            console.log('[Extension] Using UUID from lastTruncatedExecution:', uuid);
+            devLog(LOG_CHANNELS.EXTENSION, '[Extension] Using UUID from lastTruncatedExecution:', uuid);
         } else {
-            console.log('[Extension] No UUID available!');
+            devLog(LOG_CHANNELS.EXTENSION, '[Extension] No UUID available!');
         }
         
         if (uuid) {
-            console.log('[Extension] Sending expand-output message to kernel with UUID:', uuid);
+            devLog(LOG_CHANNELS.EXTENSION, '[Extension] Sending expand-output message to kernel with UUID:', uuid);
             controller.postMessageToKernel({
                 type: "expand-output",
                 uuid: uuid
@@ -915,10 +924,10 @@ async function activate(context) {
             
             vscode.window.showInformationMessage('Requesting full output...');
         } else {
-            console.log('[Extension] WARNING: No truncated output to expand');
+            devLog(LOG_CHANNELS.EXTENSION, '[Extension] WARNING: No truncated output to expand');
             vscode.window.showWarningMessage('No truncated output to expand');
         }
-        console.log('[Extension] ========================================');
+        devLog(LOG_CHANNELS.EXTENSION, '[Extension] ==============================');
     }));
     
     context.subscriptions.push(vscode.workspace.registerNotebookSerializer(
@@ -1125,20 +1134,20 @@ async function activate(context) {
 
     // Setup Escape Mode (Esc key for Mathematica-style aliases)
     (0, escape_mode_1.registerEscapeMode)(context, extensionPath);
-    console.log('[Extension] Escape mode registered');
+    devLog(LOG_CHANNELS.EXTENSION, '[Extension] Escape mode registered');
 
     // Setup SmartSelect / Expand Selection for Wolfram Language
     require('./editor/selectionRange').register(context);
-    console.log('[Extension] Selection range provider registered');
+    devLog(LOG_CHANNELS.EXTENSION, '[Extension] Selection range provider registered');
 
     // Setup bracket-based code folding for Wolfram Language
     require('./editor/folding').register(context);
-    console.log('[Extension] Folding range provider registered');
+    devLog(LOG_CHANNELS.EXTENSION, '[Extension] Folding range provider registered');
 
     // Setup refine-mode scroll guard: pins viewport to evaluated cell during
     // streaming output, cancelling VS Code's internal appendOutput-triggered scrolls.
     _scrollMgr.registerExecutionScrollGuard(context, () => controller);
-    console.log('[Extension] Execution scroll guard registered');
+    devLog(LOG_CHANNELS.EXTENSION, '[Extension] Execution scroll guard registered');
 
     // Setup Notebook Settings — already registered early above
 

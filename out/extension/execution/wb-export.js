@@ -181,65 +181,54 @@ function _highlightWolfram(code) {
     return html;
 }
 
-// Convert markdown text to HTML with KaTeX math rendering
+// Convert markdown text to HTML with KaTeX math rendering.
+// Uses `marked` (GFM mode) for full markdown support: tables, fenced code
+// blocks, lists, blockquotes, etc.  Math is extracted to placeholders before
+// parsing so marked doesn't mangle LaTeX, then substituted back after.
 function _renderMarkdown(text) {
     const hasKatex = _loadKatex();
-    // Process line by line, handling headings, paragraphs, inline math
-    const lines = text.split('\n');
-    let html = '';
-    let inParagraph = false;
 
-    for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) {
-            if (inParagraph) { html += '</p>\n'; inParagraph = false; }
-            continue;
-        }
-        // Headings
-        const hm = /^(#{1,6})\s+(.+)$/.exec(trimmed);
-        if (hm) {
-            if (inParagraph) { html += '</p>\n'; inParagraph = false; }
-            const level = hm[1].length;
-            html += `<h${level}>${_inlineMarkdown(hm[2], hasKatex)}</h${level}>\n`;
-            continue;
-        }
-        // Display math block $$...$$
-        const dm = /^\$\$([\s\S]*?)\$\$$/.exec(trimmed);
-        if (dm) {
-            if (inParagraph) { html += '</p>\n'; inParagraph = false; }
-            if (hasKatex) {
-                html += `<div class="katex-display-block">${_prerenderLatex(dm[1].trim(), true)}</div>\n`;
-            } else {
-                html += `<pre>${_esc(dm[1].trim())}</pre>\n`;
-            }
-            continue;
-        }
-        // Regular text → paragraph
-        if (!inParagraph) { html += '<p>'; inParagraph = true; }
-        else { html += '<br>'; }
-        html += _inlineMarkdown(trimmed, hasKatex);
+    // ── Step 1: extract math spans to placeholders ─────────────────────────
+    const mathStore = [];  // [{latex, display}]
+    function storeMath(latex, display) {
+        const id = `\x00MATH${mathStore.length}\x00`;
+        mathStore.push({ latex, display });
+        return id;
     }
-    if (inParagraph) html += '</p>\n';
+    // Display math $$...$$ (multi-line)
+    let processed = text.replace(/\$\$([\s\S]+?)\$\$/g, (_, latex) => storeMath(latex, true));
+    // Inline math $...$
+    processed = processed.replace(/\$([^$\n]+?)\$/g, (_, latex) => storeMath(latex, false));
+
+    // ── Step 2: run marked (GFM on for tables, task lists, etc.) ──────────
+    let html;
+    try {
+        const markedLib = require(require('path').join(__dirname, '../../../node_modules/marked'));
+        // marked v5+ exposes marked.parse(); older versions export a callable
+        const parseFn = markedLib.marked?.parse ?? markedLib.parse ?? markedLib;
+        const result = parseFn(processed, { gfm: true, breaks: false });
+        html = typeof result === 'string' ? result : String(result);
+    } catch (_) {
+        // Fallback: basic paragraph wrapping if marked not available
+        html = '<p>' + processed.replace(/\n\n+/g, '</p>\n<p>').replace(/\n/g, '<br>') + '</p>';
+    }
+
+    // ── Step 3: restore math placeholders ─────────────────────────────────
+    html = html.replace(/\x00MATH(\d+)\x00/g, (_, idx) => {
+        const { latex, display } = mathStore[parseInt(idx, 10)];
+        if (!hasKatex) {
+            return display ? `<pre class="math-raw">$$${_esc(latex)}$$</pre>`
+                           : `<code class="math-raw">$${_esc(latex)}$</code>`;
+        }
+        try {
+            const rendered = _prerenderLatex(latex.trim(), display);
+            return display ? `<div class="katex-display-block">${rendered}</div>` : rendered;
+        } catch (_) {
+            return `<span class="math-error">[LaTeX error: ${_esc(latex)}]</span>`;
+        }
+    });
+
     return html;
-}
-
-// Process inline markdown: bold, italic, code, inline math, links, images
-function _inlineMarkdown(text, hasKatex) {
-    // Inline math: $...$  (not $$)
-    if (hasKatex) {
-        text = text.replace(/\$([^$\n]+?)\$/g, (_, tex) => _prerenderLatex(tex, false));
-    }
-    // Bold **...**
-    text = text.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-    // Italic *...*
-    text = text.replace(/(?<!\*)\*([^*]+?)\*(?!\*)/g, '<em>$1</em>');
-    // Inline code `...`
-    text = text.replace(/`([^`]+?)`/g, '<code>$1</code>');
-    // Images ![alt](src)
-    text = text.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1" style="max-width:100%;">');
-    // Links [text](url)
-    text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
-    return text;
 }
 
 // Resolve image paths in HTML to data URIs for self-contained PDF
@@ -279,6 +268,60 @@ function _inlineSvgImages(html, notebookDir) {
  */
 function generatePdfHtml(notebook, notebookDir) {
     const cells = notebook.getCells().filter(c => !_isWBExportCell(c));
+
+    // ---- Detect VS Code colour theme ----
+    const isDark = (() => {
+        try {
+            const kind = vscode.window.activeColorTheme && vscode.window.activeColorTheme.kind;
+            // ColorThemeKind: Light=1, Dark=2, HighContrast=3, HighContrastLight=4
+            return kind === 2 || kind === 3;
+        } catch (_) { return false; }
+    })();
+    const th = isDark ? {
+        bg:           '#1e1e1e',
+        fg:           '#d4d4d4',
+        h:            '#e0e0e0',
+        hBorder:      '#555',
+        codeBg:       '#2a2a2a',
+        codeFg:       '#d4d4d4',
+        codeBorder:   '#444',
+        codeLabelBg:  '#252526',
+        inlineCodeBg: '#2d2d2d',
+        blockqBorder: '#555',
+        blockqFg:     '#aaa',
+        tableThBg:    '#252526',
+        tableTdBg:    '#222222',
+        tableBorder:  '#444',
+        link:         '#4fc1ff',
+        footerFg:     '#666',
+        footerBorder: '#333',
+    } : {
+        bg:           '#ffffff',
+        fg:           '#1e1e1e',
+        h:            '#1e1e1e',
+        hBorder:      '#ccc',
+        codeBg:       '#f6f8fa',
+        codeFg:       '#1e1e1e',
+        codeBorder:   '#d0d7de',
+        codeLabelBg:  '#eef1f5',
+        inlineCodeBg: '#f0f0f0',
+        blockqBorder: '#d0d7de',
+        blockqFg:     '#555',
+        tableThBg:    '#f0f3f6',
+        tableTdBg:    '#f9f9f9',
+        tableBorder:  '#d0d7de',
+        link:         '#0366d6',
+        footerFg:     '#999',
+        footerBorder: '#e0e0e0',
+    };
+
+    // ---- Wolfbook logo for footer ----
+    let logoDataUri = '';
+    try {
+        const logoPath = path.join(__dirname, '../../../images/wolfbook_logo.png');
+        const logoBuf = fs.readFileSync(logoPath);
+        logoDataUri = `data:image/png;base64,${logoBuf.toString('base64')}`;
+    } catch (_) { /* logo not found — footer will be text-only */ }
 
     // ---- Collect KaTeX CSS ----
     // Prefer the root node_modules location (packaged VSIX), fall back to
@@ -332,9 +375,9 @@ pre.vscode-wolfram-print-output { font-size:0.85em; margin:0; padding:0; line-he
 pre.vscode-wolfram-text-output, pre.vscode-wolfram-tex-source {
   font-family: Consolas, monospace;
   font-size: 13px;
-  background: #f8f8f8;
-  color: #1e1e1e;
-  border: 1px solid #ddd;
+  background: ${th.codeBg};
+  color: ${th.codeFg};
+  border: 1px solid ${th.codeBorder};
   border-radius: 3px; padding: 6px 10px;
   white-space: pre-wrap; overflow-wrap: break-word; line-height: 1.5; margin: 2px 0; }
 img.vscode-wolfram-svg-output, img.vscode-wolfram-png-output { background: transparent; max-width: 100%; }
@@ -350,38 +393,78 @@ div.vscode-wolfram-tex-output { overflow-x:auto; padding: 4px 0; }
 .wl-hl-brk  { color: #b8860b; }
 `;
 
-    // ---- Page-level CSS ----
+    // ---- Page-level CSS (theme-aware) ----
     const pageCss = `
 body {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
     font-size: 14px;
     line-height: 1.6;
-    color: #1e1e1e;
-    background: #ffffff;
+    color: ${th.fg};
+    background: ${th.bg};
     max-width: 900px;
     margin: 0 auto;
     padding: 20px 40px;
 }
-h1 { font-size: 2em; margin: 0.8em 0 0.4em; color: #1e1e1e; border-bottom: 1px solid #ccc; padding-bottom: 0.3em; }
-h2 { font-size: 1.5em; margin: 0.7em 0 0.3em; color: #1e1e1e; }
-h3 { font-size: 1.25em; margin: 0.6em 0 0.3em; color: #1e1e1e; }
-h4 { font-size: 1.1em; margin: 0.5em 0 0.2em; color: #1e1e1e; }
+h1 { font-size: 2em; margin: 0.8em 0 0.4em; color: ${th.h}; border-bottom: 1px solid ${th.hBorder}; padding-bottom: 0.3em; }
+h2 { font-size: 1.5em; margin: 0.7em 0 0.3em; color: ${th.h}; }
+h3 { font-size: 1.25em; margin: 0.6em 0 0.3em; color: ${th.h}; }
+h4 { font-size: 1.1em; margin: 0.5em 0 0.2em; color: ${th.h}; }
 p { margin: 0.5em 0; }
-code { font-family: Consolas, Courier, monospace; font-size: 0.9em; background: #f0f0f0; padding: 1px 4px; border-radius: 3px; }
-a { color: #0366d6; }
+code { font-family: Consolas, Courier, monospace; font-size: 0.9em; background: ${th.inlineCodeBg}; color: ${th.fg}; padding: 1px 4px; border-radius: 3px; }
+pre code { background: transparent; padding: 0; border-radius: 0; font-size: inherit; color: inherit; }
+.cell-markdown pre {
+    background: ${th.codeBg};
+    border: 1px solid ${th.codeBorder};
+    color: ${th.codeFg};
+    border-radius: 4px;
+    padding: 10px 14px;
+    margin: 6px 0;
+    font-family: Consolas, Courier, monospace;
+    font-size: 0.88em;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    overflow-wrap: break-word;
+}
+.cell-markdown blockquote {
+    border-left: 4px solid ${th.blockqBorder};
+    margin: 6px 0 6px 0;
+    padding: 2px 12px;
+    color: ${th.blockqFg};
+}
+.cell-markdown table {
+    border-collapse: collapse;
+    margin: 8px 0;
+    width: 100%;
+    font-size: 0.95em;
+}
+.cell-markdown th, .cell-markdown td {
+    border: 1px solid ${th.tableBorder};
+    padding: 5px 12px;
+    text-align: left;
+}
+.cell-markdown th {
+    background: ${th.tableThBg};
+    font-weight: 600;
+}
+.cell-markdown tr:nth-child(even) td { background: ${th.tableTdBg}; }
+.cell-markdown ul, .cell-markdown ol { margin: 4px 0; padding-left: 1.6em; }
+.cell-markdown li { margin: 2px 0; }
+.math-raw { color: ${th.blockqFg}; font-family: Consolas, monospace; font-size: 0.88em; }
+.math-error { color: #cc0000; font-size: 0.88em; }
+a { color: ${th.link}; }
 .cell-code {
-    background: #f6f8fa;
-    border: 1px solid #d0d7de;
+    background: ${th.codeBg};
+    border: 1px solid ${th.codeBorder};
     border-radius: 4px;
     margin: 8px 0;
     overflow: hidden;
 }
 .cell-code-label {
     font-size: 10px;
-    color: #666;
+    color: ${th.blockqFg};
     padding: 2px 8px;
-    background: #eef1f5;
-    border-bottom: 1px solid #d0d7de;
+    background: ${th.codeLabelBg};
+    border-bottom: 1px solid ${th.codeBorder};
 }
 .cell-code pre {
     margin: 0;
@@ -390,7 +473,7 @@ a { color: #0366d6; }
     line-height: 1.5;
     white-space: pre-wrap;
     overflow-wrap: break-word;
-    color: #1e1e1e;
+    color: ${th.codeFg};
 }
 .cell-output {
     margin: 4px 0 12px 0;
@@ -398,7 +481,7 @@ a { color: #0366d6; }
 }
 .cell-output-label {
     font-size: 10px;
-    color: #666;
+    color: ${th.blockqFg};
     margin-bottom: 2px;
 }
 .cell-markdown {
@@ -408,6 +491,18 @@ a { color: #0366d6; }
     overflow-x: auto;
     padding: 8px 0;
 }
+.wb-footer {
+    margin-top: 48px;
+    padding-top: 10px;
+    border-top: 1px solid ${th.footerBorder};
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: ${th.footerFg};
+    font-size: 10px;
+    opacity: 0.7;
+}
+.wb-footer img { height: 14px; width: auto; opacity: 0.6; }
 `;
 
     // ---- Build cell HTML ----
@@ -468,6 +563,11 @@ a { color: #0366d6; }
     cellsHtml = _inlineImages(cellsHtml, notebookDir);
     cellsHtml = _inlineSvgImages(cellsHtml, notebookDir);
 
+    // ---- Footer ----
+    const footerHtml = logoDataUri
+        ? `<div class="wb-footer"><img src="${logoDataUri}" alt="Wolfbook logo">Created with Wolfbook</div>`
+        : `<div class="wb-footer">Created with Wolfbook</div>`;
+
     // ---- Assemble full HTML document ----
     return `<!DOCTYPE html>
 <html lang="en">
@@ -481,6 +581,7 @@ a { color: #0366d6; }
 </head>
 <body>
 ${cellsHtml}
+${footerHtml}
 </body>
 </html>`;
 }
