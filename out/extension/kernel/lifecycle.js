@@ -460,6 +460,15 @@ async function launchKernel(self, WstpSession) {
             devLog(LOG_CHANNELS.KERNEL, '[launchKernel] NotebookDirectory set to:', _nbDir);
         }
 
+        // Set $PlotTheme based on the current VS Code colour theme so that
+        // kernel-generated plots blend with the editor background.
+        {
+            const _themeKind = vscode.window.activeColorTheme?.kind;
+            const _isDarkTheme = _themeKind === 2 || _themeKind === 3;
+            const _plotThemeExpr = _isDarkTheme ? '$PlotTheme = "BlackBackground"' : '$PlotTheme = Automatic';
+            await self.session.evaluate(_plotThemeExpr, { interactive: false }).catch(() => {});
+        }
+
         // Note: the interrupt → Dialog[] handler is installed by init.wl
         // (Quiet[Internal`AddHandler["Interrupt", Function[{}, Dialog[]]]]).
         // No separate evaluate() call needed here — that would waste a $Line slot

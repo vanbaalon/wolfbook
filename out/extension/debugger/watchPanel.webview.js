@@ -1,7 +1,9 @@
 // watchPanel.webview.js — Runs inside the VS Code webview panel (NOT in Node.js).
 // Loaded via webview.asWebviewUri() so CSP allows it without nonce issues.
+// NOTE: acquireVsCodeApi() was already called in the inline <script> block and
+// stored as window._vscode. We reuse that reference here.
 (function () {
-    const vscode      = acquireVsCodeApi();
+    const vscode      = window._vscode || acquireVsCodeApi();
     const stepHeader  = document.getElementById('step-header');
     const timingEl    = document.getElementById('timing');
     const emptyMsg    = document.getElementById('empty-msg');
@@ -200,7 +202,34 @@
             if (hoverDocContent) hoverDocContent.innerHTML   = msg.html   || '';
             if (hoverDocSection) { hoverDocSection.style.display = 'block'; hoverDocSection.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
         }
+        else if (msg.command === 'mcpState') {
+            if (window._mcpToggle) {
+                window._mcpToggle.checked = !!msg.enabled;
+                if (window._mcpUpdateLabel) window._mcpUpdateLabel();
+            }
+        }
+        else if (msg.command === 'collabState') {
+            if (window._collabToggle) {
+                window._collabToggle.checked = !!msg.enabled;
+            }
+        }
     });
+
+    // ── Toggle change handlers ─────────────────────────────────────────────
+    if (window._mcpToggle) {
+        window._mcpToggle.addEventListener('change', function() {
+            if (window._mcpUpdateLabel) window._mcpUpdateLabel();
+            vscode.postMessage({ command: 'mcpToggle', enabled: window._mcpToggle.checked });
+        });
+    }
+    if (window._collabToggle) {
+        window._collabToggle.addEventListener('change', function() {
+            console.log('[wolfbook-collab] toggle changed, checked=' + window._collabToggle.checked);
+            vscode.postMessage({ command: 'collabToggle', enabled: window._collabToggle.checked });
+        });
+    } else {
+        console.warn('[wolfbook-collab] _collabToggle NOT found in DOM');
+    }
 
     // ── Add watch ──────────────────────────────────────────────────────────
 

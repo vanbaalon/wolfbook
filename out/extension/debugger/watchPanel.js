@@ -110,6 +110,67 @@ class WatchPanelProvider {
             } else if (msg.command === 'hoverDocReceived') {
                 console.log('[wolfbook-watch] ✓ webview confirmed hoverDoc received for:', msg.symbol);
                 this._pendingHoverDoc = null;
+            } else if (msg.command === 'mcpToggle') {
+                const configCompat = require('../config-compat');
+                const newState = !!msg.enabled;
+                vscode.workspace.getConfiguration('wolfbook').update('mcpEnabled', newState, vscode.ConfigurationTarget.Workspace).then(async () => {
+                    const label = newState ? 'enabled' : 'disabled';
+                    const action = await vscode.window.showWarningMessage(
+                        `MCP Server ${label}. Reload the window to apply this change.`,
+                        'Reload Now'
+                    );
+                    if (action === 'Reload Now') {
+                        await vscode.commands.executeCommand('workbench.action.reloadWindow');
+                    }
+                });
+            } else if (msg.command === 'collabToggle') {
+                const newState = !!msg.enabled;
+                console.log('[wolfbook-collab] received collabToggle, newState=' + newState);
+                // Update config immediately (fire-and-forget — don't gate split on it)
+                vscode.workspace.getConfiguration('wolfbook').update('collabMode', newState, vscode.ConfigurationTarget.Workspace);
+                if (newState) {
+                    // Open a right-column split.
+                    (async () => {
+                        try {
+                            const visEds = vscode.window.visibleNotebookEditors;
+                            console.log('[wolfbook-collab] visibleNotebookEditors count=' + visEds.length);
+                            visEds.forEach((ed, i) => {
+                                console.log('[wolfbook-collab]   editor[' + i + '] viewColumn=' + ed.viewColumn + ' uri=' + ed.notebook?.uri?.toString());
+                            });
+                            const sorted = [...visEds].sort((a, b) => (a.viewColumn || 99) - (b.viewColumn || 99));
+                            let primaryNb = sorted[0]?.notebook;
+                            if (!primaryNb) {
+                                const nbDocs = vscode.workspace.notebookDocuments || [];
+                                console.log('[wolfbook-collab] no visible notebook editors, notebookDocuments count=' + nbDocs.length);
+                                primaryNb = nbDocs[0];
+                            }
+                            if (!primaryNb) {
+                                console.log('[wolfbook-collab] ABORT: no notebook found at all');
+                                vscode.window.showWarningMessage('Wolfbook Collab: no open notebook found — open a .wb notebook first.');
+                                return;
+                            }
+                            console.log('[wolfbook-collab] primaryNb=' + primaryNb.uri?.toString());
+                            // Already split?
+                            const editorsForNb = visEds.filter(ed =>
+                                ed.notebook.uri.toString() === primaryNb.uri.toString()
+                            );
+                            console.log('[wolfbook-collab] editorsForNb count=' + editorsForNb.length);
+                            if (editorsForNb.length >= 2) {
+                                console.log('[wolfbook-collab] already split, skipping');
+                                return;
+                            }
+                            console.log('[wolfbook-collab] calling showNotebookDocument with ViewColumn.Two (' + vscode.ViewColumn.Two + ')');
+                            const result = await vscode.window.showNotebookDocument(primaryNb, {
+                                viewColumn: vscode.ViewColumn.Two,
+                                preserveFocus: true,
+                            });
+                            console.log('[wolfbook-collab] showNotebookDocument returned, result viewColumn=' + result?.viewColumn);
+                        } catch (e) {
+                            console.error('[wolfbook-collab] ERROR in split opening:', e);
+                            vscode.window.showWarningMessage(`Wolfbook Collab: could not open split — ${e?.message || e}`);
+                        }
+                    })();
+                }
             } else {
                 console.log('[wolfbook-watch] unhandled webview msg:', JSON.stringify(msg));
             }
@@ -191,6 +252,12 @@ class WatchPanelProvider {
         if (!this._view) return;
         this._view.webview.postMessage({ command: 'setBackground', color: this._bgColor });
         this._view.webview.postMessage({ command: 'setDebugActive', active: this._debugActive });
+        // Send MCP and Collab enabled state
+        const configCompat = require('../config-compat');
+        const mcpEnabled = configCompat.getSetting('mcpEnabled', true);
+        this._view.webview.postMessage({ command: 'mcpState', enabled: mcpEnabled });
+        const collabEnabled = vscode.workspace.getConfiguration('wolfbook').get('collabMode', false);
+        this._view.webview.postMessage({ command: 'collabState', enabled: collabEnabled });
         // Show watch list placeholder names immediately (before kernel values arrive)
         if (this._watchList.length > 0) {
             this._view.webview.postMessage({ command: 'initWatchList', names: this._watchList });
@@ -366,7 +433,7 @@ class WatchPanelProvider {
             `default-src 'none'`,
             `style-src 'unsafe-inline' ${webview.cspSource}`,
             `font-src ${webview.cspSource} data:`,
-            `script-src ${webview.cspSource}`,
+            `script-src 'unsafe-inline' ${webview.cspSource}`,
             `img-src ${webview.cspSource} data: https:`,
         ].join('; ');
         return /* html */`<!DOCTYPE html>
@@ -685,6 +752,35 @@ class WatchPanelProvider {
 </style>
 </head>
 <body>
+<div id="mcp-status-bar" style="display:flex; align-items:center; gap:6px; padding:4px 0 6px; border-bottom:1px solid var(--vscode-panel-border, #444); margin-bottom:6px; flex-wrap:wrap;">
+  <span title="MCP Server: exposes Wolfbook tools over the Model Context Protocol so external AI agents (Claude Desktop, etc.) can connect to this window's Wolfram kernel. Requires window reload to take effect." style="font-size:11px; opacity:0.8; cursor:help; border-bottom:1px dotted currentColor;">MCP</span>
+  <label class="mcp-switch" style="position:relative; display:inline-block; width:32px; height:18px; cursor:pointer; flex-shrink:0;">
+    <input type="checkbox" id="mcp-toggle" style="opacity:0; width:0; height:0;">
+    <span class="mcp-slider" style="position:absolute; inset:0; border-radius:9px; transition:background 0.2s;"></span>
+  </label>
+  <span id="mcp-label" style="font-size:11px; opacity:0.7; margin-right:6px;"></span>
+  <span title="Collab mode: opens the notebook in a side-by-side split. The AI agent inserts, edits and runs cells in the right pane — your cursor and scroll position in the left pane are never disturbed." style="font-size:11px; opacity:0.8; cursor:help; border-bottom:1px dotted currentColor;">Collab</span>
+  <label class="mcp-switch" style="position:relative; display:inline-block; width:32px; height:18px; cursor:pointer; flex-shrink:0;">
+    <input type="checkbox" id="collab-toggle" style="opacity:0; width:0; height:0;">
+    <span class="collab-slider" style="position:absolute; inset:0; border-radius:9px; transition:background 0.2s;"></span>
+  </label>
+</div>
+<style>
+  .mcp-slider { background: #6e7681 !important; }
+  #mcp-toggle:checked + .mcp-slider { background: #2ea043 !important; }
+  .mcp-slider::before {
+    content:''; position:absolute; height:14px; width:14px; left:2px; bottom:2px;
+    background: white; border-radius:50%; transition: transform 0.2s;
+  }
+  #mcp-toggle:checked + .mcp-slider::before { transform: translateX(14px); }
+  .collab-slider { background: #6e7681 !important; }
+  #collab-toggle:checked + .collab-slider { background: #2ea043 !important; }
+  .collab-slider::before {
+    content:''; position:absolute; height:14px; width:14px; left:2px; bottom:2px;
+    background: white; border-radius:50%; transition: transform 0.2s;
+  }
+  #collab-toggle:checked + .collab-slider::before { transform: translateX(14px); }
+</style>
 <div id="header-row">
   <span id="step-header">Live watch</span>
   <button id="refresh-btn" title="Refresh values">⟳</button>
@@ -733,7 +829,24 @@ class WatchPanelProvider {
   <div id="hover-doc-symbol"></div>
   <div id="hover-doc-content"></div>
 </div>
-<script src="${scriptUri}"></script>
+<script>
+  // ── Hover tooltip for .wb-hint elements ───────────────────────────────────
+  // Acquire VS Code API once — stored globally so the external script can reuse it
+  // (acquireVsCodeApi() may only be called once per webview).
+  window._vscode = acquireVsCodeApi();
+  // MCP toggle refs (used by onchange inline handler and label update function)
+  window._mcpToggle = document.getElementById('mcp-toggle');
+  window._mcpLabel  = document.getElementById('mcp-label');
+  window._mcpUpdateLabel = function() {
+    if (window._mcpLabel && window._mcpToggle)
+      window._mcpLabel.textContent = window._mcpToggle.checked ? 'Enabled' : 'Disabled';
+  };
+  window._mcpUpdateLabel();
+  // Collab toggle ref (used by collabState message handler in external script)
+  window._collabToggle = document.getElementById('collab-toggle');
+  console.log('[wb-inline] init: _collabToggle=' + (window._collabToggle ? 'found' : 'NULL'));
+</script>
+<script src="${scriptUri}" onerror="console.error('[wolfbook] FAILED to load watchPanel.webview.js');"></script>
 </body>
 </html>`;
     }

@@ -292,13 +292,8 @@ function startDynamicCell(self, cell, dynExprs, imgDir, imgRel, ownedExec) {
             exe.start(Date.now());
             await exe.replaceOutput(outputs);
             exe.end(true, Date.now());
-        } catch (_) {
-            // Fallback: workspace edit (no spinner but less reliable)
-            try {
-                const edit = new vscode.WorkspaceEdit();
-                edit.set(cell.notebook.uri, [vscode.NotebookEdit.updateCellOutputs(cell.index, outputs)]);
-                await vscode.workspace.applyEdit(edit);
-            } catch (_2) {}
+        } catch (e) {
+            scrollLog('[dyn] _applyDynamicOutputs fallback error:', e.message);
         }
     };
 

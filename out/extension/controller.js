@@ -84,6 +84,111 @@ try {
     console.error("[Controller] Failed to load wstp.node:", e.message);
 }
 
+// ---------------------------------------------------------------------------
+// Silent execution shim: mimics NotebookCellExecution API but writes outputs
+// via WorkspaceEdit instead of going through VS Code's execution lifecycle.
+// This avoids triggering auto-reveal (scroll to cell), output clearing on
+// start(), and the Executing/Idle state events — so the viewport stays put
+// and no spinner appears.  Used by AI agent tools (_silentExecution = true).
+// ---------------------------------------------------------------------------
+function _createSilentExecution(cell, controller) {
+    const _cell = cell;
+    const _controller = controller;
+    // Lazily-created real NotebookCellExecution — only VS Code's execution API
+    // can write cell outputs, so we MUST use a real one.  We defer creation
+    // until the first output write to avoid the spinner/reveal for cells that
+    // produce no output.
+    let _realExec = null;
+    let _savedViewport = null;   // NotebookRange — first visibleRange before start
+    let _savedEditor   = null;   // the specific editor whose viewport was saved
+    let _executionOrder = undefined;
+
+    function _saveScroll() {
+        try {
+            // Only guard when 2+ editors are open for this notebook.
+            // With a single editor, tools scroll it freely.
+            const uri = _cell.notebook.uri.toString();
+            const matching = vscode.window.visibleNotebookEditors.filter(
+                ed => ed.notebook.uri.toString() === uri
+            );
+            if (matching.length < 2) return;
+            // Protect the leftmost editor.
+            const leftEd = matching.reduce((best, ed) =>
+                (ed.viewColumn ?? 999) <= (best.viewColumn ?? 999) ? ed : best
+            );
+            const vr = leftEd.visibleRanges;
+            if (vr && vr.length > 0) { _savedViewport = vr[0]; _savedEditor = leftEd; }
+        } catch (_) {}
+    }
+
+    function _restoreScroll() {
+        if (!_savedViewport || !_savedEditor) return;
+        try {
+            _savedEditor.revealRange(_savedViewport, vscode.NotebookEditorRevealType.AtTop);
+        } catch (_) {}
+    }
+
+    function _ensureRealExec() {
+        if (_realExec) return _realExec;
+        _saveScroll();
+        _realExec = _controller.createNotebookCellExecution(_cell);
+        _realExec.start(Date.now());
+        if (_executionOrder !== undefined) _realExec.executionOrder = _executionOrder;
+        // Restore scroll right away — VS Code reveals on start()
+        setTimeout(() => _restoreScroll(), 30);
+        return _realExec;
+    }
+
+    return {
+        cell: _cell,
+        _isSilent: true,
+        token: {
+            isCancellationRequested: false,
+            onCancellationRequested: (_cb) => ({ dispose: () => {} })
+        },
+
+        get executionOrder() { return _executionOrder; },
+        set executionOrder(v) {
+            _executionOrder = v;
+            if (_realExec) _realExec.executionOrder = v;
+        },
+
+        start(_timestamp) { /* no-op — queue calls this but we defer to first output write */ },
+
+        end(_success, _timestamp) {
+            if (_realExec) {
+                try { _realExec.end(!!_success, Date.now()); } catch (_) {}
+                // Restore scroll after VS Code processes the end event
+                setTimeout(() => _restoreScroll(), 50);
+            }
+            // If no output was written, _realExec is null — no execution to end,
+            // and VS Code never knew about this cell.  That's fine.
+        },
+
+        async replaceOutput(outputs) {
+            const exec = _ensureRealExec();
+            const arr = Array.isArray(outputs) ? outputs : (outputs ? [outputs] : []);
+            await exec.replaceOutput(arr);
+        },
+
+        async appendOutput(output) {
+            const exec = _ensureRealExec();
+            await exec.appendOutput(output);
+        },
+
+        async replaceOutputItems(items, targetOutput) {
+            const exec = _ensureRealExec();
+            await exec.replaceOutputItems(items, targetOutput);
+        },
+
+        clearOutput() {
+            if (_realExec) {
+                _realExec.clearOutput();
+            }
+        }
+    };
+}
+
 class WolframNotebookKernel {
     constructor(extContext) {
         this.notebookConfig = configCompat.getConfiguration();
@@ -363,6 +468,8 @@ class WolframNotebookKernel {
         this._pendingScrollMode         = null;  // 'advance' | 'refine' — set by execute()
         this._pendingViewportAtExecute  = null;  // cell-index of viewport top at Shift+Enter time
         this._refineGuardActive         = false; // true while a refine-mode keyboard eval is about to dispatch
+        this._agentGuardActive          = false; // true while an agent tool eval is about to dispatch
+        this._wolframExecPending        = false; // true when execution was initiated by wolfbook (keyboard or tool)
 
         // Saved viewport state for refine-mode scroll restoration at Idle.
         // Set by wolfram.executeCell in extension.js BEFORE execute() is called.
@@ -402,6 +509,22 @@ class WolframNotebookKernel {
         this._controller.supportsExecutionOrder = true;
         this._controller.executeHandler = this.execute.bind(this);
         this.extensionPath = this.thisExtension?.extensionPath || "";
+
+        // ---- Auto-associate this controller with every wolfbook notebook ----
+        // Without calling updateNotebookAffinity(..., Preferred) the controller is
+        // NOT associated on fresh installs — VS Code has no saved preference and
+        // Shift+Enter silently fails until the user clicks the "play" button to
+        // trigger kernel selection.  Setting Preferred makes VS Code automatically
+        // select us for every extended-wolfram-notebook without user interaction.
+        const _claimNotebook = (nb) => {
+            if (nb.notebookType === 'extended-wolfram-notebook') {
+                this._controller.updateNotebookAffinity(nb, vscode.NotebookControllerAffinity.Preferred);
+            }
+        };
+        // Claim all notebooks already open when the extension activates
+        for (const nb of vscode.workspace.notebookDocuments) { _claimNotebook(nb); }
+        // Claim notebooks opened later
+        vscode.workspace.onDidOpenNotebookDocument(nb => _claimNotebook(nb));
 
 
 
@@ -1138,6 +1261,56 @@ class WolframNotebookKernel {
     execute(cells, _notebook, _controller) {
         // Reset refine guard flag — set to true below if this is a refine keyboard eval.
         this._refineGuardActive = false;
+
+        // ── Silent execution mode ──
+        // When _silentExecution is true (set by AI tools), bypass keyboard/scroll detection.
+        const isSilent = !!this._silentExecution;
+        if (isSilent) {
+            scrollLog('[execute] SILENT mode — skipping keyboard/scroll detection');
+        }
+
+        // ── External tool guard ──
+        // Detect when execute() was called by something OTHER than wolfbook.executeCell
+        // (keyboard) or wolfbook AI tools. This happens when an AI agent mistakenly uses
+        // run_notebook_cell, notebook.cell.execute, or similar VS Code built-in tools on
+        // a .wb notebook. Those tools bypass wolfbook's scroll management and can corrupt
+        // the kernel state.
+        // _wolframExecPending is set to true by wolfbook.executeCell and by all wolfbook
+        // tool implementations immediately before calling execute(). Clear it here.
+        const _wasWolframExec = this._wolframExecPending;
+        this._wolframExecPending = false;
+        // Only block if this is clearly NOT a user-initiated execution.
+        // User executions come from: keyboard (wolfbook.executeCell sets the flag),
+        // the cell Run button (single cell, active editor matches), or Run All.
+        // External AI tool calls (run_notebook_cell) are the only ones to block.
+        // Heuristic: if there's an active notebook editor showing this notebook,
+        // the user likely triggered it via the UI — allow it.
+        const _activeNbEditor = vscode.window.activeNotebookEditor;
+        const _isFromActiveEditor = _activeNbEditor && cells && cells.length > 0 &&
+            _activeNbEditor.notebook === cells[0].notebook;
+        if (!isSilent && !_wasWolframExec && !_isFromActiveEditor && cells && cells.length > 0) {
+            // External call detected. Block execution and return an error output so
+            // the AI agent gets clear feedback in the cell's output.
+            const _blockMsg = '⛔ WOLFBOOK TOOL ERROR\n\nDo NOT use run_notebook_cell, edit_notebook_file, notebook.cell.execute, or other non-wolfbook tools on .wb notebooks.\n\nUse the wolfbook tools instead:\n  • wolfbook_runCell — run a cell by number\n  • wolfbook_insertCells — insert and optionally evaluate new cells\n  • wolfbook_evaluateExpression — run Wolfram code without creating a cell\n\nThis execution was BLOCKED to protect notebook state.';
+            scrollLog('[execute] BLOCKED — external tool call detected (not wolfbook keyboard or tool)');
+            // Show VS Code notification so the user is also aware.
+            vscode.window.showErrorMessage('⛔ wolfbook: External cell execution blocked. Use wolfbook_runCell instead of run_notebook_cell on .wb files.', { modal: false });
+            // Write error output to each blocked cell via the real execution API
+            // so the agent can read it in the tool result.
+            Promise.all(cells.map(async (cell) => {
+                try {
+                    const exec = this._controller.createNotebookCellExecution(cell);
+                    exec.start(Date.now());
+                    await exec.appendOutput(new vscode.NotebookCellOutput([
+                        vscode.NotebookCellOutputItem.error({ name: 'WolframToolError', message: _blockMsg, stack: '' }),
+                        vscode.NotebookCellOutputItem.text(_blockMsg, 'text/plain'),
+                    ]));
+                    exec.end(false, Date.now());
+                } catch (_) {}
+            }));
+            return;
+        }
+
         // Detect keyboard-triggered execution (Shift+Enter on the selected cell).
         // IMPORTANT: VS Code advances the selection from N → N+1 BEFORE calling
         // execute([cell N]).  So at the time execute() is called, selIdx is already
@@ -1145,7 +1318,7 @@ class WolframNotebookKernel {
         // Edge case: Shift+Enter on the last cell — no next cell, so selection stays
         // at N and diff = 0.  Both diffs are treated as keyboard-triggered.
         // Multi-cell runs (Run All) or programmatic calls produce diff ≠ 0 or 1.
-        if (cells.length === 1) {
+        if (!isSilent && cells.length === 1) {
             const ed = vscode.window.activeNotebookEditor;
             if (ed && ed.notebook === cells[0].notebook && ed.selections.length > 0) {
                 const selIdx  = ed.selections[0].start;
@@ -1251,14 +1424,19 @@ class WolframNotebookKernel {
             for (const cell of cells) {
                 // Don't double-queue a cell that already has a pending execution.
                 if (this.executionQueue.hasPendingForCell(cell)) { scrollLog('[execute] cell', cell.index, 'already pending — skipping double-queue'); continue; }
-                const execution = this._controller.createNotebookCellExecution(cell);
+                // Silent mode (agent tools): use a shim that writes outputs via
+                // WorkspaceEdit instead of the real VS Code execution lifecycle.
+                // This avoids auto-reveal, output clearing, and Executing/Idle events.
+                const execution = isSilent
+                    ? _createSilentExecution(cell, this._controller)
+                    : this._controller.createNotebookCellExecution(cell);
                 const queueId   = this.executionQueue.push(execution);
                 execution.token.onCancellationRequested(() => {
                     this.outputPanel.print("Cell execution cancelled by user");
                     this.abortEvaluation();
                 });
             }
-            scrollLog('[execute] kernel resolved — calling checkoutExecutionQueue | queue:', this.executionQueue.queueLength());
+            scrollLog('[execute] kernel resolved — calling checkoutExecutionQueue | queue:', this.executionQueue.queueLength(), '| silent:', isSilent);
             this.checkoutExecutionQueue();
         } else {
             // Kernel not running: queue the cells and auto-launch.
@@ -1373,6 +1551,57 @@ class WolframNotebookKernel {
 
     // -----------------------------------------------------------------------
     abortEvaluation() { return _editor.abortEvaluation(this); }
+
+    // Abort any ongoing evaluation and wait for the queue to drain.
+    // Used by AI tools to claim priority over user-initiated evaluations.
+    // Returns a promise that resolves when the kernel is idle.
+    async abortAndWait(timeoutMs = 10000) {
+        if (this.executionQueue.queueLength() === 0 && !this._evalDispatched && !this.isAborting) {
+            scrollLog('[abortAndWait] queue empty, not dispatched, not aborting — already idle');
+            return; // already idle
+        }
+        scrollLog('[abortAndWait] aborting — queue:', this.executionQueue.queueLength(),
+                  '| evalDispatched:', this._evalDispatched,
+                  '| isAborting:', this.isAborting);
+        // Signal checkout.js to suppress post-end scroll for the aborted user cell.
+        this._agentAbortPending = true;
+        vscode.window.showInformationMessage('⚡ AI tool has taken kernel priority — your evaluation was aborted.');
+        this.abortEvaluation();
+
+        // abortEvaluation() clears _evalDispatched and the queue immediately,
+        // but sets isAborting=true if the kernel is processing a packet.
+        // isAborting is cleared only when the kernel sends back the abort-ack.
+        // We MUST wait for isAborting to become false — otherwise the next
+        // execute() call hits the `if (this.isAborting) return;` guard.
+        const deadline = Date.now() + timeoutMs;
+        await new Promise(resolve => {
+            const poll = () => {
+                const isIdle = this.executionQueue.queueLength() === 0
+                            && !this._evalDispatched
+                            && !this.isAborting;
+                if (isIdle || Date.now() >= deadline) {
+                    if (!isIdle) scrollLog('[abortAndWait] timed out — forcing idle state');
+                    resolve();
+                } else {
+                    setTimeout(poll, 100);
+                }
+            };
+            setTimeout(poll, 100);
+        });
+        // Force-clear stale abort state on timeout so the next execution isn't blocked.
+        if (this.isAborting) {
+            scrollLog('[abortAndWait] force-clearing isAborting after timeout');
+            this.isAborting = false;
+        }
+        if (this._abortPending) {
+            this._abortPending = false;
+        }
+        this._agentAbortPending = false;
+        scrollLog('[abortAndWait] done — queue:', this.executionQueue.queueLength(),
+                  '| evalDispatched:', this._evalDispatched,
+                  '| isAborting:', this.isAborting);
+    }
+
     // -----------------------------------------------------------------------
     restartKernel() { return _editor.restartKernel(this); }
     // -----------------------------------------------------------------------

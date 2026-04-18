@@ -6,11 +6,60 @@ exports.applyNotebookSettings = applyNotebookSettings;
 const vscode = require("vscode");
 const path   = require("path");
 const fs     = require("fs");
+const os     = require("os");
 const configCompat = require("./config-compat");
 const { devLog, LOG_CHANNELS, LOG_CHANNEL_LABELS, DEV_MODE, getLogMask, setLogMask } = require('./utils/dev-logger');
 
+// ── Wolfbook prompt presets (~/.wolfbook/prompts/) ────────────────────────────
+// Stored OUTSIDE the extension so updates never overwrite user edits.
+const _WOLFBOOK_DIR  = path.join(os.homedir(), '.wolfbook');
+const _PROMPTS_DIR   = path.join(_WOLFBOOK_DIR, 'prompts');
+const _ACTIVE_FILE   = path.join(_WOLFBOOK_DIR, 'active-prompt.txt');
+
+function _ensurePromptsDir() {
+    if (!fs.existsSync(_PROMPTS_DIR)) fs.mkdirSync(_PROMPTS_DIR, { recursive: true });
+}
+
+/** On first run: copy the extension's default prompt to ~/.wolfbook/prompts/default.md */
+function _ensureDefaultPrompt() {
+    _ensurePromptsDir();
+    const defaultPath = path.join(_PROMPTS_DIR, 'default.md');
+    if (!fs.existsSync(defaultPath)) {
+        const srcPath = path.join(__dirname, 'tools', 'wolfbook-system-prompt.md');
+        try { fs.copyFileSync(srcPath, defaultPath); } catch (_) {}
+    }
+}
+
+function _listPrompts() {
+    _ensurePromptsDir();
+    try {
+        return fs.readdirSync(_PROMPTS_DIR)
+            .filter(f => f.endsWith('.md'))
+            .map(f => ({ name: f.slice(0, -3), filePath: path.join(_PROMPTS_DIR, f) }))
+            .sort((a, b) => a.name.localeCompare(b.name));
+    } catch (_) { return []; }
+}
+
+function _getActivePromptName() {
+    try {
+        const name = fs.readFileSync(_ACTIVE_FILE, 'utf8').trim();
+        if (name && fs.existsSync(path.join(_PROMPTS_DIR, name + '.md'))) return name;
+    } catch (_) {}
+    const prompts = _listPrompts();
+    return prompts.length > 0 ? prompts[0].name : 'default';
+}
+
+function _setActivePromptName(name) {
+    _ensurePromptsDir();
+    fs.writeFileSync(_ACTIVE_FILE, name, 'utf8');
+}
+
+function _getActivePromptPath() {
+    return path.join(_PROMPTS_DIR, _getActivePromptName() + '.md');
+}
+
 // ── Colour palette ────────────────────────────────────────────────────────────
-const BACKGROUND_COLORS = [
+const BACKGROUND_COLORS_LIGHT = [
     { label: "Light Cream",    value: "#FFF8F0" },
     { label: "Soft Peach",     value: "#FFE5E5" },
     { label: "Pale Yellow",    value: "#FFFACD" },
@@ -24,6 +73,68 @@ const BACKGROUND_COLORS = [
     { label: "Pale Turquoise", value: "#E8F8F5" },
     { label: "Light Coral",    value: "#FFF5F0" },
 ];
+
+const BACKGROUND_COLORS_DARK = [
+    { label: "Dark Cream",     value: "#2A2520" },
+    { label: "Dark Peach",     value: "#2E2020" },
+    { label: "Dark Yellow",    value: "#2A2918" },
+    { label: "Dark Mint",      value: "#1E2A1E" },
+    { label: "Dark Blue",      value: "#1E2530" },
+    { label: "Dark Lavender",  value: "#28202E" },
+    { label: "Dark Pink",      value: "#2A2025" },
+    { label: "Dark Aqua",      value: "#1C2A2A" },
+    { label: "Dark Lime",      value: "#232A1E" },
+    { label: "Dark Champagne", value: "#2A2518" },
+    { label: "Dark Turquoise", value: "#1E2825" },
+    { label: "Dark Coral",     value: "#2A2320" },
+];
+
+// Keys that applyNotebookSettings writes into workbench.colorCustomizations
+const _NOTEBOOK_COLOR_KEYS = [
+    'notebook.editorBackground',
+    'notebook.cellEditorBackground',
+    'notebook.cellBorderColor',
+    'notebook.inactiveFocusedCellBorder',
+    'notebook.collapsedCellBackground',
+];
+
+/** Returns true if all notebook color keys are identical between two colorCustomizations objects. */
+function _notebookColorsUnchanged(current, updated) {
+    for (const key of _NOTEBOOK_COLOR_KEYS) {
+        if ((current[key] || undefined) !== (updated[key] || undefined)) return false;
+    }
+    return true;
+}
+
+// Detect dark vs light theme
+function _isDarkTheme() {
+    // ColorThemeKind: Light=1, Dark=2, HighContrast=3, HighContrastLight=4
+    const kind = vscode.window.activeColorTheme?.kind;
+    return kind === 2 || kind === 3;
+}
+
+function _getBackgroundColors() {
+    return _isDarkTheme() ? BACKGROUND_COLORS_DARK : BACKGROUND_COLORS_LIGHT;
+}
+
+// Light ↔ Dark mapping (by index) for auto-inversion on theme switch
+const _LIGHT_TO_DARK = new Map();
+const _DARK_TO_LIGHT = new Map();
+for (let i = 0; i < BACKGROUND_COLORS_LIGHT.length; i++) {
+    _LIGHT_TO_DARK.set(BACKGROUND_COLORS_LIGHT[i].value, BACKGROUND_COLORS_DARK[i].value);
+    _DARK_TO_LIGHT.set(BACKGROUND_COLORS_DARK[i].value, BACKGROUND_COLORS_LIGHT[i].value);
+}
+
+/** If the saved color belongs to the "wrong" palette for the current theme, return its counterpart. */
+function _autoInvertColor(hex) {
+    if (!hex) return hex;
+    if (_isDarkTheme() && _LIGHT_TO_DARK.has(hex)) return _LIGHT_TO_DARK.get(hex);
+    if (!_isDarkTheme() && _DARK_TO_LIGHT.has(hex)) return _DARK_TO_LIGHT.get(hex);
+    return hex;
+}
+
+// Keep BACKGROUND_COLORS as an alias for backward compat (exports)
+const BACKGROUND_COLORS = BACKGROUND_COLORS_LIGHT;
 
 // Render a 14×14 rounded square with the given hex fill as a base64 SVG data-URI.
 // Used as QuickPickItem.iconPath so each palette entry shows its own colour swatch.
@@ -116,18 +227,41 @@ function registerNotebookSettings(context) {
         })
     );
 
+    // Re-apply settings when theme changes (dark ↔ light) to auto-invert colours.
+    // Debounced: VS Code can fire onDidChangeActiveColorTheme multiple times during
+    // theme initialisation; coalescing the calls prevents the dark↔light flicker.
+    let _themeChangeTimer = null;
+    context.subscriptions.push(
+        vscode.window.onDidChangeActiveColorTheme(() => {
+            if (_themeChangeTimer) clearTimeout(_themeChangeTimer);
+            _themeChangeTimer = setTimeout(() => {
+                _themeChangeTimer = null;
+                for (const editor of vscode.window.visibleNotebookEditors) {
+                    if (editor.notebook.notebookType === 'extended-wolfram-notebook') {
+                        applyNotebookSettings(editor.notebook);
+                    }
+                }
+            }, 300);
+        })
+    );
+
     vscode.window.visibleNotebookEditors.forEach(editor => {
         if (editor.notebook.notebookType === 'extended-wolfram-notebook') {
             applyNotebookSettings(editor.notebook);
         }
     });
+
+    // Ensure user has a prompt preset directory with the default prompt
+    _ensureDefaultPrompt();
 }
 
 // ── Settings UI ───────────────────────────────────────────────────────────────
 async function showSettingsUI(notebook) {
     const cur = getNotebookSettings(notebook);
+    const palette = _getBackgroundColors();
+    const allPalette = [...BACKGROUND_COLORS_LIGHT, ...BACKGROUND_COLORS_DARK];
     const isCustomColor = cur.backgroundColor &&
-        !BACKGROUND_COLORS.find(c => c.value === cur.backgroundColor);
+        !allPalette.find(c => c.value === cur.backgroundColor);
 
     // ── Colour items ──────────────────────────────────────────────────────
     const colorItems = [
@@ -136,7 +270,7 @@ async function showSettingsUI(notebook) {
             description: cur.backgroundColor === '' ? '✓ current' : 'Use VS Code theme default',
             value:       '',
         },
-        ...BACKGROUND_COLORS.map(c => ({
+        ...palette.map(c => ({
             label:       c.label,
             description: c.value + (cur.backgroundColor === c.value ? '   ✓ current' : ''),
             iconPath:    colorSwatch(c.value),
@@ -180,6 +314,40 @@ async function showSettingsUI(notebook) {
         },
     ];
 
+    // ── Wolfbook System Prompt presets ──────────────────────────────────────
+    const _activePromptName = _getActivePromptName();
+    const _allPrompts = _listPrompts();
+    const promptItems = [
+        ..._allPrompts.map(p => ({
+            label:       (p.name === _activePromptName ? '$(check) ' : '$(circle-large-outline) ') + p.name,
+            description: p.name === _activePromptName ? 'active — click to edit' : 'click to switch',
+            value:       p.name === _activePromptName ? '__prompt_edit__' : '__prompt_switch__',
+            _promptName: p.name,
+        })),
+        {
+            label:       '$(add) Save current as new preset…',
+            description: 'Duplicate active prompt with a new name',
+            value:       '__prompt_new__',
+        },
+    ];
+    if (_allPrompts.length > 1) {
+        promptItems.push({
+            label:       '$(trash) Delete "' + _activePromptName + '"',
+            description: 'Remove this preset permanently',
+            value:       '__prompt_delete__',
+        });
+    }
+
+    // ── MCP Server toggle ────────────────────────────────────────────────
+    const mcpEnabled = configCompat.getSetting('mcpEnabled', true);
+    const mcpItems = [
+        {
+            label:       mcpEnabled ? '$(check) MCP Server Enabled' : '$(circle-slash) MCP Server Disabled',
+            description: mcpEnabled ? 'Claude / MCP agents can connect' : 'MCP server is stopped',
+            value:       '__mcp_toggle__',
+        },
+    ];
+
     // ── Full list with separators ─────────────────────────────────────────
     const items = [
         { label: 'Background Color', kind: vscode.QuickPickItemKind.Separator },
@@ -188,6 +356,10 @@ async function showSettingsUI(notebook) {
         ...imageItems,
         { label: 'Kernel', kind: vscode.QuickPickItemKind.Separator },
         ...kernelItems,
+        { label: 'Copilot Instructions', kind: vscode.QuickPickItemKind.Separator },
+        ...promptItems,
+        { label: 'MCP Server', kind: vscode.QuickPickItemKind.Separator },
+        ...mcpItems,
         { label: '', kind: vscode.QuickPickItemKind.Separator },
         {
             label:       '$(discard) Reset all customizations',
@@ -289,9 +461,77 @@ async function showSettingsUI(notebook) {
     } else if (pick.value === '__select_kernel__') {
         await vscode.commands.executeCommand('wolfbook.selectKernel');
 
+    } else if (pick.value === '__mcp_toggle__') {
+        const wasEnabled = configCompat.getSetting('mcpEnabled', true);
+        const newState   = !wasEnabled;
+        await vscode.workspace.getConfiguration('wolfbook').update('mcpEnabled', newState, vscode.ConfigurationTarget.Workspace);
+        const label = newState ? 'enabled' : 'disabled';
+        const action = await vscode.window.showWarningMessage(
+            `MCP Server ${label}. Reload the window to apply this change.`,
+            'Reload Now'
+        );
+        if (action === 'Reload Now') {
+            await vscode.commands.executeCommand('workbench.action.reloadWindow');
+        }
+
+    } else if (pick.value === '__prompt_switch__') {
+        _setActivePromptName(pick._promptName);
+        setImmediate(() => showSettingsUI(notebook));
+
+    } else if (pick.value === '__prompt_edit__') {
+        const activePromptName = _getActivePromptName();
+        const promptPath = _getActivePromptPath();
+        let currentText = '';
+        try { currentText = fs.readFileSync(promptPath, 'utf8'); } catch (e) {
+            vscode.window.showErrorMessage('Could not read prompt: ' + e.message);
+            return;
+        }
+        const newText = await _showSystemPromptEditor(currentText, activePromptName);
+        if (newText !== undefined) {
+            try {
+                fs.writeFileSync(promptPath, newText, 'utf8');
+                vscode.window.showInformationMessage(`Prompt "${activePromptName}" saved — takes effect on next @wolfbook chat`);
+            } catch (e) {
+                vscode.window.showErrorMessage('Could not save prompt: ' + e.message);
+            }
+        }
+
+    } else if (pick.value === '__prompt_new__') {
+        const name = await vscode.window.showInputBox({
+            prompt:        'Name for new prompt preset',
+            placeHolder:   'e.g. integrability, paper-review',
+            ignoreFocusOut: true,
+            validateInput: v => (v && /^[a-zA-Z0-9_-]+$/.test(v.trim())) ? null : 'Use letters, digits, - or _ only',
+        });
+        if (name) {
+            const trimmed = name.trim();
+            const dstPath = path.join(_PROMPTS_DIR, trimmed + '.md');
+            try {
+                fs.copyFileSync(_getActivePromptPath(), dstPath);
+                _setActivePromptName(trimmed);
+                vscode.window.showInformationMessage(`Preset "${trimmed}" created and activated`);
+                setImmediate(() => showSettingsUI(notebook));
+            } catch (e) {
+                vscode.window.showErrorMessage('Could not create preset: ' + e.message);
+            }
+        }
+
+    } else if (pick.value === '__prompt_delete__') {
+        const activePromptName = _getActivePromptName();
+        const confirm = await vscode.window.showWarningMessage(
+            `Delete preset "${activePromptName}"? This cannot be undone.`,
+            'Delete', 'Cancel'
+        );
+        if (confirm === 'Delete') {
+            try { fs.unlinkSync(_getActivePromptPath()); } catch (_) {}
+            const remaining = _listPrompts();
+            if (remaining.length > 0) _setActivePromptName(remaining[0].name);
+            setImmediate(() => showSettingsUI(notebook));
+        }
+
     } else if (pick.value === '__reset__') {
-        await updateNotebookSettings(notebook, { backgroundColor: '', backgroundImagePath: '' });
-        vscode.window.showInformationMessage('All notebook background customizations reset');
+        await updateNotebookSettings(notebook, { backgroundColor: '', backgroundImagePath: '', copilotPrePrompt: '' });
+        vscode.window.showInformationMessage('All notebook customizations reset');
 
     } else if (pick.value === '__devlog_toggle__') {
         // Toggle a single channel — xor the flag
@@ -347,22 +587,33 @@ async function updateNotebookSettings(notebook, newSettings) {
 }
 
 // ── Color math helpers ────────────────────────────────────────────────────────
+// percent > 0 → lighten (towards 255); percent < 0 → darken (towards 0)
 function adjustColor(color, percent) {
     const num  = parseInt(color.replace("#", ""), 16);
     const r    = (num >> 16);
     const g    = (num >> 8) & 0x00FF;
     const b    = num & 0x0000FF;
-    const newR = Math.min(255, Math.max(0, Math.round(r + (255 - r) * percent)));
-    const newG = Math.min(255, Math.max(0, Math.round(g + (255 - g) * percent)));
-    const newB = Math.min(255, Math.max(0, Math.round(b + (255 - b) * percent)));
+    let newR, newG, newB;
+    if (percent >= 0) {
+        newR = Math.min(255, Math.max(0, Math.round(r + (255 - r) * percent)));
+        newG = Math.min(255, Math.max(0, Math.round(g + (255 - g) * percent)));
+        newB = Math.min(255, Math.max(0, Math.round(b + (255 - b) * percent)));
+    } else {
+        // Darken: shift towards 0
+        const p = -percent;
+        newR = Math.min(255, Math.max(0, Math.round(r * (1 - p))));
+        newG = Math.min(255, Math.max(0, Math.round(g * (1 - p))));
+        newB = Math.min(255, Math.max(0, Math.round(b * (1 - p))));
+    }
     return "#" + ((1 << 24) + (newR << 16) + (newG << 8) + newB).toString(16).slice(1);
 }
 
-function createBorderColor(color) {
-    const num = parseInt(color.replace("#", ""), 16);
-    const r   = Math.max(0, (num >> 16) - 20);
-    const g   = Math.max(0, ((num >> 8) & 0x00FF) - 20);
-    const b   = Math.max(0, (num & 0x0000FF) - 20);
+function createBorderColor(color, isDark) {
+    const num   = parseInt(color.replace("#", ""), 16);
+    const delta = isDark ? 20 : -20;
+    const r     = Math.min(255, Math.max(0, (num >> 16) + delta));
+    const g     = Math.min(255, Math.max(0, ((num >> 8) & 0x00FF) + delta));
+    const b     = Math.min(255, Math.max(0, (num & 0x0000FF) + delta));
     return "#" + ((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1);
 }
 
@@ -377,22 +628,34 @@ async function applyNotebookSettings(notebook) {
     const currentColors = config.get('colorCustomizations') || {};
 
     if (settings.backgroundColor) {
-        const baseColor = settings.backgroundColor;
+        const baseColor = _autoInvertColor(settings.backgroundColor);
         const isHex     = /^#[0-9a-fA-F]{3,8}$/.test(baseColor);
         const updated   = { ...currentColors };
+        const isDark    = _isDarkTheme();
 
         if (isHex) {
-            updated['notebook.editorBackground']          = adjustColor(baseColor, 0.08);
-            updated['notebook.cellEditorBackground']      = adjustColor(baseColor, 0.35);
-            updated['notebook.cellBorderColor']           = createBorderColor(baseColor);
-            updated['notebook.inactiveFocusedCellBorder'] = createBorderColor(baseColor);
-            updated['notebook.collapsedCellBackground']   = adjustColor(baseColor, 0.35);
+            if (isDark) {
+                // Dark theme: cell editor darker than notebook background
+                updated['notebook.editorBackground']          = adjustColor(baseColor, 0.12);
+                updated['notebook.cellEditorBackground']      = adjustColor(baseColor, -0.18);
+                updated['notebook.cellBorderColor']           = createBorderColor(baseColor, true);
+                updated['notebook.inactiveFocusedCellBorder'] = createBorderColor(baseColor, true);
+                updated['notebook.collapsedCellBackground']   = adjustColor(baseColor, -0.12);
+            } else {
+                updated['notebook.editorBackground']          = adjustColor(baseColor, 0.08);
+                updated['notebook.cellEditorBackground']      = adjustColor(baseColor, 0.35);
+                updated['notebook.cellBorderColor']           = createBorderColor(baseColor, false);
+                updated['notebook.inactiveFocusedCellBorder'] = createBorderColor(baseColor, false);
+                updated['notebook.collapsedCellBackground']   = adjustColor(baseColor, 0.35);
+            }
         } else {
             // rgb(...) or named color — set directly (no lighten/darken math)
             updated['notebook.editorBackground']     = baseColor;
             updated['notebook.cellEditorBackground'] = baseColor;
         }
-        await config.update('colorCustomizations', updated, vscode.ConfigurationTarget.Workspace);
+        if (!_notebookColorsUnchanged(currentColors, updated)) {
+            await config.update('colorCustomizations', updated, vscode.ConfigurationTarget.Workspace);
+        }
 
     } else if (!settings.backgroundImagePath) {
         // No color and no image — strip custom notebook colors
@@ -420,6 +683,123 @@ async function applyNotebookSettings(notebook) {
     } else {
         try { msg.postMessage({ type: 'bg-image', dataUrl: null }); } catch (_) {}
     }
+
+    // 3. Copilot instructions — inject into all Copilot chats via workspace setting
+    await _applyCopilotInstructions(settings.copilotPrePrompt || '');
+}
+
+// Tag used to identify wolfbook-managed entries in codeGeneration.instructions
+const _WB_INSTR_TAG = '[wolfbook-notebook-instructions] ';
+
+async function _applyCopilotInstructions(prePrompt) {
+    try {
+        const cfg      = vscode.workspace.getConfiguration('github.copilot.chat');
+        const existing = cfg.get('codeGeneration.instructions') || [];
+        // Remove any previous wolfbook-managed entry, then prepend new one if set
+        const filtered = existing.filter(item =>
+            !(typeof item.text === 'string' && item.text.startsWith(_WB_INSTR_TAG))
+        );
+        const updated = prePrompt
+            ? [{ text: _WB_INSTR_TAG + prePrompt }, ...filtered]
+            : filtered;
+        await cfg.update('codeGeneration.instructions', updated.length ? updated : undefined,
+            vscode.ConfigurationTarget.Workspace);
+    } catch (_) {}
+}
+
+// ── Wolfbook system prompt editor (webview panel) ─────────────────────────
+function _showSystemPromptEditor(initialText, promptName) {
+    return new Promise((resolve) => {
+        const panel = vscode.window.createWebviewPanel(
+            'wolfbook.systemPromptEditor',
+            'Wolfbook Prompt: ' + (promptName || 'default'),
+            vscode.ViewColumn.Beside,
+            { enableScripts: true, retainContextWhenHidden: true }
+        );
+
+        let resolved = false;
+        const finish = (value) => {
+            if (resolved) return;
+            resolved = true;
+            panel.dispose();
+            resolve(value);
+        };
+
+        panel.onDidDispose(() => {
+            if (!resolved) { resolved = true; resolve(undefined); }
+        });
+
+        panel.webview.onDidReceiveMessage(msg => {
+            if (msg.command === 'save')   finish(msg.text);
+            if (msg.command === 'cancel') finish(undefined);
+        });
+
+        const escHtml = (s) => s
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;');
+
+        panel.webview.html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<style>
+  body {
+    margin: 0; padding: 16px; height: 100vh; box-sizing: border-box;
+    display: flex; flex-direction: column; font-family: var(--vscode-font-family);
+    color: var(--vscode-foreground); background: var(--vscode-editor-background);
+    overflow: hidden;
+  }
+  h3 { margin: 0 0 4px; font-size: 14px; }
+  .hint { font-size: 12px; opacity: 0.7; margin-bottom: 10px; }
+  textarea {
+    flex: 1; width: 100%; box-sizing: border-box; resize: none;
+    font-family: var(--vscode-editor-font-family, monospace);
+    font-size: var(--vscode-editor-font-size, 13px);
+    line-height: 1.5;
+    padding: 10px;
+    color: var(--vscode-input-foreground); background: var(--vscode-input-background);
+    border: 1px solid var(--vscode-input-border, #555);
+    border-radius: 4px;
+    outline: none;
+  }
+  textarea:focus { border-color: var(--vscode-focusBorder); }
+  .buttons { display: flex; gap: 8px; margin-top: 12px; justify-content: flex-end; flex-shrink: 0; }
+  button { padding: 6px 16px; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; }
+  .btn-primary { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+  .btn-primary:hover { background: var(--vscode-button-hoverBackground); }
+  .btn-secondary { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
+  .btn-secondary:hover { background: var(--vscode-button-secondaryHoverBackground); }
+</style>
+</head>
+<body>
+  <h3>Wolfbook System Prompt</h3>
+  <div class="hint">This text is fed to every @wolfbook chat. Describes available tools and conventions. Cmd+S to save.</div>
+  <textarea id="editor">${escHtml(initialText)}</textarea>
+  <div class="buttons">
+    <button class="btn-secondary" id="btnCancel">Cancel</button>
+    <button class="btn-primary" id="btnSave">Save</button>
+  </div>
+  <script>
+    const vscode = acquireVsCodeApi();
+    const ta = document.getElementById('editor');
+    ta.focus();
+    document.getElementById('btnSave').addEventListener('click', () => {
+        vscode.postMessage({ command: 'save', text: ta.value });
+    });
+    document.getElementById('btnCancel').addEventListener('click', () => {
+        vscode.postMessage({ command: 'cancel' });
+    });
+    document.addEventListener('keydown', e => {
+        if (e.key === 'Escape') { e.preventDefault(); vscode.postMessage({ command: 'cancel' }); }
+        if ((e.metaKey || e.ctrlKey) && e.key === 's') {
+            e.preventDefault();
+            vscode.postMessage({ command: 'save', text: ta.value });
+        }
+    });
+  </script>
+</body>
+</html>`;
+    });
 }
 
 exports.BACKGROUND_COLORS = BACKGROUND_COLORS;

@@ -130,22 +130,28 @@ function scrollToInputCellAnimated(self, cellIndex, notebook) {
 //   - A single restore at Idle is deterministic — no timing races with
 //     rAF frames, no fragile 50ms debounce windows.
 //
-// The guard is only armed for refine-mode keyboard executions.
-// Identification key: controller._refineGuardActive is set true by execute()
-// before checkoutExecutionQueue() → start() fires the Executing event.
+// The guard is armed for refine-mode keyboard executions AND for agent-tool
+// executions.  Identification keys:
+//   controller._refineGuardActive  — set true by execute() for refine mode
+//   controller._agentGuardActive   — set true by tools before calling execute()
 //
-// Drift detection: if the user manually scrolled away (>2 cells from saved
-// position), the restore is skipped to respect their intent.
+// Drift detection: for keyboard (refine) mode, if the user manually scrolled
+// away (>2 cells from saved position) the restore is skipped to respect intent.
+// For agent mode, drift detection is DISABLED — VS Code scrolled to the cell
+// intentionally (not the user), so we always restore.
 
 function registerExecutionScrollGuard(context, getController) {
     let _guardActive      = false;
     let _guardCellIndex   = null;
     let _guardNotebook    = null;
+    let _guardIsAgent     = false;   // true when armed by an agent tool (no drift check)
     let _safetyTimeout    = null;
 
     function _doRestore(label) {
         if (!_guardActive) return;
         _guardActive = false;
+        const _wasAgent = _guardIsAgent;
+        _guardIsAgent = false;
         if (_safetyTimeout) { clearTimeout(_safetyTimeout); _safetyTimeout = null; }
 
         const self = getController();
@@ -163,16 +169,20 @@ function registerExecutionScrollGuard(context, getController) {
         }
         if (!nbEditor) { scrollLog('[scroll-guard]', label, 'no matching editor — skip'); return; }
 
-        // Drift detection: if the viewport moved >2 cells from saved position,
-        // the user scrolled manually — respect their intent.
-        const currentRange = nbEditor.visibleRanges[0];
-        if (savedRange && currentRange) {
-            const drift = Math.abs(currentRange.start - savedRange.start);
-            if (drift > 2) {
-                scrollLog('[scroll-guard]', label, 'drift', drift, '> 2 cells — user scrolled, respecting');
-                _guardCellIndex = null;
-                _guardNotebook  = null;
-                return;
+        // Drift detection: if the user manually scrolled away (>2 cells from saved
+        // position), skip the restore to respect their intent.
+        // Agent mode: skip drift check — the scroll was VS Code reacting to execution
+        // start, not the user scrolling.
+        if (!_wasAgent) {
+            const currentRange = nbEditor.visibleRanges[0];
+            if (savedRange && currentRange) {
+                const drift = Math.abs(currentRange.start - savedRange.start);
+                if (drift > 2) {
+                    scrollLog('[scroll-guard]', label, 'drift', drift, '> 2 cells — user scrolled, respecting');
+                    _guardCellIndex = null;
+                    _guardNotebook  = null;
+                    return;
+                }
             }
         }
 
@@ -180,7 +190,7 @@ function registerExecutionScrollGuard(context, getController) {
         if (savedRange) {
             try {
                 nbEditor.revealRange(savedRange, vscode.NotebookEditorRevealType.AtTop);
-                scrollLog('[scroll-guard]', label, 'viewport restored to cell', savedRange.start);
+                scrollLog('[scroll-guard]', label, _wasAgent ? '(agent) viewport restored to cell' : 'viewport restored to cell', savedRange.start);
             } catch (e) {
                 scrollLog('[scroll-guard]', label, 'revealRange error:', e.message);
             }
@@ -198,6 +208,43 @@ function registerExecutionScrollGuard(context, getController) {
         _guardNotebook  = null;
     }
 
+    // ── Continuous agent counter-scroll: react to every visible-range change ──
+    // VS Code's handleAutoReveal fires at start()/end() and may override a single
+    // revealRange call. This listener re-asserts the saved position on every frame
+    // change during an agent execution. Disabled for refine mode (the cell is
+    // already in view, so handleAutoReveal doesn't cause a visible jump).
+    let _agentScrollDisposable = null;
+    let _agentCounterScrolling = false; // reentrance guard
+
+    function _installAgentScrollLock(notebook, savedRange) {
+        _disposeAgentScrollLock();
+        if (!savedRange) return;
+        _agentCounterScrolling = false;
+        _agentScrollDisposable = vscode.window.onDidChangeNotebookEditorVisibleRanges(e => {
+            if (_agentCounterScrolling) return;
+            if (e.notebookEditor.notebook !== notebook) return;
+            const current = e.visibleRanges[0];
+            if (!current) return;
+            const drift = Math.abs(current.start - savedRange.start);
+            if (drift <= 0) return; // already at saved position
+            _agentCounterScrolling = true;
+            try {
+                e.notebookEditor.revealRange(savedRange, vscode.NotebookEditorRevealType.AtTop);
+                scrollLog('[agent-scroll-lock] counter-scroll from cell', current.start, 'back to', savedRange.start);
+            } catch (_) {}
+            // Allow next event after a short delay to prevent tight recursion.
+            setTimeout(() => { _agentCounterScrolling = false; }, 30);
+        });
+    }
+
+    function _disposeAgentScrollLock() {
+        if (_agentScrollDisposable) {
+            _agentScrollDisposable.dispose();
+            _agentScrollDisposable = null;
+        }
+        _agentCounterScrolling = false;
+    }
+
     if (!vscode.notebooks?.onDidChangeCellExecutionState) {
         scrollLog('[scroll-guard] vscode.notebooks.onDidChangeCellExecutionState not available — skipping');
         return;
@@ -208,24 +255,41 @@ function registerExecutionScrollGuard(context, getController) {
 
         if (evt.state === ExecState.Executing) {
             const self = getController();
-            if (!self || !self._refineGuardActive) return;
-            // Consume the flag so a duplicate Executing event doesn't re-arm.
+            if (!self) return;
+            const isRefine = !!self._refineGuardActive;
+            const isAgent  = !!self._agentGuardActive;
+            if (!isRefine && !isAgent) return;
+            // Consume the flags so duplicate Executing events don't re-arm.
             self._refineGuardActive = false;
+            self._agentGuardActive  = false;
 
             _guardCellIndex = evt.cell.index;
             _guardNotebook  = evt.cell.notebook;
             _guardActive    = true;
-            scrollLog('[scroll-guard] armed (refine) — cell', _guardCellIndex);
+            _guardIsAgent   = isAgent && !isRefine;
+            scrollLog('[scroll-guard] armed', _guardIsAgent ? '(agent)' : '(refine)', '— cell', _guardCellIndex);
+
+            // Agent mode: install continuous scroll lock to fight handleAutoReveal.
+            if (_guardIsAgent) {
+                const savedRange = self._scrollGuardSavedViewport;
+                _installAgentScrollLock(_guardNotebook, savedRange);
+            }
 
             // Safety timeout: if Idle never fires (kernel crash), clean up after 30s.
             if (_safetyTimeout) clearTimeout(_safetyTimeout);
-            _safetyTimeout = setTimeout(() => _doRestore('safety-timeout'), 30000);
+            _safetyTimeout = setTimeout(() => {
+                _disposeAgentScrollLock();
+                _doRestore('safety-timeout');
+            }, 30000);
 
         } else if (evt.state === ExecState.Idle) {
             if (_guardActive &&
                 _guardCellIndex === evt.cell.index &&
                 _guardNotebook  === evt.cell.notebook) {
                 scrollLog('[scroll-guard] Idle — restoring viewport for cell', evt.cell.index);
+                // Remove the scroll lock BEFORE the final restore so the
+                // restore's own revealRange is not re-triggered.
+                _disposeAgentScrollLock();
                 _doRestore('idle');
             }
         }

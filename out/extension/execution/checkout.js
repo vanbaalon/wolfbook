@@ -9,7 +9,12 @@ const { scrollLog, wstpLog } = require('../utils/dev-logger');
 const _output = require('../output/renderer');
 
 async function checkoutExecutionQueue(self) {
-    const currentExecution = self.executionQueue.getNextPendingExecution();
+    let currentExecution;
+    try {
+        currentExecution = self.executionQueue.getNextPendingExecution();
+    } catch (_getErr) {
+        return;
+    }
     if (!currentExecution) {
         scrollLog('[checkout] getNextPending → null (queue empty or all started), returning');
         return;
@@ -80,49 +85,20 @@ async function checkoutExecutionQueue(self) {
               '| prevOutputs:', prevOutputsSnap.length,
               '| t=', _t0);
 
-    self.executionQueue.start(currentExecution.id);
-    scrollLog('[start] after executionQueue.start() | dt=', Date.now() - _t0, 'ms');
-
-    // ---- Counter-scroll at execution START ----
-    // executionQueue.start() triggers VS Code's internal revealRange showing
-    // the executing cell. Counter-scroll for advance mode only.
-    // Refine mode: the scroll guard in scroll/manager.js handles viewport
-    // restoration at Idle time — no timed counter-scrolls needed.
-    {
-        const _startCell = currentExecution.execution.cell;
-        const _startNb   = _startCell.notebook;
-        const _startIdx  = _startCell.index;
-        const _startMode = self._pendingScrollMode || 'advance';
-        scrollLog('[start-reveal] mode:', _startMode, '| cell:', _startIdx);
-
-        if (_startMode !== 'refine') {
-            const _doStartReveal = (label) => {
-                try {
-                    for (const _sed of vscode.window.visibleNotebookEditors) {
-                        if (_sed.notebook === _startNb) {
-                            const RC = vscode.NotebookRange ?? vscode.NotebookCellRange;
-                            _sed.revealRange(new RC(_startIdx, _startIdx + 1),
-                                             vscode.NotebookEditorRevealType.AtTop);
-                            scrollLog('[start-reveal]', label, 'advance: AtTop cell', _startIdx);
-                            break;
-                        }
-                    }
-                } catch (e) { scrollLog('[start-reveal] error:', e.message); }
-            };
-            setTimeout(() => _doStartReveal('t=0'),  0);
-            setTimeout(() => _doStartReveal('t=16'), 16);
-            setTimeout(() => _doStartReveal('t=32'), 32);
-            setTimeout(() => _doStartReveal('t=50'), 50);
-        } else {
-            scrollLog('[start-reveal] refine: skipped — scroll guard handles it');
-        }
+    const _isSilentExec = !!currentExecution.execution._isSilent;
+    try {
+        self.executionQueue.start(currentExecution.id);
+    } catch (_startErr) {
     }
+    scrollLog('[start] after executionQueue.start() | dt=', Date.now() - _t0, 'ms', '| silent:', _isSilentExec);
+
 
     // Restore previous outputs WITHOUT await so start()+replaceOutput are sent
     // in the same synchronous JS turn. VS Code's extension host batches API calls
     // made in the same tick into a single IPC message, meaning clear+restore can
     // arrive at the renderer together — avoiding the one-frame blank-output flash.
-    if (prevOutputsSnap.length > 0) {
+    // Silent mode: start() is a no-op — VS Code never cleared outputs, skip restore.
+    if (!_isSilentExec && prevOutputsSnap.length > 0) {
         if (currentExecution.hasLaunchingPlaceholder) {
             // The only "previous" output is the "⏳ Kernel is starting…" placeholder
             // we wrote in execute().  Clear it so the real evaluation output starts fresh.
@@ -381,6 +357,43 @@ async function checkoutExecutionQueue(self) {
             self._pendingScrollCellNotebook = null;
         }
         const execMode  = self._pendingScrollMode || 'advance';
+
+        // ---- Counter-scroll at execution START ----
+        // executionQueue.start() triggers VS Code's internal revealRange showing
+        // the executing cell.
+        // Keyboard advance: counter-scroll the executing cell to AtTop.
+        // Keyboard refine:  skip — scroll guard handles it at Idle.
+        // Agent execution:  skip — scroll guard also handles it at Idle (no drift check).
+        // Agent-abort-pending: suppress to avoid scrolling to the aborted user cell.
+        if (!self._agentAbortPending && isKeyboardExec) {
+            const _startCell = currentExecution.execution.cell;
+            const _startNb   = _startCell.notebook;
+            const _startIdx  = _startCell.index;
+            const _startMode = execMode;
+            scrollLog('[start-reveal] keyboard | mode:', _startMode, '| cell:', _startIdx);
+
+            if (_startMode !== 'refine') {
+                const _doStartReveal = (label) => {
+                    try {
+                        for (const _sed of vscode.window.visibleNotebookEditors) {
+                            if (_sed.notebook === _startNb) {
+                                const RC = vscode.NotebookRange ?? vscode.NotebookCellRange;
+                                _sed.revealRange(new RC(_startIdx, _startIdx + 1),
+                                                 vscode.NotebookEditorRevealType.AtTop);
+                                scrollLog('[start-reveal]', label, 'advance: AtTop cell', _startIdx);
+                                break;
+                            }
+                        }
+                    } catch (e) { scrollLog('[start-reveal] error:', e.message); }
+                };
+                setTimeout(() => _doStartReveal('t=0'),  0);
+                setTimeout(() => _doStartReveal('t=16'), 16);
+                setTimeout(() => _doStartReveal('t=32'), 32);
+                setTimeout(() => _doStartReveal('t=50'), 50);
+            } else {
+                scrollLog('[start-reveal] refine: skipped — scroll guard handles it');
+            }
+        } // end counter-scroll block
         // Scroll in Advance mode is now fired immediately on Shift+Enter (in
         // execute()), not here on first output — so no shouldScrollOnOutput flag.
         scrollLog(isKeyboardExec
@@ -1259,7 +1272,7 @@ async function checkoutExecutionQueue(self) {
         //     off-screen first, InCenter re-centers it — a large visible jump.
         //
         //   Refine + cell was clearly ABOVE viewport (_vae > cell+1): don't override.
-        if (isKeyboardExec) {
+        if (isKeyboardExec && !self._agentAbortPending) {
             const _peNb   = execCell.notebook;
             const _peIdx  = execCell.index;
             const _vae    = _viewportAtExecute !== null ? _viewportAtExecute : _peIdx;

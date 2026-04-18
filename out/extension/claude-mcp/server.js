@@ -54,6 +54,14 @@ class WolframMCPServer {
         this._server  = null;
         this._port    = 0;
         this._secondary = false;  // true = another window owns the server; we just reuse its port
+        // Multi-window routing
+        this._workers      = new Map();  // clientId → { port, pid, notebooks }
+        this._ownClientId  = null;       // set by extension.js after election/start
+        this._ownNotebooks = [];         // updated by extension.js on notebook open/close
+        // Session targets: one target per MCP session (SSE connection)
+        // Map: sessionId → { clientId, notebook } | null
+        // 'copilot' is a synthetic sessionId used when Copilot auto-sets a target
+        this._sessionTargets = new Map();  // sessionId → { clientId, notebook }
     }
 
     /** Start listening. Returns the actual port used.
@@ -101,6 +109,51 @@ class WolframMCPServer {
     get port() { return this._port; }
     get isSecondary() { return this._secondary; }
 
+    // ── Multi-window identity & routing ─────────────────────────────────────
+
+    /** Called from extension.js once the client ID and initial notebook list are known. */
+    setOwnClientInfo(clientId, notebooks) {
+        this._ownClientId  = clientId;
+        this._ownNotebooks = notebooks || [];
+    }
+
+    /** Called from extension.js when open notebooks change. */
+    updateOwnNotebooks(notebooks) {
+        this._ownNotebooks = notebooks || [];
+    }
+
+    /**
+     * Start directly on PRIMARY_PORT without probing first.
+     * Used when a worker wins an election and needs to claim port 27182 immediately.
+     */
+    startAsPrimary(primaryPort) {
+        this._secondary = false;
+        return this._startListening(primaryPort || 27182);
+    }
+
+    /**
+     * After an election win: read the shared registry file, notify every live worker
+     * of the new primary so they re-register.  Call this after startAsPrimary() resolves.
+     */
+    async notifyWorkers() {
+        const http = require('http');
+        const { listAlive } = require('./registry');
+        const workers = listAlive();
+        for (const w of workers) {
+            if (!w.workerPort || w.clientId === this._ownClientId) continue;
+            await new Promise(resolve => {
+                const req = http.request({
+                    hostname: '127.0.0.1', port: w.workerPort,
+                    path: '/new-primary', method: 'POST',
+                    headers: { 'Content-Length': 0 }, timeout: 1500,
+                }, res => { res.resume(); resolve(); });
+                req.on('error', () => resolve());
+                req.on('timeout', () => { req.destroy(); resolve(); });
+                req.end();
+            });
+        }
+    }
+
     stop() {
         if (this._secondary) return Promise.resolve(); // not our server to close
         return new Promise(resolve => {
@@ -126,10 +179,36 @@ class WolframMCPServer {
         } else if (req.method === 'GET' && url.pathname === '/health') {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ status: 'ok', tools: this._schemas.length, port: this._port }));
+        } else if (req.method === 'POST' && url.pathname === '/register') {
+            this._handleRegister(req, res);
+        } else if (req.method === 'GET' && url.pathname === '/workers') {
+            const list = this._buildClientList();
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(list));
         } else {
             res.writeHead(404);
             res.end('Not found');
         }
+    }
+
+    // ── Worker registration ────────────────────────────────────────────────
+    _handleRegister(req, res) {
+        let body = '';
+        req.setEncoding('utf8');
+        req.on('data', d => { body += d; });
+        req.on('end', () => {
+            try {
+                const info = JSON.parse(body);
+                if (info.clientId) {
+                    this._workers.set(info.clientId, {
+                        port:      info.port,
+                        pid:       info.pid,
+                        notebooks: info.notebooks || [],
+                    });
+                }
+            } catch {}
+            res.writeHead(200); res.end();
+        });
     }
 
     // ── SSE connection — one per Claude session ────────────────────────────
@@ -144,7 +223,10 @@ class WolframMCPServer {
         this._sessions.set(sessionId, res);
         // MCP SSE transport: first event tells the client where to POST messages
         res.write(`event: endpoint\ndata: /message?sessionId=${sessionId}\n\n`);
-        req.on('close', () => this._sessions.delete(sessionId));
+        req.on('close', () => {
+            this._sessions.delete(sessionId);
+            this._sessionTargets.delete(sessionId);  // release any target claim
+        });
     }
 
     // ── Message POST — JSON-RPC dispatch ──────────────────────────────────
@@ -168,7 +250,7 @@ class WolframMCPServer {
 
             let result, error;
             try {
-                result = await this._dispatch(msg.method, msg.params || {});
+                result = await this._dispatch(msg.method, msg.params || {}, sessionId);
             } catch (e) {
                 const code = (typeof e.code === 'number') ? e.code : -32603;
                 error = { code, message: String(e.message || e) };
@@ -187,7 +269,7 @@ class WolframMCPServer {
     }
 
     // ── MCP method dispatch ────────────────────────────────────────────────
-    async _dispatch(method, params) {
+    async _dispatch(method, params, sessionId = 'mcp') {
         switch (method) {
             case 'initialize':
                 return {
@@ -199,11 +281,121 @@ class WolframMCPServer {
             case 'ping':
                 return {};
 
-            case 'tools/list':
-                return { tools: this._schemas };
+            case 'tools/list': {
+                // Inject optional client_id param into every tool so the agent can
+                // target a specific window without calling wolfbook_list_clients first.
+                const CLIENT_ID_PARAM = {
+                    type: 'string',
+                    description:
+                        'Target client ID, e.g. "VSCode[ClasterVersion]" or ' +
+                        '"Antigravity[ClasterVersion]". Omit to auto-route by notebook ' +
+                        'path. Use wolfbook_list_clients to see available clients.',
+                };
+                const injectClientId = (schema) => {
+                    if (!schema || schema.type !== 'object') return schema;
+                    return { ...schema, properties: { ...schema.properties, client_id: CLIENT_ID_PARAM } };
+                };
+                const tools = this._schemas.map(t => ({
+                    ...t, inputSchema: injectClientId(t.inputSchema),
+                }));
+                // Synthetic tools — not in _tools map, handled in tools/call
+                tools.push({
+                    name: 'wolfbook_list_clients',
+                    description:
+                        'List all connected Wolfbook clients (VS Code / Antigravity windows). ' +
+                        'Returns each client ID, its role (primary/worker), open notebooks, ' +
+                        'and workspace name. Use this to pick the right client_id before ' +
+                        'targeting a specific window.',
+                    inputSchema: { type: 'object', properties: {}, required: [] },
+                });
+                tools.push({
+                    name: 'wolfbook_setTarget',
+                    description:
+                        'Set (or clear) the session target: the default client and notebook that ' +
+                        'all subsequent tool calls are routed to automatically. Once set, you do ' +
+                        'not need to pass client_id or notebook on every call — they are injected ' +
+                        'automatically. The active [Target] is shown at the bottom of each response. ' +
+                        'Omit both client_id and notebook to clear the target.',
+                    inputSchema: {
+                        type: 'object',
+                        properties: {
+                            client_id: { type: 'string', description: 'Client to target (from wolfbook_list_clients). Omit to target own window.' },
+                            notebook:  { type: 'string', description: 'Notebook filename to switch to and target (e.g. "proto2.wb"). Omit to leave notebook selection unchanged.' },
+                        },
+                        required: [],
+                    },
+                });
+                return { tools };
+            }
 
             case 'tools/call': {
-                const { name, arguments: args } = params;
+                const { name, arguments: rawArgs } = params;
+
+                // ── Synthetic: wolfbook_list_clients ────────────────────────
+                if (name === 'wolfbook_list_clients') {
+                    return { content: [{ type: 'text', text: this._buildClientListText() }], isError: false };
+                }
+
+                // ── Synthetic: wolfbook_setTarget ────────────────────────────
+                if (name === 'wolfbook_setTarget') {
+                    return this._handleSetTarget(rawArgs || {}, sessionId);
+                }
+
+                // ── Extract & strip client_id routing hint ───────────────────
+                const args = rawArgs ? { ...rawArgs } : {};
+                const targetClientId = args.client_id || null;
+                delete args.client_id;
+
+                // ── Route to a specific worker (explicit client_id) ──────────
+                if (targetClientId && targetClientId !== this._ownClientId) {
+                    const worker = this._workers.get(targetClientId);
+                    if (!worker) {
+                        const err = new Error(
+                            `Unknown client: "${targetClientId}". ` +
+                            `Use wolfbook_list_clients to see available clients.`);
+                        err.code = -32602;
+                        throw err;
+                    }
+                    return this._invokeWorker(worker.port, name, args);
+                }
+
+                // ── Auto-route by notebook name in args ──────────────────────
+                if (!targetClientId) {
+                    const workerEntry = this._findWorkerByNotebook(args);
+                    if (workerEntry) return this._invokeWorker(workerEntry.port, name, args);
+                }
+
+                // ── Route via session target ─────────────────────────────────
+                const sessionTarget = this._sessionTargets.get(sessionId) || null;
+                if (!targetClientId && sessionTarget) {
+                    const { clientId: stClientId, notebook: stNotebook } = sessionTarget;
+                    // Inject the session notebook into args when the tool hasn't specified one
+                    if (stNotebook && !args.notebook) args.notebook = stNotebook;
+                    if (stClientId && stClientId !== this._ownClientId) {
+                        const worker = this._workers.get(stClientId);
+                        if (worker) {
+                            const result = await this._invokeWorker(worker.port, name, args);
+                            return this._appendTargetFooter(result, sessionTarget);
+                        }
+                    }
+                }
+
+                // ── No target set in a multi-window session ────────────────────
+                // When other windows are connected, require an explicit target so we
+                // never silently run in the wrong window.
+                if (!targetClientId && !sessionTarget && this._workers.size > 0) {
+                    return {
+                        content: [{ type: 'text', text:
+                            'No session target set.\n\n' +
+                            'Use `wolfbook_setTarget` to pick a client and notebook before running tools, ' +
+                            'or use `wolfbook_list_clients` to see available clients.\n\n' +
+                            'Example: wolfbook_setTarget(client_id: "VSCode[BaxterSolver]", notebook: "proto2.wb")'
+                        }],
+                        isError: false,
+                    };
+                }
+
+                // ── Run locally (primary window, single-window mode) ──────────
                 const tool = this._tools.get(name);
                 if (!tool) {
                     const err = new Error(`Unknown tool: ${name}`);
@@ -211,7 +403,7 @@ class WolframMCPServer {
                     throw err;
                 }
 
-                const options = { input: args || {} };
+                const options = { input: args };
                 // Mock VS Code CancellationToken — MCP calls are not cancellable mid-flight
                 const token = {
                     isCancellationRequested: false,
@@ -234,10 +426,10 @@ class WolframMCPServer {
                     .map(p => p.value ?? p.text ?? '')
                     .join('');
 
-                return {
+                return this._appendTargetFooter({
                     content: [{ type: 'text', text }],
                     isError: false,
-                };
+                }, this._sessionTargets.get(sessionId) || null);
             }
 
             default: {
@@ -246,6 +438,195 @@ class WolframMCPServer {
                 throw err;
             }
         }
+    }
+
+    // ── Session target helpers ─────────────────────────────────────────
+
+    /** Handle wolfbook_setTarget: validate, check conflicts, then persist per-session target. */
+    _handleSetTarget(args, sessionId = 'mcp') {
+        const targetCid = (args.client_id || '').trim() || null;
+        const targetNb  = (args.notebook  || '').trim() || null;
+
+        // Omit both → clear this session's target
+        if (!targetCid && !targetNb) {
+            this._sessionTargets.delete(sessionId);
+            return { content: [{ type: 'text', text: 'Session target cleared.' }], isError: false };
+        }
+
+        // Validate client if specified
+        if (targetCid && targetCid !== this._ownClientId && !this._workers.has(targetCid)) {
+            const known = [this._ownClientId, ...this._workers.keys()].filter(Boolean).join(', ');
+            return {
+                content: [{ type: 'text', text: `Unknown client: "${targetCid}". Known: ${known || '(none)'}. Use wolfbook_list_clients.` }],
+                isError: false,
+            };
+        }
+
+        // Conflict check: is this notebook already claimed by another session?
+        if (targetNb) {
+            for (const [sid, t] of this._sessionTargets) {
+                if (sid === sessionId) continue;  // same session updating its own target
+                const sameClient = !targetCid || !t.clientId || t.clientId === targetCid;
+                if (sameClient && t.notebook && t.notebook.toLowerCase() === targetNb.toLowerCase()) {
+                    const who = sid === 'copilot' ? 'Copilot (in-editor agent)' : `another MCP session (${sid.slice(0, 8)}…)`;
+                    return {
+                        content: [{ type: 'text', text:
+                            `Cannot claim "${targetNb}" — it is already targeted by ${who}.\n` +
+                            `Use wolfbook_list_clients to see current targets. ` +
+                            `If that session is dead, it will be released automatically when it disconnects.`
+                        }],
+                        isError: false,
+                    };
+                }
+            }
+        }
+
+        this._sessionTargets.set(sessionId, { clientId: targetCid, notebook: targetNb });
+
+        const parts = [];
+        if (targetNb)  parts.push(`notebook: **${targetNb}**`);
+        if (targetCid) parts.push(`client: **${targetCid}**`);
+        return {
+            content: [{ type: 'text', text: `Session target set — ${parts.join(', ')}. All subsequent tool calls will auto-route there.` }],
+            isError: false,
+        };
+    }
+
+    /** Append a compact [Target: ...] footer when a session target is active. */
+    _appendTargetFooter(result, target) {
+        if (!target) return result;
+        const { clientId, notebook } = target;
+        const label = [notebook, clientId].filter(Boolean).join(' @ ');
+        const footer = `\n\n└ *Target: ${label}*`;
+        if (result?.content?.[0]?.type === 'text') {
+            return {
+                ...result,
+                content: [{ type: 'text', text: (result.content[0].text || '') + footer }, ...result.content.slice(1)],
+            };
+        }
+        return result;
+    }
+
+    // ── Worker routing helpers ────────────────────────────────────────────────
+
+    /** Proxy a tool call to another window's WorkerServer. */
+    _invokeWorker(workerPort, name, args) {
+        return new Promise((resolve, reject) => {
+            const body = JSON.stringify({ name, arguments: args });
+            const req  = http.request({
+                hostname: '127.0.0.1',
+                port:     workerPort,
+                path:     '/invoke',
+                method:   'POST',
+                headers:  {
+                    'Content-Type':   'application/json',
+                    'Content-Length': Buffer.byteLength(body),
+                },
+                timeout: 120000,   // tools can take a while (kernel execution)
+            }, res => {
+                let data = '';
+                res.on('data', d => { data += d; });
+                res.on('end', () => {
+                    try {
+                        const r = JSON.parse(data);
+                        resolve({
+                            content: [{ type: 'text', text: r.isError ? `Error: ${r.error}` : (r.text || '') }],
+                            isError: !!r.isError,
+                        });
+                    } catch (e) {
+                        reject(new Error(`Worker response parse error: ${e.message}`));
+                    }
+                });
+            });
+            req.on('error',   e => reject(e));
+            req.on('timeout', () => { req.destroy(); reject(new Error('Worker tool call timed out')); });
+            req.write(body);
+            req.end();
+        });
+    }
+
+    /** Scan tool args for any value that looks like a notebook path and find the
+     *  worker that has it open.  Returns the worker info object or null. */
+    _findWorkerByNotebook(args) {
+        if (!args || typeof args !== 'object') return null;
+        const NB_EXTS = ['.wb', '.evsnb', '.vsnb'];
+        // Notebooks are stored as full paths in the registry.  The agent may
+        // pass just a basename (e.g. "proto2.wb") or a full path — match both.
+        const _base = p => (p || '').replace(/\\/g, '/').split('/').pop().toLowerCase();
+        for (const val of Object.values(args)) {
+            if (typeof val !== 'string') continue;
+            if (!NB_EXTS.some(ext => val.toLowerCase().endsWith(ext))) continue;
+            const targetBase = _base(val);
+            for (const info of this._workers.values()) {
+                if ((info.notebooks || []).some(nb => nb === val || _base(nb) === targetBase)) {
+                    return info;
+                }
+            }
+        }
+        return null;
+    }
+
+    /** Build structured client list (used by /workers endpoint and wolfbook_list_clients). */
+    _buildClientList() {
+        const list = [];
+        if (this._ownClientId) {
+            list.push({
+                clientId:  this._ownClientId,
+                role:      'primary',
+                notebooks: this._ownNotebooks,
+                pid:       process.pid,
+            });
+        }
+        for (const [clientId, info] of this._workers) {
+            list.push({
+                clientId,
+                role:      'worker',
+                notebooks: info.notebooks || [],
+                pid:       info.pid,
+            });
+        }
+        return list;
+    }
+
+    /** Format the client list as human-readable text for wolfbook_list_clients. */
+    _buildClientListText() {
+        const list = this._buildClientList();
+        if (list.length === 0) return 'No clients registered yet.';
+        const _base = p => (p || '').replace(/\\/g, '/').split('/').pop();
+
+        // Build a map of notebook basename → session label for targeted notebooks
+        const claimed = new Map();  // notebook basename (lower) → display label
+        for (const [sid, t] of this._sessionTargets) {
+            if (!t?.notebook) continue;
+            const nb  = t.notebook.toLowerCase();
+            const who = sid === 'copilot' ? 'Copilot' : `session ${sid.slice(0, 6)}…`;
+            claimed.set(nb, who);
+        }
+
+        const lines = list.map(c => {
+            const nbList = c.notebooks.length === 0
+                ? '  (no open notebooks)'
+                : c.notebooks.map(n => {
+                    const base = _base(n);
+                    const tag  = claimed.get(base.toLowerCase());
+                    return tag ? `  • ${base}  ⟵ *in use by ${tag}*` : `  • ${base}`;
+                }).join('\n');
+            return `${c.clientId}  [${c.role}]\n${nbList}`;
+        });
+
+        // Show all active session targets
+        if (this._sessionTargets.size > 0) {
+            const targetLines = [];
+            for (const [sid, t] of this._sessionTargets) {
+                const who   = sid === 'copilot' ? 'Copilot' : `session ${sid.slice(0, 6)}…`;
+                const label = [t.notebook, t.clientId].filter(Boolean).join(' @ ');
+                targetLines.push(`  ${who} → ${label}`);
+            }
+            lines.push(`\n**Active targets:**\n${targetLines.join('\n')}`);
+        } else {
+            lines.push('\n*No session targets set. Use wolfbook_setTarget to pick a default client/notebook.*');
+        }
+        return lines.join('\n\n');
     }
 }
 
@@ -438,4 +819,81 @@ function needsConfigUpdate(bridgePath, nodeBin, workspacePaths) {
     return false;
 }
 
-module.exports = { WolframMCPServer, loadMCPSchemas, configureClaudeDesktop, writeClaudeConfig, needsConfigUpdate, resolveNodeBinary, probeExistingServer };
+// ---------------------------------------------------------------------------
+// Antigravity MCP config — ~/.gemini/antigravity/mcp_config.json
+// Same { mcpServers: { wolfbook: { command, args } } } format as Claude Desktop.
+// ---------------------------------------------------------------------------
+
+/** Write the wolfbook entry into Antigravity's MCP config file.
+ *  Returns { updated: bool, configPath: string }.
+ */
+function writeAntigravityConfig(bridgePath, nodeBin) {
+    const home = process.env.HOME || process.env.USERPROFILE || '~';
+    const configPath = path.join(home, '.gemini', 'antigravity', 'mcp_config.json');
+    try {
+        let config = {};
+        try { if (fs.existsSync(configPath)) { const raw = fs.readFileSync(configPath, 'utf8'); if (raw.trim()) config = JSON.parse(raw); } } catch {}
+        if (!config.mcpServers) config.mcpServers = {};
+        config.mcpServers.wolfbook = { command: nodeBin, args: [bridgePath] };
+        fs.mkdirSync(path.dirname(configPath), { recursive: true });
+        fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf8');
+        return { updated: true, configPath };
+    } catch (e) {
+        console.warn('[Wolfbook MCP] Could not write Antigravity config:', e.message);
+        return { updated: false, configPath };
+    }
+}
+
+/** Returns true if the Antigravity config needs updating. */
+function needsAntigravityConfigUpdate(bridgePath, nodeBin) {
+    const home = process.env.HOME || process.env.USERPROFILE || '~';
+    const configPath = path.join(home, '.gemini', 'antigravity', 'mcp_config.json');
+    try {
+        const raw = fs.readFileSync(configPath, 'utf8');
+        if (!raw.trim()) return true;
+        const cfg = JSON.parse(raw);
+        const entry = cfg?.mcpServers?.wolfbook;
+        return !entry || entry.command !== nodeBin || entry.args?.[0] !== bridgePath;
+    } catch { return true; }
+}
+
+// ---------------------------------------------------------------------------
+// Antigravity Skill — ~/.gemini/antigravity/skills/wolfbook/SKILL.md
+// Installs the wolfbook skill so Gemini's agent router loads Wolfbook context
+// automatically when the user works with Wolfram Language notebooks.
+// ---------------------------------------------------------------------------
+
+const _SKILL_SRC = path.join(__dirname, 'wolfbook-skill', 'SKILL.md');
+
+/** Install (or update) the Wolfbook skill into Antigravity's global skills folder.
+ *  Returns { updated: bool, skillPath: string }.
+ */
+function installAntigravitySkill() {
+    const home = process.env.HOME || process.env.USERPROFILE || '~';
+    const skillDir  = path.join(home, '.gemini', 'antigravity', 'skills', 'wolfbook');
+    const skillDest = path.join(skillDir, 'SKILL.md');
+    try {
+        const src = fs.readFileSync(_SKILL_SRC, 'utf8');
+        // Skip write if content is identical (avoid touching mtime unnecessarily)
+        try { if (fs.readFileSync(skillDest, 'utf8') === src) return { updated: false, skillPath: skillDest }; } catch {}
+        fs.mkdirSync(skillDir, { recursive: true });
+        fs.writeFileSync(skillDest, src, 'utf8');
+        return { updated: true, skillPath: skillDest };
+    } catch (e) {
+        console.warn('[Wolfbook MCP] Could not install Antigravity skill:', e.message);
+        return { updated: false, skillPath: skillDest };
+    }
+}
+
+/** Returns true if the skill needs installing or updating. */
+function needsSkillInstall() {
+    const home = process.env.HOME || process.env.USERPROFILE || '~';
+    const skillDest = path.join(home, '.gemini', 'antigravity', 'skills', 'wolfbook', 'SKILL.md');
+    try {
+        const src  = fs.readFileSync(_SKILL_SRC, 'utf8');
+        const dest = fs.readFileSync(skillDest, 'utf8');
+        return src !== dest;
+    } catch { return true; }
+}
+
+module.exports = { WolframMCPServer, loadMCPSchemas, configureClaudeDesktop, writeClaudeConfig, needsConfigUpdate, resolveNodeBinary, probeExistingServer, writeAntigravityConfig, needsAntigravityConfigUpdate, installAntigravitySkill, needsSkillInstall };

@@ -577,10 +577,52 @@ async function activate(context) {
 
     // ── Claude Desktop MCP server ──────────────────────────────────────────
     // Exposes all Wolfram notebook tools to Claude via MCP HTTP/SSE protocol.
-    const { WolframMCPServer, loadMCPSchemas, configureClaudeDesktop, writeClaudeConfig, needsConfigUpdate, resolveNodeBinary } = require('./claude-mcp/server');
+    const _mcpDisabled = !configCompat.getSetting('mcpEnabled', true);
+    if (_mcpDisabled) {
+        devLog(LOG_CHANNELS.EXTENSION, '[Wolfbook MCP] MCP server disabled via wolfbook.mcpEnabled setting');
+    }
+    const { WolframMCPServer, loadMCPSchemas, configureClaudeDesktop, writeClaudeConfig, needsConfigUpdate, resolveNodeBinary, writeAntigravityConfig, needsAntigravityConfigUpdate, installAntigravitySkill, needsSkillInstall } = require('./claude-mcp/server');
+    const { WorkerServer }  = require('./claude-mcp/worker');
+    const { assignClientId } = require('./claude-mcp/registry');
     const _pkgJson   = path.join(context.extensionPath, 'package.json');
     const _mcpSchema = loadMCPSchemas(_pkgJson);
-    const _mcpServer = new WolframMCPServer(_toolMap, _mcpSchema);
+    let   _mcpServer = new WolframMCPServer(_toolMap, _mcpSchema);
+
+    // Stable client identity for this window
+    const _appName  = (vscode.env && vscode.env.appName) || 'VSCode';
+    const _wsName   = vscode.workspace.name ||
+        path.basename(vscode.workspace.workspaceFolders?.[0]?.uri?.fsPath || 'untitled');
+    const _clientId = assignClientId(_appName, _wsName);
+    devLog(LOG_CHANNELS.EXTENSION, `[Wolfbook MCP] Client ID: ${_clientId}`);
+
+    // Helper: ALL open wolfbook notebook paths — loaded documents AND unloaded background tabs.
+    // vscode.workspace.notebookDocuments only contains notebooks VS Code has loaded into memory.
+    // Tabs opened in previous sessions (or not yet clicked) appear in tabGroups but are NOT
+    // in notebookDocuments until the user activates them.  We merge both sources so the agent
+    // always sees the complete picture.
+    const NB_EXTS = ['.wb', '.evsnb', '.vsnb'];
+    const _getOpenNbPaths = () => {
+        const seen = new Set();
+        // 1. Fully loaded notebook documents
+        for (const nb of (vscode.workspace.notebookDocuments || [])) {
+            if (nb.notebookType === 'extended-wolfram-notebook') seen.add(nb.uri.fsPath);
+        }
+        // 2. All editor tabs (catches unloaded background tabs)
+        try {
+            for (const group of (vscode.window.tabGroups?.all || [])) {
+                for (const tab of (group.tabs || [])) {
+                    const uri = tab.input?.uri || tab.input?.modified;
+                    if (uri && NB_EXTS.some(ext => uri.fsPath.endsWith(ext))) {
+                        seen.add(uri.fsPath);
+                    }
+                }
+            }
+        } catch {}
+        return [...seen];
+    };
+
+    // Worker server (started after primary/secondary decision below)
+    let _workerServer = null;
 
     // ── Eager config write (Fix 3 from diagnostics) ────────────────────────
     // Write Claude config SYNCHRONOUSLY before yielding to the event loop.
@@ -601,6 +643,22 @@ async function activate(context) {
                 console.warn('[Wolfbook MCP] Eager config write failed:', e.message);
             }
         }
+        if (needsAntigravityConfigUpdate(_bridgePath, _nodeBin)) {
+            try {
+                writeAntigravityConfig(_bridgePath, _nodeBin);
+                devLog(LOG_CHANNELS.EXTENSION, '[Wolfbook MCP] Antigravity config written eagerly at activate()');
+            } catch (e) {
+                console.warn('[Wolfbook MCP] Antigravity eager config write failed:', e.message);
+            }
+        }
+        if (needsSkillInstall()) {
+            try {
+                installAntigravitySkill();
+                devLog(LOG_CHANNELS.EXTENSION, '[Wolfbook MCP] Antigravity skill installed at activate()');
+            } catch (e) {
+                console.warn('[Wolfbook MCP] Antigravity skill install failed:', e.message);
+            }
+        }
     }
 
     // Re-register whenever workspace folders change (user opens a new project)
@@ -609,14 +667,56 @@ async function activate(context) {
         const _nodeBin    = resolveNodeBinary();
         const _wsPaths    = _getWsPaths();
         try { writeClaudeConfig(_bridgePath, _nodeBin, undefined, _mcpServer.port, _wsPaths); } catch {}
+        try { writeAntigravityConfig(_bridgePath, _nodeBin); } catch {}
     }));
+
+    // Track the "active" MCP server — may be replaced on election win
+    let _activeMCPServer = _mcpServer;
+    context.subscriptions.push({ dispose: () => _activeMCPServer.stop() });
+    context.subscriptions.push({ dispose: () => _workerServer?.stop() });
+
+    /** Shared logic to start a WorkerServer for non-primary windows (or after election). */
+    const _startWorker = () => {
+        const ws = new WorkerServer(_toolMap, _clientId);
+        ws.updateNotebooks(_getOpenNbPaths());
+        ws.onPromoted(async () => {
+            devLog(LOG_CHANNELS.EXTENSION, '[Wolfbook MCP] Election won — promoting to primary');
+            try {
+                const newPrimary = new WolframMCPServer(_toolMap, _mcpSchema);
+                await newPrimary.startAsPrimary();
+                newPrimary.setOwnClientInfo(_clientId, _getOpenNbPaths());
+                _activeMCPServer = newPrimary;
+                _mcpServer = newPrimary;
+                await newPrimary.notifyWorkers();
+                devLog(LOG_CHANNELS.EXTENSION, '[Wolfbook MCP] Now primary after election');
+            } catch (e) {
+                console.warn('[Wolfbook MCP] Promotion failed:', e.message);
+            }
+        });
+        ws.start().catch(e => console.warn('[Wolfbook MCP] Worker start failed:', e.message));
+        return ws;
+    };
+
+    if (_mcpDisabled) {
+        devLog(LOG_CHANNELS.EXTENSION, '[Wolfbook MCP] Skipping MCP server start (disabled)');
+    } else {
 
     _mcpServer.start().then(port => {
         if (_mcpServer.isSecondary) {
-            devLog(LOG_CHANNELS.EXTENSION, `[Wolfbook MCP] Secondary window — MCP server already running on port ${port}`);
-            return; // config already up-to-date from primary window
+            devLog(LOG_CHANNELS.EXTENSION, `[Wolfbook MCP] Secondary window — starting worker for ${_clientId}`);
+            _workerServer = _startWorker();
+            return;
         }
-        devLog(LOG_CHANNELS.EXTENSION, `[Wolfbook MCP] Ready — port ${port}`);
+        // ── We are the primary ──────────────────────────────────────────────
+        _mcpServer.setOwnClientInfo(_clientId, _getOpenNbPaths());
+        // Auto-set session target when Copilot resolves a notebook in this window,
+        // so MCP agents inherit the target without needing an explicit wolfbook_setTarget call.
+        _tools.setNotebookResolvedCallback((notebook) => {
+            if (!_mcpServer._sessionTargets.has('copilot')) {
+                _mcpServer._sessionTargets.set('copilot', { clientId: _clientId, notebook });
+            }
+        });
+        devLog(LOG_CHANNELS.EXTENSION, `[Wolfbook MCP] Primary ready — port ${port}, client: ${_clientId}`);
         // Re-write config if content changed (e.g. bridge path after upgrade)
         const _bridgePath = path.join(context.extensionPath, 'out', 'extension', 'claude-mcp', 'stdio-bridge.js');
         const _nodeBin    = resolveNodeBinary();
@@ -629,10 +729,35 @@ async function activate(context) {
                 console.warn('[Wolfbook MCP] Config update failed:', e.message);
             }
         }
+        if (needsAntigravityConfigUpdate(_bridgePath, _nodeBin)) {
+            try {
+                writeAntigravityConfig(_bridgePath, _nodeBin);
+                devLog(LOG_CHANNELS.EXTENSION, '[Wolfbook MCP] Antigravity config updated');
+            } catch (e) {
+                console.warn('[Wolfbook MCP] Antigravity config update failed:', e.message);
+            }
+        }
     }).catch(e => {
         console.warn('[Wolfbook MCP] Server failed to start:', e.message);
     });
-    context.subscriptions.push({ dispose: () => _mcpServer.stop() });
+
+    } // end if (!_mcpDisabled)
+
+    // Keep primary's and worker's notebook list fresh as notebooks open/close.
+    // Uses lambdas that read _mcpServer/_workerServer at call time so election
+    // promotion (which replaces _mcpServer) is picked up automatically.
+    // We listen to both notebookDocument events (for loaded docs) AND tabGroups
+    // changes (for unloaded background tabs).
+    const _syncNotebooks = () => {
+        const paths = _getOpenNbPaths();
+        _mcpServer.updateOwnNotebooks?.(paths);
+        _workerServer?.updateNotebooks(paths);
+    };
+    context.subscriptions.push(
+        vscode.workspace.onDidOpenNotebookDocument(() => _syncNotebooks()),
+        vscode.workspace.onDidCloseNotebookDocument(() => _syncNotebooks()),
+        vscode.window.tabGroups?.onDidChangeTabs?.(() => _syncNotebooks()) ?? { dispose: () => {} }
+    );
 
     // Command: write wolfbook MCP entry into Claude Desktop and Claude Code config
     context.subscriptions.push(vscode.commands.registerCommand('wolfbook.configureClaude', async () => {
@@ -656,6 +781,27 @@ async function activate(context) {
             }
         } catch (e) {
             vscode.window.showErrorMessage(`Failed to configure Claude: ${e.message}`);
+        }
+    }));
+
+    // Command: write wolfbook MCP entry into Antigravity config
+    context.subscriptions.push(vscode.commands.registerCommand('wolfbook.configureAntigravity', async () => {
+        const bridgePath = path.join(context.extensionPath, 'out', 'extension', 'claude-mcp', 'stdio-bridge.js');
+        const nodeBin    = resolveNodeBinary();
+        try {
+            const { configPath } = writeAntigravityConfig(bridgePath, nodeBin);
+            const { skillPath }  = installAntigravitySkill();
+            const action = await vscode.window.showInformationMessage(
+                `Antigravity configured ✓ (MCP: ${path.basename(configPath)}, Skill: ${path.basename(path.dirname(skillPath))}). Restart Antigravity to apply.`,
+                'Open MCP Config', 'Open Skill File'
+            );
+            if (action === 'Open MCP Config') {
+                vscode.commands.executeCommand('vscode.open', vscode.Uri.file(configPath));
+            } else if (action === 'Open Skill File') {
+                vscode.commands.executeCommand('vscode.open', vscode.Uri.file(skillPath));
+            }
+        } catch (e) {
+            vscode.window.showErrorMessage(`Failed to configure Antigravity: ${e.message}`);
         }
     }));
     ;
@@ -840,6 +986,7 @@ async function activate(context) {
             await new Promise(r => setTimeout(r, 200));
         }
 
+        controller._wolframExecPending = true;
         controller.execute([cell], editor.notebook, controller._controller);
     }));
 
