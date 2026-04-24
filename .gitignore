@@ -14,4 +14,7 @@ wstp/build/Release/obj.target/
 
 # VS Code local settings
 .vscode/
+
+# Temporary large Docs/ folder (use lowercase docs/ for tracked documentation)
 Docs/
+!docs/
