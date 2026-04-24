@@ -208,6 +208,9 @@
                 if (window._mcpUpdateLabel) window._mcpUpdateLabel();
             }
         }
+        else if (msg.command === 'mcpInfo') {
+            renderMcpInfo(msg);
+        }
         else if (msg.command === 'collabState') {
             if (window._collabToggle) {
                 window._collabToggle.checked = !!msg.enabled;
@@ -229,6 +232,108 @@
         });
     } else {
         console.warn('[wolfbook-collab] _collabToggle NOT found in DOM');
+    }
+
+    // ── MCP info panel renderer ────────────────────────────────────────────
+
+    /**
+     * Populate the #mcp-info-panel div with dynamically-generated configuration
+     * info. Called whenever the extension sends a `mcpInfo` message.
+     */
+    function renderMcpInfo(info) {
+        var panel = window._mcpInfoPanel;
+        if (!panel) return;
+
+        var port       = info.port       || 0;
+        var bridge     = info.bridgePath || '';
+        var node       = info.nodeBin    || '';
+        var disabled   = !!info.isDisabled;
+        var secondary  = !!info.isSecondary;
+        var cfgPaths   = info.configPaths  || {};
+        var configured = info.configured   || {};
+
+        // Status line
+        var statusColor = disabled ? '#888' : '#3fb950';
+        var statusDot   = disabled ? '○' : '●';
+        var statusText  = disabled  ? 'Disabled'
+                        : secondary ? 'Running · secondary window (shares port ' + port + ')'
+                        : 'Running · port ' + port;
+
+        // Build config file rows
+        var agents = [
+            { key: 'claudeDesktop', label: 'Claude Desktop',
+              cmd: 'wolfbook.configureClaude',    cmdLabel: 'Auto-configure' },
+            { key: 'claudeCode',    label: 'Claude Code',
+              cmd: null,                          cmdLabel: null },
+            { key: 'cline',         label: 'Cline / RooCode',
+              cmd: 'wolfbook.configureCline',     cmdLabel: 'Auto-configure' },
+            { key: 'antigravity',   label: 'Antigravity (Gemini CLI)',
+              cmd: 'wolfbook.configureAntigravity', cmdLabel: 'Auto-configure' },
+            { key: 'codex',         label: 'OpenAI Codex CLI',
+              cmd: null,                          cmdLabel: null },
+        ];
+
+        var esc = function(s) {
+            return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+        };
+
+        var agentRows = agents.map(function(a) {
+            var cfgPath = cfgPaths[a.key] || '—';
+            var ok      = configured[a.key];
+            var tick    = ok
+                ? '<span style="color:#3fb950;" title="wolfbook entry present">✓</span>'
+                : '<span style="color:#888;" title="not yet configured">✗</span>';
+            var autoBtn = (a.cmd && !ok)
+                ? ' <a href="#" data-cmd="' + esc(a.cmd) + '" style="color:var(--vscode-textLink-foreground,#4e94ce); text-decoration:none;" title="Run the auto-configure VS Code command">' + esc(a.cmdLabel) + '</a>'
+                : '';
+            return '<tr><td style="padding-right:6px; white-space:nowrap;">' + tick + ' ' + esc(a.label) + autoBtn + '</td>'
+                 + '<td style="opacity:0.6; word-break:break-all;">' + esc(cfgPath) + '</td></tr>';
+        }).join('');
+
+        // Manual snippet
+        var snippet = JSON.stringify({ command: node, args: [bridge] }, null, 2);
+
+        var html = [
+            '<div style="margin-bottom:6px;">',
+            '  <span style="color:' + statusColor + '; font-weight:600;">' + statusDot + ' ' + esc(statusText) + '</span>',
+            '</div>',
+
+            '<table style="border-collapse:collapse; width:100%; margin-bottom:8px;">',
+            '  <tr><td style="padding-right:6px; white-space:nowrap; opacity:0.7;">Node</td>',
+            '      <td style="opacity:0.6; word-break:break-all;">' + esc(node || '(not found)') + '</td></tr>',
+            '  <tr><td style="padding-right:6px; white-space:nowrap; opacity:0.7;">Bridge</td>',
+            '      <td style="opacity:0.6; word-break:break-all;">' + esc(bridge) + '</td></tr>',
+            '</table>',
+
+            '<div style="opacity:0.75; margin-bottom:3px; font-weight:600;">Agent config files</div>',
+            '<table style="border-collapse:collapse; width:100%; margin-bottom:8px;">',
+            agentRows,
+            '</table>',
+
+            '<div style="opacity:0.75; margin-bottom:3px; font-weight:600;">Manual config snippet</div>',
+            '<div style="opacity:0.6; margin-bottom:2px; font-size:10px;">Add to your agent\'s MCP config under <code>mcpServers.wolfbook</code> (or equivalent):</div>',
+            '<pre style="margin:0 0 8px; padding:6px 8px; background:var(--vscode-textCodeBlock-background,#1e1e1e); border-radius:3px; overflow-x:auto; font-size:10.5px; line-height:1.5; white-space:pre-wrap;">' + esc(snippet) + '</pre>',
+
+            '<div style="opacity:0.75; margin-bottom:3px; font-weight:600;">Tips</div>',
+            '<ul style="margin:0 0 2px; padding-left:14px; opacity:0.7; line-height:1.6;">',
+            '  <li>Toggle requires a <strong>window reload</strong> to take effect.</li>',
+            '  <li>Each VS Code window joins as a client; the <em>primary</em> window runs the HTTP server — secondaries share its port.</li>',
+            '  <li>Tool calls target the <em>last active</em> Wolfbook notebook in this window. Use <code>wolfbook_setTarget</code> to pin a specific file.</li>',
+            '  <li>Port range: ' + (port || 27182) + '–' + ((port || 27182) + 19) + ' (tries next free port on conflict).</li>',
+            '  <li>For Claude Code: add to <code>~/.claude.json</code> under <code>mcpServers</code>, or run <code>claude mcp add wolfbook --transport stdio ' + esc(node) + ' ' + esc(bridge) + '</code>.</li>',
+            '  <li>For Codex CLI: add to <code>~/.codex/config.toml</code> under <code>[mcp_servers.wolfbook]</code>.</li>',
+            '</ul>',
+        ].join('\n');
+
+        panel.innerHTML = html;
+
+        // Wire up auto-configure link clicks
+        panel.querySelectorAll('a[data-cmd]').forEach(function(link) {
+            link.addEventListener('click', function(e) {
+                e.preventDefault();
+                vscode.postMessage({ command: 'runVSCodeCommand', id: link.dataset.cmd });
+            });
+        });
     }
 
     // ── Add watch ──────────────────────────────────────────────────────────

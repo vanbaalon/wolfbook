@@ -581,7 +581,7 @@ async function activate(context) {
     if (_mcpDisabled) {
         devLog(LOG_CHANNELS.EXTENSION, '[Wolfbook MCP] MCP server disabled via wolfbook.mcpEnabled setting');
     }
-    const { WolframMCPServer, loadMCPSchemas, configureClaudeDesktop, writeClaudeConfig, needsConfigUpdate, resolveNodeBinary, writeAntigravityConfig, needsAntigravityConfigUpdate, installAntigravitySkill, needsSkillInstall } = require('./claude-mcp/server');
+    const { WolframMCPServer, loadMCPSchemas, configureClaudeDesktop, writeClaudeConfig, needsConfigUpdate, resolveNodeBinary, writeAntigravityConfig, needsAntigravityConfigUpdate, installAntigravitySkill, needsSkillInstall, writeClineConfig, needsClineConfigUpdate, getMcpInfoPayload } = require('./claude-mcp/server');
     const { WorkerServer }  = require('./claude-mcp/worker');
     const { assignClientId } = require('./claude-mcp/registry');
     const _pkgJson   = path.join(context.extensionPath, 'package.json');
@@ -659,6 +659,14 @@ async function activate(context) {
                 console.warn('[Wolfbook MCP] Antigravity skill install failed:', e.message);
             }
         }
+        if (needsClineConfigUpdate(_bridgePath, _nodeBin)) {
+            try {
+                const r = writeClineConfig(_bridgePath, _nodeBin);
+                if (!r.skipped) devLog(LOG_CHANNELS.EXTENSION, '[Wolfbook MCP] Cline config written eagerly at activate()');
+            } catch (e) {
+                console.warn('[Wolfbook MCP] Cline eager config write failed:', e.message);
+            }
+        }
     }
 
     // Re-register whenever workspace folders change (user opens a new project)
@@ -668,6 +676,7 @@ async function activate(context) {
         const _wsPaths    = _getWsPaths();
         try { writeClaudeConfig(_bridgePath, _nodeBin, undefined, _mcpServer.port, _wsPaths); } catch {}
         try { writeAntigravityConfig(_bridgePath, _nodeBin); } catch {}
+        try { writeClineConfig(_bridgePath, _nodeBin); } catch {}
     }));
 
     // Track the "active" MCP server — may be replaced on election win
@@ -699,12 +708,17 @@ async function activate(context) {
 
     if (_mcpDisabled) {
         devLog(LOG_CHANNELS.EXTENSION, '[Wolfbook MCP] Skipping MCP server start (disabled)');
+        try {
+            const _bp = path.join(context.extensionPath, 'out', 'extension', 'claude-mcp', 'stdio-bridge.js');
+            _watchPanel.setMcpInfo(getMcpInfoPayload(_bp, resolveNodeBinary(), 0, false, true));
+        } catch(e) {}
     } else {
 
     _mcpServer.start().then(port => {
         if (_mcpServer.isSecondary) {
             devLog(LOG_CHANNELS.EXTENSION, `[Wolfbook MCP] Secondary window — starting worker for ${_clientId}`);
             _workerServer = _startWorker();
+            try { _watchPanel.setMcpInfo(getMcpInfoPayload(_bridgePath, _nodeBin, port, true, false)); } catch(e) {}
             return;
         }
         // ── We are the primary ──────────────────────────────────────────────
@@ -737,6 +751,8 @@ async function activate(context) {
                 console.warn('[Wolfbook MCP] Antigravity config update failed:', e.message);
             }
         }
+        // Push live info to the sidebar info panel
+        try { _watchPanel.setMcpInfo(getMcpInfoPayload(_bridgePath, _nodeBin, port, false, false)); } catch(e) {}
     }).catch(e => {
         console.warn('[Wolfbook MCP] Server failed to start:', e.message);
     });
@@ -802,6 +818,33 @@ async function activate(context) {
             }
         } catch (e) {
             vscode.window.showErrorMessage(`Failed to configure Antigravity: ${e.message}`);
+        }
+    }));
+
+    // Command: write wolfbook MCP entry into Cline's settings file
+    context.subscriptions.push(vscode.commands.registerCommand('wolfbook.configureCline', async () => {
+        const bridgePath = path.join(context.extensionPath, 'out', 'extension', 'claude-mcp', 'stdio-bridge.js');
+        const nodeBin    = resolveNodeBinary();
+        try {
+            const { updated, configPath, skipped } = writeClineConfig(bridgePath, nodeBin);
+            if (skipped) {
+                vscode.window.showWarningMessage(
+                    'Cline does not appear to be installed (settings folder not found). ' +
+                    'Install the Cline extension (saoudrizwan.claude-dev) and try again.'
+                );
+                return;
+            }
+            const action = await vscode.window.showInformationMessage(
+                `Cline configured ✓ wolfbook MCP server entry written to cline_mcp_settings.json. Reload the VS Code window to apply.`,
+                'Open Settings File', 'Reload Window'
+            );
+            if (action === 'Open Settings File') {
+                vscode.commands.executeCommand('vscode.open', vscode.Uri.file(configPath));
+            } else if (action === 'Reload Window') {
+                vscode.commands.executeCommand('workbench.action.reloadWindow');
+            }
+        } catch (e) {
+            vscode.window.showErrorMessage(`Failed to configure Cline: ${e.message}`);
         }
     }));
     ;

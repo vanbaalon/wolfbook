@@ -900,4 +900,114 @@ function needsSkillInstall() {
     } catch { return true; }
 }
 
-module.exports = { WolframMCPServer, loadMCPSchemas, configureClaudeDesktop, writeClaudeConfig, needsConfigUpdate, resolveNodeBinary, probeExistingServer, writeAntigravityConfig, needsAntigravityConfigUpdate, installAntigravitySkill, needsSkillInstall };
+// ---------------------------------------------------------------------------
+// Cline (saoudrizwan.claude-dev) MCP config
+// Path: ~/Library/Application Support/Code/User/globalStorage/
+//         saoudrizwan.claude-dev/settings/cline_mcp_settings.json  (macOS/Linux)
+//       %APPDATA%\Code\User\globalStorage\saoudrizwan.claude-dev\settings\cline_mcp_settings.json  (Windows)
+// Format: { mcpServers: { wolfbook: { command, args, disabled, autoApprove } } }
+// ---------------------------------------------------------------------------
+
+/** Resolve the Cline MCP settings file path for the current platform. */
+function _clineConfigPath() {
+    const isWin = process.platform === 'win32';
+    const base  = isWin
+        ? (process.env.APPDATA || path.join(process.env.USERPROFILE || '~', 'AppData', 'Roaming'))
+        : (process.env.HOME || '~');
+    return isWin
+        ? path.join(base, 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'settings', 'cline_mcp_settings.json')
+        : path.join(base, 'Library', 'Application Support', 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'settings', 'cline_mcp_settings.json');
+}
+
+/** Write the wolfbook MCP entry into Cline's settings file.
+ *  Only writes if Cline is installed (settings directory exists or the file already exists).
+ *  Returns { updated: bool, configPath: string, skipped: bool }.
+ */
+function writeClineConfig(bridgePath, nodeBin) {
+    const configPath = _clineConfigPath();
+    // Only write if the Cline extension storage directory exists — don't create it for non-users
+    const dir = path.dirname(configPath);
+    if (!fs.existsSync(dir)) {
+        return { updated: false, configPath, skipped: true };
+    }
+    try {
+        let config = { mcpServers: {} };
+        try {
+            if (fs.existsSync(configPath)) {
+                const raw = fs.readFileSync(configPath, 'utf8');
+                if (raw.trim()) config = JSON.parse(raw);
+            }
+        } catch {}
+        if (!config.mcpServers) config.mcpServers = {};
+        config.mcpServers.wolfbook = {
+            command:     nodeBin,
+            args:        [bridgePath],
+            disabled:    false,
+            autoApprove: [],
+        };
+        fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf8');
+        return { updated: true, configPath, skipped: false };
+    } catch (e) {
+        console.warn('[Wolfbook MCP] Could not write Cline config:', e.message);
+        return { updated: false, configPath, skipped: false };
+    }
+}
+
+/** Returns true if the Cline config needs writing (entry missing or stale). */
+function needsClineConfigUpdate(bridgePath, nodeBin) {
+    const configPath = _clineConfigPath();
+    // If the directory doesn't exist Cline isn't installed — nothing to update
+    if (!fs.existsSync(path.dirname(configPath))) return false;
+    try {
+        const raw = fs.readFileSync(configPath, 'utf8');
+        if (!raw.trim()) return true;
+        const cfg   = JSON.parse(raw);
+        const entry = cfg?.mcpServers?.wolfbook;
+        return !entry || entry.command !== nodeBin || entry.args?.[0] !== bridgePath;
+    } catch { return true; }
+}
+
+// ---------------------------------------------------------------------------
+// MCP info payload — used by the watchPanel sidebar info popup
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a serialisable info object describing the current MCP configuration.
+ * Checks which config files exist and contain the wolfbook entry so the
+ * sidebar can show live per-agent status without extra round-trips.
+ *
+ * @param {string}  bridgePath   Absolute path to stdio-bridge.js
+ * @param {string}  nodeBin      Node.js executable path
+ * @param {number}  port         Resolved HTTP port (0 = disabled/unknown)
+ * @param {boolean} isSecondary  True when this VS Code window is a secondary MCP client
+ * @param {boolean} isDisabled   True when the user has turned MCP off
+ * @returns {{port, bridgePath, nodeBin, isSecondary, isDisabled, configPaths, configured}}
+ */
+function getMcpInfoPayload(bridgePath, nodeBin, port, isSecondary, isDisabled) {
+    const home    = process.env.HOME || process.env.USERPROFILE || '~';
+    const isWin   = process.platform === 'win32';
+    const appData = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
+
+    const configPaths = {
+        claudeDesktop: isWin
+            ? path.join(appData, 'Claude', 'claude_desktop_config.json')
+            : path.join(home, 'Library', 'Application Support', 'Claude', 'claude_desktop_config.json'),
+        claudeCode:  path.join(home, '.claude.json'),
+        cline: isWin
+            ? path.join(appData, 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'settings', 'cline_mcp_settings.json')
+            : path.join(home, 'Library', 'Application Support', 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'settings', 'cline_mcp_settings.json'),
+        antigravity: path.join(home, '.gemini', 'antigravity', 'mcp_config.json'),
+        codex:       path.join(home, '.codex', 'config.toml'),
+    };
+
+    const configured = {};
+    try { configured.claudeDesktop = !!(JSON.parse(fs.readFileSync(configPaths.claudeDesktop, 'utf8'))?.mcpServers?.wolfbook); } catch { configured.claudeDesktop = false; }
+    try { configured.claudeCode    = !!(JSON.parse(fs.readFileSync(configPaths.claudeCode, 'utf8'))?.mcpServers?.wolfbook); }    catch { configured.claudeCode  = false; }
+    try { configured.cline         = !!(JSON.parse(fs.readFileSync(configPaths.cline, 'utf8'))?.mcpServers?.wolfbook); }         catch { configured.cline        = false; }
+    try { configured.antigravity   = !!(JSON.parse(fs.readFileSync(configPaths.antigravity, 'utf8'))?.wolfbook); }               catch { configured.antigravity  = false; }
+    try { configured.codex         = fs.readFileSync(configPaths.codex, 'utf8').includes('[mcp_servers.wolfbook]'); }            catch { configured.codex        = false; }
+
+    return { port: port || 0, bridgePath, nodeBin, isSecondary: !!isSecondary, isDisabled: !!isDisabled, configPaths, configured };
+}
+
+module.exports = { WolframMCPServer, loadMCPSchemas, configureClaudeDesktop, writeClaudeConfig, needsConfigUpdate, resolveNodeBinary, probeExistingServer, writeAntigravityConfig, needsAntigravityConfigUpdate, installAntigravitySkill, needsSkillInstall, writeClineConfig, needsClineConfigUpdate, getMcpInfoPayload };

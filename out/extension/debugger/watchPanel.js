@@ -36,6 +36,7 @@ class WatchPanelProvider {
         this._bgColor        = null;   // hex color, or null = use sidebar default
         this._pendingHoverDoc = null;  // {html, symbol} — resent on next visibility
         this._widthPx        = 0;     // panel pixel width reported by webview ResizeObserver
+        this._mcpInfo        = null;  // last setMcpInfo payload — resent on visibility change
     }
 
     // Called by extension.js when registering:
@@ -171,6 +172,10 @@ class WatchPanelProvider {
                         }
                     })();
                 }
+            } else if (msg.command === 'runVSCodeCommand' && msg.id) {
+                vscode.commands.executeCommand(msg.id).then(undefined, e => {
+                    vscode.window.showErrorMessage(`Command ${msg.id} failed: ${e?.message || e}`);
+                });
             } else {
                 console.log('[wolfbook-watch] unhandled webview msg:', JSON.stringify(msg));
             }
@@ -240,6 +245,13 @@ class WatchPanelProvider {
         this._view.webview.postMessage({ command: 'setDebugActive', active });
     }
 
+    /** Push MCP server info to the sidebar info popup (called from extension.js after server starts). */
+    setMcpInfo(info) {
+        this._mcpInfo = info || null;
+        if (!this._view) return;
+        this._view.webview.postMessage({ command: 'mcpInfo', ...this._mcpInfo });
+    }
+
     /** Update the panel background to match the active notebook (or clear it). */
     setBackground(color) {
         this._bgColor = color || null;
@@ -256,6 +268,7 @@ class WatchPanelProvider {
         const configCompat = require('../config-compat');
         const mcpEnabled = configCompat.getSetting('mcpEnabled', true);
         this._view.webview.postMessage({ command: 'mcpState', enabled: mcpEnabled });
+        if (this._mcpInfo) this._view.webview.postMessage({ command: 'mcpInfo', ...this._mcpInfo });
         const collabEnabled = vscode.workspace.getConfiguration('wolfbook').get('collabMode', false);
         this._view.webview.postMessage({ command: 'collabState', enabled: collabEnabled });
         // Show watch list placeholder names immediately (before kernel values arrive)
@@ -758,13 +771,14 @@ class WatchPanelProvider {
     <input type="checkbox" id="mcp-toggle" style="opacity:0; width:0; height:0;">
     <span class="mcp-slider" style="position:absolute; inset:0; border-radius:9px; transition:background 0.2s;"></span>
   </label>
-  <span id="mcp-label" style="font-size:11px; opacity:0.7; margin-right:6px;"></span>
+  <button id="mcp-info-btn" title="MCP configuration info" style="background:none; border:none; padding:0 2px; cursor:pointer; font-size:13px; line-height:1; opacity:0.65; color:inherit; flex-shrink:0; margin-right:4px;" aria-label="MCP configuration info">ⓘ</button>
   <span title="Collab mode: opens the notebook in a side-by-side split. The AI agent inserts, edits and runs cells in the right pane — your cursor and scroll position in the left pane are never disturbed." style="font-size:11px; opacity:0.8; cursor:help; border-bottom:1px dotted currentColor;">Collab</span>
   <label class="mcp-switch" style="position:relative; display:inline-block; width:32px; height:18px; cursor:pointer; flex-shrink:0;">
     <input type="checkbox" id="collab-toggle" style="opacity:0; width:0; height:0;">
     <span class="collab-slider" style="position:absolute; inset:0; border-radius:9px; transition:background 0.2s;"></span>
   </label>
 </div>
+<div id="mcp-info-panel" style="display:none; font-size:11px; line-height:1.7; padding:8px 10px; background:var(--vscode-editorWidget-background,#252526); border:1px solid var(--vscode-panel-border,#444); border-radius:4px; margin-bottom:6px; word-break:break-all;"></div>
 <style>
   .mcp-slider { background: #6e7681 !important; }
   #mcp-toggle:checked + .mcp-slider { background: #2ea043 !important; }
@@ -834,14 +848,20 @@ class WatchPanelProvider {
   // Acquire VS Code API once — stored globally so the external script can reuse it
   // (acquireVsCodeApi() may only be called once per webview).
   window._vscode = acquireVsCodeApi();
-  // MCP toggle refs (used by onchange inline handler and label update function)
-  window._mcpToggle = document.getElementById('mcp-toggle');
-  window._mcpLabel  = document.getElementById('mcp-label');
-  window._mcpUpdateLabel = function() {
-    if (window._mcpLabel && window._mcpToggle)
-      window._mcpLabel.textContent = window._mcpToggle.checked ? 'Enabled' : 'Disabled';
-  };
-  window._mcpUpdateLabel();
+  // MCP toggle refs
+  window._mcpToggle    = document.getElementById('mcp-toggle');
+  window._mcpInfoBtn   = document.getElementById('mcp-info-btn');
+  window._mcpInfoPanel = document.getElementById('mcp-info-panel');
+  // Clicking the ℹ button toggles the info panel visibility
+  window._mcpUpdateLabel = function() {}; // kept for compat — no longer sets text
+  if (window._mcpInfoBtn && window._mcpInfoPanel) {
+    window._mcpInfoBtn.addEventListener('click', function() {
+      var p = window._mcpInfoPanel;
+      var isVisible = p.style.display !== 'none';
+      p.style.display = isVisible ? 'none' : 'block';
+      window._mcpInfoBtn.style.opacity = isVisible ? '0.65' : '1';
+    });
+  }
   // Collab toggle ref (used by collabState message handler in external script)
   window._collabToggle = document.getElementById('collab-toggle');
   console.log('[wb-inline] init: _collabToggle=' + (window._collabToggle ? 'found' : 'NULL'));
