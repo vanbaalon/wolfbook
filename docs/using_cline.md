@@ -59,40 +59,44 @@ Use **Provider** → **OpenAI Compatible**, then supply the base URL and API key
 
 Wolfbook runs an **MCP server** inside VS Code on port 27182. Cline connects to it via a lightweight stdio bridge that ships with the extension — this avoids timing issues that arise if Cline tries to connect before the server is ready.
 
-### Step 1 — Find the bridge path
+### Automatic setup (recommended)
 
-The bridge script lives inside the installed Wolfbook extension. Run this in a terminal to find the current path:
+Wolfbook configures Cline automatically when VS Code starts, **if Cline is already installed**. After installing both extensions:
+
+1. Reload the VS Code window (`⌘⇧P` → **Reload Window**)
+2. Open the Cline panel → **MCP Servers** icon — you should see **wolfbook** listed
+
+That's it. No manual file editing needed.
+
+If the automatic setup didn't run (e.g. you installed Cline after Wolfbook), run the command manually:
+
+`⌘⇧P` → **Wolfbook: Configure Cline MCP**
+
+This writes the correct paths automatically and offers to reload the window.
+
+### Manual setup (if needed)
+
+If you prefer to configure it yourself, or need to debug the settings:
+
+**Step 1** — Find the bridge path:
 
 ```bash
 echo ~/.vscode/extensions/$(ls ~/.vscode/extensions | grep "wolfbook.wolfbook-" | sort -V | tail -1)/out/extension/claude-mcp/stdio-bridge.js
 ```
 
-Copy the output — you will use it in the next step.
-
-### Step 2 — Find your Node.js binary
-
-The bridge runs with Node.js. If `node` is in your PATH this is simply `node`. To check:
+**Step 2** — Find your Node.js binary:
 
 ```bash
 which node
 ```
 
-If that returns a path (e.g. `/opt/anaconda3/bin/node` or `/usr/local/bin/node`), use that full path in the config below for reliability. If `node` is reliably on your PATH you can use just `node`.
+**Step 3** — Open Cline's MCP settings file:
+- In the Cline panel, click the **MCP Servers** icon → **Edit MCP Settings**
+- Or open it directly:
+  - macOS: `~/Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json`
+  - Windows: `%APPDATA%\Code\User\globalStorage\saoudrizwan.claude-dev\settings\cline_mcp_settings.json`
 
-### Step 3 — Edit the Cline MCP settings file
-
-Open Cline's MCP settings file. The easiest way:
-
-- In the Cline panel, click the **MCP Servers** icon (plug icon at the top), then **Edit MCP Settings**
-
-Or open it directly:
-
-| Platform | Path |
-|---|---|
-| macOS / Linux | `~/Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json` |
-| Windows | `%APPDATA%\Code\User\globalStorage\saoudrizwan.claude-dev\settings\cline_mcp_settings.json` |
-
-Replace the file contents with:
+Set the contents to:
 
 ```json
 {
@@ -107,25 +111,12 @@ Replace the file contents with:
 }
 ```
 
-Substitute the actual paths from Steps 1 and 2. Example on macOS:
+Substituting the paths from Steps 1 and 2.
 
-```json
-{
-  "mcpServers": {
-    "wolfbook": {
-      "command": "/opt/anaconda3/bin/node",
-      "args": ["/Users/yourname/.vscode/extensions/wolfbook.wolfbook-2.6.51/out/extension/claude-mcp/stdio-bridge.js"],
-      "disabled": false,
-      "autoApprove": []
-    }
-  }
-}
-```
+### Verify
 
-### Step 4 — Reload and verify
-
-1. Reload the VS Code window (`⌘⇧P` → **Reload Window**)
-2. Open the Cline panel and click the **MCP Servers** icon
+1. Reload the VS Code window
+2. Open the Cline panel → **MCP Servers** icon
 3. You should see **wolfbook** listed as a connected server with all tools visible
 
 > **Note:** Wolfbook's MCP server starts a few seconds after VS Code loads. The stdio bridge waits automatically — no manual retry needed.
@@ -164,9 +155,9 @@ Rewrite the loop in cell 5 to use Table instead of Do, then evaluate it.
 
 ## 5. Updating Wolfbook
 
-When a new version of the Wolfbook extension is installed, the bridge path changes (the version number in the folder name increments). Update the path in `cline_mcp_settings.json` by re-running the command from Step 1 and replacing the `args` value.
+When a new version of Wolfbook is installed, the bridge path changes (the version number in the folder name updates). Wolfbook re-configures Cline automatically on the next VS Code reload — no manual action needed.
 
-> Future versions of Wolfbook may add a **Configure Cline MCP** command to do this automatically.
+You can also trigger it manually at any time: `⌘⇧P` → **Wolfbook: Configure Cline MCP**.
 
 ---
 

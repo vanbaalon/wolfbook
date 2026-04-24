@@ -443,6 +443,10 @@
         "title": "Wolfbook: Configure Antigravity MCP"
       },
       {
+        "command": "wolfbook.configureCline",
+        "title": "Wolfbook: Configure Cline MCP"
+      },
+      {
         "command": "wolfbook.registerFileTypes",
         "title": "Wolfbook: Register .wb / .evsnb / .vsnb File Types with Finder (macOS)"
       },
