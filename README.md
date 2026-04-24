@@ -13,8 +13,10 @@
   <a href="docs/ai-integration.md">AI Integration</a> ·
   <a href="docs/features.md">Features</a> ·
   <a href="docs/mcp-and-agent-tools.md">MCP & Agent Tools</a> ·
+  <a href="docs/using_cline.md">Using Cline</a> ·
   <a href="docs/presentations.md">Presentations (.wslide)</a> ·
-  <a href="docs/best-practices.md">Best Practices</a>
+  <a href="docs/best-practices.md">Best Practices</a> ·
+  <a href="#citing-wolfbook">Citing</a>
 </p>
 
 ---
@@ -130,13 +132,11 @@ Wolfbook is just over a month old (first release: March 2026). It works well for
 
 Feature requests and pull requests are also very welcome.
 
-## If you find Wolfbook useful
+## Citing Wolfbook
 
-Wolfbook is free and open source, and takes significant effort to develop and maintain. If you find it useful in your research, **please consider mentioning it in the acknowledgements section of your paper**. Something along the lines of:
+If Wolfbook supports your research, a brief mention in the acknowledgements helps us track impact and sustain development:
 
 > *"Some computations in this work were facilitated by the Wolfbook VS Code extension (github.com/vanbaalon/wolfbook)."*
-
-This kind of visibility helps us demonstrate impact to funding bodies and may enable us to secure support for new features like deeper AI integration, and a community documentation site.
 
 ---
 

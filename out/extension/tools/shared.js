@@ -7,6 +7,13 @@ const fs     = require("fs");
 const path   = require("path");
 
 // ---------------------------------------------------------------------------
+// MCP context flag — set true during MCP tool calls so _confirmSwitch is
+// skipped (MCP clients can't respond to VS Code dialog boxes).
+// ---------------------------------------------------------------------------
+let _mcpCallActive = false;
+function setMcpCallActive(v) { _mcpCallActive = v; }
+
+// ---------------------------------------------------------------------------
 // Shared: append an entry to the evaluation log next to the active notebook
 // Log lives at:  <notebook-dir>/img/<notebook-name>/ai_eval_log.md
 // ---------------------------------------------------------------------------
@@ -432,7 +439,7 @@ function buildTranscript(notebook, startCell, endCell, editor) {
                 lines.push(`- internal indices ${start0}-${end0} => Cells ${start0 + 1}-${end0 + 1}`);
                 for (let i = start0; i <= end0; i++) {
                     const cell = notebook.cellAt(i);
-                    lines.push(`  - Cell ${i + 1} (index ${i}), CellId: ${getCellToolId(cell)}`);
+                    lines.push(`  - Cell ${i + 1} (CellId: ${getCellToolId(cell)})`);  
                 }
             }
         }
@@ -491,26 +498,61 @@ function buildTranscript(notebook, startCell, endCell, editor) {
         lines.push('');
     }
 
+    // Append a minimal activity summary (last 1 hour) so the agent knows whether
+    // the user or agent has touched the notebook since the last context read.
+    // Only action headers are shown — no code/output — to keep context small.
+    try {
+        const notebookDir  = path.dirname(notebook.uri.fsPath);
+        const notebookName = path.basename(notebook.uri.fsPath, path.extname(notebook.uri.fsPath));
+        const logPath      = path.join(notebookDir, 'img', notebookName, 'ai_eval_log.md');
+        if (fs.existsSync(logPath)) {
+            const logContent = fs.readFileSync(logPath, 'utf8');
+            const cutoff     = Date.now() - 60 * 60 * 1000;
+            // Extract only the "## timestamp — ACTION" header lines within the last hour
+            const headerRe   = /^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) — (.+)$/gm;
+            const events     = [];
+            let m;
+            while ((m = headerRe.exec(logContent)) !== null) {
+                const ts = new Date(m[1].replace(' ', 'T') + 'Z').getTime();
+                if (ts > cutoff) events.push(`${m[1]} — ${m[2].trim()}`);
+            }
+            if (events.length > 0) {
+                lines.push('');
+                lines.push('---');
+                lines.push(`Recent activity (last 1h, ${events.length} event(s)) — user may have evaluated cells manually between agent steps:`);
+                lines.push(events.map(e => `  · ${e}`).join('\n'));
+            }
+        }
+    } catch (_) {}
+
     return lines.join('\n');
 }
 
+/** Extract the short cell ID from a vscode-notebook-cell URI (just the fragment). */
+function _shortCellId(uriOrId) {
+    if (typeof uriOrId === 'string' && uriOrId.startsWith('vscode-notebook-cell:')) {
+        const h = uriOrId.lastIndexOf('#');
+        if (h >= 0 && h < uriOrId.length - 1) return uriOrId.slice(h + 1);
+    }
+    return uriOrId;
+}
+
 /** Get (or lazily assign) a stable CellId that survives move operations.
- *  Falls back to the cell's document URI if metadata cannot be written. */
+ *  Returns only the fragment portion of the vscode-notebook-cell URI — short, unique,
+ *  and stable within a session. Old full-URI stored values are migrated on the fly. */
 function getCellToolId(cell) {
-    // Check metadata first for a stable ID we previously assigned
     const meta = cell?.metadata;
-    if (meta?.toolId) return meta.toolId;
-    // Fall back to the document URI (changes on move, but always available)
-    return cell?.document?.uri?.toString?.() || '';
+    if (meta?.toolId) return _shortCellId(meta.toolId);
+    return _shortCellId(cell?.document?.uri?.toString?.() || '');
 }
 
 /** Assign a stable toolId to a cell's metadata if it doesn't already have one.
- *  Returns the assigned/existing toolId. */
+ *  Returns the assigned/existing toolId (short fragment form). */
 async function _ensureCellToolId(notebook, cellIndex) {
     const cell = notebook.cellAt(cellIndex);
     const existing = cell.metadata?.toolId;
-    if (existing) return existing;
-    const id = cell.document.uri.toString();
+    if (existing) return _shortCellId(existing);
+    const id = _shortCellId(cell.document.uri.toString());
     const edit = new vscode.WorkspaceEdit();
     const newMeta = { ...(cell.metadata || {}), toolId: id };
     edit.set(notebook.uri, [vscode.NotebookEdit.updateCellMetadata(cellIndex, newMeta)]);
@@ -519,7 +561,7 @@ async function _ensureCellToolId(notebook, cellIndex) {
 }
 
 function formatCellRef(idx, cell) {
-    return `Cell ${idx + 1} (index ${idx}, CellId: ${getCellToolId(cell)})`;
+    return `Cell ${idx + 1} (CellId: ${getCellToolId(cell)})`;
 }
 
 function resolveCellIndex(notebook, ref, fieldName) {
@@ -547,6 +589,14 @@ function resolveCellIndex(notebook, ref, fieldName) {
         for (let i = 0; i < count; i++) {
             const id = getCellToolId(notebook.cellAt(i));
             if (id === raw) return { idx: i };
+        }
+        // Fallback: agent may have a full vscode-notebook-cell URI from an older context;
+        // extract the fragment and try again.
+        const frag = _shortCellId(raw);
+        if (frag !== raw) {
+            for (let i = 0; i < count; i++) {
+                if (getCellToolId(notebook.cellAt(i)) === frag) return { idx: i };
+            }
         }
         return { error: `${fieldName} not found: ${raw}` };
     }
@@ -677,7 +727,9 @@ async function resolveNotebookEditor(targetName, opts = {}) {
 
     /** Show confirmation dialog before switching; returns true if user accepts. */
     async function _confirmSwitch(targetFileName) {
-        if (opts.skipConfirm) return true;
+        // Skip dialog when called from MCP (client can't click a VS Code popup)
+        // or when the caller explicitly opts out of the confirmation.
+        if (_mcpCallActive || opts.skipConfirm) return true;
         const active = vscode.window.activeNotebookEditor?.notebook?.uri?.fsPath?.split('/')?.pop() || 'current notebook';
         if (targetFileName.toLowerCase() === active.toLowerCase()) return true;  // already active, no dialog
         const action = opts.actionDesc ? `\"${opts.actionDesc}\" on` : 'work on';
@@ -778,6 +830,25 @@ async function resolveNotebookEditor(targetName, opts = {}) {
         _onNotebookResolved?.(active.notebook.uri.fsPath.split('/').pop());
         return active;
     }
+    // No active notebook editor — auto-switch to first visible or in-memory wolfbook
+    const visibleWb = vscode.window.visibleNotebookEditors.find(
+        ed => /\.(wb|evsnb|vsnb)$/.test(ed.notebook.uri.fsPath)
+    );
+    if (visibleWb) {
+        try { await vscode.window.showNotebookDocument(visibleWb.notebook, { preserveFocus: false }); } catch (_) {}
+        _onNotebookResolved?.(visibleWb.notebook.uri.fsPath.split('/').pop());
+        return visibleWb;
+    }
+    // Try in-memory wolfbook documents
+    for (const doc of vscode.workspace.notebookDocuments) {
+        if (/\.(wb|evsnb|vsnb)$/.test(doc.uri.fsPath)) {
+            try {
+                const ed = await vscode.window.showNotebookDocument(doc, { preserveFocus: false });
+                _onNotebookResolved?.(doc.uri.fsPath.split('/').pop());
+                return ed;
+            } catch (_) {}
+        }
+    }
     const fallback = vscode.window.visibleNotebookEditors[0];
     if (!fallback) return null;
     try {
@@ -819,4 +890,5 @@ module.exports = {
     setNotebookResolvedCallback,
     _allNotebookUris,
     resolveNotebookEditor,
+    setMcpCallActive,
 };

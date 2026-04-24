@@ -3,7 +3,7 @@
   "displayName": "Wolfbook — AI-Friendly Wolfram Language Notebook",
   "description": "AI-friendly Wolfram Language notebook for VS Code. WSTP kernel, KaTeX rendering with adaptive line-breaking, Unicode input, LSP diagnostics, and AI-readable outputs for GitHub Copilot.",
   "publisher": "wolfbook",
-  "version": "2.6.50",
+  "version": "2.6.52",
   "engines": {
     "vscode": "^1.95.0"
   },
@@ -171,12 +171,19 @@
           "markdownDescription": "Path to the Wolfram kernel executable, or `Automatic` to use the first detected installation. Run the **Wolfbook: Select Kernel** command (`wolfbook.selectKernel`) to pick from all detected kernels.",
           "order": 0
         },
+        "wolfbook.activeSystemPrompt": {
+          "scope": "resource",
+          "type": "string",
+          "default": "default",
+          "markdownDescription": "Name of the active @wolfbook system prompt preset (matches a file in `~/.wolfbook/prompts/<name>.md`). Set per-workspace so different projects can use different prompt styles. Change via **Wolfbook: Notebook Settings** → Copilot Instructions.",
+          "order": 1
+        },
         "wolfbook.mcpEnabled": {
           "scope": "window",
           "type": "boolean",
           "default": true,
           "markdownDescription": "Enable the MCP (Model Context Protocol) server so Claude and other MCP agents can connect to this window's Wolfbook tools. Disable to prevent external agent connections. Requires window reload to take effect.",
-          "order": 1
+          "order": 2
         },
         "wolfbook.collabMode": {
           "scope": "window",
@@ -828,6 +835,12 @@
     },
     "keybindings": [
       {
+        "command": "editor.action.blockComment",
+        "key": "ctrl+/",
+        "mac": "cmd+/",
+        "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook'"
+      },
+      {
         "command": "wolfbook.formatWithUTF",
         "key": "alt+shift+f",
         "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook'"
@@ -905,7 +918,7 @@
         "when": "notebookEditorFocused && !editorTextFocus && !inputFocus && notebookType == 'extended-wolfram-notebook'"
       },
       {
-        "command": "wolfbook.navLeft",
+        "command": "wolfbook.navUp",
         "key": "up",
         "when": "notebookEditorFocused && !editorTextFocus && !inputFocus && notebookType == 'extended-wolfram-notebook'"
       },
@@ -1163,9 +1176,10 @@
                 "list",
                 "switch",
                 "save",
-                "summary"
+                "summary",
+                "brief"
               ],
-              "description": "Operation to perform: 'read' (default) returns full notebook contents, 'list' lists open notebooks, 'switch' activates a notebook, 'save' saves to disk, 'summary' returns a compact one-line-per-cell overview (alias for read+brief=true)."
+              "description": "Operation to perform: 'read' (default) returns full notebook contents, 'list' lists open notebooks, 'switch' activates a notebook, 'save' saves to disk, 'summary'/'brief' (aliases) return a compact one-line-per-cell overview."
             },
             "notebook": {
               "type": "string",
@@ -1323,35 +1337,46 @@
         "name": "wolfbook_editCell",
         "displayName": "Wolfbook: Edit Cell",
         "toolReferenceName": "wolfbookEdit",
-        "modelDescription": "Replaces the source code of an existing cell in the active Wolfram notebook. REQUIRED: you must provide cellId (preferred, stable across reorders) or cellNumber (1-based). Call wolfbook_getNotebookContext first to get CellId values. Set evaluate:true to run the updated content immediately. IMPORTANT: pass real newlines in the content string — do not use literal \\n sequences; use an actual multi-line string in your JSON call. The content must be syntactically correct Wolfram Language. Accepts 'newContent' as an alias for 'content'. Returns a diff summary showing lines added/removed.",
+        "modelDescription": "Replaces the source code of one or more cells. SINGLE CELL: provide cellId (preferred, stable) or cellNumber (1-based) plus content. BATCH: provide a 'cells' array of {cellId, content} objects — all cells are edited sequentially and evaluated by default (evaluate defaults to true in batch mode, catching errors immediately). Each item may set evaluate:false to skip its evaluation. Set a top-level timeoutSeconds (default 30) per cell. IMPORTANT: pass real newlines — do not use literal \\n; use an actual multi-line string. Content must be syntactically correct Wolfram Language. Accepts 'newContent' as alias for 'content'. Returns diff and eval output per cell.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
           "properties": {
             "cellNumber": {
               "type": "number",
-              "description": "1-based cell number to edit (from wolfbook_getNotebookContext)."
+              "description": "Single-cell mode: 1-based cell number to edit."
             },
             "cellId": {
               "type": "string",
-              "description": "Stable CellId to edit (from wolfbook_getNotebookContext). Preferred over cellNumber after reordering."
+              "description": "Single-cell mode: stable CellId to edit (preferred over cellNumber)."
             },
             "content": {
               "type": "string",
-              "description": "The new source text for the cell. Write it exactly as it should appear in the cell — do NOT add extra blank lines between statements to format it nicely, as this creates invalid syntax for single-expression inputs. Multi-line constructs like Module[...] are fine as long as brackets match."
+              "description": "Single-cell mode: new source text for the cell."
+            },
+            "cells": {
+              "type": "array",
+              "description": "Batch mode: array of cells to edit. Each item must have cellId (preferred) or cellNumber, and content. Optionally set evaluate:false on an item to skip evaluation of that cell.",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "cellId":   { "type": "string", "description": "Stable CellId of the cell to edit." },
+                  "cellNumber": { "type": "number", "description": "1-based cell number (fallback if cellId unavailable)." },
+                  "content":  { "type": "string", "description": "New source text for this cell." },
+                  "evaluate": { "type": "boolean", "description": "Override per-cell evaluation (default: inherits top-level evaluate which defaults to true)." }
+                },
+                "required": ["content"]
+              }
             },
             "evaluate": {
               "type": "boolean",
-              "description": "If true (and the cell is a code cell), evaluate the new content in the live kernel immediately after editing and include the result in the response."
+              "description": "Whether to evaluate after editing. Single-cell default: false. Batch default: true (recommended — catches errors immediately)."
             },
             "timeoutSeconds": {
               "type": "number",
-              "description": "Maximum seconds to wait for evaluation when evaluate:true (default: 15)."
+              "description": "Max seconds to wait per cell evaluation (default: 30 for batch, 15 for single-cell)."
             }
-          },
-          "required": [
-            "content"
-          ]
+          }
         }
       },
       {
@@ -1486,28 +1511,40 @@
       },
       {
         "name": "wolfbook_moveCell",
-        "displayName": "Wolfbook: Move Cell",
+        "displayName": "Wolfbook: Move/Copy Cell",
         "toolReferenceName": "wolfbookMove",
-        "modelDescription": "Moves a cell from one position to another within the active Wolfram notebook. Reordering is done atomically (delete + re-insert in one edit), so notebook cell numbers shift as expected. Call wolfbook_getNotebookContext first to get CellId values and prefer cellId/afterCellId for stable targeting. Numeric toPosition remains supported (0 means beginning; N means after Cell N).",
+        "modelDescription": "Move or copy a cell within a notebook or between two open notebooks. Within one notebook: reorders atomically. Cross-notebook: reads source cell, inserts into target, then removes from source (or keeps it if copy:true). Use sourceNotebook/targetNotebook to specify notebooks by filename; omit both to use the active notebook as both source and destination. Prefer cellId/afterCellId for stable targeting (numbers shift after edits).",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
           "properties": {
-            "cellNumber": {
-              "type": "number",
-              "description": "1-based number of the cell to move."
-            },
             "cellId": {
               "type": "string",
-              "description": "Stable CellId of the source cell to move. Preferred over cellNumber after structural edits."
+              "description": "Stable CellId of the source cell. Preferred over cellNumber after structural edits."
+            },
+            "cellNumber": {
+              "type": "number",
+              "description": "1-based number of the cell to move/copy in the source notebook."
             },
             "toPosition": {
               "type": "number",
-              "description": "Insert the cell after this 1-based cell number. Use 0 to move it to the very beginning (before Cell 1)."
+              "description": "Insert after this 1-based cell number in the target notebook. Use 0 to insert at the very beginning."
             },
             "afterCellId": {
               "type": "string",
-              "description": "Stable CellId of the target cell to move after. Preferred over toPosition for multi-step reordering."
+              "description": "Stable CellId in the target notebook to insert after. Preferred over toPosition."
+            },
+            "sourceNotebook": {
+              "type": "string",
+              "description": "Filename of the source notebook (e.g. 'solver.wb'). Omit to use the active notebook."
+            },
+            "targetNotebook": {
+              "type": "string",
+              "description": "Filename of the destination notebook (e.g. 'main.wb'). Omit to move/copy within the same notebook."
+            },
+            "copy": {
+              "type": "boolean",
+              "description": "If true, copy the cell (leave source intact). If false or omitted, move it (delete from source)."
             }
           }
         }
@@ -2401,9 +2438,13 @@
         "inputSchema": {
           "type": "object",
           "properties": {
+            "cellId": {
+              "type": "string",
+              "description": "Stable CellId to validate (single cell, preferred over cellNumber after reordering)."
+            },
             "cellNumber": {
               "type": "number",
-              "description": "Check a single cell by 1-based number. Omit to check all cells (or use startCell/endCell for a range)."
+              "description": "Check a single cell by 1-based number. Use cellId when available."
             },
             "startCell": {
               "type": "number",

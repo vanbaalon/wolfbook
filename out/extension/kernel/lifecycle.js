@@ -454,8 +454,16 @@ async function launchKernel(self, WstpSession) {
             let _nbDir = path.dirname(_wolframNbEditor.notebook.uri.fsPath);
             if (process.platform === 'win32') _nbDir = _nbDir.replace(/\\/g, '/');
             const _nbDirEsc = _nbDir.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+            // Use a dynamic := definition backed by $WBNotebookDirectory so that
+            // switching between notebooks updates the value without a kernel restart.
+            // Before each cell executes, checkout.js refreshes $WBNotebookDirectory
+            // to the directory of the notebook that owns that cell.
             await self.session.evaluate(
-                `Unprotect[NotebookDirectory, WBDirectory]; NotebookDirectory[] = "${_nbDirEsc}"; Protect[NotebookDirectory]; WBDirectory[] = "${_nbDirEsc}"; Protect[WBDirectory]`, { interactive: false }
+                `Unprotect[NotebookDirectory, WBDirectory, $WBNotebookDirectory]; ` +
+                `$WBNotebookDirectory = "${_nbDirEsc}"; ` +
+                `NotebookDirectory[] := $WBNotebookDirectory; ` +
+                `WBDirectory[]       := $WBNotebookDirectory; ` +
+                `Protect[NotebookDirectory, WBDirectory]`, { interactive: false }
             ).catch(() => {});
             devLog(LOG_CHANNELS.KERNEL, '[launchKernel] NotebookDirectory set to:', _nbDir);
         }

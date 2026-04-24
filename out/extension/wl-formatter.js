@@ -233,6 +233,18 @@ function tokenize(src) {
       i += 2;
       continue;
     }
+    // → (U+2192, Rule) and ⧴ (U+29F4, RuleDelayed) — emitted by formatter,
+    // recognized as the same ARROW tokens so the safety guard accepts them.
+    if (ch === '\u2192') {
+      tokens.push({ type: T.ARROW, value: '\u2192' });
+      i++;
+      continue;
+    }
+    if (ch === '\u29f4') {
+      tokens.push({ type: T.ARROW, value: '\u29f4' });
+      i++;
+      continue;
+    }
 
     // := ^= ^:=
     if (ch === ':' && i + 1 < n && src[i + 1] === '=') {
@@ -412,470 +424,741 @@ const DEFAULT_OPTIONS = {
   replaceNamedChars: false,   // replace \[Alpha] etc. with UTF characters
 };
 
+// ─── Statement splitter (same algorithm as execution/checkout.js) ────────────
+// Splits src into top-level statements on bare newlines, respecting:
+//   • bracket depth  • strings  • (* comments *)  • continuation operators
+// Returns [{text, blankLinesBefore}].  Single-statement src returns [{text:src,0}].
+function splitStatements(src) {
+  const ENDS_OP = /(&&|\|\||->|:>|\u2192|\u29f4|\/\/\.|\/\/|\/@|@@|<>|~~|;;|\^:=|:=|\+=|-=|\*=|\/=|[+\-*\/=,&|~@?])$/;
+  const parts = [];
+  let current = '';
+  let depth = 0, inStr = false, cDepth = 0;
+  let i = 0;
+  const n = src.length;
+  let blankLinesBefore = 0; // blank lines that precede the next part
+
+  while (i < n) {
+    const ch   = src[i];
+    const next = i + 1 < n ? src[i + 1] : '';
+
+    if (inStr) {
+      current += ch;
+      if (ch === '\\' && i + 1 < n) { current += next; i += 2; continue; }
+      if (ch === '"') inStr = false;
+      i++; continue;
+    }
+    if (cDepth > 0) {
+      current += ch;
+      if (ch === '(' && next === '*') { cDepth++; current += next; i += 2; continue; }
+      if (ch === '*' && next === ')') { cDepth--; current += next; i += 2; continue; }
+      i++; continue;
+    }
+
+    if      (ch === '"')                    { inStr = true;  current += ch; i++; }
+    else if (ch === '(' && next === '*')    { cDepth = 1;    current += ch + next; i += 2; }
+    else if (ch === '<' && next === '|')    { depth++;       current += ch + next; i += 2; }
+    else if (ch === '|' && next === '>')    { depth--;       current += ch + next; i += 2; }
+    else if ('([{'.includes(ch))            { depth++;       current += ch; i++; }
+    else if (')]}'.includes(ch))            { depth--;       current += ch; i++; }
+    else if ((ch === '\n' || ch === '\r') && depth === 0 && cDepth === 0) {
+      const trimmed = current.trim();
+      // Peek at first non-space char(s) of the next line
+      let peekPos = i + 1;
+      if (ch === '\r' && next === '\n') peekPos++;
+      while (peekPos < n && (src[peekPos] === ' ' || src[peekPos] === '\t')) peekPos++;
+      const peekCh  = peekPos < n ? src[peekPos] : '';
+      const peekTwo = peekPos + 1 < n ? src.slice(peekPos, peekPos + 2) : peekCh;
+      const endsWithOp  = trimmed.length > 0 && ENDS_OP.test(trimmed);
+      const startsWithOp = trimmed.length > 0 && peekCh.length > 0 && (
+        '=+-*/,|~@?'.includes(peekCh) ||
+        peekTwo === '&&' || peekTwo === '||' || peekTwo === '->' || peekTwo === ':>' ||
+        peekTwo === '//' || peekTwo === '<>' || peekTwo === '!=' || peekTwo === '>=' || peekTwo === '<='
+      );
+      if (endsWithOp || startsWithOp) {
+        // Continuation line — join with a space
+        current += ' ';
+        if (ch === '\r' && next === '\n') i++;
+        i++;
+      } else {
+        // Split point
+        if (ch === '\r' && next === '\n') i++;
+        i++;
+        // Consume remaining blank lines to record how many follow this part
+        let newlines = 1;
+        while (i < n) {
+          if (src[i] === ' ' || src[i] === '\t') { i++; continue; }
+          if (src[i] === '\n') { newlines++; i++; continue; }
+          if (src[i] === '\r') {
+            newlines++;
+            if (i + 1 < n && src[i + 1] === '\n') i++;
+            i++; continue;
+          }
+          break;
+        }
+        if (trimmed.length > 0) {
+          parts.push({ text: trimmed, blankLinesBefore });
+        }
+        blankLinesBefore = Math.max(0, newlines - 1);
+        current = '';
+      }
+    } else {
+      current += ch; i++;
+    }
+  }
+  const trimmed = current.trim();
+  if (trimmed.length > 0) parts.push({ text: trimmed, blankLinesBefore });
+  return parts.length > 0 ? parts : [{ text: src, blankLinesBefore: 0 }];
+}
+
+// Compare two token streams for semantic equivalence, ignoring only
+// whitespace (SPACE, NEWLINE). Any other difference (added/removed/changed
+// token, including commas, semicolons, brackets, operators, identifiers)
+// means the formatter would alter parsed meaning.
+// Canonical value for equivalence comparison: maps display-Unicode operators
+// back to their ASCII source forms so the safety guard doesn't reject them.
+function canonicalValue(t) {
+  if (t.type === T.ARROW) {
+    if (t.value === '\u2192') return '->'; // → → ->
+    if (t.value === '\u29f4') return ':>'; // ⧴ → :>
+  }
+  return t.value;
+}
+
+function tokensEquivalent(a, b) {
+  const filter = (toks) => toks.filter(t => t.type !== T.SPACE && t.type !== T.NEWLINE);
+  const A = filter(a), B = filter(b);
+  if (A.length !== B.length) return false;
+  for (let i = 0; i < A.length; i++) {
+    if (A[i].type !== B[i].type) return false;
+    if (canonicalValue(A[i]) !== canonicalValue(B[i])) return false;
+  }
+  return true;
+}
+
 function format(src, opts) {
+  try {
+    const inputStmtCount = splitStatements(src).length;
+    const result = _formatUnsafe(src, opts);
+    // Guard 1: token equivalence — no non-whitespace tokens may be added/removed/changed.
+    const inTokens  = tokenize(src);
+    const outTokens = tokenize(result);
+    if (!tokensEquivalent(inTokens, outTokens)) {
+      if (typeof console !== 'undefined' && console.warn) {
+        console.warn('[wl-formatter] token mismatch after formatting — returning original source');
+      }
+      return src;
+    }
+    // Guard 2: statement count must not decrease (merging separate expressions is wrong).
+    const outputStmtCount = splitStatements(result).length;
+    if (outputStmtCount < inputStmtCount) {
+      if (typeof console !== 'undefined' && console.warn) {
+        console.warn('[wl-formatter] statement count decreased (' + inputStmtCount + ' -> ' + outputStmtCount + ') — returning original source');
+      }
+      return src;
+    }
+    return result;
+  } catch (e) {
+    if (typeof console !== 'undefined' && console.warn) {
+      console.warn('[wl-formatter] formatting error — returning original source:', e && e.message);
+    }
+    return src;
+  }
+}
+
+// _formatSingle: format one statement (no top-level splitting).
+// This is the original _formatUnsafe body.
+function _formatSingle(src, opts) {
   opts = { ...DEFAULT_OPTIONS, ...opts };
   const tokens = tokenize(src);
-  
-  const indent = opts.indentString;
-  const maxW = opts.lineWidth;
-  
-  // ── Build a tree of "groups" from bracket structure ──
-  // Then render with indentation decisions.
-  // 
-  // Strategy: We do a single-pass render. We track:
-  //  - current bracket depth
-  //  - current line length
-  //  - pending indentation
-  // When a line gets too long, we insert breaks at the best positions.
+  const indentStr = opts.indentString;
+  const indentW   = indentStr.length;
+  const maxW      = opts.lineWidth;
 
-  // First, strip all existing whitespace (spaces + newlines) and re-insert our own.
-  // Keep comments and strings intact.
-  
-  let stripped = [];
-  let _hadSpace = false;
-  let _newlineCount = 0;
-  for (let t of tokens) {
-    if (t.type === T.SPACE) {
-      _hadSpace = true;
-      continue;
+  // ── Step 1: strip whitespace tokens; keep provenance for blank lines ──
+  const toks = [];
+  {
+    let hadSpace = false;
+    let nlCount  = 0;
+    for (const t of tokens) {
+      if (t.type === T.SPACE) { hadSpace = true; continue; }
+      if (t.type === T.NEWLINE) { hadSpace = true; nlCount++; continue; }
+      toks.push({
+        ...t,
+        hadSpaceBefore: hadSpace,
+        blankLinesBefore: Math.max(0, nlCount - 1),
+      });
+      hadSpace = false;
+      nlCount  = 0;
     }
-    if (t.type === T.NEWLINE) {
-      _hadSpace = true;
-      _newlineCount++;
-      continue;
-    }
-    t.hadSpaceBefore = _hadSpace;
-    t.hadNewlineBefore = _newlineCount > 0;
-    t.blankLineBefore = _newlineCount >= 2;
-    t.blankLineCount = Math.max(0, _newlineCount - 1); // number of blank lines (preserve user's spacing)
-    stripped.push(t);
-    _hadSpace = false;
-    _newlineCount = 0;
   }
 
-  // ── Classify bracket pairs and measure their "flat length" ──
-  // This tells us whether a bracketed group fits on one line.
-  
-  // Find matching brackets
-  const matchingClose = new Map(); // open index -> close index
-  const matchingOpen = new Map();  // close index -> open index
-  const bracketStack = [];
-  
-  for (let i = 0; i < stripped.length; i++) {
-    const t = stripped[i];
-    if (t.type === T.OPEN) {
-      bracketStack.push(i);
-    } else if (t.type === T.CLOSE) {
-      if (bracketStack.length > 0) {
-        const openIdx = bracketStack.pop();
-        matchingClose.set(openIdx, i);
-        matchingOpen.set(i, openIdx);
+  // ── Step 1b: mark unary +/- tokens (preceded by nothing, an opener,
+  // a comma/semi, or another operator). These never take a space before
+  // the following operand.
+  {
+    const startsExpr = (p) => !p ||
+      p.type === T.OPEN || p.type === T.COMMA || p.type === T.SEMI ||
+      p.type === T.ASSIGN || p.type === T.ARROW || p.type === T.COMPARE ||
+      p.type === T.LOGICAL || p.type === T.RULE_APPLY || p.type === T.POSTFIX ||
+      p.type === T.AT || p.type === T.STRJOIN ||
+      (p.type === T.OTHER && /^(\+|-|\*|\/|\^)$/.test(p.value));
+    let prev = null;
+    for (const t of toks) {
+      if (t.type === T.OTHER && (t.value === '+' || t.value === '-') && startsExpr(prev)) {
+        t.isUnary = true;
+      }
+      if (t.type !== T.COMMENT) prev = t;
+    }
+  }
+
+  // ── Step 2: match brackets ──
+  const closeOf = new Map(); // open-index  -> close-index
+  const openOf  = new Map(); // close-index -> open-index
+  {
+    const stack = [];
+    for (let i = 0; i < toks.length; i++) {
+      const t = toks[i];
+      if (t.type === T.OPEN) stack.push(i);
+      else if (t.type === T.CLOSE) {
+        const o = stack.pop();
+        if (o !== undefined) { closeOf.set(o, i); openOf.set(i, o); }
       }
     }
   }
 
-  // Measure flat length of a bracket group (open..close inclusive)
-  function flatLen(from, to) {
-    let len = 0;
-    for (let i = from; i <= to; i++) {
-      len += stripped[i].value.length;
-      // Add space between tokens where needed
-      if (i < to && needsSpaceBetween(stripped[i], stripped[i + 1])) {
-        len += 1;
-      }
+  // Optional \[Name] → UTF on emission; also render -> as → and :> as ⧴.
+  function renderToken(t) {
+    if (t.type === T.NAMEDCHAR && opts.replaceNamedChars) {
+      const code = NAMED_CHARS[t.value.slice(2, -1)];
+      if (code) return String.fromCodePoint(code);
     }
-    return len;
+    if (t.type === T.ARROW) {
+      if (t.value === '->') return '\u2192';   // →
+      if (t.value === ':>') return '\u29f4';   // ⧴
+    }
+    return t.value;
   }
 
-  // Does this bracket group fit on one line (given current column)?
-  function fitsOnLine(openIdx, col) {
-    const closeIdx = matchingClose.get(openIdx);
-    if (closeIdx === undefined) return true;
-    return col + flatLen(openIdx, closeIdx) <= maxW;
-  }
-
-  // ── Determine where spaces are needed between tokens ──
-  function needsSpaceBetween(a, b) {
+  // ── Spacing rules between adjacent tokens (unchanged from old formatter) ──
+  function needsSpace(a, b) {
     if (!a || !b) return false;
-    // No space before comma or semi or span
     if (b.type === T.COMMA || b.type === T.SEMI || b.type === T.SPAN) return false;
-    // Space after comma
     if (a.type === T.COMMA) return true;
-    // Space after semi
     if (a.type === T.SEMI) return true;
-    // No space around ;;  (Span, e.g. a[[1;;3]])
     if (a.type === T.SPAN || b.type === T.SPAN) return false;
-    // Space around logical operators && ||
     if (a.type === T.LOGICAL || b.type === T.LOGICAL) return true;
-    // Space around comparison operators
     if (a.type === T.COMPARE || b.type === T.COMPARE) return true;
-    // Space around arrows, assigns, rule-apply, postfix
     if (a.type === T.ARROW || b.type === T.ARROW) return true;
     if (a.type === T.ASSIGN || b.type === T.ASSIGN) return true;
     if (a.type === T.RULE_APPLY || b.type === T.RULE_APPLY) return true;
     if (a.type === T.STRJOIN || b.type === T.STRJOIN) return true;
-    // No space before [ after word (function call)
-    if (b.type === T.OPEN && b.value === '[' && 
-        (a.type === T.WORD || a.type === T.NAMEDCHAR || a.type === T.CLOSE)) return false;
-    if (b.type === T.OPEN && b.value === '[[' &&
-        (a.type === T.WORD || a.type === T.NAMEDCHAR || a.type === T.CLOSE)) return false;
-    // No space after open bracket
+    if (b.type === T.OPEN && (b.value === '[' || b.value === '[[') &&
+        (a.type === T.WORD || a.type === T.NAMEDCHAR || a.type === T.CLOSE || a.type === T.SLOT)) return false;
     if (a.type === T.OPEN) return false;
-    // No space before close bracket
     if (b.type === T.CLOSE) return false;
-    // No space between # and number, or between word and _
     if (a.type === T.SLOT) return false;
     if (b.type === T.PATTERN && a.type === T.WORD) return false;
     if (a.type === T.PATTERN) return false;
-    // No space in identifier continuation: \[Chi]up, x\[Alpha], xϕ
-    // But preserve space when original had one (multiplication): I \[Theta], I ϕ0
+    // Preserve source's implicit-multiplication vs identifier-glue disambiguation.
     if (a.type === T.NAMEDCHAR && b.type === T.WORD) return !!b.hadSpaceBefore;
     if (a.type === T.WORD && b.type === T.NAMEDCHAR) return !!b.hadSpaceBefore;
     if (a.type === T.NAMEDCHAR && b.type === T.NAMEDCHAR) return !!b.hadSpaceBefore;
-    // Two adjacent WORD tokens that are both pure non-ASCII (e.g. I ϕ0) or
-    // one ASCII word followed by a non-ASCII word: preserve original spacing.
     if (a.type === T.WORD && b.type === T.WORD) {
-      // If b starts with a non-ASCII char the tokens could be identifier
-      // continuation (e.g. from a split) OR implicit multiplication (I ϕ0).
-      // Use the original space to disambiguate — if there was a space, keep it.
-      if (b.value.codePointAt(0) > 127 || a.value.codePointAt(0) > 127)
-        return !!b.hadSpaceBefore;
-      return true;  // two ASCII words always need a space
-    }
-    // No space before &
-    if (b.type === T.AMP) return false;
-    // No space between word and ' (Derivative)
-    if (b.type === T.OTHER && b.value === "'") return false;
-    // No space around ++ -- (Increment/Decrement/PreIncrement/PreDecrement)
-    if (a.type === T.OTHER && (a.value === '++' || a.value === '--')) return false;
-    if (b.type === T.OTHER && (b.value === '++' || b.value === '--')) return false;
-    // Space around + -
-    if ((a.value === '+' || a.value === '-') && a.type === T.OTHER) {
-      // Could be unary: after open bracket or after comma/semi
-      // Keep space in binary contexts
+      if (b.value.codePointAt(0) > 127 || a.value.codePointAt(0) > 127) return !!b.hadSpaceBefore;
       return true;
     }
-    if ((b.value === '+' || b.value === '-') && b.type === T.OTHER) return true;
-    // Space around bare > < (comparison context)
-    if ((a.value === '>' || a.value === '<') && a.type === T.OTHER) return true;
-    if ((b.value === '>' || b.value === '<') && b.type === T.OTHER) return true;
-    // Space around * and / in binary context (between expressions)
+    if (b.type === T.AMP) return false;
+    if (b.type === T.OTHER && b.value === "'") return false;
+    if (a.type === T.OTHER && (a.value === '++' || a.value === '--')) return false;
+    if (b.type === T.OTHER && (b.value === '++' || b.value === '--')) return false;
+    // Unary +/- : no space between the sign and the operand that follows.
+    if (a.type === T.OTHER && (a.value === '+' || a.value === '-') && a.isUnary) return false;
+    if (a.type === T.OTHER && (a.value === '+' || a.value === '-')) return true;
+    if (b.type === T.OTHER && (b.value === '+' || b.value === '-')) return true;
+    if (a.type === T.OTHER && (a.value === '>' || a.value === '<')) return true;
+    if (b.type === T.OTHER && (b.value === '>' || b.value === '<')) return true;
     if (a.type === T.OTHER && (a.value === '*' || a.value === '/')) return true;
     if (b.type === T.OTHER && (b.value === '*' || b.value === '/')) return true;
-    // Space around . (Dot product) — but not decimal point
-    // This is tricky; for now skip
-    // No space between ^ and exponent
     if (a.value === '^' || b.value === '^') return false;
-    // Space between word/number tokens
     if ((a.type === T.WORD || a.type === T.NAMEDCHAR || a.type === T.STRING || a.type === T.CLOSE || a.type === T.AMP) &&
-        (b.type === T.WORD || b.type === T.NAMEDCHAR || b.type === T.STRING || b.type === T.OPEN && b.value === '(')) return true;
-    // Space around //
+        (b.type === T.WORD || b.type === T.NAMEDCHAR || b.type === T.STRING ||
+         (b.type === T.OPEN && b.value === '('))) return true;
     if (a.type === T.POSTFIX || b.type === T.POSTFIX) return true;
-    // Space around @
     if (a.type === T.AT || b.type === T.AT) return true;
-    // Space after comment
-    if (a.type === T.COMMENT) return true;
-    if (b.type === T.COMMENT) return true;
-    
+    if (a.type === T.COMMENT || b.type === T.COMMENT) return true;
     return false;
   }
 
-  // ── Render pass ──
-  // Walk through stripped tokens, building output lines.
-  
-  let out = '';
-  let depth = 0;           // bracket nesting depth  
-  let col = 0;             // current column
-  let lineStart = true;    // are we at the start of a line?
-  let suppressNextSpace = false; // set by comma/semi/bracket handlers that already positioned the next token
-  
-  // Stack of bracket contexts
-  // Each entry: { type: '{' | '[' | '(' | '[[', startCol, multiline, argCount }
-  const ctxStack = [];
-  
-  function currentIndent() {
-    return indent.repeat(depth);
-  }
-  
-  function emit(s) {
-    out += s;
-    // Update col: count from last newline
-    const lastNl = s.lastIndexOf('\n');
-    if (lastNl >= 0) {
-      col = s.length - lastNl - 1;
-      lineStart = (col === 0);
-    } else {
-      col += s.length;
-      lineStart = false;
+  // ── Step 3: Doc IR (Wadler-style pretty-printer) ──
+  //   nil, text(s), line(flat), softline(), hardline(),
+  //   nest(n, d), group(d), cat(...docs)
+  const D = {
+    nil:      () => ({ t: 'nil' }),
+    text:     (s) => (s === '' ? { t: 'nil' } : { t: 'text', s }),
+    line:     (flat = ' ') => ({ t: 'line', flat }),
+    softline: () => ({ t: 'line', flat: '' }),
+    hardline: () => ({ t: 'hardline' }),
+    nest:     (n, d) => ({ t: 'nest', n, d }),
+    group:    (d) => ({ t: 'group', d, forceBreak: containsHardline(d) }),
+    cat:      (...docs) => {
+      const flat = [];
+      for (const d of docs) {
+        if (!d || d.t === 'nil') continue;
+        if (d.t === 'cat') flat.push(...d.docs); else flat.push(d);
+      }
+      if (flat.length === 0) return { t: 'nil' };
+      if (flat.length === 1) return flat[0];
+      return { t: 'cat', docs: flat };
+    },
+  };
+
+  // A group that (transitively, outside any inner group) contains a hardline
+  // must always render in break mode — otherwise `fits` would short-circuit
+  // true on the hardline and the enclosing group would render flat but the
+  // hardline would still emit a newline, producing broken output.
+  function containsHardline(d) {
+    if (!d) return false;
+    switch (d.t) {
+      case 'hardline': return true;
+      case 'cat':      return d.docs.some(containsHardline);
+      case 'nest':     return containsHardline(d.d);
+      case 'group':    return false; // inner group's own check handles it
+      default:         return false;
     }
   }
-  
-  function emitNewline() {
-    out += '\n';
-    col = 0;
-    lineStart = true;
-  }
-  
-  function emitIndent() {
-    const ind = currentIndent();
-    out += ind;
-    col = ind.length;
-    lineStart = false;
-  }
 
-  // Determine if a bracket group should be multiline
-  function shouldBreakGroup(openIdx) {
-    const closeIdx = matchingClose.get(openIdx);
-    if (closeIdx === undefined) return false;
-    
-    // Count commas and semis at this level
-    let commas = 0, semis = 0, innerDepth = 0;
-    for (let i = openIdx + 1; i < closeIdx; i++) {
-      if (stripped[i].type === T.OPEN) innerDepth++;
-      else if (stripped[i].type === T.CLOSE) innerDepth--;
-      else if (innerDepth === 0) {
-        if (stripped[i].type === T.COMMA) commas++;
-        if (stripped[i].type === T.SEMI) semis++;
-      }
+  // Flat length of a doc (group-aware). Used to decide whether a group
+  // fits on the current line.
+  function flatLen(d) {
+    if (!d) return 0;
+    if (d._flatLen !== undefined) return d._flatLen;
+    let n = 0;
+    switch (d.t) {
+      case 'nil':      n = 0; break;
+      case 'text':     n = d.s.length; break;
+      case 'hardline': n = Infinity; break;
+      case 'line':     n = d.flat.length; break;
+      case 'nest':     n = flatLen(d.d); break;
+      case 'cat':      for (const c of d.docs) n += flatLen(c); break;
+      case 'group':    n = d.forceBreak ? Infinity : flatLen(d.d); break;
     }
-    
-    // Check if it fits on one line
-    const fl = flatLen(openIdx, closeIdx);
-    if (col + fl <= maxW) return false;
-    
-    // No natural break points (no commas, no semis) — keep on one line
-    // e.g. B[__], f[singleArg], even if it overflows
-    if (commas === 0 && semis === 0) return false;
-
-    // If there are semis, definitely break
-    if (semis > 0) return true;
-    
-    // If there are multiple commas and it doesn't fit, break
-    if (commas > 0) return true;
-    
-    return true; // doesn't fit, break somehow
+    d._flatLen = n;
+    return n;
   }
 
-  // Is the next meaningful token at this depth an arrow? (for rule lists)
-  function isRuleList(openIdx) {
-    const closeIdx = matchingClose.get(openIdx);
-    if (closeIdx === undefined) return false;
-    let innerDepth = 0;
-    for (let i = openIdx + 1; i < closeIdx; i++) {
-      if (stripped[i].type === T.OPEN) innerDepth++;
-      else if (stripped[i].type === T.CLOSE) innerDepth--;
-      else if (innerDepth === 0 && stripped[i].type === T.ARROW) return true;
-    }
-    return false;
+  // Does `doc` fit when rendered flat starting at column `col`?
+  // Per-group decision: a group goes flat iff its OWN flat content fits in
+  // the remaining width. Subsequent siblings on the same line are not
+  // considered (they will themselves be groups or texts that handle their
+  // own line management). This avoids the cascade where a long outer group
+  // forces every tiny inner group to break.
+  function groupFits(groupContent, col) {
+    return flatLen(groupContent) <= (maxW - col);
   }
 
-  // ── Main rendering loop ──
-  for (let i = 0; i < stripped.length; i++) {
-    const tok = stripped[i];
-    const prev = i > 0 ? stripped[i - 1] : null;
-    const next = i + 1 < stripped.length ? stripped[i + 1] : null;
-
-    // ── Opening bracket ──
-    if (tok.type === T.OPEN) {
-      // Preserve top-level newlines between expressions
-      if (ctxStack.length === 0 && tok.hadNewlineBefore && !lineStart) {
-        emitNewline();
-        for (let _bl = 0; _bl < (tok.blankLineCount || 0); _bl++) emit('\n');
-      }
-
-      const multiline = shouldBreakGroup(i);
-      
-      // Add space before ( if needed
-      if (!suppressNextSpace && prev && needsSpaceBetween(prev, tok) && !lineStart) {
-        emit(' ');
-      }
-      suppressNextSpace = false;
-      
-      emit(tok.value);
-      
-      if (multiline) {
-        depth++;
-        ctxStack.push({ type: tok.value, multiline: true, startCol: col });
-        emitNewline();
-        emitIndent();
-        suppressNextSpace = true;
-      } else {
-        ctxStack.push({ type: tok.value, multiline: false, startCol: col });
-      }
-      continue;
-    }
-
-    // ── Closing bracket ──
-    if (tok.type === T.CLOSE) {
-      suppressNextSpace = false;
-      const ctx = ctxStack.pop() || { multiline: false };
-      
-      if (ctx.multiline) {
-        depth--;
-        emitNewline();
-        emitIndent();
-      }
-      
-      emit(tok.value);
-      continue;
-    }
-
-    // ── Comma ──
-    if (tok.type === T.COMMA) {
-      emit(',');
-      const ctx = ctxStack.length > 0 ? ctxStack[ctxStack.length - 1] : null;
-      
-      if (ctx && ctx.multiline) {
-        emitNewline();
-        emitIndent();
-      } else if (next) {
-        // Check if adding next chunk would overflow
-        let chunkLen = 0;
-        for (let j = i + 1; j < stripped.length; j++) {
-          if (stripped[j].type === T.COMMA || stripped[j].type === T.CLOSE || 
-              stripped[j].type === T.SEMI) break;
-          chunkLen += stripped[j].value.length + 1;
+  function layout(doc) {
+    let out = '';
+    let col = 0;
+    const stack = [[0, 'break', doc]];
+    while (stack.length) {
+      const [ind, mode, d] = stack.pop();
+      switch (d.t) {
+        case 'nil': break;
+        case 'text': out += d.s; col += d.s.length; break;
+        case 'hardline': out += '\n' + ' '.repeat(ind); col = ind; break;
+        case 'line':
+          if (mode === 'flat') { out += d.flat; col += d.flat.length; }
+          else { out += '\n' + ' '.repeat(ind); col = ind; }
+          break;
+        case 'nest': stack.push([ind + d.n, mode, d.d]); break;
+        case 'cat':
+          for (let j = d.docs.length - 1; j >= 0; j--) stack.push([ind, mode, d.docs[j]]);
+          break;
+        case 'group': {
+          if (d.forceBreak) { stack.push([ind, 'break', d.d]); break; }
+          if (groupFits(d.d, col)) stack.push([ind, 'flat', d.d]);
+          else                     stack.push([ind, 'break', d.d]);
+          break;
         }
-        if (col + chunkLen > maxW && ctx) {
-          // Upgrade to multiline
-          ctx.multiline = true;
-          depth++;
-          emitNewline();
-          emitIndent();
+      }
+    }
+    return out;
+  }
+
+  // ── Step 4: build Doc from token range ──
+  // Operator precedence classes (weakest first). Each class lists predicates
+  // returning true when token `t` is a splittable operator at that class.
+  // Ordered from LOOSEST (split first) to TIGHTEST, matching Wolfram operator
+  // precedences. Note: /. (~110) is looser than -> (~120), so RULE_APPLY must
+  // come before ARROW.
+  const OP_CLASSES = [
+    // :=, =, ^=, ^:=   (Set / SetDelayed / etc., prec ~40)
+    (t) => t.type === T.ASSIGN && t.value !== '=.',
+    // //              (Postfix application, prec ~70)
+    (t) => t.type === T.POSTFIX,
+    // /., //.          (ReplaceAll / ReplaceRepeated, prec ~110)
+    (t) => t.type === T.RULE_APPLY,
+    // ->, :>           (Rule / RuleDelayed, prec ~120)
+    (t) => t.type === T.ARROW,
+    // ||               (Or, prec ~215)
+    (t) => t.type === T.LOGICAL && t.value === '||',
+    // &&               (And, prec ~225)
+    (t) => t.type === T.LOGICAL && t.value === '&&',
+    // ==, !=, <, >, <=, >=  (Equal/Unequal/etc., prec ~290)
+    (t) => t.type === T.COMPARE,
+    // +, -             (Plus / Minus, prec ~310)
+    (t) => t.type === T.OTHER && (t.value === '+' || t.value === '-'),
+    // *, /             (Times / Divide, prec ~400)
+    (t) => t.type === T.OTHER && (t.value === '*' || t.value === '/'),
+    // <>               (StringJoin, prec ~600)
+    (t) => t.type === T.STRJOIN,
+    // @, @@, @@@, /@   (Prefix / Apply, prec ~640)
+    (t) => t.type === T.AT,
+  ];
+
+  // Find top-level (bracket depth 0 within [from,to]) indices of each operator
+  // at the weakest present class. Returns { class, indices } or null.
+  function findTopLevelSplits(from, to) {
+    // collect depth-0 positions
+    const depthZero = [];
+    let depth = 0;
+    for (let i = from; i <= to; i++) {
+      const t = toks[i];
+      if (t.type === T.OPEN) { depth++; continue; }
+      if (t.type === T.CLOSE) { depth--; continue; }
+      if (depth === 0) depthZero.push(i);
+    }
+    // semicolons handled separately — but if a ; appears at this depth, it means
+    // we have CompoundExpression; caller splits first.
+    for (const test of OP_CLASSES) {
+      const idx = [];
+      for (const i of depthZero) {
+        const t = toks[i];
+        if (!test(t)) continue;
+        // Reject unary +/- as split points.
+        if (t.type === T.OTHER && (t.value === '+' || t.value === '-') && t.isUnary) continue;
+        idx.push(i);
+      }
+      if (idx.length > 0) return idx;
+    }
+    return null;
+  }
+
+  function prevSigIndex(i, from) {
+    let j = i - 1;
+    while (j >= from && toks[j].type === T.COMMENT) j--;
+    return j;
+  }
+
+  // Find top-level COMMA positions within [from, to].
+  function findCommas(from, to) {
+    const out = [];
+    let depth = 0;
+    for (let i = from; i <= to; i++) {
+      const t = toks[i];
+      if (t.type === T.OPEN) { depth++; continue; }
+      if (t.type === T.CLOSE) { depth--; continue; }
+      if (depth === 0 && t.type === T.COMMA) out.push(i);
+    }
+    return out;
+  }
+
+  // Find top-level SEMI positions within [from, to].
+  function findSemis(from, to) {
+    const out = [];
+    let depth = 0;
+    for (let i = from; i <= to; i++) {
+      const t = toks[i];
+      if (t.type === T.OPEN) { depth++; continue; }
+      if (t.type === T.CLOSE) { depth--; continue; }
+      if (depth === 0 && t.type === T.SEMI) out.push(i);
+    }
+    return out;
+  }
+
+  // Build a Doc for the token range [from, to] inclusive. Handles (in order):
+  //   1. statement separation by ';'
+  //   2. comma separation (argList = true)
+  //   3. weakest binary operator split
+  //   4. walk tokens linearly, descending into brackets
+  // `argList`: true when we are rendering the inside of a bracket-pair whose
+  // separator is comma (function-call args, list, assoc).
+  function docForRange(from, to, argList) {
+    if (from > to) return D.nil();
+
+    // (1) semicolons at this level → CompoundExpression
+    const semis = findSemis(from, to);
+    if (semis.length > 0 && !argList) {
+      const parts = [];
+      let s = from;
+      for (const si of semis) {
+        parts.push(docForRange(s, si - 1, false));
+        s = si + 1;
+      }
+      if (s <= to) parts.push(docForRange(s, to, false));
+      // Join with ';' + hardline (preserving blank lines between top-level stmts).
+      const joined = [];
+      for (let k = 0; k < parts.length; k++) {
+        if (k > 0) {
+          // find the first significant token of parts[k] to see blankLinesBefore
+          const firstTokIdx = semis[k - 1] + 1 <= to
+            ? findFirstNonCommentIndex(semis[k - 1] + 1, to)
+            : -1;
+          const blanks = firstTokIdx >= 0 ? toks[firstTokIdx].blankLinesBefore : 0;
+          joined.push(D.text(';'));
+          joined.push(D.hardline());
+          for (let _ = 0; _ < blanks; _++) joined.push(D.hardline());
+        }
+        joined.push(parts[k]);
+      }
+      return D.cat(...joined);
+    }
+
+    // (2) commas (only if we're an arg list)
+    if (argList) {
+      const commas = findCommas(from, to);
+      if (commas.length > 0) {
+        const parts = [];
+        let s = from;
+        for (const ci of commas) {
+          parts.push(docForRange(s, ci - 1, false));
+          s = ci + 1;
+        }
+        if (s <= to) parts.push(docForRange(s, to, false));
+        // Render as: a, <line> b, <line> c    (inside a group)
+        const joined = [];
+        for (let k = 0; k < parts.length; k++) {
+          if (k > 0) joined.push(D.text(','), D.line());
+          joined.push(parts[k]);
+        }
+        return D.cat(...joined);
+      }
+      // single arg — fall through
+    }
+
+    // (3) weakest binary operator split
+    const opIdxs = findTopLevelSplits(from, to);
+    if (opIdxs && opIdxs.length > 0) {
+      // Classify break style for the operator at opIdxs[0].
+      // - ASSIGN (:= = ^= ^:=) and ARROW (-> :>)  →  op clings to LHS, RHS on next line indented.
+      //     lhs := <line>
+      //         rhs
+      // - Others (+ - * / /. // @ <> && || == etc.)  →  op starts the new line (math convention).
+      //     lhs <line>
+      //     op rhs
+      const firstOp = toks[opIdxs[0]];
+      const clingLeft = (firstOp.type === T.ASSIGN || firstOp.type === T.ARROW);
+
+      const parts = [];
+      let s = from;
+      for (const oi of opIdxs) {
+        parts.push({ operand: [s, oi - 1], opIdx: oi });
+        s = oi + 1;
+      }
+      parts.push({ operand: [s, to], opIdx: null });
+
+      if (clingLeft) {
+        // Only a single assignment/arrow split is meaningful at a given level
+        // (chained `a = b = c` is rare; render it the same way).
+        const pieces = [];
+        for (let k = 0; k < parts.length; k++) {
+          const [a, b] = parts[k].operand;
+          if (k > 0) {
+            const opTok = toks[parts[k - 1].opIdx];
+            pieces.push(D.text(' ' + renderToken(opTok)));
+            pieces.push(D.nest(indentW, D.cat(D.line(' '), docForRange(a, b, false))));
+          } else {
+            pieces.push(docForRange(a, b, false));
+          }
+        }
+        return D.group(D.cat(...pieces));
+      }
+
+      // Break-at-start style (+, -, *, /, etc.)
+      // Render the first operand flat, then wrap all remaining op+operand
+      // pairs in a sub-group so they try to stay on one line together before
+      // resorting to per-item breaks (e.g. two /. rules stay on one line).
+      const [a0, b0] = parts[0].operand;
+      const firstDoc = docForRange(a0, b0, false);
+      if (parts.length === 1) return firstDoc;
+
+      const tailPieces = [];
+      for (let k = 1; k < parts.length; k++) {
+        if (k > 1) tailPieces.push(D.line(' '));
+        const opTok = toks[parts[k - 1].opIdx];
+        tailPieces.push(D.text(renderToken(opTok) + ' '));
+        const [a, b] = parts[k].operand;
+        tailPieces.push(docForRange(a, b, false));
+      }
+      const tailDoc = D.group(D.cat(...tailPieces));
+      return D.group(D.cat(firstDoc, D.line(' '), tailDoc));
+    }
+
+    // (4) walk tokens linearly: brackets become nested docs.
+    return walkTokens(from, to);
+  }
+
+  function findFirstNonCommentIndex(from, to) {
+    for (let i = from; i <= to; i++) if (toks[i].type !== T.COMMENT) return i;
+    return -1;
+  }
+
+  // Walk tokens [from, to] linearly; descend into brackets recursively.
+  function walkTokens(from, to) {
+    const pieces = [];
+    let i = from;
+    let prev = null;
+    while (i <= to) {
+      const t = toks[i];
+
+      if (t.type === T.OPEN) {
+        const close = closeOf.get(i);
+        if (close !== undefined && close <= to) {
+          // Space before bracket if needed (mainly before '(' after a word).
+          if (prev && needsSpace(prev, t)) pieces.push(D.text(' '));
+          // Determine separator kind inside this bracket.
+          const isArgBracket = (t.value === '[' || t.value === '[[' ||
+                                t.value === '{' || t.value === '(');
+          // For parentheses used as grouping (no commas), argList=false.
+          const inner = docForRange(i + 1, close - 1, isArgBracket);
+          // Rendering style:
+          //   open  nest(indent, softline + inner) softline  close
+          const doc = D.group(
+            D.cat(
+              D.text(t.value),
+              D.nest(indentW, D.cat(D.softline(), inner)),
+              D.softline(),
+              D.text(toks[close].value)
+            )
+          );
+          pieces.push(doc);
+          prev = toks[close];
+          i = close + 1;
+          continue;
+        }
+      }
+
+      if (t.type === T.COMMENT) {
+        // Comments: if original source had newlines around them, use hardlines.
+        if (t.blankLinesBefore > 0 || (prev && t.hadSpaceBefore /* conservative */)) {
+          // Put space before comment if on same line.
+          if (prev && needsSpace(prev, t)) pieces.push(D.text(' '));
+        } else if (prev && needsSpace(prev, t)) {
+          pieces.push(D.text(' '));
+        }
+        pieces.push(D.text(t.value));
+        prev = t;
+        i++;
+        continue;
+      }
+
+      // Plain token.
+      if (prev && needsSpace(prev, t)) pieces.push(D.text(' '));
+      pieces.push(D.text(renderToken(t)));
+      prev = t;
+      i++;
+    }
+    return D.cat(...pieces);
+  }
+
+  // ── Step 5: split the whole file into top-level statements and render. ──
+  // Preserve blank lines and top-level comments between statements.
+  function formatAll() {
+    if (toks.length === 0) return '';
+
+    const out = [];
+    // Find statement boundaries (top-level `;`). Also treat runs of
+    // comment-only tokens as separate statements so they stay in place.
+    const stmts = [];
+    let start = 0;
+    let depth = 0;
+    for (let i = 0; i < toks.length; i++) {
+      const t = toks[i];
+      if (t.type === T.OPEN)  depth++;
+      else if (t.type === T.CLOSE) depth--;
+      else if (depth === 0 && t.type === T.SEMI) {
+        // Look ahead for trailing comments on the same line (blankLinesBefore===0).
+        // Keep them inline with the statement rather than as a new statement.
+        let j = i + 1;
+        const trailComments = [];
+        while (j < toks.length && toks[j].type === T.COMMENT && toks[j].blankLinesBefore === 0) {
+          trailComments.push(j);
+          j++;
+        }
+        stmts.push({ from: start, to: i - 1, trailingSemi: true, trailComments });
+        start = j;
+        i = j - 1; // loop will i++
+      } else if (depth === 0 && i > start && t.blankLinesBefore >= 1) {
+        // A blank line at top level is a visual statement separator even
+        // without a semicolon (e.g. two SetDelayed definitions back-to-back).
+        // Split here so both expressions remain independent.
+        const prevTok = toks[i - 1];
+        if (prevTok && prevTok.type !== T.SEMI) {
+          stmts.push({ from: start, to: i - 1, trailingSemi: false, blankAfter: t.blankLinesBefore });
+          start = i;
+        }
+      }
+    }
+    if (start < toks.length) stmts.push({ from: start, to: toks.length - 1, trailingSemi: false });
+
+    let pieces = [];
+    for (let k = 0; k < stmts.length; k++) {
+      const s = stmts[k];
+      if (s.from > s.to && !s.trailingSemi) continue; // empty
+      // Blank lines preceding this statement.
+      if (k > 0) {
+        // For blank-line-split stmts, blankAfter on the stmt record tells us
+        // exactly how many blank lines were in the source. For ;-split stmts
+        // we look at blankLinesBefore of the first token.
+        let blanks;
+        if (s.blankAfter !== undefined) {
+          blanks = s.blankAfter;
         } else {
-          emit(' ');
+          const firstI = findFirstNonCommentIndex(s.from, s.to);
+          blanks = firstI >= 0 ? toks[firstI].blankLinesBefore : 0;
+        }
+        pieces.push('\n');
+        for (let _ = 0; _ < blanks; _++) pieces.push('\n');
+      }
+      const doc = docForRange(s.from, s.to, false);
+      pieces.push(layout(doc));
+      if (s.trailingSemi) {
+        pieces.push(';');
+        if (s.trailComments && s.trailComments.length > 0) {
+          pieces.push(' ' + s.trailComments.map(ci => toks[ci].value).join(' '));
         }
       }
-      suppressNextSpace = true;
-      continue;
     }
-
-    // ── Semicolon ──
-    if (tok.type === T.SEMI) {
-      emit(';');
-      const ctx = ctxStack.length > 0 ? ctxStack[ctxStack.length - 1] : null;
-      const atTopLevel = ctxStack.length === 0;
-      
-      if (opts.newlineAfterSemi && (atTopLevel || (ctx && ctx.multiline))) {
-        // Skip newline+indent when next non-comment token is a closing bracket —
-        // the CLOSE handler will emit its own newline before `]`, avoiding a blank line.
-        let _nextSig = null;
-        for (let _j = i + 1; _j < stripped.length; _j++) {
-          if (stripped[_j].type !== T.COMMENT) { _nextSig = stripped[_j]; break; }
-        }
-        if (!_nextSig || _nextSig.type !== T.CLOSE) {
-          emitNewline();
-          if (!atTopLevel) {
-            emitIndent();
-          }
-          // Preserve user-inserted blank line at top level
-          if (atTopLevel && _nextSig && _nextSig.blankLineBefore) {
-            emit('\n');
-          }
-        }
-        suppressNextSpace = true;
-        // If top-level and next token is an assignment (:= or symbol =), add blank line
-        // Skip if user already had a blank line (already emitted above)
-        if (atTopLevel && opts.blankLineBetweenDefs && next && !(_nextSig && _nextSig.blankLineBefore)) {
-          // Look ahead to see if the next statement is a definition
-          let j = i + 1;
-          while (j < stripped.length && stripped[j].type === T.COMMENT) j++;
-          if (j < stripped.length && j + 1 < stripped.length) {
-            // Check for x := or x[_] := pattern
-            let k = j;
-            while (k < stripped.length && (stripped[k].type === T.WORD || 
-                   stripped[k].type === T.NAMEDCHAR || stripped[k].type === T.OPEN || 
-                   stripped[k].type === T.CLOSE || stripped[k].type === T.PATTERN ||
-                   stripped[k].type === T.COMMA)) k++;
-            if (k < stripped.length && stripped[k].type === T.ASSIGN && stripped[k].value === ':=') {
-              emit('\n');
-            }
-          }
-        }
-      } else {
-        if (next) emit(' ');
-      }
-      suppressNextSpace = true;
-      continue;
-    }
-
-    // ── Comment ──  
-    if (tok.type === T.COMMENT) {
-      if (!suppressNextSpace && prev && !lineStart) emit(' ');
-      suppressNextSpace = false;
-      // At top level, ensure a blank line before the comment if there was
-      // at least one newline in the source (i.e. the comment sits on its
-      // own line, not trailing an expression on the same line).
-      if (ctxStack.length === 0 && tok.hadNewlineBefore && prev && !lineStart) {
-        emitNewline();
-        emit('\n');
-      } else if (ctxStack.length === 0 && tok.hadNewlineBefore && lineStart && prev) {
-        // Already on a new line — just ensure a blank line separator
-        if (!tok.blankLineBefore) {
-          emit('\n');
-        }
-      }
-      // Preserve internal newlines in multiline comments
-      emit(tok.value);
-      if (next && next.type !== T.CLOSE && next.type !== T.COMMA && next.type !== T.SEMI) {
-        // If comment is on its own line at top level, add newline
-        if (ctxStack.length === 0 || (ctxStack.length > 0 && ctxStack[ctxStack.length - 1].multiline)) {
-          emitNewline();
-          // Add a blank line after the comment only when it was originally on its own line
-          // (not when it was inline-trailing a semicolon and got moved to the next line)
-          if (ctxStack.length === 0 && tok.hadNewlineBefore) emit('\n');
-          if (ctxStack.length > 0) emitIndent();
-          suppressNextSpace = true;
-        }
-      }
-      continue;
-    }
-
-    // ── All other tokens ──
-    // Preserve top-level newlines between expressions
-    if (ctxStack.length === 0 && tok.hadNewlineBefore && !lineStart) {
-      emitNewline();
-      for (let _bl = 0; _bl < (tok.blankLineCount || 0); _bl++) emit('\n');
-    }
-    // Add space if needed
-    if (!suppressNextSpace && prev && needsSpaceBetween(prev, tok) && !lineStart) {
-      emit(' ');
-    }
-    suppressNextSpace = false;
-
-    // Check if we need to break the line before this token
-    if (!lineStart && col + tok.value.length > maxW) {
-      // Try to break. Find a good break point.
-      // Simple: break before operators
-      if (tok.type === T.RULE_APPLY || tok.type === T.POSTFIX || 
-          tok.type === T.STRJOIN || tok.type === T.AT ||
-          (tok.type === T.OTHER && (tok.value === '+' || tok.value === '-'))) {
-        emitNewline();
-        emitIndent();
-        emit(indent); // extra indent for continuation
-      }
-    }
-
-    // Optionally replace \[Name] with UTF
-    if (tok.type === T.NAMEDCHAR && opts.replaceNamedChars) {
-      const name = tok.value.slice(2, -1); // strip \[ and ]
-      const code = NAMED_CHARS[name];
-      if (code) {
-        emit(String.fromCodePoint(code));
-      } else {
-        emit(tok.value); // keep original if no mapping
-      }
-    } else {
-      emit(tok.value);
-    }
+    return pieces.join('');
   }
 
-  // Preserve the exact number of trailing newlines from the source
-  const trailingNLs = src.match(/\n+$/)?.[0] ?? '';
-  out = out.replace(/\n+$/, '');
-  out += trailingNLs;
+  let result = formatAll();
+  // Preserve exact trailing newlines from source.
+  const trailing = src.match(/\n+$/)?.[0] ?? '';
+  result = result.replace(/\n+$/, '') + trailing;
+  return result;
+}
 
-  return out;
+// _formatUnsafe: entry point that first splits into statements, then
+// formats each independently via _formatSingle and reassembles.
+function _formatUnsafe(src, opts) {
+  const stmts = splitStatements(src);
+  if (stmts.length <= 1) return _formatSingle(src, opts);
+
+  const pieces = [];
+  for (let k = 0; k < stmts.length; k++) {
+    const s = stmts[k];
+    if (k > 0) {
+      // Preserve the exact number of blank lines from the source.
+      // blanks=0 → consecutive lines (just \n), blanks=1 → one blank line, etc.
+      const blanks = s.blankLinesBefore;
+      pieces.push('\n'.repeat(blanks + 1));
+    }
+    pieces.push(_formatSingle(s.text, opts));
+  }
+  // Preserve exact trailing newlines from the original source.
+  const trailing = src.match(/\n+$/)?.[0] ?? '';
+  return pieces.join('').replace(/\n+$/, '') + trailing;
 }
 
 // ─── Exports ────────────────────────────────────────────────────

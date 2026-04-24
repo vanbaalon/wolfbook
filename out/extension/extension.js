@@ -1145,11 +1145,39 @@ async function activate(context) {
     // Left:  enter the nearest code cell ABOVE the current selection, cursor at END.
     // Right: enter the nearest code cell BELOW the current selection, cursor at START.
     //        If no code cell exists below — create one and start editing.
+    //
+    // Bounce-back: if the user just exited a cell via cursorDown (last line → Down key)
+    // and immediately presses Up, re-enter the SAME cell with cursor at end of last line.
+    // Symmetrically, exit via cursorUp + immediately Down → same cell, cursor at start.
+    const BOUNCE_BACK_MS = 1000;
+    let _lastArrowExit = null;  // { time, direction: 'up'|'down', cellIndex }
+
     context.subscriptions.push(vscode.commands.registerCommand('wolfbook.navLeft', async () => {
         const editor = vscode.window.activeNotebookEditor;
         if (!editor) return;
         const nb       = editor.notebook;
         const selStart = editor.selection.start;
+
+        // Bounce-back (← key): re-enter the cell we just left via Down arrow, cursor at END of last line.
+        if (_lastArrowExit && _lastArrowExit.direction === 'down' &&
+            Date.now() - _lastArrowExit.time < BOUNCE_BACK_MS &&
+            _lastArrowExit.cellIndex >= 0 && _lastArrowExit.cellIndex < nb.cellCount) {
+            const idx = _lastArrowExit.cellIndex;
+            _lastArrowExit = null;
+            const cell = nb.cellAt(idx);
+            if (cell && cell.kind === vscode.NotebookCellKind.Code) {
+                editor.selection = new vscode.NotebookRange(idx, idx + 1);
+                await vscode.commands.executeCommand('notebook.cell.edit');
+                const txtEditor = vscode.window.activeTextEditor;
+                if (txtEditor) {
+                    const lastLine = txtEditor.document.lineCount - 1;
+                    const endPos   = new vscode.Position(lastLine, txtEditor.document.lineAt(lastLine).text.length);
+                    txtEditor.selection = new vscode.Selection(endPos, endPos);
+                }
+                return;
+            }
+        }
+        _lastArrowExit = null;
 
         // Walk upward to find the nearest code cell above the selection.
         for (let i = selStart - 1; i >= 0; i--) {
@@ -1179,6 +1207,26 @@ async function activate(context) {
         const nb      = editor.notebook;
         const selEnd  = editor.selection.end;  // exclusive end of selection range
 
+        // Bounce-back: re-enter the cell we just left via Up arrow.
+        if (_lastArrowExit && _lastArrowExit.direction === 'up' &&
+            Date.now() - _lastArrowExit.time < BOUNCE_BACK_MS &&
+            _lastArrowExit.cellIndex >= 0 && _lastArrowExit.cellIndex < nb.cellCount) {
+            const idx = _lastArrowExit.cellIndex;
+            _lastArrowExit = null;
+            const cell = nb.cellAt(idx);
+            if (cell && cell.kind === vscode.NotebookCellKind.Code) {
+                editor.selection = new vscode.NotebookRange(idx, idx + 1);
+                await vscode.commands.executeCommand('notebook.cell.edit');
+                const txtEditor = vscode.window.activeTextEditor;
+                if (txtEditor) {
+                    const startPos = new vscode.Position(0, 0);
+                    txtEditor.selection = new vscode.Selection(startPos, startPos);
+                }
+                return;
+            }
+        }
+        _lastArrowExit = null;
+
         // Walk downward to find the nearest code cell below (after) the selection.
         for (let i = selEnd; i < nb.cellCount; i++) {
             const cell = nb.cellAt(i);
@@ -1197,6 +1245,54 @@ async function activate(context) {
         // No code cell below — insert a new one at the bottom and start editing.
         await vscode.commands.executeCommand('notebook.cell.insertCodeCellBelow');
         await vscode.commands.executeCommand('notebook.cell.edit');
+    }));
+
+    // wolfbook.navUp — ↑ key in nav mode.
+    // Bounce-back (↑ after down-exit): re-enter the same cell, cursor at BEGINNING of last line.
+    // Normal: walk upward to the nearest code cell, cursor at end (same as navLeft).
+    context.subscriptions.push(vscode.commands.registerCommand('wolfbook.navUp', async () => {
+        const editor = vscode.window.activeNotebookEditor;
+        if (!editor) return;
+        const nb       = editor.notebook;
+        const selStart = editor.selection.start;
+
+        // Bounce-back (↑ after down-exit): cursor at BEGINNING of last line.
+        if (_lastArrowExit && _lastArrowExit.direction === 'down' &&
+            Date.now() - _lastArrowExit.time < BOUNCE_BACK_MS &&
+            _lastArrowExit.cellIndex >= 0 && _lastArrowExit.cellIndex < nb.cellCount) {
+            const idx = _lastArrowExit.cellIndex;
+            _lastArrowExit = null;
+            const cell = nb.cellAt(idx);
+            if (cell && cell.kind === vscode.NotebookCellKind.Code) {
+                editor.selection = new vscode.NotebookRange(idx, idx + 1);
+                await vscode.commands.executeCommand('notebook.cell.edit');
+                const txtEditor = vscode.window.activeTextEditor;
+                if (txtEditor) {
+                    const lastLine = txtEditor.document.lineCount - 1;
+                    const startOfLast = new vscode.Position(lastLine, 0);
+                    txtEditor.selection = new vscode.Selection(startOfLast, startOfLast);
+                }
+                return;
+            }
+        }
+        _lastArrowExit = null;
+
+        // Walk upward to find the nearest code cell above the selection.
+        for (let i = selStart - 1; i >= 0; i--) {
+            const cell = nb.cellAt(i);
+            if (cell.kind === vscode.NotebookCellKind.Code) {
+                editor.selection = new vscode.NotebookRange(i, i + 1);
+                await vscode.commands.executeCommand('notebook.cell.edit');
+                const txtEditor = vscode.window.activeTextEditor;
+                if (txtEditor) {
+                    const lastLine = txtEditor.document.lineCount - 1;
+                    const endPos   = new vscode.Position(lastLine, txtEditor.document.lineAt(lastLine).text.length);
+                    txtEditor.selection = new vscode.Selection(endPos, endPos);
+                }
+                return;
+            }
+        }
+        await vscode.commands.executeCommand('notebook.focusPreviousCell');
     }));
 
     // wolfram.cursorLeft / cursorRight / cursorUp / cursorDown
@@ -1249,6 +1345,9 @@ async function activate(context) {
         const editor = vscode.window.activeTextEditor;
         if (!isRepeat && editor && editor.selection.isEmpty) {
             if (editor.selection.active.line === 0) {
+                // Record exit so navRight can bounce back into this cell.
+                const nbEd = vscode.window.activeNotebookEditor;
+                _lastArrowExit = { time: Date.now(), direction: 'up', cellIndex: nbEd ? nbEd.selection.start : -1 };
                 await vscode.commands.executeCommand('notebook.cell.quitEdit');
                 return;
             }
@@ -1264,6 +1363,9 @@ async function activate(context) {
         if (!isRepeat && editor && editor.selection.isEmpty) {
             const last = editor.document.lineCount - 1;
             if (editor.selection.active.line === last) {
+                // Record exit so navLeft can bounce back into this cell.
+                const nbEd = vscode.window.activeNotebookEditor;
+                _lastArrowExit = { time: Date.now(), direction: 'down', cellIndex: nbEd ? nbEd.selection.start : -1 };
                 await vscode.commands.executeCommand('notebook.cell.quitEdit');
                 return;
             }
@@ -1678,6 +1780,7 @@ async function activate(context) {
                     if (msg.includes('Suspicious use of') && msg.includes('session symbol')) return false;
                     if (msg.includes('Suspicious uppercase') && msg.includes('pattern')) return false;
                     if (msg.includes('Operands') && msg.includes('different lines')) return false;
+                    if (/expected.*operand/i.test(msg)) return false;
                     if (msg.includes('Non-ASCII character')) return false;
                     if (msg.includes('letterlike') || msg.includes('Unexpected character') ||
                         msg.includes('unexpected character') || msg.includes('Unknown character')) {
@@ -1791,6 +1894,7 @@ async function activate(context) {
                         if (msg.includes('Suspicious use of') && msg.includes('session symbol')) return false;
                         if (msg.includes('Suspicious uppercase') && msg.includes('pattern')) return false;
                         if (msg.includes('Operands') && msg.includes('different lines')) return false;
+                        if (/expected.*operand/i.test(msg)) return false;
                         if (msg.includes('Non-ASCII character')) return false;
                         // Suppress any diagnostic whose range contains ONLY non-ASCII characters
                         // (these are our \[Name] → Unicode replacements — fully valid WL).

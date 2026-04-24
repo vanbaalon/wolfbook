@@ -16,6 +16,7 @@ const http   = require('http');
 const crypto = require('crypto');
 const path   = require('path');
 const fs     = require('fs');
+const { setMcpCallActive } = require('../tools/shared');
 
 const DEFAULT_PORT  = 27182;
 const PORT_RANGE    = 20;  // try DEFAULT_PORT … DEFAULT_PORT+PORT_RANGE if busy
@@ -403,7 +404,7 @@ class WolframMCPServer {
                     throw err;
                 }
 
-                const options = { input: args };
+                const options = { input: args, skipConfirm: true };  // MCP calls can't respond to dialogs
                 // Mock VS Code CancellationToken — MCP calls are not cancellable mid-flight
                 const token = {
                     isCancellationRequested: false,
@@ -411,6 +412,7 @@ class WolframMCPServer {
                 };
 
                 let toolResult;
+                setMcpCallActive(true);
                 try {
                     toolResult = await tool.invoke(options, token);
                 } catch (e) {
@@ -419,6 +421,8 @@ class WolframMCPServer {
                         content:  [{ type: 'text', text: `Error: ${e.message || String(e)}` }],
                         isError:  true,
                     };
+                } finally {
+                    setMcpCallActive(false);
                 }
 
                 // Extract text from LanguageModelToolResult (content items have .value)

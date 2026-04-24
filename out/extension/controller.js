@@ -283,10 +283,13 @@ class WolframNotebookKernel {
         // prior VS Code session (which used a different random epoch) are cleaned up
         // by the renderer's session-changed handler on notebook open/reload.
         this._sessionEpoch = (Math.random() * 999998 | 0) + 1;
-        // Container pixel width reported by the renderer webview via 'container-width'
-        // messages.  Converted to em and passed to lineBreakLatex when > 0.
+        // Container pixel widths keyed by notebook URI string.
+        // Replaces the old scalar _latexPageWidthPx/_latexPageWidthEm so that
+        // multiple open notebooks each get the correct width for their webview.
+        this._latexPageWidthPxMap = new Map(); // uriStr → px
+        this._latexPageWidthEmMap = new Map(); // uriStr → em
+        // Fallback scalars kept for backward-compat (watch-panel, etc.).
         this._latexPageWidthEm = 0;
-        // Target line-break width in pixels (80% of the renderer container width).
         this._latexPageWidthPx = 0;
         // Proportionality coefficient: how many real rendered px correspond to one
         // C++ "em" unit used inside lineBreakLatex's width estimator.
@@ -569,14 +572,20 @@ class WolframNotebookKernel {
                 return;
             }
 
-            // Renderer reports its container pixel width.
-            // Keep pageWidthPx deterministic (objective container width), then
-            // derive an em fallback from configured base font size.
+            // Renderer reports its container pixel width — keyed by the notebook
+            // that owns this webview so two open notebooks don't clobber each other.
             if (message.type === 'container-width' && message.widthPx > 0) {
                 const targetPx = Math.floor(message.widthPx * 0.80);
                 const baseFontSizePx = Math.max(8, Number(this.config.get('notebook.rendering.lineBreaking.baseFontSizePx') ?? 16));
+                const targetEm = Math.floor(targetPx / baseFontSizePx);
+                if (_eventNbUri) {
+                    const _key = _eventNbUri.toString();
+                    this._latexPageWidthPxMap.set(_key, targetPx);
+                    this._latexPageWidthEmMap.set(_key, targetEm);
+                }
+                // Also update the scalars as a fallback for watch-panel / unknown context.
                 this._latexPageWidthPx = targetPx;
-                this._latexPageWidthEm = Math.floor(targetPx / baseFontSizePx);
+                this._latexPageWidthEm = targetEm;
                 return;
             }
 
@@ -670,7 +679,7 @@ class WolframNotebookKernel {
                     try {
                         const renderResult = await Promise.race([renderPromise, timeoutPromise]);
                         if (renderResult?.result?.type === "string" && renderResult.result.value) {
-                        htmlVal = this._processWLLatexBoxes(this._fixImageUris(renderResult.result.value));
+                        htmlVal = this._processWLLatexBoxes(this._fixImageUris(renderResult.result.value), undefined, undefined, undefined, undefined, info.cell.notebook.uri);
                             if (htmlVal.length > MAX_HTML_BYTES) {
                                 failReason = `output too large (${(htmlVal.length / 1024).toFixed(0)} KB HTML \u2014 would freeze browser)`;
                                 htmlVal = null;
@@ -836,7 +845,7 @@ class WolframNotebookKernel {
                         const rawHtml = moreResult.result.value;
                         // Allow BTL paging — when expand-more produces >maxRows lines,
                         // the output gets a pager just like the full-expression path.
-                        const moreHtml = this._processWLLatexBoxes(this._fixImageUris(rawHtml), _moreLogPath, null, 'expand-more');
+                        const moreHtml = this._processWLLatexBoxes(this._fixImageUris(rawHtml), _moreLogPath, null, 'expand-more', undefined, info.cell.notebook.uri);
                         // Check rawHtml (before BTL processing) — the skeleton wrapper div is on the
                         // outer layer and BTL only replaces the inner wllatex-boxes div, but checking
                         // rawHtml is more reliable since BTL never sees the outer wrapper.
@@ -958,7 +967,7 @@ class WolframNotebookKernel {
                         vscode.window.showWarningMessage(`Render message: ${rfMsg}`);
                     }
                     if (rfResult?.result?.type === 'string' && rfResult.result.value) {
-                        const rfHtml = this._processWLLatexBoxes(this._fixImageUris(rfResult.result.value));
+                        const rfHtml = this._processWLLatexBoxes(this._fixImageUris(rfResult.result.value), undefined, undefined, undefined, undefined, info.cell.notebook.uri);
                         // Update registry so subsequent switches see the new format
                         info.format = newFormat;
                         this._outputRegistry.set(outputId, info);
@@ -1214,19 +1223,26 @@ class WolframNotebookKernel {
     }
 
     // Build the native line-break options from runtime width info + user settings.
-    _getLineBreakOptions(widthOverrideEm) {
-        let pageWidth = (widthOverrideEm !== undefined && widthOverrideEm > 0)
-            ? Math.floor(widthOverrideEm)
-            : this._latexPageWidthEm;
-        if (pageWidth <= 0) pageWidth = 80;
-
-        let pageWidthPx = 0;
+    // nbUri: optional vscode.Uri of the notebook being rendered — used to look up
+    // the per-notebook container width rather than the last-updated global fallback.
+    _getLineBreakOptions(widthOverrideEm, nbUri) {
+        let pageWidth, pageWidthPx;
         const baseFontSizePx = Math.max(8, Number(this.config.get('notebook.rendering.lineBreaking.baseFontSizePx') ?? 16));
         if (widthOverrideEm !== undefined && widthOverrideEm > 0) {
-            pageWidthPx = Math.floor(widthOverrideEm * baseFontSizePx);
-        } else if (this._latexPageWidthPx > 0) {
+            pageWidth    = Math.floor(widthOverrideEm);
+            pageWidthPx  = Math.floor(widthOverrideEm * baseFontSizePx);
+        } else if (nbUri) {
+            const _key = typeof nbUri === 'string' ? nbUri : nbUri.toString();
+            const _px  = this._latexPageWidthPxMap.get(_key) ?? 0;
+            const _em  = this._latexPageWidthEmMap.get(_key) ?? 0;
+            pageWidthPx = _px > 0 ? _px : this._latexPageWidthPx;
+            pageWidth   = _em > 0 ? _em : this._latexPageWidthEm;
+        } else {
             pageWidthPx = this._latexPageWidthPx;
+            pageWidth   = this._latexPageWidthEm;
         }
+        if (pageWidth   <= 0) pageWidth   = 80;
+        if (pageWidthPx <= 0) pageWidthPx = 0;
         const indentStep = Math.max(0, Math.floor(Number(this.config.get('notebook.rendering.lineBreaking.indentStep') ?? 2)));
         const maxDelimDepth = Math.max(1, Math.floor(Number(this.config.get('notebook.rendering.lineBreaking.maxDelimDepth') ?? 2)));
         const maxIterations = Math.max(1, Math.floor(Number(this.config.get('notebook.rendering.lineBreaking.maxIterations') ?? 5)));
@@ -1247,9 +1263,11 @@ class WolframNotebookKernel {
     // Post-process HTML containing WLLatex box placeholders — thin wrapper.
     // widthOverride: optional em width to use instead of the notebook's container width
     // (e.g. pass the watch-panel's own width when rendering for the side panel).
+    // nbUri: optional vscode.Uri of the notebook — used to look up the correct
+    // per-notebook container width when two notebooks are open side-by-side.
     // source: optional label written to btl.log ('notebook', 'watch-panel', etc.)
-    _processWLLatexBoxes(html, logPath, widthOverride, source, extraOpts) {
-        const lineBreakOpts = { ...this._getLineBreakOptions(widthOverride), ...(extraOpts || {}) };
+    _processWLLatexBoxes(html, logPath, widthOverride, source, extraOpts, nbUri) {
+        const lineBreakOpts = { ...this._getLineBreakOptions(widthOverride, nbUri), ...(extraOpts || {}) };
         return _output.processWLLatexBoxes(this, html, logPath, lineBreakOpts.pageWidth, source, lineBreakOpts);
     }
 
@@ -1269,47 +1287,8 @@ class WolframNotebookKernel {
             scrollLog('[execute] SILENT mode — skipping keyboard/scroll detection');
         }
 
-        // ── External tool guard ──
-        // Detect when execute() was called by something OTHER than wolfbook.executeCell
-        // (keyboard) or wolfbook AI tools. This happens when an AI agent mistakenly uses
-        // run_notebook_cell, notebook.cell.execute, or similar VS Code built-in tools on
-        // a .wb notebook. Those tools bypass wolfbook's scroll management and can corrupt
-        // the kernel state.
-        // _wolframExecPending is set to true by wolfbook.executeCell and by all wolfbook
-        // tool implementations immediately before calling execute(). Clear it here.
-        const _wasWolframExec = this._wolframExecPending;
+        // Clear the pending-exec flag (was used by the now-removed external-tool guard).
         this._wolframExecPending = false;
-        // Only block if this is clearly NOT a user-initiated execution.
-        // User executions come from: keyboard (wolfbook.executeCell sets the flag),
-        // the cell Run button (single cell, active editor matches), or Run All.
-        // External AI tool calls (run_notebook_cell) are the only ones to block.
-        // Heuristic: if there's an active notebook editor showing this notebook,
-        // the user likely triggered it via the UI — allow it.
-        const _activeNbEditor = vscode.window.activeNotebookEditor;
-        const _isFromActiveEditor = _activeNbEditor && cells && cells.length > 0 &&
-            _activeNbEditor.notebook === cells[0].notebook;
-        if (!isSilent && !_wasWolframExec && !_isFromActiveEditor && cells && cells.length > 0) {
-            // External call detected. Block execution and return an error output so
-            // the AI agent gets clear feedback in the cell's output.
-            const _blockMsg = '⛔ WOLFBOOK TOOL ERROR\n\nDo NOT use run_notebook_cell, edit_notebook_file, notebook.cell.execute, or other non-wolfbook tools on .wb notebooks.\n\nUse the wolfbook tools instead:\n  • wolfbook_runCell — run a cell by number\n  • wolfbook_insertCells — insert and optionally evaluate new cells\n  • wolfbook_evaluateExpression — run Wolfram code without creating a cell\n\nThis execution was BLOCKED to protect notebook state.';
-            scrollLog('[execute] BLOCKED — external tool call detected (not wolfbook keyboard or tool)');
-            // Show VS Code notification so the user is also aware.
-            vscode.window.showErrorMessage('⛔ wolfbook: External cell execution blocked. Use wolfbook_runCell instead of run_notebook_cell on .wb files.', { modal: false });
-            // Write error output to each blocked cell via the real execution API
-            // so the agent can read it in the tool result.
-            Promise.all(cells.map(async (cell) => {
-                try {
-                    const exec = this._controller.createNotebookCellExecution(cell);
-                    exec.start(Date.now());
-                    await exec.appendOutput(new vscode.NotebookCellOutput([
-                        vscode.NotebookCellOutputItem.error({ name: 'WolframToolError', message: _blockMsg, stack: '' }),
-                        vscode.NotebookCellOutputItem.text(_blockMsg, 'text/plain'),
-                    ]));
-                    exec.end(false, Date.now());
-                } catch (_) {}
-            }));
-            return;
-        }
 
         // Detect keyboard-triggered execution (Shift+Enter on the selected cell).
         // IMPORTANT: VS Code advances the selection from N → N+1 BEFORE calling
@@ -1388,7 +1367,10 @@ class WolframNotebookKernel {
 
                     } else {
                         // ---- ADVANCE MODE ----
-                        // Let VS Code advance the selection to N+1 freely.
+                        // In VS Code, the selection is already advanced N→N+1 before
+                        // execute() is called (diff === 1).  In Antigravity and some
+                        // other hosts the selection is NOT pre-advanced (diff === 0),
+                        // so we must do it explicitly here.
                         // Scroll the evaluated cell's input to the top of the viewport
                         // immediately on Shift+Enter — no waiting for first output.
                         // Because the cell is already at top when output arrives, it
@@ -1396,11 +1378,29 @@ class WolframNotebookKernel {
                         const _advIdx = cellIdx;
                         const _advNb  = cells[0].notebook;
                         const _advT0  = Date.now();
-                        scrollLog('[advance] scheduling immediate input-cell animated scroll for cell', _advIdx);
+                        const _needExplicitAdvance = (diff === 0);   // Antigravity: not pre-advanced
+                        scrollLog('[advance] scheduling immediate input-cell animated scroll for cell', _advIdx,
+                            _needExplicitAdvance ? '(will explicitly advance selection)' : '(VS Code already advanced)');
                         setTimeout(() => {
-                            // setTimeout(0) lets VS Code's selection advance (N→N+1) happen
-                            // first, then we scroll the EVALUATED cell (not the newly selected one).
+                            // setTimeout(0) lets VS Code's own selection advance (if any) settle,
+                            // then scroll the EVALUATED cell (not the newly selected one).
                             scrollLog('[advance t=0] scrolling cell', _advIdx, 'to top (animated) | dt=', Date.now() - _advT0, 'ms since execute()');
+                            // Explicitly advance selection when the host didn't do it (Antigravity).
+                            // Silent AI executions never reach here (isSilent guard above).
+                            // User keyboard executions should advance in ALL modes, including collab.
+                            if (_needExplicitAdvance) {
+                                const _nextIdx = _advIdx + 1;
+                                if (_nextIdx < _advNb.cellCount) {
+                                    try {
+                                        const _advEd = vscode.window.visibleNotebookEditors.find(e => e.notebook === _advNb);
+                                        if (_advEd) {
+                                            const RC = vscode.NotebookRange;
+                                            _advEd.selections = [new RC(_nextIdx, _nextIdx + 1)];
+                                            scrollLog('[advance t=0] explicitly set selection to cell', _nextIdx);
+                                        }
+                                    } catch (_) {}
+                                }
+                            }
                             this._scrollToInputCellAnimated(_advIdx, _advNb);
                         }, 0);
                     }

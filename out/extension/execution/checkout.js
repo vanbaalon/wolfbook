@@ -181,7 +181,7 @@ async function checkoutExecutionQueue(self) {
                     // potential split point
                     const t = current.trim();
                     // Keep lines together when current ends with a continuation operator
-                    const endsWithOp = t.length > 0 && /(&&|\|\||->|:>|\/\/\.|\/\/|\/\/@|\/@|@@|<>|~~|;;|\^:=|:=|\+=|-=|\*=|\/=|=\.|[+\-*\/=,&|~@?])$/.test(t);
+                    const endsWithOp = t.length > 0 && /(&&|\|\||->|:>|\/\/\.|\/\/|\/\/@|\/@|@@|<>|~~|;;|\^:=|:=|\+=|-=|\*=|\/=|[+\-*\/=,&|~@?])$/.test(t);
                     // Peek at first non-whitespace char(s) of the next line
                     let peekPos = i + 1;
                     if (ch === '\r' && next === '\n') peekPos = i + 2;
@@ -190,7 +190,8 @@ async function checkoutExecutionQueue(self) {
                     const peekTwo = (peekPos + 1 < code.length) ? code.slice(peekPos, peekPos + 2) : peekCh;
                     const startsWithOp = t.length > 0 && peekCh.length > 0 && (
                         '=+-*/,|~@?'.includes(peekCh) ||
-                        peekTwo === '&&' || peekTwo === '||' || peekTwo === '->' || peekTwo === ':>' || peekTwo === '//'
+                        peekTwo === '&&' || peekTwo === '||' || peekTwo === '->' || peekTwo === ':>' ||
+                        peekTwo === '//' || peekTwo === '<>' || peekTwo === '!=' || peekTwo === '>=' || peekTwo === '<='
                     );
                     if (endsWithOp || startsWithOp) {
                         // Continuation line — replace newline with space so WL
@@ -293,6 +294,29 @@ async function checkoutExecutionQueue(self) {
 
         const _coT0 = Date.now();
         const _imgDirChanged = (self._lastMainImgDir !== imgDir) || (self._lastMainImgRel !== imgRel);
+
+        // ---- Update $WBNotebookDirectory before each cell ----
+        // This keeps NotebookDirectory[] / WBDirectory[] correct when the user
+        // runs cells in different notebooks that share a kernel.
+        // We only send a kernel round-trip when the notebook has changed.
+        {
+            let _cellNbDir = path.dirname(nbFsPath);
+            if (process.platform === 'win32') _cellNbDir = _cellNbDir.replace(/\\/g, '/');
+            if (_cellNbDir !== self._lastNbDir) {
+                const _esc = _cellNbDir.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+                try {
+                    await self.session.evaluate(
+                        `$WBNotebookDirectory = "${_esc}"`,
+                        { interactive: false, rejectDialog: true }
+                    );
+                    self._lastNbDir = _cellNbDir;
+                    scrollLog('[checkout] $WBNotebookDirectory updated to', _cellNbDir);
+                } catch (_e) {
+                    self.writeDebugLog(`[CHECKOUT] $WBNotebookDirectory update failed (non-fatal): ${_e.message}`);
+                }
+            }
+        }
+
         if (_imgDirChanged) {
             scrollLog('[checkout] VsCodeSetImgDir start | cell', currentExecution.execution.cell.index);
             self.writeDebugLog(`[CHECKOUT] cell ${currentExecution.execution.cell.index} | VsCodeSetImgDir start`);
@@ -462,7 +486,10 @@ async function checkoutExecutionQueue(self) {
         for (let i = 0; i < subExprs.length; i++) {
             if (self.isAborting) { anyAborted = true; break; }
 
-            const { text: subExpr, startLine: _subStartLine, endLine: _subEndLine } = subExprs[i];
+            let { text: subExpr, startLine: _subStartLine, endLine: _subEndLine } = subExprs[i];
+            // Substitute display-only Unicode operators back to ASCII for the kernel.
+            // The formatter renders -> as → (\u2192) and :> as ⧴ (\u29f4).
+            subExpr = subExpr.replace(/\u2192/g, '->').replace(/\u29f4/g, ':>');
             scrollLog('[checkout] sub', i, '/', subExprs.length, 'start | cell', currentExecution.execution.cell.index, '| expr:', subExpr.slice(0, 60));
             self.writeDebugLog(`[CHECKOUT] cell ${currentExecution.execution.cell.index} | sub ${i}/${subExprs.length} start | expr: ${subExpr.slice(0, 80)}`);
 
@@ -655,7 +682,8 @@ async function checkoutExecutionQueue(self) {
                     return '<pre class="vscode-wolfram-print-output">' + self.escapeHtml(text) + '</pre>';
                 });
                 const btlLogPath = path.join(imgDir, 'btl.log');
-                const newHtml = self._processWLLatexBoxes(htmlParts.join(''), btlLogPath);
+                const _nbUri_btl = currentExecution.execution.cell.notebook.uri;
+                const newHtml = self._processWLLatexBoxes(htmlParts.join(''), btlLogPath, undefined, undefined, undefined, _nbUri_btl);
                 const newText = decodedTexts.map(t => t.trim().startsWith('BoxData[') ? '[formula]' : t).join('');
                 if (printOutput) {
                     printHtml += newHtml;
@@ -901,7 +929,8 @@ async function checkoutExecutionQueue(self) {
 
                     if (renderResult?.result?.type === "string" && renderResult.result.value) {
                         const btlLogPath2 = path.join(imgDir, 'btl.log');
-                        let html = self._processWLLatexBoxes(self._fixImageUris(renderResult.result.value), btlLogPath2);
+                        const _nbUri_btl2 = currentExecution.execution.cell.notebook.uri;
+                        let html = self._processWLLatexBoxes(self._fixImageUris(renderResult.result.value), btlLogPath2, undefined, undefined, undefined, _nbUri_btl2);
                         const _subsBadge = _isSubsession
                             ? '<span style="font-size:9px;color:#e8a020;background:rgba(232,160,32,0.12);border:1px solid rgba(232,160,32,0.35);border-radius:3px;padding:1px 5px;margin-right:6px;font-style:italic;">subsession</span>'
                             : '';

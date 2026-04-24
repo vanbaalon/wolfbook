@@ -4,6 +4,73 @@ All notable changes to **Wolfbook** are documented here.
 
 ---
 
+## [2.6.51] - 2026-04-24
+
+### Added — `wolfbook_editCell` batch mode
+
+`wolfbook_editCell` now accepts a `cells` array for batch editing:
+
+```json
+{ "cells": [{ "cellId": "abc", "content": "f[x_]:=x^2" }, …] }
+```
+
+- Cells are edited and evaluated sequentially through the real kernel pipeline (not a scratch-pad) — outputs appear in the notebook and errors surface immediately.
+- `evaluate` defaults to **`true`** in batch mode; pass `evaluate:false` on individual items or at the top level to skip.
+- Returns a per-cell diff + output/message summary in a single tool response.
+- `timeoutSeconds` (default 30) applies per cell.
+
+### Fixed — `wolfbook_editCell` was single-cell only (Q1 2026 feedback)
+
+Previous feedback: batch editing required multiple sequential `wolfbook_editCell` calls. Now a single call handles all cells in one round-trip.
+
+### Fixed — CellId verbosity (token waste)
+
+Cell IDs in all tool results were the full `vscode-notebook-cell:/path/to/notebook.wb#fragment` URI (100+ chars). They are now just the short fragment (e.g. `Y113sZmlsZQ%3D%3D`) — unique per cell, stable within a session, and ~10× shorter. Old full-URI IDs from prior sessions are automatically resolved via fragment matching.
+
+### Fixed — `\[Rule]` and `\[RuleDelayed]` arrows missing from BTL rendering
+
+`Solve[x^2==1,x]` output the `→` arrow symbol (WL private-use U+F522) as invisible. Added `\[Rule]→\to` and `\[RuleDelayed]→\mapsto` to `special_chars.cpp` (both named-form and raw-UTF-8 entries). Rebuilt native BTL addon.
+
+---
+
+## [2.6.50] - 2026-04-22
+
+### Fixed — Multi-editor LaTeX width
+
+When two notebook editors were open side-by-side, the LaTeX line-breaking width used by the BTL native addon was a single shared scalar, so both notebooks rendered at the width of the narrower editor. Width is now tracked per-notebook via a URI-keyed `Map`, and all `_processWLLatexBoxes` call sites pass the evaluating cell's notebook URI.
+
+### Fixed — External tool guard leaking into Shift+Enter output
+
+The "External tool guard" block in the cell execution path could emit a `WolframToolError: WOLFBOOK TOOL ERROR` header into a user's output when Shift+Enter-evaluating a cell. The guard block was removed; the internal `_wolframExecPending` flag is still cleared as before.
+
+### Fixed — `Cmd+/` comment shortcut
+
+`wolfram.language-configuration.json` defines no `lineComment`, so VS Code's default `editor.action.commentLine` wrapped the entire line in `(* *)` instead of the selection. Added a keybinding override that routes `Cmd+/` / `Ctrl+/` to `editor.action.blockComment` when editing a Wolfram notebook cell.
+
+### Rewritten — WL code formatter (`wl-formatter.js`)
+
+The formatter was rewritten around a Wadler/Oppen-style **Doc IR** (`nil · text · line · softline · hardline · nest · group · cat`) with fits-or-broken group layout:
+
+- Recursive `docForRange`: splits each range at the weakest top-level binary operator (ASSIGN, POSTFIX, RULE_APPLY, ARROW, `||`, `&&`, COMPARE, `+`/`-`, `*`/`/`, `<>`, `@`).
+- Unary `+`/`-` detected in a pre-pass (`t.isUnary = true`) so they never receive spaces and never trigger false operator splits.
+- `ASSIGN` and `ARROW` cling to the LHS end; other operators break at the start of the next line (standard math convention).
+- Per-group independent `groupFits` check — no Wadler fits cascade, so small inner groups stay on one line when the outer group is already broken.
+- Brackets descend into their own `group(open · nest(4, softline · inner) · softline · close)`.
+
+### Added — Formatter token-equivalence safety guard
+
+After formatting, the output is re-tokenized and compared token-by-token to the input (ignoring `SPACE` / `NEWLINE` only). Any added, removed, or changed non-whitespace token causes the formatter to return the original source unchanged. Any exception during formatting is caught and the original is returned. Result: **the formatter can never invalidate a cell's syntax**, no matter what the input is.
+
+### Improved — Multi-expression cell splitter
+
+`checkout.js` sub-expression splitter now also recognises `<>`, `!=`, `>=`, `<=` as continuation operators when they appear at the start of a new line, matching the formatter's break styles.
+
+### Fixed — LSP "Expected an operand" false positive
+
+Added `/expected.*operand/i` to the LSP `handleDiagnostics` filters (both push and pull paths) to suppress the red wavy line that the Wolfram LSP emits on legitimate multi-line expressions such as `(...) / (...) /. rule`.
+
+---
+
 ## [2.6.47] - 2026-04-16
 
 ### Added — `wolfteam_askSpecialist` tool

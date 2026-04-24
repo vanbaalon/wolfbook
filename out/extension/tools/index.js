@@ -37,6 +37,88 @@ const {
     GetCellOutputTool, ValidateSyntaxTool, LatexTool,
 } = require('./wolfslide-tools');
 
+// ---------------------------------------------------------------------------
+// summariseEvalOutputs(outs, hasError)
+//   Converts a list of plain-text kernel outputs into a compact string for
+//   the agent, applying smarter truncation when the total is long or when
+//   there are errors/warnings (which tend to be the most verbose).
+//
+//   Strategy:
+//   - No outputs → "(no output)"
+//   - Total ≤ 400 chars → full join
+//   - Any error/warning present → show each message capped at 200 chars,
+//     summarise count: "3 messages: <first 200>... [2 more: <tags>]"
+//   - Otherwise → join + truncate to 400 chars with an ellipsis
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// summariseMsgs(messages)
+//   Formats kernel messages (warnings/errors) for agent consumption.
+//   Each message is capped at MSG_CAP chars. If the same tag repeats
+//   (e.g. three N::meprec), we show the first instance in full and
+//   collapse the rest to "[N::meprec ×2 suppressed]".
+// ---------------------------------------------------------------------------
+const MSG_CAP = 200;
+function summariseMsgs(messages) {
+    if (!messages || !messages.length) return [];
+    const tagCount = {};   // tag → count of shown messages
+    const lines = [];
+    for (const m of messages) {
+        const tagMatch = m.match(/^(\w+::\w+):/);
+        const tag = tagMatch ? tagMatch[1] : null;
+        if (tag) {
+            tagCount[tag] = (tagCount[tag] || 0) + 1;
+            if (tagCount[tag] > 1) {
+                // Update (or add) a suppression note for this tag
+                const suppIdx = lines.findIndex(l => l.startsWith(`[message] [${tag}`));
+                if (suppIdx >= 0) {
+                    lines[suppIdx] = `[message] [${tag} ×${tagCount[tag] - 1} more suppressed — first instance shown above]`;
+                } else {
+                    lines.push(`[message] [${tag} ×${tagCount[tag] - 1} more suppressed — first instance shown above]`);
+                }
+                continue;
+            }
+        }
+        const truncated = m.length > MSG_CAP;
+        lines.push(`[message] ${m.slice(0, MSG_CAP)}${truncated ? `… [${m.length} chars]` : ''}`);
+    }
+    return lines;
+}
+
+
+function summariseEvalOutputs(outs, hasError) {
+    if (!outs.length) return '(no output)';
+    const joined = outs.join(' | ');
+    if (joined.length <= 400) return joined;
+
+    if (hasError) {
+        // Split: separate normal results from WL message lines (Symbol::tag: …)
+        const msgLines = outs.filter(o => /\w+::\w+:/.test(o));
+        const valLines = outs.filter(o => !/\w+::\w+:/.test(o));
+        const parts = [];
+        if (msgLines.length) {
+            const first = msgLines[0].slice(0, 200);
+            const ellipsis = msgLines[0].length > 200 ? '…' : '';
+            parts.push(`${msgLines.length} kernel message${msgLines.length > 1 ? 's' : ''}: ${first}${ellipsis}`);
+            if (msgLines.length > 1) {
+                // Show just the message tags for the rest: General::stop, Syntax::sntxf, …
+                const restTags = msgLines.slice(1).map(m => {
+                    const match = m.match(/(\w+::\w+):/);
+                    return match ? match[1] : m.slice(0, 30);
+                });
+                parts.push(`[also: ${restTags.join(', ')}]`);
+            }
+        }
+        if (valLines.length) {
+            const valStr = valLines.join(' | ').slice(0, 200);
+            parts.push(`result: ${valStr}${valLines.join(' | ').length > 200 ? '…' : ''}`);
+        }
+        return parts.join(' ');
+    }
+
+    // Normal long output: truncate with char count hint
+    return joined.slice(0, 400) + `… [${joined.length} chars total]`;
+}
+
 
 class GetNotebookContextTool {
     async prepareInvocation(options, _token) {
@@ -44,18 +126,27 @@ class GetNotebookContextTool {
         if (action === 'list') return { invocationMessage: 'List open notebooks' };
         if (action === 'switch') return { invocationMessage: `Switch to notebook: ${options.input?.notebook || '?'}` };
         if (action === 'save') return { invocationMessage: 'Save notebook to disk' };
-        if (action === 'summary') return { invocationMessage: 'Get notebook summary (brief)' };
+        if (action === 'summary' || action === 'brief') return { invocationMessage: 'Get notebook summary (brief)' };
         return {};
     }
 
     async invoke(options, _token) {
         let action = options.input?.action || 'read';
 
-        // "summary" is a natural alias for brief read — treat it as such
-        if (action === 'summary') {
+        // "summary" and "brief" are both natural aliases for brief read — treat them as such
+        if (action === 'summary' || action === 'brief') {
             // Force brief mode on via a patched options proxy so the read path picks it up
             options = { ...options, input: { ...(options.input || {}), action: 'read', brief: true } };
             action = 'read';
+        }
+
+        const _USAGE = 'Valid actions: "read" (full cell source + outputs, default), "summary"/"brief" (compact cell list), "list" (open notebooks), "switch" (with notebook="file.wb"), "save". Use brief=true with action="read" for a compact view.';
+
+        // Unknown action — return usage guidance
+        if (!['list', 'switch', 'save', 'read'].includes(action)) {
+            return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(`Unknown action "${action}". ${_USAGE}`)
+            ]);
         }
 
         // ── action: list ─────────────────────────────────────────────────────
@@ -141,7 +232,8 @@ class GetNotebookContextTool {
 
         // ── action: read (default) ───────────────────────────────────────────
         const targetName = options.input?.notebook;
-        const editor = await resolveNotebookEditor(targetName, { actionDesc: 'read notebook' });
+        // Reading is non-destructive — always auto-switch without confirmation dialog.
+        const editor = await resolveNotebookEditor(targetName, { skipConfirm: true });
         if (!editor) {
             const notFoundMsg = targetName
                 ? `Notebook "${targetName}" is not open. Use action="list" to see open notebooks.`
@@ -161,17 +253,21 @@ class GetNotebookContextTool {
 
         // Brief mode: compact table of cell numbers, kinds, and first-line previews
         if (options.input?.brief === true) {
-            const decoder = new util.TextDecoder();
-            const nbName  = notebook.uri.fsPath.split('/').pop();
-            const from    = Math.max(1, startCell || 1);
-            const to      = Math.min(notebook.cellCount, endCell || notebook.cellCount);
+            const decoder     = new util.TextDecoder();
+            const nbName      = notebook.uri.fsPath.split('/').pop();
+            const from        = Math.max(1, startCell || 1);
+            const to          = Math.min(notebook.cellCount, endCell || notebook.cellCount);
+            // previewChars: how many chars of source to show per cell (default 100, max 500)
+            const previewCap  = Math.min(500, Math.max(20, Number(options.input?.previewChars) || 100));
             const lines   = [`**${nbName}** — ${notebook.cellCount} cells${from !== 1 || to !== notebook.cellCount ? ` (showing ${from}–${to})` : ''}`];
             for (let i = from - 1; i < to; i++) {
                 const cell   = notebook.cellAt(i);
                 const cellId = getCellToolId(cell);
                 const kind   = cell.kind === vscode.NotebookCellKind.Markup ? 'md' : 'code';
                 const src    = cell.document.getText().trim();
-                const firstLine = (src.split('\n')[0] || '').slice(0, 70);
+                // Show up to previewCap chars of source, collapsing newlines to ↵ for compactness
+                const preview = src.slice(0, previewCap).replace(/\n/g, '\u21B5') + (src.length > previewCap ? '\u2026' : '');
+                const firstLine = preview || '*(empty)*';
                 // Also show output summary for evaluated cells
                 let outSummary = '';
                 for (const output of cell.outputs) {
@@ -188,9 +284,9 @@ class GetNotebookContextTool {
                         break;
                     }
                 }
-                lines.push(`Cell ${i + 1} [${kind}] ${cellId} | ${firstLine || '*(empty)*'}${outSummary}`);
+                lines.push(`Cell ${i + 1} [${kind}] ${cellId} | ${firstLine}${outSummary}`);
             }
-            lines.push('\nUse brief=false (default) or omit brief to get full cell source + outputs.');
+            lines.push(`\nUse brief=false (default) or omit brief to get full cell source + outputs. Use previewChars=N (default 100, max 500) to control source preview length.`);
             return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(lines.join('\n'))]);
         }
 
@@ -315,7 +411,7 @@ class EvaluateExpressionTool {
                         const ps = linePrints.join('').replace(/\n$/, '');
                         parts.push(`Print:\n${ps}`);
                     }
-                    const msgs = (result?.messages ?? []).map(m => `[message] ${cleanWrapperFromMsg(m)}`);
+                    const msgs = summariseMsgs((result?.messages ?? []).map(cleanWrapperFromMsg));
                     if (msgs.length) parts.push(msgs.join('\n'));
                     if (suppressed) {
                         parts.push(`${label}= (suppressed)`);
@@ -408,7 +504,7 @@ class EvaluateExpressionTool {
             // Strip internal $wbR$ wrapper artefacts that can appear in syntax-error messages.
             if (result?.messages?.length) {
                 const clean = result.messages.map(m => cleanWrapperFromMsg(m));
-                output += clean.map(m => `[message] ${m}`).join('\n') + '\n';
+                output += summariseMsgs(clean).join('\n') + '\n';
             }
             if (result?.result?.type === 'string' && result.result.value === '$WBTIMEOUT$') {
                 // WL-level timeout — kernel aborted cleanly, WSTP link is intact
@@ -576,7 +672,7 @@ class InsertCellsTool {
     }
 
     async invoke(options, _token) {
-        const editor = await resolveNotebookEditor(options.input?.notebook, { actionDesc: 'insert cells' });
+        const editor = await resolveNotebookEditor(options.input?.notebook, { skipConfirm: true });
         if (!editor) {
             return new vscode.LanguageModelToolResult([
                 new vscode.LanguageModelTextPart('No active notebook editor.')
@@ -598,7 +694,9 @@ class InsertCellsTool {
 
         const position = options.input?.position;
         const afterCellId = options.input?.afterCellId;
-        const afterCellNum = options.input?.afterCell != null ? Number(options.input.afterCell) : undefined;
+        const afterCellNum = options.input?.afterCell != null ? Number(options.input.afterCell)
+                           : options.input?.afterCellNumber != null ? Number(options.input.afterCellNumber)
+                           : undefined;
         const idxRes = resolveInsertIndex(notebook, editor, position, afterCellId, afterCellNum);
         if (idxRes.error) {
             return new vscode.LanguageModelToolResult([
@@ -731,9 +829,14 @@ class InsertCellsTool {
                             }
                             const timedOut = Date.now() >= cellDeadline && _ctrl._evalDispatched;
                             const status   = timedOut ? '⏱ timeout' : '✓';
-                            const outStr   = outs.join(' | ').slice(0, 800) || '(no output)';
+                            const outStr   = summariseEvalOutputs(outs, hasError);
                             const cellRef  = formatCellRef(idx, updatedCell);
-                            evalResults.push(`${cellRef}: ${status} — ${outStr}`);
+                            // Detect Syntax:: messages — surface prominently so the agent knows
+                            // definitions may be stale (e.g. Get[file] with a bad string escape).
+                            const hasSyntaxMsg = outs.some(t => /Syntax::\w+:/.test(t));
+                            let resultLine = `${cellRef}: ${status} — ${outStr}`;
+                            if (hasSyntaxMsg) resultLine += '\n⚠️ SYNTAX MESSAGE DETECTED — definitions loaded before this error may be stale. Fix the syntax issue and reload.';
+                            evalResults.push(resultLine);
                             appendEvalLog(cells[i].content || '', outStr);
 
                             if (Date.now() >= deadline) { evalResults.push('(global timeout reached)'); break; }
@@ -771,7 +874,7 @@ class DeleteCellTool {
     }
 
     async invoke(options, _token) {
-        const editor = await resolveNotebookEditor(options.input?.notebook, { actionDesc: 'delete cells' });
+        const editor = await resolveNotebookEditor(options.input?.notebook, { skipConfirm: true });
         if (!editor) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart('No active notebook editor.')]);
 
         const notebook = editor.notebook;
@@ -783,8 +886,13 @@ class DeleteCellTool {
         if (Array.isArray(options.input?.cellIds)) refs.push(...options.input.cellIds);
         if (Array.isArray(options.input?.cellNumbers)) refs.push(...options.input.cellNumbers);
         if (refs.length === 0) {
+            if (options.input?.cellIndex != null) {
+                return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
+                    'Unknown parameter "cellIndex". Use cellId (string) or cellNumber (integer) for a single cell, or cellIds/cellNumbers arrays for multiple. Example: { cellId: "c3a2" } or { cellNumbers: [3, 5, 7] }'
+                )]);
+            }
             return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
-                'Provide cellId/cellNumber (single) or cellIds/cellNumbers (array).'
+                'Required: cellId (string) or cellNumber (integer) for one cell, or cellIds (string[]) / cellNumbers (integer[]) for multiple. Example: { cellId: "c3a2" } or { cellNumbers: [3, 5, 7] }'
             )]);
         }
 
@@ -850,7 +958,7 @@ class DeleteCellTool {
             const d = deleted[0];
             const preview = d.source.trim().slice(0, 100).replace(/\n/g, '\u21b5');
             return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
-                `Deleted ${d.kindStr} Cell ${d.cellNumber} (index ${d.idx}, CellId: ${d.cellId})${recovery}. Notebook now has ${totalAfter} cell(s).\nContent: ${preview}${d.source.trim().length > 100 ? '\u2026' : ''}`
+                `Deleted ${d.kindStr} Cell ${d.cellNumber} (CellId: ${d.cellId})${recovery}. Notebook now has ${totalAfter} cell(s).\nContent: ${preview}${d.source.trim().length > 100 ? '\u2026' : ''}`
             )]);
         }
 
@@ -858,7 +966,7 @@ class DeleteCellTool {
         const lines = [`Deleted ${deleted.length} cells${recovery}. Notebook now has ${totalAfter} cell(s).\n`];
         for (const d of deleted) {
             const preview = d.source.trim().slice(0, 100).replace(/\n/g, '\u21b5');
-            lines.push(`- Cell ${d.cellNumber} [${d.kindStr}] (index ${d.idx}, CellId: ${d.cellId}): ${preview}${d.source.trim().length > 100 ? '\u2026' : ''}`);
+            lines.push(`- Cell ${d.cellNumber} [${d.kindStr}] (CellId: ${d.cellId}): ${preview}${d.source.trim().length > 100 ? '\u2026' : ''}`);
         }
         return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(lines.join('\n'))]);
     }
@@ -914,6 +1022,11 @@ class RestoreDeletedCellsTool {
         }
 
         const action = options.input?.action || 'list';
+        if (!['list', 'restore'].includes(action)) {
+            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
+                `Unknown action "${action}". Valid: "list" (default) — preview deleted cells; "restore" — insert them back at optional insertPosition/afterCellId.`
+            )]);
+        }
         const count  = Math.max(1, Math.min(
             Number(options.input?.count) || (action === 'list' ? 10 : 1),
             entries.length
@@ -968,7 +1081,7 @@ class RestoreDeletedCellsTool {
             const newCellNum = insertIdx + 1 + i;
             const id         = getCellToolId(notebook.cellAt(insertIdx + i));
             const preview    = e.source.trim().slice(0, 100).replace(/\n/g, '\u21b5');
-            lines.push(`- Cell ${newCellNum} [${e.kind}] (index ${insertIdx + i}, CellId: ${id}, was Cell ${e.originalCell} at ${e.timestamp}): ${preview}${e.source.trim().length > 100 ? '\u2026' : ''}`);
+            lines.push(`- Cell ${newCellNum} [${e.kind}] (CellId: ${id}, was Cell ${e.originalCell} at ${e.timestamp}): ${preview}${e.source.trim().length > 100 ? '\u2026' : ''}`);
         }
         return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(lines.join('\n') + _katexWarningsForCells(cellDatas))]);
     }
@@ -984,6 +1097,12 @@ class EditCellTool {
     }
 
     async prepareInvocation(options, _token) {
+        if (Array.isArray(options.input?.cells)) {
+            const count    = options.input.cells.length;
+            const evaluate = options.input?.evaluate !== false;  // default true
+            const verb     = evaluate ? 'Edit & evaluate' : 'Edit';
+            return { invocationMessage: `${verb} ${count} cell(s) in notebook` };
+        }
         const n       = options.input?.cellId || options.input?.cellNumber;
         const content = String(options.input?.content || '');
         const preview = content.length > 100 ? content.slice(0, 100) + '…' : content;
@@ -993,13 +1112,192 @@ class EditCellTool {
     }
 
     async invoke(options, token) {
-        const editor = await resolveNotebookEditor(options.input?.notebook, { actionDesc: 'edit cell' });
+        const editor = await resolveNotebookEditor(options.input?.notebook, { skipConfirm: true });
         if (!editor) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart('No active notebook editor.')]);
 
+        // ── Batch mode: cells array ───────────────────────────────────────────────
+        if (Array.isArray(options.input?.cells)) {
+            const items      = options.input.cells;
+            if (items.length === 0) {
+                return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart('cells array is empty.')]);
+            }
+            const notebook    = editor.notebook;
+            const nbName      = notebook.uri.fsPath.split('/').pop();
+            // evaluate defaults true — run each cell through the real pipeline after editing
+            const doEval      = options.input?.evaluate !== false;
+            const timeoutSec  = Math.max(5, Number(options.input?.timeoutSeconds) || 30);
+            const decoder     = new util.TextDecoder();
+            const results     = [];
+            let errorCount    = 0;
+            let evalErrorCount = 0;
+
+            // Prepare controller once before the loop
+            const _ctrl = doEval ? this._getController?.() : null;
+            const useCtrl = doEval && _ctrl && typeof _ctrl.execute === 'function' && _ctrl.kernelStatusString === 'resolved';
+            if (useCtrl) {
+                // Abort any ongoing eval before starting the batch
+                if (_ctrl._evalDispatched || _ctrl.executionQueue.queueLength() > 0) {
+                    await _ctrl.abortAndWait(8000);
+                }
+                _ctrl._silentExecution = true;
+            }
+
+            const _vpSnapshot = _snapshotViewport(notebook);
+
+            try {
+            for (const item of items) {
+                if (token.isCancellationRequested) {
+                    results.push('⊘ Cancelled.');
+                    break;
+                }
+                if (item == null || (item.cellId == null && item.cellNumber == null)) {
+                    results.push(`⚠ Skipped: missing cellId and cellNumber`);
+                    errorCount++;
+                    continue;
+                }
+                if (item.content == null) {
+                    results.push(`⚠ ${item.cellId ?? item.cellNumber}: missing content`);
+                    errorCount++;
+                    continue;
+                }
+
+                const by = item.cellId != null ? item.cellId : item.cellNumber;
+                const resolved = resolveCellIndex(notebook, by, item.cellId != null ? 'cellId' : 'cellNumber');
+                if (resolved.error) {
+                    results.push(`⚠ ${by}: ${resolved.error}`);
+                    errorCount++;
+                    continue;
+                }
+
+                const idx        = resolved.idx;
+                const cellNumber = idx + 1;
+                const cell       = notebook.cellAt(idx);
+                const cellId     = getCellToolId(cell);
+                const isCode     = cell.kind === vscode.NotebookCellKind.Code;
+                const newContent = normalizeToolContent(item.content);
+                const oldContent = cell.document.getText();
+
+                // Compact diff summary (3 lines max each side)
+                const _ds = (() => {
+                    if (oldContent === newContent) return ' [no changes]';
+                    const oldLines = oldContent.split('\n');
+                    const newLines = newContent.split('\n');
+                    const added   = newLines.filter(l => !oldLines.includes(l));
+                    const removed = oldLines.filter(l => !newLines.includes(l));
+                    const parts = [];
+                    if (removed.length > 0) parts.push(removed.slice(0, 3).map(l => `- ${l.trim().slice(0, 60)}`).join('\n') + (removed.length > 3 ? `\n  … +${removed.length - 3} more` : ''));
+                    if (added.length > 0)   parts.push(added.slice(0, 3).map(l => `+ ${l.trim().slice(0, 60)}`).join('\n') + (added.length > 3 ? `\n  … +${added.length - 3} more` : ''));
+                    return parts.length > 0 ? '\n' + parts.join('\n') : ' [whitespace only]';
+                })();
+
+                // ── Apply text edit ───────────────────────────────────────────
+                const cellDoc   = cell.document;
+                const fullRange = new vscode.Range(
+                    0, 0,
+                    Math.max(0, cellDoc.lineCount - 1),
+                    cellDoc.lineAt(Math.max(0, cellDoc.lineCount - 1)).text.length
+                );
+                const edit = new vscode.WorkspaceEdit();
+                edit.set(cellDoc.uri, [new vscode.TextEdit(fullRange, newContent)]);
+                await vscode.workspace.applyEdit(edit);
+                appendEventLog(`✏️ EDIT CELL ${cellNumber} [batch]`,
+                    newContent.trim().length > 200 ? newContent.trim().slice(0, 200) + '…' : newContent.trim() || '*(empty)*');
+
+                // ── Evaluate via real kernel pipeline ─────────────────────────
+                const shouldEval = doEval && (item.evaluate !== false) && isCode && newContent.trim();
+                if (!shouldEval) {
+                    results.push(`✓ Cell ${cellNumber} (${cellId})${_ds}`);
+                    continue;
+                }
+
+                if (!useCtrl) {
+                    results.push(`✓ Cell ${cellNumber} (${cellId})${_ds}\n  ⚠ Kernel not running — edit applied but not evaluated.`);
+                    evalErrorCount++;
+                    continue;
+                }
+
+                // Arm scroll guard per cell
+                const _snap = _snapshotViewport(notebook);
+                if (_snap) {
+                    _ctrl._scrollGuardSavedViewport   = _snap.viewport;
+                    _ctrl._scrollGuardSavedSelections = _snap.selections;
+                    _ctrl._agentGuardActive = true;
+                }
+                _ctrl._wolframExecPending = true;
+                _ctrl.execute([notebook.cellAt(idx)], notebook, _ctrl._controller);
+
+                const deadline = Date.now() + timeoutSec * 1000;
+                await new Promise(resolve => {
+                    const poll = () => {
+                        if (token.isCancellationRequested) { resolve(); return; }
+                        if ((!_ctrl._evalDispatched && _ctrl.executionQueue.queueLength() === 0) || Date.now() >= deadline) resolve();
+                        else setTimeout(poll, 150);
+                    };
+                    setTimeout(poll, 200);
+                });
+                _ctrl._agentGuardActive = false;
+
+                const timedOut   = _ctrl._evalDispatched || _ctrl.executionQueue.queueLength() > 0;
+                const updCell    = notebook.cellAt(idx);
+                const outs       = [];
+                const msgOuts    = [];
+                for (const output of updCell.outputs) {
+                    const mimes     = output.items.map(it => it.mime);
+                    const plainItem = output.items.find(it => it.mime === 'text/plain');
+                    const isErrSentinel = mimes.includes('x-application/wolfram-language-html') &&
+                                          mimes.includes('application/vnd.code.notebook.error');
+                    if (!plainItem) continue;
+                    try {
+                        const txt = decoder.decode(plainItem.data).trim();
+                        if (!txt) continue;
+                        if (isErrSentinel) msgOuts.push(txt);
+                        else outs.push(txt);
+                    } catch (_) {}
+                }
+
+                const outSummary = summariseEvalOutputs(outs, msgOuts.length > 0);
+                let evalStatus;
+                if (timedOut) {
+                    evalStatus = `  ⏱ timed out after ${timeoutSec}s`;
+                    evalErrorCount++;
+                } else if (msgOuts.length > 0) {
+                    const msgSummary = summariseEvalOutputs(msgOuts, true);
+                    evalStatus = `  ⚠ ${msgSummary}` + (outs.length > 0 ? `\n  Out= ${outSummary}` : '');
+                    evalErrorCount++;
+                } else {
+                    evalStatus = `  Out= ${outSummary}`;
+                }
+
+                const timing = updCell.executionSummary?.timing;
+                const timingStr = (!timedOut && timing?.startTime && timing?.endTime)
+                    ? ` (${((timing.endTime - timing.startTime) / 1000).toFixed(2)}s)` : '';
+                appendEvalLog(newContent, evalStatus.trim());
+                results.push(`✓ Cell ${cellNumber} (${cellId})${timingStr}${_ds}\n${evalStatus}`);
+            }
+            } finally {
+                if (useCtrl) { _ctrl._silentExecution = false; _ctrl._agentGuardActive = false; }
+            }
+
+            _restoreViewport(_vpSnapshot);
+            const ok = items.length - errorCount;
+            const evalNote = doEval && useCtrl
+                ? (evalErrorCount > 0 ? ` — ${evalErrorCount} cell(s) had errors/warnings` : ' — all cells evaluated OK')
+                : (doEval && !useCtrl ? ' — kernel not running, edits applied without evaluation' : '');
+            const summary = `Batch-edited ${ok}/${items.length} cell(s) in ${nbName}${evalNote}.`;
+            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(summary + '\n' + results.join('\n'))]);
+        }
+
+        // ── Single-cell mode ──────────────────────────────────────────────────
         if (options.input?.cellId == null && options.input?.cellNumber == null) {
+            // Detect common wrong parameter names and give a clear error
+            const _CELL_USAGE = 'Correct parameters: cellId (stable string, preferred) or cellNumber (1-based integer). Call wolfbook_getNotebookContext first to get CellId values. For batch edits, use the "cells" array parameter.';
+            if (options.input?.cellIndex != null) {
+                return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
+                    `Unknown parameter "cellIndex". ${_CELL_USAGE}`
+                )]);
+            }
             return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
-                'You must provide either cellId (stable identifier, preferred) or cellNumber (1-based integer) to identify the target cell. ' +
-                'Call wolfbook_getNotebookContext first to get CellId values.'
+                `You must provide either cellId (stable identifier, preferred) or cellNumber (1-based integer) to identify the target cell, or a "cells" array for batch edits. ${_CELL_USAGE}`
             )]);
         }
 
@@ -1063,7 +1361,7 @@ class EditCellTool {
         }
         const _vpSnapshot = _snapshotViewport(notebook);
 
-        const editedMsg = `Edited Cell ${cellNumber} (index ${idx}, CellId: ${cellId}) of ${notebook.cellCount} in ${notebook.uri.fsPath.split('/').pop()}.${_diffSummary}`;
+        const editedMsg = `Edited Cell ${cellNumber} (CellId: ${cellId}) of ${notebook.cellCount} in ${notebook.uri.fsPath.split('/').pop()}.${_diffSummary}`;
         appendEventLog(`\u270F\uFE0F EDIT CELL ${cellNumber}`,
             newContent.trim().length > 200 ? newContent.trim().slice(0, 200) + '\u2026' : newContent.trim() || '*(empty)*');
 
@@ -1100,7 +1398,7 @@ class EditCellTool {
                 if (dynCount > 0) evalOut += `[note] ${dynCount} Dynamic widget(s) active\n`;
                 if (result?.messages?.length) {
                     const clean = result.messages.map(cleanWrapperFromMsg);
-                    evalOut += clean.map(m => `[message] ${m}`).join('\n') + '\n';
+                    evalOut += summariseMsgs(clean).join('\n') + '\n';
                 }
                 if (result?.result?.type === 'string' && result.result.value === '$WBTIMEOUT$') {
                     evalOut += `Timed out after ${wlTimeout}s — kernel is still alive. Increase timeoutSeconds.`;
@@ -1160,8 +1458,21 @@ class RunCellTool {
     }
 
     async invoke(options, token) {
-        const editor = await resolveNotebookEditor(options.input?.notebook, { actionDesc: 'run cell' });
+        const editor = await resolveNotebookEditor(options.input?.notebook, { skipConfirm: true });
         if (!editor) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart('No active notebook editor.')]);
+
+        // ── detect wrong parameter names ──────────────────────────────────────
+        const _CELL_USAGE = 'Correct parameters: cellId (stable string, preferred) or cellNumber (1-based integer) for a single cell; startCell/endCell for a range.';
+        if (options.input?.cellIndex != null || options.input?.cell_index != null) {
+            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
+                `Unknown parameter "cellIndex". ${_CELL_USAGE}`
+            )]);
+        }
+        if (options.input?.index != null && options.input?.cellId == null && options.input?.cellNumber == null) {
+            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
+                `Unknown parameter "index". ${_CELL_USAGE}`
+            )]);
+        }
 
         // ── range mode: no cell target given — run a range of cells ──────────
         const hasCellTarget = options.input?.cellId != null || options.input?.cellNumber != null;
@@ -1262,7 +1573,12 @@ class RunCellTool {
                 }
 
                 const status = timedOut ? '\u23F1 timeout' : '\u2713';
-                const resultLine = `Cell ${n}: ${status} \u2014 ${outs.join(' | ').slice(0, 800) || '(no output)'}`;
+                const outStr = summariseEvalOutputs(outs, hasError);
+                // Detect Syntax:: messages — surface prominently so the agent knows
+                // definitions may be stale (e.g. Get[file] with a bad string escape).
+                const hasSyntaxMsg = outs.some(t => /Syntax::\w+:/.test(t));
+                let resultLine = `Cell ${n}: ${status} \u2014 ${outStr}`;
+                if (hasSyntaxMsg) resultLine += '\n  \u26A0\uFE0F SYNTAX MESSAGE DETECTED \u2014 definitions loaded before this error may be stale.';
                 // errorsOnly: only include cells that had messages/warnings
                 if (!errorsOnly || hasError || timedOut) {
                     results.push(resultLine);
@@ -1308,7 +1624,7 @@ class RunCellTool {
         const cellId = getCellToolId(cell);
         if (cell.kind === vscode.NotebookCellKind.Markup) {
             return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
-                `Cell ${cellNumber} (index ${idx}, CellId: ${cellId}) is a markdown cell — nothing to run.`
+                `Cell ${cellNumber} (CellId: ${cellId}) is a markdown cell — nothing to run.`
             )]);
         }
 
@@ -1935,85 +2251,135 @@ class DebugCellTool {
 }
 
 // ---------------------------------------------------------------------------
-// wolfbook_moveCell — move a cell from one position to another
+// wolfbook_moveCell — move (or copy) a cell within or between notebooks
 // ---------------------------------------------------------------------------
 
 class MoveCellTool {
     async prepareInvocation(options, _token) {
-        const from = options.input?.cellId || options.input?.cellNumber;
-        const to   = options.input?.afterCellId || options.input?.toPosition;
-        return { invocationMessage: `Move cell ${from} to after ${to}` };
+        const from      = options.input?.cellId || options.input?.cellNumber;
+        const to        = options.input?.afterCellId || options.input?.toPosition;
+        const isCopy    = options.input?.copy === true;
+        const srcNb     = options.input?.sourceNotebook;
+        const dstNb     = options.input?.targetNotebook || options.input?.notebook;
+        const verb      = isCopy ? 'Copy' : 'Move';
+        const crossNote = srcNb || dstNb ? ` (${srcNb || 'active'} → ${dstNb || 'active'})` : '';
+        return { invocationMessage: `${verb} cell ${from} to after ${to}${crossNote}` };
     }
 
     async invoke(options, _token) {
-        const editor = await resolveNotebookEditor(options.input?.notebook, { actionDesc: 'move cell' });
-        if (!editor) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart('No active notebook editor.')]);
+        const isCopy      = options.input?.copy === true;
+        const srcNbName   = options.input?.sourceNotebook || options.input?.notebook;
+        const dstNbName   = options.input?.targetNotebook;
 
-        const notebook = editor.notebook;
+        // ── resolve source notebook ──────────────────────────────────────────
+        const srcEditor = await resolveNotebookEditor(srcNbName, { skipConfirm: true });
+        if (!srcEditor) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
+            srcNbName ? `Source notebook "${srcNbName}" not found. Use wolfbook_getNotebookContext(action:"list") to see open notebooks.`
+                      : 'No active notebook editor.'
+        )]);
+
+        const srcNotebook = srcEditor.notebook;
         const fromRef = options.input?.cellId != null ? options.input?.cellId : options.input?.cellNumber;
-        const fromRes = resolveCellIndex(notebook, fromRef, options.input?.cellId != null ? 'cellId' : 'cellNumber');
-        if (fromRes.error) {
+        if (fromRef == null) {
             return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
-                fromRes.error
+                'Required: cellId (stable string, preferred) or cellNumber (1-based integer) to identify the source cell. Example: { cellId: "c3a2", toPosition: 5 } or { cellNumber: 3, afterCellId: "c5b1" }'
             )]);
         }
-        const fromIdx = fromRes.idx;
-        const cellNumber = fromIdx + 1;
-        const sourceId = getCellToolId(notebook.cellAt(fromIdx));
+        const fromRes = resolveCellIndex(srcNotebook, fromRef, options.input?.cellId != null ? 'cellId' : 'cellNumber');
+        if (fromRes.error) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(fromRes.error)]);
 
+        const fromIdx    = fromRes.idx;
+        const cellNumber = fromIdx + 1;
+        const cell       = srcNotebook.cellAt(fromIdx);
+        const kind       = cell.kind;
+        const lang       = cell.document.languageId;
+        const source     = cell.document.getText();
+        const sourceId   = getCellToolId(cell);
+        const stableId   = await _ensureCellToolId(srcNotebook, fromIdx);
+        const kindStr    = kind === vscode.NotebookCellKind.Markup ? 'markdown' : 'code';
+
+        // ── resolve destination notebook ─────────────────────────────────────
+        const dstEditor = dstNbName
+            ? await resolveNotebookEditor(dstNbName, { skipConfirm: true })
+            : srcEditor;
+        if (!dstEditor) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
+            `Target notebook "${dstNbName}" not found. Use wolfbook_getNotebookContext(action:"list") to see open notebooks.`
+        )]);
+
+        const dstNotebook  = dstEditor.notebook;
+        const crossNotebook = dstNotebook.uri.toString() !== srcNotebook.uri.toString();
+
+        // ── resolve destination position ─────────────────────────────────────
         let toPosition;
         const afterCellId = options.input?.afterCellId;
         if (typeof afterCellId === 'string' && afterCellId.trim()) {
-            const toRes = resolveCellIndex(notebook, afterCellId, 'afterCellId');
+            const toRes = resolveCellIndex(dstNotebook, afterCellId, 'afterCellId');
             if (toRes.error) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(toRes.error)]);
             toPosition = toRes.idx + 1;
         } else {
-            toPosition = Number(options.input?.toPosition);  // insert AFTER this 1-based cell (0 = make first)
+            toPosition = options.input?.toPosition != null ? Number(options.input.toPosition) : NaN;
         }
 
-        if (!Number.isInteger(toPosition) || toPosition < 0 || toPosition > notebook.cellCount) {
+        if (isNaN(toPosition)) {
             return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
-                `Invalid toPosition ${toPosition}. Must be 0 (make first) to ${notebook.cellCount} (make last).`
+                `Required: afterCellId (stable cellId in the target notebook) or toPosition (0 = beginning, ${dstNotebook.cellCount} = end). Example: { cellId: "c3a2", targetNotebook: "other.wb", toPosition: 5 }`
             )]);
         }
-        // No-op: toPosition === cellNumber (insert after self) or cellNumber-1 (insert before self)
-        if (toPosition === cellNumber || toPosition === cellNumber - 1) {
+        // clamp toPosition to valid range
+        toPosition = Math.max(0, Math.min(dstNotebook.cellCount, Math.round(toPosition)));
+
+        // Within same notebook: no-op check
+        if (!crossNotebook && (toPosition === cellNumber || toPosition === cellNumber - 1)) {
             return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
                 `Cell ${cellNumber} is already at that position — no move needed.`
             )]);
         }
 
-        const cell     = notebook.cellAt(fromIdx);
-        const kind     = cell.kind;
-        const lang     = cell.document.languageId;
-        const source   = cell.document.getText();
-        // Ensure cell has a stable toolId before moving (so we can copy it)
-        const stableId = await _ensureCellToolId(notebook, fromIdx);
+        // ── build cell data to insert ─────────────────────────────────────────
         const cellData = new vscode.NotebookCellData(kind, source, lang);
-        // Preserve metadata (including toolId) so CellId survives the move
         cellData.metadata = { ...(cell.metadata || {}), toolId: stableId };
 
-        // Single atomic edit: delete at original index + insert at original toPosition.
-        // VS Code applies notebook edits sorted by descending index, so:
-        //   moving up  (fromIdx > toPosition): delete first, then insert — both valid
-        //   moving down (fromIdx < toPosition): insert first, then delete — both valid
-        const edit = new vscode.WorkspaceEdit();
-        edit.set(notebook.uri, [
-            vscode.NotebookEdit.deleteCells(new vscode.NotebookRange(fromIdx, fromIdx + 1)),
-            vscode.NotebookEdit.insertCells(toPosition, [cellData])
-        ]);
-        await vscode.workspace.applyEdit(edit);
+        // ── apply edits ───────────────────────────────────────────────────────
+        if (crossNotebook) {
+            // Two separate edits: insert into destination, then (if move) delete from source
+            const insertEdit = new vscode.WorkspaceEdit();
+            insertEdit.set(dstNotebook.uri, [vscode.NotebookEdit.insertCells(toPosition, [cellData])]);
+            await vscode.workspace.applyEdit(insertEdit);
 
-        const newPos = toPosition < cellNumber ? toPosition + 1 : toPosition;
-        const newIdx = Math.max(0, newPos - 1);
+            if (!isCopy) {
+                const deleteEdit = new vscode.WorkspaceEdit();
+                deleteEdit.set(srcNotebook.uri, [vscode.NotebookEdit.deleteCells(new vscode.NotebookRange(fromIdx, fromIdx + 1))]);
+                await vscode.workspace.applyEdit(deleteEdit);
+            }
+        } else {
+            // Same notebook: atomic delete + re-insert
+            const edit = new vscode.WorkspaceEdit();
+            edit.set(srcNotebook.uri, [
+                vscode.NotebookEdit.deleteCells(new vscode.NotebookRange(fromIdx, fromIdx + 1)),
+                vscode.NotebookEdit.insertCells(toPosition, [cellData])
+            ]);
+            await vscode.workspace.applyEdit(edit);
+        }
 
-        const kindStr = kind === vscode.NotebookCellKind.Markup ? 'markdown' : 'code';
-        appendEventLog(`\u2195\uFE0F MOVE ${kindStr.toUpperCase()} CELL ${cellNumber} \u2192 position ${newPos}`,
-            source.trim().slice(0, 100) || '*(empty)*');
-        const posLabel = toPosition === 0 ? 'beginning' : `after Cell ${toPosition}`;
-        return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
-            `Moved ${kindStr} Cell ${cellNumber} (index ${fromIdx}, CellId: ${sourceId}) to Cell ${newPos} (index ${newIdx}, ${posLabel}). Notebook now has ${notebook.cellCount} cell(s).`
-        )]);
+        // ── compute new position label ────────────────────────────────────────
+        const newPos = crossNotebook ? toPosition + 1
+                     : (toPosition < cellNumber ? toPosition + 1 : toPosition);
+        const posLabel   = toPosition === 0 ? 'beginning' : `after position ${toPosition}`;
+        const srcNbLabel = srcNotebook.uri.fsPath.split('/').pop();
+        const dstNbLabel = dstNotebook.uri.fsPath.split('/').pop();
+        const verb       = isCopy ? 'Copied' : 'Moved';
+
+        const logAction = isCopy
+            ? `📋 COPY ${kindStr.toUpperCase()} CELL ${cellNumber} → ${dstNbLabel}`
+            : crossNotebook
+                ? `↔️ CROSS-NB MOVE ${kindStr.toUpperCase()} CELL ${cellNumber} ${srcNbLabel} → ${dstNbLabel}`
+                : `↕️ MOVE ${kindStr.toUpperCase()} CELL ${cellNumber} → position ${newPos}`;
+        appendEventLog(logAction, source.trim().slice(0, 100) || '*(empty)*');
+
+        const summary = crossNotebook
+            ? `${verb} ${kindStr} Cell ${cellNumber} (CellId: ${sourceId}) from ${srcNbLabel} to Cell ${newPos} (${posLabel}) of ${dstNbLabel}.`
+            : `${verb} ${kindStr} Cell ${cellNumber} (CellId: ${sourceId}) to Cell ${newPos} (${posLabel}). Notebook now has ${srcNotebook.cellCount} cell(s).`;
+        return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(summary)]);
     }
 }
 
@@ -2076,7 +2442,7 @@ class SearchCellsTool {
             if (matchedIn.length > 0) {
                 const preview = src.trim().slice(0, 120).replace(/\n/g, '\u21B5');
                 const cellId = getCellToolId(cell);
-                matches.push(`Cell ${cellNo} [${cellKind}] (index ${i}, CellId: ${cellId}; ${matchedIn.join('+')}) — ${preview}${src.trim().length > 120 ? '\u2026' : ''}`);
+                matches.push(`Cell ${cellNo} [${cellKind}] (CellId: ${cellId}; ${matchedIn.join('+')}) — ${preview}${src.trim().length > 120 ? '\u2026' : ''}`);
             }
         }
 
@@ -2845,6 +3211,9 @@ function registerTools(context, getController, debugCtrl, getAskPanel) {
         { name: 'wolfbook_insertCells',        impl: new InsertCellsTool(getController) },
         { name: 'wolfbook_editCell',           impl: new EditCellTool(getController) },
         { name: 'wolfbook_runCell',            impl: new RunCellTool(getController) },
+        // wolfbook_runRange is a convenience alias for wolfbook_runCell with startCell/endCell.
+        // Use it to re-execute a range of cells after a kernel restart.
+        { name: 'wolfbook_runRange',           impl: new RunCellTool(getController) },
         { name: 'wolfbook_getCellOutput',      impl: new GetCellOutputTool() },
         { name: 'wolfbook_validateSyntax',     impl: new ValidateSyntaxTool(getController) },
         { name: 'wolfbook_latex',              impl: new LatexTool() },
@@ -2921,6 +3290,37 @@ function registerTools(context, getController, debugCtrl, getAskPanel) {
                 )]);
             },
         }},
+        // Intercept replace_string_in_file when used on .wb/.evsnb notebooks.
+        // These files store cell content as JSON with escaped chars — on-disk edits silently
+        // corrupt the format.  Return a clear error with the correct alternatives.
+        { name: 'replace_string_in_file', impl: {
+            prepareInvocation: (options) => {
+                const fp = options.input?.filePath || options.input?.path || '';
+                if (/\.(wb|evsnb|vsnb)$/i.test(fp)) {
+                    return { invocationMessage: `⛔ Blocked: replace_string_in_file on Wolfbook file` };
+                }
+                return { invocationMessage: `Edit file: ${fp.split('/').pop() || fp}` };
+            },
+            invoke: (options) => {
+                const fp = options.input?.filePath || options.input?.path || '';
+                if (/\.(wb|evsnb|vsnb)$/i.test(fp)) {
+                    return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
+                        `ERROR: replace_string_in_file must NOT be used on Wolfbook notebooks (${fp.split('/').pop()}).\n` +
+                        '.wb/.evsnb files store cell content as JSON with escaped characters; direct file edits silently corrupt the format.\n\n' +
+                        'Use the correct Wolfbook tools instead:\n' +
+                        '  • wolfbook_editCell(cellId, newSource) — replace the source of an existing cell\n' +
+                        '  • wolfbook_insertCells(cells, position) — insert new cells\n' +
+                        '  • wolfbook_deleteCell(cellId/cellNumber) — delete a cell\n' +
+                        '  • wolfbook_moveCell(cellId/cellNumber, newPosition) — reorder cells\n' +
+                        'Call wolfbook_getNotebookContext first to get cell IDs.'
+                    )]);
+                }
+                // Not a wolfbook file — return a pass-through so Copilot uses its built-in tool
+                return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
+                    'This is not a Wolfbook notebook file — use the standard replace_string_in_file tool directly.'
+                )]);
+            },
+        }},
     ];
 
     for (const { name, impl } of tools) {
@@ -2939,14 +3339,15 @@ function registerTools(context, getController, debugCtrl, getAskPanel) {
 // ---------------------------------------------------------------------------
 
 const _WOLFBOOK_SYSTEM_PROMPT_PATH = path.join(__dirname, 'wolfbook-system-prompt.md');
-const _WOLFBOOK_ACTIVE_FILE  = path.join(require('os').homedir(), '.wolfbook', 'active-prompt.txt');
 const _WOLFBOOK_PROMPTS_DIR  = path.join(require('os').homedir(), '.wolfbook', 'prompts');
+// Active preset is stored per-workspace in VS Code settings (wolfbook.activeSystemPrompt).
+const _WOLFBOOK_ACTIVE_PRESET_KEY = 'activeSystemPrompt';
 
 // Read the active user preset from ~/.wolfbook/prompts/, falling back to the
 // bundled default.  Reads fresh on every call so edits take effect immediately.
 function _getWolfbookSystemPrompt() {
     try {
-        const name = require('fs').readFileSync(_WOLFBOOK_ACTIVE_FILE, 'utf8').trim();
+        const name = vscode.workspace.getConfiguration('wolfbook').get(_WOLFBOOK_ACTIVE_PRESET_KEY, '');
         if (name) {
             const p = require('path').join(_WOLFBOOK_PROMPTS_DIR, name + '.md');
             if (require('fs').existsSync(p)) return require('fs').readFileSync(p, 'utf8');
@@ -3011,9 +3412,9 @@ function registerChatParticipant(context, getController) {
                     if (start0 >= nb.cellCount) continue;
                     if (start0 === end0) {
                         const c = nb.cellAt(start0);
-                        stateLines.push(`- index ${start0} => Cell ${start0 + 1}, CellId: ${getCellToolId(c)}`);
+                        stateLines.push(`- Cell ${start0 + 1} (CellId: ${getCellToolId(c)})`);
                     } else {
-                        stateLines.push(`- indices ${start0}-${end0} => Cells ${start0 + 1}-${end0 + 1}`);
+                        stateLines.push(`- Cells ${start0 + 1}-${end0 + 1}`);
                     }
                 }
             }
@@ -3075,7 +3476,7 @@ function registerChatParticipant(context, getController) {
         const toolNames = [
             'wolfbook_getNotebookContext',
             'wolfbook_evaluateExpression', 'wolfbook_lookupSymbol',
-            'wolfbook_insertCells', 'wolfbook_editCell', 'wolfbook_runCell',
+            'wolfbook_insertCells', 'wolfbook_editCell', 'wolfbook_runCell', 'wolfbook_runRange',
             'wolfbook_getCellOutput', 'wolfbook_validateSyntax',
             'wolfbook_deleteCell', 'wolfbook_restoreDeletedCells',
             'wolfbook_moveCell', 'wolfbook_searchCells', 'wolfbook_getKernelState',
@@ -3226,9 +3627,9 @@ function registerWolfteamParticipant(context, getController) {
                     if (start0 >= nb.cellCount) continue;
                     if (start0 === end0) {
                         const c = nb.cellAt(start0);
-                        stateLines.push(`- index ${start0} => Cell ${start0 + 1}, CellId: ${getCellToolId(c)}`);
+                        stateLines.push(`- Cell ${start0 + 1} (CellId: ${getCellToolId(c)})`);
                     } else {
-                        stateLines.push(`- indices ${start0}-${end0} => Cells ${start0 + 1}-${end0 + 1}`);
+                        stateLines.push(`- Cells ${start0 + 1}-${end0 + 1}`);
                     }
                 }
             }
@@ -3282,7 +3683,7 @@ function registerWolfteamParticipant(context, getController) {
         const toolNames = [
             'wolfbook_getNotebookContext',
             'wolfbook_evaluateExpression', 'wolfbook_lookupSymbol',
-            'wolfbook_insertCells', 'wolfbook_editCell', 'wolfbook_runCell',
+            'wolfbook_insertCells', 'wolfbook_editCell', 'wolfbook_runCell', 'wolfbook_runRange',
             'wolfbook_getCellOutput', 'wolfbook_validateSyntax',
             'wolfbook_deleteCell', 'wolfbook_restoreDeletedCells',
             'wolfbook_moveCell', 'wolfbook_searchCells', 'wolfbook_getKernelState',

@@ -222,7 +222,11 @@ VsCodeRenderExpr[expr_, format_String, scale_?NumericQ, searchPat_String:""] :=
             ];
             boxes = expandAllTemplateBoxes[boxes];
             boxStr = ToString[boxes, InputForm];
-            b64 = StringReplace[Quiet[ExportString[boxStr, "Base64"]], WhitespaceCharacter -> ""];
+            (* Encode as UTF-8 bytes → Base64 so Unicode (emoji, \[Alpha]) survives
+               without being converted to \|NNNNNN / \[Name] escape sequences that
+               BTL cannot decode. *)
+            b64 = Quiet[BaseEncode[StringToByteArray[boxStr, "UTF-8"], "Base64"]];
+            b64 = StringReplace[b64, WhitespaceCharacter -> ""];
             Return["<div class=\"vscode-wolfram-wllatex-boxes\" data-boxes-b64=\"" <> b64 <> "\"></div>"]
         ]
     ];
@@ -236,7 +240,8 @@ VsCodeRenderExpr[expr_, format_String, scale_?NumericQ, searchPat_String:""] :=
             ];
             boxes = expandAllTemplateBoxes[boxes];
             boxStr = ToString[boxes, InputForm];
-            b64 = StringReplace[Quiet[ExportString[boxStr, "Base64"]], WhitespaceCharacter -> ""];
+            b64 = Quiet[BaseEncode[StringToByteArray[boxStr, "UTF-8"], "Base64"]];
+            b64 = StringReplace[b64, WhitespaceCharacter -> ""];
             Return["<div class=\"vscode-wolfram-wllatex-boxes-raw\" data-boxes-b64=\"" <> b64 <> "\"></div>"]
         ]
     ];
@@ -250,7 +255,8 @@ VsCodeRenderExpr[expr_, format_String, scale_?NumericQ, searchPat_String:""] :=
             ];
             boxes = expandAllTemplateBoxes[boxes];
             boxStr = ToString[boxes, InputForm];
-            b64 = StringReplace[Quiet[ExportString[boxStr, "Base64"]], WhitespaceCharacter -> ""];
+            b64 = Quiet[BaseEncode[StringToByteArray[boxStr, "UTF-8"], "Base64"]];
+            b64 = StringReplace[b64, WhitespaceCharacter -> ""];
             Return["<div class=\"vscode-wolfram-wllatex-boxes-src\" data-boxes-b64=\"" <> b64 <> "\"></div>"]
         ]
     ];

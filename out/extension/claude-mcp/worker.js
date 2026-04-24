@@ -10,6 +10,8 @@
 //  • Register themselves with the primary via POST /register on port 27182
 //  • Expose  POST /invoke   — primary proxies tool calls here
 //  • Expose  GET  /notebooks — current open notebook paths
+
+const { setMcpCallActive } = require('../tools/shared');
 //  • Poll the primary's /health; on 3 consecutive failures → run election
 //
 // Election:
@@ -162,12 +164,15 @@ class WorkerServer {
             };
 
             let toolResult;
+            setMcpCallActive(true);
             try {
                 toolResult = await tool.invoke({ input: args || {} }, token);
             } catch (e) {
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ error: e.message || String(e), isError: true }));
                 return;
+            } finally {
+                setMcpCallActive(false);
             }
 
             const text = (toolResult?.content || []).map(p => p.value ?? p.text ?? '').join('');

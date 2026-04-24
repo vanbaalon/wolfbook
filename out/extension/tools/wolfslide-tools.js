@@ -3,6 +3,9 @@
 // Manipulate .wslide custom editors via AI agent tools.
 
 const vscode = require("vscode");
+const util   = require("util");
+const fs     = require("fs");
+const path   = require("path");
 const {
     normalizeToolContent, getCellToolId, resolveCellIndex,
     resolveNotebookEditor,
@@ -2111,8 +2114,13 @@ class GetCellOutputTool {
         const notebook = editor.notebook;
         const by = options.input?.cellId != null ? options.input.cellId : options.input?.cellNumber;
         if (by == null) {
+            if (options.input?.cellIndex != null) {
+                return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
+                    'Unknown parameter "cellIndex". Use cellId (stable string, preferred) or cellNumber (1-based integer). Example: { cellId: "c3a2" } or { cellNumber: 5 }'
+                )]);
+            }
             return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
-                'Provide cellId or cellNumber to identify the cell.'
+                'Required: cellId (stable string, e.g. "c3a2") or cellNumber (1-based integer, e.g. 5). Call wolfbook_getNotebookContext to get CellId values.'
             )]);
         }
         const resolved = resolveCellIndex(notebook, by, options.input?.cellId != null ? 'cellId' : 'cellNumber');
@@ -2163,8 +2171,9 @@ class ValidateSyntaxTool {
     constructor(getController) { this._getController = getController; }
 
     async prepareInvocation(options, _token) {
-        if (options.input?.cellNumber != null) {
-            return { invocationMessage: `Validate syntax of cell ${options.input.cellNumber}` };
+        const n = options.input?.cellId || options.input?.cellNumber;
+        if (n != null) {
+            return { invocationMessage: `Validate syntax of cell ${n}` };
         }
         const s = options.input?.startCell || 1, e = options.input?.endCell || '\u2026';
         return { invocationMessage: `Validate syntax of cells ${s}\u2013${e}` };
@@ -2179,7 +2188,15 @@ class ValidateSyntaxTool {
         const hasKernel   = controller?.session && controller.kernelStatusString === 'resolved' && !controller._evalDispatched;
 
         let from = 1, to = notebook.cellCount;
-        if (options.input?.cellNumber != null) {
+        if (options.input?.cellIndex != null) {
+            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
+                'Unknown parameter "cellIndex". Use cellId (stable string) or cellNumber (1-based integer) for a single cell, or startCell/endCell for a range.'
+            )]);
+        } else if (options.input?.cellId != null) {
+            const resolved = resolveCellIndex(notebook, options.input.cellId, 'cellId');
+            if (resolved.error) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(resolved.error)]);
+            from = to = resolved.idx + 1;
+        } else if (options.input?.cellNumber != null) {
             from = to = Math.max(1, Math.min(notebook.cellCount, Number(options.input.cellNumber)));
         } else if (options.input?.startCell != null) {
             from = Math.max(1, Number(options.input.startCell));

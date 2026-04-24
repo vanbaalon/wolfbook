@@ -14,20 +14,22 @@ const { devLog, LOG_CHANNELS, LOG_CHANNEL_LABELS, DEV_MODE, getLogMask, setLogMa
 // Stored OUTSIDE the extension so updates never overwrite user edits.
 const _WOLFBOOK_DIR  = path.join(os.homedir(), '.wolfbook');
 const _PROMPTS_DIR   = path.join(_WOLFBOOK_DIR, 'prompts');
-const _ACTIVE_FILE   = path.join(_WOLFBOOK_DIR, 'active-prompt.txt');
+// Active preset is stored per-workspace in VS Code settings (wolfbook.activeSystemPrompt)
+// so different projects can have different active prompts.
+const _ACTIVE_PRESET_KEY = 'activeSystemPrompt';
 
 function _ensurePromptsDir() {
     if (!fs.existsSync(_PROMPTS_DIR)) fs.mkdirSync(_PROMPTS_DIR, { recursive: true });
 }
 
-/** On first run: copy the extension's default prompt to ~/.wolfbook/prompts/default.md */
+/** Always sync ~/.wolfbook/prompts/default.md from the bundled prompt.
+ *  'default' is a read-only built-in that tracks the extension's bundled file.
+ *  Users who want a customised prompt should create a named preset instead. */
 function _ensureDefaultPrompt() {
     _ensurePromptsDir();
     const defaultPath = path.join(_PROMPTS_DIR, 'default.md');
-    if (!fs.existsSync(defaultPath)) {
-        const srcPath = path.join(__dirname, 'tools', 'wolfbook-system-prompt.md');
-        try { fs.copyFileSync(srcPath, defaultPath); } catch (_) {}
-    }
+    const srcPath = path.join(__dirname, 'tools', 'wolfbook-system-prompt.md');
+    try { fs.copyFileSync(srcPath, defaultPath); } catch (_) {}
 }
 
 function _listPrompts() {
@@ -41,17 +43,16 @@ function _listPrompts() {
 }
 
 function _getActivePromptName() {
-    try {
-        const name = fs.readFileSync(_ACTIVE_FILE, 'utf8').trim();
-        if (name && fs.existsSync(path.join(_PROMPTS_DIR, name + '.md'))) return name;
-    } catch (_) {}
+    // Read from workspace-scoped VS Code settings so each project can have its own preset.
+    const name = vscode.workspace.getConfiguration('wolfbook').get(_ACTIVE_PRESET_KEY, '');
+    if (name && fs.existsSync(path.join(_PROMPTS_DIR, name + '.md'))) return name;
     const prompts = _listPrompts();
     return prompts.length > 0 ? prompts[0].name : 'default';
 }
 
-function _setActivePromptName(name) {
-    _ensurePromptsDir();
-    fs.writeFileSync(_ACTIVE_FILE, name, 'utf8');
+async function _setActivePromptName(name) {
+    await vscode.workspace.getConfiguration('wolfbook').update(
+        _ACTIVE_PRESET_KEY, name, vscode.ConfigurationTarget.Workspace);
 }
 
 function _getActivePromptPath() {
@@ -96,6 +97,10 @@ const _NOTEBOOK_COLOR_KEYS = [
     'notebook.cellBorderColor',
     'notebook.inactiveFocusedCellBorder',
     'notebook.collapsedCellBackground',
+    'notebook.focusedCellBackground',
+    'notebook.selectedCellBackground',
+    'notebook.inactiveSelectedCellBackground',
+    'notebook.cellHoverBackground',
 ];
 
 /** Returns true if all notebook color keys are identical between two colorCustomizations objects. */
@@ -222,7 +227,16 @@ function registerNotebookSettings(context) {
     context.subscriptions.push(
         vscode.window.onDidChangeActiveNotebookEditor(editor => {
             if (editor && editor.notebook.notebookType === 'extended-wolfram-notebook') {
-                applyNotebookSettings(editor.notebook);
+                // When multiple wolfram notebooks are visible with DIFFERENT background
+                // colours, skip the global colorCustomizations update to prevent
+                // the two notebooks from fighting each other and causing a blink.
+                const activeColor = (getNotebookSettings(editor.notebook).backgroundColor) || null;
+                const conflict = vscode.window.visibleNotebookEditors.some(e =>
+                    e.notebook !== editor.notebook &&
+                    e.notebook.notebookType === 'extended-wolfram-notebook' &&
+                    ((getNotebookSettings(e.notebook).backgroundColor) || null) !== activeColor
+                );
+                if (!conflict) applyNotebookSettings(editor.notebook);
             }
         })
     );
@@ -230,16 +244,17 @@ function registerNotebookSettings(context) {
     // Re-apply settings when theme changes (dark ↔ light) to auto-invert colours.
     // Debounced: VS Code can fire onDidChangeActiveColorTheme multiple times during
     // theme initialisation; coalescing the calls prevents the dark↔light flicker.
+    // On theme change, apply the ACTIVE notebook's colour (not all visible ones in
+    // sequence, which would let the last one win and cause a blink on split views).
     let _themeChangeTimer = null;
     context.subscriptions.push(
         vscode.window.onDidChangeActiveColorTheme(() => {
             if (_themeChangeTimer) clearTimeout(_themeChangeTimer);
             _themeChangeTimer = setTimeout(() => {
                 _themeChangeTimer = null;
-                for (const editor of vscode.window.visibleNotebookEditors) {
-                    if (editor.notebook.notebookType === 'extended-wolfram-notebook') {
-                        applyNotebookSettings(editor.notebook);
-                    }
+                const active = vscode.window.activeNotebookEditor;
+                if (active && active.notebook.notebookType === 'extended-wolfram-notebook') {
+                    applyNotebookSettings(active.notebook);
                 }
             }, 300);
         })
@@ -475,7 +490,7 @@ async function showSettingsUI(notebook) {
         }
 
     } else if (pick.value === '__prompt_switch__') {
-        _setActivePromptName(pick._promptName);
+        await _setActivePromptName(pick._promptName);
         setImmediate(() => showSettingsUI(notebook));
 
     } else if (pick.value === '__prompt_edit__') {
@@ -635,23 +650,44 @@ async function applyNotebookSettings(notebook) {
 
         if (isHex) {
             if (isDark) {
-                // Dark theme: cell editor darker than notebook background
-                updated['notebook.editorBackground']          = adjustColor(baseColor, 0.12);
-                updated['notebook.cellEditorBackground']      = adjustColor(baseColor, -0.18);
-                updated['notebook.cellBorderColor']           = createBorderColor(baseColor, true);
-                updated['notebook.inactiveFocusedCellBorder'] = createBorderColor(baseColor, true);
-                updated['notebook.collapsedCellBackground']   = adjustColor(baseColor, -0.12);
+                // Dark theme: outer bg slightly lighter than base, cell interior
+                // slightly darker — gives subtle depth while keeping corner
+                // cutout areas (which show cellEditorBackground) blending in.
+                // Small delta keeps absolute RGB diff ≤ ~6 per channel.
+                const _outerBg = adjustColor(baseColor, 0.03);   // slightly lighter outer bg
+                const _cellBg  = adjustColor(baseColor, -0.06);  // slightly darker cell interior
+                updated['notebook.editorBackground']                = _outerBg;
+                updated['notebook.cellEditorBackground']            = _cellBg;
+                updated['notebook.cellBorderColor']                 = createBorderColor(baseColor, true);
+                updated['notebook.inactiveFocusedCellBorder']       = createBorderColor(baseColor, true);
+                updated['notebook.collapsedCellBackground']         = adjustColor(baseColor, -0.08);
+                // Set ALL cell-container background tokens to match outer bg so that
+                // the rounded corner cutouts (outside cell-editor-part) are seamless.
+                updated['notebook.focusedCellBackground']           = _outerBg;
+                updated['notebook.selectedCellBackground']          = _outerBg;
+                updated['notebook.inactiveSelectedCellBackground']  = _outerBg;
+                updated['notebook.cellHoverBackground']             = _outerBg;
             } else {
-                updated['notebook.editorBackground']          = adjustColor(baseColor, 0.08);
-                updated['notebook.cellEditorBackground']      = adjustColor(baseColor, 0.35);
-                updated['notebook.cellBorderColor']           = createBorderColor(baseColor, false);
-                updated['notebook.inactiveFocusedCellBorder'] = createBorderColor(baseColor, false);
-                updated['notebook.collapsedCellBackground']   = adjustColor(baseColor, 0.35);
+                const _outerBg = adjustColor(baseColor, 0.08);
+                updated['notebook.editorBackground']                = _outerBg;
+                updated['notebook.cellEditorBackground']            = adjustColor(baseColor, 0.35);
+                updated['notebook.cellBorderColor']                 = createBorderColor(baseColor, false);
+                updated['notebook.inactiveFocusedCellBorder']       = createBorderColor(baseColor, false);
+                updated['notebook.collapsedCellBackground']         = adjustColor(baseColor, 0.35);
+                // Set ALL cell-container background tokens to match outer bg
+                updated['notebook.focusedCellBackground']           = _outerBg;
+                updated['notebook.selectedCellBackground']          = _outerBg;
+                updated['notebook.inactiveSelectedCellBackground']  = _outerBg;
+                updated['notebook.cellHoverBackground']             = _outerBg;
             }
         } else {
             // rgb(...) or named color — set directly (no lighten/darken math)
-            updated['notebook.editorBackground']     = baseColor;
-            updated['notebook.cellEditorBackground'] = baseColor;
+            updated['notebook.editorBackground']               = baseColor;
+            updated['notebook.cellEditorBackground']           = baseColor;
+            updated['notebook.focusedCellBackground']          = baseColor;
+            updated['notebook.selectedCellBackground']         = baseColor;
+            updated['notebook.inactiveSelectedCellBackground'] = baseColor;
+            updated['notebook.cellHoverBackground']            = baseColor;
         }
         if (!_notebookColorsUnchanged(currentColors, updated)) {
             await config.update('colorCustomizations', updated, vscode.ConfigurationTarget.Workspace);
@@ -659,13 +695,9 @@ async function applyNotebookSettings(notebook) {
 
     } else if (!settings.backgroundImagePath) {
         // No color and no image — strip custom notebook colors
-        if (currentColors['notebook.cellEditorBackground'] || currentColors['notebook.editorBackground']) {
+        if (_NOTEBOOK_COLOR_KEYS.some(k => currentColors[k])) {
             const updated = { ...currentColors };
-            delete updated['notebook.cellEditorBackground'];
-            delete updated['notebook.editorBackground'];
-            delete updated['notebook.cellBorderColor'];
-            delete updated['notebook.inactiveFocusedCellBorder'];
-            delete updated['notebook.collapsedCellBackground'];
+            for (const k of _NOTEBOOK_COLOR_KEYS) delete updated[k];
             await config.update('colorCustomizations', updated, vscode.ConfigurationTarget.Workspace);
         }
     }

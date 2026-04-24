@@ -463,6 +463,7 @@ var NAMED_CHARS = {
   "RightTriangle": 0x22B3, // ⊳
   "RightTriangleEqual": 0x22B5, // ⊵
   "RightVector": 0x21C0, // ⇀
+  "Rule": 0xF522, // WL private-use rule arrow \[Rule]
   "RuleDelayed": 0x29F4, // ⧴
   "Rupee": 0x20B9, // ₹
   "SadSmiley": 0x2639, // ☹
