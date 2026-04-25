@@ -18,3 +18,6 @@ wstp/build/Release/obj.target/
 # Temporary large Docs/ folder (use lowercase docs/ for tracked documentation)
 Docs/
 !docs/
+
+# Internal AI agent reference (lives in parent folder, not tracked here)
+AGENTS.md

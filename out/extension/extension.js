@@ -715,6 +715,9 @@ async function activate(context) {
     } else {
 
     _mcpServer.start().then(port => {
+        // Hoist these so both the secondary and primary branches can use them
+        const _bridgePath = path.join(context.extensionPath, 'out', 'extension', 'claude-mcp', 'stdio-bridge.js');
+        const _nodeBin    = resolveNodeBinary();
         if (_mcpServer.isSecondary) {
             devLog(LOG_CHANNELS.EXTENSION, `[Wolfbook MCP] Secondary window — starting worker for ${_clientId}`);
             _workerServer = _startWorker();
@@ -732,8 +735,6 @@ async function activate(context) {
         });
         devLog(LOG_CHANNELS.EXTENSION, `[Wolfbook MCP] Primary ready — port ${port}, client: ${_clientId}`);
         // Re-write config if content changed (e.g. bridge path after upgrade)
-        const _bridgePath = path.join(context.extensionPath, 'out', 'extension', 'claude-mcp', 'stdio-bridge.js');
-        const _nodeBin    = resolveNodeBinary();
         const _wsPaths    = _getWsPaths();
         if (needsConfigUpdate(_bridgePath, _nodeBin, _wsPaths)) {
             try {

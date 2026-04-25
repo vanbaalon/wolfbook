@@ -108,6 +108,10 @@ class WatchPanelProvider {
                 this._widthPx = msg.widthPx;
             } else if (msg.command === 'scriptLoaded') {
                 console.log('[wolfbook-watch] ✓ webview script loaded and running');
+                // Resend full state now that the external script's message listener is ready.
+                // setImmediate() in resolveWebviewView fires before the <script src="..."> loads,
+                // so any postMessage sent there is dropped. This is the reliable resend point.
+                this._sendCurrentState();
             } else if (msg.command === 'hoverDocReceived') {
                 console.log('[wolfbook-watch] ✓ webview confirmed hoverDoc received for:', msg.symbol);
                 this._pendingHoverDoc = null;
