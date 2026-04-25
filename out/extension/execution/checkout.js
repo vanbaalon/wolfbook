@@ -1518,15 +1518,30 @@ function cleanupImgDir(self, notebook, imgDir) {
                 }
             }
         }
-        // Delete any .svg/.png not in the live set
+        // Delete any .svg/.png not in the live set, BUT spare files modified
+        // within the grace period. The kernel writes image files asynchronously
+        // and the rendered HTML (containing data-wl-img) may not yet be in the
+        // cell output when GC runs — without this guard, fresh images can be
+        // deleted before they're attached to a cell. 60 s is comfortably above
+        // typical render+attach latency and well below user-perceptible cleanup
+        // delay for stale images.
+        const GRACE_MS = 60 * 1000;
+        const now = Date.now();
         const files = fs.readdirSync(imgDir);
-        let deleted = 0;
+        let deleted = 0, spared = 0;
         for (const fname of files) {
             if (!/\.(svg|png)$/i.test(fname)) continue;
             const fpath = path.join(imgDir, fname);
-            if (!live.has(fpath)) {
-                try { fs.unlinkSync(fpath); deleted++; } catch (_) {}
-            }
+            if (live.has(fpath)) continue;
+            // Check mtime — skip recently-written files (still being attached to a cell)
+            try {
+                const st = fs.statSync(fpath);
+                if ((now - st.mtimeMs) < GRACE_MS) { spared++; continue; }
+            } catch (_) { continue; }
+            try { fs.unlinkSync(fpath); deleted++; } catch (_) {}
+        }
+        if (deleted || spared) {
+            self.writeDebugLog(`[GC] cleanupImgDir: deleted=${deleted} spared=${spared} (grace=${GRACE_MS}ms) dir=${imgDir}`);
         }
     } catch (err) {
         self.writeDebugLog(`[GC] _cleanupImgDir failed (non-fatal): ${err.message}`);

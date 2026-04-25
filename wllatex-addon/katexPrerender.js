@@ -48,6 +48,30 @@ function escapeHtml(s) {
         .replace(/'/g, '&#39;');
 }
 // ----------------------------------------------------------
+// validateBtlOutput
+//   Quick scan for known-invalid BTL output patterns.
+//   Logs a console warning when problems are detected so that
+//   BTL regressions are visible without crashing the renderer.
+// ----------------------------------------------------------
+function validateBtlOutput(latex) {
+    const issues = [];
+    // \n as a LaTeX command (backslash + n) — undefined in KaTeX.
+    // Arises when BTL emits a WL string newline escape verbatim.
+    if (/(?<!\\)\\n(?![a-zA-Z{])/.test(latex)) {
+        issues.push('\\n command (undefined in KaTeX — likely a WL string newline)');
+    }
+    // \text{} nested inside inline math: $\text{...}$ — accent commands inside
+    // math-mode \text{} are rejected by KaTeX.
+    if (/\$\\text\{/.test(latex)) {
+        issues.push('\\text{} nested inside inline math ($\\text{...}$)');
+    }
+    if (issues.length > 0) {
+        console.warn(`[BTL] KaTeX validation issues:\n` +
+            issues.map(s => `  • ${s}`).join('\n') +
+            `\nLaTeX (first 300 chars): ${latex.substring(0, 300)}`);
+    }
+}
+// ----------------------------------------------------------
 // prerenderLatex
 //   latex       — LaTeX string from boxToLatex C++ addon
 //   displayMode — true for display math (centred block),
@@ -56,6 +80,7 @@ function escapeHtml(s) {
 // Returns a self-contained HTML string (never throws).
 // ----------------------------------------------------------
 function prerenderLatex(latex, displayMode = true) {
+    validateBtlOutput(latex);
     try {
         return katex_1.default.renderToString(latex, { ...BASE_OPTIONS, displayMode });
     }
