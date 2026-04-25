@@ -131,6 +131,8 @@ var NAMED_CHARS = {
   "ClubSuit": 0x2663, // ♣
   "Colon": 0x2236, // ∶
   "Congruent": 0x2261, // ≡
+  "Conjugate": 0xF3C8, // WL \[Conjugate] private-use
+  "ConjugateTranspose": 0xF3C9, // WL \[ConjugateTranspose] private-use
   "ContourIntegral": 0x222E, // ∮
   "Coproduct": 0x2210, // ∐
   "Copyright": 0x00A9, // ©
@@ -356,6 +358,7 @@ var NAMED_CHARS = {
   "LeftDoubleBracket": 0x301A, // 〚
   "LeftFloor": 0x230A, // ⌊
   "LeftGuillemet": 0x00AB, // «
+  "LeftSkeleton": 0xF761, // WL \[LeftSkeleton] private-use
   "LeftRightArrow": 0x2194, // ↔
   "LeftTee": 0x22A3, // ⊣
   "LeftTriangle": 0x22B2, // ⊲
@@ -458,8 +461,10 @@ var NAMED_CHARS = {
   "RightDoubleBracket": 0x301B, // 〛
   "RightFloor": 0x230B, // ⌋
   "RightGuillemet": 0x00BB, // »
+  "RightSkeleton": 0xF762, // WL \[RightSkeleton] private-use
   "RightTee": 0x22A2, // ⊢
   "RightTeeArrow": 0x21A6, // ↦
+  "Function": 0xF4A1, // WL \[Function] mapsto private-use
   "RightTriangle": 0x22B3, // ⊳
   "RightTriangleEqual": 0x22B5, // ⊵
   "RightVector": 0x21C0, // ⇀
@@ -565,6 +570,7 @@ var NAMED_CHARS = {
   "TildeTilde": 0x2248, // ≈
   "Times": 0x00D7, // ×
   "Trademark": 0x2122, // ™
+  "TwoWayRule": 0xF120, // WL \[TwoWayRule] private-use
   "UAcute": 0x00FA, // ú
   "UDoubleAcute": 0x0171, // ű
   "UDoubleDot": 0x00FC, // ü
