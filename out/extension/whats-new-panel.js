@@ -18,7 +18,7 @@ const path = require('path');
 // Content — edit this when releasing a new version.
 // ---------------------------------------------------------------------------
 
-const VERSION = '2.7.0';
+const VERSION = '2.7.2';
 
 // Each entry: { icon, title, body (HTML) }
 const HIGHLIGHTS = [
