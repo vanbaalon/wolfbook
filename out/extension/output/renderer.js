@@ -143,7 +143,9 @@ function _extractInfoDataHtml(boxStr) {
     const usageRaw    = getStr('Usage');
     if (!fullNameRaw && !usageRaw) return null;  // not enough info — skip
 
-    // Decode WL string escapes + named characters → display text
+    // Decode WL string escapes + named characters → display text.
+    // Important: \!, \(, \), \* are front-end typesetting chars (NOT WL string
+    // escapes), so they survive this decode as literal backslash+char pairs.
     const decode = (s) => wlNameToUTF(
         s.replace(/\\n/g, '\n')
          .replace(/\\t/g, '\t')
@@ -152,7 +154,6 @@ function _extractInfoDataHtml(boxStr) {
     );
     const fullName  = decode(fullNameRaw);
     const shortName = fullName ? fullName.split('`').pop() : '';
-    const usage     = decode(usageRaw);
 
     // Attributes (optional — may not be a string value)
     const attribsM = assoc.match(/"Attributes"\s*->\s*\{([^}]*)\}/);
@@ -161,6 +162,83 @@ function _extractInfoDataHtml(boxStr) {
     const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const headerColor = 'var(--vscode-descriptionForeground,#888)';
 
+    // ---------------------------------------------------------------------------
+    // Usage rendering: split on \!\(...\) inline-typeset segments.
+    //
+    // Usage messages for built-in symbols embed Mathematica front-end box
+    // expressions as \!\(\*BoxExpr\): the \! introduces inline typeset, \( opens
+    // the box, \* means "interpret as boxes", and \) closes it.  After decode()
+    // these are literal backslash+char pairs, e.g. \!\(\*RowBox[{...}]\).
+    //
+    // We split the decoded text on these segments, run each box expression
+    // through the BTL addon → KaTeX inline, and HTML-escape the plain parts.
+    // For our own functions (no \!\( in usage) the plain-text path is taken.
+    // ---------------------------------------------------------------------------
+
+    // Step 1: split decoded usage text into {kind:'text'|'box', value} parts.
+    const parseUsageParts = (text) => {
+        const parts = [];
+        let pos = 0;
+        while (pos < text.length) {
+            // Find next \!\( (literal chars: backslash + ! + backslash + open-paren)
+            let found = -1;
+            for (let i = pos; i < text.length - 3; i++) {
+                if (text[i]==='\\' && text[i+1]==='!' && text[i+2]==='\\' && text[i+3]==='(') {
+                    found = i; break;
+                }
+            }
+            if (found === -1) {
+                const t = text.slice(pos);
+                if (t) parts.push({ kind: 'text', value: t });
+                break;
+            }
+            if (found > pos) parts.push({ kind: 'text', value: text.slice(pos, found) });
+            // Find the closing \) (backslash + close-paren)
+            const contentStart = found + 4; // skip \!\(
+            let closePos = -1;
+            for (let i = contentStart; i < text.length - 1; i++) {
+                if (text[i]==='\\' && text[i+1]===')') { closePos = i; break; }
+            }
+            if (closePos === -1) {
+                parts.push({ kind: 'text', value: text.slice(found) });
+                break;
+            }
+            parts.push({ kind: 'box', value: text.slice(contentStart, closePos) });
+            pos = closePos + 2;
+        }
+        return parts;
+    };
+
+    // Step 2: render each part to HTML.
+    const renderUsageParts = (parts) => {
+        let html = '';
+        for (const part of parts) {
+            if (part.kind === 'text') {
+                // Preserve newlines between multiple usage forms
+                html += esc(part.value).replace(/\n/g, '<br>');
+            } else {
+                // Strip leading \* to get the raw box expression
+                const boxExpr = part.value.startsWith('\\*') ? part.value.slice(2) : part.value;
+                if (!_btlAddon || !_btlPrerenderLatex) {
+                    html += `<code>${esc(boxExpr)}</code>`; // graceful fallback
+                    continue;
+                }
+                try {
+                    const r = _btlAddon.boxToLatex(boxExpr, { trigOmitParens: false, maxRows: 0 });
+                    const latex = (r && typeof r === 'object') ? (r.latex || '') : String(r);
+                    if (!latex) { html += `<code>${esc(boxExpr)}</code>`; continue; }
+                    html += _btlPrerenderLatex(latex, false); // false = inline mode
+                } catch (e) {
+                    html += `<code>${esc(boxExpr)}</code>`;
+                }
+            }
+        }
+        return html;
+    };
+
+    const usageDecoded = usageRaw ? decode(usageRaw) : '';
+    const usageHtml    = usageDecoded ? renderUsageParts(parseUsageParts(usageDecoded)) : '';
+
     let html = '<div class="wl-info-data" style="padding:6px 8px;font-family:var(--vscode-editor-font-family,monospace);">';
     if (shortName) {
         html += `<div style="font-size:14px;font-weight:bold;margin-bottom:3px;">${esc(shortName)}</div>`;
@@ -168,8 +246,8 @@ function _extractInfoDataHtml(boxStr) {
             html += `<div style="font-size:11px;color:${headerColor};margin-bottom:6px;">${esc(fullName)}</div>`;
         }
     }
-    if (usage) {
-        html += `<div style="font-size:12px;line-height:1.6;white-space:pre-wrap;margin-bottom:4px;">${esc(usage)}</div>`;
+    if (usageHtml) {
+        html += `<div style="font-size:12px;line-height:1.8;margin-bottom:4px;">${usageHtml}</div>`;
     }
     if (attribs) {
         html += `<div style="font-size:11px;color:${headerColor};">Attributes: {${esc(attribs)}}</div>`;

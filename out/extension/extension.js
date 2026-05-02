@@ -1895,6 +1895,7 @@ async function activate(context) {
                 if (Array.isArray(items)) {
                     const popSet = _wolframPopularFunctions;
                     for (const it of items) {
+                        if (!it) continue;
                         const label = typeof it.label === 'string' ? it.label : it.label?.label;
                         if (label && popSet.has(label)) {
                             it.sortText = '0' + (it.sortText || label);
