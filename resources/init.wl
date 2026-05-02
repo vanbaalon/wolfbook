@@ -1,6 +1,9 @@
 (* Wolfram Kernel Initialization Script - WSTP mode *)
 (* No ZeroMQ - installs rendering helpers called by JS via session.sub() *)
 
+(* Ensure consistent UTF-8 encoding, important on non-Western systems *)
+$CharacterEncoding = "UTF-8";
+
 (* ===== Logging ===== *)
 $logDir = FileNameJoin[{$UserBaseDirectory, "ApplicationData", "wolfbook"}];
 If[!DirectoryQ[$logDir], Quiet[CreateDirectory[$logDir, CreateIntermediateDirectories -> True]]];
@@ -26,11 +29,6 @@ Quiet[Module[{files, now},
     Do[If[AbsoluteTime[FileDate[f]] < now - 7*86400, DeleteFile[f]], {f, files}]
 ]];
 
-(* ===== WBDirectory ===== *)
-(* Set by extension.js at kernel launch and on every active-notebook switch.      *)
-(* Default is ""; extension.js is the only authoritative source of the path.     *)
-WBDirectory[] = "";
-
 (* ===== Per-notebook image directory ===== *)
 (* Set by controller before each cell execution via VsCodeSetImgDir.              *)
 (* SVG/PNG outputs are written as individual files; embedded via relative src=    *)
@@ -39,10 +37,8 @@ $wolframImgDir      = "";   (* absolute path — used for file I/O and GC       
 $wolframImgRelPrefix = "";  (* relative prefix, e.g. "img/MyNotebook"            *)
 
 VsCodeSetImgDir[dir_String, relPrefix_String] := Module[{},
-    Unprotect[$wolframImgDir, $wolframImgRelPrefix];
     $wolframImgDir       = dir;
     $wolframImgRelPrefix = relPrefix;
-    Protect[$wolframImgDir, $wolframImgRelPrefix];
     If[StringLength[dir] > 0 && !DirectoryQ[$wolframImgDir],
         Quiet[CreateDirectory[$wolframImgDir, CreateIntermediateDirectories -> True]]];
     Null
@@ -82,13 +78,13 @@ $config = <|
     "imageScale"         -> 0.8,
     "useSVG"             -> True,
     "showPrint"          -> True,
-    "maxOutputLength"    -> 1000000,
+    "maxOutputLength"    -> 100000,
     "outputSizeLimit"    -> 1000,  (* KB of ByteCount; expressions larger than this use Short[] for display *)
     "truncatedTooltip"   -> "Output truncated. Click \"Expand Inline\" to render in full.",
     "autoOpenMessages"   -> False
 |>;
 
-$setKernelConfig[name_String, value_] := (Unprotect[$config]; $config[name] = value; Protect[$config]; Null);
+$setKernelConfig[name_String, value_] := ($config[name] = value; Null);
 $getKernelConfig[name_String]           := Lookup[$config, name, Missing["NotFound", name]];
 $getKernelConfig[name_String, default_] := Lookup[$config, name, default];
 
@@ -115,46 +111,171 @@ Check[Get[FileNameJoin[{$wolframResourceDir, "render-html.wl"}]],
    wolfram.notebook.print.pageWidth package.json default.
    controller.js also updates $PageWidth after launch so the user-configured
    value takes effect without a kernel restart. *)
+$PageWidth = 78;
 (* Prevent EnterTextPacket (Dialog/busy-path subAuto) from inserting
    OutputForm line-continuation escapes (\\\012 \012>) into long strings.
    The WSTP output stream defaults to PageWidth→78; setting it to Infinity
-   ensures busy-path results are byte-identical to idle-path ones.
-   IMPORTANT: SetOptions[$Output] is done FIRST, then $PageWidth is set
-   explicitly below.  This order matters: on some Mathematica versions
-   SetOptions[$Output, PageWidth->Infinity] also updates $PageWidth, so the
-   explicit assignment must come after to ensure Short[] keeps working. *)
+   ensures busy-path results are byte-identical to idle-path ones. *)
 SetOptions[$Output, PageWidth -> Infinity];
-(* Restore System`$PageWidth to a finite value so Short[expr, n] abbreviates
-   correctly.  lifecycle.js will later override this to the user-configured
-   value (notebook.print.pageWidth).  $PageWidth and $Output's PageWidth
-   are independent once $PageWidth is set explicitly here.
-   Use fully-qualified System`$PageWidth so it is unambiguous regardless of
-   the current $Context.  Protect[] prevents ClearAll["Global`*"] or user
-   code from wiping the value. *)
-Unprotect[System`$PageWidth];
-System`$PageWidth = 78;
-Protect[System`$PageWidth];
-(* $inPrintPatch lives in a private wolfbook context so ClearAll["Global`*"]
-   cannot wipe it and accidentally cause infinite recursion in Print[]. *)
-If[!MemberQ[$ContextPath, "WolfbookPrivate`"],
-    PrependTo[$ContextPath, "WolfbookPrivate`"]];
-Unprotect[Print];
-Print[args___] /; !TrueQ[WolfbookPrivate`$inPrintPatch] :=
-    Block[{WolfbookPrivate`$inPrintPatch = True},
-        WriteString[$Output,
-            StringJoin[Function[arg,
-                (* BoxData[_] from CellPrint-fallback / OGRe-style packages:
-                   serialize inner boxes as InputForm so all leaf atoms are
-                   quoted strings — required by the C++ boxToLatex parser. *)
-                If[MatchQ[arg, _BoxData],
-                    "BoxData[" <> ToString[First[arg], InputForm] <> "]",
-                    If[StringQ[arg], arg,
-                        ToString[arg, InputForm]]
+
+(* ===== Shared arg encoder for Print / WBPrint ===== *)
+(* Each arg is encoded to one of four prefixed forms:
+     BoxData[…]  — expression typeset via MakeBoxes → BTL/KaTeX
+     *STR*<txt>  — plain string literal
+     *SVG*<b64>  — inline SVG base64 (graphics)
+     <text>      — plain OutputForm fallback
+   Multiple args in a single Print call are joined by ASCII File Separator (U+001C, \034)
+   so the JS side can split them and render each piece individually. *)
+$encodePrintArg[arg_] := Which[
+    (* BoxData[_] from CellPrint-fallback / OGRe-style packages:
+       serialize inner boxes as InputForm so all leaf atoms are
+       quoted strings — required by the C++ boxToLatex parser. *)
+    MatchQ[arg, _BoxData],
+        "BoxData[" <> ToString[First[arg], InputForm] <> "]",
+    (* Strings: pass through as plain text *)
+    StringQ[arg],
+        "*STR*" <> arg,
+    (* Graphics: export as inline SVG (base64) so the JS side can
+       embed it directly as a data URI — no file I/O needed.
+       Skip Graphics3D/Image3D: ExportString["SVG"] for 3D can
+       block waiting for the front-end renderer. *)
+    TrueQ[UseSvgQ[]] && graphicsQ[arg] && FreeQ[arg, _Graphics3D | _Image3D],
+        Module[{svg, svgClean, b64},
+            svg = Quiet[CheckAbort[
+                Check[TimeConstrained[ExportString[arg, "SVG", Background -> None], 10, $Failed], $Failed],
+                $Failed]];
+            If[StringQ[svg],
+                svgClean = StringDelete[svg, "\n" | "\r"];
+                svgClean = vscodeStripSVGFonts[svgClean];
+                b64 = Quiet[BaseEncode[StringToByteArray[svgClean, "UTF-8"]]];
+                "*SVG*" <> b64,
+                (* SVG export failed — fall back to OutputForm *)
+                ToString[arg, OutputForm, PageWidth -> $PageWidth]
+            ]
+        ],
+    (* InformationData (result of ?Symbol / Information[sym] via Print side-channel)
+       — the kernel emits InterpretationBox[<widget>, InformationData[assoc, True]].
+       The widget boxes contain DynamicModuleBox / PaneSelectorBox / ButtonBox that
+       BTL cannot render. Extract the association and build clean HTML directly.
+       NOTE: InformationData lives in the Information` package context — do NOT use
+       _InformationData pattern (resolves to Global`InformationData at load time).
+       Use a string-based head check instead. *)
+    Head[arg] === InterpretationBox && Length[arg] >= 2 &&
+        StringContainsQ[ToString[Head[arg[[2]]], InputForm], "InformationData"],
+        Module[{infoData, assoc, fullName, shortName, usageStr, attribs, dvHtml, html,
+                esc},
+            esc[s_String] := StringReplace[s,
+                {"&" -> "&amp;", "<" -> "&lt;", ">" -> "&gt;", "\"" -> "&quot;"}];
+            infoData  = arg[[2]];  (* InformationData[assoc, True] *)
+            assoc     = If[Length[infoData] >= 1 && AssociationQ[infoData[[1]]],
+                           infoData[[1]], <||>];
+            fullName  = Lookup[assoc, "FullName", "?"];
+            shortName = Last[StringSplit[fullName, "`"]];
+            usageStr  = Lookup[assoc, "Usage", None];
+            attribs   = Lookup[assoc, "Attributes", {}];
+            dvHtml = Module[{sym, dvs},
+                sym = Quiet[Check[ToExpression[fullName, InputForm], $Failed]];
+                dvs = If[sym =!= $Failed && Head[sym] === Symbol,
+                         Quiet[DownValues[sym]], {}];
+                If[!ListQ[dvs] || Length[dvs] === 0, "",
+                    "<div style=\"margin-top:6px;\">" <>
+                    "<span style=\"font-size:11px;font-weight:bold;" <>
+                    "color:var(--vscode-descriptionForeground,#888);\">Definitions</span>" <>
+                    "<pre style=\"font-size:11px;white-space:pre-wrap;overflow-wrap:anywhere;" <>
+                    "background:var(--vscode-textCodeBlock-background,rgba(128,128,128,0.1));" <>
+                    "padding:6px 8px;border-radius:3px;margin:4px 0 0;\">" <>
+                    esc[ToString[dvs, InputForm]] <>
+                    "</pre></div>"
                 ]
-            ] /@ {args}] <> "\n"
+            ];
+            html =
+                "<div style=\"padding:4px 0;\">" <>
+                "<div style=\"font-size:14px;font-weight:bold;margin-bottom:3px;\">" <>
+                esc[shortName] <> "</div>" <>
+                "<div style=\"font-size:11px;color:var(--vscode-descriptionForeground,#888);" <>
+                "margin-bottom:6px;\">" <> esc[fullName] <> "</div>" <>
+                If[StringQ[usageStr] && usageStr =!= "",
+                    "<div style=\"font-size:12px;line-height:1.6;white-space:pre-wrap;" <>
+                    "margin-bottom:4px;\">" <> esc[usageStr] <> "</div>",
+                    ""] <>
+                dvHtml <>
+                If[ListQ[attribs] && Length[attribs] > 0,
+                    "<div style=\"font-size:11px;color:var(--vscode-descriptionForeground,#888);" <>
+                    "margin-top:4px;\">Attributes: " <>
+                    esc[ToString[attribs, OutputForm]] <> "</div>",
+                    ""] <>
+                "</div>";
+            "*HTML*" <> html
+        ],
+    (* Everything else: typeset via MakeBoxes → BTL/KaTeX pipeline *)
+    True,
+        Module[{boxes, boxStr},
+            boxes = Quiet[CheckAbort[
+                Check[MakeBoxes[arg, TraditionalForm], $Failed],
+                $Failed]];
+            If[boxes === $Failed,
+                ToString[arg, OutputForm, PageWidth -> $PageWidth],
+                boxes = expandAllTemplateBoxes[boxes];
+                boxStr = ToString[boxes, InputForm];
+                "BoxData[" <> boxStr <> "]"
+            ]
+        ]
+];
+
+Unprotect[Print];
+Print[args___] /; !TrueQ[$inPrintPatch] :=
+    Block[{$inPrintPatch = True},
+        (* Args joined by ASCII File Separator (\034 / \x1c) so JS can split
+           and render each piece (string / expression / graphics) individually. *)
+        WriteString[$Output,
+            StringRiffle[$encodePrintArg /@ {args}, "\034"] <> "\n"
         ]
     ];
 Protect[Print];
+
+(* ===== WBPrint — in-place updating print for loops / progress display ===== *)
+(* Like Print but:
+   - Carries an *WBP* prefix so the JS renderer can identify and update it in-place.
+   - When called repeatedly (e.g. inside Do[]), each call REPLACES the previous
+     WBPrint output for this cell — no accumulation, just an updating "status line".
+   - The output disappears automatically when the next cell is evaluated. *)
+WBPrint::usage = "WBPrint[args___] displays args as a single in-place output block that \
+replaces itself on each call within the same cell evaluation. Unlike Print[], which \
+accumulates one line per call, WBPrint[] shows only the most recent call\[CloseCurlyQuote]s \
+output \[LongDash] making it ideal for loop progress display and live status updates. \
+The output disappears automatically when any new cell starts evaluating. \
+Accepts the same argument types as Print[]: strings, numbers, expressions, and Graphics objects.\n\n\
+Examples:\n  Do[Pause[0.2]; WBPrint[\"Step: \", i, \" / 20\"], {i, 20}]\n  \
+WBPrint[\"Computing\[Ellipsis] norm = \", Norm[v]]";
+WBPrint[args___] :=
+    Block[{$inPrintPatch = True},
+        WriteString[$Output,
+            "*WBP*" <> StringRiffle[$encodePrintArg /@ {args}, "\034"] <> "\n"
+        ]
+    ];
+
+(* ===== Usage messages for JS-intercepted WB functions ===== *)
+(* WBInclude, WBExport, and WBPrompt are intercepted by the Wolfbook extension   *)
+(* before the kernel ever sees them.  These ::usage strings exist purely so that  *)
+(* ?WBInclude (and friends) display helpful documentation in the kernel REPL.    *)
+WBInclude::usage = "WBInclude[\"path\"] imports the contents of an external .wl, .m, \
+.wls, .nb, .evsnb, or .wb file as new notebook cells inserted immediately after the \
+WBInclude cell. The path must be a static string literal \[LongDash] runtime expressions \
+are not supported. This call is intercepted by the Wolfbook extension and never \
+reaches the kernel.";
+
+WBExport::usage = "WBExport[] or WBExport[\"path\"] exports the current Wolfbook \
+notebook as a Mathematica .nb file. Without an argument the .nb file is saved \
+alongside the current .wb notebook. The path argument, if given, must be a static \
+string literal. This call is intercepted by the Wolfbook extension and never \
+reaches the kernel.";
+
+WBPrompt::usage = "WBPrompt[\"text\"] or WBPrompt[\"text\", \"wolfbook\"->True|False] \
+opens the Copilot Agent Chat panel with the given prompt pre-filled and submitted. \
+With \"wolfbook\"->True (default) the prompt is routed to the @wolfbook agent, which \
+has live kernel access and can insert cells. With \"wolfbook\"->False the prompt \
+goes to plain Copilot chat. The argument must be a static string literal. This call \
+is intercepted by the Wolfbook extension and never reaches the kernel.";
 
 (* ===== Interrupt → Dialog handler ===== *)
 (* Required for the ⌥⇧↵ "evaluate in dialog" and variable-monitor features.     *)
@@ -167,14 +288,8 @@ Protect[Print];
 Off[Interrupt::dgbgn]; Off[Interrupt::dgend];
 Quiet[Internal`AddHandler["Interrupt", Function[{}, Dialog[]]]];
 
-(* SVG/typesetting pipeline prewarm — runs synchronously during kernel init so
-   the first user Plot[] renders instantly.
-   ExportString["SVG"] on a headless kernel cold-starts MathematicaServer, an
-   internal Wolfram rendering subprocess.  This takes ~4-5s the very first time.
-   Graphics[{}] is NOT sufficient — a real Plot[] call is needed to fully warm
-   the subprocess.  We run this here so the delay is absorbed into kernel startup
-   (which users expect to take a moment) rather than appearing on first Plot.   *)
-Quiet[CheckAbort[ExportString[Plot[1,{x,0,1},Axes->False,Frame->False],"SVG"], Null]];
+(* SVG/typesetting pipeline and CodeParser are prewarmed in the background by
+   lifecycle.js via subWhenIdle() after the kernel is declared ready.          *)
 
 logWrite["init.wl loaded (WSTP mode, no ZMQ)"];
 
@@ -239,11 +354,3 @@ VsCodeSymbolMarkdown[symName_String, longForm_: True] :=
         HoldFirst]
     ];
 
-(* ===== Protect all wolfbook init symbols from ClearAll["Global`*"] ===== *)
-Protect[
-    $logDir, $logPath, logWrite, logWriteFile, logError,
-    $wolframOutputTempDir, $wolframImgDir, $wolframImgRelPrefix,
-    VsCodeSetImgDir, VsCodeCleanupImgDir,
-    $hasCodeParser, $config, $setKernelConfig, $getKernelConfig,
-    WBDirectory, VsCodeSymbolMarkdown
-];

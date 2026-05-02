@@ -1,39 +1,75 @@
-# Wolfbook — AI-Native Mathematica Notebooks for VS Code
+# Wolfbook — AI-Friendly Wolfram Language Notebook
 
 <p align="center">
-  <img src="images/wolfbook_logo.png" alt="Wolfbook logo" width="120"/>
-</p>
-
-<p align="center">
-  <strong>Wolfram Language notebooks with full AI agent integration, rich LaTeX rendering and abortable evaluation with step-by-step debugging and live watch panel.</strong>
+  <img src="images/wolfbook_logo.png" alt="Wolfbook logo — Mathematica-style notebooks for VS Code" width="120"/>
 </p>
 
 <p align="center">
   <a href="docs/getting-started.md">Get Started</a> ·
-  <a href="docs/ai-integration.md">AI Integration</a> ·
   <a href="docs/features.md">Features</a> ·
+  <a href="docs/ai-integration.md">AI Integration</a> ·
   <a href="docs/mcp-and-agent-tools.md">MCP & Agent Tools</a> ·
   <a href="docs/using_cline.md">Using Cline</a> ·
+  <a href="docs/deepseek-copilot.md">DeepSeek + Copilot</a> ·
   <a href="docs/presentations.md">Presentations (.wslide)</a> ·
   <a href="docs/best-practices.md">Best Practices</a> ·
+  <a href="docs/wb-functions.md">WB Functions</a> ·
   <a href="#citing-wolfbook">Citing</a>
 </p>
 
----
+Wolfbook is a Mathematica notebook frontend for VS Code. It lets you create, edit and run Wolfram Language notebooks using a local Wolfram Engine or Mathematica kernel — with rich LaTeX and graphics output, a live kernel that AI agents can call, and plain-text notebooks that work with Git.
 
-## What is Wolfbook?
-
-Wolfbook is a VS Code extension that gives you interactive **Wolfram Language notebooks** (`.wb` files) directly in your editor — with none of the limitations of the standard Mathematica frontend.
-
-You get a notebook interface that renders symbolic math and graphics with high-quality typesetting, a live kernel connection via a bespoke native WSTP connector, and — crucially — **full integration with VS Code's/Antigravity's AI ecosystem**: GitHub Copilot, CODEX, Claude Code, and Antigravity can read your notebook, evaluate expressions, look up documentation, insert and edit cells, and drive the step-by-step debugger, all without leaving your workspace. All this together gives you the power of Mathematica with the flexibility of VS Code and constitutes unique workflow with the agility of AI and precision of Mathematica. Producing verifiable and reproducible analysis of your computational problems becomes a breeze. You can finally benefit from the latest development in AI tools without sacrifising the robust and proven Wolfram Language computational engine.
-
-Wolfbook is **free and open source**. It works with the free [Wolfram Engine](https://wolfram.com/engine) — no Mathematica licence required.
+<p align="center">
+  <img src="docs/screenshot-debugger.png" alt="Mathematica-style Wolfram Language notebook in VS Code with live kernel evaluation, LaTeX typesetting, graphics output and debugger breakpoint" width="80%" />
+</p>
 
 ---
 
 ## Why Wolfbook?
 
-Standard Mathematica is powerful but isolated. Its `.nb` format is binary — you cannot `git diff` it. There is no split view, no multi-cursor, no extension ecosystem, and AI integration is chat-only: the AI cannot call the kernel, read your notebook state, or insert cells. Even if you have a Mathematica license, you still pay extra for LLM access, and you can't use other AI tools like Copilot or Claude Code. Wolfbook works with both Mathematica and Wolfram Engine and connects you to all standard AI tools like GitHub Copilot, CODEX, Claude Code, and Antigravity with MCP (Model Context Protocol) and .wb (Wolfbook) format which is plain text and can be version controlled.
+- A real Mathematica notebook inside VS Code, not just syntax highlighting
+- Works with **Wolfram Engine** (free) or **Mathematica**
+- Plain-text `.wb` / `.vsnb` notebooks — **diffable in Git**, readable by AI tools
+- Rich math output: **LaTeX / KaTeX**, **SVG / PNG graphics**,  **TikZ**
+- **Live kernel access for AI agents** — Copilot, Claude Code, Codex, MCP-compatible tools
+- **Mid-evaluation abort**, **Dynamic[]** widgets, debugger and watch panel
+- Open source, Apache 2.0
+
+---
+
+## Wolfbook vs other Wolfram/Mathematica VS Code extensions
+
+| Feature | Wolfbook | Official Wolfram extension | Wolfram Language Notebook |
+|---|---|---|---|
+| Wolfram Language syntax highlighting | ✓ | ✓ | ✓ |
+| Mathematica-style notebook UI | ✓ | basic | ✓ |
+| Live Wolfram kernel via WSTP | ✓ | — | wolframscript |
+| Rich LaTeX / KaTeX rendering | ✓ | — | partial |
+| Inline SVG / PNG / TikZ graphics | ✓ | static | basic |
+| Mid-evaluation abort | ✓ | — | — |
+| Dynamic[] widgets | ✓ | — | — |
+| AI agents can evaluate cells (MCP / Copilot) | ✓ | — | — |
+| Plain-text notebook format (Git-friendly) | ✓ | ✓ | ✓ |
+| Open source | ✓ | ✓ | ✓ |
+
+---
+
+## Screenshots
+
+![Live variable watch panel and mid-evaluation selection in a Wolfram Language notebook](docs/screenshot-watchpanel.png)
+*Live watch of variables and mid-evaluation evaluate-selection feature — inspect expressions without Print statements, all while the kernel is running.*
+
+![Rich symbolic output rendered as LaTeX via KaTeX, with adaptive line-breaking and matrix pagination](docs/screenshot-latex.png)
+*Symbolic Mathematica output typeset with LaTeX via KaTeX. Adaptive line-breaking and matrix paging make even huge expressions readable.*
+
+![An AI agent calling Wolfbook's kernel tools: $Aport, Wolfram Language documentation lookup, and cell evaluation](docs/screenshot-aport.png)
+*An AI agent using Wolfbook's MCP tools — calling `$Aport`, looking up documentation, evaluating cells in the live Wolfram kernel.*
+
+![Claude Code agent evaluating a Mathematica cell through the Wolfbook MCP server](docs/screenshot-ai.png)
+*An AI agent (Claude Code / Copilot / MCP-compatible) evaluating cells and inspecting results in a live Wolfram kernel.*
+
+![Inline graphics rendering: plots and SVG output from a Wolfram kernel inside a VS Code notebook](docs/screenshot-graphics.png)
+*AI agents can read your notebook content in an AI-friendly format, assist you in writing code, or solve mathematical problems from start to end with full numerical and analytic verification — producing a clean notebook for your inspection, debugging errors, and summarizing main findings. You can then export results to your LaTeX documents with ease, either using AI agents or manually.*
 
 ---
 
@@ -42,11 +78,12 @@ Standard Mathematica is powerful but isolated. Its `.nb` format is binary — yo
 ### A proper notebook in VS Code
 
 - `.wb` files with code cells and Markdown cells (with full LaTeX math via KaTeX)
-- Symbolic results rendered as typeset mathematics with line breaked LaTeX — not plain text
+- Symbolic results rendered as typeset mathematics with line-broken LaTeX — not plain text
 - Graphics (plots, `Graphics[…]`) rendered as SVG or PNG inline
 - Per-cell output format switching: WL / SVG / LaTeX / MathML / TikZ
 - `Dynamic[expr]` widgets that update live while the kernel runs
-- Abort the kernel without losing your kernel context, or restart with a clean kernel with one click or with a shortcut (still impossible in Mathematica!)
+- Abort the kernel without losing your kernel context, or restart with a clean kernel with one click — exactly like in Mathematica, but unique among VS Code notebook extensions
+- Escape-mode Greek entry: type `\[Alpha]`, `\[Beta]`, `\[Gamma]` and they get converted into symbols, or use [escape]a[escape] etc.
 - Watch any expression continuously; evaluate any selection mid-computation
 
 ### VS Code IDE features — free
@@ -59,7 +96,7 @@ Standard Mathematica is powerful but isolated. Its `.nb` format is binary — yo
 
 ### AI that actually knows your notebook
 
-Wolfbook exposes your live kernel and notebook contents to AI agents via a set of purpose-built optimised tools. GitHub Copilot in Agent mode can, for  example:
+Wolfbook exposes your live kernel and notebook contents to AI agents via purpose-built tools. GitHub Copilot in Agent mode can, for example:
 
 - Read all cells and their outputs (`#wolfbookContext`)
 - Evaluate any expression in the live kernel (`#wolfbookEval`)
@@ -86,7 +123,7 @@ Wolfbook includes a `.wslide` presentation format: JSON-based slides rendered vi
 
 **2. Install Wolfbook**
 
-Wolfbook can be found in the VS Code Marketplace or on GitHub in the [Releases](https://github.com/vanbaalon/wolfbook/releases) section. Or on Antigravity's marketplace or https://open-vsx.org/.
+Wolfbook can be found in the VS Code Marketplace or on GitHub in the [Releases](https://github.com/vanbaalon/wolfbook/releases) section. Or on Antigravity's marketplace or [open-vsx.org](https://open-vsx.org/).
 
 **3. Create your first notebook**
 
@@ -106,7 +143,7 @@ Wolfbook is built around two bespoke native C++ addons:
 
 **`mathematica-wstp-node`** — connects directly to the Wolfram kernel via the WSTP (Wolfram Symbolic Transfer Protocol) protocol. No subprocess piping, no ZeroMQ. This is what makes mid-evaluation abort, Dynamic widgets, and Dialog[] subsessions possible.
 
-**`wolfbook-btl`** (Box-to-LaTeX) — translates Wolfram's internal `TraditionalForm` box structures to LaTeX, rendered client-side with KaTeX. About 10× faster than Wolfram's built-in `TeXForm` for complex expressions, and handles many cases TeXForm cannot and also dynamically adjusts the page width and breaks the line at appropriate positions to make it fit the page width. Long expressions are also paginated or can be exported in one click in .wl (Wolfram Language) format.
+**`wolfbook-btl`** (Box-to-LaTeX) — translates Wolfram's internal `TraditionalForm` box structures to LaTeX, rendered client-side with KaTeX. About 10× faster than Wolfram's built-in `TeXForm` for complex expressions, and handles many cases TeXForm cannot. Dynamically adjusts line-breaking to fit the page width. Long expressions are paginated or can be exported in one click in `.wl` format.
 
 Both addons are prebuilt for macOS (Apple Silicon and Intel) and Windows and bundled in the `.vsix`. Linux is under construction. You can also compile them yourself; see [Building from Source](docs/building.md).
 
@@ -121,8 +158,10 @@ Both addons are prebuilt for macOS (Apple Silicon and Intel) and Windows and bun
 | [MCP & Agent Tools](docs/mcp-and-agent-tools.md) | Using Wolfbook with Claude Code, Codex, and other MCP clients |
 | [Features](docs/features.md) | Notebook interface, kernel control, editor, debugger, Dynamic |
 | [Presentations (.wslide)](docs/presentations.md) | The AI-native slide format |
+| [DeepSeek + Copilot](docs/deepseek-copilot.md) | Using DeepSeek models with VS Code Copilot |
 | [Best Practices](docs/best-practices.md) | How to work effectively with the agent |
 | [Building from Source](docs/building.md) | Compile the native addons, package the extension |
+| [WB Functions](docs/wb-functions.md) | Custom WL functions: WBVersion, WBDirectory, WBPrint, WBInclude, WBExport, WBPrompt |
 
 ---
 
@@ -153,5 +192,5 @@ If Wolfbook supports your research, a brief mention in the acknowledgements help
 
 ## Acknowledgements 
 
-Wolfbook was heavily inspired by and initially based on the official vscode-wolfram extension by Wolfram Research Inc. (Apache 2.0). The LSP client layer and kernel-finding logic originate from that project. The notebook frontend and the entire kernel backend have since been rewritten from scratch.
+Wolfbook was heavily inspired by and initially based on the official `vscode-wolfram` extension by Wolfram Research Inc. (Apache 2.0). The LSP client layer and kernel-finding logic originate from that project. The notebook frontend and the entire kernel backend have since been rewritten from scratch.
 

@@ -137,7 +137,7 @@ html,body{margin:0;padding:0;background:#000;}
 .reveal .slides section h1,.reveal .slides section h2,.reveal .slides section h3,
 .reveal .slides section h4,.reveal .slides section h5,.reveal .slides section h6{
   text-transform:none!important;letter-spacing:normal!important;font-weight:700;margin:0;padding:0;}
-.reveal .slides section h2{background:var(--navy);color:#fff;padding:14px 36px;font-size:1.1em;width:100%;}
+.reveal .slides section h2{font-size:1.33em;line-height:1.2;margin:0 0 12px;}
 .reveal .slides section img{border:none!important;box-shadow:none!important;background:none!important;margin:0!important;}
 .reveal .slides section ul,.reveal .slides section ol{margin:0;padding-left:1.4em;text-align:left;}
 .reveal .slides section p{margin:0;}
@@ -453,7 +453,7 @@ img{border:none;box-shadow:none;background:none;max-width:100%;max-height:100%;d
 ul,ol{padding-left:1.4em;}
 p{margin:0;}
 h1,h2,h3,h4,h5,h6{margin:0;padding:0;font-weight:700;text-transform:none;letter-spacing:normal;}
-h2{background:var(--navy);color:#fff;padding:14px 36px;font-size:1.1em;width:100%;}
+h2{font-size:1.33em;line-height:1.2;margin:0 0 12px;}
 .hidden-step{visibility:hidden;}
 /* When Chrome headless renders via --print-to-pdf it uses @media print */
 @media print{
@@ -474,17 +474,6 @@ h2{background:var(--navy);color:#fff;padding:14px 36px;font-size:1.1em;width:100
   .slide-page{box-shadow:0 2px 16px rgba(0,0,0,.5);}
 }
 </style>
-<script>
-// Scale slides to fit the browser window for preview
-function fitSlides(){
-  var w=window.innerWidth-16;
-  var s=Math.min(1,w/1920);
-  var all=document.querySelectorAll('.slide-page');
-  all.forEach(function(el){el.style.transform='scale('+s+')';el.style.marginBottom=(1080*s-1080)+'px';});
-}
-window.addEventListener('load',fitSlides);
-window.addEventListener('resize',fitSlides);
-</script>
 </head>
 <body>
 <!-- Print this page to PDF.  Each section becomes one page (1920×1080 pts ~ 16:9). -->

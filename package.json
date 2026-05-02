@@ -1,9 +1,9 @@
 {
   "name": "wolfbook",
-  "displayName": "Wolfbook — AI-Friendly Wolfram Language Notebook",
-  "description": "AI-friendly Wolfram Language notebook for VS Code. WSTP kernel, KaTeX rendering with adaptive line-breaking, Unicode input, LSP diagnostics, and AI-readable outputs for GitHub Copilot.",
+  "displayName": "Mathematica & Wolfram Language Notebooks for VS Code — Wolfbook",
+  "description": "Mathematica-style Wolfram Language notebooks in VS Code. Run a live Wolfram kernel, render LaTeX/graphics, debug code, and let Copilot, Claude Code or MCP agents evaluate cells.",
   "publisher": "wolfbook",
-  "version": "2.6.57",
+  "version": "2.7.1",
   "engines": {
     "vscode": "^1.95.0"
   },
@@ -12,17 +12,43 @@
     "url": "https://github.com/vanbaalon/wolfbook.git"
   },
   "keywords": [
-    "wolfram",
     "mathematica",
-    "notebook",
-    "wstp",
+    "wolfram",
+    "wolfram-language",
+    "wolfram-engine",
+    "wolfram-kernel",
     "wolframscript",
-    "notebookRenderer"
+    "notebook",
+    "notebooks",
+    "vscode-notebook",
+    "mathematica-notebook",
+    "wolfram-notebook",
+    "frontend",
+    "mathematica-frontend",
+    "symbolic-computation",
+    "computer-algebra",
+    "cas",
+    "latex",
+    "katex",
+    "tikz",
+    "math",
+    "physics",
+    "ai",
+    "copilot",
+    "claude",
+    "claude-code",
+    "codex",
+    "mcp",
+    "agent",
+    "wstp",
+    "jupyter"
   ],
   "categories": [
-    "Programming Languages",
     "Notebooks",
-    "Other"
+    "Programming Languages",
+    "Data Science",
+    "Visualization",
+    "Education"
   ],
   "galleryBanner": {
     "color": "#CC3333",
@@ -185,6 +211,27 @@
           "markdownDescription": "Enable the MCP (Model Context Protocol) server so Claude and other MCP agents can connect to this window's Wolfbook tools. Disable to prevent external agent connections. Requires window reload to take effect.",
           "order": 2
         },
+        "wolfbook.remote.allowHostExtension": {
+          "scope": "window",
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Allow the **Wolfbook Remote Host** companion extension (`wolfbook.wolfbook-remote-host`) to drive this window via the `wolfbook.remote.*` command surface. Each workspace also requires a one-time consent prompt the first time the host extension connects. Set to `false` to disable the remote bridge entirely.",
+          "order": 2
+        },
+        "wolfbook.remote.checkpointDirectoryName": {
+          "scope": "resource",
+          "type": "string",
+          "default": "wolfremote/checkpoints",
+          "markdownDescription": "Subpath inside the notebook's `.img/` sidecar directory where `wolfbook_remote_checkpoint` files are written. Each notebook gets its own checkpoint history; the agent reads back prior checkpoints via standard file tools.",
+          "order": 3
+        },
+        "wolfbook.remote.mirrorWolfbookToolUsage": {
+          "scope": "window",
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Forward Wolfbook MCP tool invocations (run cell, edit cell, etc.) to paired iOS devices via the Wolfbook Remote Host as a live activity timeline. Disable to keep tool usage local.",
+          "order": 3
+        },
         "wolfbook.collabMode": {
           "scope": "window",
           "type": "boolean",
@@ -344,6 +391,12 @@
           "type": "boolean",
           "default": false,
           "description": "When formatting, replace \\[Name] escape sequences with their UTF-8 Unicode characters (e.g. \\[Alpha] → α).",
+          "order": 4
+        },
+        "wolfbook.formatter.replaceMultiply": {
+          "type": "boolean",
+          "default": false,
+          "description": "When formatting with Option+Shift+F (UTF mode), replace explicit * multiplication operators with implicit multiplication (a space), e.g. a*b → a b. Preserves *= (TimesBy). Off by default; always enabled in UTF format mode.",
           "order": 4
         },
         "wolfbook.formatter.autoFormat": {
@@ -845,9 +898,24 @@
         "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook'"
       },
       {
+        "command": "-editor.action.formatDocument",
+        "key": "alt+shift+f",
+        "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook'"
+      },
+      {
         "command": "wolfbook.formatWithUTF",
         "key": "alt+shift+f",
         "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook'"
+      },
+      {
+        "command": "-editor.action.formatDocument",
+        "key": "alt+shift+f",
+        "when": "notebookEditorFocused && !editorTextFocus && notebookType == 'extended-wolfram-notebook'"
+      },
+      {
+        "command": "wolfbook.formatNotebook",
+        "key": "alt+shift+f",
+        "when": "notebookEditorFocused && !editorTextFocus && notebookType == 'extended-wolfram-notebook'"
       },
       {
         "command": "wolfbook.handleEnter",
@@ -1164,6 +1232,42 @@
       }
     ],
     "languageModelTools": [
+      {
+        "name": "wolfbook_remote_checkpoint",
+        "displayName": "Wolfbook Remote Checkpoint",
+        "modelDescription": "REQUIRED USAGE — agent working memory. Persist a structured checkpoint (plan, decision, finding, summary, or blocker) for the active Wolfbook notebook. The checkpoint is saved to disk under the notebook's .img/ sidecar directory AND mirrored to any paired iOS device watching the workspace. The tool's reply lists prior checkpoints for the same notebook, so the agent should call this tool at session start (with kind='summary' to read prior context) and after every meaningful step (decisions, findings, plan updates, blockers). Treat the checkpoint history as your durable working memory across sessions.",
+        "canBeReferencedInPrompt": false,
+        "tags": ["wolfbook", "wolfbook-remote"],
+        "inputSchema": {
+          "type": "object",
+          "required": ["kind", "summary"],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": ["plan", "decision", "finding", "summary", "blocker"],
+              "description": "Checkpoint category. 'plan' = next steps; 'decision' = chosen approach with rationale; 'finding' = empirical result or insight; 'summary' = recap of session/sub-task; 'blocker' = unresolved problem requiring user input."
+            },
+            "summary": {
+              "type": "string",
+              "description": "One-line headline (≤ 120 chars). Shown on the iOS timeline as the primary text."
+            },
+            "detail": {
+              "type": "string",
+              "description": "Multi-paragraph markdown body. Include rationale, code snippets, links to cells, etc. Becomes the file body."
+            },
+            "relatedCells": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Optional list of CellIds this checkpoint references."
+            },
+            "relatedFiles": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Optional list of workspace-relative file paths this checkpoint references."
+            }
+          }
+        }
+      },
       {
         "name": "wolfbook_getNotebookContext",
         "displayName": "Wolfbook: Get Notebook Context",
@@ -3389,6 +3493,7 @@
           "―": true
         }
       },
+      "editor.scrollbar.horizontalScrollbarSize": 0,
       "notebook.showCellStatusBar": "visible",
       "notebook.scrolling.revealNextCellOnExecute": "none"
     },

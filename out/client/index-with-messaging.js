@@ -209,6 +209,38 @@ export function activate(context) {
                 // No persistent highlight — default is remembered internally only.
             }
 
+            // ---- Phase-2 async line-breaking result ----
+            // Replaces a wl-lb-pending placeholder with the line-broken KaTeX HTML.
+            if (msg.type === 'wl-lb-result' && msg.lbId) {
+                const el = document.querySelector('[data-lb-id="' + msg.lbId + '"]');
+                if (el) {
+                    if (msg.pagerHtml) {
+                        // lineBreakLatex produced multiple pages — replace entire element with pager
+                        const tmp = document.createElement('div');
+                        tmp.innerHTML = msg.pagerHtml;
+                        const pagerEl = tmp.firstElementChild;
+                        if (pagerEl) el.replaceWith(pagerEl);
+                    } else if (msg.html !== null && msg.html !== undefined) {
+                        // Single-page: replace inner content and remove pending style
+                        const inner = el.querySelector('.wl-lb-content');
+                        if (inner) inner.innerHTML = msg.html;
+                        if (msg.latexB64) el.setAttribute('data-latex-b64', msg.latexB64);
+                        if (msg.lineBroken) el.setAttribute('data-line-broken', '1');
+                    }
+                    // Remove pending class and restore opacity (CSS transition to 1.0)
+                    el.classList.remove('wl-lb-pending');
+                    el.style.opacity = '';
+                    el.style.transition = '';
+                }
+                return;
+            }
+
+            // ---- WBPrint expire — remove all WBPrint DOM nodes to free memory ----
+            if (msg.type === 'wbp-expire') {
+                document.querySelectorAll('.wl-wbp-output').forEach(el => el.remove());
+                return;
+            }
+
             // ---- Dialog[] subsession widget ----
             if (msg.type === 'dialog-begin') {
                 showDialogWidget(context);
@@ -543,6 +575,38 @@ export function activate(context) {
             // Render HTML content
             element.innerHTML = cleanHtml;
             console.log('[WolframRenderer] innerHTML assigned — pre-render element width was:', _preRenderWidth);
+
+            // ---- Hover output → send source-line highlight request to extension ----
+            // ---- Double-click output header → navigate cursor to source line ----
+            // Attach once per element; reads header data lazily at event time so it
+            // works correctly even if replaceOutputItems updates the HTML later.
+            if (!element._wlHoverAttached && context && context.postMessage) {
+                element._wlHoverAttached = true;
+                element.addEventListener('mouseenter', () => {
+                    const _hdr = element.querySelector('.wl-output-header[data-cell-idx]');
+                    if (!_hdr) return;
+                    const _cidx = parseInt(_hdr.getAttribute('data-cell-idx'), 10);
+                    if (isNaN(_cidx)) return;
+                    const _sStart = parseInt(_hdr.getAttribute('data-sub-start') || '0', 10);
+                    const _sEnd   = parseInt(_hdr.getAttribute('data-sub-end')   || '0', 10);
+                    try { context.postMessage({ type: 'hover-output', cellIdx: _cidx, start: _sStart, end: _sEnd }); } catch (_) {}
+                });
+                element.addEventListener('mouseleave', () => {
+                    try { context.postMessage({ type: 'hover-output-end' }); } catch (_) {}
+                });
+                // Double-click the output header bar → navigate to source line in cell editor
+                element.addEventListener('dblclick', (evt) => {
+                    const _hdr = (evt.target && evt.target.closest)
+                        ? evt.target.closest('.wl-output-header[data-cell-idx]')
+                        : null;
+                    if (!_hdr) return;
+                    const _cidx = parseInt(_hdr.getAttribute('data-cell-idx'), 10);
+                    if (isNaN(_cidx)) return;
+                    const _sStart = parseInt(_hdr.getAttribute('data-sub-start') || '0', 10);
+                    const _sEnd   = parseInt(_hdr.getAttribute('data-sub-end')   || '0', 10);
+                    try { context.postMessage({ type: 'goto-source', cellIdx: _cidx, start: _sStart, end: _sEnd }); } catch (_) {}
+                });
+            }
 
             // SCROLL-TIMING: notify extension that DOM has been updated
             if (context && context.postMessage) {
@@ -908,7 +972,13 @@ export function activate(context) {
                             if (block2) {
                                 const srcEl = block2.querySelector('.wl-matrix-pager[data-latex-b64], .vscode-wolfram-wllatex-prerendered[data-latex-b64]');
                                 let latex = '';
-                                try { latex = srcEl ? atob(srcEl.getAttribute('data-latex-b64') || '') : ''; } catch(_) {}
+                                try {
+                                    const _b64 = srcEl ? (srcEl.getAttribute('data-latex-b64') || '') : '';
+                                    if (_b64) {
+                                        const _bytes = Uint8Array.from(atob(_b64), c => c.charCodeAt(0));
+                                        latex = new TextDecoder('utf-8').decode(_bytes);
+                                    }
+                                } catch(_) {}
                                 if (latex) {
                                     const content = block2.querySelector('.wl-output-content');
                                     if (content) {

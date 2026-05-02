@@ -37,6 +37,7 @@ class WatchPanelProvider {
         this._pendingHoverDoc = null;  // {html, symbol} — resent on next visibility
         this._widthPx        = 0;     // panel pixel width reported by webview ResizeObserver
         this._mcpInfo        = null;  // last setMcpInfo payload — resent on visibility change
+        this._remoteConnected = false; // whether remote host is connected
     }
 
     // Called by extension.js when registering:
@@ -249,6 +250,13 @@ class WatchPanelProvider {
         this._view.webview.postMessage({ command: 'setDebugActive', active });
     }
 
+    /** Notify the webview of Wolfbook Remote Host connection status. */
+    setRemoteStatus(connected) {
+        this._remoteConnected = !!connected;
+        if (!this._view) return;
+        this._view.webview.postMessage({ command: 'remoteStatus', connected: this._remoteConnected });
+    }
+
     /** Push MCP server info to the sidebar info popup (called from extension.js after server starts). */
     setMcpInfo(info) {
         this._mcpInfo = info || null;
@@ -275,6 +283,7 @@ class WatchPanelProvider {
         if (this._mcpInfo) this._view.webview.postMessage({ command: 'mcpInfo', ...this._mcpInfo });
         const collabEnabled = vscode.workspace.getConfiguration('wolfbook').get('collabMode', false);
         this._view.webview.postMessage({ command: 'collabState', enabled: collabEnabled });
+        this._view.webview.postMessage({ command: 'remoteStatus', connected: this._remoteConnected });
         // Show watch list placeholder names immediately (before kernel values arrive)
         if (this._watchList.length > 0) {
             this._view.webview.postMessage({ command: 'initWatchList', names: this._watchList });
@@ -781,6 +790,7 @@ class WatchPanelProvider {
     <input type="checkbox" id="collab-toggle" style="opacity:0; width:0; height:0;">
     <span class="collab-slider" style="position:absolute; inset:0; border-radius:9px; transition:background 0.2s;"></span>
   </label>
+  <span id="remote-dot" title="Wolfbook Remote: not connected" style="font-size:9px; color:#6e7681; line-height:1; flex-shrink:0; margin-left:auto; cursor:help;" aria-label="Remote connection status">&#11044;</span>
 </div>
 <div id="mcp-info-panel" style="display:none; font-size:11px; line-height:1.7; padding:8px 10px; background:var(--vscode-editorWidget-background,#252526); border:1px solid var(--vscode-panel-border,#444); border-radius:4px; margin-bottom:6px; word-break:break-all;"></div>
 <style>

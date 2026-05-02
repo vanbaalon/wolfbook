@@ -103,6 +103,8 @@ function tokenizeBrackets(text) {
         if (c === '}') { tokens.push({ type: 'BRC', offset: i, len: 1 }); i++; continue; }
         if (c === '<' && d === '|') { tokens.push({ type: 'AO', offset: i, len: 2 }); i += 2; continue; }
         if (c === '|' && d === '>') { tokens.push({ type: 'AC', offset: i, len: 2 }); i += 2; continue; }
+        if (c === '\u301a') { tokens.push({ type: 'BBO', offset: i, len: 1 }); i++; continue; } // 〚 treated as [[
+        if (c === '\u301b') { tokens.push({ type: 'BBC', offset: i, len: 1 }); i++; continue; } // 〛 closes 〚
         i++;
     }
     return tokens;
@@ -161,6 +163,24 @@ function buildBracketPairs(tokens) {
                 });
                 ti++;
             }
+            continue;
+        }
+
+        // BBC (〛) closes BBO (〚)
+        if (tok.type === 'BBC') {
+            let idx = stack.length - 1;
+            while (idx >= 0 && stack[idx].type !== 'BBO') idx--;
+            if (idx < 0) { ti++; continue; }
+            const open = stack[idx];
+            stack.splice(idx);
+            pairs.push({
+                openStart:  open.offset,
+                openEnd:    open.offset + open.len,
+                closeStart: tok.offset,
+                closeEnd:   tok.offset + 1,
+                type:       'BBO',
+            });
+            ti++;
             continue;
         }
 

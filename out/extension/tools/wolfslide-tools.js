@@ -1147,7 +1147,7 @@ class WolfslideGetSlideHtmlTool {
                 `.reveal-viewport{background:#000!important;}\n` +
                 `.reveal .slides section{padding:0!important;margin:0!important;top:0!important;text-align:left;overflow:hidden;width:1920px;height:1080px;}\n` +
                 `.reveal .slides section h1,.reveal .slides section h2,.reveal .slides section h3{text-transform:none!important;font-weight:700;margin:0;padding:0;}\n` +
-                `.reveal .slides section h2{background:var(--navy);color:#fff;padding:14px 36px;font-size:1.1em;width:100%;}\n` +
+                `.reveal .slides section h2{font-size:1.33em;line-height:1.2;margin:0 0 12px;}\n` +
                 `.reveal .slides section img{border:none!important;box-shadow:none!important;}\n` +
                 `.wslide-canvas{position:relative;width:1920px;height:1080px;}\n.wel{position:absolute;box-sizing:border-box;}\n</style>\n` +
                 `${userCSS}\n</head>\n<body>\n` +

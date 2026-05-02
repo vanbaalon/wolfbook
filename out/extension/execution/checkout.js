@@ -438,6 +438,36 @@ async function checkoutExecutionQueue(self) {
         scrollLog('[checkout] _evalDispatched = true | cell', currentExecution.execution.cell.index, '| cellEpoch (pre-cell)', self._cellEpoch);
         self.writeDebugLog(`[CHECKOUT] cell ${currentExecution.execution.cell.index} | _evalDispatched = true`);
 
+        // When any cell starts executing: remove all WBPrint outputs from the notebook
+        // document (frees memory), then notify the renderer to drop any live DOM nodes.
+        try {
+            const _nbk = currentExecution.execution.cell.notebook;
+            const _wbpWsEdit = new vscode.WorkspaceEdit();
+            const _wbpEdits = [];
+            _nbk.getCells().forEach(_c => {
+                const _filtered = _c.outputs.filter(
+                    o => !o.metadata?.wolfbook_wbp
+                );
+                if (_filtered.length < _c.outputs.length)
+                    _wbpEdits.push(vscode.NotebookEdit.updateCellOutputs(_c.index, _filtered));
+            });
+            if (_wbpEdits.length > 0) {
+                _wbpWsEdit.set(_nbk.uri, _wbpEdits);
+                vscode.workspace.applyEdit(_wbpWsEdit).then(null, () => {});
+            }
+        } catch (_) {}
+        try { if (self._rendererMessaging) self._rendererMessaging.postMessage({ type: 'wbp-expire' }); } catch (_) {}
+
+        // WBPrint state — shared across ALL sub-expressions in this cell execution.
+        // Unlike printOutput (per-sub-expression), wbpOutput is updated in-place for
+        // every WBPrint call so loops produce a single updating output rather than
+        // accumulating one per iteration.
+        let wbpOutput   = null;
+        let wbpHtml     = "";
+        let wbpText     = "";
+        const wbpLineQueue = [];
+        let wbpFlushPending = false;
+
         // ---- Evaluate each sub-expression one by one ----
         // Each goes through the interactive kernel main loop → gets its own
         // Out[N]= label and increments $Line.  Rendering is a separate batch
@@ -484,7 +514,7 @@ async function checkoutExecutionQueue(self) {
         };
 
         for (let i = 0; i < subExprs.length; i++) {
-            if (self.isAborting) { anyAborted = true; break; }
+            if (self.isAborting) { self.isAborting = false; anyAborted = true; break; }
 
             let { text: subExpr, startLine: _subStartLine, endLine: _subEndLine } = subExprs[i];
             // Substitute display-only Unicode operators back to ASCII for the kernel.
@@ -657,34 +687,51 @@ async function checkoutExecutionQueue(self) {
             let msgOutput    = null;
             const msgHtmlParts = [];
 
+            // Render one arg from a multi-arg Print/WBPrint call.
+            // BoxData stays as <div> (processWLLatexBoxes regex requires the div tag).
+            // Strings/SVG use inline <span> so all args flow on the same line.
+            const _renderArgPart = t => {
+                if (t.startsWith('*HTML*'))
+                    return t.slice(6);  // raw trusted HTML built on the WL side
+                if (t.startsWith('BoxData[') && t.endsWith(']')) {
+                    const inner = t.slice(8, -1);                    // strip outer BoxData[…]
+                    const unesc = inner.replace(/\\\\/g, '\\');        // un-double WSTP backslashes
+                    const clean = unesc.replace(/\n\s*>?\s*/g, ' ');  // strip Wolfram ">" line-fold markers
+                    const b64   = Buffer.from(clean).toString('base64');
+                    const rawB64 = Buffer.from(t).toString('base64');
+                    return `<div class="vscode-wolfram-wllatex-boxes" data-boxes-b64="${b64}" data-raw-b64="${rawB64}"></div>`;
+                }
+                if (t.startsWith('*STR*'))
+                    return '<span class="wl-ps">' + self.escapeHtml(t.slice(5)) + '</span>';
+                if (t.startsWith('*SVG*') && t.length > 6)
+                    return '<span class="wl-pg"><img src="data:image/svg+xml;base64,' + t.slice(5) + '" style="max-width:420px;max-height:300px;height:auto;width:auto;"/></span>';
+                return '<span class="wl-ps">' + self.escapeHtml(t) + '</span>';
+            };
+
             const flushPrint = async () => {
                 if (printLineQueue.length === 0) { printFlushPending = false; return; }
                 const packets = printLineQueue.splice(0);
                 // Decode \012 → real newlines, then decode Wolfram octal byte escapes → Unicode.
-                // Each WSTP TextPacket becomes one <pre> block; internal newlines render
-                // as-is so OutputForm ASCII art (e.g. exponents above the line) is preserved.
                 const decodedTexts = packets.map(pkt => self.decodeWolframOctal(pkt.replace(/\\012/g, '\n')));
-                // If a Print packet is a WL box expression wrapped in BoxData[...] (e.g. from
-                // OGRe/packages that use CellPrint falling back to Print in script mode), render
-                // it via BTL→KaTeX instead of showing raw box syntax in a <pre>.
-                const htmlParts = decodedTexts.map(text => {
-                    const t = text.trim();
-                    if (t.startsWith('BoxData[') && t.endsWith(']')) {
-                        const inner = t.slice(8, -1);                    // strip outer BoxData[…]
-                        // WSTP doubles backslashes in text content; un-double them so
-                        // InputForm escapes like \" and \[Eta] reach BTL correctly.
-                        const unesc = inner.replace(/\\\\/g, '\\');
-                        const clean = unesc.replace(/\n\s*>?\s*/g, ' '); // strip Wolfram ">" line-fold markers and collapse whitespace
-                        const b64   = Buffer.from(clean).toString('base64');
-                        const rawB64 = Buffer.from(t).toString('base64'); // original verbatim string from kernel
-                        return `<div class="vscode-wolfram-wllatex-boxes" data-boxes-b64="${b64}" data-raw-b64="${rawB64}"></div>`;
-                    }
-                    return '<pre class="vscode-wolfram-print-output">' + self.escapeHtml(text) + '</pre>';
-                });
+                // Each Print call (one TextPacket) → one flex-row div so all args appear on the same line.
+                // Multi-arg args are joined by ASCII File Separator (\x1c) in the kernel output.
+                const htmlLines = decodedTexts.map(text =>
+                    '<div class="wl-print-line">' + text.split('\x1c').map(_renderArgPart).join('') + '</div>'
+                );
                 const btlLogPath = path.join(imgDir, 'btl.log');
                 const _nbUri_btl = currentExecution.execution.cell.notebook.uri;
-                const newHtml = self._processWLLatexBoxes(htmlParts.join(''), btlLogPath, undefined, undefined, undefined, _nbUri_btl);
-                const newText = decodedTexts.map(t => t.trim().startsWith('BoxData[') ? '[formula]' : t).join('');
+                const _rawNewHtml = self._processWLLatexBoxes(htmlLines.join(''), btlLogPath, undefined, undefined, undefined, _nbUri_btl);
+                const newHtml = '<div class="wl-print-output">' + _rawNewHtml + '</div>';
+                const newText = decodedTexts.map(text =>
+                    text.split('\x1c').map(t => {
+                        const trimmed = t.trim();
+                        if (trimmed.startsWith('*STR*')) return trimmed.slice(5);
+                        if (trimmed.startsWith('*SVG*')) return '[graphics]';
+                        if (trimmed.startsWith('*HTML*')) return '[info]';
+                        if (trimmed.startsWith('BoxData[')) return '[formula]';
+                        return trimmed;
+                    }).join('')
+                ).join('');
                 if (printOutput) {
                     printHtml += newHtml;
                     printText += newText;
@@ -716,6 +763,65 @@ async function checkoutExecutionQueue(self) {
                 }
             };
 
+            // flushWbp — handles *WBP* packets (WBPrint).
+            // Unlike flushPrint (which accumulates), each WBPrint call REPLACES the
+            // previous output in-place (for live loop progress display).
+            // wbpOutput is shared across all sub-expressions in this cell execution.
+            const flushWbp = async () => {
+                if (wbpLineQueue.length === 0) { wbpFlushPending = false; return; }
+                const packets = wbpLineQueue.splice(0);
+                const decodedTexts = packets.map(pkt => self.decodeWolframOctal(pkt.replace(/\\012/g, '\n')));
+                // Each WBPrint call → one flex-row div with all its args inline.
+                const htmlLines = decodedTexts.map(text => {
+                    const content = text.startsWith('*WBP*') ? text.slice(5) : text;
+                    return '<div class="wl-print-line">' + content.split('\x1c').map(_renderArgPart).join('') + '</div>';
+                });
+                const btlLogPath = path.join(imgDir, 'btl.log');
+                const _nbUri_wbp = currentExecution.execution.cell.notebook.uri;
+                const _rawNewHtml = self._processWLLatexBoxes(htmlLines.join(''), btlLogPath, undefined, undefined, undefined, _nbUri_wbp);
+                // wl-wbp-output wrapper used to identify/remove outputs on next cell eval.
+                const newHtml = '<div class="wl-wbp-output"><div class="wl-print-output">' + _rawNewHtml + '</div></div>';
+                const newText = decodedTexts.map(text => {
+                    const content = text.startsWith('*WBP*') ? text.slice(5) : text;
+                    return content.split('\x1c').map(t => {
+                        const trimmed = t.trim();
+                        if (trimmed.startsWith('*STR*')) return trimmed.slice(5);
+                        if (trimmed.startsWith('*SVG*')) return '[graphics]';
+                        if (trimmed.startsWith('*HTML*')) return '[info]';
+                        if (trimmed.startsWith('BoxData[')) return '[formula]';
+                        return trimmed;
+                    }).join('');
+                }).join('');
+                // Always replace (not append) — in-place update behaviour for loop progress display.
+                wbpHtml = newHtml;
+                wbpText = newText;
+                if (wbpOutput) {
+                    await currentExecution.execution.replaceOutputItems(
+                        [
+                            vscode.NotebookCellOutputItem.text(wbpHtml, "x-application/wolfram-language-html"),
+                            vscode.NotebookCellOutputItem.text('WBPrint: ' + wbpText.trimEnd(), "text/plain")
+                        ],
+                        wbpOutput
+                    );
+                } else {
+                    wbpOutput = new vscode.NotebookCellOutput([
+                        vscode.NotebookCellOutputItem.text(wbpHtml, "x-application/wolfram-language-html"),
+                        vscode.NotebookCellOutputItem.text('WBPrint: ' + wbpText.trimEnd(), "text/plain")
+                    ], { wolfbook_wbp: true });
+                    if (currentExecution.hasOutput) {
+                        await currentExecution.execution.appendOutput(wbpOutput);
+                    } else {
+                        currentExecution.hasOutput = true;
+                        await currentExecution.execution.replaceOutput(wbpOutput);
+                    }
+                }
+                wbpFlushPending = false;
+                if (wbpLineQueue.length > 0) {
+                    wbpFlushPending = true;
+                    setImmediate(() => flushWbp());
+                }
+            };
+
             // Evaluate the sub-expression interactively.
             // The kernel's main loop sets Out[N] and increments $Line automatically.
             // onMessage fires for kernel warnings/errors (e.g. Set::write for Protected).
@@ -734,6 +840,16 @@ async function checkoutExecutionQueue(self) {
                     // internal kernel communication noise, not user-visible output.
                     if (line.includes('Your options are:') &&
                         (line.includes('interrupt') || line.includes('abort') || line.includes('continue'))) return;
+                    // Route WBPrint packets (*WBP* prefix) to the WBPrint queue —
+                    // these replace their output in-place rather than accumulating.
+                    if (line.startsWith('*WBP*')) {
+                        wbpLineQueue.push(line);
+                        if (!wbpFlushPending) {
+                            wbpFlushPending = true;
+                            setImmediate(() => flushWbp());
+                        }
+                        return;
+                    }
                     printLineQueue.push(line);
                     if (!printFlushPending) {
                         printFlushPending = true;
@@ -804,10 +920,12 @@ async function checkoutExecutionQueue(self) {
 
             const lineN = r.cellIndex;
             if (i === 0 && lineN > 0) firstLineNum = lineN;
-            // Force-flush any remaining print lines (synchronous callbacks
+            // Force-flush any remaining print / WBP lines (synchronous callbacks
             // that fired before any await could yield).
             printFlushPending = false;
             if (printLineQueue.length > 0) await flushPrint();
+            wbpFlushPending = false;
+            if (wbpLineQueue.length > 0) await flushWbp();
 
             if (r.aborted) {
                 scrollLog('[checkout] r.aborted received — sub-expr', i, 'cell', currentExecution.execution.cell.index,
@@ -843,7 +961,7 @@ async function checkoutExecutionQueue(self) {
                     // Build placeholder HTML — only shown after 1 s if render is slow.
                     // (MathematicaServer cold-start ~4 s on first SVG; subsequent renders are fast.)
                     const _phOutLabel = `<span style="font-size:10px;color:#888;margin-right:8px;">${r.outputName}</span>`;
-                    const _phHeaderRow = `<div class="wl-output-header" style="display:flex;align-items:center;gap:6px;width:100%;min-height:22px;" data-session-epoch="${self._sessionEpoch}" data-output-id="${outputId}" data-out-n="${lineN}" data-sub-idx="${i}" data-output-format="${subFmt}" data-output-is-graphics="0">${_phOutLabel}</div>`;
+                    const _phHeaderRow = `<div class="wl-output-header" style="display:flex;align-items:center;gap:6px;width:100%;min-height:22px;" data-session-epoch="${self._sessionEpoch}" data-output-id="${outputId}" data-out-n="${lineN}" data-sub-idx="${i}" data-output-format="${subFmt}" data-output-is-graphics="0" data-cell-idx="${execCell.index}" data-sub-start="${_subStartLine ?? 0}" data-sub-end="${_subEndLine ?? 0}">${_phOutLabel}</div>`;
                     const _phHtml = `<div class="wl-output-block">${_phHeaderRow}<div class="wl-output-content"><span style="color:var(--vscode-descriptionForeground,#888);font-style:italic;font-size:12px;">&#8987; Rendering\u2026</span></div></div>`;
                     const _phOut = new vscode.NotebookCellOutput([vscode.NotebookCellOutputItem.text(_phHtml, "x-application/wolfram-language-html")]);
                     // Show placeholder only if render takes >1 s — fast renders skip it entirely.
@@ -884,13 +1002,48 @@ async function checkoutExecutionQueue(self) {
 
                     scrollLog('[checkout] VsCodeRender start | sub', i, '| lineN', lineN, '| format', subFmt);
                     const _renderT0 = Date.now();
-                    const renderResult = await self.session.evaluate(
-                        `VsCodeRender[${lineN}, "${subFmt}", ${scale}]`,
-                        { interactive: false, rejectDialog: true }
-                    );
+                    // 30-second hard limit on VsCodeRender to guard against headless renderer hangs
+                    // (e.g. ExportString["SVG"] for Graphics3D blocks in a C-level front-end IPC call
+                    // that TimeConstrained cannot interrupt).  On timeout: abort the kernel evaluate,
+                    // clear the interrupt-handler flag (abort resets WL $Pre), and show a warning.
+                    const _renderAbortMs = 30000;
+                    let _renderTimedOut = false;
+                    const renderResult = await new Promise(resolve => {
+                        const _abortTimer = setTimeout(() => {
+                            _renderTimedOut = true;
+                            scrollLog('[checkout] VsCodeRender TIMEOUT after', _renderAbortMs, 'ms — aborting kernel');
+                            self.writeDebugLog(`[CHECKOUT] VsCodeRender TIMEOUT after ${_renderAbortMs}ms | cell ${currentExecution.execution.cell.index} | lineN ${lineN}`);
+                            self._interruptHandlerInstalled = false; // abort clears WL $Pre handler
+                            self.session.abort();
+                            resolve(null);
+                        }, _renderAbortMs);
+                        self.session.evaluate(
+                            `VsCodeRender[${lineN}, "${subFmt}", ${scale}]`,
+                            { interactive: false, rejectDialog: true }
+                        ).then(r => { clearTimeout(_abortTimer); if (!_renderTimedOut) resolve(r); })
+                         .catch(() => { clearTimeout(_abortTimer); if (!_renderTimedOut) resolve(null); });
+                    });
                     clearTimeout(_phTimer);
                     await _placeholderAppended;  // ensure placeholder append completes before replacing
-                    scrollLog('[checkout] VsCodeRender done | dt=', Date.now() - _renderT0, 'ms | ph:', _placeholderShown, '| type:', renderResult?.result?.type);
+                    scrollLog('[checkout] VsCodeRender done | dt=', Date.now() - _renderT0, 'ms | ph:', _placeholderShown, '| timedOut:', _renderTimedOut, '| type:', renderResult?.result?.type);
+
+                    // If the render timed out, show an amber warning in place of the output.
+                    if (_renderTimedOut) {
+                        const _toHtml =
+                            '<div class="vscode-wolfram-message-output" style="' +
+                            'color:#cc8800;border-left:3px solid #cc8800;' +
+                            'background:rgba(204,136,0,0.08);' +
+                            'padding:4px 8px;margin:1px 0;border-radius:0 3px 3px 0;' +
+                            'font-family:monospace;font-size:0.85em;white-space:pre-wrap">' +
+                            'Rendering timed out after 30 s — graphics export blocked waiting for front-end renderer.<br>' +
+                            'Re-evaluate the cell to retry. If the problem persists, restart the kernel.</div>';
+                        await _replacePlaceholder([
+                            vscode.NotebookCellOutputItem.text(_toHtml, 'x-application/wolfram-language-html'),
+                            vscode.NotebookCellOutputItem.text('[Rendering timed out]', 'text/plain')
+                        ]);
+                        currentExecution.hasOutput = true;
+                        continue;
+                    }
                     // ---- Forward any messages emitted during the render call ----
                     // e.g. $RecursionLimit::reclim from a recursive Format rule.
                     // In the non-interactive render path these were previously silently
@@ -956,7 +1109,7 @@ async function checkoutExecutionQueue(self) {
                         const _effectiveFmt = self._resolveFormat(execCell, _isGfx, i);
                         self._outputRegistry.set(outputId,
                             { cell: execCell, outN: lineN, subIdx: i, outName: r.outputName, format: _effectiveFmt, isGfx: _isGfx });
-                        const headerRow = `<div class="wl-output-header" style="display:flex;align-items:center;gap:6px;width:100%;min-height:22px;" data-session-epoch="${self._sessionEpoch}" data-output-id="${outputId}" data-out-n="${lineN}" data-sub-idx="${i}" data-output-format="${_effectiveFmt}" data-output-is-graphics="${_isGfx ? '1' : '0'}">${outLabel}</div>`;
+                        const headerRow = `<div class="wl-output-header" style="display:flex;align-items:center;gap:6px;width:100%;min-height:22px;" data-session-epoch="${self._sessionEpoch}" data-output-id="${outputId}" data-out-n="${lineN}" data-sub-idx="${i}" data-output-format="${_effectiveFmt}" data-output-is-graphics="${_isGfx ? '1' : '0'}" data-cell-idx="${execCell.index}" data-sub-start="${_subStartLine ?? 0}" data-sub-end="${_subEndLine ?? 0}">${outLabel}</div>`;
                         // Graphics outputs are <img src="file.svg/png"/> — tiny HTML that
                         // never needs truncation; applying it would corrupt the tag.
                         // BTL-paged outputs already have their content split into pages;

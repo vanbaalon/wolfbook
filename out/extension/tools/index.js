@@ -795,18 +795,36 @@ class InsertCellsTool {
                             _ctrl._wolframExecPending = true;
                             _ctrl.execute([cell], notebook, _ctrl._controller);
 
-                            // Wait for checkout to finish (polls _evalDispatched → false or queueLength → 0)
+                            // Wait for checkout to finish (polls _evalDispatched → false or queueLength → 0).
+                            // Grace period: wait 200 ms after first idle to allow async appendOutput
+                            // operations started by checkout to settle before reading outputs.
                             const cellDeadline = Math.min(deadline, Date.now() + 300000);
+                            let hasSeenCellIdle = false;
                             await new Promise(resolve => {
                                 const poll = () => {
                                     // isIdle when queue cleared AND we're not waiting on kernel
                                     const isIdle = !_ctrl._evalDispatched && _ctrl.executionQueue.queueLength() === 0;
-                                    if (isIdle || Date.now() >= cellDeadline) resolve();
+                                    if (isIdle) {
+                                        if (!hasSeenCellIdle) {
+                                            hasSeenCellIdle = true;
+                                            setTimeout(poll, 200);
+                                            return;
+                                        }
+                                    } else {
+                                        hasSeenCellIdle = false;
+                                    }
+                                    if ((isIdle && hasSeenCellIdle) || Date.now() >= cellDeadline) resolve();
                                     else setTimeout(poll, 100);
                                 };
                                 // Start polling sooner
                                 setTimeout(poll, 50);
                             });
+
+                            // Scroll the evaluated cell into view so the user can see its output.
+                            // In collab mode flashCell scrolls the right pane; in non-collab it
+                            // scrolls the single editor (InCenterIfOutsideViewport — no-op if
+                            // VS Code's handleAutoReveal already revealed the cell).
+                            await flashCell(editor, idx);
 
                             // Read cell outputs for the tool response
                             const updatedCell = notebook.cellAt(idx);
@@ -1522,11 +1540,22 @@ class RunCellTool {
                     _ctrl._wolframExecPending = true;
                     _ctrl.execute([notebook.cellAt(idx)], notebook, _ctrl._controller);
                     const cellDeadline = Math.min(deadline, Date.now() + 300000);
+                    // Grace period for async output operations to settle after idle is detected
+                    let hasSeenCellIdle = false;
                     await new Promise(resolve => {
                         const poll = () => {
                             if (token.isCancellationRequested) { resolve(); return; }
-                            if (!_ctrl._evalDispatched && _ctrl.executionQueue.queueLength() === 0) resolve();
-                            else if (Date.now() >= cellDeadline) resolve();
+                            const cellIsIdle = !_ctrl._evalDispatched && _ctrl.executionQueue.queueLength() === 0;
+                            if (cellIsIdle) {
+                                if (!hasSeenCellIdle) {
+                                    hasSeenCellIdle = true;
+                                    setTimeout(poll, 200);  // wait 200ms for async appends
+                                    return;
+                                }
+                            } else {
+                                hasSeenCellIdle = false;
+                            }
+                            if ((cellIsIdle && hasSeenCellIdle) || Date.now() >= cellDeadline) resolve();
                             else setTimeout(poll, 200);
                         };
                         setTimeout(poll, 300);
@@ -1646,12 +1675,25 @@ class RunCellTool {
             try {
                 _ctrl._wolframExecPending = true;
                 _ctrl.execute([notebook.cellAt(idx)], notebook, _ctrl._controller);
-                // Wait for checkout to finish
+                // Wait for checkout to finish. After idle is detected, add a grace period
+                // to allow async appendOutput() operations to complete (they were started
+                // by the checkout pipeline but may still be in-flight).
                 const deadline = Date.now() + timeoutSec * 1000;
+                let hasSeenIdle = false;
                 await new Promise(resolve => {
                     const poll = () => {
                         const isIdle = !_ctrl._evalDispatched && _ctrl.executionQueue.queueLength() === 0;
-                        if (token.isCancellationRequested || isIdle || Date.now() >= deadline) resolve();
+                        if (isIdle) {
+                            if (!hasSeenIdle) {
+                                // Just detected idle — wait 200ms for async output ops to settle
+                                hasSeenIdle = true;
+                                setTimeout(poll, 200);
+                                return;
+                            }
+                        } else {
+                            hasSeenIdle = false;  // reset if we go back to busy
+                        }
+                        if (token.isCancellationRequested || (isIdle && hasSeenIdle) || Date.now() >= deadline) resolve();
                         else setTimeout(poll, 100);
                     };
                     setTimeout(poll, 50);
@@ -3202,6 +3244,158 @@ class PaperSearchTool {
     }
 }
 
+// ---------------------------------------------------------------------------
+// wolfbook_remote_checkpoint — agent-facing working-memory tool
+// ---------------------------------------------------------------------------
+//
+// Persists a checkpoint markdown file under the active notebook's `.img/`
+// sidecar directory and emits a `checkpoint` event on the remote event bus
+// so any paired iOS device can show it on its activity timeline.
+//
+// The directory subpath is configurable via `wolfbook.remote.checkpointDirectoryName`
+// (default: "wolfremote/checkpoints"). Files are named
+// `<ISO-timestamp>-<short-id>.md`.
+//
+// The tool's textual reply is intentionally rich: it lists prior checkpoints
+// in the same notebook, instructing the agent to read them at session start.
+// This is what motivates the agent to actually call the tool — it's working
+// memory, not just user-facing telemetry.
+// ---------------------------------------------------------------------------
+
+const _kEventBus = require('../remote/eventBus');
+const _kPath     = require('path');
+const _kFs       = require('fs');
+
+/**
+ * Compress a LanguageModelToolResult down to a short string for iOS timeline.
+ * Caps at ~500 chars. Returns null on null/undefined.
+ */
+function _summariseToolResult(result) {
+    if (!result) return null;
+    let text = '';
+    try {
+        const content = result.content || [];
+        for (const part of content) {
+            if (part && typeof part.value === 'string') text += part.value;
+            else if (part && typeof part === 'object' && 'value' in part) text += String(part.value);
+        }
+    } catch (_) {}
+    if (!text) return null;
+    text = text.replace(/\s+/g, ' ').trim();
+    if (text.length > 500) text = text.slice(0, 497) + '…';
+    return text;
+}
+
+class RemoteCheckpointTool {
+    async prepareInvocation(options, _token) {
+        const kind = options.input?.kind || 'finding';
+        const summary = options.input?.summary || '';
+        const short = summary.length > 80 ? summary.slice(0, 77) + '…' : summary;
+        return { invocationMessage: `Checkpoint [${kind}]: ${short}` };
+    }
+
+    async invoke(options, _token) {
+        const inp = options.input || {};
+        const kind = inp.kind || 'finding';
+        const summary = String(inp.summary || '').trim();
+        const detail  = String(inp.detail  || '').trim();
+        if (!summary) {
+            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
+                'Error: wolfbook_remote_checkpoint requires a non-empty `summary` field.')]);
+        }
+
+        // Find the active wolfbook notebook to anchor the .img directory.
+        const ed = vscode.window.activeNotebookEditor;
+        const nb = ed?.notebook;
+        if (!nb || nb.notebookType !== 'extended-wolfram-notebook') {
+            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
+                'Error: wolfbook_remote_checkpoint requires an active Wolfbook notebook.')]);
+        }
+        const nbPath = nb.uri.fsPath;
+        if (!nbPath || !nbPath.endsWith('.wb') && !nbPath.endsWith('.evsnb') && !nbPath.endsWith('.vsnb')) {
+            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
+                'Error: active notebook has no on-disk path; save it first.')]);
+        }
+
+        const cfg = vscode.workspace.getConfiguration('wolfbook.remote');
+        const subdir = cfg.get('checkpointDirectoryName', 'wolfremote/checkpoints');
+        const imgDir = nbPath + '.img';
+        const dir = _kPath.join(imgDir, subdir);
+        try { _kFs.mkdirSync(dir, { recursive: true }); } catch (_) {}
+
+        const ts = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+        const shortId = require('crypto').randomBytes(2).toString('hex');
+        const filename = `${ts.replace(/:/g, '-')}-${shortId}.md`;
+        const fpath = _kPath.join(dir, filename);
+
+        const body =
+`---
+kind: ${kind}
+summary: ${JSON.stringify(summary)}
+ts: ${ts}
+relatedCells: ${JSON.stringify(inp.relatedCells || [])}
+relatedFiles: ${JSON.stringify(inp.relatedFiles || [])}
+notebook: ${_kPath.basename(nbPath)}
+---
+
+# ${summary}
+
+${detail}
+`;
+        try { _kFs.writeFileSync(fpath, body, 'utf8'); }
+        catch (err) {
+            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
+                `Error writing checkpoint: ${err?.message || err}`)]);
+        }
+
+        // Emit on the remote bus (no-op if no listeners)
+        try {
+            _kEventBus.emit('checkpoint', {
+                docId: nb.uri.toString(),
+                fsPath: nbPath,
+                file: fpath,
+                kind, summary, detail,
+                relatedCells: inp.relatedCells || [],
+                relatedFiles: inp.relatedFiles || [],
+                ts: Date.now(),
+            });
+        } catch (_) {}
+
+        // Build the prior-checkpoints listing for the agent's reply.
+        let prior = [];
+        try {
+            const entries = _kFs.readdirSync(dir).filter(f => f.endsWith('.md') && f !== filename);
+            entries.sort().reverse();
+            for (const f of entries.slice(0, 12)) {
+                let kindTag = '?', sumLine = '';
+                try {
+                    const head = _kFs.readFileSync(_kPath.join(dir, f), 'utf8').split('\n').slice(0, 8).join('\n');
+                    const km = head.match(/^kind:\s*(\S+)/m);
+                    const sm = head.match(/^summary:\s*"?(.+?)"?$/m);
+                    if (km) kindTag = km[1];
+                    if (sm) sumLine = sm[1];
+                } catch (_) {}
+                prior.push(`  - ${f}  [${kindTag}]  ${sumLine}`);
+            }
+        } catch (_) {}
+
+        const relPath = _kPath.relative(_kPath.dirname(nbPath), fpath);
+        const replyLines = [
+            `Checkpoint saved: ${relPath}`,
+            ''
+        ];
+        if (prior.length > 0) {
+            replyLines.push(`Prior checkpoints in this notebook (most recent first):`);
+            replyLines.push(...prior);
+            replyLines.push('');
+            replyLines.push('To read any checkpoint, use your file-read tool with the path. Recommended: read the most recent 2-3 plan and decision checkpoints at the start of each session.');
+        } else {
+            replyLines.push('(This is the first checkpoint in this notebook.)');
+        }
+        return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(replyLines.join('\n'))]);
+    }
+}
+
 function registerTools(context, getController, debugCtrl, getAskPanel) {
     const tools = [
         // Core notebook tools (visible in chat panel)
@@ -3235,6 +3429,8 @@ function registerTools(context, getController, debugCtrl, getAskPanel) {
         { name: 'wolfteam_askDecision',        impl: new AskDecisionTool() },
         { name: 'wolfteam_checkpoint',         impl: new CheckpointTool() },
         { name: 'wolfteam_askSpecialist',      impl: new AskSpecialistTool(getAskPanel || (() => null)) },
+        // Wolfbook Remote — agent-facing checkpoint tool (working memory + iOS timeline)
+        { name: 'wolfbook_remote_checkpoint',  impl: new RemoteCheckpointTool() },
         // Wolfslide tools
         { name: 'wolfslide_getContext',      impl: new WolfslideGetContextTool() },
         { name: 'wolfslide_listSlides',      impl: new WolfslideListSlidesTool() },
@@ -3324,6 +3520,38 @@ function registerTools(context, getController, debugCtrl, getAskPanel) {
     ];
 
     for (const { name, impl } of tools) {
+        // Wrap the tool's invoke() so we can emit a `toolUsage` event on the
+        // remote event bus. The wrap is no-op when there are no listeners
+        // (typical desktop case without a paired iOS device).
+        if (typeof impl.invoke === 'function' && !impl.__wolfbookRemoteWrapped) {
+            const _origInvoke = impl.invoke.bind(impl);
+            impl.invoke = async function (options, token) {
+                const startedAt = Date.now();
+                let result;
+                let ok = true;
+                try {
+                    result = await _origInvoke(options, token);
+                    return result;
+                } catch (err) {
+                    ok = false;
+                    throw err;
+                } finally {
+                    try {
+                        if (_kEventBus.listenerCount('toolUsage') > 0) {
+                            _kEventBus.emit('toolUsage', {
+                                tool: name,
+                                args: options?.input ?? null,
+                                result: _summariseToolResult(result),
+                                ok,
+                                durationMs: Date.now() - startedAt,
+                                ts: Date.now(),
+                            });
+                        }
+                    } catch (_) {}
+                }
+            };
+            impl.__wolfbookRemoteWrapped = true;
+        }
         if (vscode.lm && vscode.lm.registerTool) {
             context.subscriptions.push(vscode.lm.registerTool(name, impl));
         }

@@ -210,6 +210,7 @@ async function activate(context) {
             return {
                 lineWidth: cfg.get('formatter.pageLength', 150),
                 replaceNamedChars: cfg.get('formatter.replaceNamedChars', false),
+                replaceMultiply: cfg.get('formatter.replaceMultiply', false),
                 ...overrides
             };
         }
@@ -224,13 +225,11 @@ async function activate(context) {
                 vscode.window.showErrorMessage('Wolfbook formatter error: ' + e.message);
                 return Promise.resolve(false);
             }
-            const fullRange = new vscode.Range(
-                doc.positionAt(0),
-                doc.positionAt(text.length)
-            );
-            const edit = new vscode.WorkspaceEdit();
-            edit.replace(doc.uri, fullRange, formatted);
-            return vscode.workspace.applyEdit(edit);
+            const edits = _computeMinimalEdits(doc, text, formatted);
+            if (edits.length === 0) return Promise.resolve(true);
+            const wsEdit = new vscode.WorkspaceEdit();
+            wsEdit.set(doc.uri, edits);
+            return vscode.workspace.applyEdit(wsEdit);
         }
 
         context.subscriptions.push(vscode.commands.registerCommand('wolfbook.format', () => {
@@ -242,13 +241,13 @@ async function activate(context) {
         context.subscriptions.push(vscode.commands.registerCommand('wolfbook.formatWithUTF', () => {
             const editor = vscode.window.activeTextEditor;
             if (!editor) return;
-            _formatDocument(editor, _getFormatterOpts({ replaceNamedChars: true }));
+            _formatDocument(editor, _getFormatterOpts({ replaceNamedChars: true, replaceMultiply: true, replacePartBrackets: true }));
         }));
 
         context.subscriptions.push(vscode.commands.registerCommand('wolfbook.formatWithUTFWide', () => {
             const editor = vscode.window.activeTextEditor;
             if (!editor) return;
-            _formatDocument(editor, _getFormatterOpts({ replaceNamedChars: true, lineWidth: 200 }));
+            _formatDocument(editor, _getFormatterOpts({ replaceNamedChars: true, replaceMultiply: true, replacePartBrackets: true, lineWidth: 200 }));
         }));
 
         // Compute minimal TextEdits so formatting doesn't nuke the undo stack.
@@ -275,13 +274,13 @@ async function activate(context) {
 
         context.subscriptions.push(
             vscode.languages.registerDocumentFormattingEditProvider(
-                [{ language: 'wolfram' }, { scheme: 'vscode-notebook-cell' }],
+                [{ language: 'wolfram' }, { scheme: 'vscode-notebook-cell', language: 'wolfram' }],
                 {
                     provideDocumentFormattingEdits(doc) {
                         if (doc.languageId === 'markdown') return [];
                         const text = doc.getText();
                         try {
-                            const formatted = wlFormat(text, _getFormatterOpts({ replaceNamedChars: true }));
+                            const formatted = wlFormat(text, _getFormatterOpts({ replaceNamedChars: true, replaceMultiply: true, replacePartBrackets: true }));
                             if (formatted === text) return [];
                             return _computeMinimalEdits(doc, text, formatted);
                         } catch (e) {
@@ -294,7 +293,7 @@ async function activate(context) {
 
         context.subscriptions.push(
             vscode.languages.registerDocumentRangeFormattingEditProvider(
-                [{ language: 'wolfram' }, { scheme: 'vscode-notebook-cell' }],
+                [{ language: 'wolfram' }, { scheme: 'vscode-notebook-cell', language: 'wolfram' }],
                 {
                     provideDocumentRangeFormattingEdits(doc, range) {
                         if (doc.languageId === 'markdown') return [];
@@ -333,7 +332,7 @@ async function activate(context) {
             if (!isWolfram) return vscode.commands.executeCommand('default:type', { text: '\n' });
 
             // Format first — cursor stays at its pre-Enter position in the formatted result
-            await _formatDocument(editor, _getFormatterOpts({ replaceNamedChars: true }));
+            await _formatDocument(editor, _getFormatterOpts({ replaceNamedChars: true, replaceMultiply: true, replacePartBrackets: true }));
 
             // Now insert the newline; cursor lands on the new blank line
             await vscode.commands.executeCommand('default:type', { text: '\n' });
@@ -346,7 +345,7 @@ async function activate(context) {
                 vscode.window.showInformationMessage('No active notebook.');
                 return;
             }
-            const opts = _getFormatterOpts({});
+            const opts = _getFormatterOpts({ replaceNamedChars: true, replaceMultiply: true, replacePartBrackets: true });
             const we = new vscode.WorkspaceEdit();
             let count = 0;
             for (const cell of nb.getCells()) {
@@ -574,6 +573,20 @@ async function activate(context) {
     _tools.registerChatParticipant(context, () => controller);
     // Register @wolfteam collaborative chat participant
     _tools.registerWolfteamParticipant(context, () => controller);
+
+    // ── Wolfbook Remote Host bridge (optional addon extension) ─────────────
+    // Registers wolfbook.remote.* commands consumed by the
+    // wolfbook.wolfbook-remote-host addon. Failure to register MUST NOT break
+    // the main extension activation.
+    try {
+        require('./remote').register(context, () => controller, () => _toolMap);
+        const _remoteEventBus = require('./remote/eventBus');
+        _remoteEventBus.on('remoteConnected', ({ connected }) => {
+            try { _watchPanel.setRemoteStatus(connected); } catch (_) {}
+        });
+    } catch (err) {
+        try { devLog(LOG_CHANNELS.EXTENSION, '[Wolfbook Remote] register failed:', err?.message || err); } catch (_) {}
+    }
 
     // ── Claude Desktop MCP server ──────────────────────────────────────────
     // Exposes all Wolfram notebook tools to Claude via MCP HTTP/SSE protocol.
@@ -983,7 +996,22 @@ async function activate(context) {
         const sel = editor.selections;
         if (!sel || sel.length === 0) return;
         const cell = editor.notebook.cellAt(sel[0].start);
-        if (!cell || cell.kind !== vscode.NotebookCellKind.Code) return;
+        // If the current cell is a markup (markdown) cell, advance to the next
+        // code cell rather than getting stuck. Keep skipping consecutive markup cells.
+        if (!cell) return;
+        if (cell.kind !== vscode.NotebookCellKind.Code) {
+            let nextIdx = sel[0].start + 1;
+            while (nextIdx < editor.notebook.cellCount &&
+                   editor.notebook.cellAt(nextIdx).kind !== vscode.NotebookCellKind.Code) {
+                nextIdx++;
+            }
+            if (nextIdx < editor.notebook.cellCount) {
+                const RC = vscode.NotebookRange ?? vscode.NotebookCellRange;
+                editor.selections = [new RC(nextIdx, nextIdx + 1)];
+                editor.revealRange(new RC(nextIdx, nextIdx + 1), vscode.NotebookEditorRevealType.Default);
+            }
+            return;
+        }
 
         // ---- Save viewport + selection for refine-mode scroll guard ----
         // Saved NOW — before ANY execution-related scroll can fire.
@@ -1821,7 +1849,9 @@ async function activate(context) {
                 const filtered = diagnostics.filter((diag) => {
                     const msg = diag.message;
                     if (msg.toLowerCase().includes('unexpected expression at top-level')) return false;
-                    if (msg.includes('Suspicious use of') && msg.includes('session symbol')) return false;
+                    if (msg.includes('Unexpected prefix')) return false;
+                    if (msg.includes('Unexpected letterlike')) return false;
+                    if (msg.includes('Suspicious use of') && msg.includes('session')) return false;
                     if (msg.includes('Suspicious uppercase') && msg.includes('pattern')) return false;
                     if (msg.includes('Operands') && msg.includes('different lines')) return false;
                     if (/expected.*operand/i.test(msg)) return false;
@@ -1935,7 +1965,9 @@ async function activate(context) {
                     const filtered = diagnostics.filter((diag) => {
                         const msg = diag.message;
                         if (msg.toLowerCase().includes('unexpected expression at top-level')) return false;
-                        if (msg.includes('Suspicious use of') && msg.includes('session symbol')) return false;
+                        if (msg.includes('Unexpected prefix')) return false;
+                        if (msg.includes('Unexpected letterlike')) return false;
+                        if (msg.includes('Suspicious use of') && msg.includes('session')) return false;
                         if (msg.includes('Suspicious uppercase') && msg.includes('pattern')) return false;
                         if (msg.includes('Operands') && msg.includes('different lines')) return false;
                         if (/expected.*operand/i.test(msg)) return false;
@@ -2020,6 +2052,9 @@ async function activate(context) {
     // Dismiss the loading indicator now that activation is complete
     clearTimeout(_loadingTimeout);
     _dismissLoading();
+
+    // Show "What's New" panel once after each version upgrade (not on first install).
+    try { require('./whats-new-panel').maybeShowWhatsNew(context); } catch (_) {}
 }
 exports.activate = activate;
 

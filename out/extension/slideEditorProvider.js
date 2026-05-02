@@ -115,7 +115,11 @@ function _exportHtmlToPdf(html, outPath) {
         }
         // Write HTML to a temp file Chrome can open via file:// URL
         const tmpHtml = path.join(os.tmpdir(), `wslide_pdf_${Date.now()}.html`);
+        // Use an isolated user-data-dir so headless Chrome does not conflict
+        // with any already-running Chrome instances sharing the default profile.
+        const tmpUserDataDir = path.join(os.tmpdir(), `wslide_chrome_${Date.now()}`);
         try { fs.writeFileSync(tmpHtml, html, 'utf8'); } catch (e) { reject(e); return; }
+        try { fs.mkdirSync(tmpUserDataDir, { recursive: true }); } catch (e) { /* ignore */ }
 
         const args = [
             '--headless=new',
@@ -127,17 +131,86 @@ function _exportHtmlToPdf(html, outPath) {
             // 1920×1080 px at 96 dpi = 20×11.25 inches = 1920×1080 pt at 96 dpi
             // Chrome --print-to-pdf uses CSS @page size, so set it explicitly too
             '--print-to-pdf-no-header',
+            `--user-data-dir=${tmpUserDataDir}`,
             `--print-to-pdf=${outPath}`,
             `file://${tmpHtml}`,
         ];
 
         execFile(chrome, args, { timeout: 60000 }, (err, stdout, stderr) => {
-            fs.unlink(tmpHtml, () => {});  // clean up temp file
+            fs.unlink(tmpHtml, () => {});  // clean up temp html
+            fs.rm(tmpUserDataDir, { recursive: true, force: true }, () => {});  // clean up user-data-dir
             if (err) { reject(new Error(`Chrome PDF render failed: ${stderr || err.message}`)); return; }
             if (!fs.existsSync(outPath)) { reject(new Error('Chrome ran but did not produce a PDF file.')); return; }
             resolve();
         });
     });
+}
+
+// Merge an array of PDF files into a single output PDF using python3 + pypdf.
+function _mergePdfs(inputs, outputPath) {
+    return new Promise((resolve, reject) => {
+        // pypdf 6.x uses PdfWriter/PdfReader; older versions used PdfMerger
+        const script = [
+            'import sys',
+            'from pypdf import PdfWriter, PdfReader',
+            'w = PdfWriter()',
+            'for f in sys.argv[1:-1]:',
+            '    r = PdfReader(f)',
+            '    for p in r.pages: w.add_page(p)',
+            'with open(sys.argv[-1], "wb") as fout: w.write(fout)',
+        ].join('\n');
+        const tmpScript = path.join(os.tmpdir(), `wslide_merge_${Date.now()}.py`);
+        try { fs.writeFileSync(tmpScript, script, 'utf8'); } catch (e) { reject(e); return; }
+        const python = '/opt/anaconda3/bin/python3';
+        execFile(python, [tmpScript, ...inputs, outputPath], { timeout: 60000 }, (err) => {
+            fs.unlink(tmpScript, () => {});
+            if (err) reject(new Error(`PDF merge failed: ${err.message}`));
+            else resolve();
+        });
+    });
+}
+
+// Export deck as PDF by splitting into chunks of CHUNK_SIZE slides each,
+// rendering each chunk with Chrome, then merging all chunk PDFs into one.
+// This works around Chrome headless --print-to-pdf failures on large decks.
+const _PDF_CHUNK_SIZE = 8;
+
+// onProgress(message, increment) — optional VS Code progress callback
+async function _exportDeckToPdf(deck, deckDir, outPath, onProgress) {
+    const exporter = require('./slideExporter');
+    const slides = deck.slides || [];
+    if (slides.length <= _PDF_CHUNK_SIZE) {
+        onProgress && onProgress('Rendering slides…', 90);
+        const html = exporter.exportDeckPdf(deck, deckDir);
+        await _exportHtmlToPdf(html, outPath);
+        onProgress && onProgress('Done', 10);
+        return;
+    }
+    const numChunks = Math.ceil(slides.length / _PDF_CHUNK_SIZE);
+    // 90% of progress for rendering chunks, 10% for merging
+    const renderShare = 90;
+    const mergeShare = 10;
+    const tmpPdfs = [];
+    try {
+        for (let i = 0; i < slides.length; i += _PDF_CHUNK_SIZE) {
+            const chunkIndex = Math.floor(i / _PDF_CHUNK_SIZE);
+            const slideFrom = i + 1;
+            const slideTo = Math.min(i + _PDF_CHUNK_SIZE, slides.length);
+            onProgress && onProgress(
+                `Rendering slides ${slideFrom}–${slideTo} of ${slides.length} (part ${chunkIndex + 1}/${numChunks})…`,
+                renderShare / numChunks
+            );
+            const chunk = Object.assign({}, deck, { slides: slides.slice(i, i + _PDF_CHUNK_SIZE) });
+            const html = exporter.exportDeckPdf(chunk, deckDir);
+            const tmpPdf = path.join(os.tmpdir(), `wslide_chunk_${Date.now()}_${i}.pdf`);
+            await _exportHtmlToPdf(html, tmpPdf);
+            tmpPdfs.push(tmpPdf);
+        }
+        onProgress && onProgress(`Merging ${numChunks} parts…`, mergeShare);
+        await _mergePdfs(tmpPdfs, outPath);
+    } finally {
+        tmpPdfs.forEach(f => { try { fs.unlinkSync(f); } catch (e) { /* ignore */ } });
+    }
 }
 
 // Module-level reference for wolfslide tools to reach the active provider.
@@ -346,9 +419,9 @@ class SlideEditorProvider {
 
                 case 'exportPdf': {
                     try {
-                        const html = exporter.exportDeckPdf(entry.deck, path.dirname(document.uri.fsPath));
+                        const deckDir = path.dirname(document.uri.fsPath);
                         const defaultUri = vscode.Uri.file(
-                            path.join(path.dirname(document.uri.fsPath), deckName + '.pdf')
+                            path.join(deckDir, deckName + '.pdf')
                         );
                         const saveUri = await vscode.window.showSaveDialog({
                             defaultUri,
@@ -360,8 +433,10 @@ class SlideEditorProvider {
                                 location: vscode.ProgressLocation.Notification,
                                 title: 'Exporting PDF…',
                                 cancellable: false
-                            }, async () => {
-                                await _exportHtmlToPdf(html, saveUri.fsPath);
+                            }, async (progress) => {
+                                await _exportDeckToPdf(entry.deck, deckDir, saveUri.fsPath,
+                                    (msg, increment) => progress.report({ message: msg, increment })
+                                );
                             });
                             vscode.window.showInformationMessage(`PDF exported: ${path.basename(saveUri.fsPath)}`);
                         }

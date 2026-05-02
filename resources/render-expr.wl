@@ -2,6 +2,9 @@
 (* Extracted from init.wl (Round 9 refactor). *)
 
 (* ===== WBVersion[] — returns a formatted version summary ===== *)
+WBVersion::usage = "WBVersion[] prints the version numbers and build dates for all \
+Wolfbook components: the VS Code extension, the BoxToLatex (BTL) addon, the WSTP \
+addon, and the Mathematica kernel.";
 WBVersion[] := (
     Print["Wolfbook extension : ", $getKernelConfig["wolfbookVersion",      "unknown"],
           "  (installed: ", $getKernelConfig["wolfbookBuildDate",    "unknown"], ")"];
@@ -213,6 +216,72 @@ VsCodeRenderExpr[expr_, format_String, scale_?NumericQ, searchPat_String:""] :=
         ]
     ];
 
+    (* ---- InformationData path: ?SymbolName single-symbol documentation ---- *)
+    (* ?Symbol returns InterpretationBox[<interactive_widget_boxes>, InformationData[assoc_, True]]
+       The widget boxes contain DynamicModuleBox / PaneSelectorBox / ButtonBox which BTL
+       cannot render, producing garbled LaTeX.  Instead we extract the association directly
+       and emit clean HTML with the symbol name, usage text, definitions, and attributes.
+       NOTE: InformationData lives in the Information` package context — do NOT use
+       _InformationData pattern (resolves to Global`InformationData at load time).
+       Use a string-based head check instead. *)
+    If[Head[expr] === InterpretationBox && Length[expr] >= 2 &&
+       StringContainsQ[ToString[Head[expr[[2]]], InputForm], "InformationData"],
+        Module[{rawInfo, infoAssoc, fullName, shortName,
+                usageStr, attribs,
+                headerHtml, usageHtml, defsHtml, attribsHtml},
+            rawInfo   = expr[[2]];
+            infoAssoc = If[Length[rawInfo] >= 1 && AssociationQ[rawInfo[[1]]],
+                           rawInfo[[1]], <||>];
+            fullName  = Lookup[infoAssoc, "FullName", ""];
+            shortName = Last[StringSplit[If[fullName === "", "?", fullName], "`"]];
+            usageStr  = Lookup[infoAssoc, "Usage", None];
+            attribs   = Lookup[infoAssoc, "Attributes", {}];
+
+            headerHtml =
+                "<div style=\"font-size:14px;font-weight:bold;margin-bottom:4px;\">" <>
+                shortName <> "</div>" <>
+                If[StringContainsQ[fullName, "`"],
+                    "<div style=\"font-size:11px;color:var(--vscode-descriptionForeground,#888);margin-bottom:8px;\">" <>
+                    fullName <> "</div>", ""];
+
+            usageHtml = If[StringQ[usageStr] && usageStr =!= "",
+                "<div style=\"margin-bottom:10px;\">" <>
+                "<div style=\"font-size:11px;font-weight:bold;" <>
+                "color:var(--vscode-descriptionForeground,#888);margin-bottom:3px;\">Usage</div>" <>
+                "<div style=\"font-size:12px;line-height:1.6;white-space:pre-wrap;\">" <>
+                StringReplace[usageStr, {"<" -> "&lt;", ">" -> "&gt;", "&" -> "&amp;"}] <>
+                "</div></div>",
+                ""];
+
+            defsHtml = Module[{sym, dvs},
+                sym = Quiet[Check[ToExpression[fullName, InputForm], $Failed]];
+                dvs = If[sym =!= $Failed && Head[sym] === Symbol,
+                         Quiet[DownValues[sym]], {}];
+                If[!ListQ[dvs] || Length[dvs] === 0, "",
+                    "<div style=\"margin-bottom:8px;\">" <>
+                    "<div style=\"font-size:11px;font-weight:bold;" <>
+                    "color:var(--vscode-descriptionForeground,#888);margin-bottom:3px;\">Definitions</div>" <>
+                    "<pre style=\"font-size:11px;white-space:pre-wrap;overflow-wrap:anywhere;" <>
+                    "background:var(--vscode-textCodeBlock-background,rgba(128,128,128,0.1));" <>
+                    "padding:6px 8px;border-radius:3px;margin:0;\">" <>
+                    StringReplace[ToString[dvs, InputForm],
+                                  {"<" -> "&lt;", ">" -> "&gt;", "&" -> "&amp;"}] <>
+                    "</pre></div>"
+                ]
+            ];
+
+            attribsHtml = If[ListQ[attribs] && Length[attribs] > 0,
+                "<div style=\"font-size:11px;color:var(--vscode-descriptionForeground,#888);\">" <>
+                "Attributes: " <>
+                StringReplace[ToString[attribs, OutputForm],
+                               {"<" -> "&lt;", ">" -> "&gt;", "&" -> "&amp;"}] <>
+                "</div>", ""];
+
+            Return["<div style=\"padding:6px 8px;\">" <>
+                   headerHtml <> usageHtml <> defsHtml <> attribsHtml <> "</div>"]
+        ]
+    ];
+
     (* ---- WLLatex path: TraditionalForm boxes → C++ boxToLatex addon → KaTeX HTML ---- *)
     If[fmt === "WLLatex",
         Module[{boxes, boxStr, b64},
@@ -320,7 +389,13 @@ VsCodeRenderExpr[expr_, format_String, scale_?NumericQ, searchPat_String:""] :=
     (* ---- SVG path: Graphics → SVG/PNG vector; non-graphics → Rasterize → PNG ---- *)
     If[fmt === "SVG",
         If[graphicsQ[expr],
-            svgStr = Quiet[CheckAbort[Check[TimeConstrained[ExportString[expr, "SVG", Background -> None], 10, $Failed], $Failed], $Failed]];
+            (* ExportString["SVG"] for Graphics3D/Image3D blocks in a C-level IPC call
+               waiting for the front-end renderer (MathematicaServer).  TimeConstrained
+               cannot interrupt this because the kernel is stuck in a system-level wait.
+               Skip SVG entirely for 3D content; fall through to the Rasterize → PNG path. *)
+            svgStr = If[FreeQ[expr, _Graphics3D | _Image3D],
+                Quiet[CheckAbort[Check[TimeConstrained[ExportString[expr, "SVG", Background -> None], 10, $Failed], $Failed], $Failed]],
+                $Failed];
             (* ExportString prepends <?xml...> and <!DOCTYPE...> before <svg.
                Strip everything before the first <svg so the browser gets clean SVG.
                Also strip newlines: WSTP transmits them as literal \012 escape sequences
@@ -345,14 +420,16 @@ VsCodeRenderExpr[expr_, format_String, scale_?NumericQ, searchPat_String:""] :=
                            $wolframImgRelPrefix <> "/" <> fname <> "\"/>"]
                 ]
             ];
-            (* SVG timed out (>10s) — PNG fallback at the same ImageSize so it looks the same. *)
+            (* SVG timed out (>10s) OR 3D graphics (SVG skipped) — PNG fallback.
+               For 3D graphics, Export["PNG"] uses the kernel's in-process rasterizer
+               and does NOT require the front-end renderer, so TimeConstrained works. *)
             If[$wolframImgDir =!= "" && StringLength[$wolframImgDir] > 0,
                 hashStr = IntegerString[Hash[expr], 36];
                 fname = "wl_" <> hashStr <> ".png";
                 fpath = FileNameJoin[{$wolframImgDir, fname}];
                 If[!FileExistsQ[fpath],
-                    Quiet[CheckAbort[Export[fpath, expr, "PNG",
-                        Background -> None, ImageSize -> Automatic, ImageResolution -> 144], $Failed]]];
+                    Quiet[CheckAbort[TimeConstrained[Export[fpath, expr, "PNG",
+                        Background -> None, ImageSize -> Automatic, ImageResolution -> 144], 45, $Failed], $Failed]]];
                 If[FileExistsQ[fpath],
                     Return["<img class=\"vscode-wolfram-png-output\" data-wl-img=\"" <>
                            fpath <> "\" src=\"" <>

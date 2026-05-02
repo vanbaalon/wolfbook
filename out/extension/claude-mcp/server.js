@@ -696,9 +696,24 @@ function resolveNodeBinary() {
     // Try to resolve 'node' via PATH using a synchronous shell call
     try {
         const { execSync } = require('child_process');
-        const resolved = execSync('which node || where node', { encoding: 'utf8', timeout: 3000 }).trim().split('\n')[0].trim();
+        // Source shell profile so we pick up nvm/conda/homebrew paths
+        const shellCmd = process.platform === 'win32'
+            ? 'where node'
+            : 'source ~/.zshrc 2>/dev/null || source ~/.bashrc 2>/dev/null || true; which node';
+        const resolved = execSync(shellCmd, { encoding: 'utf8', shell: '/bin/zsh', timeout: 5000 }).trim().split('\n')[0].trim();
         if (resolved && fs.existsSync(resolved)) return resolved;
     } catch {}
+    // Hard-coded fallbacks for common macOS/Linux installations
+    const fallbacks = [
+        '/opt/anaconda3/bin/node',
+        '/usr/local/bin/node',
+        '/opt/homebrew/bin/node',
+        '/usr/bin/node',
+        `${process.env.HOME || ''}/.nvm/versions/node/$(ls ${process.env.HOME || ''}/.nvm/versions/node/ 2>/dev/null | sort -V | tail -1)/bin/node`,
+    ];
+    for (const fb of fallbacks) {
+        try { if (fs.existsSync(fb)) return fb; } catch {}
+    }
     return 'node';  // rely on PATH as last resort
 }
 

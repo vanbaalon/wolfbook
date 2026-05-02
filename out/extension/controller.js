@@ -260,6 +260,15 @@ class WolframNotebookKernel {
         });
         this.runtimeMsgDecorationCells = new Map();  // docUri → ranges[]
 
+        // Decoration type for hover-output source highlighting (subtle blue glow).
+        // Applied while the user hovers an output; cleared on mouseleave.
+        this.hoverOutputDecoration = vscode.window.createTextEditorDecorationType({
+            isWholeLine: true,
+            backgroundColor: "rgba(100, 160, 255, 0.08)",
+            borderLeft: "3px solid rgba(100, 160, 255, 0.35)",
+        });
+        this._hoverOutputDecorCell = null;  // currently-decorated cell docUri
+
         this.cellDecorations      = new Map();  // docUri -> ranges[]
         this.truncatedOutputCells = new Map();  // outputId -> {cell, outN}
         // Per-output registry — maps uniqueOutputId → {cell, outN, outName, format}.
@@ -1033,6 +1042,78 @@ class WolframNotebookKernel {
                           '| t_renderer:', message.t,
                           '| lag:', Date.now() - message.t, 'ms',
                           message.h !== undefined ? ('| scrollH:' + message.h) : '');
+            }
+
+            // ---- Hover output → highlight source lines in the input cell ----
+            if (message.type === 'hover-output') {
+                const nb = event.editor?.notebook;
+                if (nb && message.cellIdx != null) {
+                    try {
+                        const cell = nb.cellAt(message.cellIdx);
+                        const cellUri = cell.document.uri.toString();
+                        const editor = vscode.window.visibleTextEditors.find(
+                            e => e.document.uri.toString() === cellUri
+                        );
+                        if (editor) {
+                            const startLine = Math.max(0, message.start ?? 0);
+                            const endLine   = Math.max(startLine, message.end ?? startLine);
+                            editor.setDecorations(this.hoverOutputDecoration, [
+                                new vscode.Range(
+                                    new vscode.Position(startLine, 0),
+                                    new vscode.Position(endLine, 0)
+                                )
+                            ]);
+                            this._hoverOutputDecorCell = cellUri;
+                        }
+                    } catch (_) {}
+                }
+                return;
+            }
+            if (message.type === 'hover-output-end') {
+                if (this._hoverOutputDecorCell) {
+                    const editor = vscode.window.visibleTextEditors.find(
+                        e => e.document.uri.toString() === this._hoverOutputDecorCell
+                    );
+                    if (editor) editor.setDecorations(this.hoverOutputDecoration, []);
+                    this._hoverOutputDecorCell = null;
+                }
+                return;
+            }
+
+            // ---- Double-click output header → navigate cursor to source line ----
+            if (message.type === 'goto-source') {
+                const nb = event.editor?.notebook;
+                const nbEditor = event.editor;
+                if (!nb || !nbEditor || message.cellIdx == null) return;
+                try {
+                    const cell = nb.cellAt(message.cellIdx);
+                    const startLine = Math.max(0, message.start ?? 0);
+                    const endLine   = Math.max(startLine, message.end ?? startLine);
+                    const startPos  = new vscode.Position(startLine, 0);
+                    const endPos    = new vscode.Position(endLine, 0);
+                    const range     = new vscode.Range(startPos, endPos);
+                    // Scroll the notebook view to show the source cell
+                    nbEditor.revealRange(
+                        new vscode.NotebookRange(message.cellIdx, message.cellIdx + 1),
+                        vscode.NotebookEditorRevealType.Default
+                    );
+                    // Place cursor at the source line if the cell editor is visible
+                    const cellUri = cell.document.uri.toString();
+                    const cellEditor = vscode.window.visibleTextEditors.find(
+                        e => e.document.uri.toString() === cellUri
+                    );
+                    if (cellEditor) {
+                        cellEditor.revealRange(range, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+                        cellEditor.selection = new vscode.Selection(startPos, startPos);
+                    } else {
+                        // Cell not yet in edit mode — open it
+                        await vscode.window.showTextDocument(cell.document, {
+                            selection: range,
+                            preserveFocus: false,
+                        });
+                    }
+                } catch (_) {}
+                return;
             }
 
             // ---- InformationDataGrid symbol badge click → open docs in Watch panel ----

@@ -216,6 +216,14 @@
                 window._collabToggle.checked = !!msg.enabled;
             }
         }
+        else if (msg.command === 'remoteStatus') {
+            var rd = document.getElementById('remote-dot');
+            if (rd) {
+                var isConnected = !!msg.connected;
+                rd.style.color = isConnected ? '#3fb950' : '#6e7681';
+                rd.title = isConnected ? 'Wolfbook Remote: connected' : 'Wolfbook Remote: not connected';
+            }
+        }
     });
 
     // ── Toggle change handlers ─────────────────────────────────────────────

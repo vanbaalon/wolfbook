@@ -29,7 +29,7 @@ const fs = require('fs');
 const path = require('path');
 const { DEV_MODE } = require('../utils/dev-logger');
 const _encoding = require('../utils/encoding');
-const { wlUTFtoNames } = require('../namedchars');
+const { wlUTFtoNames, wlNameToUTF } = require('../namedchars');
 
 // ---- WolfbookLaTeX C++ addon (lazy-loaded, shared with controller) --------
 // We re-expose the same module-level lazy references that controller.js uses,
@@ -40,6 +40,7 @@ const _BTL_DIR              = require('path').join(__dirname, '../../../wllatex-
 const _KATEX_PRERENDER_PATH = require('path').join(__dirname, '../../../wllatex-addon/katexPrerender.js');
 let _btlAddon = null;
 let _btlPrerenderLatex = null;
+let _btlAddonPath = null;   // cached for worker threads
 function _loadBtlAddon() {
     if (_btlAddon) return true;
     try {
@@ -49,6 +50,7 @@ function _loadBtlAddon() {
         const _fallback = require('path').join(_BTL_DIR, 'wolfbook_btl.node');
         const _addonPath = _fs.existsSync(_prebuilt) ? _prebuilt : _fallback;
         _btlAddon = require(_addonPath);
+        _btlAddonPath = _addonPath;
         _btlPrerenderLatex = require(_KATEX_PRERENDER_PATH).prerenderLatex;
         return true;
     } catch (_) { return false; }
@@ -107,6 +109,76 @@ function resolveFormat(self, cell, knownIsGfx, outN) {
 }
 
 // ---------------------------------------------------------------------------
+// InformationData (result of ?Symbol) extractor.
+//
+// When ?Symbol is evaluated, the kernel emits an InterpretationBox whose second
+// argument is InformationData[<|assoc|>, True].  The widget boxes in the first
+// argument contain DynamicModuleBox / PaneSelectorBox / ButtonBox that BTL
+// cannot render, producing garbled LaTeX.  This function intercepts the box
+// string BEFORE it reaches BTL and builds clean HTML from the association data.
+//
+// Returns an HTML string on success, or null if the box is not InformationData.
+function _extractInfoDataHtml(boxStr) {
+    // Must be an InterpretationBox
+    if (!boxStr.startsWith('InterpretationBox[')) return null;
+    // Must contain InformationData[<| somewhere
+    const idxInfo = boxStr.lastIndexOf('InformationData[<|');
+    if (idxInfo === -1) return null;
+
+    // Extract association content between <| ... |>
+    const assocStart = idxInfo + 'InformationData[<|'.length;
+    const assocEnd   = boxStr.lastIndexOf('|>');
+    if (assocEnd <= assocStart) return null;
+    const assoc = boxStr.slice(assocStart, assocEnd);
+
+    // Helper: extract a string value for a given key from the WL association text.
+    // Handles \" escapes inside the value string.
+    const getStr = (key) => {
+        const re = new RegExp('"' + key + '"\\s*->\\s*"((?:[^"\\\\]|\\\\.)*)"');
+        const m = assoc.match(re);
+        return m ? m[1] : '';
+    };
+
+    const fullNameRaw = getStr('FullName');
+    const usageRaw    = getStr('Usage');
+    if (!fullNameRaw && !usageRaw) return null;  // not enough info — skip
+
+    // Decode WL string escapes + named characters → display text
+    const decode = (s) => wlNameToUTF(
+        s.replace(/\\n/g, '\n')
+         .replace(/\\t/g, '\t')
+         .replace(/\\"/g, '"')
+         .replace(/\\\\/g, '\\')
+    );
+    const fullName  = decode(fullNameRaw);
+    const shortName = fullName ? fullName.split('`').pop() : '';
+    const usage     = decode(usageRaw);
+
+    // Attributes (optional — may not be a string value)
+    const attribsM = assoc.match(/"Attributes"\s*->\s*\{([^}]*)\}/);
+    const attribs  = attribsM ? attribsM[1].trim() : '';
+
+    const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const headerColor = 'var(--vscode-descriptionForeground,#888)';
+
+    let html = '<div class="wl-info-data" style="padding:6px 8px;font-family:var(--vscode-editor-font-family,monospace);">';
+    if (shortName) {
+        html += `<div style="font-size:14px;font-weight:bold;margin-bottom:3px;">${esc(shortName)}</div>`;
+        if (fullName && fullName.includes('`')) {
+            html += `<div style="font-size:11px;color:${headerColor};margin-bottom:6px;">${esc(fullName)}</div>`;
+        }
+    }
+    if (usage) {
+        html += `<div style="font-size:12px;line-height:1.6;white-space:pre-wrap;margin-bottom:4px;">${esc(usage)}</div>`;
+    }
+    if (attribs) {
+        html += `<div style="font-size:11px;color:${headerColor};">Attributes: {${esc(attribs)}}</div>`;
+    }
+    html += '</div>';
+    return html;
+}
+
+// ---------------------------------------------------------------------------
 // WLLatex box post-processing
 
 // Post-process HTML from the kernel: if it contains a WLLatex box-placeholder
@@ -155,6 +227,13 @@ function processWLLatexBoxes(self, html, logPath, pageWidthEm = 0, source = '', 
             let boxStr = Buffer.from(b64, 'base64').toString('utf8');
             // Convert all Unicode chars + \|XXXX hex escapes to \[Name] for BTL
             boxStr = wlUTFtoNames(boxStr);
+            // Check for InformationData boxes — render as HTML directly, skip BTL.
+            // InterpretationBox[<widget>, InformationData[<|assoc|>, True]] contains
+            // DynamicModuleBox / ButtonBox that BTL cannot render without errors.
+            const _directHtml = _extractInfoDataHtml(boxStr);
+            if (_directHtml !== null) {
+                return { boxStr, latex: '', totalPages: 1, allPageLatex: null, error: null, _directHtml };
+            }
             // allPages:true returns ALL page LaTeX strings in result.pages[]
             // in a single C++ call — avoids re-parsing the entire box string per page.
             const result = _btlAddon.boxToLatex(boxStr, {...btlOpts, allPages: true});
@@ -173,7 +252,9 @@ function processWLLatexBoxes(self, html, logPath, pageWidthEm = 0, source = '', 
     if (hasPrerendered) {
         html = html.replace(/<div class="vscode-wolfram-wllatex-boxes" data-boxes-b64="([^"]*)"(?:\s+data-raw-b64="([^"]*)")?\s*>\s*<\/div>/g,
             (_, b64, rawB64) => {
-                const { boxStr, latex, totalPages, allPageLatex, error } = translate(b64);
+                const { boxStr, latex, totalPages, allPageLatex, error, _directHtml } = translate(b64);
+                // InformationData (?Symbol) — rendered directly as HTML, no BTL/KaTeX needed.
+                if (_directHtml !== undefined) return _directHtml;
                 // Apply line-breaking if enabled and we have a container width estimate.
                 const _lineBreakEnabled = (self.config?.get('notebook.rendering.lineBreakingEnabled')
                     ?? self.config?.get('notebook.rendering.lineBreaking')) !== false;
@@ -236,11 +317,82 @@ function processWLLatexBoxes(self, html, logPath, pageWidthEm = 0, source = '', 
                 }
 
                 // ---- Single-page output ----
+                // Two-phase rendering: phase 1 renders without line-breaking (fast) and
+                // displays immediately at reduced opacity. Phase 2 runs lineBreakLatex in a
+                // worker thread and patches the element via wl-lb-result message.
+                const _lbWouldRun = _lineBreakEnabled && pageWidthEm > 5 && !!_btlAddon.lineBreakLatex;
+                if (_lbWouldRun && _btlAddonPath && self._rendererMessaging) {
+                    // Phase 1: render unbroken, emit placeholder with reduced opacity
+                    let phase1Rendered;
+                    try { phase1Rendered = _btlPrerenderLatex(latex, true); }
+                    catch (e) {
+                        return '<pre class="vscode-wolfram-text-output">WLLatex KaTeX error: ' +
+                               _encoding.escapeHtml(String(e.message || e)) + '</pre>';
+                    }
+                    const lbId = 'lb-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 9);
+                    const _phase1LatexB64 = Buffer.from(latex).toString('base64');
+                    const errorNoteP1 = error
+                        ? `<div style="color:#e05c4e;font-size:11px;margin:2px 0;">\u26a0\ufe0f boxToLatex error: ${_encoding.escapeHtml(error)}</div>`
+                        : '';
+                    // Phase 2: spawn worker to run lineBreakLatex + KaTeX prerender
+                    const { Worker } = require('worker_threads');
+                    const _lbWorkerPath = require('path').join(__dirname, 'lb-worker.js');
+                    const worker = new Worker(_lbWorkerPath, {
+                        workerData: {
+                            addonPath: _btlAddonPath,
+                            katexPrerenderPath: _KATEX_PRERENDER_PATH,
+                            latex,
+                            lbOpts: { ...lbOpts, allPages: true },
+                            logPath: logPath || null,
+                            source: source || '',
+                            rawText: rawB64 ? Buffer.from(rawB64, 'base64').toString('utf8') : '',
+                            boxStr,
+                            pageWidthEm,
+                        }
+                    });
+                    const _msgApi = self._rendererMessaging;
+                    worker.once('message', (result) => {
+                        if (!result.ok) {
+                            // Phase-2 failed: remove opacity guard, keep phase-1 content as-is
+                            try { _msgApi.postMessage({ type: 'wl-lb-result', lbId, html: null }); } catch (_) {}
+                            return;
+                        }
+                        if (result.totalPages === 1) {
+                            const latexB64 = Buffer.from(result.latexFinal).toString('base64');
+                            const lineBroken = result.latexFinal !== latex;
+                            try { _msgApi.postMessage({ type: 'wl-lb-result', lbId, html: result.html, latexB64, lineBroken }); } catch (_) {}
+                        } else {
+                            // lineBreakLatex produced multiple pages — build pager on main thread
+                            const pagerId = _genPageId();
+                            let p0Rendered;
+                            try { p0Rendered = _btlPrerenderLatex(result.latexFinal, true); }
+                            catch (e) { p0Rendered = `<span style="color:#e05c4e;">KaTeX: ${_encoding.escapeHtml(String(e.message || e))}</span>`; }
+                            const _lbB64 = Buffer.from(result.latexFinal).toString('base64');
+                            if (!self._pagerStore) self._pagerStore = new Map();
+                            self._pagerStore.set(pagerId, { type: 'lb', latex, lbOpts, totalPages: result.totalPages, allPageLatex: result.allPageLatex, _pageCache: { 0: { html: p0Rendered, latexB64: _lbB64 } } });
+                            const pagerHtml =
+                                `<div class="vscode-wolfram-wllatex-prerendered wl-matrix-pager" data-current-page="0" data-page-count="${result.totalPages}" data-pager-id="${pagerId}" data-page-width-em="${pageWidthEm}" data-latex-b64="${_lbB64}">` +
+                                (error ? `<div style="color:#e05c4e;font-size:11px;margin:2px 0;">\u26a0\ufe0f boxToLatex error: ${_encoding.escapeHtml(error)}</div>` : '') +
+                                _buildNavBar(result.totalPages, _maxMatrixRows + '\u202flines/page', true) +
+                                `<div class="wl-matrix-page">${p0Rendered}</div>` +
+                                _buildNavBar(result.totalPages, _maxMatrixRows + '\u202flines/page') + '</div>';
+                            try { _msgApi.postMessage({ type: 'wl-lb-result', lbId, pagerHtml }); } catch (_) {}
+                        }
+                    });
+                    worker.once('error', () => {
+                        try { _msgApi.postMessage({ type: 'wl-lb-result', lbId, html: null }); } catch (_) {}
+                    });
+                    return `<div class="vscode-wolfram-wllatex-prerendered wl-lb-pending" data-lb-id="${lbId}" data-page-width-em="${pageWidthEm}" data-latex-b64="${_phase1LatexB64}" style="opacity:0.65;transition:opacity 0.35s">` +
+                           errorNoteP1 + `<div class="wl-lb-content">${phase1Rendered}</div></div>`;
+                }
+
+                // ---- Fallback: synchronous line-breaking ----
+                // Used when: line-breaking disabled, no page width, addon unavailable, or no renderer messaging.
                 let latexFinal = latex;
                 let lineBreakStatus = 'disabled';
                 let lbTotalPages = 1;
                 let lbAllPageLatex = null;
-                if (_lineBreakEnabled && pageWidthEm > 5 && _btlAddon.lineBreakLatex) {
+                if (_lbWouldRun) {
                     try {
                         const lbr = _btlAddon.lineBreakLatex(latex, { ...lbOpts, allPages: true });
                         if (lbr && typeof lbr === 'object') {

@@ -442,16 +442,26 @@ async function launchKernel(self, WstpSession) {
 
         // Set NotebookDirectory[] / WBDirectory[] to the directory of the active wolfram
         // notebook so that Get["relative/path"] and friends work as expected.
-        // Prefer activeNotebookEditor; fall back to first visible wolfram notebook.
-        const _wolframNbEditor =
-            (vscode.window.activeNotebookEditor?.notebook?.notebookType === 'extended-wolfram-notebook'
-                ? vscode.window.activeNotebookEditor
-                : null) ||
-            vscode.window.visibleNotebookEditors.find(
-                ed => ed.notebook.notebookType === 'extended-wolfram-notebook'
-            );
-        if (_wolframNbEditor) {
-            let _nbDir = path.dirname(_wolframNbEditor.notebook.uri.fsPath);
+        // Always define them (even with no notebook open yet — fallback to $HomeDirectory)
+        // so that WBDirectory[] never returns unevaluated.  checkout.js updates
+        // $WBNotebookDirectory before each cell evaluation, which is picked up
+        // dynamically by the := definitions.
+        {
+            // Determine initial directory: prefer active wolfram notebook, fall back
+            // to the first visible wolfram notebook, then to $HomeDirectory.
+            const _wolframNbEditor =
+                (vscode.window.activeNotebookEditor?.notebook?.notebookType === 'extended-wolfram-notebook'
+                    ? vscode.window.activeNotebookEditor
+                    : null) ||
+                vscode.window.visibleNotebookEditors.find(
+                    ed => ed.notebook.notebookType === 'extended-wolfram-notebook'
+                );
+            let _nbDir;
+            if (_wolframNbEditor) {
+                _nbDir = path.dirname(_wolframNbEditor.notebook.uri.fsPath);
+            } else {
+                _nbDir = process.env.HOME || process.env.USERPROFILE || '.';
+            }
             if (process.platform === 'win32') _nbDir = _nbDir.replace(/\\/g, '/');
             const _nbDirEsc = _nbDir.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
             // Use a dynamic := definition backed by $WBNotebookDirectory so that
@@ -463,9 +473,12 @@ async function launchKernel(self, WstpSession) {
                 `$WBNotebookDirectory = "${_nbDirEsc}"; ` +
                 `NotebookDirectory[] := $WBNotebookDirectory; ` +
                 `WBDirectory[]       := $WBNotebookDirectory; ` +
+                `WBDirectory::usage  = "WBDirectory[] returns the directory of the currently active Wolfbook notebook. ` +
+                `Equivalent to NotebookDirectory[] in the standard Wolfram frontend. ` +
+                `The value is updated automatically before each cell evaluation to reflect the notebook currently being run."; ` +
                 `Protect[NotebookDirectory, WBDirectory]`, { interactive: false }
             ).catch(() => {});
-            devLog(LOG_CHANNELS.KERNEL, '[launchKernel] NotebookDirectory set to:', _nbDir);
+            devLog(LOG_CHANNELS.KERNEL, '[launchKernel] NotebookDirectory/WBDirectory defined, dir:', _nbDir);
         }
 
         // Set $PlotTheme based on the current VS Code colour theme so that

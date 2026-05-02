@@ -132,7 +132,20 @@ function tokenize(src) {
     }
 
     // ── Brackets ──
-    // Track bracket stack to disambiguate ]] (Part close vs two ] closes)
+    // Track bracket stack to disambiguate ]] (Part close vs two ] closes).
+    // Also accept 〚 (U+301A) / 〛 (U+301B) as already-rendered Part brackets.
+    if (ch === '\u301a') {
+      tokens.push({ type: T.OPEN, value: '[[', bracket: 'part' });
+      bracketStack.push('[[');
+      i++;
+      continue;
+    }
+    if (ch === '\u301b') {
+      tokens.push({ type: T.CLOSE, value: ']]', bracket: 'part' });
+      if (bracketStack.length > 0 && bracketStack[bracketStack.length - 1] === '[[') bracketStack.pop();
+      i++;
+      continue;
+    }
     if (ch === '[' || ch === '(' || ch === '{') {
       if (ch === '[' && i + 1 < n && src[i + 1] === '[') {
         tokens.push({ type: T.OPEN, value: '[[', bracket: 'part' });
@@ -278,6 +291,18 @@ function tokenize(src) {
       i += 2;
       continue;
     }
+
+    // >>> (PutAppend) and >> (Put) — keep together; must follow >= check
+    if (ch === '>' && i + 1 < n && src[i + 1] === '>') {
+      if (i + 2 < n && src[i + 2] === '>') {
+        tokens.push({ type: T.OTHER, value: '>>>' });
+        i += 3;
+      } else {
+        tokens.push({ type: T.OTHER, value: '>>' });
+        i += 2;
+      }
+      continue;
+    }
     if (ch === '<' && i + 1 < n && src[i + 1] === '=') {
       tokens.push({ type: T.COMPARE, value: '<=' });
       i += 2;
@@ -299,6 +324,13 @@ function tokenize(src) {
     // <> (StringJoin)
     if (ch === '<' && i + 1 < n && src[i + 1] === '>') {
       tokens.push({ type: T.STRJOIN, value: '<>' });
+      i += 2;
+      continue;
+    }
+
+    // << (Get short form — keep together so the formatter doesn't split it)
+    if (ch === '<' && i + 1 < n && src[i + 1] === '<') {
+      tokens.push({ type: T.OTHER, value: '<<' });
       i += 2;
       continue;
     }
@@ -360,11 +392,21 @@ function tokenize(src) {
       continue;
     }
 
+    // ⩵ (U+2A75, Equal) — display replacement for ==, recognized as COMPARE token.
+    // Must be before the non-ASCII word handler so it isn't swallowed as an identifier.
+    if (ch === '\u2a75') {
+      tokens.push({ type: T.COMPARE, value: '\u2a75' });
+      i++;
+      continue;
+    }
+
     // ── Identifiers and numbers ──
-    // Non-ASCII characters (Greek letters, etc.) are valid WL identifier chars.
-    if (/[a-zA-Z$]/.test(ch) || ch.codePointAt(0) > 127) {
+    // Non-ASCII characters (Greek letters, etc.) are valid WL identifier chars,
+    // but NOT the special bracket replacements 〚 (U+301A), 〛 (U+301B), or ⩵ (U+2A75).
+    if (/[a-zA-Z$]/.test(ch) || (ch.codePointAt(0) > 127 && ch !== '\u301a' && ch !== '\u301b' && ch !== '\u2a75')) {
       let j = i;
-      while (j < n && (/[a-zA-Z0-9$`]/.test(src[j]) || src[j].codePointAt(0) > 127)) j++;
+      while (j < n && (/[a-zA-Z0-9$`]/.test(src[j]) ||
+             (src[j].codePointAt(0) > 127 && src[j] !== '\u301a' && src[j] !== '\u301b' && src[j] !== '\u2a75'))) j++;
       tokens.push({ type: T.WORD, value: src.slice(i, j) });
       i = j;
       continue;
@@ -375,8 +417,8 @@ function tokenize(src) {
       let j = i;
       // integer part
       while (j < n && ((src[j] >= '0' && src[j] <= '9') || src[j] === '.')) j++;
-      // precision/accuracy marks
-      if (j < n && (src[j] === '`' || src[j] === '*')) {
+      // precision/accuracy marks (backtick only — * is NOT a precision mark; *^ is handled below)
+      if (j < n && src[j] === '`') {
         j++;
         while (j < n && ((src[j] >= '0' && src[j] <= '9') || src[j] === '.')) j++;
       }
@@ -396,6 +438,13 @@ function tokenize(src) {
       continue;
     }
 
+    // Compound assignments: *= /= += -= (TimesBy, DivideBy, AddTo, SubtractFrom)
+    if ((ch === '*' || ch === '/' || ch === '+' || ch === '-') && i + 1 < n && src[i + 1] === '=') {
+      tokens.push({ type: T.ASSIGN, value: ch + '=' });
+      i += 2;
+      continue;
+    }
+
     // ++ -- (Increment/Decrement — unary, no surrounding spaces)
     if ((ch === '+' || ch === '-') && i + 1 < n && src[i + 1] === ch) {
       tokens.push({ type: T.OTHER, value: ch + ch });
@@ -403,7 +452,23 @@ function tokenize(src) {
       continue;
     }
 
-    // ── Everything else (single char operators: + - * / ^ ! ~ ? ' etc) ──
+    // ? — Information query glob (?WBPrint, ?WB*, ?*Name*) — keep entire glob as one token
+    // so the formatter never inserts spaces within ?symbol* patterns.
+    if (ch === '?') {
+      const peek = i + 1 < n ? src[i + 1] : '';
+      if (/[a-zA-Z$]/.test(peek) || peek === '*' || peek.codePointAt(0) > 127) {
+        let j = i + 1;
+        while (j < n && (/[a-zA-Z0-9$`_*]/.test(src[j]) || src[j].codePointAt(0) > 127)) j++;
+        tokens.push({ type: T.WORD, value: src.slice(i, j) });
+        i = j;
+      } else {
+        tokens.push({ type: T.OTHER, value: '?' });
+        i++;
+      }
+      continue;
+    }
+
+    // ── Everything else (single char operators: + - * / ^ ! ~ ' etc) ──
     tokens.push({ type: T.OTHER, value: ch });
     i++;
   }
@@ -422,6 +487,8 @@ const DEFAULT_OPTIONS = {
   alignArrows: false,         // align -> in rule lists
   blankLineBetweenDefs: true, // blank line between top-level := definitions
   replaceNamedChars: false,   // replace \[Alpha] etc. with UTF characters
+  replaceMultiply: false,     // replace * (Times) with implicit-multiplication space
+  replacePartBrackets: false, // replace [[ ]] with 〚 〛 (U+301A / U+301B)
 };
 
 // ─── Statement splitter (same algorithm as execution/checkout.js) ────────────
@@ -429,7 +496,7 @@ const DEFAULT_OPTIONS = {
 //   • bracket depth  • strings  • (* comments *)  • continuation operators
 // Returns [{text, blankLinesBefore}].  Single-statement src returns [{text:src,0}].
 function splitStatements(src) {
-  const ENDS_OP = /(&&|\|\||->|:>|\u2192|\u29f4|\/\/\.|\/\/|\/@|@@|<>|~~|;;|\^:=|:=|\+=|-=|\*=|\/=|[+\-*\/=,&|~@?])$/;
+  const ENDS_OP = /(&&|\|\||->|:>|\u2192|\u29f4|\/\/\.|\/\/|\/@|@@|<>|~~|;;|\^:=|:=|\+=|-=|\*=|\/=|[+\-*\/=,|~@?])$/;
   const parts = [];
   let current = '';
   let depth = 0, inStr = false, cDepth = 0;
@@ -521,6 +588,11 @@ function canonicalValue(t) {
     if (t.value === '\u2192') return '->'; // → → ->
     if (t.value === '\u29f4') return ':>'; // ⧴ → :>
   }
+  // 〚 / 〛 are display replacements for [[ / ]] — treat as equivalent for guard.
+  if (t.type === T.OPEN  && t.value === '\u301a') return '[[';
+  if (t.type === T.CLOSE && t.value === '\u301b') return ']]';
+  // ⩵ (U+2A75, Equal) — display replacement for == — treat as equivalent for guard.
+  if (t.type === T.COMPARE && t.value === '\u2a75') return '==';
   return t.value;
 }
 
@@ -540,8 +612,37 @@ function format(src, opts) {
     const inputStmtCount = splitStatements(src).length;
     const result = _formatUnsafe(src, opts);
     // Guard 1: token equivalence — no non-whitespace tokens may be added/removed/changed.
-    const inTokens  = tokenize(src);
-    const outTokens = tokenize(result);
+    // When replaceNamedChars is true, pre-apply the same \[Name]→UTF transformation
+    // to the input before tokenizing, so that NAMEDCHAR+adjacent-WORD merges
+    // (e.g. \[CurlyTheta]1 → ϑ1) are handled identically on both sides.
+    const mergedOpts = { ...DEFAULT_OPTIONS, ...opts };
+    const srcForCmp = mergedOpts.replaceNamedChars
+      ? src.replace(/\\\[([A-Za-z]+)\]/g, (_, name) => {
+          const code = NAMED_CHARS[name];
+          return code ? String.fromCodePoint(code) : '\\[' + name + ']';
+        })
+      : src;
+    // Filter standalone * tokens when replaceMultiply is on (they become implicit spaces).
+    // Preserve *= (TimesBy): * followed by = ASSIGN token.
+    const filterMultiply = mergedOpts.replaceMultiply
+      ? (toks) => {
+          const out = [];
+          for (let i = 0; i < toks.length; i++) {
+            if (toks[i].type === T.OTHER && toks[i].value === '*') {
+              let j = i + 1;
+              while (j < toks.length && (toks[j].type === T.SPACE || toks[j].type === T.NEWLINE)) j++;
+              const nxt = toks[j];
+              if (nxt && nxt.type === T.ASSIGN && nxt.value === '=') out.push(toks[i]);
+              // else drop standalone *
+            } else {
+              out.push(toks[i]);
+            }
+          }
+          return out;
+        }
+      : (toks) => toks;
+    const inTokens  = filterMultiply(tokenize(srcForCmp));
+    const outTokens = filterMultiply(tokenize(result));
     if (!tokensEquivalent(inTokens, outTokens)) {
       if (typeof console !== 'undefined' && console.warn) {
         console.warn('[wl-formatter] token mismatch after formatting — returning original source');
@@ -626,7 +727,8 @@ function _formatSingle(src, opts) {
     }
   }
 
-  // Optional \[Name] → UTF on emission; also render -> as → and :> as ⧴.
+  // Optional \[Name] → UTF on emission; also render -> as → and :> as ⧴,
+  // and (when replacePartBrackets) [[ / ]] as 〚 / 〛.
   function renderToken(t) {
     if (t.type === T.NAMEDCHAR && opts.replaceNamedChars) {
       const code = NAMED_CHARS[t.value.slice(2, -1)];
@@ -636,12 +738,22 @@ function _formatSingle(src, opts) {
       if (t.value === '->') return '\u2192';   // →
       if (t.value === ':>') return '\u29f4';   // ⧴
     }
+    if (opts.replacePartBrackets) {
+      if (t.type === T.OPEN  && t.value === '[[') return '\u301a';  // 〚
+      if (t.type === T.CLOSE && t.value === ']]') return '\u301b';  // 〛
+    }
+    // ⩵ (U+2A75) ↔ == : UTF path converts == → ⩵; src path normalizes ⩵ → ==
+    if (t.type === T.COMPARE) {
+      if (opts.replaceNamedChars && (t.value === '==' || t.value === '\u2a75')) return '\u2a75'; // ⩵
+      if (t.value === '\u2a75') return '==';
+    }
     return t.value;
   }
 
   // ── Spacing rules between adjacent tokens (unchanged from old formatter) ──
   function needsSpace(a, b) {
     if (!a || !b) return false;
+    if (a._implicitMult) return false; // space already emitted for * → implicit mult
     if (b.type === T.COMMA || b.type === T.SEMI || b.type === T.SPAN) return false;
     if (a.type === T.COMMA) return true;
     if (a.type === T.SEMI) return true;
@@ -652,7 +764,7 @@ function _formatSingle(src, opts) {
     if (a.type === T.ASSIGN || b.type === T.ASSIGN) return true;
     if (a.type === T.RULE_APPLY || b.type === T.RULE_APPLY) return true;
     if (a.type === T.STRJOIN || b.type === T.STRJOIN) return true;
-    if (b.type === T.OPEN && (b.value === '[' || b.value === '[[') &&
+    if (b.type === T.OPEN && (b.value === '[' || b.value === '[[' || b.value === '\u301a') &&
         (a.type === T.WORD || a.type === T.NAMEDCHAR || a.type === T.CLOSE || a.type === T.SLOT)) return false;
     if (a.type === T.OPEN) return false;
     if (b.type === T.CLOSE) return false;
@@ -675,8 +787,8 @@ function _formatSingle(src, opts) {
     if (a.type === T.OTHER && (a.value === '+' || a.value === '-') && a.isUnary) return false;
     if (a.type === T.OTHER && (a.value === '+' || a.value === '-')) return true;
     if (b.type === T.OTHER && (b.value === '+' || b.value === '-')) return true;
-    if (a.type === T.OTHER && (a.value === '>' || a.value === '<')) return true;
-    if (b.type === T.OTHER && (b.value === '>' || b.value === '<')) return true;
+    if (a.type === T.OTHER && (a.value === '>' || a.value === '<' || a.value === '<<' || a.value === '>>' || a.value === '>>>')) return true;
+    if (b.type === T.OTHER && (b.value === '>' || b.value === '<' || b.value === '<<' || b.value === '>>' || b.value === '>>>')) return true;
     if (a.type === T.OTHER && (a.value === '*' || a.value === '/')) return true;
     if (b.type === T.OTHER && (b.value === '*' || b.value === '/')) return true;
     if (a.value === '^' || b.value === '^') return false;
@@ -895,6 +1007,9 @@ function _formatSingle(src, opts) {
         parts.push(docForRange(s, si - 1, false));
         s = si + 1;
       }
+      // s > to means the range ended with ';' (trailing semicolon, e.g. Do[Print[...];, …]).
+      // Record this so we can re-emit it after the last part — otherwise it would be dropped.
+      const trailingHadSemi = (s > to);
       if (s <= to) parts.push(docForRange(s, to, false));
       // Join with ';' + hardline (preserving blank lines between top-level stmts).
       const joined = [];
@@ -911,6 +1026,8 @@ function _formatSingle(src, opts) {
         }
         joined.push(parts[k]);
       }
+      // Re-emit trailing ';' when the range ended with one (e.g. the body of Do[expr;, iter]).
+      if (trailingHadSemi) joined.push(D.text(';'));
       return D.cat(...joined);
     }
 
@@ -982,6 +1099,24 @@ function _formatSingle(src, opts) {
       const firstDoc = docForRange(a0, b0, false);
       if (parts.length === 1) return firstDoc;
 
+      // When replaceMultiply is on and ALL operators in this group are * (and
+      // none is part of *=), render them as implicit multiplication (plain space).
+      if (opts.replaceMultiply && opIdxs.every(oi => {
+        const t = toks[oi];
+        if (t.type !== T.OTHER || t.value !== '*') return false;
+        // *=  (TimesBy) must not be treated as implicit multiply
+        const nxt = toks[oi + 1];
+        return !(nxt && nxt.type === T.ASSIGN && nxt.value === '=');
+      })) {
+        const implPieces = [firstDoc];
+        for (let k = 1; k < parts.length; k++) {
+          implPieces.push(D.text(' '));
+          const [a, b] = parts[k].operand;
+          implPieces.push(docForRange(a, b, false));
+        }
+        return D.cat(...implPieces);
+      }
+
       const tailPieces = [];
       for (let k = 1; k < parts.length; k++) {
         if (k > 1) tailPieces.push(D.line(' '));
@@ -1025,10 +1160,10 @@ function _formatSingle(src, opts) {
           //   open  nest(indent, softline + inner) softline  close
           const doc = D.group(
             D.cat(
-              D.text(t.value),
+              D.text(renderToken(t)),
               D.nest(indentW, D.cat(D.softline(), inner)),
               D.softline(),
-              D.text(toks[close].value)
+              D.text(renderToken(toks[close]))
             )
           );
           pieces.push(doc);
@@ -1050,6 +1185,19 @@ function _formatSingle(src, opts) {
         prev = t;
         i++;
         continue;
+      }
+
+      // Replace * with implicit multiplication (space) when replaceMultiply is on.
+      // Exception: *=  (TimesBy) — detected by checking toks[i+1] for ASSIGN '='.
+      if (opts.replaceMultiply && t.type === T.OTHER && t.value === '*') {
+        const nextTok = toks[i + 1];
+        const isTimesBy = nextTok && nextTok.type === T.ASSIGN && nextTok.value === '=';
+        if (!isTimesBy) {
+          if (prev) pieces.push(D.text(' '));
+          prev = { type: T.OTHER, value: '', _implicitMult: true };
+          i++;
+          continue;
+        }
       }
 
       // Plain token.

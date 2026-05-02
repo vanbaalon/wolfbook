@@ -4,6 +4,90 @@ All notable changes to **Wolfbook** are documented here.
 
 ---
 
+## [2.7.0] - 2026-05-02
+
+### Added — WBPrint: live updating output for Print/WBPrint in loops
+
+`WBPrint[expr]` is a new Wolfram function (injected via `init.wl`) that sends output back to the notebook using a dedicated `*WBP*` packet.  Unlike `Print[]`, which accumulates one line per call, `WBPrint` **replaces** the previous WBPrint output each time — so a loop like
+
+```mathematica
+Do[WBPrint["Step ", k, ": ", k^2]; Pause[0.1], {k, 1, 100}]
+```
+
+shows a single updating output line rather than 100 accumulated lines.  Each call renders all its arguments inline (strings, numbers, expressions, and even SVG graphics) on one flex-row using the same KaTeX renderer as regular outputs.
+
+`Print[]` continues to work as before (accumulates lines); only `WBPrint[]` does live-replace.
+
+### Added — Double-click output header navigates to source line
+
+Every output has a thin header bar showing the expression index (Output 1, Output 2, …).  Double-clicking that bar now scrolls the code editor to the corresponding source line inside the cell.
+
+### Added — Remote bridge (`wolfbook.remote.*`) — iOS/web companion surface
+
+A new `remote/` module registers a `wolfbook.remote.*` command surface consumed by the **Wolfbook Remote Host** companion extension (otherwise nothing is translated outside for safety reasons).  It proxies notebook operations over WebRTC to a paired iOS app:
+
+- `handshake`, `listDocuments`, `focusDocument`, `getDocumentState`
+- `getCell`, `editCell`, `evalCell`, `abortEval`, `saveFile`, `restartKernel`
+- `copilotSubmit` / `copilotAbort` — triggers the Copilot chat panel remotely
+- `subscribe` / `pull` / `unsubscribe` — event-stream for the iOS timeline
+
+Connection status (connected / disconnected) is shown as a dot in the Wolfbook sidebar panel.
+
+### Added — `wolfbook_remote_checkpoint` tool — agent durable working memory
+
+New MCP tool that persists a Markdown checkpoint file alongside the notebook (under `<notebook>.img/wolfremote/checkpoints/`).  The tool's reply includes a listing of prior checkpoints so agents can resume work across sessions without losing context.  Emits a `checkpoint` event on the internal event bus so the iOS companion can display the agent's plan on-device.
+
+### Added — `formatWithUTF` replaces `[[` with `〚〛` and `==` with `⩵`
+
+`Option+Shift+F` (Format with UTF) now additionally:
+- Replaces `[[` / `]]` (Part operator) with `〚` / `〛` (U+301A/U+301B)
+- Replaces `==` (Equal) with `⩵` (U+2A75)
+
+### Added — `〚` / `〛` fully integrated as brackets
+
+After replacing Part brackets with the Unicode glyphs, they now behave like first-class bracket characters:
+- **Bracket colouring & matching** — VS Code highlights the matching `〚`/`〛` pair under the cursor (via `language-configuration.json`)
+- **Smart selection** — Shift+Alt+Right expands selection to the contents and then across `〚…〛` (via `selectionRange.js`)
+- **Folding** — multi-line `〚…〛` expressions can be folded (via `folding.js`)
+- **Surrounding pairs** — selecting text and typing `〚` wraps it in `〚…〛`
+
+### Added — Chunk folding
+
+Multi-line top-level expressions are now foldable as a unit.  A bracket-depth-aware two-pass algorithm in `folding.js` identifies expression boundaries: lines inside open brackets always belong to the same chunk; at depth 0, a bare newline ends a chunk unless a continuation operator is present at the end of the current line or the start of the next.  The first line stays visible when folded.
+
+### Fixed — `WBDirectory[]` evaluates to unevaluated symbol on first kernel start
+
+`WBDirectory[]` returned the symbol `WBDirectory[]` unevaluated if the kernel started before any notebook was opened.  The kernel init now always defines `$WBNotebookDirectory` (falling back to `$HomeDirectory`) so `WBDirectory[]` is always defined immediately after startup.
+
+### Fixed — Trailing semicolon dropped by formatter inside brackets
+
+Formatting `Do[Print[k];, {k, 4}]` dropped the trailing `;` after `Print[k]`, producing invalid code.  The formatter now correctly identifies when a range ends with a semicolon (vs a semicolon separator between two expressions) and re-emits it.
+
+### Fixed — Formatter trailing semicolon in any nested context
+
+The same trailing-semicolon fix applies to any `expr;` inside brackets: `Block[{}, a; b;]`, `Module[{x}, x=1;]`, function bodies with trailing `Null`-returning semicolons, etc.
+
+### Fixed — Horizontal scrollbar causes scroll-jump when cells leave viewport
+
+Code cells with long lines showed a horizontal scrollbar, which disappeared when VS Code virtualised the cell outside the viewport, causing a ~17 px height change and a visible scroll jump.  `editor.scrollbar.horizontalScrollbarSize` is now set to `0` for Wolfram files — the scrollbar gutter reserves no height so cell height is stable, while horizontal scrolling via trackpad still works.
+
+### Fixed — Spurious LSP diagnostic warnings suppressed
+
+Three additional warning classes from the Wolfram Language Server are now filtered out of the Problems panel:
+- `"Unexpected prefix +."` — legitimate unary `+` is flagged as a prefix error
+- `"Suspicious use of … session token."` — false positive on common patterns
+- `"Unexpected letterlike character …"` — false positive on Unicode operator symbols
+
+### Fixed — Autoconfigure Cline MCP on activate
+
+The extension now automatically injects the Wolfbook MCP entry into the Cline configuration file on first activation (if Cline is installed), without requiring the user to run `wolfbook.configureCline` manually.
+
+### Fixed — `InformationData` / `?Symbol` output now renders cleanly
+
+When `?Symbol` was evaluated, the kernel emitted an `InterpretationBox` containing `InformationData[<|…|>]` with dynamic widget boxes that BTL could not render.  The output renderer now detects this box structure and builds clean HTML directly from the association data, showing usage messages and attributes without garbled LaTeX.
+
+---
+
 ## [2.6.51] - 2026-04-24
 
 ### Added — `wolfbook_editCell` batch mode

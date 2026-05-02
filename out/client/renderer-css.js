@@ -37,6 +37,16 @@ wsub > :last-child { font-size:var(--script-font-size);vertical-align:-0.7ex; }
 pre { font-family: Consolas, Courier, monospace; }
 pre > .wl-message { color: var(--vscode-editorError-foreground); }
 pre.vscode-wolfram-print-output { font-size:0.85em; margin:0; padding:0; line-height:1.3; }
+div.wl-print-output { text-align:left; }
+/* Output header: pointer cursor signals double-click-to-navigate */
+div.wl-output-header { cursor: pointer; user-select: none; }
+/* Each Print/WBPrint call → one flex row; args flow inline on the same line */
+div.wl-print-line { display:flex; flex-wrap:wrap; align-items:baseline; gap:0.2em; margin:1px 0; }
+span.wl-ps { font-family:var(--vscode-editor-font-family,monospace); font-size:0.85em; white-space:pre-wrap; line-height:1.3; }
+span.wl-pg img { max-width:420px; max-height:300px; height:auto; width:auto; background:transparent; vertical-align:middle; }
+div.wl-print-output .vscode-wolfram-wllatex-prerendered { font-size:0.82em; }
+/* KaTeX display-mode inside a print line: render inline so it sits beside text args */
+div.wl-print-line .katex-display { display:inline-block !important; text-align:left !important; margin:0 !important; }
 pre.vscode-wolfram-text-output, pre.vscode-wolfram-tex-source {
   font-family: var(--vscode-editor-font-family, var(--vscode-font-family, Consolas, monospace));
   font-size: var(--vscode-editor-font-size, 13px);
@@ -63,8 +73,10 @@ div.vscode-wolfram-tex-output { overflow-x:auto; padding: 1px 0; }
 div.vscode-wolfram-wllatex-prerendered,
 div.vscode-wolfram-wllatex-raw-latex,
 div.vscode-wolfram-tex-output {
-  margin: 0.1em 0;
+  margin: 0;
 }
+.katex-display { margin: 4px 0 !important; }
+.output { margin-top: 1px !important; margin-bottom: 1px !important; }
 /* Inline syntax highlight tokens */
 .wl-hl-str  { color: #ce9178; }
 .wl-hl-cmt  { color: #6a9955; font-style: italic; }
