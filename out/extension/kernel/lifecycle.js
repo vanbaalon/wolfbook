@@ -496,7 +496,9 @@ async function launchKernel(self, WstpSession) {
         // (making the user's first cell show In[2] instead of In[1]) and could
         // double-register the handler (two Dialog[] calls per interrupt).
 
-        self.kernelStatusString = "resolved";
+        // kernelStatusString remains "launching" until $ProcessID eval completes below.
+        // Do NOT set it to "resolved" here — that would allow user-queued cells to race
+        // with the $ProcessID evaluate() call, causing a fatal WSTP concurrency crash.
         vscode.commands.executeCommand("setContext", "wolframKernelActive", true);
         vscode.window.showInformationMessage("Wolfram kernel launched (WSTP), ready for evaluation.");
         devLog(LOG_CHANNELS.KERNEL, '[launchKernel] kernel ready');
@@ -537,6 +539,11 @@ async function launchKernel(self, WstpSession) {
                 }
             }
         } catch(_) {}
+
+        // Only mark kernel as resolved AFTER the $ProcessID eval completes.
+        // Setting 'resolved' earlier would allow user-queued cells to race with
+        // the $ProcessID evaluate() call, causing a fatal WSTP concurrency crash.
+        self.kernelStatusString = "resolved";
 
         clearKernelOfflineUI(self);
         // Notify renderer that a new session started — it will remove stale
