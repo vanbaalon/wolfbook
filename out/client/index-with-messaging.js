@@ -115,6 +115,26 @@ export function activate(context) {
         },
     };
 
+    // Buffer for Phase-2 lb results that arrive before renderOutputItem sets innerHTML.
+    // Maps lbId → {msg, ts}. Flushed on the next renderOutputItem call.
+    const _lbPendingResults = new Map();
+    function _applyLbResult(el, msg) {
+        if (msg.pagerHtml) {
+            const tmp = document.createElement('div');
+            tmp.innerHTML = msg.pagerHtml;
+            const pagerEl = tmp.firstElementChild;
+            if (pagerEl) el.replaceWith(pagerEl);
+        } else if (msg.html !== null && msg.html !== undefined) {
+            const inner = el.querySelector('.wl-lb-content');
+            if (inner) inner.innerHTML = msg.html;
+            if (msg.latexB64) el.setAttribute('data-latex-b64', msg.latexB64);
+            if (msg.lineBroken) el.setAttribute('data-line-broken', '1');
+        }
+        el.classList.remove('wl-lb-pending');
+        el.style.opacity = '';
+        el.style.transition = '';
+    }
+
     // Listen for replies from the extension (open-text-done / open-text-error / session-changed / kernel-offline / kernel-online)
     if (context && context.onDidReceiveMessage) {
         context.onDidReceiveMessage(msg => {
@@ -214,23 +234,11 @@ export function activate(context) {
             if (msg.type === 'wl-lb-result' && msg.lbId) {
                 const el = document.querySelector('[data-lb-id="' + msg.lbId + '"]');
                 if (el) {
-                    if (msg.pagerHtml) {
-                        // lineBreakLatex produced multiple pages — replace entire element with pager
-                        const tmp = document.createElement('div');
-                        tmp.innerHTML = msg.pagerHtml;
-                        const pagerEl = tmp.firstElementChild;
-                        if (pagerEl) el.replaceWith(pagerEl);
-                    } else if (msg.html !== null && msg.html !== undefined) {
-                        // Single-page: replace inner content and remove pending style
-                        const inner = el.querySelector('.wl-lb-content');
-                        if (inner) inner.innerHTML = msg.html;
-                        if (msg.latexB64) el.setAttribute('data-latex-b64', msg.latexB64);
-                        if (msg.lineBroken) el.setAttribute('data-line-broken', '1');
-                    }
-                    // Remove pending class and restore opacity (CSS transition to 1.0)
-                    el.classList.remove('wl-lb-pending');
-                    el.style.opacity = '';
-                    el.style.transition = '';
+                    _applyLbResult(el, msg);
+                } else {
+                    // Element not yet in DOM — worker completed before renderOutputItem ran.
+                    // Buffer for up to 30 s; flushed on the next renderOutputItem call.
+                    _lbPendingResults.set(msg.lbId, { msg, ts: Date.now() });
                 }
                 return;
             }
@@ -575,6 +583,17 @@ export function activate(context) {
             // Render HTML content
             element.innerHTML = cleanHtml;
             console.log('[WolframRenderer] innerHTML assigned — pre-render element width was:', _preRenderWidth);
+
+            // Flush any Phase-2 lb results that arrived before this renderOutputItem call
+            // (race condition: worker completes before VS Code calls renderOutputItem).
+            if (_lbPendingResults.size > 0) {
+                const _now = Date.now();
+                _lbPendingResults.forEach((entry, lbId) => {
+                    if (_now - entry.ts > 30000) { _lbPendingResults.delete(lbId); return; }
+                    const pendEl = element.querySelector('[data-lb-id="' + lbId + '"]');
+                    if (pendEl) { _applyLbResult(pendEl, entry.msg); _lbPendingResults.delete(lbId); }
+                });
+            }
 
             // ---- Hover output → send source-line highlight request to extension ----
             // ---- Double-click output header → navigate cursor to source line ----

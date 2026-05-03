@@ -429,7 +429,9 @@ function processWLLatexBoxes(self, html, logPath, pageWidthEm = 0, source = '', 
                         }
                     });
                     const _msgApi = self._rendererMessaging;
+                    let _workerResponded = false;
                     worker.once('message', (result) => {
+                        _workerResponded = true;
                         if (!result.ok) {
                             // Phase-2 failed: remove opacity guard, keep phase-1 content as-is
                             try { _msgApi.postMessage({ type: 'wl-lb-result', lbId, html: null }); } catch (_) {}
@@ -458,7 +460,15 @@ function processWLLatexBoxes(self, html, logPath, pageWidthEm = 0, source = '', 
                         }
                     });
                     worker.once('error', () => {
+                        _workerResponded = true;
                         try { _msgApi.postMessage({ type: 'wl-lb-result', lbId, html: null }); } catch (_) {}
+                    });
+                    // Safety net: if worker exits without sending a message (native crash, etc.),
+                    // restore opacity so the output doesn't stay gray forever.
+                    worker.once('exit', () => {
+                        if (!_workerResponded) {
+                            try { _msgApi.postMessage({ type: 'wl-lb-result', lbId, html: null }); } catch (_) {}
+                        }
                     });
                     return `<div class="vscode-wolfram-wllatex-prerendered wl-lb-pending" data-lb-id="${lbId}" data-page-width-em="${pageWidthEm}" data-latex-b64="${_phase1LatexB64}" style="opacity:0.65;transition:opacity 0.35s">` +
                            errorNoteP1 + `<div class="wl-lb-content">${phase1Rendered}</div></div>`;
