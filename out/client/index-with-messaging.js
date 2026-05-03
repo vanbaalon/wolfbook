@@ -118,12 +118,55 @@ export function activate(context) {
     // Buffer for Phase-2 lb results that arrive before renderOutputItem sets innerHTML.
     // Maps lbId → {msg, ts}. Flushed on the next renderOutputItem call.
     const _lbPendingResults = new Map();
+
+    // Attach page-navigation click handlers to a single .wl-matrix-pager element.
+    // Called both from the renderOutputItem pager loop and after _applyLbResult
+    // inserts a pager that was built asynchronously (the worker finishes AFTER
+    // renderOutputItem ran, so the pager wasn't present during the initial scan).
+    function _setupPagerListeners(pager) {
+        if (pager._wlPagerListened) return;  // guard: prevent double-attach
+        pager._wlPagerListened = true;
+        const N = parseInt(pager.getAttribute('data-page-count') || '1', 10);
+        if (N <= 1) return;
+        const pagerId = pager.getAttribute('data-pager-id') || '';
+        const allLabels  = pager.querySelectorAll('.wl-matrix-page-label');
+        const allFirsts  = pager.querySelectorAll('button[data-action="go-first"]');
+        const allPrevs   = pager.querySelectorAll('button[data-action="prev-page"]');
+        const allNexts   = pager.querySelectorAll('button[data-action="next-page"]');
+        const allLasts   = pager.querySelectorAll('button[data-action="go-last"]');
+        const setAllLabels = (txt) => allLabels.forEach(el => el.textContent = txt);
+        const setAllPrev   = (dis) => { allFirsts.forEach(el => el.disabled = dis); allPrevs.forEach(el => el.disabled = dis); };
+        const setAllNext   = (dis) => { allNexts.forEach(el => el.disabled = dis); allLasts.forEach(el => el.disabled = dis); };
+        const goTo = (i) => {
+            const cur = parseInt(pager.getAttribute('data-current-page') || '0', 10);
+            if (i < 0 || i >= N || i === cur) return;
+            if (!pagerId || !context || !context.postMessage) return;
+            setAllPrev(true); setAllNext(true);
+            setAllLabels(`\u23f3 ${i + 1}\u202f/\u202f${N}`);
+            try { context.postMessage({ type: 'output-page-request', pagerId, page: i }); }
+            catch (_) {
+                setAllLabels(`${cur + 1}\u202f/\u202f${N}`);
+                setAllPrev(cur === 0); setAllNext(cur === N - 1);
+            }
+        };
+        setAllPrev(true);
+        allFirsts.forEach(btn => btn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); goTo(0); }));
+        allPrevs.forEach(btn  => btn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); goTo(parseInt(pager.getAttribute('data-current-page') || '0', 10) - 1); }));
+        allNexts.forEach(btn  => btn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); goTo(parseInt(pager.getAttribute('data-current-page') || '0', 10) + 1); }));
+        allLasts.forEach(btn  => btn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); goTo(N - 1); }));
+    }
+
     function _applyLbResult(el, msg) {
         if (msg.pagerHtml) {
             const tmp = document.createElement('div');
             tmp.innerHTML = msg.pagerHtml;
             const pagerEl = tmp.firstElementChild;
-            if (pagerEl) el.replaceWith(pagerEl);
+            if (pagerEl) {
+                el.replaceWith(pagerEl);
+                // The pager was built asynchronously — renderOutputItem's pager scan
+                // already ran (finding no pager), so we must attach listeners now.
+                _setupPagerListeners(pagerEl);
+            }
         } else if (msg.html !== null && msg.html !== undefined) {
             const inner = el.querySelector('.wl-lb-content');
             if (inner) inner.innerHTML = msg.html;
@@ -880,54 +923,7 @@ export function activate(context) {
 
             // ---- Matrix pager: prev/next page navigation (server-side page requests) ----
             const matrixPagers = element.querySelectorAll('.wl-matrix-pager[data-page-count]');
-            matrixPagers.forEach(pager => {
-                const N = parseInt(pager.getAttribute('data-page-count') || '1', 10);
-                if (N <= 1) return;
-                const pagerId = pager.getAttribute('data-pager-id') || '';
-                // There may be two nav bars (top + bottom) — operate on all matching elements.
-                const allLabels  = pager.querySelectorAll('.wl-matrix-page-label');
-                const allFirsts  = pager.querySelectorAll('button[data-action="go-first"]');
-                const allPrevs   = pager.querySelectorAll('button[data-action="prev-page"]');
-                const allNexts   = pager.querySelectorAll('button[data-action="next-page"]');
-                const allLasts   = pager.querySelectorAll('button[data-action="go-last"]');
-                const setAllLabels = (txt)  => allLabels.forEach(el => el.textContent = txt);
-                const setAllPrev   = (dis)  => { allFirsts.forEach(el => el.disabled = dis); allPrevs.forEach(el => el.disabled = dis); };
-                const setAllNext   = (dis)  => { allNexts.forEach(el => el.disabled = dis); allLasts.forEach(el => el.disabled = dis); };
-
-                const goTo = (i) => {
-                    const cur = parseInt(pager.getAttribute('data-current-page') || '0', 10);
-                    if (i < 0 || i >= N || i === cur) return;
-                    if (!pagerId || !context || !context.postMessage) return;
-                    // Disable all buttons while waiting for page content from extension host
-                    setAllPrev(true); setAllNext(true);
-                    setAllLabels(`\u23f3 ${i + 1}\u202f/\u202f${N}`);
-                    try { context.postMessage({ type: 'output-page-request', pagerId, page: i }); }
-                    catch (_) {
-                        // Revert on send failure
-                        setAllLabels(`${cur + 1}\u202f/\u202f${N}`);
-                        setAllPrev(cur === 0); setAllNext(cur === N - 1);
-                    }
-                };
-
-                // Start on page 0: prev/first always disabled, register click handlers on all bars
-                setAllPrev(true);
-                allFirsts.forEach(btn => btn.addEventListener('click', (e) => {
-                    e.preventDefault(); e.stopPropagation();
-                    goTo(0);
-                }));
-                allPrevs.forEach(btn => btn.addEventListener('click', (e) => {
-                    e.preventDefault(); e.stopPropagation();
-                    goTo(parseInt(pager.getAttribute('data-current-page') || '0', 10) - 1);
-                }));
-                allNexts.forEach(btn => btn.addEventListener('click', (e) => {
-                    e.preventDefault(); e.stopPropagation();
-                    goTo(parseInt(pager.getAttribute('data-current-page') || '0', 10) + 1);
-                }));
-                allLasts.forEach(btn => btn.addEventListener('click', (e) => {
-                    e.preventDefault(); e.stopPropagation();
-                    goTo(N - 1);
-                }));
-            });
+            matrixPagers.forEach(pager => _setupPagerListeners(pager));
 
             // ---- Format + zoom buttons for each output header ----
             // Each .wl-output-header[data-out-n] gets a button group:
