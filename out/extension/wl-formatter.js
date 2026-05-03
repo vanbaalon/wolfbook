@@ -742,9 +742,8 @@ function _formatSingle(src, opts) {
       if (t.type === T.OPEN  && t.value === '[[') return '\u301a';  // 〚
       if (t.type === T.CLOSE && t.value === ']]') return '\u301b';  // 〛
     }
-    // ⩵ (U+2A75) ↔ == : UTF path converts == → ⩵; src path normalizes ⩵ → ==
+    // ⩵ (U+2A75) ↔ == : normalize existing ⩵ → == so files round-trip safely
     if (t.type === T.COMPARE) {
-      if (opts.replaceNamedChars && (t.value === '==' || t.value === '\u2a75')) return '\u2a75'; // ⩵
       if (t.value === '\u2a75') return '==';
     }
     return t.value;

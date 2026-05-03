@@ -3,7 +3,7 @@
   "displayName": "Mathematica & Wolfram Language Notebooks for VS Code — Wolfbook",
   "description": "Mathematica-style Wolfram Language notebooks in VS Code. Run a live Wolfram kernel, render LaTeX/graphics, debug code, and let Copilot, Claude Code or MCP agents evaluate cells.",
   "publisher": "wolfbook",
-  "version": "2.7.4",
+  "version": "2.7.5",
   "engines": {
     "vscode": "^1.95.0"
   },
@@ -56,6 +56,7 @@
   },
   "activationEvents": [
     "onLanguage:wolfram",
+    "onNotebook:extended-wolfram-notebook",
     "onCommand:wolfbook.OpenNotebook",
     "onCommand:wolfbook.DownloadWolframEngine",
     "onCommand:createWolframScriptTerminal",
