@@ -367,7 +367,26 @@ async function launchKernel(self, WstpSession) {
         truncateLogs();
         if (typeof self.clearDebugLog === 'function') self.clearDebugLog();
         dynLog('=== KERNEL START ===', new Date().toISOString());
-        self.session = _wstpWrap(new WstpSession(kernelCommand, { interactive: true }), 'main');
+        // Linux/Electron: use listen→spawn→connect to avoid MLFileManager::closeFileReferences()
+        // triggering Electron's FD-ownership enforcement (SIGTRAP crash with linkmode launch).
+        // WstpSession constructor opens a SharedMemory listen link and returns its name.
+        // We then spawn the kernel externally via child_process so no fork happens inside Electron.
+        const _rawSession = new WstpSession(kernelCommand, { interactive: true });
+        const _linkName = _rawSession.linkName;
+        devLog(LOG_CHANNELS.KERNEL, `[launchKernel] WSTP listen link: ${_linkName}`);
+        const _cp = require('child_process');
+        const _kernelProc = _cp.spawn(kernelCommand, [
+            '-wstp',
+            '-linkname',    _linkName,
+            '-linkmode',    'connect',
+            '-linkprotocol','SharedMemory',
+        ], { detached: false, stdio: 'ignore' });
+        _kernelProc.on('error', (e) => {
+            scrollLog(`[launchKernel] kernel spawn error: ${e.message}`);
+        });
+        devLog(LOG_CHANNELS.KERNEL, `[launchKernel] kernel spawned pid=${_kernelProc.pid}, calling connect()…`);
+        _rawSession.connect();
+        self.session = _wstpWrap(_rawSession, 'main');
 
         // Load init.wl via sub() so it runs as a priority batch call and
         // does NOT count as a user evaluation (does not increment $Line).
