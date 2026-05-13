@@ -15,29 +15,36 @@ const path = require('path');
 const configCompat = require("./config-compat");
 class FindKernel {
     constructor() {
-        this.linuxKernelPath = [
-            // ToDo: Add Wolfram app paths
-            "/usr/local/Wolfram/Wolfram/14.2/Executables/WolframKernel",
-            "/usr/local/Wolfram/WolframEngine/14.2/Executables/WolframKernel",
-            "/usr/local/Wolfram/Wolfram/14.1/Executables/WolframKernel",
-            "/usr/local/Wolfram/WolframEngine/14.1/Executables/WolframKernel",
-            "/usr/local/Wolfram/Mathematica/14.0/Executables/WolframKernel",
-            "/usr/local/Wolfram/WolframEngine/14.0/Executables/WolframKernel",
-            "/usr/local/Wolfram/Mathematica/13.3/Executables/WolframKernel",
-            "/usr/local/Wolfram/WolframEngine/13.3/Executables/WolframKernel",
-            "/usr/local/Wolfram/Mathematica/13.2/Executables/WolframKernel",
-            "/usr/local/Wolfram/WolframEngine/13.2/Executables/WolframKernel",
-            "/usr/local/Wolfram/Mathematica/13.1/Executables/WolframKernel",
-            "/usr/local/Wolfram/WolframEngine/13.1/Executables/WolframKernel",
-            "/usr/local/Wolfram/Mathematica/13.0/Executables/WolframKernel",
-            "/usr/local/Wolfram/WolframEngine/13.0/Executables/WolframKernel",
-            "/usr/local/Wolfram/Mathematica/12.3/Executables/WolframKernel",
-            "/usr/local/Wolfram/WolframEngine/12.3/Executables/WolframKernel",
-            "/usr/local/Wolfram/Mathematica/12.2/Executables/WolframKernel",
-            "/usr/local/Wolfram/WolframEngine/12.2/Executables/WolframKernel",
-            "/usr/local/Wolfram/Mathematica/12.1/Executables/WolframKernel",
-            "/usr/local/Wolfram/WolframEngine/12.1/Executables/WolframKernel"
-        ];
+        this.linuxKernelPath = (() => {
+            // Dynamically enumerate all installed Wolfram products and versions
+            // under /usr/local/Wolfram/.  Mirrors macKernelPath below.  Sorted
+            // descending so the newest version is tried first.
+            const _paths = [];
+            const _productDirs = [
+                '/usr/local/Wolfram/WolframEngine',
+                '/usr/local/Wolfram/Mathematica',
+                '/usr/local/Wolfram/Wolfram',
+            ];
+            const _verToNum = (v) => {
+                const parts = String(v || '').split('.').map(x => parseInt(x, 10));
+                const a = Number.isFinite(parts[0]) ? parts[0] : 0;
+                const b = Number.isFinite(parts[1]) ? parts[1] : 0;
+                return a * 1e6 + b * 1e3;
+            };
+            for (const base of _productDirs) {
+                try {
+                    if (!fs.existsSync(base)) continue;
+                    const entries = fs.readdirSync(base, { withFileTypes: true })
+                        .filter(e => e.isDirectory() && /^\d/.test(e.name))
+                        .map(e => e.name)
+                        .sort((a, b) => _verToNum(b) - _verToNum(a));
+                    for (const ver of entries) {
+                        _paths.push(path.join(base, ver, 'Executables', 'WolframKernel'));
+                    }
+                } catch (_) {}
+            }
+            return _paths;
+        })();
         this.macKernelPath = (() => {
             // Dynamically discover all Wolfram/Mathematica apps in /Applications/.
             // Handles numbered variants ("Wolfram 3.app", "Wolfram 14.app", etc.) and
