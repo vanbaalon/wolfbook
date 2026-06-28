@@ -1,0 +1,2204 @@
+'use strict';
+/**
+ * Oberon — Fairy worker (Phase 3: FSM-driven loop).
+ *
+ * State machine:
+ *   intake → explore → compile → verify → delivered
+ *                             ↘ diagnose ↗ ↓
+ *                                          failed | escalate
+ *
+ * The model uses 8 internal tools (probe, inspect, lookup, record, assume,
+ * chain, invalidate, finalize) instead of the old wolfram_eval/editCell set.
+ * Tool budget is enforced by FairyFSM.
+ *
+ * Events emitted:
+ *   fairy.started, llm.call, llm.reasoning_progress, llm.response_progress,
+ *   tool.call, correlated.tool, omen{...}, scroll.submitted
+ */
+
+const crypto = require('crypto');
+const path   = require('path');
+const vscode = require('vscode');
+
+const { getAdapter }     = require('../providers');
+const { computeCost }    = require('../providers/cost');
+const { sha256 }         = require('./promptAssembly');
+const { makeSpanId }     = require('../telemetry/bus');
+const settings           = require('../config/settings');
+const roles              = require('../config/roles');
+const scrollsFs          = require('../memory/scrolls');
+const project            = require('../memory/project');
+const contributionInbox  = require('../memory/contributionInbox');
+const wolframShim        = require('./wolframShim');
+const { FairyFSM }       = require('../fairy/fsm');
+const { FAIRY_TOOL_SPECS, EXPLORE_FAIRY_TOOL_SPECS, POLISH_FAIRY_TOOL_SPECS, FAILED_PROBE_TOOL_SPECS, FAILED_PROBE_FIX_TOOL_SPECS, RECORD_GATE_TOOL_SPECS, PARTIAL_REPORT_TOOL_SPECS } = require('../fairy/toolSpecs');
+// Tools the model may actually invoke during the polish phase. Anything else (notably
+// invalidate, which deletes the verified clean.wb) is rejected before dispatch.
+const POLISH_ALLOWED = new Set(['run_clean', 'edit_cell', 'probe', 'chain', 'finalize']);
+const { dispatchFairyTool }  = require('../fairy/tools');
+const { createWorkDir }      = require('../fairy/workDir');
+const { compile, verify, autoCorrectMissingStep } = require('../fairy/harness');
+const { buildSkillsUsedMarkdown, buildLiteratureCitations, buildLiteratureBriefMarkdown } = require('../fairy/skillCitation');
+const { reasoningTail } = require('../fairy/notebookBanners');
+const { resolveWolframscript } = require('../fairy/kernelVerifier');
+const FindKernel = require('../../find-kernel');
+const {
+    FAIRY_SYSTEM_PROMPT,
+    buildExploreUserMessage,
+    buildRecallContextBlock,
+    buildDiagnoseUserMessage,
+    buildBudgetReminderMessage,
+    buildCompactionPrompt,
+    buildPolishEntryMessage,
+    buildPartialReportUserMessage,
+} = require('../fairy/prompts');
+const { runRecall }      = require('../fairy/recall');
+const { SkilXivClient }  = require('../fairy/skilxivClient');
+
+// ── Constants ─────────────────────────────────────────────────────────────────
+
+/**
+ * Append text to the content of the most recent tool or user message in the
+ * conversation. This keeps system-injected hints (budget warnings, failure
+ * nudges) inside the existing message sequence so the cache prefix is never
+ * broken by an extra user message in the middle of a turn.
+ *
+ * Falls back to pushing a new user message if no prior tool/user message exists.
+ */
+function appendToLastToolOrUser(messages, text) {
+    for (let i = messages.length - 1; i >= 0; i--) {
+        const m = messages[i];
+        if (m.role === 'tool' || m.role === 'user') {
+            messages[i] = { ...m, content: (m.content || '') + '\n\n' + text };
+            return;
+        }
+    }
+    messages.push({ role: 'user', content: text });
+}
+
+/**
+ * Replace each failed (assistant-call, tool-fail) probe pair with a one-line
+ * collapsed entry. Used before sending history to the summariser so it sees a
+ * compact representation of dead-ends rather than full error payloads.
+ */
+function collapseFailed(messages) {
+    const result = [];
+    let i = 0;
+    while (i < messages.length) {
+        const m = messages[i];
+        if (
+            m.role === 'assistant' &&
+            Array.isArray(m.tool_calls) && m.tool_calls.length === 1 &&
+            m.tool_calls[0].function.name === 'probe' &&
+            i + 1 < messages.length &&
+            messages[i + 1].role === 'tool'
+        ) {
+            let content = {};
+            try { content = JSON.parse(messages[i + 1].content || '{}'); } catch (_) {}
+            if (content.ok === false) {
+                const probeId   = content.probeId || '?';
+                const errSnip   = (content.error || content.kind || 'error').slice(0, 80);
+                result.push({ role: 'user', content: `[${probeId}: FAILED — ${errSnip}]` });
+                i += 2;
+                continue;
+            }
+        }
+        result.push(m);
+        i++;
+    }
+    return result;
+}
+
+/**
+ * Call the cheap summariser model to distill message history into a digest.
+ * Never throws — returns a bracketed error string on failure.
+ */
+async function callSummariser(adapter, binding, promptText, bus, spanId, quest, charm) {
+    try {
+        const req = {
+            messages: [
+                { role: 'system', content: 'You are a concise technical summariser for Wolfram Language computation logs.' },
+                { role: 'user',   content: promptText },
+            ],
+            model:       binding.model,
+            temperature: 0.1,
+            maxTokens:   binding.maxTokens || 500,
+            signal:      null,
+        };
+        const result = await adapter.chatComplete(req, { pricing: binding.pricing });
+        bus.appendEvent('llm.call', {
+            role: 'fairy_summariser', model: binding.model,
+            usage: result.usage || {}, costUSD: result.costUSD || null,
+            promptMessages: req.messages,
+        }, { spanId, questId: quest && quest.id, charmId: charm && charm.id }).catch(() => {});
+        return result.content || '[empty summary]';
+    } catch (e) {
+        return `[summariser unavailable: ${e && e.message}]`;
+    }
+}
+
+/**
+ * O1: find a safe start index for the verbatim tail. The tail must not begin with a
+ * `tool` message (which must directly follow its assistant `tool_calls`). Starting at
+ * the desired length, walk BACKWARD to the nearest non-`tool` message (preferring an
+ * assistant, so any tool responses that belong to it are kept together). Never returns
+ * an index below `minStart`.
+ *
+ * @param {object[]} messages
+ * @param {number} desiredTailLen
+ * @param {number} minStart
+ * @returns {number}
+ */
+/**
+ * O6: rough character estimate of the message context (≈ 4 chars/token). Counts
+ * message content plus serialized tool_calls so growth from tool arguments is seen.
+ * @param {object[]} messages
+ * @returns {number}
+ */
+function estimateContextChars(messages) {
+    let n = 0;
+    for (const m of messages) {
+        if (typeof m.content === 'string') n += m.content.length;
+        if (Array.isArray(m.tool_calls)) {
+            for (const tc of m.tool_calls) {
+                n += ((tc.function && tc.function.arguments) || '').length + ((tc.function && tc.function.name) || '').length;
+            }
+        }
+    }
+    return n;
+}
+
+function findSafeTailStart(messages, desiredTailLen, minStart) {
+    let idx = Math.max(minStart, messages.length - desiredTailLen);
+    while (idx > minStart && messages[idx] && messages[idx].role === 'tool') idx--;
+    return idx;
+}
+
+/**
+ * O1: defensive pass — drop any `tool` message that is not immediately preceded by an
+ * assistant message carrying tool_calls. Guarantees the array we send can never trip
+ * the provider's "tool must follow tool_calls" rule, regardless of how it was built.
+ *
+ * @param {object[]} messages
+ * @returns {object[]}
+ */
+function sanitizeToolPairing(messages) {
+    // Pass 1: drop orphan tool messages. A tool message is valid if its tool_call_id
+    // belongs to the NEAREST preceding assistant tool_calls message — walking back past
+    // SIBLING tool messages (a single assistant turn can carry multiple tool_calls, so
+    // the 2nd/3rd tool result is preceded by another tool message, not the assistant).
+    // The old "immediately-preceded-by-assistant" rule wrongly dropped those siblings,
+    // which left the assistant tool_calls with missing responses → provider 400.
+    const kept = [];
+    for (const m of messages) {
+        if (m && m.role === 'tool') {
+            let j = kept.length - 1;
+            while (j >= 0 && kept[j] && kept[j].role === 'tool') j--;
+            const anchor = j >= 0 ? kept[j] : null;
+            const ok = anchor && anchor.role === 'assistant' && Array.isArray(anchor.tool_calls)
+                && anchor.tool_calls.some(tc => tc && tc.id === m.tool_call_id);
+            if (!ok) continue;  // orphan tool response — drop it
+        }
+        kept.push(m);
+    }
+    // Pass 2: the inverse constraint — every assistant tool_calls id MUST have a tool
+    // message. Synthesize a placeholder for any that are missing (e.g. elided during
+    // compaction), so we never send an assistant tool_calls without all its responses.
+    const out = [];
+    for (let i = 0; i < kept.length; i++) {
+        const m = kept[i];
+        out.push(m);
+        if (m && m.role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.length) {
+            const present = new Set();
+            let k = i + 1;
+            while (k < kept.length && kept[k] && kept[k].role === 'tool') { present.add(kept[k].tool_call_id); out.push(kept[k]); k++; }
+            for (const tc of m.tool_calls) {
+                if (tc && tc.id && !present.has(tc.id)) {
+                    out.push({ role: 'tool', tool_call_id: tc.id, content: '{"ok":true,"note":"result elided during compaction"}' });
+                }
+            }
+            i = k - 1;  // skip the tool messages already emitted
+        }
+    }
+    return out;
+}
+
+/**
+ * Compact the message history by replacing old turns with an LLM-generated digest.
+ *
+ * Always keeps:
+ *   messages[0] — system prompt (fixed, always cached)
+ *   messages[1] — first user message (task description)
+ *   last keepLast*2 messages — verbatim recent turns (snapped to a safe boundary)
+ *
+ * Returns a new array; does not mutate the input.
+ * Skips compaction silently if there is not enough history or the summariser is unconfigured.
+ */
+async function compactMessages(messages, keepLast, adapter, summaryBinding, bus, spanId, quest, charm, workDir) {
+    if (!summaryBinding || !summaryBinding.configured) return messages;
+
+    const FIXED_HEAD = 2;
+    const minLength  = FIXED_HEAD + keepLast * 2;
+    if (messages.length <= minLength) return messages;
+
+    const head         = messages.slice(0, FIXED_HEAD);
+    // O1: the verbatim tail MUST begin at a message that can legally follow a user
+    // summary — i.e. an assistant or user message, never an orphan `tool` response
+    // (a tool message must directly follow its assistant `tool_calls`). A blind slice
+    // frequently lands mid tool_calls/tool pair → provider 400 → run killed. Snap the
+    // boundary backward to the nearest assistant/user message at or before the target.
+    const tailStart    = findSafeTailStart(messages, keepLast * 2, FIXED_HEAD);
+    const toSummarise  = messages.slice(FIXED_HEAD, tailStart);
+    const verbatimTail = messages.slice(tailStart);
+
+    const collapsed   = collapseFailed(toSummarise);
+    const promptText  = buildCompactionPrompt(collapsed);
+    const summaryText = await callSummariser(adapter, summaryBinding, promptText, bus, spanId, quest, charm);
+
+    const turnsSummarised = Math.floor(toSummarise.length / 2);
+
+    // R3: preserve definitions and established facts VERBATIM — never summarise them away.
+    const ledgerParts = [];
+    if (workDir) {
+        const [defs, facts] = await Promise.all([
+            workDir.buildDefinitionsLedger({ maxChars: 4000 }).catch(() => ''),
+            workDir.buildFactsLedger({ maxChars: 1200 }).catch(() => ''),
+        ]);
+        if (defs)  ledgerParts.push('[Definitions still alive in the kernel — verbatim, call by name:\n' + defs + '\n]');
+        if (facts) ledgerParts.push('[Established results — verbatim:\n' + facts + '\n]');
+    }
+    const ledgerMsgs = ledgerParts.map(content => ({ role: 'user', content }));
+
+    const summaryMsg = {
+        role: 'user',
+        content: `[History digest — ${turnsSummarised} turns]\n${summaryText}`,
+    };
+
+    // O1: final defensive sanitize so no orphan tool message can ever be sent.
+    return sanitizeToolPairing([...head, ...ledgerMsgs, summaryMsg, ...verbatimTail]);
+}
+
+const STEER_NO_ACTION =
+    'No tool call or control signal found. ' +
+    'If your chain is complete, emit the `done_exploring` control signal as plain JSON. ' +
+    'If not, call a tool (probe, inspect, lookup, record, assume, chain, invalidate, or finalize).';
+
+/** P4: auto-checkpoint trigger — fire every `every` records. */
+function shouldAutoCheckpoint(recordsSinceCheckpoint, every = 3) {
+    return recordsSinceCheckpoint > 0 && recordsSinceCheckpoint % every === 0;
+}
+
+/**
+ * M9: extract the primary symbol a probe DEFINES, for repeat-and-abandon detection.
+ * Returns the LHS symbol of the first `name := …`, `name[args] := …`, or `name = …`
+ * (Set/SetDelayed) at a statement boundary, or null if the probe defines nothing.
+ *
+ * @param {string} code
+ * @returns {string|null}
+ */
+function extractTargetSymbol(code) {
+    if (!code || typeof code !== 'string') return null;
+    // Match a symbol at the start of a line (optionally after whitespace/comments),
+    // optionally followed by a [...] pattern arg list, then = or :=
+    const re = /(?:^|\n)\s*([A-Za-z$][A-Za-z0-9$]*)\s*(?:\[[^\]]*\])?\s*:?=(?![=])/g;
+    let m;
+    while ((m = re.exec(code)) !== null) {
+        const sym = m[1];
+        // Skip pure equality/comparison artifacts and obvious non-definitions.
+        if (sym && sym.length > 0) return sym;
+    }
+    return null;
+}
+
+
+// ── SteerQueue ─────────────────────────────────────────────────────────────────
+
+/**
+ * Thread-safe (single-threaded JS) queue for user steering messages.
+ * The UI layer pushes text; runModelTurns drains one message per turn.
+ */
+class SteerQueue {
+    constructor() { this._items = []; }
+
+    /** @param {string} text — raw user input (caller should pre-slice to max length) */
+    push(text) { this._items.push(String(text)); }
+
+    /** Returns the oldest queued text and removes it, or null if empty. */
+    drain() { return this._items.length ? this._items.shift() : null; }
+}
+
+// ── Core LLM call utilities (kept from prior implementation) ──────────────────
+
+function tryParseJson(text) {
+    const s = String(text || '').trim();
+    if (!s) return { ok: false, error: 'empty response' };
+
+    function maybeUnwrap(val) {
+        if (Array.isArray(val) && val.length > 0 && val[0] && typeof val[0] === 'object') return val[0];
+        return val;
+    }
+
+    const fenceRe = /```(?:json|JSON)?\s*([\s\S]*?)```/;
+    const fenceMatch = s.match(fenceRe);
+    if (fenceMatch && fenceMatch[1]) {
+        const inner = fenceMatch[1].trim();
+        if (inner.startsWith('{') || inner.startsWith('[')) {
+            try { return { ok: true, value: maybeUnwrap(JSON.parse(inner)) }; } catch (_) {}
+        }
+    }
+    const stripped = s.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+    if (stripped.startsWith('{') || stripped.startsWith('[')) {
+        try { return { ok: true, value: maybeUnwrap(JSON.parse(stripped)) }; } catch (_) {}
+    }
+    const firstBrace   = s.indexOf('{');
+    const firstBracket = s.indexOf('[');
+    if (firstBracket >= 0 && (firstBrace < 0 || firstBracket < firstBrace)) {
+        const lastBracket = s.lastIndexOf(']');
+        if (lastBracket > firstBracket) {
+            try { return { ok: true, value: maybeUnwrap(JSON.parse(s.slice(firstBracket, lastBracket + 1))) }; }
+            catch (_) {}
+        }
+    }
+    const last = s.lastIndexOf('}');
+    if (firstBrace >= 0 && last > firstBrace) {
+        const slice = s.slice(firstBrace, last + 1);
+        try { return { ok: true, value: JSON.parse(slice) }; }
+        catch (e) { return { ok: false, error: `JSON parse failed: ${e.message}` }; }
+    }
+    return { ok: false, error: 'no JSON object found in response' };
+}
+
+function stableArgsKey(args) {
+    if (!args || typeof args !== 'object') return String(args);
+    try {
+        const keys = Object.keys(args).sort();
+        const parts = keys.map(k => k + '=' + JSON.stringify(args[k]));
+        const s = parts.join('|');
+        return s.length > 256 ? s.slice(0, 256) : s;
+    } catch (_) { return ''; }
+}
+
+function truncateArgsForUi(args) {
+    if (!args || typeof args !== 'object') return args;
+    const out = {};
+    for (const k of Object.keys(args)) {
+        const v = args[k];
+        out[k] = typeof v === 'string' && v.length > 200 ? v.slice(0, 200) + '…' : v;
+    }
+    return out;
+}
+
+async function callOnce({ bus, adapter, binding, messages, tools, toolChoice, signal, spanId, prefixSha256, quest, charm, turnIndex }) {
+    const tel = settings.telemetry();
+
+    const FRESH_TURNS = 3;
+    const MID_TURNS   = 7;
+    const CAP_MID     = 600;
+    const CAP_STALE   = 200;
+    for (const m of messages) {
+        if (m.role !== 'tool' || typeof m.content !== 'string') continue;
+        if (m._turnIndex == null) continue;
+        const age = turnIndex - m._turnIndex;
+        if (age < FRESH_TURNS) continue;
+        const cap = age < MID_TURNS ? CAP_MID : CAP_STALE;
+        if (m._trimmedCap != null && m._trimmedCap <= cap) continue;
+        if (m.content.length <= cap) { m._trimmedCap = m.content.length; continue; }
+        const head = m.content.slice(0, cap);
+        m.content = `${head}\n…[trimmed: full output in notebook turn ${m._turnIndex}]`;
+        m._trimmedCap = cap;
+    }
+
+    const turnMaxTokens = binding.maxTokens || 8000;
+    const req = {
+        // Final safety net: guarantee tool_calls/tool pairing on EVERY send (not just after
+        // compaction) so a malformed history can never 400 the run mid-explore.
+        messages: sanitizeToolPairing(messages),
+        model:          binding.model,
+        temperature:    0.3,
+        maxTokens:      turnMaxTokens,
+        responseFormat: tools ? undefined : 'json_object',
+        signal,
+        tools, toolChoice,
+    };
+
+    let result;
+    try {
+        let _reasoningAccum = '';
+        let _responseAccum  = '';
+        let _lastEmitMs = 0;
+        const REASONING_FLUSH_MS = 200;
+        const onChunk = (chunk) => {
+            const now = Date.now();
+            if (chunk.type === 'reasoning' && chunk.text) {
+                _reasoningAccum += chunk.text;
+                if (now - _lastEmitMs < REASONING_FLUSH_MS) return;
+                _lastEmitMs = now;
+                bus.appendEvent('llm.reasoning_progress', {
+                    role: 'fairy', questId: quest.id, charmId: charm.id, turnIndex,
+                    preview: _reasoningAccum.slice(-1800),   // fills the scrolling status box
+                }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+            } else if ((chunk.type === 'content' || chunk.type === 'text') && chunk.text) {
+                _responseAccum += chunk.text;
+                if (now - _lastEmitMs < REASONING_FLUSH_MS) return;
+                _lastEmitMs = now;
+                bus.appendEvent('llm.response_progress', {
+                    role: 'fairy', questId: quest.id, charmId: charm.id, turnIndex,
+                    preview: _responseAccum.slice(-400),
+                }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+            }
+        };
+        result = await adapter.chatComplete(req, { pricing: binding.pricing, onChunk });
+    } catch (e) {
+        await bus.appendEvent('omen', {
+            kind: 'provider_error',
+            message: e && e.message || String(e),
+            detail: { provider: binding.provider, model: binding.model, status: e && e.status || null },
+        }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+        throw e;
+    }
+
+    const costUSD = (typeof result.costUSD === 'number')
+        ? result.costUSD
+        : computeCost(result.usage, binding.pricing);
+
+    await bus.appendEvent('llm.call', {
+        role: 'fairy', provider: result.provider, model: result.model,
+        usage: result.usage, costUSD, latencyMs: result.latencyMs,
+        stopReason: result.stopReason, prefixSha256, turnIndex,
+        toolCallsRequested: Array.isArray(result.toolCalls) ? result.toolCalls.length : 0,
+        promptMessages: messages, responseText: result.content,
+        reasoning: result.reasoning || null,
+        promptBlob:   tel.saveRawPrompts   ? sha256(JSON.stringify(messages)) : null,
+        responseBlob: tel.saveRawResponses ? sha256(result.content || '')     : null,
+    }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+
+    return result;
+}
+
+async function callOnceWithRetry(params) {
+    const isAborted = () => params.signal && params.signal.aborted;
+    try {
+        return await callOnce(params);
+    } catch (e) {
+        if (isAborted()) throw e;
+        const status = e && e.status;
+        const isTransient =
+            !status ||
+            status >= 500 ||
+            status === 429 ||
+            /ECONNRESET|ETIMEDOUT|ENOTFOUND|fetch failed/i.test(String(e && e.message || ''));
+        if (!isTransient) throw e;
+        const waitMs = Math.min(Math.max(Number(e.retryAfterMs) || 1500, 500), 4000);
+        try {
+            await params.bus.appendEvent('omen', {
+                kind:    'provider_retry',
+                message: `Transient provider error (status=${status || 'n/a'}); retrying after ${waitMs}ms.`,
+                detail:  { message: e.message || String(e), retryAfterMs: waitMs },
+            }, { spanId: params.spanId, questId: params.quest.id, charmId: params.charm.id });
+        } catch (_) {}
+        await new Promise((resolve, reject) => {
+            const t = setTimeout(resolve, waitMs);
+            if (params.signal) {
+                const onAbort = () => { clearTimeout(t); reject(new Error('aborted during retry backoff')); };
+                if (params.signal.aborted) onAbort();
+                else params.signal.addEventListener('abort', onAbort, { once: true });
+            }
+        });
+        return await callOnce(params);
+    }
+}
+
+// ── Phase 3 helpers ───────────────────────────────────────────────────────────
+
+/**
+ * Compute the absolute charmDir path for this run.
+ * <wsRoot>/quests/<questId>_<shortName>/charms/<charmId>/
+ */
+function resolveCharmDir(quest, charm) {
+    const qDir = project.questsDir();
+    if (!qDir) throw new Error('No workspace open; cannot resolve charmDir');
+    const questFolder = `${quest.id}_${quest.shortName || quest.id}`;
+    return path.join(qDir, questFolder, 'charms', charm.id);
+}
+
+/**
+ * Parse a JSON control signal embedded in model text output.
+ * Returns the parsed object (with .control string) or null.
+ */
+function tryParseControlSignal(text) {
+    const parsed = tryParseJson(text);
+    if (parsed.ok && parsed.value && typeof parsed.value.control === 'string') {
+        return parsed.value;
+    }
+    return null;
+}
+
+/**
+ * Return the recorded probe value (InputForm string) for targetStepId's probe.
+ */
+async function findRecordedValue(workDir, targetStepId) {
+    const steps = await workDir.loadValidSteps().catch(() => []);
+    const step  = steps.find(s => s.id === targetStepId);
+    if (!step || !step.probeId) return null;
+    const probe = await workDir.getProbe(step.probeId).catch(() => null);
+    return probe ? (probe.value || null) : null;
+}
+
+/**
+ * Restart the working kernel and evaluate task inputs + set $Assumptions.
+ * Gracefully no-ops when the kernel is unavailable.
+ */
+async function setupWorkingKernel({ workDir, inputs, assumptions, bus, signal, spanId, quest, charm }) {
+    const ks = wolframShim.kernelStatus();
+    if (!ks.available) {
+        await bus.appendEvent('omen', {
+            kind:    'kernel_unavailable_warning',
+            message: `Wolfram kernel not available (${ks.reason}); Fairy will run without live evaluation.`,
+        }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+        return { kernelFresh: false, inputsLoaded: 0 };
+    }
+
+    let kernelFresh = false;
+    try {
+        const r = await wolframShim.restartKernel();
+        kernelFresh = !!r.ok;
+        if (!r.ok) {
+            await bus.appendEvent('omen', {
+                kind:    'kernel_reset_failed',
+                message: `Kernel restart failed: ${r.reason || 'unknown'}. Continuing with current state.`,
+            }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+        }
+    } catch (_) {}
+
+    let inputsLoaded = 0;
+    if (inputs && inputs.length > 0) {
+        await workDir.setInputs(inputs).catch(() => {});
+        for (const inp of inputs) {
+            if (inp.code) {
+                await wolframShim.evalOnce({ expression: inp.code, signal }).catch(() => {});
+                inputsLoaded++;
+            }
+        }
+    }
+
+    if (assumptions && assumptions.length > 0) {
+        for (const a of assumptions) {
+            await workDir.upsertAssumption(a).catch(() => {});
+        }
+        const wlExprs = assumptions.map(a => a.wlAssumption || a.statement).filter(Boolean);
+        if (wlExprs.length > 0) {
+            const expr = wlExprs.length === 1
+                ? `$Assumptions = ${wlExprs[0]};`
+                : `$Assumptions = And[${wlExprs.join(', ')}];`;
+            await wolframShim.evalOnce({ expression: expr, signal }).catch(() => {});
+        }
+    }
+
+    return { kernelFresh, inputsLoaded };
+}
+
+/**
+ * Run the model tool loop for one phase (explore or diagnose).
+ *
+ * Returns one of:
+ *   { type: 'done_exploring', targetStepId, includeSteps, excludeSteps }
+ *   { type: 'escalate', reason }
+ *   { type: 'failed', summary, reason }
+ *   { type: 'return_to_explore' }   — invalidate fired while in diagnose
+ *   { type: 'exhausted' }           — budget ran out
+ */
+async function runModelTurns({
+    phase, messages, fsm, adapter, binding, summaryBinding, bus, signal, spanId, quest, charm, workDir, getWorkingNbDoc,
+    steerQueue, recallRef, recallState, metrics, paperTools, literatureLlm,
+}) {
+    const M = metrics || {};  // R10: metric counters (mutated in place)
+    const fairySettings = settings.fairy();
+    const askSpecialistEnabled = fairySettings.askSpecialistEnabled;
+    const askUser = askSpecialistEnabled
+        ? async (question, context) => vscode.window.showInputBox({
+            title:           'Fairy asks',
+            prompt:          question,
+            placeHolder:     context || '',
+            ignoreFocusOut:  true,
+        })
+        : null;
+    const fairyCtx = {
+        workDir, shim: wolframShim, signal,
+        getWorkingNbDoc: getWorkingNbDoc || (() => null),
+        askUser,
+        rejectRedefinition: fairySettings.rejectRedefinition,  // M8
+        recalledSkillRefs: recallRef ? [recallRef] : [],       // cite_skill validation
+        paperTools,                                            // research_literature
+        literatureLlm,                                         // research_literature (optional)
+    };
+    const exploreTools = askSpecialistEnabled
+        ? EXPLORE_FAIRY_TOOL_SPECS
+        : EXPLORE_FAIRY_TOOL_SPECS.filter(t => t.function.name !== 'ask_specialist');
+    let budgetReminderInjected = false;
+    let lastProbeFailed = false;   // restricts tools to amend/probe/lookup until the failure is fixed
+    let lastProbeId = null;        // R1: probeId of the most recent probe (for amend_probe)
+    let consecutiveFailures = 0;   // triggers a forced reflection message after 3 in a row
+    let probesSinceCheckpoint = 0; // nudges the fairy to checkpoint after accumulating sub-results
+    let planRecorded = false;      // enforces plan-once-only guard
+    const rebuildCounts = {};      // M9: symbol → # of times rebuilt without recording
+    const REBUILD_THRESHOLD = 3;   // M9: nudge after this many rebuilds of one symbol
+    // R4: track clean, symbol-defining probes that were not yet recorded/amended.
+    // { probeId, symbol, turnSeen, nudged } — nudge once if unrecorded after 2 turns.
+    const pendingRecords = [];
+    // R1/R7: amend bookkeeping. The first FREE_AMENDS amends of a given probe are free.
+    let amendsUsedForCurrentProbe = 0;
+    const FREE_AMENDS = 2;
+    // P4: auto-checkpoint after every AUTO_CHECKPOINT_EVERY records (a budget-overrun safety net).
+    let recordsSinceCheckpoint = 0;
+    const AUTO_CHECKPOINT_EVERY = 3;
+    // R10: record-rate soft gate — force a consolidation turn when unrecorded clean
+    // results pile up. Cooling flag prevents a hard lock across consecutive turns.
+    // R11: capped + higher threshold — at 4/turn-12 it became a nuisance (run Q_QQHP45)
+    // that nagged without lifting the record rate (the agent was thrashing on the math,
+    // not merely forgetting to record). A few firm nudges, then leave the agent alone.
+    let recordGateCoolingDown = false;
+    const RECORD_GATE_THRESHOLD = 6;
+    const MAX_RECORD_GATES = 3;
+
+    const canContinue = () => {
+        if (!fsm.canTurn()) return false;
+        if (phase === 'diagnose' && !fsm.canDiagnoseTurn()) return false;
+        return true;
+    };
+
+    while (canContinue()) {
+        // O6: compact when the context grows past a size budget (token estimate),
+        // not on a fixed turn count. Skip while the last message is an unanswered
+        // assistant tool_calls (must never compact mid tool-call/response pair).
+        const lastMsg = messages[messages.length - 1];
+        const lastIsPendingCalls = lastMsg && lastMsg.role === 'assistant'
+            && Array.isArray(lastMsg.tool_calls) && lastMsg.tool_calls.length > 0;
+        const contextChars = estimateContextChars(messages);
+        const COMPACT_CHAR_BUDGET = 60000;  // ≈ 15k tokens
+        if (!lastIsPendingCalls && fsm.turnsUsed > 0 && contextChars > COMPACT_CHAR_BUDGET) {
+            messages = await compactMessages(messages, 6, adapter, summaryBinding, bus, spanId, quest, charm, workDir);
+            bus.appendEvent('fairy.history_compacted', {
+                questId: quest.id, charmId: charm.id, turnsCompacted: fsm.turnsUsed,
+                contextCharsBefore: contextChars,
+            }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+        }
+
+        // Drain one steering message per turn (newest user directive goes first).
+        if (phase === 'explore' && steerQueue) {
+            const steerText = steerQueue.drain();
+            if (steerText) {
+                messages.push({ role: 'user', content: `[User steering]: ${steerText}` });
+                bus.appendEvent('fairy.steer', {
+                    questId: quest.id, charmId: charm.id, text: steerText,
+                }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+            }
+        }
+
+        // Nudge fairy to checkpoint after accumulating 10 valid probes without checkpointing.
+        if (phase === 'explore' && probesSinceCheckpoint > 0 && probesSinceCheckpoint % 10 === 0) {
+            appendToLastToolOrUser(messages,
+                '[System: You have accumulated significant results without checkpointing. ' +
+                'Consider calling `chain` to review, then `checkpoint` to commit the completed sub-results ' +
+                'before continuing. This preserves your progress if the budget runs out.]');
+        }
+
+        // M7: every 5 turns, surface the live kernel symbol table so the model calls
+        // existing symbols by name instead of defensively rebuilding them.
+        // R2: also surface the established-results ledger so it does not re-derive facts.
+        if (phase === 'explore' && fsm.turnsUsed > 0 && fsm.turnsUsed % 5 === 0) {
+            const [symbolTable, factsLedger] = await Promise.all([
+                workDir.buildSymbolTable({ maxChars: 1200 }).catch(() => ''),
+                workDir.buildFactsLedger({ maxChars: 1200 }).catch(() => ''),
+            ]);
+            if (symbolTable) {
+                appendToLastToolOrUser(messages,
+                    '[Kernel symbols currently defined — call these BY NAME, do NOT redefine them:\n' +
+                    symbolTable + '\n]');
+            }
+            if (factsLedger) {
+                appendToLastToolOrUser(messages,
+                    '[Established results — do NOT recompute these; reference by key:\n' +
+                    factsLedger + '\n]');
+            }
+        }
+
+        // R4: nudge to record a clean, symbol-defining probe left unrecorded for 2+ turns.
+        if (phase === 'explore' && pendingRecords.length) {
+            for (const p of pendingRecords) {
+                if (!p.nudged && (fsm.turnsUsed - p.turnSeen) >= 3) {
+                    p.nudged = true;
+                    bus.appendEvent('fairy.unrecorded_success', {
+                        questId: quest.id, charmId: charm.id, probeId: p.probeId, symbol: p.symbol,
+                    }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+                    appendToLastToolOrUser(messages,
+                        `[System: probe ${p.probeId} produced a clean result defining \`${p.symbol}\` ` +
+                        'but you have not recorded it. If it belongs in the final chain, `record` it now ' +
+                        '(or `note_fact` its value) before building further — unrecorded results are lost.]');
+                }
+            }
+        }
+
+        if (phase === 'explore' && !budgetReminderInjected && fsm.exploreProbesRemaining <= 3) {
+            budgetReminderInjected = true;
+            appendToLastToolOrUser(messages, buildBudgetReminderMessage({
+                exploreProbesRemaining: fsm.exploreProbesRemaining,
+                backtracksRemaining:    fsm.backtracksRemaining,
+            }));
+        }
+
+        // After a failed probe, restrict tool choice. P2: the FIRST fix turn offers ONLY
+        // amend_probe + lookup (force an in-place fix, not a fresh probe); once an amend
+        // has been tried, the full failed-set (incl. probe) returns for a new approach.
+        //
+        // R10 record-rate soft gate: if NOT in a failed-probe fix and too many clean,
+        // symbol-defining probes are piling up unrecorded, force ONE consolidation turn
+        // (record/note_fact/chain/invalidate only). Cool down for a turn afterwards so the
+        // agent can't be hard-locked (e.g. if it only calls chain).
+        let activeTools;
+        if (phase === 'explore' && lastProbeFailed) {
+            activeTools = amendsUsedForCurrentProbe === 0 ? FAILED_PROBE_FIX_TOOL_SPECS : FAILED_PROBE_TOOL_SPECS;
+            recordGateCoolingDown = false;
+        } else if (phase === 'explore' && !recordGateCoolingDown && (M.recordGates || 0) < MAX_RECORD_GATES && pendingRecords.length >= RECORD_GATE_THRESHOLD) {
+            activeTools = RECORD_GATE_TOOL_SPECS;
+            recordGateCoolingDown = true;
+            M.recordGates = (M.recordGates || 0) + 1;
+            bus.appendEvent('fairy.record_gate', {
+                questId: quest.id, charmId: charm.id, unrecorded: pendingRecords.length,
+            }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+            appendToLastToolOrUser(messages,
+                `[System: ${pendingRecords.length} clean results are unrecorded. CONSOLIDATE NOW — ` +
+                '`record` the steps that belong in the final chain (or `note_fact` their values, or ' +
+                '`invalidate` dead ends). Probing is paused this turn until you commit results; ' +
+                'exploring without recording is why runs deliver partial.]');
+        } else {
+            activeTools = exploreTools;
+            recordGateCoolingDown = false;
+        }
+
+        fsm.incrementTurn();
+        const result = await callOnceWithRetry({
+            bus, adapter, binding, messages, tools: activeTools,
+            signal, spanId, prefixSha256: null, quest, charm,
+            turnIndex: fsm.turnsUsed,
+        });
+
+        if (signal && signal.aborted) throw new Error('aborted');
+
+        // Accumulate run cost for the live status line.
+        M.costUSD = (M.costUSD || 0) + (Number(result.costUSD) || 0);
+
+        // P7: live status — stream phase, remaining budget, cost/probes/turns, and the
+        // tail of the model's reasoning into a pinned working.wb cell (throttled in UI).
+        if (phase === 'explore') {
+            bus.appendEvent('fairy.status', {
+                questId: quest.id, charmId: charm.id, charmDir: workDir.dir,
+                phase, budgetLeft: fsm.exploreProbesRemaining,
+                probesUsed: (M.probesOk || 0) + (M.probesFailed || 0),
+                turnsUsed: fsm.turnsUsed,
+                costUSD: M.costUSD,
+                thinkingTail: reasoningTail(result.content || '', 3),
+            }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+        }
+
+        const calls = Array.isArray(result.toolCalls) ? result.toolCalls : [];
+
+        if (calls.length > 0) {
+            messages.push({
+                role: 'assistant',
+                content: result.content || '',
+                tool_calls: calls.map(c => ({
+                    id: c.id, type: 'function',
+                    function: { name: c.name, arguments: JSON.stringify(c.arguments || {}) },
+                })),
+            });
+
+            for (const call of calls) {
+                const callArgs = call.arguments || {};
+                const correlationId = 'cor_' + crypto.randomBytes(6).toString('hex');
+
+                await bus.appendEvent('tool.call', {
+                    correlationId, name: call.name, args: truncateArgsForUi(callArgs),
+                }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+
+                // Budget guard: probe
+                if (call.name === 'probe' && !fsm.canProbe()) {
+                    messages.push({ role: 'tool', tool_call_id: call.id,
+                        content: JSON.stringify({
+                            rejected: true,
+                            reason:          'probe budget exhausted',
+                            suggestedAction: 'Emit done_exploring with your current chain (and excludeSteps for any redundant steps), or call finalize if the chain cannot produce the requested result.',
+                        }) });
+                    await bus.appendEvent('correlated.tool', {
+                        correlationId, name: call.name, ok: false, error: 'probe_budget_exhausted',
+                    }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+                    continue;
+                }
+
+                // Guard: plan may only be called once
+                if (call.name === 'plan' && planRecorded) {
+                    messages.push({ role: 'tool', tool_call_id: call.id,
+                        content: JSON.stringify({
+                            rejected: true,
+                            reason:   'plan has already been recorded for this run — you may not call it again',
+                            suggestedAction: 'Proceed with your existing plan. Call probe to start computing.',
+                        }) });
+                    continue;
+                }
+
+                // Budget guard: invalidate
+                if (call.name === 'invalidate' && !fsm.canBacktrack()) {
+                    messages.push({ role: 'tool', tool_call_id: call.id,
+                        content: JSON.stringify({
+                            rejected: true,
+                            reason:          'backtrack budget exhausted — invalidate is now blocked',
+                            suggestedAction: 'Emit done_exploring with your current chain. If two steps define the same symbol, list the redundant step in excludeSteps. Only call finalize(escalate) if the chain is semantically broken and cannot produce the requested result at all.',
+                        }) });
+                    await bus.appendEvent('correlated.tool', {
+                        correlationId, name: call.name, ok: false, error: 'backtrack_budget_exhausted',
+                    }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+                    continue;
+                }
+
+                // R1: expose the last probe to amend_probe so it can reuse the slot.
+                fairyCtx.lastProbeId     = lastProbeId;
+                fairyCtx.lastProbeFailed = lastProbeId ? lastProbeFailed : false;
+
+                const toolResult = await dispatchFairyTool({ name: call.name, args: callArgs }, fairyCtx);
+
+                // Post-dispatch: consume probe budget, track failure state, checkpoint/plan counters
+                if (call.name === 'plan') {
+                    if (toolResult.ok !== false) {
+                        planRecorded = true;
+                        let planPayload = {};
+                        try { planPayload = JSON.parse(toolResult.modelPayload || '{}'); } catch (_) {}
+                        bus.appendEvent('plan.created', {
+                            questId:  quest.id,
+                            charmId:  charm.id,
+                            charmDir: workDir.dir,
+                            steps:    planPayload.steps  || (callArgs && callArgs.steps) || [],
+                            note:     planPayload.note   || (callArgs && callArgs.note)  || '',
+                        }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+                    }
+                }
+                if (call.name === 'checkpoint' && toolResult.ok !== false) {
+                    probesSinceCheckpoint = 0;
+                    recordsSinceCheckpoint = 0;   // P4: explicit checkpoint resets the auto counter
+                    let cpPayload = {};
+                    try { cpPayload = JSON.parse(toolResult.modelPayload || '{}'); } catch (_) {}
+                    bus.appendEvent('checkpoint.recorded', {
+                        questId:       quest.id,
+                        charmId:       charm.id,
+                        charmDir:      workDir.dir,
+                        sectionTitle:  cpPayload.sectionTitle  || (callArgs && callArgs.sectionTitle) || '',
+                        stepsIncluded: cpPayload.stepsIncluded || (callArgs && callArgs.stepIds)      || [],
+                        note:          (callArgs && callArgs.note) || '',
+                    }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+                }
+
+                if (call.name === 'define_util' && (toolResult.kind === 'util_fork' || toolResult.kind === 'util_cap')) {
+                    M.utilForkRejections = (M.utilForkRejections || 0) + 1;   // P10
+                }
+                // P6: trace every registered util into working.wb so the user sees the spine.
+                if (call.name === 'define_util' && toolResult.ok !== false) {
+                    const uName = (callArgs && callArgs.name) || '';
+                    // M9: feed util re-derivation into the repeat-abandon counter.
+                    if (uName) {
+                        rebuildCounts[uName] = (rebuildCounts[uName] || 0) + 1;
+                    }
+                    bus.appendEvent('util.registered', {
+                        questId: quest.id, charmId: charm.id, charmDir: workDir.dir,
+                        name: uName, note: (callArgs && callArgs.note) || '', code: (callArgs && callArgs.code) || '',
+                    }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+                }
+                // Near-duplicate rejection: no probe was spent, so do NOT count it as a
+                // failure or reset the amend cycle. Set lastProbeFailed so the next turn
+                // offers the amend/lookup gate — which is exactly the remedy (revise the
+                // last real probe in place instead of re-pasting it).
+                if (call.name === 'probe' && toolResult.kind === 'near_duplicate') {
+                    M.nearDuplicateRejections = (M.nearDuplicateRejections || 0) + 1;
+                    lastProbeFailed = true;
+                    bus.appendEvent('fairy.near_duplicate', {
+                        questId: quest.id, charmId: charm.id, lastProbeId,
+                    }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+                } else if (call.name === 'probe') {
+                    // R1: a fresh probe starts a new amend cycle.
+                    lastProbeId = toolResult.probeId || lastProbeId;
+                    amendsUsedForCurrentProbe = 0;
+                    if (toolResult.ok !== false) {
+                        lastProbeFailed = false;
+                        consecutiveFailures = 0;
+                        probesSinceCheckpoint++;
+                        M.probesOk = (M.probesOk || 0) + 1;
+                        try { fsm.consumeProbe(); } catch (_) {}
+
+                        // M9: repeat-and-abandon detection. If the model keeps redefining
+                        // the same symbol without recording, it is rebuilding, not extending.
+                        const targetSym = extractTargetSymbol((callArgs && callArgs.code) || '');
+                        if (targetSym) {
+                            rebuildCounts[targetSym] = (rebuildCounts[targetSym] || 0) + 1;
+                            if (rebuildCounts[targetSym] >= REBUILD_THRESHOLD) {
+                                M.repeatAbandon = (M.repeatAbandon || 0) + 1;
+                                bus.appendEvent('fairy.repeat_abandon', {
+                                    questId: quest.id, charmId: charm.id,
+                                    symbol: targetSym, count: rebuildCounts[targetSym],
+                                }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+                                appendToLastToolOrUser(messages,
+                                    `[System: you have rebuilt \`${targetSym}\` ${rebuildCounts[targetSym]} times ` +
+                                    'without recording it. Either record the working version now and build forward ' +
+                                    'on it, or invalidate and move to the next sub-problem. Do NOT rebuild ' +
+                                    `\`${targetSym}\` from scratch again.]`);
+                                rebuildCounts[targetSym] = 0;  // reset so we don't nudge every probe
+                            }
+                            // R4: this clean probe defines a symbol — track it as a pending record.
+                            pendingRecords.push({
+                                probeId: toolResult.probeId || '', symbol: targetSym,
+                                turnSeen: fsm.turnsUsed, nudged: false,
+                            });
+                        }
+
+                        // NOTE: skill "use" is no longer inferred from probe tokens — that
+                        // produced false positives (e.g. a probe calling Range[] "using" any
+                        // skill whose text contains "Range"). Use is now declared explicitly
+                        // by the agent via the cite_skill tool. See the cite_skill post-dispatch.
+                        bus.appendEvent('fairy.budget', {
+                            questId: quest.id, charmId: charm.id,
+                            budget: fsm.getBudgetStatus(),
+                        }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+                        // Signal the UI to append a live cell (with output) to working.wb.
+                        bus.appendEvent('probe.appended', {
+                            questId: quest.id, charmId: charm.id,
+                            charmDir: workDir.dir,
+                            probeId:  toolResult.probeId || '',
+                            code:     (callArgs && callArgs.code) || '',
+                            note:     (callArgs && callArgs.note) || '',
+                            value:    (toolResult.raw && toolResult.raw.value) || '',
+                        }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+                    } else {
+                        // Probe failed — lock tools to amend/probe/lookup until fixed.
+                        lastProbeFailed = true;
+                        M.probesFailed = (M.probesFailed || 0) + 1;
+                        consecutiveFailures++;
+                        if (consecutiveFailures >= 3) {
+                            bus.appendEvent('fairy.consecutive_failures', {
+                                questId: quest.id, charmId: charm.id, count: consecutiveFailures,
+                            }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+                            appendToLastToolOrUser(messages,
+                                `[System: ${consecutiveFailures} consecutive probe failures. ` +
+                                'Before your next probe: (1) call lookup on any unfamiliar function, ' +
+                                '(2) change your approach — do not retry the same code. ' +
+                                'State explicitly in the note field what you are changing and why.]',
+                            );
+                            consecutiveFailures = 0;  // reset so we don't spam every subsequent failure
+                        }
+                    }
+                }
+
+                // R1/R7: amend_probe — fix the prior probe in place. First FREE_AMENDS
+                // are free; further amends of the same probe each cost one probe.
+                if (call.name === 'amend_probe' && toolResult.kind !== 'nothing_to_amend' && toolResult.kind !== 'bad_args') {
+                    const paid = amendsUsedForCurrentProbe >= FREE_AMENDS;
+                    amendsUsedForCurrentProbe++;
+                    M.amends = (M.amends || 0) + 1;
+                    if (paid) { try { fsm.consumeProbe(); } catch (_) {} }
+                    if (toolResult.ok !== false) {
+                        lastProbeFailed = false;       // the failure is resolved
+                        consecutiveFailures = 0;
+                        bus.appendEvent('fairy.amend', {
+                            questId: quest.id, charmId: charm.id,
+                            probeId: toolResult.probeId || lastProbeId,
+                            free: !paid, amendsUsed: amendsUsedForCurrentProbe,
+                        }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+                        // Re-render the corrected cell in working.wb (same probeId slot).
+                        bus.appendEvent('probe.appended', {
+                            questId: quest.id, charmId: charm.id, charmDir: workDir.dir,
+                            probeId: toolResult.probeId || lastProbeId,
+                            code:    (callArgs && callArgs.code) || '',
+                            note:    (callArgs && callArgs.note) || '',
+                            value:   (toolResult.raw && toolResult.raw.value) || '',
+                        }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+                    } else {
+                        lastProbeFailed = true;        // still broken — stay in fix mode
+                    }
+                }
+
+                // M9: a successful record means a step was locked in — progress was made,
+                // so clear all rebuild counters (the model is extending, not stuck).
+                // R4: a record/note_fact clears the pending-record backlog too.
+                if ((call.name === 'record' || call.name === 'note_fact') && toolResult.ok !== false) {
+                    for (const k of Object.keys(rebuildCounts)) delete rebuildCounts[k];
+                    pendingRecords.length = 0;
+                    if (call.name === 'record')    M.records   = (M.records || 0) + 1;
+                    if (call.name === 'note_fact') M.noteFacts = (M.noteFacts || 0) + 1;
+
+                    // P4: auto-checkpoint after every AUTO_CHECKPOINT_EVERY records, so a
+                    // budget-overrun run still leaves committed sub-results in clean_in_progress.wb.
+                    if (call.name === 'record') {
+                        recordsSinceCheckpoint++;
+                        if (shouldAutoCheckpoint(recordsSinceCheckpoint, AUTO_CHECKPOINT_EVERY)) {
+                            recordsSinceCheckpoint = 0;
+                            try {
+                                const validSteps = await workDir.loadValidSteps().catch(() => []);
+                                if (validSteps.length) {
+                                    const inp  = await workDir.loadInputs().catch(() => []);
+                                    const asm  = await workDir.loadAssumptions().catch(() => []);
+                                    const title = `Auto-checkpoint (${validSteps.length} steps)`;
+                                    await workDir.appendCheckpointSection({ sectionTitle: title, steps: validSteps, inputs: inp, assumptions: asm });
+                                    M.checkpoints = (M.checkpoints || 0) + 1;
+                                    bus.appendEvent('checkpoint.recorded', {
+                                        questId: quest.id, charmId: charm.id, charmDir: workDir.dir,
+                                        sectionTitle: title, stepsIncluded: validSteps.map(s => s.id), note: 'auto', auto: true,
+                                    }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+                                }
+                            } catch (_) { /* auto-checkpoint never blocks the run */ }
+                        }
+                    }
+                }
+                if (call.name === 'inspect') M.inspects = (M.inspects || 0) + 1;
+
+                // cite_skill — the agent explicitly declared it used a recalled skill.
+                // This is the authoritative "skill used" signal (drives used_reproduced).
+                if (call.name === 'cite_skill' && toolResult.ok !== false) {
+                    const ref = (callArgs && callArgs.skillRef) || '';
+                    if (ref && recallState) {
+                        recallState.cited = recallState.cited || new Set();
+                        recallState.cited.add(ref);
+                        recallState.referenced = true;  // back-compat flag
+                    }
+                    bus.appendEvent('skill.cited', {
+                        questId: quest.id, charmId: charm.id,
+                        skillRef: ref, how: (callArgs && callArgs.how) || '',
+                    }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+                }
+
+                // Post-dispatch: research_literature — record the brief telemetry
+                if (call.name === 'research_literature' && toolResult.ok !== false) {
+                    const brief = (toolResult.raw && toolResult.raw.brief) || null;
+                    const diag  = (brief && brief.diagnostics) || {};
+                    M.literatureQueries = (M.literatureQueries || 0) + 1;
+                    // Live summary cell in working.wb so the user sees the findings.
+                    if (brief) {
+                        try {
+                            const md = buildLiteratureBriefMarkdown(brief);
+                            if (md) bus.appendEvent('literature.brief', {
+                                questId: quest.id, charmId: charm.id, markdown: md,
+                            }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+                        } catch (_) {}
+                    }
+                    bus.appendEvent('literature.searched', {
+                        questId: quest.id, charmId: charm.id,
+                        question: (callArgs && callArgs.question) || '',
+                        keywords: (brief && brief.plan && brief.plan.keywords) || null,
+                        searched: diag.searched || 0,     // raw hits from the backends
+                        read:     diag.read || 0,         // papers actually fetched + read
+                        fullText: diag.fullText || 0,     // got full text (not just abstract)
+                        relevant: diag.relevant || 0,     // judged relevant after reading
+                        papers:   brief ? (brief.papers || []).length : 0,
+                        equations: brief ? (brief.key_equations || []).length : 0,
+                        topTitle: brief && brief.papers && brief.papers[0] ? String(brief.papers[0].title || '').slice(0, 80) : null,
+                    }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+                }
+
+                // Post-dispatch: invalidate triggers backtrack + possible phase return
+                if (call.name === 'invalidate' && toolResult.ok !== false) {
+                    try { fsm.consumeBacktrack(); } catch (_) {}
+                    messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(toolResult) });
+                    await bus.appendEvent('correlated.tool', {
+                        correlationId, name: call.name, ok: true,
+                    }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+                    if (phase === 'diagnose') return { type: 'return_to_explore' };
+                    continue;
+                }
+
+                // Post-dispatch: finalize triggers terminal routing
+                if (call.name === 'finalize') {
+                    messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(toolResult) });
+                    await bus.appendEvent('correlated.tool', {
+                        correlationId, name: call.name, ok: toolResult.ok !== false,
+                    }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+                    if (toolResult.ok === false) continue; // bad args — steer and continue
+                    const status  = toolResult.status  || callArgs.status  || 'escalate';
+                    const summary = toolResult.summary || callArgs.summary || '';
+                    const reason  = toolResult.reason  || callArgs.reason  || '';
+                    return { type: status === 'failed' ? 'failed' : 'escalate', summary, reason };
+                }
+
+                messages.push({
+                    role: 'tool', tool_call_id: call.id,
+                    _turnIndex: fsm.turnsUsed,
+                    content: JSON.stringify(toolResult),
+                });
+                await bus.appendEvent('correlated.tool', {
+                    correlationId, name: call.name, ok: toolResult.ok !== false,
+                }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+            }
+
+        } else {
+            // No tool calls — check for control signal
+            const content = result.content || '';
+            messages.push({ role: 'assistant', content });
+
+            const control = tryParseControlSignal(content);
+            if (control) {
+                if (control.control === 'done_exploring') {
+                    return {
+                        type:         'done_exploring',
+                        targetStepId: control.targetStepId,
+                        includeSteps: Array.isArray(control.includeSteps) ? control.includeSteps : [],
+                        excludeSteps: Array.isArray(control.excludeSteps) ? control.excludeSteps : [],
+                    };
+                }
+                if (control.control === 'escalate') {
+                    return { type: 'escalate', reason: control.reason || 'model requested escalation' };
+                }
+            }
+
+            messages.push({ role: 'user', content: STEER_NO_ACTION });
+        }
+    }
+
+    return { type: 'exhausted' };
+}
+
+/**
+ * Run the polish phase: agent must call run_clean (allClean: true) then emit
+ * clean_verified. Agent may also call edit_cell, probe, chain, finalize.
+ *
+ * Returns one of:
+ *   { type: 'clean_verified' }
+ *   { type: 'failed', summary, reason }
+ *   { type: 'escalate', reason }
+ *   { type: 'exhausted' }
+ */
+async function runPolishTurns({
+    messages, fsm, adapter, binding, bus, signal, spanId, quest, charm, workDir,
+}) {
+    const fairyCtx = { workDir, shim: wolframShim, signal };
+    let cleanVerified = false; // set to true when run_clean returned allClean: true
+
+    const STEER_POLISH =
+        'No tool call or control signal found. ' +
+        'Call `run_clean` to verify clean.wb. After run_clean returns allClean: true, ' +
+        'emit `{ "control": "clean_verified" }` as plain JSON text.';
+
+    while (fsm.canPolishTurn()) {
+        fsm.incrementPolishTurn();
+        const result = await callOnceWithRetry({
+            bus, adapter, binding, messages, tools: POLISH_FAIRY_TOOL_SPECS,
+            signal, spanId, prefixSha256: null, quest, charm,
+            turnIndex: fsm.turnsUsed,
+        });
+
+        if (signal && signal.aborted) throw new Error('aborted');
+
+        const calls = Array.isArray(result.toolCalls) ? result.toolCalls : [];
+
+        if (calls.length > 0) {
+            messages.push({
+                role: 'assistant',
+                content: result.content || '',
+                tool_calls: calls.map(c => ({
+                    id: c.id, type: 'function',
+                    function: { name: c.name, arguments: JSON.stringify(c.arguments || {}) },
+                })),
+            });
+
+            for (const call of calls) {
+                const callArgs = call.arguments || {};
+                const correlationId = 'cor_' + crypto.randomBytes(6).toString('hex');
+
+                await bus.appendEvent('tool.call', {
+                    correlationId, name: call.name, args: truncateArgsForUi(callArgs),
+                }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+
+                // POLISH GUARD: only run_clean / edit_cell / probe / chain / finalize are valid
+                // here. Reject anything else (models sometimes call invalidate, define_util, …
+                // which are NOT offered) BEFORE dispatch — invalidate in particular pruned a
+                // step AND DELETED the verified clean.wb (the deliverable), failing the run.
+                if (!POLISH_ALLOWED.has(call.name)) {
+                    messages.push({ role: 'tool', tool_call_id: call.id,
+                        content: JSON.stringify({
+                            rejected: true,
+                            reason:   `'${call.name}' is not available in the polish phase — it would not fix the clean notebook.`,
+                            suggestedAction: 'Use `edit_cell` to fix the offending cell, then `run_clean` to re-verify. Do not invalidate or rebuild — the recorded chain is final; only the clean.wb cells may be edited.',
+                        }) });
+                    await bus.appendEvent('correlated.tool', {
+                        correlationId, name: call.name, ok: false, error: 'tool_not_in_polish_set',
+                    }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+                    continue;
+                }
+
+                // run_clean budget guard
+                if (call.name === 'run_clean' && !fsm.canPolishRunClean()) {
+                    messages.push({ role: 'tool', tool_call_id: call.id,
+                        content: JSON.stringify({
+                            rejected: true,
+                            reason:   'run_clean budget exhausted for this polish phase',
+                            suggestedAction: 'Call finalize(failed) if the notebook cannot be made clean.',
+                        }) });
+                    await bus.appendEvent('correlated.tool', {
+                        correlationId, name: call.name, ok: false, error: 'run_clean_budget_exhausted',
+                    }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+                    continue;
+                }
+
+                // probe budget guard (uses remaining diagnose budget)
+                if (call.name === 'probe' && !fsm.canProbe()) {
+                    messages.push({ role: 'tool', tool_call_id: call.id,
+                        content: JSON.stringify({
+                            rejected: true,
+                            reason:   'probe budget exhausted — no probes remaining',
+                            suggestedAction: 'Edit the cell directly with edit_cell based on your understanding of the error.',
+                        }) });
+                    await bus.appendEvent('correlated.tool', {
+                        correlationId, name: call.name, ok: false, error: 'probe_budget_exhausted',
+                    }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+                    continue;
+                }
+
+                const toolResult = await dispatchFairyTool({ name: call.name, args: callArgs }, fairyCtx);
+
+                // Track run_clean budget and whether we got allClean: true
+                if (call.name === 'run_clean') {
+                    try { fsm.consumePolishRunClean(); } catch (_) {}
+                    if (toolResult.ok) {
+                        let payload;
+                        try { payload = JSON.parse(toolResult.modelPayload || '{}'); } catch (_) { payload = {}; }
+                        if (payload.allClean === true) cleanVerified = true;
+                    }
+                }
+
+                // probe budget tracking in polish
+                if (call.name === 'probe' && toolResult.ok !== false) {
+                    try { fsm.consumeProbe(); } catch (_) {}
+                    // Signal UI to append live cell to working.wb
+                    bus.appendEvent('probe.appended', {
+                        questId: quest.id, charmId: charm.id,
+                        charmDir: workDir.dir,
+                        probeId:  toolResult.probeId || '',
+                        code:     (callArgs && callArgs.code) || '',
+                        note:     (callArgs && callArgs.note) || '[polish probe]',
+                        value:    (toolResult.raw && toolResult.raw.value) || '',
+                    }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+                }
+
+                // finalize in polish
+                if (call.name === 'finalize') {
+                    messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(toolResult) });
+                    await bus.appendEvent('correlated.tool', {
+                        correlationId, name: call.name, ok: toolResult.ok !== false,
+                    }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+                    if (toolResult.ok === false) continue;
+                    const status  = toolResult.status  || callArgs.status  || 'escalate';
+                    const summary = toolResult.summary || callArgs.summary || '';
+                    const reason  = toolResult.reason  || callArgs.reason  || '';
+                    return { type: status === 'failed' ? 'failed' : 'escalate', summary, reason };
+                }
+
+                messages.push({
+                    role: 'tool', tool_call_id: call.id,
+                    _turnIndex: fsm.turnsUsed,
+                    content: JSON.stringify(toolResult),
+                });
+                await bus.appendEvent('correlated.tool', {
+                    correlationId, name: call.name, ok: toolResult.ok !== false,
+                }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+            }
+
+        } else {
+            const content = result.content || '';
+            messages.push({ role: 'assistant', content });
+
+            const control = tryParseControlSignal(content);
+            if (control && control.control === 'clean_verified') {
+                if (!cleanVerified) {
+                    // Enforce: must have a passing run_clean before accepting clean_verified
+                    messages.push({ role: 'user', content:
+                        '**clean_verified rejected**: You must call `run_clean` first and it must return `allClean: true`. ' +
+                        'The harness has not seen a successful run_clean yet. Call `run_clean` now.' });
+                    continue;
+                }
+                return { type: 'clean_verified' };
+            }
+
+            if (control && (control.control === 'escalate' || control.control === 'done_exploring')) {
+                return { type: 'escalate', reason: 'model escalated during polish phase' };
+            }
+
+            messages.push({ role: 'user', content: STEER_POLISH });
+        }
+    }
+
+    return { type: 'exhausted' };
+}
+
+/**
+ * Run the partial-report phase: bonus turns for the agent to write clean_partial.wb.
+ *
+ * The agent is given only `chain` and `write_partial_report` tools.
+ * Returns:
+ *   { type: 'partial_delivered', partialNbPath }
+ *   { type: 'exhausted' }
+ */
+async function runPartialReportTurns({
+    messages, fsm, adapter, binding, bus, signal, spanId, quest, charm, workDir,
+}) {
+    const fairyCtx = { workDir, shim: wolframShim, signal };
+    let reportWritten = false;
+    let partialNbPath = null;
+
+    const STEER_PARTIAL =
+        'No tool call found. ' +
+        'Call `chain` to review what was recorded, then call `write_partial_report` to write the partial results notebook.';
+
+    while (fsm.canPartialReportTurn()) {
+        fsm.incrementPartialReportTurn();
+        const result = await callOnceWithRetry({
+            bus, adapter, binding, messages, tools: PARTIAL_REPORT_TOOL_SPECS,
+            signal, spanId, prefixSha256: null, quest, charm,
+            turnIndex: fsm.turnsUsed,
+        });
+
+        if (signal && signal.aborted) throw new Error('aborted');
+
+        const calls = Array.isArray(result.toolCalls) ? result.toolCalls : [];
+
+        if (calls.length > 0) {
+            messages.push({
+                role: 'assistant',
+                content: result.content || '',
+                tool_calls: calls.map(c => ({
+                    id: c.id, type: 'function',
+                    function: { name: c.name, arguments: JSON.stringify(c.arguments || {}) },
+                })),
+            });
+
+            for (const call of calls) {
+                const callArgs = call.arguments || {};
+                const correlationId = 'cor_' + crypto.randomBytes(6).toString('hex');
+
+                await bus.appendEvent('tool.call', {
+                    correlationId, name: call.name, args: truncateArgsForUi(callArgs),
+                }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+
+                const toolResult = await dispatchFairyTool({ name: call.name, args: callArgs }, fairyCtx);
+
+                if (call.name === 'write_partial_report' && toolResult.ok !== false) {
+                    let payload;
+                    try { payload = JSON.parse(toolResult.modelPayload || '{}'); } catch (_) { payload = {}; }
+                    if (payload.path) {
+                        reportWritten = true;
+                        partialNbPath = payload.path;
+                    }
+                }
+
+                messages.push({
+                    role: 'tool', tool_call_id: call.id,
+                    content: JSON.stringify(toolResult),
+                });
+                await bus.appendEvent('correlated.tool', {
+                    correlationId, name: call.name, ok: toolResult.ok !== false,
+                }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+
+                if (reportWritten) return { type: 'partial_delivered', partialNbPath };
+            }
+
+        } else {
+            messages.push({ role: 'assistant', content: result.content || '' });
+            messages.push({ role: 'user', content: STEER_PARTIAL });
+        }
+    }
+
+    // Budget exhausted without the agent writing the report — write a best-effort one anyway
+    try {
+        const steps       = await workDir.loadAllSteps().catch(() => []);
+        const inputs      = await workDir.loadInputs().catch(() => []);
+        const assumptions = await workDir.loadAssumptions().catch(() => []);
+        partialNbPath = await workDir.writePartialNotebook({
+            steps, inputs, assumptions,
+            summary: 'Partial report was not written by the agent before partial_report phase budget was exhausted.',
+            failedAttempts: [],
+            openQuestions: [],
+            recommendations: 'Review the recorded steps in this run and manually assess what remains.',
+        });
+    } catch (_) {}
+
+    return { type: 'exhausted', partialNbPath };
+}
+
+/**
+ * Build and persist a Scroll from the terminal FSM result.
+ * Returns { scroll, fileRef }.
+ */
+async function buildAndPersistScroll({ terminalResult, workDir, quest, charm, bus, fsm, spanId, recallResult }) {
+    const status = (terminalResult && terminalResult.status) || 'escalate';
+
+    let steps = [];
+    try { steps = await workDir.loadValidSteps(); } catch (_) {}
+
+    const confidence = status === 'delivered' ? 0.95
+        : status === 'partial_delivered' ? 0.3
+        : status === 'failed'   ? 0.1
+        :                         0.05;
+
+    const statusNote =
+        status === 'delivered'         ? 'Verification passed.'
+        : status === 'partial_delivered' ? `Partial results written to clean_partial.wb: ${((terminalResult && terminalResult.reason) || '').slice(0, 200)}`
+        : status === 'failed'          ? `Failed: ${((terminalResult && terminalResult.summary) || '').slice(0, 200)}`
+        :                                `Escalated: ${((terminalResult && terminalResult.reason)  || '').slice(0, 200)}`;
+
+    const summary = [
+        `Charm ${charm.id} — ${statusNote}`,
+        steps.length > 0 ? `${steps.length} recorded step(s).` : 'No steps recorded.',
+    ].join(' ').slice(0, 1000);
+
+    const findings = steps.length > 0
+        ? steps.map(s =>
+            `**Step ${s.id}** (${(s.definesSymbols || []).join(', ') || 'no new symbols'}): \`${(s.code || '').slice(0, 200)}\``
+          ).slice(0, 32)
+        : [`Run terminated with status '${status}'.`];
+
+    const openQuestions = status !== 'delivered'
+        ? [((terminalResult && (terminalResult.reason || terminalResult.summary)) || `Status: ${status}`).slice(0, 500)]
+        : [];
+
+    const scroll = {
+        id:            'S01',
+        questId:       quest.id,
+        charmId:       charm.id,
+        summary,
+        findings,
+        openQuestions,
+        confidence,
+        selfChecks:    [],
+        evidence:      [],
+        createdAt:     new Date().toISOString(),
+        fairyArtifact: {
+            status,
+            charmDir:        workDir.dir,
+            cleanNbPath:     status === 'delivered'         ? ((terminalResult && terminalResult.cleanNbPath)   || null) : null,
+            partialNbPath:   status === 'partial_delivered' ? ((terminalResult && terminalResult.partialNbPath) || null) : null,
+            candidateNbPath: (terminalResult && terminalResult.candidateNbPath) || null,
+            phaseHistory:    fsm.phaseHistory,
+            budget:          fsm.getBudgetStatus(),
+            steps:           steps.map(s => ({ id: s.id, probeId: s.probeId, definesSymbols: s.definesSymbols || [] })),
+            recallMode:         (recallResult && recallResult.mode)      || 'none',
+            skillConsultedRef:  (recallResult && recallResult.skillRef)  || null,
+        },
+    };
+
+    const scrollId = await scrollsFs.nextScrollId(quest).catch(() => 'S01');
+    scroll.id = scrollId;
+
+    const fileRef = await scrollsFs.writeScroll(quest, scroll)
+        .catch(e => ({ path: null, sha256: null, error: e.message }));
+
+    await bus.appendEvent('scroll.submitted', {
+        scrollId:    scroll.id,
+        questId:     quest.id,
+        charmId:     charm.id,
+        status,
+        confidence,
+        fileRef,
+        phaseHistory: fsm.phaseHistory,
+        budget:      fsm.getBudgetStatus(),
+        cleanNbPath:   status === 'delivered'         ? ((terminalResult && terminalResult.cleanNbPath)   || null) : null,
+        partialNbPath: status === 'partial_delivered' ? ((terminalResult && terminalResult.partialNbPath) || null) : null,
+        steps: steps.map(s => ({
+            id:             s.id,
+            probeId:        s.probeId,
+            code:           (s.code || '').slice(0, 300),
+            definesSymbols: s.definesSymbols || [],
+            usesSymbols:    (s.usesSymbols || []).slice(0, 8),
+            dependsOn:      s.dependsOn || [],
+            note:           s.note || '',
+        })),
+    }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+
+    return { scroll, fileRef };
+}
+
+// ── Main entry point ──────────────────────────────────────────────────────────
+
+/**
+ * @param {{
+ *   quest:  object,
+ *   charm:  object,
+ *   bus:    import('../telemetry/bus').TelemetryBus,
+ *   signal?: AbortSignal,
+ * }} args
+ * @returns {Promise<{ scroll: object, fileRef: {path:string, sha256:string} }>}
+ */
+async function runFairy(args) {
+    if (!args || !args.quest || !args.charm) throw new Error('runFairy: quest and charm are required');
+    const { quest, charm, bus, signal, writeNotebook, getWorkingNbDoc } = args;
+    // Optional UI hook: when the run would stop (budget exhausted or the model escalates),
+    // ask the user whether to continue with a fresh budget instead of ending. Returns
+    // a Promise<boolean>. Provided by index.js (which has VS Code dialog access).
+    const askContinue = typeof args.askContinue === 'function' ? args.askContinue : null;
+    let continuations = 0;
+    const MAX_CONTINUATIONS = 3;
+    const CONTINUE_GRANT = { probes: 15, turns: 25, backtracks: 3 };
+
+    const binding = roles.resolveRole('fairy');
+    if (!binding.configured) {
+        const err = new Error('Fairy role is not configured (provider + model + API key required).');
+        err.kind = 'not_configured';
+        throw err;
+    }
+    const summaryBinding = roles.resolveRole('fairy_summariser');
+    const adapter = getAdapter(binding.provider);
+    const spanId  = makeSpanId();
+
+    // Literature sub-agent wiring (research_literature tool). The paper tools are
+    // pure functions over INSPIRE/arXiv; the LLM is a fast/cheap completion used to
+    // rank papers and extract equations. Both are optional — if the literature role
+    // is unconfigured the sub-agent falls back to top-k papers with no extraction.
+    const paperSearch = require('../../tools/paperSearch');
+    const paperTools = {
+        // NB: forward the 3rd `opts` arg ({sort}) — the literature agent passes
+        // sort:'mostcited' (#3); dropping it silently disables impact ranking.
+        searchPapers: (params, max, opts) =>
+            paperSearch.searchPapers({ ...params, query: (params && (params.q || params.query)) || '' }, max, opts),
+        searchArxiv:     (params, max, opts) => paperSearch.searchArxiv(params, max, opts),
+        searchInspire:   (params, max, opts) => paperSearch.searchInspire(params, max, opts),
+        fetchPaperHtml:  paperSearch.fetchPaperHtml,
+        extractSections: paperSearch.extractSections,
+        getInspireBibtex: paperSearch.getInspireBibtex,
+        // Citation-graph clients (Phase 3): enable backward (#4) + forward (#18) snowball.
+        getInspireReferences: paperSearch.getInspireReferences,
+        getCitationContexts:  paperSearch.getCitationContexts,
+    };
+    const litBinding = roles.resolveRole('literature');
+    const litAdapter = litBinding.configured ? getAdapter(litBinding.provider) : null;
+    const literatureLlm = (litAdapter && litBinding.configured)
+        ? async (prompt) => {
+            try {
+                const res = await litAdapter.chatComplete({
+                    messages: [
+                        { role: 'system', content: 'You are a precise literature-extraction assistant for physics/math papers. Answer tersely and exactly as instructed.' },
+                        { role: 'user',   content: String(prompt) },
+                    ],
+                    model:       litBinding.model,
+                    temperature: 0.1,
+                    maxTokens:   litBinding.maxTokens || 800,
+                    signal,
+                }, { pricing: litBinding.pricing });
+                bus.appendEvent('llm.call', {
+                    role: 'literature', model: litBinding.model,
+                    usage: res.usage || {}, costUSD: res.costUSD || null,
+                }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+                return res.content || '';
+            } catch (_) { return ''; }
+        }
+        : null;
+
+    let charmDir;
+    try { charmDir = resolveCharmDir(quest, charm); }
+    catch (e) { throw Object.assign(e, { kind: 'no_workspace' }); }
+
+    const workDir = await createWorkDir(charmDir);
+
+    // M6: register the post-restart util seeder so that if the kernel restarts
+    // mid-run, all registered helpers are re-evaluated once and remain callable
+    // by name. Also re-applies the non-critical-warning suppression (Off[...]) so it
+    // survives a restart. Cleared in the finally block at the end of the run.
+    wolframShim.setPostRestartSeeder(async () => {
+        const utils = await workDir.getUtilsCode().catch(() => '');
+        return wolframShim.buildSuppressionCode() + '\n' + utils;
+    });
+
+    const inputs      = Array.isArray(charm.inputs)      ? charm.inputs      : [];
+    const assumptions = Array.isArray(charm.assumptions) ? charm.assumptions : [];
+
+    // Full reset before each run: clear probe results, steps, assumptions, and
+    // the working notebook so reruns always start at p001 with a clean scratchpad.
+    const fsp = require('fs/promises');
+    await Promise.all([
+        // Reset working.wb (with a subtle distinct tint marking it as the agent's scratchpad)
+        fsp.writeFile(workDir.workingNb, JSON.stringify({ cells: [], metadata: { wolframSettings: { backgroundColor: '#F0F8FF' } } }, null, 2), 'utf8').catch(() => {}),
+        // Reset steps and assumptions (but keep inputs — set by the caller)
+        fsp.writeFile(workDir.stepsFile,  JSON.stringify([], null, 2), 'utf8').catch(() => {}),
+        fsp.writeFile(workDir.assumFile,  JSON.stringify([], null, 2), 'utf8').catch(() => {}),
+        // Reset per-run memory: utils, plan, facts, cited skills
+        fsp.writeFile(workDir.utilsFile,  JSON.stringify([], null, 2), 'utf8').catch(() => {}),
+        fsp.writeFile(workDir.factsFile,  JSON.stringify([], null, 2), 'utf8').catch(() => {}),
+        fsp.writeFile(workDir.citedSkillsFile, JSON.stringify([], null, 2), 'utf8').catch(() => {}),
+        fsp.writeFile(workDir.literatureFile, JSON.stringify([], null, 2), 'utf8').catch(() => {}),
+        fsp.rm(workDir.planFile, { force: true }).catch(() => {}),
+        // Clear all probe result files so nextProbeCounter() starts at 1
+        fsp.readdir(workDir._dir + '/results').then(files =>
+            Promise.all(files.filter(f => f.endsWith('.json')).map(f =>
+                fsp.unlink(workDir._dir + '/results/' + f).catch(() => {})))
+        ).catch(() => {}),
+    ]);
+
+    await bus.appendEvent('fairy.started', {
+        questId: quest.id, charmId: charm.id,
+        provider: binding.provider, model: binding.model,
+        charmDir,
+        workingNbPath: workDir.workingNb,
+    }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+
+    // ── RECALL phase — R5: kick off concurrently with kernel setup so its ~15s
+    // latency overlaps the kernel warm-up instead of blocking run start. ──────
+    const recallCfg = settings.recall();
+    let recallPromise = Promise.resolve({ mode: 'none', recallLog: { error: 'recall disabled' } });
+    if (recallCfg.enabled && !charm.confidential) {
+        const skilxivClient = new SkilXivClient({
+            baseUrl:  recallCfg.skilxivBaseUrl,
+            apiToken: recallCfg.skilxivApiToken,
+        });
+        const taskText = String(charm.task || charm.goal || charm.title || '');
+        recallPromise = runRecall(taskText, { client: skilxivClient, signal }).catch(e => ({
+            mode: 'none',
+            recallLog: { error: (e && e.message) || String(e) },
+        }));
+    }
+
+    const { kernelFresh, inputsLoaded } = await setupWorkingKernel({ workDir, inputs, assumptions, bus, signal, spanId, quest, charm });
+
+    const recallResult = await recallPromise;
+    if (recallResult.mode !== 'none' || recallResult.skillRef) {
+        await bus.appendEvent('recall.completed', {
+            questId:    quest.id,
+            charmId:    charm.id,
+            mode:       recallResult.mode,
+            skillRef:   recallResult.skillRef || null,
+            recallLog:  recallResult.recallLog,
+        }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+    }
+    const recallBlock = buildRecallContextBlock(recallResult);
+    // Skill use is declared by the agent (cite_skill), not inferred. recallState.cited
+    // accumulates the skillRefs the agent explicitly cited as used.
+    const recallState = { referenced: false, cited: new Set() };
+
+    const fsm = new FairyFSM();
+    // Instrument transitionTo to fire UI phase-change events (fire-and-forget).
+    const _fsmTransitionOrig = fsm.transitionTo.bind(fsm);
+    fsm.transitionTo = (newPhase) => {
+        _fsmTransitionOrig(newPhase);
+        bus.appendEvent('fairy.phase', {
+            questId: quest.id, charmId: charm.id,
+            phase: newPhase, phaseHistory: fsm.phaseHistory,
+            budget: fsm.getBudgetStatus(),
+        }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+    };
+    fsm.transitionTo('explore');
+
+    const messages = [
+        { role: 'system', content: FAIRY_SYSTEM_PROMPT },
+        { role: 'user',   content: buildExploreUserMessage({
+            taskDescription: String(charm.task || charm.goal || charm.title || 'Perform the computation described in this Charm.'),
+            inputs,
+            assumptions,
+            budget: {
+                exploreProbesRemaining: fsm.exploreProbesRemaining,
+                backtracksRemaining:    fsm.backtracksRemaining,
+                turnsRemaining:         fsm.turnsRemaining,
+            },
+            charmId:       charm.id,
+            kernelFresh,
+            inputsLoaded,
+            recallBlock:   recallBlock || null,
+        }) },
+    ];
+
+    let targetStepId        = null;
+    let currentIncludeSteps = [];
+    let currentExcludeSteps = [];
+    let terminalResult      = null;
+    let lastCompileResult   = null;
+
+    // Create steer queue for this run. Index.js will expose setSteerQueue so the UI
+    // can push text; messages are drained one-per-turn in runModelTurns.
+    const steerQueue = new SteerQueue();
+    if (args.onSteerQueueReady) args.onSteerQueueReady(steerQueue);
+
+    // R10: run-efficiency metrics accumulator (mutated in runModelTurns).
+    const metrics = {
+        probesOk: 0, probesFailed: 0, records: 0, noteFacts: 0,
+        amends: 0, repeatAbandon: 0, inspects: 0,
+    };
+
+    // Ask the user whether to continue instead of stopping (budget exhausted / escalate).
+    // On "yes", extend the budget and resume Explore from the current state. Returns true
+    // if the run should continue. No-op when no askContinue hook is wired.
+    async function _maybeContinue(kind, reason) {
+        if (!askContinue || continuations >= MAX_CONTINUATIONS || fsm.isTerminal) return false;
+        let want = false;
+        try {
+            want = await askContinue({
+                kind, reason,
+                records:    metrics.records || 0,
+                noteFacts:  metrics.noteFacts || 0,
+                probesUsed: fsm.probesUsed,
+                turnsUsed:  fsm.turnsUsed,
+                continuation: continuations + 1,
+            });
+        } catch (_) { want = false; }
+        if (!want) return false;
+        continuations++;
+        fsm.grantMoreBudget(CONTINUE_GRANT);
+        messages.push({ role: 'user', content:
+            `[The user chose to CONTINUE. Fresh budget granted: +${CONTINUE_GRANT.probes} probes, +${CONTINUE_GRANT.turns} turns. ` +
+            `You have ${metrics.records || 0} recorded step(s) and ${metrics.noteFacts || 0} fact(s) so far. ` +
+            'Consolidate what you have and finish the remaining sub-problems toward a complete, recordable result.]' });
+        await bus.appendEvent('fairy.continued', {
+            questId: quest.id, charmId: charm.id, kind, continuation: continuations, grant: CONTINUE_GRANT,
+        }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+        return true;
+    }
+
+    // Polish-phase variant: clean.wb still has warnings/errors. Offer more polish budget
+    // so the agent can FINISH cleaning it (the deliverable must verify clean).
+    async function _maybeContinuePolish(reason) {
+        if (!askContinue || continuations >= MAX_CONTINUATIONS || fsm.isTerminal) return false;
+        let want = false;
+        try {
+            want = await askContinue({
+                kind: 'polish', reason,
+                records: metrics.records || 0, noteFacts: metrics.noteFacts || 0,
+                probesUsed: fsm.probesUsed, turnsUsed: fsm.turnsUsed, continuation: continuations + 1,
+            });
+        } catch (_) { want = false; }
+        if (!want) return false;
+        continuations++;
+        fsm.grantMoreBudget({ polishTurns: 6, polishRunCleans: 3, turns: 8 });
+        messages.push({ role: 'user', content:
+            '[The user chose to CONTINUE polishing. More polish budget granted. The clean notebook MUST verify ' +
+            'fully clean before finishing: call run_clean, fix EVERY remaining warning/error with edit_cell, and ' +
+            'repeat until run_clean returns allClean: true. Do not stop while any warning remains.]' });
+        await bus.appendEvent('fairy.continued', {
+            questId: quest.id, charmId: charm.id, kind: 'polish', continuation: continuations,
+        }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+        return true;
+    }
+
+    // ── Outer FSM loop ────────────────────────────────────────────────────────
+    while (!fsm.isTerminal) {
+        const phase = fsm.phase;
+
+        if (phase === 'explore' || phase === 'diagnose') {
+            let loopResult;
+            try {
+                loopResult = await runModelTurns({
+                    phase, messages, fsm, adapter, binding, summaryBinding, bus, signal, spanId, quest, charm, workDir, getWorkingNbDoc,
+                    steerQueue: phase === 'explore' ? steerQueue : null,
+                    recallRef: recallResult.skillRef || null, recallState,
+                    metrics, paperTools, literatureLlm,
+                });
+            } catch (e) {
+                if (signal && signal.aborted) {
+                    terminalResult = { status: 'escalate', reason: 'aborted by user' };
+                    fsm.transitionTo('escalate');
+                    break;
+                }
+                // O2: a non-abort error (e.g. a provider 400) must NOT discard the run.
+                // Salvage: emit an omen, mark escalate, and break to the end-of-run blocks
+                // so recorded steps, usage feedback, and metrics are still persisted.
+                bus.appendEvent('fairy.error', {
+                    questId: quest.id, charmId: charm.id, phase,
+                    message: (e && e.message) || String(e),
+                }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+                terminalResult = { status: 'escalate', reason: `run error in ${phase}: ${(e && e.message) || String(e)}` };
+                fsm.transitionTo('escalate');
+                break;
+            }
+
+            if (loopResult.type === 'done_exploring') {
+                targetStepId        = loopResult.targetStepId;
+                currentIncludeSteps = loopResult.includeSteps || [];
+                currentExcludeSteps = loopResult.excludeSteps || [];
+                fsm.transitionTo('compile');
+
+            } else if (loopResult.type === 'escalate') {
+                // Ask the user before giving up — in isolated/quick-compute mode an
+                // escalate usually means "I'm stuck", and the user may want to weigh in.
+                if (await _maybeContinue('escalate', loopResult.reason)) continue;
+                terminalResult = { status: 'escalate', reason: loopResult.reason };
+                fsm.transitionTo('escalate');
+
+            } else if (loopResult.type === 'failed') {
+                terminalResult = { status: 'failed', summary: loopResult.summary, reason: loopResult.reason };
+                fsm.transitionTo('failed');
+
+            } else if (loopResult.type === 'return_to_explore') {
+                fsm.transitionTo('explore');
+                messages.push({ role: 'user', content: 'Returning to Explore after invalidation. Resume building the chain from your remaining valid steps.' });
+
+            } else {
+                // Budget exhausted — offer to continue with a fresh budget before falling
+                // back to a partial report.
+                if (await _maybeContinue('budget', 'ran out of probe/turn budget')) continue;
+                fsm.transitionTo('partial_report');
+            }
+
+        } else if (phase === 'compile') {
+            if (!targetStepId) {
+                terminalResult = { status: 'escalate', reason: 'compile phase reached without a targetStepId' };
+                fsm.transitionTo('escalate');
+                continue;
+            }
+
+            // Skills-used + citation block for the clean notebook (and working.wb).
+            // A skill is shown as USED only if the agent cited it (cite_skill); otherwise
+            // it was merely consulted. The "how it helped" comes from the citation itself.
+            let skillsBlock = '';
+            if (recallResult && recallResult.skillRef) {
+                const ref = recallResult.skillRef;
+                const cited = await workDir.loadCitedSkills().catch(() => []);
+                const citation = cited.find(c => c.skillRef === ref);
+                const usedNow = !!citation;
+                let runReport = '';
+                try {
+                    const facts = await workDir.loadFacts().catch(() => []);
+                    const topFact = facts.find(f => f.confidence === 'high') || facts[0];
+                    runReport = [
+                        usedNow && citation.how ? `Used: ${citation.how}` : 'Consulted but not cited as used.',
+                        topFact ? `Key result: ${topFact.key} = ${String(topFact.value).slice(0, 120)}` : '',
+                    ].filter(Boolean).join(' ');
+                } catch (_) {}
+                skillsBlock = buildSkillsUsedMarkdown({
+                    baseUrl: recallCfg.skilxivBaseUrl,
+                    runReport,
+                    skills: [{ ref, used: usedNow,
+                        conclusion: usedNow && citation.how ? citation.how : undefined,
+                        outcome: usedNow ? 'used_reproduced' : 'consulted' }],
+                });
+            }
+            // Append a "Literature consulted" block (independent of recalled skills) — the
+            // papers surfaced by the research_literature sub-agent are cited at run end.
+            try {
+                const briefs = await workDir.loadLiteratureBriefs().catch(() => []);
+                const litBlock = buildLiteratureCitations(briefs);
+                if (litBlock) {
+                    skillsBlock = skillsBlock ? `${skillsBlock}\n\n${litBlock}` : litBlock;
+                    const papersCited = new Set();
+                    for (const b of briefs) for (const p of (b.papers || [])) papersCited.add(p.ref || p.title);
+                    bus.appendEvent('literature.cited', {
+                        questId: quest.id, charmId: charm.id,
+                        papers: papersCited.size, briefs: briefs.length,
+                    }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+                }
+            } catch (_) {}
+
+            // Surface the same block in the live working notebook (inserted once).
+            if (skillsBlock) {
+                bus.appendEvent('skills.used', {
+                    questId: quest.id, charmId: charm.id, charmDir: workDir.dir,
+                    skillRef: recallResult.skillRef || null, markdown: skillsBlock,
+                }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+            }
+
+            let compileResult;
+            try {
+                compileResult = await compile(workDir, targetStepId, {
+                    includeSteps:  currentIncludeSteps,
+                    excludeSteps:  currentExcludeSteps,
+                    taskTitle:     charm.task || charm.goal || charm.title,
+                    writeNotebook,
+                    skillsBlock,
+                });
+            } catch (e) {
+                await bus.appendEvent('omen', {
+                    kind: 'compile_error', message: e.message,
+                }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+                compileResult = {
+                    ok: false, phase: 'diagnose', closureSteps: [], cleanNbPath: null,
+                    diagnostics: [{ type: 'exception', details: e.message }], targetStepMissing: false,
+                };
+            }
+            lastCompileResult = compileResult;
+
+            if (compileResult.ok) {
+                fsm.transitionTo('polish');
+            } else {
+                const diagDetails = (compileResult.diagnostics || [])
+                    .map(d => d.details || JSON.stringify(d)).join('\n');
+                messages.push({ role: 'user', content: buildDiagnoseUserMessage({
+                    classification:   'cell_errored',
+                    firstFailureCell: null,
+                    freshOutput:      diagDetails.slice(0, 400),
+                    recordedOutput:   null,
+                    messages:         (compileResult.diagnostics || []).map(d => d.details || '').slice(0, 3),
+                    details:          `Compilation failed: ${diagDetails.slice(0, 400)}`,
+                    budget: {
+                        diagnoseProbesRemaining: fsm.diagnoseProbesRemaining,
+                        diagnoseTurnsRemaining:  fsm.diagnose_turns_remaining,
+                    },
+                    targetStepId: targetStepId,
+                }) });
+                fsm.transitionTo('diagnose');
+            }
+
+        } else if (phase === 'polish') {
+            const cleanNbPath = lastCompileResult && lastCompileResult.cleanNbPath;
+
+            // Inject the polish entry message (replaces the old subprocess verify)
+            messages.push({ role: 'user', content: buildPolishEntryMessage({
+                cleanNbPath:          cleanNbPath || workDir.cleanNb,
+                runCleansRemaining:   fsm.polishRunCleansRemaining,
+                polishTurnsRemaining: fsm.polishTurnsRemaining,
+            }) });
+
+            let polishResult;
+            try {
+                polishResult = await runPolishTurns({
+                    messages, fsm, adapter, binding, bus, signal, spanId, quest, charm, workDir,
+                });
+            } catch (e) {
+                if (signal && signal.aborted) {
+                    terminalResult = { status: 'escalate', reason: 'aborted by user' };
+                    fsm.transitionTo('escalate');
+                    break;
+                }
+                // O2: salvage — escalate honestly. A clean.wb may be compiled but
+                // polish (fresh-kernel verification) did not complete, so do NOT claim
+                // delivery; record the path so the user can inspect it.
+                bus.appendEvent('fairy.error', {
+                    questId: quest.id, charmId: charm.id, phase: 'polish',
+                    message: (e && e.message) || String(e),
+                }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+                terminalResult = { status: 'escalate', cleanNbPath: cleanNbPath || null,
+                    reason: `polish error (clean.wb compiled but not verified): ${(e && e.message) || String(e)}` };
+                fsm.transitionTo('escalate');
+                break;
+            }
+
+            if (polishResult.type === 'clean_verified') {
+                terminalResult = { status: 'delivered', cleanNbPath };
+                fsm.transitionTo('delivered');
+
+            } else if (polishResult.type === 'failed') {
+                // The clean notebook still has unresolved warnings/errors. Offer to keep
+                // fixing (more polish budget) before giving up — the deliverable must be clean.
+                if (await _maybeContinuePolish(polishResult.reason || 'clean.wb still has unresolved warnings')) continue;
+                terminalResult = { status: 'failed', summary: polishResult.summary, reason: polishResult.reason, cleanNbPath };
+                fsm.transitionTo('failed');
+
+            } else if (polishResult.type === 'escalate') {
+                terminalResult = { status: 'escalate', reason: polishResult.reason, cleanNbPath };
+                fsm.transitionTo('escalate');
+
+            } else {
+                // exhausted — offer to extend polish so the agent can finish cleaning up.
+                if (await _maybeContinuePolish('ran out of polish budget before clean.wb verified')) continue;
+                terminalResult = { status: 'failed', reason: 'polish phase exhausted without clean verification', cleanNbPath };
+                fsm.transitionTo('failed');
+            }
+
+        } else if (phase === 'partial_report') {
+            // Bonus turns to write clean_partial.wb after budget exhaustion
+            const stepsRecorded = (await workDir.loadAllSteps().catch(() => [])).filter(s => s.status === 'valid').length;
+            messages.push({ role: 'user', content: buildPartialReportUserMessage({
+                stepsRecorded,
+                probesUsed:                  fsm.probesUsed,
+                partialReportTurnsRemaining: fsm.partialReportTurnsRemaining,
+            }) });
+
+            let partialResult;
+            try {
+                partialResult = await runPartialReportTurns({
+                    messages, fsm, adapter, binding, bus, signal, spanId, quest, charm, workDir,
+                });
+            } catch (e) {
+                if (signal && signal.aborted) {
+                    terminalResult = { status: 'escalate', reason: 'aborted by user' };
+                    fsm.transitionTo('escalate');
+                    break;
+                }
+                // O2: salvage — recorded steps are already on disk; escalate gracefully.
+                bus.appendEvent('fairy.error', {
+                    questId: quest.id, charmId: charm.id, phase: 'partial_report',
+                    message: (e && e.message) || String(e),
+                }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+                terminalResult = { status: 'escalate', reason: `partial_report error: ${(e && e.message) || String(e)}` };
+                fsm.transitionTo('escalate');
+                break;
+            }
+
+            const partialNbPath = partialResult && partialResult.partialNbPath;
+            terminalResult = {
+                status:        'partial_delivered',
+                partialNbPath: partialNbPath || workDir.partialNb,
+                reason:        'probe budget exhausted; partial results written to clean_partial.wb',
+            };
+            fsm.transitionTo('partial_delivered');
+        }
+    }
+
+    // ── End-of-run: persist scroll, raise candidate, report usage + metrics ──
+    // O2/O3/O5: usage feedback, run metrics, and seeder cleanup run in a `finally`
+    // so they survive even if scroll-building or the contribute step throws.
+    let scroll = null, fileRef = null;
+    try {
+        ({ scroll, fileRef } = await buildAndPersistScroll({ terminalResult, workDir, quest, charm, bus, fsm, spanId, recallResult }));
+
+        // ── CONTRIBUTE — Stage 2: raise a LOCAL candidate, never auto-submit ─────
+        // On a delivered, non-confidential run with reusable content, write a private
+        // candidate to the review inbox (the human approves later; nothing auto-submits).
+        if ((terminalResult && terminalResult.status === 'delivered')
+            && settings.contribution().mode !== 'off') {
+            try {
+                const [defsLedger, factsLedger, facts] = await Promise.all([
+                    workDir.buildDefinitionsLedger({ maxChars: 6000 }).catch(() => ''),
+                    workDir.buildFactsLedger({ maxChars: 2000 }).catch(() => ''),
+                    workDir.loadFacts().catch(() => []),
+                ]);
+                const taskText = String(charm.task || charm.goal || charm.title || '');
+                const title    = String(charm.title || charm.goal || taskText).slice(0, 120);
+                // F6: only set a lineage parent when a recalled skill was ACTUALLY cited
+                // as used. Otherwise this is NEW work → fresh skill, no false derived_from.
+                const citedRecalled = !!(recallState && recallState.cited
+                    && recallResult.skillRef && recallState.cited.has(recallResult.skillRef));
+                const derivedFrom = citedRecalled ? recallResult.skillRef : null;
+                const cand = await contributionInbox.writeCandidate({
+                    charmId: charm.id, questId: quest.id, title, task: taskText,
+                    status: 'delivered', confidential: !!charm.confidential,
+                    inputs, outputs: Array.isArray(charm.outputs) ? charm.outputs : [],
+                    definitionsLedger: defsLedger, factsLedger, factsCount: facts.length,
+                    cleanNbPath: (terminalResult && terminalResult.cleanNbPath) || workDir.cleanNb,
+                    derivedFrom,
+                    generatedWith: `wolfbook-fairy/${binding.model || 'unknown'}`,
+                });
+                if (cand && cand.eligible) {
+                    metrics.candidateRaised = true;
+                    await bus.appendEvent('contribution.candidate', {
+                        questId: quest.id, charmId: charm.id, candidateId: cand.id, dir: cand.dir,
+                        derivedFrom, isNewSkill: !derivedFrom,
+                    }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+                } else if (cand) {
+                    await bus.appendEvent('contribution.skipped', {
+                        questId: quest.id, charmId: charm.id, reasons: cand.reasons,
+                    }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+                }
+            } catch (_) { /* fail-open: candidate creation never blocks the run */ }
+        }
+    } finally {
+        // ── O3 + F1/F2/F5: SkilXiv usage feedback. The recalled skill is credited as
+        // USED only when the agent EXPLICITLY cited it (cite_skill) — never inferred from
+        // tokens. used_reproduced requires (cited AND delivered); otherwise the skill was
+        // merely consulted.
+        try {
+            const skillRef = recallResult.skillRef;
+            if (recallResult.mode === 'consult' && skillRef && !charm.confidential) {
+                const status   = terminalResult && terminalResult.status;
+                const cited     = !!(recallState && recallState.cited && recallState.cited.has(skillRef));
+                // Valid SkilXiv outcomes: consulted | used_reproduced | diverged.
+                const outcome  = (cited && status === 'delivered') ? 'used_reproduced' : 'consulted';
+                const envClass = `WL-unknown-${process.platform}-${process.arch}`;
+                const eventId  = sha256(charm.id + '|' + skillRef + '|' + (status || '') + '|' + cited);
+
+                // Prefer the agent's own "how it helped" note; else a short content-light line.
+                const contribCfg = settings.contribution();
+                const sharePublicly = !!contribCfg.shareUsagePublicly;
+                let agentReport = null;
+                try {
+                    const citedList = await workDir.loadCitedSkills().catch(() => []);
+                    const citation  = citedList.find(c => c.skillRef === skillRef);
+                    if (citation && citation.how) {
+                        agentReport = `Used: ${citation.how}`.slice(0, 600);
+                    } else {
+                        const taskShort = String(charm.task || charm.goal || charm.title || '').replace(/\s+/g, ' ').slice(0, 180);
+                        agentReport = ['Consulted this skill (not cited as used).', taskShort ? `Task: ${taskShort}` : '']
+                            .filter(Boolean).join(' ').slice(0, 600);
+                    }
+                } catch (_) {}
+
+                // The report is the USER'S OWN data — always store it locally (regardless
+                // of sharePublicly) so they can read their own run reports. Only the
+                // *remote* submission is gated by the privacy opt-in.
+                const usageEvent = { skill: skillRef, outcome, cited, event_id: eventId,
+                    environment_class: envClass, sharePublicly, report: agentReport,
+                    questId: quest.id, charmId: charm.id, timestamp: new Date().toISOString() };
+                const fsp = require('fs/promises');
+                const usageLogPath = path.join(charmDir, '..', '..', '..', '..', 'usage_log.jsonl');
+                fsp.appendFile(usageLogPath, JSON.stringify(usageEvent) + '\n', 'utf8').catch(() => {});
+                // Also persist alongside the run for easy discovery.
+                fsp.writeFile(path.join(workDir.dir, 'skill_usage.json'),
+                    JSON.stringify(usageEvent, null, 2), 'utf8').catch(() => {});
+
+                await bus.appendEvent('skill.usage_reported', {
+                    questId: quest.id, charmId: charm.id, skillRef, outcome, cited, sharePublicly,
+                    report: agentReport,
+                }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+
+                if (recallCfg.usageTelemetry) {
+                    const usageClient = new SkilXivClient({ baseUrl: recallCfg.skilxivBaseUrl, apiToken: recallCfg.skilxivApiToken });
+                    // Confirm the +1 actually reached the registry (await + log the result),
+                    // so an independent record exists that the skill was used & reproduced.
+                    // Identity + report are sent only when the user opted in (sharePublicly).
+                    usageClient.reportUsage({
+                        skill: skillRef, outcome, eventId, environmentClass: envClass,
+                        agentReport: sharePublicly ? agentReport : null,
+                        sharePublicly,
+                    })
+                        .then(() => bus.appendEvent('skill.usage_confirmed', {
+                            questId: quest.id, charmId: charm.id, skillRef, outcome, delivered: true, sharePublicly,
+                        }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {}))
+                        .catch((e) => bus.appendEvent('skill.usage_failed', {
+                            questId: quest.id, charmId: charm.id, skillRef,
+                            error: (e && e.message) || String(e),
+                        }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {}));
+                }
+            }
+        } catch (_) { /* usage feedback never blocks the run */ }
+
+        // ── O5: run-efficiency metrics — emit even on error/abort. ───────────
+        try {
+            const okN = metrics.probesOk || 0, failN = metrics.probesFailed || 0;
+            const totalProbes = okN + failN;
+            await bus.appendEvent('fairy.run_metrics', {
+                questId: quest.id, charmId: charm.id,
+                probesOk: okN, probesFailed: failN,
+                probeSuccessRate: totalProbes ? +(okN / totalProbes).toFixed(3) : null,
+                records: metrics.records || 0,
+                recordRate: okN ? +((metrics.records || 0) / okN).toFixed(3) : null,
+                noteFacts: metrics.noteFacts || 0,
+                amends: metrics.amends || 0,
+                amendRatio: failN ? +((metrics.amends || 0) / failN).toFixed(2) : null,   // P10
+                probeFailRate: totalProbes ? +(failN / totalProbes).toFixed(3) : null,   // P10
+                checkpoints: metrics.checkpoints || 0,                                   // P10
+                utilForkRejections: metrics.utilForkRejections || 0,                     // P10
+                nearDuplicateRejections: metrics.nearDuplicateRejections || 0,           // R6 dup-probe guard
+                recordGates: metrics.recordGates || 0,                                   // R10 record-rate gate
+                continuations: continuations,                                            // R11 user "continue" grants
+                literatureQueries: metrics.literatureQueries || 0,                       // R4 lit
+                reDerivations: metrics.repeatAbandon || 0,
+                inspects: metrics.inspects || 0,
+                inspectsPerProbe: okN ? +((metrics.inspects || 0) / okN).toFixed(2) : null,
+                recallSkill: (recallResult && recallResult.skillRef) || null,
+                recallUsed: !!(recallState && recallState.cited && recallState.cited.size),
+                candidateRaised: !!metrics.candidateRaised,
+                status: (terminalResult && terminalResult.status) || 'unknown',
+            }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+        } catch (_) { /* metrics never block the run */ }
+
+        // P7: terminal status — swap the live status cell to a final ✅/▢ line.
+        bus.appendEvent('fairy.status', {
+            questId: quest.id, charmId: charm.id, charmDir: workDir.dir,
+            done: true, status: (terminalResult && terminalResult.status) || 'unknown',
+        }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+
+        // M6: clear the post-restart seeder now the run is over (next run re-registers).
+        wolframShim.setPostRestartSeeder(null);
+    }
+
+    return {
+        scroll,
+        fileRef,
+        workingNbPath:  workDir.workingNb,
+        cleanNbPath:    scroll && scroll.fairyArtifact && scroll.fairyArtifact.cleanNbPath    || null,
+        partialNbPath:  scroll && scroll.fairyArtifact && scroll.fairyArtifact.partialNbPath  || null,
+    };
+}
+
+module.exports = {
+    runFairy,
+    SteerQueue,
+    _internals: {
+        tryParseControlSignal, tryParseJson, resolveCharmDir, findRecordedValue, buildAndPersistScroll,
+        appendToLastToolOrUser, collapseFailed, compactMessages, extractTargetSymbol, shouldAutoCheckpoint,
+        findSafeTailStart, sanitizeToolPairing, estimateContextChars,
+    },
+};
