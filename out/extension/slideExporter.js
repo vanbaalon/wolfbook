@@ -1126,8 +1126,10 @@ html,body{margin:0;padding:0;}
   .slide-wrap{margin:10px 0;box-shadow:0 2px 16px rgba(0,0,0,.5);overflow:hidden;}
 }
 @media print{
-  .slide-wrap{margin:0;box-shadow:none;}
-  .slide-page{break-after:page;break-inside:avoid;}
+  /* Undo the on-screen fit() scaling so each slide prints at full 1920×1080
+     per @page (the JS sets an inline transform + sized wrappers for screen). */
+  .slide-wrap{margin:0!important;box-shadow:none;width:auto!important;height:auto!important;overflow:visible!important;}
+  .slide-page{transform:none!important;break-after:page;break-inside:avoid;}
   .slide-wrap:last-child .slide-page{break-after:auto;}
 }
 </style>
