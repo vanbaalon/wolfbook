@@ -160,6 +160,18 @@ New runtime dependency: **`prismjs ^1.29.0`** (added to `package.json`, same pat
 
 ---
 
+## Reveal.js wrapper over the serialized DOM (animation + transitions)
+The HTML export now wraps the serialized editor DOM in **Reveal.js** for navigation,
+fragment animation and per-slide transitions — without changing the renderer:
+- The webview tags blocks that have a `fragmentOrder` with Reveal `fragment` classes
+  (`data-fragment-index = order-1`) and returns each slide's `transition` + `notes`.
+- `slideExporter.assembleSerializedReveal()` wraps each serialized `.slide-content` in
+  a `<section data-transition=…>` with the slide background (gradients supported);
+  `random` is resolved to a concrete transition. No Reveal *theme* is loaded, so the
+  content styling stays 100% the editor's own CSS.
+- HTML export / `wolfslide_exportHtml` → Reveal presentation (fallback: string Reveal).
+- PDF *publishing* → the flat one-page-per-slide serialized HTML (printed).
+
 ## Architecture — webview-driven export (one renderer)
 The export now prefers to **serialize the webview's own live DOM** instead of
 re-building slides with a separate string renderer:

@@ -973,7 +973,7 @@ ${inner}
 </html>`;
 }
 
-module.exports = { exportDeck, exportDeckPdf, exportSlideStepHtml, slideToHTML, slideToStaticHTML, assembleSerializedDeck, checkExportDependencies, exportDependencyWarning };
+module.exports = { exportDeck, exportDeckPdf, exportSlideStepHtml, slideToHTML, slideToStaticHTML, assembleSerializedDeck, assembleSerializedReveal, checkExportDependencies, exportDependencyWarning };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PDF-frames export  —  print-ready HTML: one page per animation step
@@ -1161,6 +1161,64 @@ ${pages}
   fit(); addEventListener('resize', fit);
 })();
 </script>
+</body>
+</html>`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Serialized-deck Reveal.js export  —  same live DOM as assembleSerializedDeck,
+// but wrapped in Reveal.js <section>s so navigation, fragment animation and the
+// per-slide transition (from the deck JSON) work. The slide CONTENT is the
+// editor's own DOM/CSS; Reveal only adds the presentation shell.
+// ─────────────────────────────────────────────────────────────────────────────
+function assembleSerializedReveal(parts, opts) {
+    const all = (parts && parts.slides) || [];
+    const slides = all.filter(s => s && !s.hidden);
+    const sections = slides.map(s => {
+        let trans = s.transition || '';
+        if (trans === 'random') trans = ['fade','slide','convex','concave','zoom'][Math.floor(Math.random() * 5)];
+        const tAttr = trans ? ` data-transition="${escapeAttr(trans)}"` : '';
+        const bg = s.background || '#fafcff';
+        const notes = s.notes ? `\n<aside class="notes">${escapeAttr(s.notes)}</aside>` : '';
+        return `<section${tAttr} style="background:${escapeAttr(bg)};">${s.html || ''}${notes}</section>`;
+    }).join('\n');
+    const prismCss = _prismThemeCSS();
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>${escapeHtml((opts && opts.title) || 'Presentation')}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5/dist/reveal.css">
+<style>
+/* Reveal shell only — slide CONTENT styling comes from the editor's own CSS below.
+   No theme stylesheet is loaded, so nothing recolours/uppercases the content. */
+html,body{margin:0;padding:0;background:#000;}
+.reveal{background:#000;}
+.reveal .slides{text-align:left;}
+.reveal .slides section{padding:0!important;margin:0!important;top:0!important;width:1920px;height:1080px;overflow:hidden;}
+.reveal .slides section>.slide-content{width:1920px;height:1080px;}
+.reveal .slides section h1,.reveal .slides section h2,.reveal .slides section h3,
+.reveal .slides section h4,.reveal .slides section h5,.reveal .slides section h6{text-transform:none;letter-spacing:normal;}
+.reveal .slide-background-content{background:#000;}
+${parts.themeVars || ''}
+</style>
+<style>
+/* The editor's own slide CSS, captured live from the webview. */
+${parts.slideCSS || ''}
+</style>
+${prismCss ? `<style>\n${prismCss}\n</style>` : ''}
+${katexHeadAssets(false)}
+<style>
+.code-block,.code-block pre,.code-block code,.code-block code *{font-family:'SF Mono','Fira Code','Consolas',monospace!important;}
+</style>
+</head>
+<body>
+<div class="reveal"><div class="slides">
+${sections}
+</div></div>
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5/dist/reveal.js"></script>
+<script>Reveal.initialize({hash:true,slideNumber:'c/t',width:1920,height:1080,margin:0,minScale:0.1,maxScale:2,transition:'slide',center:false,controls:true,progress:true});</script>
 </body>
 </html>`;
 }

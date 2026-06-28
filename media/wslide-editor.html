@@ -3670,6 +3670,23 @@ function buildSlideContentForExport(slide) {
   return contentDiv;
 }
 
+// Tag blocks that have a fragmentOrder with Reveal.js fragment classes so the
+// exported deck animates step-by-step exactly like the editor's fragment order.
+function _applyFragmentClasses(content, slide) {
+  const map = {};
+  (function walk(b) {
+    if (!b || typeof b !== 'object') return;
+    if (b.id && b.fragmentOrder >= 1) map[b.id] = b.fragmentOrder;
+    (b.children || []).forEach(walk);
+    (b.items || []).forEach(walk);
+    (b.elements || []).forEach(walk);
+  })({ children: slide.children, items: slide.items, elements: slide.elements });
+  content.querySelectorAll('[data-block-id]').forEach(el => {
+    const fo = map[el.dataset.blockId];
+    if (fo >= 1) { el.classList.add('fragment'); el.setAttribute('data-fragment-index', String(fo - 1)); }
+  });
+}
+
 // Convert webview-resource image srcs to data URIs so the exported HTML is portable.
 async function _inlineExportImages(root) {
   const imgs = [...root.querySelectorAll('img')];
@@ -3717,7 +3734,14 @@ async function serializeDeckForExport(id) {
       await _inlineExportImages(content);
       // Drop transient editor-only affordances that renderBlock emits regardless of mode.
       content.querySelectorAll('.eval-spinner, .frag-badge, .font-warn, .move-handle, .rh').forEach(el => el.remove());
-      slides.push({ background: slide.background || '#fafcff', hidden: !!slide.hidden, html: content.outerHTML });
+      _applyFragmentClasses(content, slide);
+      slides.push({
+        background: slide.background || '#fafcff',
+        hidden: !!slide.hidden,
+        transition: slide.transition || '',
+        notes: slide.notes || '',
+        html: content.outerHTML,
+      });
     }
     vscodeApi.postMessage({ cmd: 'serializeDeckResult', id, slides, slideCSS: getSlideExportCSS(), themeVars: getThemeVarsCSS() });
   } catch (err) {

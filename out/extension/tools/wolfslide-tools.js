@@ -1760,9 +1760,9 @@ class WolfslideExportHtmlTool {
             const deckName0 = entry0 ? require('path').basename(entry0.document.uri.fsPath, '.wslide') : 'presentation';
             let html = null;
             if (entry0 && p._buildSerializedHtml) {
-                html = await p._buildSerializedHtml(entry0, null, deckName0);
+                html = await p._buildSerializedHtml(entry0, null, deckName0, 'reveal');
             }
-            if (!html) html = exporter.exportDeckPdf(deck, exDeckDir, { finalOnly: true, embedImages: true });
+            if (!html) html = exporter.exportDeck(deck, { deckDir: exDeckDir });
             const destPath = options.input?.outputPath;
             if (destPath) {
                 require('fs').writeFileSync(destPath, html, 'utf8');

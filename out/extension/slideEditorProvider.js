@@ -629,11 +629,11 @@ class SlideEditorProvider {
                     try {
                         _warnMissingExportDeps();
                         const exDeckDir = path.dirname(document.uri.fsPath);
-                        // Preferred: serialize the webview's LIVE rendered DOM so the export
-                        // is byte-for-byte the editor's own output. Fall back to the string
-                        // renderer if the webview round-trip fails for any reason.
-                        let html = await this._buildSerializedHtml(entry, null, deckName);
-                        if (!html) html = exporter.exportDeckPdf(entry.deck, exDeckDir, { finalOnly: true, embedImages: true });
+                        // Preferred: serialize the webview's LIVE rendered DOM and wrap it in
+                        // Reveal.js (navigation + fragment animation + per-slide transitions).
+                        // Fall back to the string Reveal renderer if the round-trip fails.
+                        let html = await this._buildSerializedHtml(entry, null, deckName, 'reveal');
+                        if (!html) html = exporter.exportDeck(entry.deck, { deckDir: exDeckDir });
                         const defaultUri = vscode.Uri.file(
                             path.join(path.dirname(document.uri.fsPath), deckName + '.html')
                         );
@@ -724,7 +724,7 @@ class SlideEditorProvider {
                                 let serialHtml = null;
                                 if (finalOnly) {
                                     progress.report({ message: 'Rendering slides…', increment: 5 });
-                                    serialHtml = await this._buildSerializedHtml(entry, slideIndices, deckName);
+                                    serialHtml = await this._buildSerializedHtml(entry, slideIndices, deckName, 'static');
                                 }
                                 if (serialHtml) {
                                     progress.report({ message: 'Writing PDF…', increment: 80 });
@@ -1195,7 +1195,7 @@ class SlideEditorProvider {
      * string exporter). slideIndices (0-based into deck.slides) optionally limits
      * the output to a subset, preserving order.
      */
-    async _buildSerializedHtml(entry, slideIndices, title) {
+    async _buildSerializedHtml(entry, slideIndices, title, mode) {
         try {
             const exporter = require('./slideExporter');
             const parts = await this.serializeDeck(entry);
@@ -1204,7 +1204,11 @@ class SlideEditorProvider {
                 parts.slides = slideIndices.map(i => parts.slides[i]).filter(Boolean);
                 if (!parts.slides.length) return null;
             }
-            return exporter.assembleSerializedDeck(parts, { title: title || 'Presentation' });
+            // 'reveal' → interactive presentation (navigation, fragment animation,
+            // per-slide transitions). 'static' → one page per slide (for PDF/print).
+            return (mode === 'static')
+                ? exporter.assembleSerializedDeck(parts, { title: title || 'Presentation' })
+                : exporter.assembleSerializedReveal(parts, { title: title || 'Presentation' });
         } catch (err) {
             console.warn('[wslide] serialized export unavailable, using string exporter:', err && err.message);
             return null;
