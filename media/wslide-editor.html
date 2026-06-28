@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src __CSP_SOURCE__ 'unsafe-inline' https://cdn.jsdelivr.net; script-src __CSP_SOURCE__ 'unsafe-inline' https://cdn.jsdelivr.net; img-src __CSP_SOURCE__ blob: data: https:; font-src __CSP_SOURCE__ https://cdn.jsdelivr.net;">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src __CSP_SOURCE__ 'unsafe-inline' https://cdn.jsdelivr.net; script-src __CSP_SOURCE__ 'unsafe-inline' https://cdn.jsdelivr.net; img-src __CSP_SOURCE__ blob: data: https:; font-src __CSP_SOURCE__ https://cdn.jsdelivr.net; connect-src __CSP_SOURCE__ data: blob: https:;">
 <title>Wolfbook Slide Creator</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16/dist/katex.min.css">
@@ -105,7 +105,7 @@ button.tb.danger  { border-color: var(--accent); color: var(--accent); }
 #inline-editor-modebar { display: flex; align-items: center; background: #141926; border-bottom: 1px solid var(--border); padding: 3px 8px; gap: 6px; flex-shrink: 0; }
 #inline-editor-modebar button { background: transparent; border: 1px solid transparent; color: var(--muted); cursor: pointer; padding: 2px 10px; border-radius: 3px; font-size: 11px; }
 #inline-editor-modebar button.active { background: rgba(0,154,200,.2); border-color: var(--cyan); color: var(--text); }
-#inline-editor-ce { flex:1; min-height: 80px; max-height: 340px; border: none; padding: 10px 14px; font-size: 15px; line-height: 1.5; outline: none; overflow-y: auto; box-sizing: border-box; white-space: pre-wrap; cursor: text; color: #e8e8e8 !important; background: #1a2035; }
+#inline-editor-ce { flex:1; min-height: 80px; max-height: 340px; border: none; padding: 10px 14px; font-size: 15px; line-height: 1.5; outline: none; overflow-y: auto; box-sizing: border-box; white-space: pre-wrap; cursor: text; color: #e8e8e8; background: #1a2035; }
 #inline-editor-ce:empty::before { content: attr(data-placeholder); color: rgba(128,128,128,.5); pointer-events: none; }
 #inline-editor-panel textarea { width: 100%; display: block; flex-shrink: 0; min-height: 120px; height: 200px; background: #1a2035; color: #e8e8e8; border: none; padding: 10px 14px; font-family: 'SF Mono', Menlo, Monaco, 'Courier New', monospace; font-size: 13px; line-height: 1.5; resize: vertical; outline: none; box-sizing: border-box; overflow: auto; }
 #inline-editor-panel textarea::placeholder { color: rgba(255,255,255,.3); }
@@ -164,17 +164,24 @@ button.tb.danger  { border-color: var(--accent); color: var(--accent); }
 .bar-hdr { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; width: 100%; margin-top: 2px; }
 #add-bar .inline-btn { font-size: 10px; padding: 3px 8px; }
 
+/* ── Style editor prop-group ─────────────────────────────────────────────── */
+#style-props { min-width: 170px; }
+#style-props textarea { width: 155px; height: 96px; background: #1a2035; border: 1px solid var(--border); color: var(--text); border-radius: 3px; padding: 4px 6px; font-size: 10px; font-family: 'SF Mono','Fira Code','Consolas',monospace; resize: none; line-height: 1.45; outline: none; }
+#style-props textarea:focus { border-color: var(--cyan); }
+#style-props .style-hint { font-size: 8.5px; color: var(--muted); margin-top: 2px; }
 /* ── Arrow block ─────────────────────────────────────────────────────────── */
 .arrow-handle { pointer-events: all; cursor: crosshair; transition: transform .1s, box-shadow .1s; }
 .arrow-handle:hover { transform: scale(1.3); box-shadow: 0 0 0 3px rgba(255,255,255,.4); }
 .block-dom.arrow-wrap.selected { outline: none; }
 .block-dom.arrow-wrap.panel-highlight { box-shadow: none; filter: drop-shadow(0 0 4px #ffd700) drop-shadow(0 0 10px rgba(255,215,0,.55)); }
 /* ── Code block ──────────────────────────────────────────────────────────── */
-.code-block { background: rgba(0,0,0,.35); border: 1px solid rgba(255,255,255,.1); border-radius: 6px; padding: 16px 20px; font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace; white-space: pre-wrap; word-break: break-word; line-height: 1.5; color: #e8e8e8; }
+/* Solid dark-navy default (not a translucent tint) so code reads well on any
+   slide background and stays projector-legible out of the box. See feedback §B. */
+.code-block { background: #0d1b30; border: 1px solid rgba(255,255,255,.12); border-radius: 6px; padding: 16px 20px; font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace; white-space: pre-wrap; word-break: break-word; line-height: 1.5; color: #e8edf5; }
 .code-block pre { background: none !important; }
 /* Prevent slide theme CSS from re-colouring Prism tokens */
 .code-block code[class*="language-"], .code-block pre[class*="language-"] { color: inherit; background: none !important; font-family: inherit; }
-.code-block .code-lang { position: absolute; top: 4px; right: 10px; font-size: 10px; color: var(--muted); text-transform: uppercase; pointer-events: none; }
+.code-block .code-lang { position: absolute; top: 4px; right: 10px; font-size: 11px; color: #7fb8d8; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; pointer-events: none; }
 /* ── Eval block ──────────────────────────────────────────────────────────── */
 .eval-block { position: relative; border: 1px solid rgba(255,255,255,.1); border-radius: 6px; overflow: hidden; min-height: 60px; }
 .eval-block .eval-output { width: 100%; display: flex; align-items: center; justify-content: center; overflow: hidden; }
@@ -193,10 +200,13 @@ button.tb.danger  { border-color: var(--accent); color: var(--accent); }
 @keyframes eval-spin { 0%,100% { opacity: 1; } 50% { opacity: .4; } }
 /* ── Slide content typography (built-in defaults) ─────────────────────── */
 .slide-content { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 36px; line-height: 1.4; color: #1a1a2e; }
-.slide-content h1 { font-size: 64px; font-weight: 700; line-height: 1.15; margin: 0 0 16px; }
-.slide-content h2 { font-size: 48px; font-weight: 700; line-height: 1.2; margin: 0 0 12px; }
-.slide-content h3 { font-size: 40px; font-weight: 600; line-height: 1.25; margin: 0 0 10px; }
-.slide-content h4 { font-size: 34px; font-weight: 600; line-height: 1.3; margin: 0 0 8px; }
+/* Headings in em (relative to the 36px .slide-content base) so a slide/deck
+   `scale` set on the container scales them too — see feedback §C. At scale 1
+   these equal the original 64/48/40/34px. */
+.slide-content h1 { font-size: 1.7778em; font-weight: 700; line-height: 1.15; margin: 0 0 16px; }
+.slide-content h2 { font-size: 1.3333em; font-weight: 700; line-height: 1.2; margin: 0 0 12px; }
+.slide-content h3 { font-size: 1.1111em; font-weight: 600; line-height: 1.25; margin: 0 0 10px; }
+.slide-content h4 { font-size: 0.9444em; font-weight: 600; line-height: 1.3; margin: 0 0 8px; }
 .slide-content p  { margin: 0 0 12px; }
 .slide-content ul, .slide-content ol { margin: 0 0 12px; padding-left: 1.2em; }
 .slide-content li { margin-bottom: 6px; }
@@ -327,7 +337,7 @@ button.tb.danger  { border-color: var(--accent); color: var(--accent); }
   <button class="tb" id="btn-saveas">Save As…</button>
   <div class="sep"></div>
   <button class="tb" id="btn-export">Export HTML</button>
-  <button class="tb" id="btn-export-pdf" title="Export PDF frames: one page per animation step (open in browser → Print → Save as PDF)">Export PDF</button>
+  <button class="tb" id="btn-export-pdf" title="Export PDF — choose Publishing (one page per slide, final state) or Presenting (one page per animation step)">Export PDF</button>
   <button class="tb primary" id="btn-present" title="Present (F5)">▶ Present</button>
   <div class="sep"></div>
   <button class="tb" id="btn-toggle-anim" title="Toggle Animation Panel">Anim</button>
@@ -415,6 +425,11 @@ button.tb.danger  { border-color: var(--accent); color: var(--accent); }
             <button class="inline-btn" id="btn-clear-frag" style="flex:none;padding:3px 7px;font-size:10px;">✕</button>
           </div>
           <p style="font-size:9px;color:var(--muted)">blank=always · 1,2…=order</p>
+        </div>
+        <div class="prop-group" id="style-props">
+          <h3>Style</h3>
+          <textarea id="p-style" placeholder="color: white&#10;fontSize: 32px&#10;fontWeight: bold" spellcheck="false" title="CSS properties — one per line as  key: value"></textarea>
+          <div class="style-hint">key: value · one per line</div>
         </div>
         <div class="prop-group" id="action-props">
           <h3>Actions</h3>
@@ -561,6 +576,7 @@ window.addEventListener('message', e => {
         requestAnimationFrame(() => {
             deck = msg.deck;
             deckName = msg.deckName;
+            if (msg.slideClipboard) _slideClipboard = msg.slideClipboard; // seed from host (cross-file paste)
             if (_ensureBlockIds(deck)) markDirty();  // auto-fix missing IDs
             dirty = false;
             _lastSnapshot = JSON.parse(JSON.stringify(deck));
@@ -574,11 +590,18 @@ window.addEventListener('message', e => {
 
     if (msg.cmd === 'deckUpdate') {
         const oldDeck = deck;
-        // Copilot-originated edits: push old state to undoStack (makes Copilot edit undoable) and clear redoStack
         if (msg.source === 'copilot' && oldDeck) {
+            // Agent edit: push previous state so Ctrl+Z undoes this one step
             undoStack.push(JSON.parse(JSON.stringify(oldDeck)));
             if (undoStack.length > MAX_UNDO) undoStack.shift();
             redoStack = [];
+        } else if (oldDeck) {
+            // External file change (VS Code native undo/redo, or reload):
+            // preserve the current webview state in undoStack so the user can
+            // Ctrl+Z back to it.  Do NOT clear redoStack — external changes
+            // shouldn't kill a pending redo sequence.
+            undoStack.push(JSON.parse(JSON.stringify(oldDeck)));
+            if (undoStack.length > MAX_UNDO) undoStack.shift();
         }
         deck = msg.deck;
         _lastSnapshot = JSON.parse(JSON.stringify(deck));
@@ -670,6 +693,87 @@ window.addEventListener('message', e => {
     if (msg.cmd === 'undo') { undo(); return; }
     if (msg.cmd === 'redo') { redo(); return; }
 
+    if (msg.cmd === 'screenshot') {
+        // Capture the rendered slide as a JPEG image using html2canvas.
+        // html2canvas is loaded lazily from CDN on first use.
+        const reqIdx = msg.slideIndex != null ? msg.slideIndex : slideIdx;
+        const prevIdx = slideIdx;
+        if (reqIdx !== slideIdx) { slideIdx = reqIdx; renderSlide(); }
+        async function doCapture() {
+            const canvasEl = document.getElementById('slide-canvas');
+            // Temporarily remove CSS scale so html2canvas captures at full 1920x1080
+            const savedTransform = canvasEl.style.transform;
+            canvasEl.style.transform = '';
+            // Convert vscode-webview-resource:// img srcs → data URLs so html2canvas can load them.
+            // For images that fail to fetch, inject a visible placeholder div so the capture
+            // shows a labeled box instead of blank space.
+            const imgs = [...canvasEl.querySelectorAll('img')];
+            const origSrcs = imgs.map(i => i.src);
+            const placeholders = []; // {img, ph} pairs for failed loads
+            await Promise.all(imgs.map(async (img, k) => {
+                if (!img.src || img.src.startsWith('data:')) return;
+                try {
+                    const res = await fetch(img.src);
+                    const blob = await res.blob();
+                    img.src = await new Promise(r => { const fr = new FileReader(); fr.onload = ev => r(ev.target.result); fr.readAsDataURL(blob); });
+                } catch(_) {
+                    // Image load failed — replace with a visible placeholder that html2canvas can render
+                    const w = img.offsetWidth || img.naturalWidth || 120;
+                    const h = img.offsetHeight || img.naturalHeight || 80;
+                    const fname = (origSrcs[k] || '').split('/').pop().replace(/\?.*$/, '').slice(0, 26);
+                    const ph = document.createElement('div');
+                    ph.style.cssText = `display:inline-flex;flex-direction:column;align-items:center;justify-content:center;` +
+                        `width:${w}px;height:${h}px;background:#1e2233;border:2px dashed #5577aa;` +
+                        `color:#8899bb;font-size:11px;font-family:monospace;border-radius:4px;gap:3px;` +
+                        `box-sizing:border-box;overflow:hidden;vertical-align:top;`;
+                    ph.innerHTML = `<span style="font-size:16px;opacity:.7">\u{1F5BC}</span>` +
+                        `<span>${w}\u00d7${h}</span>` +
+                        `<span style="opacity:.6;max-width:90%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${fname}</span>`;
+                    img.parentNode.insertBefore(ph, img);
+                    img.style.display = 'none';
+                    placeholders.push({ img, ph });
+                }
+            }));
+            const restore = () => {
+                imgs.forEach((img, k) => { img.src = origSrcs[k]; });
+                placeholders.forEach(({ img, ph }) => { img.style.display = ''; if (ph.parentNode) ph.parentNode.removeChild(ph); });
+                canvasEl.style.transform = savedTransform;
+                if (reqIdx !== prevIdx) { slideIdx = prevIdx; renderSlide(); }
+            };
+            try {
+                const captured = await html2canvas(canvasEl, {
+                    scale: msg.scale || 0.5,
+                    width: 1920, height: 1080,
+                    useCORS: true, logging: false, backgroundColor: null,
+                });
+                restore();
+                const dataUrl = captured.toDataURL('image/jpeg', 0.88);
+                vscodeApi.postMessage({ cmd: 'screenshotResult', id: msg.id, dataUrl });
+            } catch(err) {
+                restore();
+                vscodeApi.postMessage({ cmd: 'screenshotResult', id: msg.id, error: String(err) });
+            }
+        }
+        if (window.html2canvas) {
+            requestAnimationFrame(doCapture);
+        } else {
+            const script = document.createElement('script');
+            script.src = 'https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js';
+            script.onload  = () => requestAnimationFrame(doCapture);
+            script.onerror = () => {
+                if (reqIdx !== prevIdx) { slideIdx = prevIdx; renderSlide(); }
+                vscodeApi.postMessage({ cmd: 'screenshotResult', id: msg.id, error: 'html2canvas failed to load from CDN' });
+            };
+            document.head.appendChild(script);
+        }
+        return;
+    }
+    if (msg.cmd === 'slideClipboard') {
+        // Host broadcast: another panel copied/cut slides — sync local clipboard so Cmd+V works here
+        _slideClipboard = msg.slides || null;
+        return;
+    }
+
     if (msg.cmd === 'evalBlockResult') {
         const slide = deck?.slides[slideIdx];
         if (slide) {
@@ -677,7 +781,11 @@ window.addEventListener('message', e => {
             if (found) {
                 found.block._evaluating = false;
                 found.block.output = msg.output;
-                renderSlide(); markDirty();
+                renderSlide();
+                // Use _scheduleDirtySave (not markDirty) so a background eval
+                // completing after the user has pressed Ctrl+Z does not wipe
+                // the redo stack.
+                _scheduleDirtySave(500);
                 updatePropsPanel();
             }
         }
@@ -719,7 +827,9 @@ let _savedRange = null;       // selection range saved before toolbar color pick
 let _clipboard = null;        // internal block clipboard {block: deepClone}
 let _slideClipboard = null;   // array of slides for Cmd+C/V on slide panel (always array or null)
 let _suppressNextPaste = false; // set by Cmd+V keydown so paste event is skipped
+let _pendingBlockPaste = false; // set by Cmd+V keydown; cleared in paste event (image wins)
 let _slideListFocused = false; // true = last click was in the slide-panel sidebar
+let _thumbMode = false;        // true while renderBlock is called from thumbnail renderer — suppresses interaction
 let selectedBlockIds = new Set(); // full set for multi-selection (always includes selectedBlockId)
 let _selectedSlideIdxs = new Set(); // multi-slide selection (always includes slideIdx when focused)
 
@@ -1235,6 +1345,14 @@ function renderSlide() {
   applyContainerLayout(contentDiv, slide);
   if (slide.padding) contentDiv.style.padding = slide.padding;
 
+  // Deck/slide-level font scaling (feedback §C). `scale` multiplies the slide's
+  // base font size so the whole slide enlarges to fill space with a single knob;
+  // `baseFontSize` (px) is an alias (relative to 36px). Headings are expressed in
+  // `em` (see the .slide-content CSS) so they scale with this; block-level inline
+  // fontSize still overrides. Resolution: slide wins over deck.
+  const _scale = resolveSlideScale(slide, deck);
+  if (_scale !== 1) contentDiv.style.fontSize = (36 * _scale) + 'px';
+
   (slide.children || []).forEach(block => {
     const dom = renderBlock(block, slide);
     if (dom) contentDiv.appendChild(dom);
@@ -1262,6 +1380,21 @@ function renderSlide() {
   }
 }
 
+// Resolve the effective font scale for a slide (feedback §C). Honours, in order:
+//   slide.scale → slide.baseFontSize/36 → deck.scale → deck.baseFontSize/36 → 1
+function resolveSlideScale(slide, dk) {
+  const fromSize = v => (typeof v === 'number' && v > 0) ? v / 36
+    : (typeof v === 'string' && /^\d+(\.\d+)?px$/.test(v.trim())) ? parseFloat(v) / 36 : null;
+  const cands = [
+    typeof slide?.scale === 'number' ? slide.scale : null,
+    fromSize(slide?.baseFontSize),
+    typeof dk?.scale === 'number' ? dk.scale : null,
+    fromSize(dk?.baseFontSize),
+  ];
+  const s = cands.find(v => v != null && v > 0);
+  return (s && s > 0) ? s : 1;
+}
+
 function applyContainerLayout(dom, block) {
   const layout = block.layout || 'column';
   if (layout === 'free') {
@@ -1269,7 +1402,7 @@ function applyContainerLayout(dom, block) {
   } else {
     dom.style.display = 'flex';
     dom.style.flexDirection = layout === 'row' ? 'row' : 'column';
-    if (block.gap != null) dom.style.gap = block.gap + 'px';
+    if (block.gap != null) dom.style.gap = typeof block.gap === 'number' ? block.gap + 'px' : block.gap;
     if (block.align) dom.style.alignItems = block.align;
     if (block.justify) dom.style.justifyContent = block.justify;
   }
@@ -1315,6 +1448,11 @@ function renderBlock(block, slide) {
     dom.classList.add('has-offset');
   }
 
+  // Apply style preset as base (block.style properties override preset)
+  if (block.stylePreset && deck?.stylePresets?.[block.stylePreset]) {
+    Object.entries(deck.stylePresets[block.stylePreset]).forEach(([k, v]) => { dom.style[k] = v; });
+  }
+
   // Apply inline style object
   if (block.style && typeof block.style === 'object') {
     Object.entries(block.style).forEach(([k, v]) => { dom.style[k] = v; });
@@ -1325,24 +1463,26 @@ function renderBlock(block, slide) {
     block.className.split(/\s+/).forEach(c => { if (c) dom.classList.add(c); });
   }
 
-  // Selection state
-  if (block.id === selectedBlockId || selectedBlockIds.has(block.id)) {
-    dom.classList.add('selected');
-    if (block.type !== 'arrow') addResizeHandles(dom);
-  }
+  if (!_thumbMode) {
+    // Selection state
+    if (block.id === selectedBlockId || selectedBlockIds.has(block.id)) {
+      dom.classList.add('selected');
+      if (block.type !== 'arrow') addResizeHandles(dom);
+    }
 
-  // Font size warning: flag text blocks with small fonts
-  if ((block.type === 'text' || block.type === 'heading') && block.fontSize && block.fontSize < 24) {
-    const warn = document.createElement('span');
-    warn.className = 'font-warn';
-    warn.textContent = '⚠';
-    warn.title = `Font size ${block.fontSize}px may be too small for projection`;
-    dom.style.position = dom.style.position || 'relative';
-    dom.appendChild(warn);
-  }
+    // Font size warning: flag text blocks with small fonts
+    if ((block.type === 'text' || block.type === 'heading') && block.fontSize && block.fontSize < 24) {
+      const warn = document.createElement('span');
+      warn.className = 'font-warn';
+      warn.textContent = '⚠';
+      warn.title = `Font size ${block.fontSize}px may be too small for projection`;
+      dom.style.position = dom.style.position || 'relative';
+      dom.appendChild(warn);
+    }
 
-  // Click handler
-  attachBlockEvents(dom, block, slide);
+    // Interactive event handlers
+    attachBlockEvents(dom, block, slide);
+  }
 
   return dom;
 }
@@ -1362,10 +1502,56 @@ function renderContainer(block, slide) {
   return dom;
 }
 
+// ── Markdown renderer (inline **bold**, *italic*, GFM tables) ─────────────
+// Processes $...$ / $$...$$ LaTeX spans via placeholder protection so they
+// are never touched by markdown regexes. KaTeX auto-render handles math
+// after innerHTML is set (via renderMathInElement called from renderSlide).
+function _renderMd(content) {
+  if (!content || typeof content !== 'string') return content || '';
+  if (!/\*\*|\*[^*\s]|\|/.test(content)) return content; // fast exit
+  const spans = [];
+  let s = content.replace(/\$\$[\s\S]*?\$\$|\$[^$\n]*?\$/g, m => {
+    const k = '\x00' + spans.length + '\x00';
+    spans.push(m); return k;
+  });
+  s = _mdTables(s);
+  // Inline: bold/italic in text nodes only (not inside HTML tags)
+  s = s.split(/(<[^>]+>)/).map((p, i) => {
+    if (i % 2 === 1) return p;
+    p = p.replace(/\*\*([^*\n]+?)\*\*/g, '<strong>$1</strong>');
+    p = p.replace(/(?<!\*)\*([^*\n]+?)\*(?!\*)/g, '<em>$1</em>');
+    return p;
+  }).join('');
+  s = s.replace(/\x00(\d+)\x00/g, (_, i) => spans[+i]);
+  return s;
+}
+function _mdTables(content) {
+  const lines = content.split('\n'); const out = []; let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (/^\s*\|.*\|\s*$/.test(line) && i + 1 < lines.length && /^\s*\|[\s\-:|]+\|\s*$/.test(lines[i + 1])) {
+      const hdrs = _splitTblRow(line);
+      const aligns = lines[i+1].split('|').slice(1,-1).map(c=>{ c=c.trim(); return /^:.*:$/.test(c)?'center':/^:/.test(c)?'left':/:$/.test(c)?'right':''; });
+      let j = i + 2; const rows = [];
+      while (j < lines.length && /^\s*\|/.test(lines[j])) { rows.push(_splitTblRow(lines[j])); j++; }
+      let html = '<table style="border-collapse:collapse;width:100%;"><thead><tr>';
+      hdrs.forEach((h,k)=>{ const a=aligns[k]?` style="text-align:${aligns[k]};"`:''; html+=`<th${a} style="padding:4px 10px;border-bottom:2px solid currentColor;">${h}</th>`; });
+      html += '</tr></thead><tbody>';
+      rows.forEach(r=>{ html+='<tr>'; r.forEach((c,k)=>{ const a=aligns[k]?` style="text-align:${aligns[k]};"`:''; html+=`<td${a} style="padding:3px 10px;border-bottom:1px solid rgba(0,0,0,.12);">${c}</td>`; }); html+='</tr>'; });
+      html += '</tbody></table>';
+      out.push(html); i = j;
+    } else { out.push(line); i++; }
+  }
+  return out.join('\n');
+}
+function _splitTblRow(line) {
+  return line.trim().replace(/^\||\|$/g,'').split('|').map(c=>c.trim());
+}
+
 function renderHeading(block) {
   const level = block.level || 2;
   const dom = document.createElement('h' + Math.min(level, 6));
-  dom.innerHTML = block.content || '';
+  dom.innerHTML = _renderMd(block.content || '');
   if (block.fontSize) dom.style.fontSize = block.fontSize + 'px';
   if (block.color) dom.style.color = block.color;
   return dom;
@@ -1374,7 +1560,7 @@ function renderHeading(block) {
 function renderText(block) {
   const tag = block.tag || 'div';
   const dom = document.createElement(tag === 'span' ? 'div' : tag);
-  dom.innerHTML = block.content || '';
+  dom.innerHTML = _renderMd(block.content || '');
   if (block.fontSize) dom.style.fontSize = block.fontSize + 'px';
   if (block.color) dom.style.color = block.color;
   return dom;
@@ -1414,7 +1600,7 @@ function renderList(block, slide) {
     const li = document.createElement('li');
     li.classList.add('block-dom');
     li.dataset.blockId = item.id;
-    li.innerHTML = item.content || '';
+    li.innerHTML = _renderMd(item.content || '');
     if (item.children) {
       item.children.forEach(child => {
         const childDom = renderBlock(child, slide);
@@ -2069,6 +2255,8 @@ function startInlineEdit(dom, block) {
   const _rawSlideBg = deck?.slides[slideIdx]?.background || '#fafcff';
   const _textColor  = block.color || '#333333';
   const _editorBg   = _editorBgForBlock(_rawSlideBg, _textColor);
+  // Derive editor text colour: light text on dark bg, dark text on light bg
+  const _editorTextColor = _editorBg === '#1a2035' ? '#e8e8e8' : '#1a2035';
 
   // Rich contenteditable div
   const ce = document.createElement('div');
@@ -2078,6 +2266,7 @@ function startInlineEdit(dom, block) {
   ce.spellcheck = false;
   ce.innerHTML = block.content || '';
   ce.style.background = _editorBg;
+  ce.style.color = _editorTextColor;
   panel.style.background = _editorBg;
   panel.appendChild(ce);
 
@@ -2108,11 +2297,10 @@ function startInlineEdit(dom, block) {
 
   // Auto-size a textarea element
   function autoSizeTa(el) {
-    // Grow to fit content on initial show; user can then resize freely with the drag handle
+    // Reset to zero first so scrollHeight measures true content height (avoids cumulative growth)
+    el.style.height = '0';
     const natural = el.scrollHeight + 4;
-    if (natural > el.offsetHeight) {
-      el.style.height = Math.min(natural, Math.floor(window.innerHeight * 0.6)) + 'px';
-    }
+    el.style.height = Math.min(natural, Math.floor(window.innerHeight * 0.6)) + 'px';
   }
 
   // Position panel below the block
@@ -2430,6 +2618,8 @@ function syncPropsFromBlock(block) {
   if (altInput) altInput.value = block.type === 'image' ? (block.alt || '') : '';
   const codeLang = document.getElementById('p-code-lang');
   if (codeLang) codeLang.value = block.language || '';
+  const styleTA = document.getElementById('p-style');
+  if (styleTA) styleTA.value = styleToText(block.style);
 }
 
 // Prop inputs → block
@@ -2478,6 +2668,33 @@ document.getElementById('p-color').addEventListener('input', () => {
   const block = getSelectedBlock(); if (!block) return;
   block.color = document.getElementById('p-color').value;
   renderSlide(); markDirty();
+});
+// ── Style object editor ───────────────────────────────────────────────────
+function styleToText(styleObj) {
+  if (!styleObj || typeof styleObj !== 'object') return '';
+  return Object.entries(styleObj).map(([k, v]) => `${k}: ${v}`).join('\n');
+}
+function textToStyle(text) {
+  if (!text || !text.trim()) return null;
+  const obj = {};
+  text.split('\n').forEach(line => {
+    const colon = line.indexOf(':');
+    if (colon < 1) return;
+    const k = line.slice(0, colon).trim();
+    const v = line.slice(colon + 1).trim();
+    if (k && v) obj[k] = v;
+  });
+  return Object.keys(obj).length ? obj : null;
+}
+document.getElementById('p-style').addEventListener('blur', () => {
+  const block = getSelectedBlock(); if (!block) return;
+  const newStyle = textToStyle(document.getElementById('p-style').value);
+  block.style = newStyle || undefined;
+  renderSlide(); markDirty();
+});
+document.getElementById('p-style').addEventListener('keydown', e => {
+  // Allow Tab to insert spaces inside the textarea instead of leaving focus
+  if (e.key === 'Tab') { e.preventDefault(); const ta = e.target; const s = ta.selectionStart; ta.setRangeText('  ', s, s, 'end'); }
 });
 document.getElementById('p-layout').addEventListener('change', () => {
   const block = getSelectedBlock(); if (!block) return;
@@ -2955,7 +3172,7 @@ function buildPresBlock(block) {
     case 'heading': {
       const level = block.level || 2;
       dom = document.createElement('h' + Math.min(level, 6));
-      dom.innerHTML = block.content || '';
+      dom.innerHTML = _renderMd(block.content || '');
       if (block.fontSize) dom.style.fontSize = block.fontSize + 'px';
       if (block.color) dom.style.color = block.color;
       break;
@@ -2963,7 +3180,7 @@ function buildPresBlock(block) {
     case 'text': {
       const tag = block.tag || 'div';
       dom = document.createElement(tag === 'span' ? 'div' : tag);
-      dom.innerHTML = block.content || '';
+      dom.innerHTML = _renderMd(block.content || '');
       if (block.fontSize) dom.style.fontSize = block.fontSize + 'px';
       if (block.color) dom.style.color = block.color;
       break;
@@ -2987,7 +3204,7 @@ function buildPresBlock(block) {
       dom = document.createElement(block.ordered ? 'ol' : 'ul');
       (block.items || []).forEach(item => {
         const li = document.createElement('li');
-        li.innerHTML = item.content || '';
+        li.innerHTML = _renderMd(item.content || '');
         if (item.children) {
           item.children.forEach(child => {
             const cd = buildPresBlock(child);
@@ -3130,6 +3347,9 @@ function buildPresBlock(block) {
   if (block.flex) dom.style.flex = block.flex;
   if (block.offset && (block.offset.dx || block.offset.dy)) {
     dom.style.transform = `translate(${block.offset.dx || 0}px, ${block.offset.dy || 0}px)`;
+  }
+  if (block.stylePreset && deck?.stylePresets?.[block.stylePreset]) {
+    Object.entries(deck.stylePresets[block.stylePreset]).forEach(([k, v]) => { dom.style[k] = v; });
   }
   if (block.style && typeof block.style === 'object') {
     Object.entries(block.style).forEach(([k, v]) => { dom.style[k] = v; });
@@ -3446,15 +3666,18 @@ function renderThumbContent(preview, slide) {
   applyContainerLayout(contentDiv, slide);
   if (slide.padding) contentDiv.style.padding = slide.padding;
 
-  (slide.children || []).forEach(block => {
-    const dom = buildPresBlock(block);
-    if (dom) contentDiv.appendChild(dom);
-  });
+  _thumbMode = true;
+  try {
+    (slide.children || []).forEach(block => {
+      const dom = renderBlock(block, slide);
+      if (dom) contentDiv.appendChild(dom);
+    });
+  } finally {
+    _thumbMode = false;
+  }
 
   inner.appendChild(contentDiv);
   preview.appendChild(inner);
-  // Show all animated elements fully revealed in thumbnails
-  inner.querySelectorAll('.pres-frag').forEach(el => el.classList.add('revealed'));
 }
 
 // Structural hash to detect slide add/delete/reorder (avoids full DOM rebuild on selection change)
@@ -3548,10 +3771,12 @@ function renderThumbs() {
       showCtxMenu(e.clientX, e.clientY, [
         { label: multi ? `Copy ${n} Slides` : 'Copy Slide', shortcut: '⌘C', action() {
           _slideClipboard = idxs.map(k => JSON.parse(JSON.stringify(deck.slides[k])));
+          vscodeApi.postMessage({ cmd: 'slideClipboard', slides: _slideClipboard });
           setStatus(multi ? `${n} slides copied ✓` : 'Slide copied ✓');
         }},
         { label: multi ? `Cut ${n} Slides` : 'Cut Slide', shortcut: '⌘X', disabled: deck.slides.length - n < 1, action() {
           _slideClipboard = idxs.map(k => JSON.parse(JSON.stringify(deck.slides[k])));
+          vscodeApi.postMessage({ cmd: 'slideClipboard', slides: _slideClipboard });
           for (let k = idxs.length - 1; k >= 0; k--) deck.slides.splice(idxs[k], 1);
           slideIdx = Math.min(idxs[0], deck.slides.length - 1);
           _selectedSlideIdxs = new Set([slideIdx]);
@@ -3838,12 +4063,17 @@ function markDirty() {
     redoStack = [];
     _lastSnapshot = JSON.parse(JSON.stringify(deck));
   }
+  _scheduleDirtySave(2000);
+}
+// Schedule a file save without touching undoStack/redoStack.
+// Used after undo/redo and background changes (eval results) so those
+// don't accidentally wipe the redo stack.
+function _scheduleDirtySave(delay) {
   dirty = true;
   document.title = (deckName || 'Untitled') + ' \u2022 \u2014 Wolfbook Slides';
-  // Auto-save (debounced 2 s)
   if (deckName && deckName !== 'Untitled') {
     clearTimeout(_autoSaveTimer);
-    _autoSaveTimer = setTimeout(autoSave, 2000);
+    _autoSaveTimer = setTimeout(autoSave, delay ?? 2000);
   }
 }
 async function autoSave() {
@@ -3860,11 +4090,24 @@ function _applySnapshot(snap) {
   deck = JSON.parse(JSON.stringify(snap));
   _lastSnapshot = JSON.parse(JSON.stringify(deck));
   slideIdx = Math.min(slideIdx, deck.slides.length - 1);
-  selectedBlockId = null; dirty = true;
+  selectedBlockId = null;
+  // Save to file quickly so the file stays in sync with the undo/redo state.
+  // Use _scheduleDirtySave instead of markDirty to avoid wiping redoStack.
+  _scheduleDirtySave(300);
   renderAll();
 }
-function undo() { if (!undoStack.length || !deck) return; redoStack.push(JSON.parse(JSON.stringify(deck))); _applySnapshot(undoStack.pop()); setStatus('Undo'); }
-function redo() { if (!redoStack.length || !deck) return; undoStack.push(JSON.parse(JSON.stringify(deck))); _applySnapshot(redoStack.pop()); setStatus('Redo'); }
+function undo() {
+  if (!undoStack.length || !deck) return;
+  redoStack.push(JSON.parse(JSON.stringify(deck)));
+  _applySnapshot(undoStack.pop());
+  setStatus(`Undo (${undoStack.length} more)`);
+}
+function redo() {
+  if (!redoStack.length || !deck) return;
+  undoStack.push(JSON.parse(JSON.stringify(deck)));
+  _applySnapshot(redoStack.pop());
+  setStatus(`Redo (${redoStack.length} more)`);
+}
 
 async function saveCurrentDeck() {
   if (!deck) return;
@@ -4321,6 +4564,7 @@ document.addEventListener('paste', async e => {
   if (imgItems.length) {
     e.preventDefault();
     _suppressNextPaste = false; // cancel any pending block-paste suppression
+    _pendingBlockPaste = false; // image wins over internal block clipboard
     // Try the modern async Clipboard API first — on macOS it returns the full-resolution
     // image (Electron reads the native TIFF and converts to PNG at true pixel density).
     // Fall back to the legacy synchronous clipboardData if the async API is unavailable
@@ -4356,9 +4600,34 @@ document.addEventListener('paste', async e => {
   // was already pasted from the Cmd+V keydown handler via the internal clipboard).
   if (_suppressNextPaste) { _suppressNextPaste = false; e.preventDefault(); return; }
 
+  // Internal block clipboard — deferred from keydown so images could take priority above.
+  if (_pendingBlockPaste && !_slideListFocused && _clipboard) {
+    _pendingBlockPaste = false;
+    e.preventDefault();
+    const _pSlide = deck?.slides[slideIdx]; if (!_pSlide) return;
+    const _pBlock = deepCloneBlock(_clipboard);
+    if (selectedBlockId) {
+      const _pFound = findBlock(selectedBlockId, _pSlide);
+      if (_pFound) {
+        _pFound.parent[_pFound.key].splice(_pFound.index + 1, 0, _pBlock);
+        selectedBlockId = _pBlock.id;
+        renderAll(); markDirty(); setStatus('Pasted ✓');
+        return;
+      }
+    }
+    if (!_pSlide.children) _pSlide.children = [];
+    _pSlide.children.push(_pBlock);
+    selectedBlockId = _pBlock.id;
+    renderAll(); markDirty(); setStatus('Pasted ✓');
+    return;
+  }
+
   // Let contenteditable / input / textarea handle text paste natively.
   const active = document.activeElement;
-  if (active && (active.contentEditable === 'true' || active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) return;
+  if (active && (active.contentEditable === 'true' || active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) {
+    _pendingBlockPaste = false; // safety: don't leak state into next paste
+    return;
+  }
 
   const textItem = items.find(i => i.type === 'text/plain');
   if (textItem) {
@@ -4737,6 +5006,7 @@ document.addEventListener('keydown', e => {
       if (idxs.length === 0 && deck?.slides[slideIdx]) { idxs.push(slideIdx); }
       if (idxs.length > 0) {
         _slideClipboard = idxs.map(i => JSON.parse(JSON.stringify(deck.slides[i])));
+        vscodeApi.postMessage({ cmd: 'slideClipboard', slides: _slideClipboard });
         setStatus(idxs.length === 1 ? 'Slide copied ✓' : `${idxs.length} slides copied ✓`);
       }
     } else if (selectedBlockId) {
@@ -4753,6 +5023,7 @@ document.addEventListener('keydown', e => {
       if (idxs.length === 0 && deck?.slides[slideIdx]) { idxs.push(slideIdx); }
       if (idxs.length > 0 && deck.slides.length - idxs.length >= 1) {
         _slideClipboard = idxs.map(i => JSON.parse(JSON.stringify(deck.slides[i])));
+        vscodeApi.postMessage({ cmd: 'slideClipboard', slides: _slideClipboard });
         // Remove from highest index first to preserve indices
         for (let k = idxs.length - 1; k >= 0; k--) deck.slides.splice(idxs[k], 1);
         slideIdx = Math.min(idxs[0], deck.slides.length - 1);
@@ -4826,27 +5097,12 @@ document.addEventListener('keydown', e => {
   }
 
   // ── Cmd+V → paste block from internal clipboard (canvas context)
+  // Don't paste immediately — mark intent and let the paste event decide:
+  // if the system clipboard has an image, the image wins; otherwise the block clipboard is used.
   if ((e.ctrlKey || e.metaKey) && e.key === 'v' && !_slideListFocused && _clipboard) {
-    e.preventDefault();
-    _suppressNextPaste = true;
-    setTimeout(() => { _suppressNextPaste = false; }, 80); // safety reset
-    const slide = deck?.slides[slideIdx]; if (!slide) return;
-    const pasted = deepCloneBlock(_clipboard); // fresh IDs each paste
-    if (selectedBlockId) {
-      const found = findBlock(selectedBlockId, slide);
-      if (found) {
-        found.parent[found.key].splice(found.index + 1, 0, pasted);
-        selectedBlockId = pasted.id;
-        renderAll(); markDirty();
-        setStatus('Pasted ✓');
-        return;
-      }
-    }
-    if (!slide.children) slide.children = [];
-    slide.children.push(pasted);
-    selectedBlockId = pasted.id;
-    renderAll(); markDirty();
-    setStatus('Pasted ✓');
+    _pendingBlockPaste = true;
+    setTimeout(() => { _pendingBlockPaste = false; }, 200); // safety cleanup
+    // No e.preventDefault() here — let the paste event fire and inspect clipboard content
     return;
   }
 
@@ -4856,6 +5112,57 @@ document.addEventListener('keydown', e => {
     const slide = deck.slides[slideIdx];
     const found = findBlock(selectedBlockId, slide);
     if (found && found.parent && found.parent.id) selectBlock(found.parent.id);
+    return;
+  }
+
+  // ── Cmd+G → group selected blocks into a free container
+  if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key === 'g') {
+    e.preventDefault();
+    const slide = deck?.slides[slideIdx]; if (!slide) return;
+    const ids = selectedBlockIds.size > 1 ? [...selectedBlockIds] : (selectedBlockId ? [selectedBlockId] : []);
+    if (ids.length < 2) { setStatus('Select 2+ blocks to group (Shift+click)'); return; }
+    const founds = ids.map(id => findBlock(id, slide)).filter(Boolean);
+    const parent = founds[0]?.parent;
+    const key    = founds[0]?.key;
+    if (!parent || !key || founds.some(f => f.parent !== parent)) { setStatus('Can only group blocks with the same parent'); return; }
+    const indices = founds.map(f => f.index).sort((a, b) => a - b);
+    const blocks  = indices.map(i => parent[key][i]);
+    const container = { id: uid(), type: 'container', layout: 'free', children: blocks };
+    for (let k = indices.length - 1; k >= 0; k--) parent[key].splice(indices[k], 1);
+    parent[key].splice(indices[0], 0, container);
+    selectedBlockId = container.id; selectedBlockIds = new Set([container.id]);
+    setStatus('Grouped ✓'); renderAll(); markDirty();
+    return;
+  }
+
+  // ── Cmd+Shift+G → ungroup container (promote children to parent)
+  if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'g') {
+    e.preventDefault();
+    if (!selectedBlockId) return;
+    const slide = deck?.slides[slideIdx]; if (!slide) return;
+    const found = findBlock(selectedBlockId, slide); if (!found) return;
+    const block = found.block;
+    if (block.type !== 'container' || !block.children?.length) { setStatus('Select a container to ungroup'); return; }
+    const children = [...block.children];
+    found.parent[found.key].splice(found.index, 1, ...children);
+    selectedBlockId = children[0]?.id || null;
+    selectedBlockIds = new Set(children.map(b => b.id));
+    setStatus('Ungrouped ✓'); renderAll(); markDirty();
+    return;
+  }
+
+  // ── Cmd+, / Cmd+. → decrease / increase fragmentOrder on selected block
+  if ((e.ctrlKey || e.metaKey) && (e.key === ',' || e.key === '.')) {
+    e.preventDefault();
+    const block = getSelectedBlock(); if (!block) return;
+    const cur = block.fragmentOrder;
+    if (e.key === ',') {
+      block.fragmentOrder = (cur && cur > 1) ? cur - 1 : null;
+    } else {
+      block.fragmentOrder = cur ? cur + 1 : (maxFragOrder(deck.slides[slideIdx]) + 1);
+    }
+    setStatus(`Fragment order: ${block.fragmentOrder ?? 'none'}`);
+    renderSlide(); markDirty();
     return;
   }
 

@@ -7,8 +7,46 @@ const util   = require("util");
 const https  = require("https");
 const fs     = require("fs");
 const path   = require("path");
-const { decodeWstpText } = require('../utils/encoding');
+const { decodeWstpText, cleanPrintLine, setBoxToLatexProvider } = require('../utils/encoding');
 const paperSearch = require('./paperSearch');
+
+// Wire up the BTL (box-to-LaTeX) C++ addon so cleanPrintLine can convert BoxData → LaTeX.
+// Uses the same platform-aware loading strategy as output/renderer.js.
+// Runs once at module load; failures are silent (cleanPrintLine falls back to [formula]).
+;(function _setupBtlProvider() {
+    const _BTL_DIR = path.join(__dirname, '../../../wllatex-addon');
+    let _btlAddon = null;
+    function _loadBtl() {
+        if (_btlAddon) return _btlAddon;
+        try {
+            const _prebuilt = path.join(_BTL_DIR, 'prebuilt',
+                `wolfbook_btl-${process.platform}-${process.arch}.node`);
+            const _fallback = path.join(_BTL_DIR, 'wolfbook_btl.node');
+            _btlAddon = require(fs.existsSync(_prebuilt) ? _prebuilt : _fallback);
+            return _btlAddon;
+        } catch (_) { return null; }
+    }
+    const { wlUTFtoNames } = require('../namedchars');
+    const { decodeWolframOctal } = require('../utils/encoding');
+    setBoxToLatexProvider(rawBox => {
+        if (!rawBox.startsWith('BoxData[') || !rawBox.endsWith(']')) return null;
+        const btl = _loadBtl();
+        if (!btl) return null;
+        // Strip BoxData[ … ], un-double WSTP backslashes, strip WL line-fold markers,
+        // decode octal byte sequences to Unicode, then map Unicode → \[Name] for BTL.
+        const inner   = rawBox.slice(8, -1);
+        const unesc   = inner.replace(/\\\\/g, '\\');
+        const clean   = unesc.replace(/\n\s*>?\s*/g, ' ');
+        const decoded = decodeWolframOctal(clean);
+        const wlNamed = wlUTFtoNames(decoded);
+        try {
+            const result = btl.boxToLatex(wlNamed, { trigOmitParens: false, maxRows: 0 });
+            if (!result) return null;
+            const latex = typeof result === 'string' ? result : result.latex;
+            return (latex && !result.error) ? latex : null;
+        } catch (_) { return null; }
+    });
+})();
 const {
     clearEvalLog, appendEvalLog, appendEventLog,
     normalizeToolContent, splitWLIntoStatements,
@@ -19,12 +57,12 @@ const {
     formatCellRef, resolveCellIndex, resolveInsertIndex,
     isKernelConnectionError, cleanWrapperFromMsg, KERNEL_CRASH_MSG,
     NB_EXTS, setNotebookResolvedCallback, _allNotebookUris,
-    resolveNotebookEditor,
+    resolveNotebookEditor, noEditorMsg,
 } = require('./shared');
 const {
     WolfslideGetContextTool, WolfslideListSlidesTool, WolfslideGetSlideTool,
-    WolfslideInsertSlideTool, WolfslideEditSlideTool, WolfslideDeleteSlideTool,
-    WolfslideMoveSlideTool, WolfslideUndoTool, WolfslideSaveFileTool,
+    WolfslideInsertSlideTool, WolfslideReplaceSlideTool, WolfslideEditSlideTool, WolfslideDeleteSlideTool, WolfslideDeleteSlidesTool,
+    WolfslideMoveSlideTool, WolfslideUndoTool, WolfslideReloadTool, WolfslideSaveFileTool,
     WolfslideDuplicateSlideTool, WolfslideSearchSlidesTool,
     WolfslideEditBlockTool, WolfslideInsertBlockTool,
     WolfslideDeleteBlockTool, WolfslideMoveBlockTool,
@@ -32,8 +70,8 @@ const {
     WolfslideMeasureSlideTool, WolfslideGetSlideHtmlTool,
     WolfslideGetImageDimensionsTool, WolfslideExportHtmlTool,
     WolfslideSetThemeTool, WolfslideImageAssetTool,
-    WolfslideBulkInsertTool, WolfslideInsertEvalBlockTool,
-    WolfslideRunEvalBlockTool, WolfslideBlockTool, WolfslideAdvancedTool,
+    WolfslideBulkInsertTool, WolfslideCopySlides, WolfslideInsertEvalBlockTool,
+    WolfslideRunEvalBlockTool, WolfslideBlockTool, WolfslidePatchBlockTool, WolfslideAdvancedTool,
     GetCellOutputTool, ValidateSyntaxTool, LatexTool,
 } = require('./wolfslide-tools');
 
@@ -260,6 +298,14 @@ class GetNotebookContextTool {
             // previewChars: how many chars of source to show per cell (default 100, max 500)
             const previewCap  = Math.min(500, Math.max(20, Number(options.input?.previewChars) || 100));
             const lines   = [`**${nbName}** — ${notebook.cellCount} cells${from !== 1 || to !== notebook.cellCount ? ` (showing ${from}–${to})` : ''}`];
+            // Surface the active (focused) cell so the agent knows where the user is
+            if (editor && Array.isArray(editor.selections) && editor.selections.length > 0) {
+                const activeIdx = editor.selections[0].start;
+                if (activeIdx >= 0 && activeIdx < notebook.cellCount) {
+                    const activeCell = notebook.cellAt(activeIdx);
+                    lines.push(`Current cell: Cell ${activeIdx + 1} (cellId: ${getCellToolId(activeCell)})`);
+                }
+            }
             for (let i = from - 1; i < to; i++) {
                 const cell   = notebook.cellAt(i);
                 const cellId = getCellToolId(cell);
@@ -268,23 +314,32 @@ class GetNotebookContextTool {
                 // Show up to previewCap chars of source, collapsing newlines to ↵ for compactness
                 const preview = src.slice(0, previewCap).replace(/\n/g, '\u21B5') + (src.length > previewCap ? '\u2026' : '');
                 const firstLine = preview || '*(empty)*';
-                // Also show output summary for evaluated cells
+                // Show evaluation state and output summary
+                let evalState = '';
                 let outSummary = '';
-                for (const output of cell.outputs) {
-                    const mimes = output.items.map(it => it.mime);
-                    const isErrSentinel = mimes.includes('x-application/wolfram-language-html') &&
-                                         mimes.includes('application/vnd.code.notebook.error');
-                    if (isErrSentinel) { outSummary = ' ⚠ msgs'; break; }
-                    const plain = output.items.find(it => it.mime === 'text/plain');
-                    if (plain) {
-                        try {
-                            const t = decoder.decode(plain.data).trim().slice(0, 30);
-                            if (t) { outSummary = ` → ${t}${t.length >= 30 ? '…' : ''}`; }
-                        } catch (_) {}
-                        break;
+                if (cell.outputs.length === 0) {
+                    evalState = kind === 'code' ? ' [?]' : '';
+                } else {
+                    let hasError = false;
+                    for (const output of cell.outputs) {
+                        const mimes = output.items.map(it => it.mime);
+                        if (mimes.includes('x-application/wolfram-language-html') &&
+                            mimes.includes('application/vnd.code.notebook.error')) {
+                            hasError = true;
+                            outSummary = ' ⚠ msgs';
+                            break;
+                        }
+                        const plain = output.items.find(it => it.mime === 'text/plain');
+                        if (plain) {
+                            try {
+                                const t = decoder.decode(plain.data).trim().slice(0, 30);
+                                if (t) { outSummary = ` → ${t}${t.length >= 30 ? '…' : ''}`; }
+                            } catch (_) {}
+                        }
                     }
+                    evalState = hasError ? ' [err]' : ' [ok]';
                 }
-                lines.push(`Cell ${i + 1} [${kind}] ${cellId} | ${firstLine}${outSummary}`);
+                lines.push(`Cell ${i + 1} [${kind}]${evalState} ${cellId} | ${firstLine}${outSummary}`);
             }
             lines.push(`\nUse brief=false (default) or omit brief to get full cell source + outputs. Use previewChars=N (default 100, max 500) to control source preview length.`);
             return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(lines.join('\n'))]);
@@ -402,13 +457,13 @@ class EvaluateExpressionTool {
                 const linePrints = [];
                 const evalP    = controller.session.evaluate(mkWrapped(ln, wlSec), {
                     interactive: false,
-                    onPrint: p => linePrints.push(p.replace(/\\012/g, '\n'))
+                    onPrint: p => linePrints.push(cleanPrintLine(p))
                 });
                 const timeoutP = new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), remaining));
                 try {
                     const result = await Promise.race([evalP, timeoutP]);
                     if (linePrints.length) {
-                        const ps = linePrints.join('').replace(/\n$/, '');
+                        const ps = linePrints.join('\n').replace(/\n$/, '');
                         parts.push(`Print:\n${ps}`);
                     }
                     const msgs = summariseMsgs((result?.messages ?? []).map(cleanWrapperFromMsg));
@@ -476,7 +531,7 @@ class EvaluateExpressionTool {
         const singlePrints = [];
         const evalPromise    = controller.session.evaluate(wrappedExpr, {
             interactive: false,
-            onPrint: p => singlePrints.push(p.replace(/\\012/g, '\n'))
+            onPrint: p => singlePrints.push(cleanPrintLine(p))
         });
         let   timedOut       = false;
         const timeoutPromise = new Promise((_, rej) =>
@@ -496,7 +551,7 @@ class EvaluateExpressionTool {
 
             // Print[] output collected via onPrint callback (fires before result resolves).
             if (singlePrints.length) {
-                const printStr = singlePrints.join('').replace(/\n$/, '');
+                const printStr = singlePrints.join('\n').replace(/\n$/, '');
                 output += `Print:\n${printStr}\n`;
             }
 
@@ -671,23 +726,31 @@ class InsertCellsTool {
         return { invocationMessage: `Insert ${cells.length} cell(s) ${posStr}` };
     }
 
-    async invoke(options, _token) {
+    async invoke(options, token) {
         const editor = await resolveNotebookEditor(options.input?.notebook, { skipConfirm: true });
         if (!editor) {
             return new vscode.LanguageModelToolResult([
-                new vscode.LanguageModelTextPart('No active notebook editor.')
+                new vscode.LanguageModelTextPart(noEditorMsg(options.input?.notebook))
             ]);
         }
 
         const notebook = editor.notebook;
         // Support both `cells` array and shorthand top-level `kind`+`content`
         let cells = options.input?.cells;
+        // Handle case where cells arrives as a JSON string (MCP serialization artifact)
+        if (typeof cells === 'string') {
+            try { cells = JSON.parse(cells); } catch (_) { cells = null; }
+        }
         if (!Array.isArray(cells) || cells.length === 0) {
             if (options.input?.kind && options.input?.content !== undefined) {
                 cells = [{ kind: options.input.kind, content: options.input.content }];
             } else {
+                const received = options.input?.cells !== undefined
+                    ? ` (received cells=${JSON.stringify(options.input.cells).slice(0, 120)})`
+                    : ' (cells parameter not provided)';
                 return new vscode.LanguageModelToolResult([
-                    new vscode.LanguageModelTextPart('Provide either cells=[{kind,content},...] or top-level kind+content for a single cell.')
+                    new vscode.LanguageModelTextPart(
+                        `Provide either cells=[{kind,content},...] ("type" is also accepted as an alias for "kind") or top-level kind+content for a single cell.${received}`)
                 ]);
             }
         }
@@ -706,8 +769,9 @@ class InsertCellsTool {
         const insertIdx = idxRes.insertIdx;
 
         const cellDatas = cells.map(c => {
-            const ck     = (c.kind === 'markdown') ? vscode.NotebookCellKind.Markup : vscode.NotebookCellKind.Code;
-            const langId = (c.kind === 'markdown') ? 'markdown' : 'wolfram';
+            const kindVal = c.kind || c.type || 'code';
+            const ck     = (kindVal === 'markdown') ? vscode.NotebookCellKind.Markup : vscode.NotebookCellKind.Code;
+            const langId = (kindVal === 'markdown') ? 'markdown' : 'wolfram';
             return new vscode.NotebookCellData(ck, normalizeToolContent(c.content || ''), langId);
         });
 
@@ -739,7 +803,7 @@ class InsertCellsTool {
             `\u{1F4E5} BULK INSERT ${cells.length} CELL(S) at positions ${firstNew}\u2013${lastNew}`,
             cells.map((c, i) => {
                 const preview = (c.content || '').trim().slice(0, 100).replace(/\n/g, '\u21B5');
-                return `${i + 1}. [${c.kind || 'code'}] ${preview}`;
+                return `${i + 1}. [${c.kind || c.type || 'code'}] ${preview}`;
             }).join('\n')
         );
 
@@ -750,7 +814,7 @@ class InsertCellsTool {
         cells.forEach((c, i) => {
             const preview = (c.content || '').trim().slice(0, 80).replace(/\n/g, '\u21B5');
             const cellAt = notebook.cellAt(insertIdx + i);
-            lines.push(`- ${formatCellRef(insertIdx + i, cellAt)} [${c.kind || 'code'}]: ${preview}${
+            lines.push(`- ${formatCellRef(insertIdx + i, cellAt)} [${c.kind || c.type || 'code'}]: ${preview}${
                 (c.content || '').trim().length > 80 ? '\u2026' : ''}`);
         });
 
@@ -758,7 +822,7 @@ class InsertCellsTool {
         // Default true for code cells (pass evaluate:false to suppress)
         const evaluate = options.input?.evaluate !== false;
         if (evaluate) {
-            const hasCodeCells = cells.some(c => (c.kind || 'code') !== 'markdown');
+            const hasCodeCells = cells.some(c => (c.kind || c.type || 'code') !== 'markdown');
             if (hasCodeCells) {
                 const timeoutSec  = Number(options.input?.timeoutSeconds) || 30;
                 const deadline    = Date.now() + timeoutSec * 1000;
@@ -779,11 +843,10 @@ class InsertCellsTool {
 
                     try {
                         for (let i = 0; i < cells.length; i++) {
-                            if ((cells[i].kind || 'code') === 'markdown') continue;
+                            if ((cells[i].kind || cells[i].type || 'code') === 'markdown') continue;
                             const idx  = insertIdx + i;
-                            const cell = notebook.cellAt(idx);
 
-                            // Arm the scroll guard (same as refine mode, but drift-check disabled).
+                            // Arm the scroll guard (same pattern as RunCellTool).
                             const _snap = _snapshotViewport(notebook);
                             if (_snap) {
                                 _ctrl._scrollGuardSavedViewport   = _snap.viewport;
@@ -791,18 +854,18 @@ class InsertCellsTool {
                                 _ctrl._agentGuardActive = true;
                             }
 
-                            // Fire execution (real VS Code execution API)
+                            // Fire execution through the notebook pipeline (same as runCell).
                             _ctrl._wolframExecPending = true;
-                            _ctrl.execute([cell], notebook, _ctrl._controller);
+                            _ctrl.execute([notebook.cellAt(idx)], notebook, _ctrl._controller);
 
-                            // Wait for checkout to finish (polls _evalDispatched → false or queueLength → 0).
-                            // Grace period: wait 200 ms after first idle to allow async appendOutput
-                            // operations started by checkout to settle before reading outputs.
+                            // Poll for idle — identical timing to RunCellTool:
+                            // initial 300 ms lets checkout set _evalDispatched before first check;
+                            // 200 ms grace period after idle lets async appendOutput calls settle.
                             const cellDeadline = Math.min(deadline, Date.now() + 300000);
                             let hasSeenCellIdle = false;
                             await new Promise(resolve => {
                                 const poll = () => {
-                                    // isIdle when queue cleared AND we're not waiting on kernel
+                                    if (token.isCancellationRequested) { resolve(); return; }
                                     const isIdle = !_ctrl._evalDispatched && _ctrl.executionQueue.queueLength() === 0;
                                     if (isIdle) {
                                         if (!hasSeenCellIdle) {
@@ -814,17 +877,10 @@ class InsertCellsTool {
                                         hasSeenCellIdle = false;
                                     }
                                     if ((isIdle && hasSeenCellIdle) || Date.now() >= cellDeadline) resolve();
-                                    else setTimeout(poll, 100);
+                                    else setTimeout(poll, 200);
                                 };
-                                // Start polling sooner
-                                setTimeout(poll, 50);
+                                setTimeout(poll, 300);
                             });
-
-                            // Scroll the evaluated cell into view so the user can see its output.
-                            // In collab mode flashCell scrolls the right pane; in non-collab it
-                            // scrolls the single editor (InCenterIfOutsideViewport — no-op if
-                            // VS Code's handleAutoReveal already revealed the cell).
-                            await flashCell(editor, idx);
 
                             // Read cell outputs for the tool response
                             const updatedCell = notebook.cellAt(idx);
@@ -856,6 +912,13 @@ class InsertCellsTool {
                             if (hasSyntaxMsg) resultLine += '\n⚠️ SYNTAX MESSAGE DETECTED — definitions loaded before this error may be stale. Fix the syntax issue and reload.';
                             evalResults.push(resultLine);
                             appendEvalLog(cells[i].content || '', outStr);
+
+                            // Stop on error: do not evaluate subsequent cells when a cell fails.
+                            // This prevents cascade failures and forces the agent to fix the problem first.
+                            if (hasError || hasSyntaxMsg || timedOut) {
+                                evalResults.push(`⛔ Evaluation stopped at cell ${idx + 1} — fix the error above before continuing. Remaining cells were NOT evaluated.`);
+                                break;
+                            }
 
                             if (Date.now() >= deadline) { evalResults.push('(global timeout reached)'); break; }
                         }
@@ -1477,7 +1540,7 @@ class RunCellTool {
 
     async invoke(options, token) {
         const editor = await resolveNotebookEditor(options.input?.notebook, { skipConfirm: true });
-        if (!editor) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart('No active notebook editor.')]);
+        if (!editor) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(noEditorMsg(options.input?.notebook))]);
 
         // ── detect wrong parameter names ──────────────────────────────────────
         const _CELL_USAGE = 'Correct parameters: cellId (stable string, preferred) or cellNumber (1-based integer) for a single cell; startCell/endCell for a range.';
@@ -1776,6 +1839,14 @@ class RunCellTool {
 
         if (msgOuts.length > 0) {
             resultParts.push(`\n\u26A0 Kernel messages (${msgOuts.length}):\n${msgOuts.join('\n')}`);
+        }
+        // Also flag if any normal outputs contain inline Mathematica messages (Symbol::tag: pattern)
+        // that didn't come through the error sentinel \u2014 these can otherwise be missed.
+        if (msgOuts.length === 0) {
+            const inlineMsgs = outs.filter(o => /\b\w+::\w+:/.test(o));
+            if (inlineMsgs.length > 0) {
+                resultParts.push(`\n\u26A0 Output contains kernel messages (check above output carefully):\n${inlineMsgs.join('\n')}`);
+            }
         }
 
         const inputPreview = (cell.document.getText?.() || '').trim().slice(0, 200).replace(/\n/g, '\u21B5') || '(code cell)';
@@ -2790,6 +2861,75 @@ class RunTerminalTool {
 }
 
 // ---------------------------------------------------------------------------
+// wolfbook_showImage — return a base64 thumbnail of a local image file
+// ---------------------------------------------------------------------------
+
+class ShowImageTool {
+    async prepareInvocation(options, _token) {
+        const p = options.input?.path || '?';
+        return { invocationMessage: `Show image: ${path.basename(p)}` };
+    }
+
+    async invoke(options, _token) {
+        const imgPath = options.input?.path;
+        if (!imgPath) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart('path is required.')]);
+        if (!fs.existsSync(imgPath)) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(`File not found: ${imgPath}`)]);
+
+        const ext = path.extname(imgPath).toLowerCase();
+        const mimeMap = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+                          '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml' };
+        const mime = mimeMap[ext] || 'image/png';
+
+        const maxBytes = 512 * 1024; // 512 KB cap — avoid flooding context
+        const stat = fs.statSync(imgPath);
+        if (stat.size > 4 * 1024 * 1024) {
+            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
+                `File too large to inline (${(stat.size / 1024 / 1024).toFixed(1)} MB). Use wolfbook_runTerminal to inspect it or resize first.`
+            )]);
+        }
+
+        const buf = fs.readFileSync(imgPath);
+        const b64 = buf.slice(0, maxBytes).toString('base64');
+        const truncated = buf.length > maxBytes;
+
+        const dims = (() => {
+            try {
+                // Quick PNG/JPEG dimension read without external deps
+                if (ext === '.png' && buf.length >= 24) {
+                    const w = buf.readUInt32BE(16), h = buf.readUInt32BE(20);
+                    return `${w}×${h}`;
+                }
+                if ((ext === '.jpg' || ext === '.jpeg') && buf.length > 4) {
+                    let i = 2;
+                    while (i < buf.length) {
+                        const marker = buf.readUInt16BE(i);
+                        if (marker >= 0xFFC0 && marker <= 0xFFC3) {
+                            const h = buf.readUInt16BE(i + 5), w = buf.readUInt16BE(i + 7);
+                            return `${w}×${h}`;
+                        }
+                        i += 2 + buf.readUInt16BE(i + 2);
+                    }
+                }
+            } catch (_) {}
+            return null;
+        })();
+
+        const header = [`Image: ${path.basename(imgPath)}`,
+            dims ? `Dimensions: ${dims} px` : '',
+            `Size: ${(stat.size / 1024).toFixed(1)} KB`,
+            truncated ? `(preview truncated to 512 KB)` : ''].filter(Boolean).join(' | ');
+
+        // Return header as text + image as a data URI text part.
+        // The MCP server detects data:image/... parts and promotes them to MCP image content blocks.
+        // VS Code Copilot receives both as text parts.
+        return new vscode.LanguageModelToolResult([
+            new vscode.LanguageModelTextPart(header),
+            new vscode.LanguageModelTextPart(`data:${mime};base64,${b64}`),
+        ]);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // wolfbook_fileOps — read, write, or list workspace files
 // ---------------------------------------------------------------------------
 
@@ -3405,9 +3545,8 @@ function registerTools(context, getController, debugCtrl, getAskPanel) {
         { name: 'wolfbook_insertCells',        impl: new InsertCellsTool(getController) },
         { name: 'wolfbook_editCell',           impl: new EditCellTool(getController) },
         { name: 'wolfbook_runCell',            impl: new RunCellTool(getController) },
-        // wolfbook_runRange is a convenience alias for wolfbook_runCell with startCell/endCell.
-        // Use it to re-execute a range of cells after a kernel restart.
-        { name: 'wolfbook_runRange',           impl: new RunCellTool(getController) },
+        // wolfbook_runCells: run a contiguous range of cells (startCell/endCell, 1-based)
+        { name: 'wolfbook_runCells',           impl: new RunCellTool(getController) },
         { name: 'wolfbook_getCellOutput',      impl: new GetCellOutputTool() },
         { name: 'wolfbook_validateSyntax',     impl: new ValidateSyntaxTool(getController) },
         { name: 'wolfbook_latex',              impl: new LatexTool() },
@@ -3422,6 +3561,7 @@ function registerTools(context, getController, debugCtrl, getAskPanel) {
         { name: 'wolfbook_findPackage',        impl: new FindPackageTool(getController) },
         { name: 'wolfbook_debugCell',          impl: new DebugCellTool(getController, debugCtrl) },
         { name: 'wolfbook_fileOps',            impl: new FileOpsTool() },
+        { name: 'wolfbook_showImage',          impl: new ShowImageTool() },
         { name: 'wolfbook_runTerminal',        impl: new RunTerminalTool() },
         { name: 'wolfbook_paperSearch',        impl: new PaperSearchTool() },
         // Wolfteam tools
@@ -3438,18 +3578,23 @@ function registerTools(context, getController, debugCtrl, getAskPanel) {
         { name: 'wolfslide_getSlideHtml',    impl: new WolfslideGetSlideHtmlTool() },
         { name: 'wolfslide_getImageDimensions', impl: new WolfslideGetImageDimensionsTool() },
         { name: 'wolfslide_insertSlide',     impl: new WolfslideInsertSlideTool() },
+        { name: 'wolfslide_replaceSlide',    impl: new WolfslideReplaceSlideTool() },
         { name: 'wolfslide_editSlide',       impl: new WolfslideEditSlideTool() },
         { name: 'wolfslide_deleteSlide',     impl: new WolfslideDeleteSlideTool() },
+        { name: 'wolfslide_deleteSlides',    impl: new WolfslideDeleteSlidesTool() },
         { name: 'wolfslide_duplicateSlide',  impl: new WolfslideDuplicateSlideTool() },
         { name: 'wolfslide_moveSlide',       impl: new WolfslideMoveSlideTool() },
         { name: 'wolfslide_searchSlides',    impl: new WolfslideSearchSlidesTool() },
         { name: 'wolfslide_block',           impl: new WolfslideBlockTool() },
+        { name: 'wolfslide_patchBlock',      impl: new WolfslidePatchBlockTool() },
         { name: 'wolfslide_advanced',        impl: new WolfslideAdvancedTool() },
         { name: 'wolfslide_undo',            impl: new WolfslideUndoTool() },
+        { name: 'wolfslide_reload',          impl: new WolfslideReloadTool() },
         { name: 'wolfslide_saveFile',        impl: new WolfslideSaveFileTool() },
         { name: 'wolfslide_exportHtml',      impl: new WolfslideExportHtmlTool() },
         { name: 'wolfslide_setTheme',        impl: new WolfslideSetThemeTool() },
         { name: 'wolfslide_bulkInsert',      impl: new WolfslideBulkInsertTool() },
+        { name: 'wolfslide_copySlides',      impl: new WolfslideCopySlides() },
         { name: 'wolfslide_imageAsset',      impl: new WolfslideImageAssetTool() },
         { name: 'wolfslide_insertEvalBlock', impl: new WolfslideInsertEvalBlockTool(getController) },
         { name: 'wolfslide_runEvalBlock',    impl: new WolfslideRunEvalBlockTool(getController) },
@@ -3553,7 +3698,11 @@ function registerTools(context, getController, debugCtrl, getAskPanel) {
             impl.__wolfbookRemoteWrapped = true;
         }
         if (vscode.lm && vscode.lm.registerTool) {
-            context.subscriptions.push(vscode.lm.registerTool(name, impl));
+            try {
+                context.subscriptions.push(vscode.lm.registerTool(name, impl));
+            } catch (regErr) {
+                console.error(`[wolfbook] Failed to register LM tool "${name}":`, regErr?.message ?? regErr);
+            }
         }
     }
 

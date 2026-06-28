@@ -146,70 +146,243 @@ function _exportHtmlToPdf(html, outPath) {
     });
 }
 
-// Merge an array of PDF files into a single output PDF using python3 + pypdf.
-function _mergePdfs(inputs, outputPath) {
+// Find python3 on the system: check PATH first, then common install locations.
+function _findPython() {
+    const { execSync } = require('child_process');
+    // Try PATH first
+    try {
+        const p = execSync('which python3', { timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+        if (p && fs.existsSync(p)) return p;
+    } catch (_) {}
+    // Fall back to common locations
+    const candidates = process.platform === 'darwin' ? [
+        '/opt/anaconda3/bin/python3',
+        '/opt/homebrew/bin/python3',
+        '/usr/local/bin/python3',
+        '/usr/bin/python3',
+    ] : process.platform === 'win32' ? [
+        'python3.exe',
+        'python.exe',
+    ] : [
+        '/usr/bin/python3',
+        '/usr/local/bin/python3',
+    ];
+    for (const p of candidates) { if (fs.existsSync(p)) return p; }
+    return null;
+}
+
+// Check that python3 is available and pypdf is installed.
+// Returns null if OK, or an error string with install instructions.
+function _checkPythonDeps() {
+    const python = _findPython();
+    if (!python) {
+        return 'Python 3 not found. Install it from https://python.org or via Homebrew (brew install python).';
+    }
+    const { execSync } = require('child_process');
+    try {
+        execSync(`"${python}" -c "import pypdf"`, { timeout: 5000, stdio: 'ignore' });
+    } catch (_) {
+        return `pypdf not installed. Run: ${python} -m pip install pypdf`;
+    }
+    return null;
+}
+
+// Parse a slide range string like "1-5, 7, 10-12" into sorted 0-based indices.
+function _parseSlideRange(input, total) {
+    const indices = new Set();
+    for (const part of input.split(',')) {
+        const m = part.trim().match(/^(\d+)(?:\s*-\s*(\d+))?$/);
+        if (!m) continue;
+        const from = Math.max(1, parseInt(m[1]));
+        const to   = m[2] ? Math.min(total, parseInt(m[2])) : from;
+        for (let i = from; i <= to; i++) indices.add(i - 1);
+    }
+    return [...indices].sort((a, b) => a - b);
+}
+
+// Max fragmentOrder across all blocks in a slide (0 = no animation).
+function _maxFragOrder(slide) {
+    let m = 0;
+    function walk(node) {
+        (node.children || []).forEach(b => { if ((b.fragmentOrder || 0) > m) m = b.fragmentOrder; walk(b); });
+        (node.items    || []).forEach(b => { if ((b.fragmentOrder || 0) > m) m = b.fragmentOrder; walk(b); });
+    }
+    walk(slide);
+    return m;
+}
+
+// Assemble an ordered array of PNG paths into a single PDF using Chrome's
+// --print-to-pdf. Each PNG becomes one page. No Python dependency needed.
+function _assemblePngsToPdf(pngPaths, outPath) {
     return new Promise((resolve, reject) => {
-        // pypdf 6.x uses PdfWriter/PdfReader; older versions used PdfMerger
+        const chrome = _findChrome();
+        // Build a minimal HTML: one full-bleed image per @page.
+        // Chrome --print-to-pdf honours the @page size and break-after rules.
+        const pages = pngPaths.map(p => {
+            const fileUrl = 'file://' + p.replace(/\\/g, '/');
+            return `<div class="page"><img src="${fileUrl.replace(/"/g, '%22')}"></div>`;
+        }).join('\n');
+        const html = `<!DOCTYPE html><html><head>
+<style>
+@page{size:20in 11.25in;margin:0;}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{background:#000;}
+.page{width:1920px;height:1080px;overflow:hidden;break-after:page;break-inside:avoid;}
+.page:last-child{break-after:auto;}
+img{width:1920px;height:1080px;display:block;}
+</style></head><body>${pages}</body></html>`;
+
+        const tag    = Date.now();
+        const tmpHtml = path.join(os.tmpdir(), `wslide_asm_${tag}.html`);
+        const tmpUdd  = path.join(os.tmpdir(), `wslide_udd_${tag}`);
+        try { fs.writeFileSync(tmpHtml, html, 'utf8'); } catch (e) { reject(e); return; }
+        try { fs.mkdirSync(tmpUdd, { recursive: true }); } catch (_) {}
+
+        const args = [
+            '--headless=new', '--no-sandbox', '--disable-gpu', '--disable-extensions',
+            '--run-all-compositor-stages-before-draw',
+            '--print-to-pdf-no-header', '--no-pdf-header-footer',
+            `--user-data-dir=${tmpUdd}`,
+            `--print-to-pdf=${outPath}`,
+            `file://${tmpHtml}`,
+        ];
+        execFile(chrome, args, { timeout: 120000 }, (err) => {
+            fs.unlink(tmpHtml, () => {});
+            fs.rm(tmpUdd, { recursive: true, force: true }, () => {});
+            if (err) { reject(new Error(`PDF assembly failed: ${err.message}`)); return; }
+            if (!fs.existsSync(outPath)) { reject(new Error('Chrome assembly did not produce a PDF.')); return; }
+            resolve();
+        });
+    });
+}
+
+// Screenshot a standalone HTML page to a PNG using Chrome headless.
+// Uses the full GPU rendering pipeline — shadows, gradients, and all CSS effects render correctly.
+function _screenshotHtmlToPng(html, outPath) {
+    return new Promise((resolve, reject) => {
+        const chrome = _findChrome();
+        const tag = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+        const tmpHtml = path.join(os.tmpdir(), `wslide_shot_${tag}.html`);
+        const tmpUdd  = path.join(os.tmpdir(), `wslide_udd_${tag}`);
+        try { fs.writeFileSync(tmpHtml, html, 'utf8'); } catch (e) { reject(e); return; }
+        try { fs.mkdirSync(tmpUdd, { recursive: true }); } catch (_) {}
+        const args = [
+            '--headless=new', '--no-sandbox', '--disable-gpu', '--disable-extensions',
+            '--run-all-compositor-stages-before-draw',
+            '--window-size=1920,1080', '--hide-scrollbars', '--force-device-scale-factor=1',
+            `--user-data-dir=${tmpUdd}`,
+            `--screenshot=${outPath}`,
+            `file://${tmpHtml}`,
+        ];
+        execFile(chrome, args, { timeout: 30000 }, (err) => {
+            fs.unlink(tmpHtml, () => {});
+            fs.rm(tmpUdd, { recursive: true, force: true }, () => {});
+            if (err) { reject(new Error(`Screenshot failed: ${err.message}`)); return; }
+            if (!fs.existsSync(outPath)) { reject(new Error('Chrome ran but produced no screenshot.')); return; }
+            resolve();
+        });
+    });
+}
+
+// Merge an array of PNG files into one PDF using python3 + img2pdf.
+// img2pdf embeds PNGs losslessly — pixel-perfect output, no JPEG artefacts.
+function _mergeImagesToPdf(pngPaths, outputPath) {
+    return new Promise((resolve, reject) => {
+        const python = _findPython();
+        // img2pdf reads DPI from PNG metadata; Chrome writes 96dpi → 20×11.25in page
         const script = [
-            'import sys',
-            'from pypdf import PdfWriter, PdfReader',
-            'w = PdfWriter()',
-            'for f in sys.argv[1:-1]:',
-            '    r = PdfReader(f)',
-            '    for p in r.pages: w.add_page(p)',
-            'with open(sys.argv[-1], "wb") as fout: w.write(fout)',
+            'import sys, img2pdf',
+            'with open(sys.argv[-1], "wb") as f:',
+            '    f.write(img2pdf.convert(sys.argv[1:-1]))',
         ].join('\n');
-        const tmpScript = path.join(os.tmpdir(), `wslide_merge_${Date.now()}.py`);
+        const tmpScript = path.join(os.tmpdir(), `wslide_imgpdf_${Date.now()}.py`);
         try { fs.writeFileSync(tmpScript, script, 'utf8'); } catch (e) { reject(e); return; }
-        const python = '/opt/anaconda3/bin/python3';
-        execFile(python, [tmpScript, ...inputs, outputPath], { timeout: 60000 }, (err) => {
+        execFile(python, [tmpScript, ...pngPaths, outputPath], { timeout: 120000 }, (err, _stdout, stderr) => {
             fs.unlink(tmpScript, () => {});
-            if (err) reject(new Error(`PDF merge failed: ${err.message}`));
+            if (err) reject(new Error(`Image→PDF failed: ${stderr || err.message}`));
             else resolve();
         });
     });
 }
 
-// Export deck as PDF by splitting into chunks of CHUNK_SIZE slides each,
-// rendering each chunk with Chrome, then merging all chunk PDFs into one.
-// This works around Chrome headless --print-to-pdf failures on large decks.
-const _PDF_CHUNK_SIZE = 8;
+// Run async tasks with limited concurrency. items[i] → fn(item, i) → result[i].
+async function _runConcurrent(items, concurrency, fn) {
+    const results = new Array(items.length);
+    const queue = items.map((item, i) => [i, item]);
+    async function worker() {
+        while (queue.length) {
+            const [i, item] = queue.shift();
+            results[i] = await fn(item, i);
+        }
+    }
+    await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker));
+    return results;
+}
+
+// Non-blocking: if a render dependency (katex/prismjs) is missing, surface a
+// clear warning with a copyable install command. Exports still proceed (degraded)
+// so the user is never hard-blocked, but they know why output won't match the editor.
+function _warnMissingExportDeps() {
+    try {
+        const exporter = require('./slideExporter');
+        const missing = exporter.checkExportDependencies ? exporter.checkExportDependencies() : [];
+        if (!missing.length) return;
+        const pkgs = missing.map(m => m.pkg).join(' ');
+        const installCmd = `cd "Extension Development" && npm install ${pkgs}`;
+        const detail = missing.map(m => `${m.pkg} (${m.purpose})`).join(', ');
+        vscode.window.showWarningMessage(
+            `Slide export is missing ${detail} — exports will NOT match the editor. Install: ${installCmd}`,
+            'Copy install command'
+        ).then(choice => {
+            if (choice === 'Copy install command') vscode.env.clipboard.writeText(installCmd);
+        });
+    } catch (_) { /* never block export on the check itself */ }
+}
 
 // onProgress(message, increment) — optional VS Code progress callback
-async function _exportDeckToPdf(deck, deckDir, outPath, onProgress) {
+async function _exportDeckToPdf(deck, deckDir, outPath, onProgress, opts) {
     const exporter = require('./slideExporter');
-    const slides = deck.slides || [];
-    if (slides.length <= _PDF_CHUNK_SIZE) {
-        onProgress && onProgress('Rendering slides…', 90);
-        const html = exporter.exportDeckPdf(deck, deckDir);
-        await _exportHtmlToPdf(html, outPath);
-        onProgress && onProgress('Done', 10);
-        return;
-    }
-    const numChunks = Math.ceil(slides.length / _PDF_CHUNK_SIZE);
-    // 90% of progress for rendering chunks, 10% for merging
-    const renderShare = 90;
-    const mergeShare = 10;
-    const tmpPdfs = [];
-    try {
-        for (let i = 0; i < slides.length; i += _PDF_CHUNK_SIZE) {
-            const chunkIndex = Math.floor(i / _PDF_CHUNK_SIZE);
-            const slideFrom = i + 1;
-            const slideTo = Math.min(i + _PDF_CHUNK_SIZE, slides.length);
-            onProgress && onProgress(
-                `Rendering slides ${slideFrom}–${slideTo} of ${slides.length} (part ${chunkIndex + 1}/${numChunks})…`,
-                renderShare / numChunks
-            );
-            const chunk = Object.assign({}, deck, { slides: slides.slice(i, i + _PDF_CHUNK_SIZE) });
-            const html = exporter.exportDeckPdf(chunk, deckDir);
-            const tmpPdf = path.join(os.tmpdir(), `wslide_chunk_${Date.now()}_${i}.pdf`);
-            await _exportHtmlToPdf(html, tmpPdf);
-            tmpPdfs.push(tmpPdf);
+    const slides = (deck.slides || []).filter(s => !s.hidden);
+    // finalOnly: one page per slide rendered at its FINAL state (all fragments
+    // revealed) — for publishing/handout PDFs. Default (false): the Beamer-style
+    // per-step export with one page per animation click — for presenting.
+    const finalOnly = !!(opts && opts.finalOnly);
+
+    // Pre-flight
+    if (!_findChrome()) throw new Error('No Chrome/Chromium found. Install Google Chrome and try again.');
+
+    // Collect all (slide, step) pages in display order
+    const pages = [];
+    for (const slide of slides) {
+        const maxFrag = _maxFragOrder(slide);
+        if (finalOnly) {
+            // step = maxFrag makes every fragment visible (nothing has fo > step)
+            pages.push({ slide, step: maxFrag });
+        } else {
+            for (let step = 0; step <= maxFrag; step++) pages.push({ slide, step });
         }
-        onProgress && onProgress(`Merging ${numChunks} parts…`, mergeShare);
-        await _mergePdfs(tmpPdfs, outPath);
+    }
+
+    onProgress && onProgress(`Rendering ${pages.length} ${finalOnly ? 'slide' : 'frame'}(s)…`, 5);
+
+    // Screenshot each frame in parallel (6 concurrent Chrome instances)
+    const tmpPngs = new Array(pages.length).fill(null);
+    let done = 0;
+    try {
+        await _runConcurrent(pages, 6, async ({ slide, step }, i) => {
+            const html = exporter.exportSlideStepHtml(slide, step, deck, deckDir);
+            const png  = path.join(os.tmpdir(), `wslide_frame_${Date.now()}_${i}.png`);
+            await _screenshotHtmlToPng(html, png);
+            tmpPngs[i] = png;
+            done++;
+            onProgress && onProgress(`Rendered ${done}/${pages.length} ${finalOnly ? 'slides' : 'frames'}…`, 85 / pages.length);
+        });
+
+        onProgress && onProgress('Assembling PDF…', 8);
+        await _assemblePngsToPdf(tmpPngs, outPath);
+        onProgress && onProgress('Done', 2);
     } finally {
-        tmpPdfs.forEach(f => { try { fs.unlinkSync(f); } catch (e) { /* ignore */ } });
+        tmpPngs.forEach(f => f && fs.unlink(f, () => {}));
     }
 }
 
@@ -224,6 +397,7 @@ class SlideEditorProvider {
         // Entries: Map<docUriString, {deck, webviewPanel, document, saving}>
         this._panels = new Map();
         this._getController = null;
+        this._slideClipboard = null; // shared slide clipboard across all open .wslide editors
         _activeProvider = this;
     }
 
@@ -257,7 +431,7 @@ class SlideEditorProvider {
         };
 
         let deck = _parseDeck(document.getText());
-        const entry = { deck, webviewPanel, document, saving: false, currentSlideIndex: 0 };
+        const entry = { deck, webviewPanel, document, saving: false, currentSlideIndex: 0, _undoStack: [], _scope: null };
         this._panels.set(docKey, entry);
 
         webviewPanel.webview.html = this._buildHtml(webviewPanel.webview, document);
@@ -269,15 +443,21 @@ class SlideEditorProvider {
             switch (msg.cmd) {
 
                 case 'ready': {
-                    const deckToSend = _rewriteDeckImgPaths(
-                        entry.deck,
-                        path.dirname(document.uri.fsPath),
-                        webviewPanel.webview
-                    );
+                    const deckDir = path.dirname(document.uri.fsPath);
+                    const deckToSend = _rewriteDeckImgPaths(entry.deck, deckDir, webviewPanel.webview);
+                    let initClipboard = null;
+                    if (this._slideClipboard) {
+                        const clip = this._slideClipboard;
+                        initClipboard = _translateSlideImages(
+                            clip.slides, clip.srcDeckDir, clip.srcDeckName,
+                            deckDir, deckName, webviewPanel.webview
+                        );
+                    }
                     webviewPanel.webview.postMessage({
                         cmd: 'init',
                         deck: deckToSend,
                         deckName,
+                        slideClipboard: initClipboard,
                     });
                     break;
                 }
@@ -289,6 +469,37 @@ class SlideEditorProvider {
                             msg.deck,
                             path.dirname(document.uri.fsPath)
                         );
+                        // Fix any foreign webview URIs that _revertDeckImgPaths couldn't convert
+                        // (cross-directory paste before clipboard translation was active)
+                        const saveDir     = path.dirname(document.uri.fsPath);
+                        const saveImgDir  = path.join(saveDir, 'img', deckName + '.wslide');
+                        _walkDeckSrcs(reverted, src => {
+                            if (!src || !src.includes('vscode')) return src;
+                            try {
+                                let fsPath;
+                                if (src.startsWith('vscode-resource:')) {
+                                    fsPath = decodeURIComponent(src.replace(/^vscode-resource:\/\//, '/').replace(/^vscode-resource:/, ''));
+                                } else {
+                                    const u = new URL(src);
+                                    fsPath = decodeURIComponent(u.pathname);
+                                    if (/^\/[A-Za-z]:/.test(fsPath)) fsPath = fsPath.slice(1);
+                                }
+                                if (fs.existsSync(fsPath)) {
+                                    const fname = path.basename(fsPath);
+                                    fs.mkdirSync(saveImgDir, { recursive: true });
+                                    const dest = path.join(saveImgDir, fname);
+                                    if (!fs.existsSync(dest)) fs.copyFileSync(fsPath, dest);
+                                    return `img/${deckName}.wslide/${fname}`;
+                                }
+                            } catch (_) {}
+                            return src;
+                        });
+                        // Snapshot pre-edit state so wolfslide_undo can revert UI edits
+                        if (entry.deck) {
+                            if (!entry._undoStack) entry._undoStack = [];
+                            entry._undoStack.push(JSON.parse(JSON.stringify(entry.deck)));
+                            if (entry._undoStack.length > 20) entry._undoStack.shift();
+                        }
                         entry.deck = reverted;
                         const text = JSON.stringify(reverted, (k, v) => k.startsWith('_') ? undefined : v, 2);
                         const edit = new vscode.WorkspaceEdit();
@@ -329,32 +540,29 @@ class SlideEditorProvider {
                         const newDeck = JSON.parse(JSON.stringify(entry.deck));
                         if (newDeck.meta) newDeck.meta.title = newDeckName;
 
-                        // Copy image folder if it exists, rewriting src paths
-                        const srcImgDir  = path.join(srcDir,  'img', deckName  + '.wslide');
+                        // Copy all referenced images to the new location (handles pasted slides
+                        // from other files that may use img/<otherDeckName>.wslide/ paths)
                         const destImgDir = path.join(destDir, 'img', newDeckName + '.wslide');
-                        if (fs.existsSync(srcImgDir)) {
-                            fs.mkdirSync(destImgDir, { recursive: true });
-                            for (const f of fs.readdirSync(srcImgDir)) {
-                                fs.copyFileSync(
-                                    path.join(srcImgDir, f),
-                                    path.join(destImgDir, f)
-                                );
-                            }
-                            // Rewrite src references: img/<oldName>.wslide/ → img/<newName>.wslide/
-                            const oldPrefix = `img/${deckName}.wslide/`;
-                            const newPrefix = `img/${newDeckName}.wslide/`;
-                            function rewriteSrcs(b) {
-                                if (!b) return;
-                                if (typeof b.src === 'string' && b.src.startsWith(oldPrefix)) {
-                                    b.src = newPrefix + b.src.slice(oldPrefix.length);
+                        function fixImgSrcs(b) {
+                            if (!b) return;
+                            if (typeof b.src === 'string' && /^img\/[^/]+\.wslide\//.test(b.src)) {
+                                const fname = b.src.replace(/^img\/[^/]+\.wslide\//, '');
+                                const srcFilePath = path.join(srcDir, b.src);
+                                if (fs.existsSync(srcFilePath)) {
+                                    try {
+                                        fs.mkdirSync(destImgDir, { recursive: true });
+                                        const destFilePath = path.join(destImgDir, fname);
+                                        if (!fs.existsSync(destFilePath)) fs.copyFileSync(srcFilePath, destFilePath);
+                                    } catch (_) {}
                                 }
-                                (b.children || []).forEach(rewriteSrcs);
-                                (b.items    || []).forEach(rewriteSrcs);
+                                b.src = `img/${newDeckName}.wslide/${fname}`;
                             }
-                            (newDeck.slides || []).forEach(s =>
-                                (s.children || s.elements || []).forEach(rewriteSrcs)
-                            );
+                            (b.children || []).forEach(fixImgSrcs);
+                            (b.items    || []).forEach(fixImgSrcs);
                         }
+                        (newDeck.slides || []).forEach(s =>
+                            (s.children || s.elements || []).forEach(fixImgSrcs)
+                        );
 
                         // Write the new .wslide file
                         fs.writeFileSync(destPath, JSON.stringify(newDeck, null, 2), 'utf8');
@@ -378,8 +586,29 @@ class SlideEditorProvider {
                     break;
                 }
 
+                case 'slideClipboard': {
+                    // Webview notifies host of a copy/cut.
+                    // Revert webview URIs → relative paths so the data is portable across panels.
+                    const srcDeckDir = path.dirname(document.uri.fsPath);
+                    const slidesReverted = _revertDeckImgPaths(
+                        { slides: msg.slides || [] }, srcDeckDir
+                    ).slides;
+                    this._slideClipboard = { slides: slidesReverted, srcDeckDir, srcDeckName: deckName };
+                    // Broadcast to other panels — copy images and rewrite paths for each target
+                    for (const [key, otherEntry] of this._panels) {
+                        if (key === docKey) continue;
+                        const otherDeckName = path.basename(otherEntry.document.uri.fsPath, '.wslide');
+                        const otherDeckDir  = path.dirname(otherEntry.document.uri.fsPath);
+                        const translated = _translateSlideImages(
+                            slidesReverted, srcDeckDir, deckName,
+                            otherDeckDir, otherDeckName, otherEntry.webviewPanel.webview
+                        );
+                        otherEntry.webviewPanel.webview.postMessage({ cmd: 'slideClipboard', slides: translated });
+                    }
+                    break;
+                }
+
                 case 'upload': {
-                    // Save images to img/<deckName>.wslide/ next to the .wslide file
                     const deckDir = path.dirname(document.uri.fsPath);
                     const imgDir  = path.join(deckDir, 'img', deckName + '.wslide');
                     fs.mkdirSync(imgDir, { recursive: true });
@@ -398,7 +627,12 @@ class SlideEditorProvider {
 
                 case 'export': {
                     try {
-                        const html = exporter.exportDeck(entry.deck);
+                        _warnMissingExportDeps();
+                        // Viewer-accurate static HTML (one 1920×1080 page per slide, final
+                        // state) — same renderer as the PDF, NOT reveal.js, so HTML, PDF and
+                        // the editor are visually identical.
+                        const exDeckDir = path.dirname(document.uri.fsPath);
+                        const html = exporter.exportDeckPdf(entry.deck, exDeckDir, { finalOnly: true, embedImages: true });
                         const defaultUri = vscode.Uri.file(
                             path.join(path.dirname(document.uri.fsPath), deckName + '.html')
                         );
@@ -419,14 +653,63 @@ class SlideEditorProvider {
 
                 case 'exportPdf': {
                     try {
-                        const deckDir = path.dirname(document.uri.fsPath);
+                        _warnMissingExportDeps();
+                        const deckDir  = path.dirname(document.uri.fsPath);
+                        const allSlides = entry.deck.slides || [];
+                        const total    = allSlides.length;
+
+                        // ── Export style: presenting vs publishing ───────────
+                        const stylePick = await vscode.window.showQuickPick([
+                            { label: '$(book) Publishing — one page per slide',
+                              detail: 'Final state of each slide, animations ignored. Best for handouts / sharing.',
+                              value: 'final' },
+                            { label: '$(play) Presenting — one page per animation step',
+                              detail: 'Beamer-style: a separate page for each click/fragment reveal.',
+                              value: 'steps' },
+                        ], { title: 'PDF Export — style?', placeHolder: 'How should animations be handled?' });
+                        if (!stylePick) break;
+                        const finalOnly = stylePick.value === 'final';
+
+                        // ── Slide selection ──────────────────────────────────
+                        const pick = await vscode.window.showQuickPick([
+                            { label: `All slides (${total})`,     value: 'all' },
+                            { label: 'Current slide only',        value: 'current' },
+                            { label: 'Custom range…',             value: 'custom' },
+                        ], { title: 'PDF Export — which slides?', placeHolder: 'Select slide range' });
+                        if (!pick) break;
+
+                        let slideIndices; // 0-based indices into allSlides
+                        if (pick.value === 'all') {
+                            slideIndices = allSlides.map((_, i) => i);
+                        } else if (pick.value === 'current') {
+                            slideIndices = [entry.currentSlideIndex ?? 0];
+                        } else {
+                            const input = await vscode.window.showInputBox({
+                                prompt: `Slide range (1–${total}). Examples: "1-5", "1,3,7", "2-4,8-10"`,
+                                placeHolder: `1-${total}`,
+                                validateInput: v => {
+                                    const parsed = _parseSlideRange(v, total);
+                                    return parsed.length ? null : 'No valid slide numbers found';
+                                },
+                            });
+                            if (!input) break;
+                            slideIndices = _parseSlideRange(input, total);
+                        }
+
+                        const deckSubset = Object.assign({}, entry.deck, {
+                            slides: slideIndices.map(i => allSlides[i]).filter(Boolean),
+                        });
+                        const rangeLabel = pick.value === 'all' ? '' : `_slides${slideIndices.map(i => i+1).join('-')}`;
+                        // Distinguish the per-step "presenting" PDF so it doesn't overwrite
+                        // the clean per-slide "publishing" one (which keeps the plain name).
+                        const styleLabel = finalOnly ? '' : '_steps';
                         const defaultUri = vscode.Uri.file(
-                            path.join(deckDir, deckName + '.pdf')
+                            path.join(deckDir, deckName + styleLabel + rangeLabel + '.pdf')
                         );
                         const saveUri = await vscode.window.showSaveDialog({
                             defaultUri,
                             filters: { 'PDF Presentation': ['pdf'] },
-                            title: 'Export Slides as PDF (one page per animation step)',
+                            title: 'Export Slides as PDF',
                         });
                         if (saveUri) {
                             await vscode.window.withProgress({
@@ -434,8 +717,9 @@ class SlideEditorProvider {
                                 title: 'Exporting PDF…',
                                 cancellable: false
                             }, async (progress) => {
-                                await _exportDeckToPdf(entry.deck, deckDir, saveUri.fsPath,
-                                    (msg, increment) => progress.report({ message: msg, increment })
+                                await _exportDeckToPdf(deckSubset, deckDir, saveUri.fsPath,
+                                    (msg, increment) => progress.report({ message: msg, increment }),
+                                    { finalOnly }
                                 );
                             });
                             vscode.window.showInformationMessage(`PDF exported: ${path.basename(saveUri.fsPath)}`);
@@ -455,6 +739,14 @@ class SlideEditorProvider {
                     if (msg.id && this._measurePending && this._measurePending[msg.id]) {
                         this._measurePending[msg.id](msg.result);
                         delete this._measurePending[msg.id];
+                    }
+                    break;
+                }
+
+                case 'screenshotResult': {
+                    if (msg.id && this._screenshotPending && this._screenshotPending[msg.id]) {
+                        this._screenshotPending[msg.id](msg);
+                        delete this._screenshotPending[msg.id];
                     }
                     break;
                 }
@@ -627,6 +919,7 @@ class SlideEditorProvider {
             if (entry.saving)                            return; // we caused this
             const newDeck = _parseDeck(e.document.getText());
             entry.deck = newDeck;
+            entry._undoStack = []; // external edit clears tool undo history
             const deckToSend = _rewriteDeckImgPaths(
                 newDeck,
                 path.dirname(document.uri.fsPath),
@@ -695,6 +988,16 @@ class SlideEditorProvider {
         return textDoc ? { e: null, document: textDoc } : { e: null, document: null };
     }
 
+    /** Session-scoped task anchor — shown prominently in getContext to keep the model focused. */
+    getScope(docUriStr) {
+        const { e } = this._resolveEntry(docUriStr);
+        return e ? (e._scope || null) : null;
+    }
+    setScope(docUriStr, scope) {
+        const { e } = this._resolveEntry(docUriStr);
+        if (e) e._scope = scope || null;
+    }
+
     /** Current deck for the active (or specified) editor. */
     getDeck(docUriStr) {
         const { e, document } = this._resolveEntry(docUriStr);
@@ -703,13 +1006,40 @@ class SlideEditorProvider {
         return document ? _parseDeck(document.getText()) : null;
     }
 
-    /** Replace the deck, save to file, refresh webview (if resolved). */
-    async applyDeck(newDeck, docUriStr) {
+    /** Absolute filesystem directory of the .wslide file (or null). */
+    getDeckDir(docUriStr) {
+        const { e, document } = this._resolveEntry(docUriStr);
+        const doc = e ? e.document : document;
+        return doc ? path.dirname(doc.uri.fsPath) : null;
+    }
+
+    /** Like getDeck but with webview URIs reverted to relative img/ paths (suitable for static export). */
+    getDeckOnDisk(docUriStr) {
+        const { e, document } = this._resolveEntry(docUriStr);
+        const doc = e ? e.document : document;
+        if (!doc) return null;
+        if (e && e.deck) {
+            const deckDir = path.dirname(doc.uri.fsPath);
+            return _revertDeckImgPaths(JSON.parse(JSON.stringify(e.deck)), deckDir);
+        }
+        return document ? _parseDeck(document.getText()) : null;
+    }
+
+    /** Replace the deck, save to file, refresh webview (if resolved).
+     * opts.skipUndoPush — if true, don't push current state onto the undo stack
+     *   (used by undo itself so a redo is not accidentally created). */
+    async applyDeck(newDeck, docUriStr, opts) {
         const { e, document } = this._resolveEntry(docUriStr);
         if (!document) throw new Error('No active .wslide editor found');
 
         if (e) e.saving = true;
         try {
+            if (e && !opts?.skipUndoPush) {
+                // Push a snapshot of the current deck onto the undo stack (capped at 20)
+                e._undoStack = e._undoStack || [];
+                e._undoStack.push(JSON.parse(JSON.stringify(e.deck)));
+                if (e._undoStack.length > 20) e._undoStack.shift();
+            }
             if (e) e.deck = newDeck;
             const text = JSON.stringify(newDeck, (k, v) => k.startsWith('_') ? undefined : v, 2);
             const edit = new vscode.WorkspaceEdit();
@@ -732,6 +1062,23 @@ class SlideEditorProvider {
         } finally {
             if (e) e.saving = false;
         }
+    }
+
+    /** Force-reload the deck from the current document text, reset undo stack, and push to webview.
+     * Call after external edits or a confusing undo sequence to get a clean state. */
+    reloadDeck(docUriStr) {
+        const { e, document } = this._resolveEntry(docUriStr);
+        if (!e || !document) return null;
+        const freshDeck = _parseDeck(document.getText());
+        e.deck = freshDeck;
+        e._undoStack = [];
+        const deckForWebview = _rewriteDeckImgPaths(
+            freshDeck,
+            path.dirname(document.uri.fsPath),
+            e.webviewPanel.webview
+        );
+        e.webviewPanel.webview.postMessage({ cmd: 'deckUpdate', deck: deckForWebview });
+        return freshDeck;
     }
 
     /** List all open .wslide document URIs (panels + unresolved TextDocuments). */
@@ -763,6 +1110,35 @@ class SlideEditorProvider {
             }, 5000);
         });
     }
+
+    /**
+     * Capture the slide as a JPEG image (base64 data URL) using html2canvas in the webview.
+     * @param {number} slideIndex  0-based slide index
+     * @param {string} [docUriStr] optional docUri to target a specific panel
+     * @param {number} [scale]     capture scale (default 0.5 → 960x540 px)
+     * @returns {Promise<string>} base64 JPEG data URL, e.g. "data:image/jpeg;base64,..."
+     */
+    async screenshotSlide(slideIndex, docUriStr, scale) {
+        const e = docUriStr ? this._panels.get(docUriStr) : this.getActiveEntry();
+        if (!e) throw new Error('No active .wslide editor found');
+        if (!this._screenshotPending) this._screenshotPending = {};
+        if (!this._screenshotNextId) this._screenshotNextId = 0;
+        const id = ++this._screenshotNextId;
+        return new Promise((resolve, reject) => {
+            this._screenshotPending[id] = (msg) => {
+                if (msg.error) reject(new Error(msg.error));
+                else resolve(msg.dataUrl);
+            };
+            e.webviewPanel.webview.postMessage({ cmd: 'screenshot', id, slideIndex, scale: scale || 0.5 });
+            // Timeout after 30s (html2canvas may need to load from CDN first)
+            setTimeout(() => {
+                if (this._screenshotPending[id]) {
+                    delete this._screenshotPending[id];
+                    reject(new Error('Screenshot timed out'));
+                }
+            }, 30000);
+        });
+    }
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -774,9 +1150,27 @@ function _parseDeck(text) {
         if (!d.meta)           d.meta   = { title: 'Untitled' };
         if (!d.theme)          d.theme  = {};
         if (!d.formatVersion)  d.formatVersion = 2;
+        // v3 migration: normalize legacy "elements" array key → "children"
+        function _normalizeNode(node) {
+            if (!node) return;
+            if (Array.isArray(node.elements) && !node.children) {
+                node.children = node.elements;
+                delete node.elements;
+            }
+            (node.children || []).forEach(_normalizeNode);
+            (node.items    || []).forEach(_normalizeNode);
+        }
+        d.slides.forEach(s => {
+            if (Array.isArray(s.elements) && !s.children) {
+                s.children = s.elements;
+                delete s.elements;
+            }
+            (s.children || []).forEach(_normalizeNode);
+        });
+        if (d.formatVersion < 3) d.formatVersion = 3;
         return d;
     } catch (_) {
-        return { formatVersion: 2, meta: { title: 'Untitled' }, theme: {}, slides: [] };
+        return { formatVersion: 3, meta: { title: 'Untitled' }, theme: {}, slides: [] };
     }
 }
 
@@ -808,7 +1202,46 @@ function _walkDeckSrcs(deck, fn) {
     });
     return d;
 }
-
+/**
+ * Copy image files from srcDeckDir into destDeckDir (if different) and return
+ * the slides array with paths rewritten for destDeck.  If destWebview is given,
+ * paths are returned as webview URIs; otherwise as relative img/ paths.
+ */
+function _translateSlideImages(slides, srcDeckDir, srcDeckName, destDeckDir, destDeckName, destWebview) {
+    const destPrefix  = `img/${destDeckName}.wslide/`;
+    const sameLocation = path.resolve(srcDeckDir) === path.resolve(destDeckDir) && srcDeckName === destDeckName;
+    function translateSrc(src) {
+        if (!src || !src.startsWith('img/')) return src;
+        const m = src.match(/^img\/[^/]+\.wslide\/(.+)$/);
+        if (!m) return src;
+        const fname = m[1];
+        if (!sameLocation) {
+            const srcFilePath = path.join(srcDeckDir, src);
+            const destImgDir  = path.join(destDeckDir, destPrefix);
+            if (fs.existsSync(srcFilePath)) {
+                try {
+                    fs.mkdirSync(destImgDir, { recursive: true });
+                    const destFilePath = path.join(destImgDir, fname);
+                    if (!fs.existsSync(destFilePath)) fs.copyFileSync(srcFilePath, destFilePath);
+                } catch (_) {}
+            }
+        }
+        if (destWebview) {
+            return destWebview.asWebviewUri(vscode.Uri.file(path.join(destDeckDir, destPrefix, fname))).toString();
+        }
+        return `${destPrefix}${fname}`;
+    }
+    function walkBlock(b) {
+        if (!b) return;
+        if (typeof b.src === 'string') b.src = translateSrc(b.src);
+        (b.children || []).forEach(walkBlock);
+        (b.items    || []).forEach(walkBlock);
+        (b.elements || []).forEach(walkBlock);
+    }
+    const cloned = JSON.parse(JSON.stringify(slides));
+    cloned.forEach(s => (s.children || s.elements || []).forEach(walkBlock));
+    return cloned;
+}
 /** Replace relative img/ paths → webview URIs (for sending to webview). */
 function _rewriteDeckImgPaths(deck, deckDir, webview) {
     return _walkDeckSrcs(deck, src => {
@@ -873,12 +1306,18 @@ function _pruneUnusedImages(deck, deckDir, deckName) {
         (s.children || s.elements || []).forEach(walkBlock)
     );
 
-    // Remove files not in usedFiles
+    // Remove files not in usedFiles — but only if they are older than 2 hours.
+    // Images created by an in-progress agent run may not yet be referenced;
+    // deleting them immediately would break those runs.
+    const TWO_HOURS_MS = 2 * 60 * 60 * 1000;
     let pruned = 0;
     for (const f of fs.readdirSync(imgDir)) {
-        if (!usedFiles.has(f)) {
-            try { fs.unlinkSync(path.join(imgDir, f)); pruned++; } catch (_) {}
-        }
+        if (usedFiles.has(f)) continue;
+        try {
+            const stat = fs.statSync(path.join(imgDir, f));
+            if (Date.now() - stat.mtimeMs < TWO_HOURS_MS) continue; // too recent — keep
+            fs.unlinkSync(path.join(imgDir, f)); pruned++;
+        } catch (_) {}
     }
     if (pruned > 0) {
         console.log(`[wslide] Pruned ${pruned} unused image(s) from ${imgDir}`);

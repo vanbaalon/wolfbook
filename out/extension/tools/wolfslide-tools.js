@@ -8,8 +8,12 @@ const fs     = require("fs");
 const path   = require("path");
 const {
     normalizeToolContent, getCellToolId, resolveCellIndex,
-    resolveNotebookEditor,
+    resolveNotebookEditor, checkMarkdownKaTeX,
 } = require('./shared');
+// decodeWstpText is used by _parseEvalResult (SVG/BOXES branches). Without this
+// require, any non-graphics eval (even `1+1`, which returns a BOXES: result)
+// threw "decodeWstpText is not defined" — see Day2 wslide feedback §H.
+const { decodeWstpText } = require('../utils/encoding');
 
 // =============================================================================
 // Wolfslide tools  —  manipulate .wslide custom editors
@@ -24,14 +28,78 @@ function _slideResult(text) {
 }
 function _uid() { return Math.random().toString(36).slice(2, 10); }
 
-/** Recursively assign IDs to any block (or slide children) that lacks one. */
+/** Smooth over two common authoring papercuts on a single block (see feedback §G):
+ *   • list items given as plain strings → wrapped into {type:'text', content}
+ *   • eval blocks whose expression was put in `content` → aliased to `input`
+ *  Idempotent; safe to call on already-normalized blocks. */
+function _normalizeBlockNode(node) {
+    if (!node || typeof node !== 'object' || Array.isArray(node)) return;
+    if (node.type === 'list' && Array.isArray(node.items)) {
+        node.items = node.items.map(it =>
+            (typeof it === 'string') ? { type: 'text', content: it } : it);
+    }
+    if (node.type === 'eval' && !node.input && typeof node.content === 'string') {
+        node.input = node.content;
+        delete node.content;
+    }
+}
+
+/** Recursively apply _normalizeBlockNode across a block tree (or array of blocks).
+ *  Used at insert sites that validate block shape *before* _ensureBlockIds runs. */
+function _normalizeBlockTree(node) {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) { node.forEach(_normalizeBlockTree); return; }
+    _normalizeBlockNode(node);
+    if (node.children) _normalizeBlockTree(node.children);
+    if (node.items)    _normalizeBlockTree(node.items);
+    if (node.elements) _normalizeBlockTree(node.elements);
+}
+
+/** Recursively assign IDs to any block (or slide children) that lacks one.
+ *  Also normalizes each block (list-item strings, eval content→input). */
 function _ensureBlockIds(node) {
     if (!node || typeof node !== 'object') return;
     if (Array.isArray(node)) { node.forEach(_ensureBlockIds); return; }
+    _normalizeBlockNode(node);
     if (node.type && !node.id) node.id = _uid();
     if (node.children) _ensureBlockIds(node.children);
     if (node.items) _ensureBlockIds(node.items);
     if (node.elements) _ensureBlockIds(node.elements);
+}
+
+/** Return a Set of every block id used anywhere in the deck. */
+function _collectDeckIds(deck) {
+    const ids = new Set();
+    (deck.slides || []).forEach(s => _collectAllBlocks(s).forEach(b => { if (b.id) ids.add(b.id); }));
+    return ids;
+}
+
+/** Return [{id, slides:[...1-based slide numbers]}] for IDs that appear more than once across the deck. */
+function _detectDeckDuplicateIds(deck) {
+    const seen = new Map();
+    (deck.slides || []).forEach((s, i) => {
+        _collectAllBlocks(s).forEach(b => {
+            if (!b.id) return;
+            if (!seen.has(b.id)) seen.set(b.id, []);
+            seen.get(b.id).push(i + 1);
+        });
+    });
+    return [...seen.entries()].filter(([, sl]) => sl.length > 1).map(([id, slides]) => ({ id, slides }));
+}
+
+/** Mutate any block whose id already exists in existingIds, giving it a fresh uid.
+ *  Appends a warning string per rename to warnings[]. */
+function _freshenConflicts(existingIds, node, warnings) {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) { node.forEach(n => _freshenConflicts(existingIds, n, warnings)); return; }
+    if (node.id && existingIds.has(node.id)) {
+        const oldId = node.id;
+        node.id = _uid();
+        warnings.push(`Block id="${oldId}" already exists in this deck — auto-renamed to "${node.id}" to prevent duplicate`);
+    }
+    _freshenConflicts(existingIds, node.children, warnings);
+    _freshenConflicts(existingIds, node.items, warnings);
+    _freshenConflicts(existingIds, node.elements, warnings);
 }
 
 /** Recursively collect all image blocks from a slide (v2 children or v1 elements). */
@@ -107,10 +175,67 @@ function _findBlockRecursive(blockId, root) {
     return null;
 }
 
-/** Deep merge source into target (mutates target). Arrays are replaced, not merged. */
+/** Recursively find a block by name field, returning { block, parent, key, index } or null. */
+function _findBlockByName(name, root) {
+    if (!root || !name) return null;
+    const arrays = [
+        { key: 'children', arr: root.children },
+        { key: 'items',    arr: root.items },
+        { key: 'elements', arr: root.elements },
+    ];
+    for (const { key, arr } of arrays) {
+        if (!arr) continue;
+        for (let i = 0; i < arr.length; i++) {
+            if (arr[i]?.name === name) return { block: arr[i], parent: root, key, index: i };
+            const found = _findBlockByName(name, arr[i]);
+            if (found) return found;
+        }
+    }
+    return null;
+}
+
+/**
+ * Resolve a block by blockId or blockName across a deck.
+ * Searches resolveSlide first, then all other slides.
+ * Returns { found, resolvedSlide, resolvedIdx } or { error }.
+ */
+function _resolveBlockRef(options, r) {
+    let blockId   = options.input?.blockId;
+    const blockName = options.input?.blockName;
+    if (!blockId && !blockName) return { error: 'blockId or blockName is required.' };
+
+    if (blockId) {
+        const found = _findBlockRecursive(blockId, r.slide);
+        if (found) return { found, resolvedSlide: r.slide, resolvedIdx: r.idx };
+        // Not on current slide — search all slides
+        for (let si = 0; si < r.deck.slides.length; si++) {
+            if (si === r.idx) continue;
+            const f = _findBlockRecursive(blockId, r.deck.slides[si]);
+            if (f) return { found: f, resolvedSlide: r.deck.slides[si], resolvedIdx: si };
+        }
+        const allIds = _collectAllBlocks(r.slide).map(b => b.id);
+        return { error: `Block "${blockId}" not found on slide ${r.idx + 1}. Valid ids: ${allIds.join(', ')}` };
+    }
+
+    // blockName path
+    let nameMatch = _findBlockByName(blockName, r.slide);
+    if (nameMatch) return { found: nameMatch, resolvedSlide: r.slide, resolvedIdx: r.idx };
+    for (let si = 0; si < r.deck.slides.length; si++) {
+        if (si === r.idx) continue;
+        nameMatch = _findBlockByName(blockName, r.deck.slides[si]);
+        if (nameMatch) return { found: nameMatch, resolvedSlide: r.deck.slides[si], resolvedIdx: si };
+    }
+    return { error: `No block with name="${blockName}" found in any slide.` };
+}
+
+/** Deep merge source into target (mutates target). Arrays are replaced, not merged.
+ *  A null value means "delete this key" from target.
+ */
 function _deepMerge(target, source) {
     for (const key of Object.keys(source)) {
-        if (source[key] && typeof source[key] === 'object' && !Array.isArray(source[key])
+        if (source[key] === null) {
+            delete target[key]; // null means "remove this property"
+        } else if (source[key] && typeof source[key] === 'object' && !Array.isArray(source[key])
             && target[key] && typeof target[key] === 'object' && !Array.isArray(target[key])) {
             _deepMerge(target[key], source[key]);
         } else {
@@ -129,130 +254,90 @@ function _stripHtml(html) {
         .replace(/\s+/g, ' ').trim();
 }
 
-/** Short human-readable label for a block. */
+/** Short human-readable label for a block — includes frag:N/- and fs:X inline. */
 function _blockLabel(b) {
-    const nameTag = b.name ? ` "${b.name}"` : '';
+    const frag = b.fragmentOrder != null ? ` frag:${b.fragmentOrder}` : ' frag:-';
+    const fs = b.fontSize ? ` fs:${b.fontSize}` : (b.style?.fontSize ? ` fs:${b.style.fontSize}` : '');
+    const nameTag = b.name ? ` name:${b.name}` : '';
     switch (b.type) {
-        case 'heading':   return `[H${b.level || 2}${nameTag}] "${_stripHtml(b.content).slice(0, 80)}"`;
-        case 'text':      return `[TEXT${nameTag}] "${_stripHtml(b.content).slice(0, 80)}"`;
-        case 'code':      return `[CODE${nameTag} ${b.language || ''}] "${_stripHtml(b.content).slice(0, 80)}"`;
-        case 'image':     return `[IMG${nameTag}] alt="${b.alt || '⚠NOT SET'}" src=${(b.src || '').split('/').slice(-2).join('/') || '?'}`;
-        case 'list':      return `[LIST${nameTag}] ${(b.items || []).length} items: "${_stripHtml((b.items?.[0]?.content) || '').slice(0, 50)}"…`;
-        case 'container': {
-            const flex = (b.style?.flex || b.style?.width || '').match(/[\d.]+%/) ? ` flex:${b.style.flex || b.style.width}` : (b.flex ? ` flex:${b.flex}` : '');
-            const grid = b.style?.gridTemplateColumns ? ` grid(${b.style.gridTemplateColumns})` : '';
-            const cn   = b.className ? ` .${b.className}` : '';
-            const ch   = (b.children || []).length;
-            return `[CONT${nameTag} ${b.layout || 'col'}${flex}${grid}${cn} children:${ch}]`;
+        case 'heading':   return `[H${b.level || 2}${frag}${fs}${nameTag}] "${_stripHtml(b.content).slice(0, 80)}"`;
+        case 'text':      return `[TEXT${frag}${fs}${nameTag}] "${_stripHtml(b.content).slice(0, 80)}"`;
+        case 'code':      return `[CODE${frag} ${b.language || ''}${nameTag}] "${_stripHtml(b.content).slice(0, 60)}"`;
+        case 'image': {
+            const dims = (b.w && b.h) ? ` ${b.w}×${b.h}` : (b.w ? ` w=${b.w}` : (b.h ? ` h=${b.h}` : ''));
+            const fname = (b.src || '').split('/').pop().replace(/\?.*$/, '') || '?';
+            const altStr = b.alt ? ` alt="${b.alt.slice(0, 40)}"` : ' ⚠NO-ALT';
+            return `[IMG${frag}${dims}${nameTag}] src=${fname}${altStr}`;
         }
-        case 'arrow':     return `[ARROW${nameTag}] (${b.x0},${b.y0})→(${b.x1},${b.y1})`;
-        case 'raw':       return `[RAW HTML${nameTag}]`;
+        case 'list':      return `[LIST${frag}${nameTag}] ${(b.items || []).length} items: "${_stripHtml((b.items?.[0]?.content) || '').slice(0, 50)}"`;
+        case 'container': {
+            const flexSrc = b.style?.flex || b.style?.width || b.flex || '';
+            const flexStr = flexSrc ? ` flex:${flexSrc}` : '';
+            const gap = b.gap != null ? ` gap:${typeof b.gap === 'number' ? b.gap + 'px' : b.gap}`
+                       : (b.style?.gap ? ` gap:${b.style.gap}` : '');
+            const pad = b.padding != null ? ` pad:${typeof b.padding === 'number' ? b.padding + 'px' : b.padding}`
+                      : (b.style?.padding ? ` pad:${b.style.padding}` : '');
+            const align = (b.alignItems || b.style?.alignItems)
+                         ? ` align:${b.alignItems || b.style.alignItems}` : '';
+            const grid = b.style?.gridTemplateColumns ? ` grid(${b.style.gridTemplateColumns})` : '';
+            const cn = b.className ? ` .${b.className}` : '';
+            return `[CONT${frag} ${b.layout || 'col'}${flexStr}${gap}${pad}${align}${grid}${cn}${nameTag}]`;
+        }
+        case 'box': {
+            const preview = _stripHtml(b.content).slice(0, 60);
+            const cn = b.className ? ` .${b.className}` : '';
+            // Show key style properties so agents can detect styling (gradient vs class-based)
+            const styleBits = [];
+            if (b.style?.background || b.style?.backgroundColor)
+                styleBits.push(`bg:${(b.style.background || b.style.backgroundColor).slice(0, 40)}`);
+            if (b.style?.color) styleBits.push(`color:${b.style.color}`);
+            if (b.style?.borderRadius) styleBits.push(`r:${b.style.borderRadius}`);
+            if (b.style?.border) styleBits.push(`border:${String(b.style.border).slice(0, 30)}`);
+            const styleStr = styleBits.length ? `  style{${styleBits.join(' ')}}` : '';
+            return `[BOX${frag}${fs}${cn}${nameTag}]${styleStr}${preview ? ` "${preview}"` : ''}`;
+        }
+        case 'math':      return `[MATH${frag}${nameTag}] "${(b.content || '').slice(0, 60)}"`;
+        case 'arrow':     return `[ARROW${frag}${nameTag}] (${b.x0},${b.y0})→(${b.x1},${b.y1})`;
+        case 'raw':       return `[RAW${frag}${nameTag}]`;
         case 'eval': {
             const inp = (b.input || '').slice(0, 60);
             const st = b.output ? (b.output.type === 'image' ? '✓img' : b.output.type === 'error' ? '✗err' : '✓txt') : '⏳';
-            return `[EVAL${nameTag} ${st}] "${inp}"`;
+            return `[EVAL${frag}${nameTag} ${st}] "${inp}"`;
         }
-        default:          return `[${b.type || '?'}${nameTag}]`;
+        default:          return `[${b.type || '?'}${frag}${nameTag}]`;
     }
 }
 
-/** Positional/animation annotations for a block. */
+/** Positional/size annotations for a block (fragmentOrder now in _blockLabel). */
 function _blockAnno(b) {
     const parts = [];
-    if (b.name) parts.push(`name:${b.name}`);
-    if (b.fragmentOrder != null) parts.push(`⚡step${b.fragmentOrder}`);
     if (b.offset && (b.offset.dx || b.offset.dy))
         parts.push(`@(${b.offset.dx >= 0 ? '+' : ''}${b.offset.dx},${b.offset.dy >= 0 ? '+' : ''}${b.offset.dy})`);
-    if (b.w || b.h) {
+    if (b.type !== 'image' && (b.w || b.h)) {
         let dimStr = `${b.w || '?'}×${b.h || '?'}px`;
-        // Show style constraints that override w/h visually
         const mw = b.style?.maxWidth; const mh = b.style?.maxHeight;
-        if (mw || mh) dimStr += ` (capped:${mw ? ' maxW=' + mw : ''}${mh ? ' maxH=' + mh : ''})`;
+        if (mw || mh) dimStr += `(cap:${mw ? 'mW=' + mw : ''}${mh ? ' mH=' + mh : ''})`;
         parts.push(dimStr);
     }
-    if (b.type === 'image' && !b.alt) parts.push('⚠NO-ALT');
     return parts.length ? `  [${parts.join(' ')}]` : '';
 }
 
 /**
- * Render an ASCII structural layout diagram of a slide (78 chars wide).
- * Row-containers are rendered as side-by-side columns using box-drawing chars.
- * Flex percentages are used to proportion column widths when present.
+ * Render an indented ASCII structural tree of a slide.
+ * Each block shows type, frag:N, fs:X, layout props, content preview, and full id.
  */
 function _asciiSlide(slide) {
-    const TOTAL_W = 78;
     const lines = [];
-
-    function renderBlock(b, indent, availW) {
-        const pfx = ' '.repeat(indent);
-        const idTag = b.id ? ` #${b.id.slice(0, 8)}` : '';
-        const header = _blockLabel(b) + _blockAnno(b) + idTag;
-        lines.push((pfx + header).slice(0, availW));
-
+    function renderBlock(b, indent) {
+        const pfx = '  '.repeat(indent);
+        const idTag = b.id ? `  #${b.id}` : '';
+        lines.push(pfx + _blockLabel(b) + _blockAnno(b) + idTag);
         const kids = b.type !== 'list' ? (b.children || b.elements || []) : [];
-        if (!kids.length) return;
-
-        const isRow = b.type === 'container' &&
-            (b.layout === 'row' || (b.style?.display === 'flex' && b.style?.flexDirection !== 'column'));
-
-        if (isRow) {
-            // Determine proportional column widths from flex percentages
-            const flexVals = kids.map(k => {
-                const src = k.style?.flex || k.style?.width || '';
-                const m = src.match(/(\d+(?:\.\d+)?)%/);
-                return m ? parseFloat(m[1]) : null;
-            });
-            const allFlex = flexVals.every(v => v !== null);
-            const totalFlex = allFlex ? flexVals.reduce((a, v) => a + v, 0) : kids.length;
-            const innerW = Math.max(kids.length * 4, availW - indent - 2);
-            const rawWidths = flexVals.map((v, i) =>
-                Math.max(4, v !== null
-                    ? Math.round(v / totalFlex * innerW)
-                    : Math.round(innerW / kids.length))
-            );
-            // Fix rounding so columns sum to innerW; clamp to min 1 to prevent repeat() crash
-            const diff = innerW - rawWidths.reduce((a, v) => a + v, 0);
-            rawWidths[rawWidths.length - 1] = Math.max(1, rawWidths[rawWidths.length - 1] + diff);
-            // Clamp all widths to at least 1
-            for (let i = 0; i < rawWidths.length; i++) rawWidths[i] = Math.max(1, rawWidths[i]);
-
-            // Collect content lines for each column (max depth 3 levels)
-            const colContents = kids.map((k, ci) => {
-                const cw = rawWidths[ci];
-                const tmp = [];
-                function sub(b2, d) {
-                    if (d > 3) return;
-                    tmp.push((_blockLabel(b2) + _blockAnno(b2)).slice(0, cw - 2));
-                    const kids2 = b2.type !== 'list' ? (b2.children || b2.elements || []) : [];
-                    kids2.forEach(k2 => sub(k2, d + 1));
-                }
-                sub(k, 0);
-                return tmp;
-            });
-
-            const maxRows = Math.max(1, ...colContents.map(c => c.length));
-            const colWstr = rawWidths.map(w => '─'.repeat(w));
-            lines.push(pfx + '┌' + colWstr.join('┬') + '┐');
-            for (let r = 0; r < maxRows; r++) {
-                let row = pfx + '│';
-                colContents.forEach((cc, ci) => {
-                    const cw = rawWidths[ci];
-                    const txt = cc[r] || '';
-                    row += txt + ' '.repeat(Math.max(0, cw - txt.length)) + '│';
-                });
-                lines.push(row);
-            }
-            lines.push(pfx + '└' + colWstr.join('┴') + '┘');
-        } else {
-            kids.forEach(k => renderBlock(k, indent + 2, availW));
-        }
+        kids.forEach(k => renderBlock(k, indent + 1));
     }
 
     const topBlocks = slide.children || slide.elements || [];
-    topBlocks.forEach((b, i) => {
-        if (i > 0) lines.push('─'.repeat(TOTAL_W));
-        renderBlock(b, 0, TOTAL_W);
-    });
+    topBlocks.forEach(b => renderBlock(b, 0));
     return lines.join('\n');
 }
 
@@ -316,17 +401,43 @@ const THEME_PRESETS = {
 
 class WolfslideGetContextTool {
     prepareInvocation() { return { invocationMessage: 'Getting slide editor context' }; }
-    async invoke(_options, _token) {
+    async invoke(options, _token) {
         const p = _getSlideProvider();
         const openUris = p ? p.listOpenEditors() : [];
         const activeEntry = p ? p.getActiveEntry() : null;
         const activeUri = activeEntry?.document?.uri?.toString() ?? null;
 
+        // Handle scope set/clear
+        const scopeInput = options?.input?.scope;
+        if (scopeInput !== undefined && p) {
+            p.setScope(activeUri, scopeInput || null);
+        }
+        const currentScope = p ? p.getScope(activeUri) : null;
+
         const lines = [];
 
-        if (openUris.length) {
+        // Scope banner — always first so the model can't miss it
+        if (currentScope) {
+            lines.push('╔══════════════════════════════════════════════════════════════╗');
+            lines.push(`║  ⚑ SCOPE: ${currentScope.padEnd(52)}║`);
+            lines.push('║  Work ONLY within this scope. Ignore problems outside it.   ║');
+            lines.push('║  To update: wolfslide_getContext(scope:"new task")           ║');
+            lines.push('║  To clear:  wolfslide_getContext(scope:"")                   ║');
+            lines.push('╚══════════════════════════════════════════════════════════════╝');
+            lines.push('');
+        }
+
+        lines.push('🚫 NEVER read or write .wslide files directly with file/disk tools.');
+        lines.push('   All edits MUST go through wolfslide_* tools. Direct file edits bypass');
+        lines.push('   the live editor state and corrupt the undo stack.');
+        lines.push('');
+
+        // Only show real file:// URIs — filter out VS Code internal virtual docs
+        // (chat-editing-text-model://, chat-editing-snapshot-text-model://, etc.)
+        const fileUris = openUris.filter(u => u.startsWith('file://'));
+        if (fileUris.length) {
             lines.push('Open .wslide editors:');
-            for (const u of openUris) {
+            for (const u of fileUris) {
                 const d = p.getDeck(u);
                 const title = d?.meta?.title || 'Untitled';
                 const count = d?.slides?.length ?? 0;
@@ -356,7 +467,10 @@ class WolfslideGetContextTool {
             const slide = activeDeck.slides?.[idx];
             if (slide) {
                 lines.push('');
-                lines.push(`Currently visible slide: ${idx + 1} of ${activeDeck.slides.length} — "${slide.label || '(unlabeled)'}"`);
+                lines.push(`Currently visible slide: Slide ${idx + 1} of ${activeDeck.slides.length} — "${slide.label || '(unlabeled)'}" (slideIndex=${idx + 1} to use in tools)`);
+                // Compact slide directory so the model always knows which number = which slide
+                const slideDir = activeDeck.slides.map((sl, si) => `Slide ${si + 1}${sl.label ? ': "' + sl.label + '"' : ''}`).join('  |  ');
+                lines.push(`All slides: ${slideDir}`);
                 const ascii = _asciiSlide(slide);
                 lines.push('Block tree:');
                 lines.push('```');
@@ -372,8 +486,12 @@ class WolfslideGetContextTool {
             lines.push('Current theme:');
             lines.push(`  navy=${t.navy||'#0a244a'} blue=${t.blue||'#0064b4'} cyan=${t.cyan||'#009ac8'} accent=${t.accent||'#be1e2d'}`);
             if (t.editorCSS) {
-                lines.push(`  editorCSS (${t.editorCSS.length} chars):`);
-                lines.push(t.editorCSS);
+                if (options?.input?.includeCss) {
+                    lines.push(`  editorCSS (${t.editorCSS.length} chars):`);
+                    lines.push(t.editorCSS);
+                } else {
+                    lines.push(`  editorCSS: ${t.editorCSS.length} chars (omitted — pass includeCss:true to view full CSS)`);
+                }
             }
         }
 
@@ -396,25 +514,28 @@ class WolfslideGetContextTool {
             lines.push(`  "${key}" — ${p2.description}`);
         }
 
-        // ── Best practices ───────────────────────────────────────────────
+        // ── Style presets (deck-level reusable style bundles) ────────────
+        if (activeDeck?.stylePresets && Object.keys(activeDeck.stylePresets).length > 0) {
+            lines.push('');
+            lines.push('Style presets (set stylePreset:"name" on any block; block.style overrides preset):');
+            for (const [name, props] of Object.entries(activeDeck.stylePresets)) {
+                const propList = Object.entries(props).map(([k, v]) => `${k}:${v}`).join(', ');
+                lines.push(`  "${name}" — { ${propList} }`);
+            }
+            lines.push('Set/update via: wolfslide_setTheme(stylePresets:{ "name": { color:"#fff", ... } })');
+            lines.push('Delete a preset: wolfslide_setTheme(stylePresets:{ "name": null })');
+        } else {
+            lines.push('Style presets: none defined yet. Create with wolfslide_setTheme(stylePresets:{ "preset-name": { color:"#fff", fontSize:"32px" } })');
+        }
+
+        // ── Critical reminders (non-obvious traps only) ──────────────────
         lines.push('');
-        lines.push('=== Best Practices ===');
-        lines.push('• Start with wolfslide_setTheme to set a color preset before building slides.');
-        lines.push('• For new decks with many slides, use wolfslide_bulkInsert to insert all slides in one call.');
-        lines.push('• Use containers with layout:"row" for side-by-side columns, layout:"column" for vertical stacking.');
-        lines.push('• Add flex:"1" to child containers for equal-width columns, or flex:"60%" / flex:"40%" for proportional.');
-        lines.push('• Set slide.background for per-slide backgrounds; the theme provides defaults.');
-        lines.push('• Use fragmentOrder for narrative builds: 1,2,3… reveals items in order on click/advance.');
-        lines.push('• Images support: w, h (pixels), fit ("contain"/"cover"), alt (accessibility text).');
-        lines.push('• Font size: block.fontSize (number in px). Headings default to ~48px; body to ~28px.');
-        lines.push('• Block positioning: default is flow layout. Set position:"absolute", x, y for pixel-precise placement.');
-        lines.push('Inspection workflow: (1) wolfslide_listSlides — overview of all slides with block counts, steps, char counts; pass verbose:true to also get the ASCII block tree for every slide. (2) wolfslide_getSlide — full block tree + raw JSON for one slide; defaults to the currently visible slide when no index given. (3) wolfslide_searchSlides — find blocks by text query, block type, or style property across the whole deck. (4) wolfslide_getSlideHtml — render a single slide to standalone HTML instantly (avoids exporting the full 4MB deck just to check layout).');
-        lines.push('• NEVER write JSON directly to .wslide files — always use wolfslide tools to keep the editor in sync.');
-        lines.push('• Use eval blocks for computed content: plots, formulas, diagrams — they render as crisp SVG or LaTeX instead of static images.');
-        lines.push('• Prefer eval blocks over external image files when the content can be generated by Wolfram Language (e.g., Plot, Graphics, NumberLinePlot).');
-        lines.push('• Image layout contract: the image block\'s w and h properties define the wrapper div size. style.maxHeight / style.maxWidth only constrain the wrapper — without explicit w and h, the image still fills the column. Always set w, h, AND style.maxHeight/maxWidth together, OR just use w and h alone. Use wolfslide_getImageDimensions to get pixel dimensions from a local path or URL before inserting.');
-        lines.push('• fragmentOrder on containers: setting fragmentOrder on a container block animates the entire container as one unit (all children appear/disappear together). Use this for revealing whole column sections at once.');
-        lines.push('• External image URLs (arXiv, web): links work in the editor preview but may be blocked offline or slow to load in exported HTML. Copy images locally with wolfslide_imageAsset({action:"copy",...}) for reliable exports.');
+        lines.push('=== Key Reminders ===');
+        lines.push('• Single-block edits: wolfslide_patchBlock(blockId:"id", patch:{...}) — preferred, finds block anywhere in tree.');
+        lines.push('⚠ editSlide children array: ONLY pure {id:"..."} stubs allowed — rejects id+fields. Use patchBlock for any property change.');
+        lines.push('⚠ Image src: NEVER use absolute paths — use wolfslide_imageAsset(action:"copy") first to get a relative src.');
+        lines.push('• block.style wins over top-level block properties. Structural exceptions (position, x, y, w, h, fit, offset) stay top-level.');
+        lines.push('• Inspection: listSlides(slideIndex:N) for one slide tree; listSlides(verbose:true) floods context — avoid on large decks.');
 
         // ── New-deck onboarding ──────────────────────────────────────────
         if (activeDeck && (activeDeck.slides || []).length === 0) {
@@ -484,7 +605,8 @@ class WolfslideGetContextTool {
             lines.push('');
             lines.push('── EDITING INDIVIDUAL BLOCKS ───────────────────────────────────');
             lines.push('After creating slides, use wolfslide_getSlide to get the ASCII diagram with block IDs (#xxxxxxxx).');
-            lines.push('Then use wolfslide_editSlide(action:"editBlock") or wolfslide_block(action:"edit") with the block id.');
+            lines.push('Then use wolfslide_patchBlock(blockId:"xxxxxxxx", patch:{...}) to change any block property without touching anything else.');
+            lines.push('Style properties merge deeply: wolfslide_patchBlock(blockId:"xx", patch:{ style:{ background:"rgba(0,0,0,0.5)" } }) only changes background, leaving all other style keys intact.');
             lines.push('');
             lines.push('── VERIFY THEME WAS APPLIED ────────────────────────────────────');
             lines.push('After wolfslide_setTheme, call wolfslide_getContext again — the full editorCSS will appear above.');
@@ -503,8 +625,25 @@ class WolfslideListSlidesTool {
         const docUri = options.input?.docUri || undefined;
         const deck = p.getDeck(docUri);
         if (!deck) return _slideResult('No deck found.');
-        const verbose = !!options.input?.verbose;
-        const lines = (deck.slides || []).map((s, i) => {
+
+        // slideIndex: if given, show only that slide (verbose defaults true for single-slide queries)
+        const targetIdx = options.input?.slideIndex != null ? Number(options.input.slideIndex) - 1 : null;
+        const verbose = targetIdx !== null
+            ? (options.input?.verbose !== false)          // single slide: default verbose=true
+            : !!options.input?.verbose;                   // full listing: default verbose=false
+
+        const scope = p.getScope ? p.getScope(docUri) : null;
+        const scopeBanner = scope ? `⚑ SCOPE: ${scope}\n` : '';
+
+        const allSlides = deck.slides || [];
+        const slides = targetIdx !== null
+            ? (allSlides[targetIdx] ? [{ slide: allSlides[targetIdx], i: targetIdx }] : [])
+            : allSlides.map((s, i) => ({ slide: s, i }));
+
+        if (targetIdx !== null && slides.length === 0)
+            return _slideResult(`Slide ${targetIdx + 1} not found (deck has ${allSlides.length}).`);
+
+        const lines = slides.map(({ slide: s, i }) => {
             const label   = s.label || s.meta?.title || '';
             const bg      = s.background || '';
             const hidden  = s.hidden ? '  HIDDEN' : '';
@@ -535,14 +674,18 @@ class WolfslideListSlidesTool {
             if (noAltImgs.length) warnings.push('no-alt');
             if (topBlocks.length > 10) warnings.push('dense');
             const warnInfo = warnings.length ? `  ⚠${warnings.join(',')}` : '';
-            const summary = `[${i + 1}] id=${s.id}  label="${label}"  bg="${bg}"${hidden}${stepsInfo}${charsInfo}${warnInfo}\n    blocks: ${blockDesc}${imgInfo}`;
+            const trans = s.transition ? `  transition="${s.transition}"` : '';
+            const summary = `Slide ${i + 1}  (slideIndex=${i + 1})  id=${s.id}  label="${label}"  bg="${bg}"${trans}${hidden}${stepsInfo}${charsInfo}${warnInfo}\n    blocks: ${blockDesc}${imgInfo}`;
             if (verbose) {
                 const ascii = _asciiSlide(s);
                 return summary + '\n```\n' + ascii + '\n```';
             }
             return summary;
         });
-        return _slideResult(`${lines.length} slide(s):\n` + lines.join('\n'));
+        const header = targetIdx !== null
+            ? `Slide ${targetIdx + 1} of ${allSlides.length}`
+            : `${allSlides.length} slides — slideIndex:N in all tools equals the number shown as "Slide N" below${verbose ? '' : ' (pass verbose:true to include block trees)'}`;
+        return _slideResult(scopeBanner + header + ':\n' + lines.join('\n'));
     }
 }
 
@@ -572,6 +715,7 @@ class WolfslideGetSlideTool {
                 idx = activeEntry?.currentSlideIndex ?? 0;
             }
         }
+        const isCurrentSlide = !options.input?.slideIndex && !options.input?.slideNumber && !options.input?.slideId;
         const slide = deck.slides?.[idx];
         if (!slide) return _slideResult(`Slide ${idx + 1} not found (deck has ${deck.slides?.length ?? 0}).`);
 
@@ -579,6 +723,9 @@ class WolfslideGetSlideTool {
         const label  = slide.label || slide.meta?.title || '';
         const hidden = slide.hidden ? '  ⚠ HIDDEN (skipped in presentation)' : '';
         const transition = slide.transition ? `  transition: ${slide.transition}` : '';
+        const currentBanner = isCurrentSlide
+            ? `▶ CURRENTLY VIEWING: Slide ${idx + 1} of ${deck.slides.length} — edit tools default to this slide when slideIndex is omitted\n`
+            : '';
         const asciiHeader =
             `## Slide ${idx + 1}: "${label}"  bg: ${slide.background || 'default'}  layout: ${slide.layout || 'column'}${hidden}${transition}\n` +
             `## Canvas: 1920×1080 px  |  blocks at top level: ${(slide.children || slide.elements || []).length}\n`;
@@ -611,13 +758,21 @@ class WolfslideGetSlideTool {
             ? `\n\n## ⚠ Render Warnings (${renderWarnings.length})\n${renderWarnings.map(w => '  - ' + w).join('\n')}`
             : '';
 
+        const brief = !!options.input?.brief;
+        const currentScope = p.getScope ? p.getScope(docUri) : null;
+        const scopeFooter = currentScope
+            ? `\n\n⚑ SCOPE: "${currentScope}" — work here only. Ignore anything outside this scope.`
+            : '';
+
         const output =
+            currentBanner +
             asciiHeader +
             '```\n' + ascii + '\n```' +
             imgSummary +
             notesSummary +
             renderWarnStr +
-            '\n\n## Raw JSON\n```json\n' + JSON.stringify(slide, null, 2) + '\n```';
+            (brief ? '' : '\n\n## Raw JSON\n```json\n' + JSON.stringify(slide, null, 2) + '\n```') +
+            scopeFooter;
         return _slideResult(output);
     }
 }
@@ -639,11 +794,82 @@ class WolfslideInsertSlideTool {
         _ensureBlockIds(newSlide.children);
         _ensureBlockIds(newSlide.items);
         _ensureBlockIds(newSlide.elements);
+        // Freshen any block IDs that would collide with existing blocks in the deck
+        const insertSlideWarnings = [];
+        const existingIds = _collectDeckIds(deck);
+        _freshenConflicts(existingIds, newSlide.children, insertSlideWarnings);
+        _freshenConflicts(existingIds, newSlide.items, insertSlideWarnings);
+        _freshenConflicts(existingIds, newSlide.elements, insertSlideWarnings);
         const afterIndex = options.input?.afterIndex;
         const insertAt = (afterIndex != null) ? Math.min(afterIndex, deck.slides.length) : deck.slides.length;
         deck.slides.splice(insertAt, 0, newSlide);
         await p.applyDeck(deck, docUri);
-        return _slideResult(`Inserted slide at position ${insertAt + 1} (id=${newSlide.id}).`);
+        const warnStr = insertSlideWarnings.length ? `\nWarnings:\n${insertSlideWarnings.map(w => `  ⚠ ${w}`).join('\n')}` : '';
+        return _slideResult(`Inserted slide at position ${insertAt + 1} (id=${newSlide.id}).${warnStr}`);
+    }
+}
+
+class WolfslideReplaceSlideTool {
+    prepareInvocation(options) {
+        return { invocationMessage: `Replacing slide ${options.input?.slideId ?? options.input?.slideIndex ?? ''}` };
+    }
+    async invoke(options, _token) {
+        const r = _resolveSlide(options);
+        if (!r) return _slideResult('No .wslide editor is open.');
+        if (r.error) return _slideResult(r.error);
+        const { deck, idx, slide: oldSlide, docUri, p } = r;
+
+        const newSlide = options.input?.slide;
+        if (!newSlide || typeof newSlide !== 'object' || Array.isArray(newSlide)) {
+            return _slideResult('"slide" object is required (the full replacement slide, e.g. {label, background, layout, children:[...]}).');
+        }
+
+        // Preserve the existing slide id by default so any references (and the
+        // editor's current-slide tracking) stay stable. Pass slide.id explicitly
+        // to override.
+        if (!newSlide.id) newSlide.id = oldSlide.id;
+
+        // Normalize authoring shorthands, then validate block types (same rules
+        // as bulkInsert) so a bad replacement is rejected rather than silently
+        // rendering nothing.
+        _normalizeBlockTree(newSlide.children);
+        _normalizeBlockTree(newSlide.items);
+        _normalizeBlockTree(newSlide.elements);
+        const VALID_TYPES = new Set(['container','heading','text','image','list','math','box','raw','code','arrow','eval']);
+        const typeWarnings = [];
+        (function _check(blocks, path) {
+            if (!Array.isArray(blocks)) return;
+            for (const b of blocks) {
+                if (!b) continue;
+                if (!b.type) typeWarnings.push(`Block ${path}id=${b.id||'?'} is missing "type" — will not render.`);
+                else if (!VALID_TYPES.has(b.type)) typeWarnings.push(`Block ${path}id=${b.id||'?'} has unknown type "${b.type}".`);
+                _check(b.children || b.items || b.elements, `${path}${b.id||'?'}/`);
+            }
+        })(newSlide.children || newSlide.items || newSlide.elements, '');
+        if (typeWarnings.length > 0) {
+            return _slideResult(`Validation errors — slide NOT replaced:\n${typeWarnings.map(w => '  ⚠ ' + w).join('\n')}\nValid block types: ${[...VALID_TYPES].join(', ')}.`);
+        }
+
+        _ensureBlockIds(newSlide.children);
+        _ensureBlockIds(newSlide.items);
+        _ensureBlockIds(newSlide.elements);
+
+        // Freshen block ids that collide with OTHER slides (ignore the slide being
+        // replaced — its ids are about to disappear, so reusing them is fine).
+        const warnings = [];
+        const otherIds = new Set();
+        deck.slides.forEach((s, i) => {
+            if (i === idx) return;
+            _collectAllBlocks(s).forEach(b => { if (b.id) otherIds.add(b.id); });
+        });
+        _freshenConflicts(otherIds, newSlide.children, warnings);
+        _freshenConflicts(otherIds, newSlide.items, warnings);
+        _freshenConflicts(otherIds, newSlide.elements, warnings);
+
+        deck.slides[idx] = newSlide;
+        await p.applyDeck(deck, docUri);
+        const warnStr = warnings.length ? `\nWarnings:\n${warnings.map(w => `  ⚠ ${w}`).join('\n')}` : '';
+        return _slideResult(`Replaced slide ${idx + 1} (id=${newSlide.id}) "${oldSlide.label || ''}" → "${newSlide.label || ''}".${warnStr}`);
     }
 }
 
@@ -672,31 +898,134 @@ class WolfslideEditSlideTool {
         }
         _checkBlockTypes(patch.children || patch.items || patch.elements);
 
-        // Merge semantics: for children arrays, id-only stubs mean "keep existing block unchanged"
+        // Stub resolution: each entry must be a pure {id:"..."} stub (enforced by pre-flight).
+        // Resolve each stub to the full existing block by id, preserving order from incoming.
         function _mergeBlocks(existing, incoming) {
             if (!Array.isArray(incoming)) return incoming;
             const existingById = (existing || []).reduce((m, b) => { if (b?.id) m[b.id] = b; return m; }, {});
             return incoming.map(b => {
-                if (b && b.id && Object.keys(b).length === 1 && existingById[b.id]) {
-                    return existingById[b.id]; // id-only stub — preserve existing
-                }
-                return b;
+                if (!b || !b.id) return b;
+                return existingById[b.id] || b; // stub → full existing block; unknown id → passthrough
             });
         }
         const mergedPatch = Object.assign({}, patch);
-        for (const key of ['children', 'items', 'elements']) {
+        const arrKeys = ['children', 'items', 'elements'];
+        const hasChildrenInPatch = arrKeys.some(k => Array.isArray(patch[k]));
+
+        // Pre-flight: reject ANY children entry that carries properties beyond just "id".
+        // wolfslide_editSlide children arrays accept ONLY pure id-only stubs {id:"..."}.
+        // Anything else silently destroys the block's type/layout/children.
+        // Redirect every property change to wolfslide_patchBlock.
+        if (hasChildrenInPatch) {
+            const offenders = [];
+            for (const key of arrKeys) {
+                if (!Array.isArray(patch[key])) continue;
+                for (const b of patch[key]) {
+                    if (b && typeof b === 'object' && b.id && Object.keys(b).length > 1) {
+                        offenders.push({ id: b.id, extraKeys: Object.keys(b).filter(k => k !== 'id') });
+                    }
+                }
+            }
+            if (offenders.length > 0) {
+                const lines = [
+                    `ERROR: wolfslide_editSlide children array is for STRUCTURAL layout only.`,
+                    `It only accepts pure id-only stubs {"id":"..."} — no property changes.`,
+                    ``,
+                    `${offenders.length} block(s) carry extra fields that would destroy their type/layout/children:`,
+                    ...offenders.map(o => `  ⚠ id="${o.id}"  extra fields: ${o.extraKeys.join(', ')}`),
+                    ``,
+                    `Use wolfslide_patchBlock for each change (safe, finds blocks anywhere in the tree):`,
+                    ...offenders.map(o => `  wolfslide_patchBlock(blockId: "${o.id}", patch: { ${o.extraKeys.map(k => `${k}: ...`).join(', ')} })`),
+                ];
+                return _slideResult(lines.join('\n'));
+            }
+        }
+
+        for (const key of arrKeys) {
             if (Array.isArray(patch[key])) {
                 mergedPatch[key] = _mergeBlocks(r.slide[key], patch[key]);
             }
+        }
+
+        // dryRun: compute diff and return without saving
+        const dryRun = !!options.input?.dryRun;
+        if (dryRun) {
+            if (!hasChildrenInPatch) {
+                return _slideResult('dryRun:true requires at least one children/items/elements array in the patch to be useful.');
+            }
+            const lines = ['=== DRY RUN — no changes will be saved ===', ''];
+            for (const key of arrKeys) {
+                if (!Array.isArray(patch[key])) continue;
+                const existing = r.slide[key] || [];
+                const incoming = patch[key];
+                const existingById = new Set(existing.map(b => b?.id).filter(Boolean));
+                const incomingById = new Set(incoming.map(b => b?.id).filter(Boolean));
+                const preserved = [], patched = [], added = [], deleted = [];
+                for (const b of existing) {
+                    if (b?.id && !incomingById.has(b.id)) deleted.push(b);
+                }
+                for (const b of incoming) {
+                    if (!b?.id || !existingById.has(b.id)) { added.push(b); continue; }
+                    if (Object.keys(b).length === 1) preserved.push(b);
+                    else patched.push(b);
+                }
+                const existingMap = existing.reduce((m, b) => { if (b?.id) m[b.id] = b; return m; }, {});
+                lines.push(`${key} changes on slide ${r.idx + 1} "${r.slide.label || r.slide.id}":`);
+                lines.push(`  Preserved (id-only stubs): ${preserved.length}`);
+                preserved.forEach(b => lines.push(`    • ${b.id}  ${_blockLabel(existingMap[b.id] || b)}`));
+                lines.push(`  Patched (id + fields): ${patched.length}`);
+                patched.forEach(b => {
+                    const keys = Object.keys(b).filter(k => k !== 'id');
+                    lines.push(`    • ${b.id}  ${_blockLabel(existingMap[b.id] || b)}  — keys: ${keys.join(', ')}`);
+                });
+                lines.push(`  New blocks added: ${added.length}`);
+                added.forEach(b => lines.push(`    • ${b.id || '(auto-id)'}  type:${b.type || '?'}`));
+                if (deleted.length > 0) {
+                    lines.push(`  ⚠ BLOCKS THAT WOULD BE DELETED: ${deleted.length}`);
+                    deleted.forEach(b => lines.push(`    ⚠ ${b.id}  ${_blockLabel(b)}`));
+                } else {
+                    lines.push(`  Deleted: 0  ✓ safe`);
+                }
+                lines.push('');
+            }
+            lines.push('Run without dryRun:true to apply.');
+            return _slideResult(lines.join('\n'));
+        }
+
+        // Warn about blocks being silently dropped (not listed in incoming children)
+        for (const key of arrKeys) {
+            if (!Array.isArray(patch[key])) continue;
+            const existingList = r.slide[key] || [];
+            const incomingIds = new Set((patch[key]).map(b => b?.id).filter(Boolean));
+            const dropped = existingList.filter(b => b?.id && !incomingIds.has(b.id));
+            if (dropped.length > 0) {
+                warnings.push(`${dropped.length} block(s) removed from "${key}" (not listed in incoming): ${dropped.map(b => `${b.id}(${b.type || '?'})`).join(', ')}. Add id-only stubs to preserve them: {"id":"<id>"}`);
+            }
+        }
+
+        // Deprecation warning when children array is passed
+        if (hasChildrenInPatch) {
+            warnings.push('Passing children/items/elements to wolfslide_editSlide is deprecated. Use wolfslide_block(action:"insert"|"delete"|"move") for structural changes or wolfslide_patchBlock for property edits. Use dryRun:true first to verify which blocks will be affected.');
         }
 
         Object.assign(r.slide, mergedPatch);
         _ensureBlockIds(r.slide.children);
         _ensureBlockIds(r.slide.items);
         _ensureBlockIds(r.slide.elements);
+        // Post-edit duplicate ID check
+        if (hasChildrenInPatch) {
+            const dupes = _detectDeckDuplicateIds(r.deck);
+            if (dupes.length > 0) {
+                warnings.push(`⚠ DUPLICATE BLOCK IDs introduced by this edit: ${dupes.map(d => `"${d.id}" on slides [${d.slides.join(',')}]`).join('; ')}. Fix with wolfslide_advanced(action:"check") or rename manually.`);
+            }
+        }
         await r.p.applyDeck(r.deck, r.docUri);
         const warningStr = warnings.length ? `\nWarnings:\n${warnings.map(w => `  ⚠ ${w}`).join('\n')}` : '';
-        return _slideResult(`Slide ${r.idx + 1} (id=${r.slide.id}) updated.${warningStr}`);
+        const wasCurrentSlide = options.input?.slideIndex == null && options.input?.slideNumber == null && options.input?.slideId == null;
+        const whichSlide = wasCurrentSlide
+            ? `Currently visible Slide ${r.idx + 1} "${r.slide.label || r.slide.id}" (id=${r.slide.id}) updated.`
+            : `Slide ${r.idx + 1} "${r.slide.label || r.slide.id}" (id=${r.slide.id}) updated.`;
+        return _slideResult(whichSlide + warningStr);
     }
 }
 
@@ -711,7 +1040,61 @@ class WolfslideDeleteSlideTool {
         if (r.deck.slides.length <= 1) return _slideResult('Cannot delete the last slide.');
         const [removed] = r.deck.slides.splice(r.idx, 1);
         await r.p.applyDeck(r.deck, r.docUri);
-        return _slideResult(`Deleted slide ${r.idx + 1} (id=${removed.id}).`);
+        return _slideResult(`Deleted slide ${r.idx + 1} "${removed.label || removed.id}" (id=${removed.id}).`);
+    }
+}
+
+class WolfslideDeleteSlidesTool {
+    prepareInvocation(options) {
+        const inp = options.input || {};
+        if (Array.isArray(inp.slideIndices)) {
+            return { invocationMessage: `Deleting ${inp.slideIndices.length} slides` };
+        }
+        return { invocationMessage: `Deleting slides ${inp.from ?? '?'} to ${inp.to ?? '?'}` };
+    }
+    async invoke(options, _token) {
+        const p = _getSlideProvider();
+        if (!p) return _slideResult('No .wslide editor is open.');
+        const docUri = options.input?.docUri || undefined;
+        const deck = p.getDeck(docUri);
+        if (!deck) return _slideResult('No deck found.');
+
+        const n = deck.slides.length;
+        let indices;
+
+        if (Array.isArray(options.input?.slideIndices)) {
+            // Convert 1-based to 0-based, validate
+            indices = options.input.slideIndices.map(i => {
+                const idx = Number(i) - 1;
+                if (!Number.isInteger(idx) || idx < 0 || idx >= n) return null;
+                return idx;
+            });
+            if (indices.some(i => i === null)) {
+                return _slideResult(`One or more slideIndices are out of range (deck has ${n} slides). Use 1-based indices.`);
+            }
+        } else if (options.input?.from != null && options.input?.to != null) {
+            const from = Number(options.input.from) - 1;
+            const to   = Number(options.input.to) - 1;
+            if (from < 0 || to >= n || from > to) {
+                return _slideResult(`Range from=${options.input.from} to=${options.input.to} is out of range (deck has ${n} slides). Use 1-based indices.`);
+            }
+            indices = [];
+            for (let i = from; i <= to; i++) indices.push(i);
+        } else {
+            return _slideResult('Provide either slideIndices (array of 1-based indices) or from+to (1-based range).');
+        }
+
+        if (indices.length >= n) {
+            return _slideResult(`Cannot delete all ${n} slides — at least one slide must remain.`);
+        }
+
+        // Remove in reverse order so earlier indices stay valid
+        const sorted = [...new Set(indices)].sort((a, b) => b - a);
+        const removed = sorted.map(i => deck.slides[i].label || deck.slides[i].id);
+        sorted.forEach(i => deck.slides.splice(i, 1));
+
+        await p.applyDeck(deck, docUri);
+        return _slideResult(`Deleted ${sorted.length} slide(s): ${removed.join(', ')}. Deck now has ${deck.slides.length} slide(s).`);
     }
 }
 
@@ -730,7 +1113,7 @@ class WolfslideMoveSlideTool {
         const [slide] = r.deck.slides.splice(r.idx, 1);
         r.deck.slides.splice(to, 0, slide);
         await r.p.applyDeck(r.deck, r.docUri);
-        return _slideResult(`Moved slide "${slide.id}" from position ${r.idx + 1} to ${to + 1}.`);
+        return _slideResult(`Moved slide ${r.idx + 1} "${slide.label || slide.id}" (id=${slide.id}) → position ${to + 1}.`);
     }
 }
 
@@ -742,8 +1125,25 @@ class WolfslideUndoTool {
         const docUri = options.input?.docUri;
         const entry = docUri ? p._panels?.get(docUri) : p.getActiveEntry();
         if (!entry) return _slideResult('No active .wslide editor.');
-        entry.webviewPanel.webview.postMessage({ cmd: 'undo' });
-        return _slideResult('Undo triggered.');
+        const stack = entry._undoStack || [];
+        if (stack.length === 0) return _slideResult('Nothing to undo.');
+        const prevDeck = stack.pop();
+        await p.applyDeck(prevDeck, docUri, { skipUndoPush: true });
+        const slideCount = (prevDeck.slides || []).length;
+        return _slideResult(`Reverted to previous state. Slide count: ${slideCount}. Undo stack depth remaining: ${stack.length}.`);
+    }
+}
+
+class WolfslideReloadTool {
+    prepareInvocation() { return { invocationMessage: 'Reloading .wslide from disk' }; }
+    async invoke(options, _token) {
+        const p = _getSlideProvider();
+        if (!p) return _slideResult('No .wslide editor is open.');
+        const docUri = options.input?.docUri;
+        const freshDeck = p.reloadDeck(docUri);
+        if (!freshDeck) return _slideResult('No active .wslide editor found (or the editor is not yet resolved).');
+        const slideCount = (freshDeck.slides || []).length;
+        return _slideResult(`Reloaded from disk. Slide count: ${slideCount}. Undo stack cleared.`);
     }
 }
 
@@ -800,6 +1200,10 @@ class WolfslideSearchSlidesTool {
         (deck.slides || []).forEach((s, i) => {
             const allBlocks = _collectAllBlocks(s);
             const matches = [];
+
+            // Check if slide label matches query (slide-level match — no block filter needed)
+            const slideLabelMatch = query && (s.label || '').toLowerCase().includes(query);
+
             allBlocks.forEach(b => {
                 // Type filter
                 if (blockTypeFilter && (b.type || '').toLowerCase() !== blockTypeFilter) return;
@@ -823,11 +1227,16 @@ class WolfslideSearchSlidesTool {
                 const styleHint = styleKey ? `  ${styleKey}=${b.style?.[styleKey]}` : '';
                 matches.push(`    block id=${b.id} type=${b.type}${styleHint}: "${preview}"`);
             });
-            if (matches.length) {
-                results.push(`[${i + 1}] id=${s.id} label="${s.label || ''}":\n${matches.join('\n')}`);
+
+            if (slideLabelMatch && !blockTypeFilter && !styleKey) {
+                // Slide label matched — report the slide even if no block content matches
+                const labelNote = `    (label match: "${s.label}")`;
+                results.push(`[${i + 1}] id=${s.id} label="${s.label || ''}" slideIndex=${i + 1}:\n${labelNote}${matches.length ? '\n' + matches.join('\n') : ''}`);
+            } else if (matches.length) {
+                results.push(`[${i + 1}] id=${s.id} label="${s.label || ''}" slideIndex=${i + 1}:\n${matches.join('\n')}`);
             }
         });
-        const desc = [query && `text:"${query}"`, blockTypeFilter && `type:${blockTypeFilter}`, styleKey && `style.${styleKey}${styleValue ? '='+styleValue : ''}`].filter(Boolean).join(', ');
+        const desc = [query && `text/label:"${query}"`, blockTypeFilter && `type:${blockTypeFilter}`, styleKey && `style.${styleKey}${styleValue ? '='+styleValue : ''}`].filter(Boolean).join(', ');
         if (!results.length) return _slideResult(`No matches for [${desc}] across ${deck.slides.length} slide(s).`);
         return _slideResult(`Matches for [${desc}] in ${results.length} slide(s):\n${results.join('\n')}`);
     }
@@ -837,27 +1246,72 @@ class WolfslideSearchSlidesTool {
 
 class WolfslideEditBlockTool {
     prepareInvocation(options) {
-        return { invocationMessage: `Editing block ${options.input?.blockId ?? ''}` };
+        return { invocationMessage: `Editing block ${options.input?.blockId ?? options.input?.blockName ?? ''}` };
     }
     async invoke(options, _token) {
         const r = _resolveSlide(options);
         if (!r) return _slideResult('No .wslide editor is open.');
         if (r.error) return _slideResult(r.error);
-        const blockId = options.input?.blockId;
-        if (!blockId) return _slideResult('blockId is required.');
-        const found = _findBlockRecursive(blockId, r.slide);
-        if (!found) {
-            const allIds = _collectAllBlocks(r.slide).map(b => b.id);
-            return _slideResult(`Block "${blockId}" not found on slide ${r.idx + 1}. Valid ids: ${allIds.join(', ')}`);
-        }
+        const ref = _resolveBlockRef(options, r);
+        if (ref.error) return _slideResult(ref.error);
+        const { found, resolvedSlide, resolvedIdx } = ref;
+        const blockId = found.block.id;
         const updates = options.input?.updates || options.input?.patch;
         if (!updates || typeof updates !== 'object') return _slideResult('updates (or patch) object is required.');
+
+        // childrenOps: precise insert/remove/reorder within a block's children array
+        const childrenOps = updates.childrenOps;
+        const restUpdates = Object.assign({}, updates);
+        delete restUpdates.childrenOps;
+
+        if (childrenOps && Array.isArray(childrenOps)) {
+            if (!found.block.children) found.block.children = [];
+            const children = found.block.children;
+            const opsLog = [];
+            for (const op of childrenOps) {
+                if (op.op === 'remove') {
+                    const idx = children.findIndex(c => c.id === op.blockId);
+                    if (idx !== -1) { children.splice(idx, 1); opsLog.push(`removed ${op.blockId}`); }
+                    else opsLog.push(`remove: ${op.blockId} not found`);
+                } else if (op.op === 'insert') {
+                    const nb = op.block;
+                    if (!nb) { opsLog.push('insert: missing block'); continue; }
+                    if (!nb.id) nb.id = _uid();
+                    if (op.afterId) {
+                        const ai = children.findIndex(c => c.id === op.afterId);
+                        if (ai !== -1) { children.splice(ai + 1, 0, nb); opsLog.push(`inserted ${nb.id} after ${op.afterId}`); }
+                        else { children.push(nb); opsLog.push(`inserted ${nb.id} at end (afterId ${op.afterId} not found)`); }
+                    } else {
+                        const pos = op.position != null ? Math.min(op.position, children.length) : children.length;
+                        children.splice(pos, 0, nb);
+                        opsLog.push(`inserted ${nb.id} at pos ${pos}`);
+                    }
+                } else if (op.op === 'reorder') {
+                    if (!Array.isArray(op.ids)) { opsLog.push('reorder: ids array required'); continue; }
+                    const byId = {};
+                    children.forEach(c => { byId[c.id] = c; });
+                    const reordered = op.ids.map(id => byId[id]).filter(Boolean);
+                    const remaining = children.filter(c => !op.ids.includes(c.id));
+                    found.block.children = [...reordered, ...remaining];
+                    opsLog.push(`reordered: [${op.ids.join(', ')}]`);
+                } else {
+                    opsLog.push(`unknown op "${op.op}" (valid: insert/remove/reorder)`);
+                }
+            }
+            if (Object.keys(restUpdates).length) _deepMerge(found.block, restUpdates);
+            _ensureBlockIds(found.block.children);
+            await r.p.applyDeck(r.deck, r.docUri);
+            return _slideResult(`Block ${blockId} on slide ${resolvedIdx + 1} "${resolvedSlide.label || resolvedSlide.id}" — childrenOps: ${opsLog.join('; ')}`);
+        }
+
         _deepMerge(found.block, updates);
         _ensureBlockIds(found.block.children);
         _ensureBlockIds(found.block.items);
         _ensureBlockIds(found.block.elements);
         await r.p.applyDeck(r.deck, r.docUri);
-        return _slideResult(`Block ${blockId} updated on slide ${r.idx + 1}. Keys changed: ${Object.keys(updates).join(', ')}`);
+        const wasCurrentSlide = options.input?.slideIndex == null && options.input?.slideId == null;
+        const slideNote = wasCurrentSlide ? `currently visible Slide` : `Slide`;
+        return _slideResult(`Block "${blockId}" updated on ${slideNote} ${resolvedIdx + 1} "${resolvedSlide.label || resolvedSlide.id}". Keys changed: ${Object.keys(updates).join(', ')}`);
     }
 }
 
@@ -894,65 +1348,62 @@ class WolfslideInsertBlockTool {
         const pos = (position != null && position >= 0) ? Math.min(position, arr.length) : arr.length;
         arr.splice(pos, 0, block);
         await r.p.applyDeck(r.deck, r.docUri);
-        return _slideResult(`Inserted block id=${block.id} type=${block.type || '?'} at position ${pos} on slide ${r.idx + 1}.`);
+        return _slideResult(`Inserted block id=${block.id} type=${block.type || '?'} at position ${pos} on slide ${r.idx + 1} "${r.slide.label || r.slide.id}".`);
     }
 }
 
 class WolfslideDeleteBlockTool {
     prepareInvocation(options) {
-        return { invocationMessage: `Deleting block ${options.input?.blockId ?? ''}` };
+        return { invocationMessage: `Deleting block ${options.input?.blockId ?? options.input?.blockName ?? ''}` };
     }
     async invoke(options, _token) {
         const r = _resolveSlide(options);
         if (!r) return _slideResult('No .wslide editor is open.');
         if (r.error) return _slideResult(r.error);
-        const blockId = options.input?.blockId;
-        if (!blockId) return _slideResult('blockId is required.');
-        const found = _findBlockRecursive(blockId, r.slide);
-        if (!found) {
-            const allIds = _collectAllBlocks(r.slide).map(b => b.id);
-            return _slideResult(`Block "${blockId}" not found on slide ${r.idx + 1}. Valid ids: ${allIds.join(', ')}`);
-        }
+        const ref = _resolveBlockRef(options, r);
+        if (ref.error) return _slideResult(ref.error);
+        const { found, resolvedSlide, resolvedIdx } = ref;
         found.parent[found.key].splice(found.index, 1);
         await r.p.applyDeck(r.deck, r.docUri);
-        return _slideResult(`Deleted block ${blockId} (type=${found.block.type}) from slide ${r.idx + 1}.`);
+        return _slideResult(`Deleted block ${found.block.id} (type=${found.block.type}) from slide ${resolvedIdx + 1} "${resolvedSlide.label || resolvedSlide.id}".`);
     }
 }
 
 class WolfslideMoveBlockTool {
     prepareInvocation(options) {
-        return { invocationMessage: `Moving block ${options.input?.blockId ?? ''}` };
+        return { invocationMessage: `Moving block ${options.input?.blockId ?? options.input?.blockName ?? ''}` };
     }
     async invoke(options, _token) {
         const r = _resolveSlide(options);
         if (!r) return _slideResult('No .wslide editor is open.');
         if (r.error) return _slideResult(r.error);
-        const blockId = options.input?.blockId;
-        if (!blockId) return _slideResult('blockId is required.');
-        const found = _findBlockRecursive(blockId, r.slide);
-        if (!found) {
-            const allIds = _collectAllBlocks(r.slide).map(b => b.id);
-            return _slideResult(`Block "${blockId}" not found on slide ${r.idx + 1}. Valid ids: ${allIds.join(', ')}`);
-        }
-        // Remove from old location
-        const [block] = found.parent[found.key].splice(found.index, 1);
-        // Insert at new location
+        const ref = _resolveBlockRef(options, r);
+        if (ref.error) return _slideResult(ref.error);
+        const { found, resolvedSlide, resolvedIdx } = ref;
+        // Resolve destination BEFORE removing the block (so we don't lose it if dest is not found)
         const newParentId = options.input?.newParentId || null;
         const newPosition = options.input?.newPosition;
         let arr;
         if (newParentId) {
-            const dest = _findBlockRecursive(newParentId, r.slide);
-            if (!dest) return _slideResult(`Destination parent "${newParentId}" not found.`);
+            const dest = _findBlockRecursive(newParentId, resolvedSlide);
+            if (!dest) {
+                const containerIds = _collectAllBlocks(resolvedSlide)
+                    .filter(b => b.type === 'container')
+                    .map(b => b.id);
+                return _slideResult(`Destination parent block "${newParentId}" not found on slide ${resolvedIdx + 1}. Available container ids: ${containerIds.join(', ') || '(none)'}.`);
+            }
             if (!dest.block.children) dest.block.children = [];
             arr = dest.block.children;
         } else {
-            if (!r.slide.children) r.slide.children = [];
-            arr = r.slide.children;
+            if (!resolvedSlide.children) resolvedSlide.children = [];
+            arr = resolvedSlide.children;
         }
+        // Now remove from old location and insert at new location
+        found.parent[found.key].splice(found.index, 1);
         const pos = (newPosition != null && newPosition >= 0) ? Math.min(newPosition, arr.length) : arr.length;
-        arr.splice(pos, 0, block);
+        arr.splice(pos, 0, found.block);
         await r.p.applyDeck(r.deck, r.docUri);
-        return _slideResult(`Moved block ${blockId} to ${newParentId ? 'parent ' + newParentId : 'top-level'} position ${pos} on slide ${r.idx + 1}.`);
+        return _slideResult(`Moved block ${found.block.id} → parent:${newParentId || '(slide root)'} pos:${pos} on slide ${resolvedIdx + 1} "${resolvedSlide.label || resolvedSlide.id}". Confirm: block is now in ${newParentId || 'slide root'}.`);
     }
 }
 
@@ -1021,6 +1472,10 @@ class WolfslideCheckDeckTool {
                 issues.push({ issue: 'duplicate_label', label, slides });
             }
         }
+        // Report duplicate block IDs (highest priority — causes silent wrong-block edits)
+        _detectDeckDuplicateIds(deck).forEach(({ id, slides }) => {
+            issues.push({ issue: 'duplicate_block_id', id, slides, detail: `Block id="${id}" exists on slides [${slides.join(',')}] — wolfslide_patchBlock will always hit the first occurrence` });
+        });
         const slideCount = deck.slides?.length || 0;
         const hiddenCount = (deck.slides || []).filter(s => s.hidden).length;
         const stats = {
@@ -1121,48 +1576,68 @@ class WolfslideMeasureSlideTool {
 class WolfslideGetSlideHtmlTool {
     prepareInvocation(options) {
         const n = options.input?.slideIndex ?? options.input?.slideNumber ?? '?';
-        return { invocationMessage: `Rendering slide ${n} to HTML` };
+        const fmt = options.input?.format || 'image';
+        return { invocationMessage: `Rendering slide ${n} (${fmt})` };
     }
     async invoke(options, _token) {
         const r = _resolveSlide(options);
         if (!r) return _slideResult('No .wslide editor is open.');
         if (r.error) return _slideResult(r.error);
+
+        const fmt = (options.input?.format || 'image').toLowerCase();
+
+        // ── Image mode (default): capture via webview html2canvas ──────────
+        if (fmt === 'image') {
+            const outputPath = options.input?.outputPath;
+            if (!outputPath) {
+                return _slideResult(
+                    'Error: outputPath is required for format:"image". ' +
+                    'Returning a screenshot inline as base64 produces ~100 KB of text and will exhaust the context window. ' +
+                    'Pass outputPath:"/absolute/path/slide.jpg" to save the file to disk instead, then use the path to reference it.'
+                );
+            }
+            try {
+                const scale = Number(options.input?.scale) || 0.5;
+                const dataUrl = await r.p.screenshotSlide(r.idx, r.docUri, scale);
+                // Strip the data:image/jpeg;base64, prefix to return raw base64
+                const base64 = dataUrl.replace(/^data:[^;]+;base64,/, '');
+                require('fs').writeFileSync(outputPath, Buffer.from(base64, 'base64'));
+                return _slideResult(
+                    `Slide ${r.idx + 1} "${r.slide.label || ''}" screenshot saved to ${outputPath} (${Math.round(base64.length * 3/4 / 1024)}KB, scale=${scale}).`
+                );
+            } catch (e) {
+                return _slideResult(`Screenshot failed: ${e.message}. Try format:"html" as fallback.`);
+            }
+        }
+
+        // ── HTML mode: return standalone static HTML (all elements visible) ─
         try {
             const exporter = require('../slideExporter');
-            const section  = exporter.slideToHTML(r.slide);
-            const t = r.deck.theme || {};
-            const navy   = t.navy   || '#0a244a';
-            const blue   = t.blue   || '#0064b4';
-            const cyan   = t.cyan   || '#009ac8';
-            const accent = t.accent || '#be1e2d';
-            const userCSS = t.editorCSS ? `<style>\n${t.editorCSS}\n</style>` : '';
-            const html = `<!DOCTYPE html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n` +
-                `<title>Slide ${r.idx + 1} — ${(r.slide.label || '').replace(/</g,'&lt;')}</title>\n` +
-                `<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5/dist/reveal.css">\n` +
-                `<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5/dist/theme/white.css">\n` +
-                `<style>\n:root{--navy:${navy};--blue:${blue};--cyan:${cyan};--accent:${accent};}\n` +
-                `html,body{margin:0;padding:0;background:#000;}\n` +
-                `.reveal,.reveal *:not(.katex):not(.katex *){font-family:'Helvetica Neue',Helvetica,Arial,sans-serif!important;box-sizing:border-box;}\n` +
-                `.reveal{font-size:36px;color:var(--navy);background:#000!important;}\n` +
-                `.reveal-viewport{background:#000!important;}\n` +
-                `.reveal .slides section{padding:0!important;margin:0!important;top:0!important;text-align:left;overflow:hidden;width:1920px;height:1080px;}\n` +
-                `.reveal .slides section h1,.reveal .slides section h2,.reveal .slides section h3{text-transform:none!important;font-weight:700;margin:0;padding:0;}\n` +
-                `.reveal .slides section h2{font-size:1.33em;line-height:1.2;margin:0 0 12px;}\n` +
-                `.reveal .slides section img{border:none!important;box-shadow:none!important;}\n` +
-                `.wslide-canvas{position:relative;width:1920px;height:1080px;}\n.wel{position:absolute;box-sizing:border-box;}\n</style>\n` +
-                `${userCSS}\n</head>\n<body>\n` +
-                `<div class="reveal"><div class="slides">\n${section}\n</div></div>\n` +
-                `<script src="https://cdn.jsdelivr.net/npm/reveal.js@5/dist/reveal.js"></script>\n` +
-                `<script>Reveal.initialize({hash:false,width:1920,height:1080,margin:0.04,minScale:0.1,maxScale:2,transition:'none',center:false,controls:false,progress:false});</script>\n` +
-                `</body>\n</html>`;
+            const animationSteps = options.input?.animationSteps === true;
+            const deckDir = r.p.getDeckDir ? r.p.getDeckDir(r.docUri) : null;
+            let html;
+            if (animationSteps) {
+                // Full Reveal.js with step navigation. Render a single-slide deck through
+                // exportDeck so it uses the EXACT same styling/code-highlighting as the
+                // real Export-HTML path (no separate hand-rolled template to drift).
+                const oneSlideDeck = Object.assign({}, r.deck, { slides: [r.slide] });
+                html = exporter.exportDeck(oneSlideDeck, deckDir ? { deckDir } : {});
+            } else {
+                // Static HTML — all animation fragments visible at once (default for html mode)
+                // Pass deckDir so images can be embedded as data URIs
+                html = exporter.slideToStaticHTML(r.slide, r.deck, deckDir);
+            }
+
+            const depWarn = exporter.exportDependencyWarning ? exporter.exportDependencyWarning() : null;
+            const warnPrefix = depWarn ? depWarn + '\n\n' : '';
 
             const outputPath = options.input?.outputPath;
             if (outputPath) {
                 require('fs').writeFileSync(outputPath, html, 'utf8');
-                return _slideResult(`Slide ${r.idx + 1} HTML written to ${outputPath} (${html.length} bytes).`);
+                return _slideResult(`${warnPrefix}Slide ${r.idx + 1} HTML written to ${outputPath} (${html.length} bytes).`);
             }
             return _slideResult(
-                `Slide ${r.idx + 1} "${r.slide.label || ''}" HTML (${html.length} bytes):\n\n` +
+                `${warnPrefix}Slide ${r.idx + 1} "${r.slide.label || ''}" HTML (${html.length} bytes):\n\n` +
                 `\`\`\`html\n${html}\n\`\`\``
             );
         } catch (e) {
@@ -1276,11 +1751,16 @@ class WolfslideExportHtmlTool {
         if (!deck) return _slideResult('No deck found.');
         try {
             const exporter = require('../slideExporter');
-            const html = exporter.exportDeck(deck);
+            const depWarn = exporter.exportDependencyWarning ? exporter.exportDependencyWarning() : null;
+            const warnPrefix = depWarn ? depWarn + '\n\n' : '';
+            // Viewer-accurate static HTML (same renderer as the PDF, not reveal.js).
+            const entry0 = docUri ? p._panels?.get(docUri) : p.getActiveEntry();
+            const exDeckDir = entry0 ? require('path').dirname(entry0.document.uri.fsPath) : null;
+            const html = exporter.exportDeckPdf(deck, exDeckDir, { finalOnly: true, embedImages: true });
             const destPath = options.input?.outputPath;
             if (destPath) {
                 require('fs').writeFileSync(destPath, html, 'utf8');
-                return _slideResult(`Exported ${html.length} bytes to ${destPath}.`);
+                return _slideResult(`${warnPrefix}Exported ${html.length} bytes to ${destPath}.`);
             }
             // No path provided: show save dialog
             const entry = docUri ? p._panels?.get(docUri) : p.getActiveEntry();
@@ -1301,7 +1781,7 @@ class WolfslideExportHtmlTool {
             });
             if (!saveUri) return _slideResult('Export cancelled.');
             require('fs').writeFileSync(saveUri.fsPath, html, 'utf8');
-            return _slideResult(`Exported to ${saveUri.fsPath}.`);
+            return _slideResult(`${warnPrefix}Exported to ${saveUri.fsPath}.`);
         } catch (e) {
             return _slideResult(`Export failed: ${e.message}`);
         }
@@ -1324,8 +1804,11 @@ class WolfslideSetThemeTool {
         if (!deck.theme) deck.theme = {};
         const presetName = options.input?.preset;
 
-        // Warn about unknown parameters (e.g. "overrides" — a common mistake; the correct key is "theme")
-        const knownKeys = new Set(['preset', 'theme', 'docUri', 'applyBackground', 'defaultBackground']);
+        // Warn about unknown parameters (e.g. "overrides" — a common mistake; the correct key is "theme").
+        // 'notebook' and 'client_id' are auto-injected into every MCP tool's schema by the
+        // session-target wrapper (claude-mcp/server.js); accept-and-ignore them silently so
+        // they don't produce a spurious "unknown parameter" warning. See feedback §I.
+        const knownKeys = new Set(['preset', 'theme', 'docUri', 'applyBackground', 'defaultBackground', 'stylePresets', 'appendEditorCSS', 'editorCSSReplace', 'notebook', 'client_id']);
         const unknownKeys = Object.keys(options.input || {}).filter(k => !knownKeys.has(k));
         if (unknownKeys.length > 0) {
             return _slideResult(
@@ -1333,6 +1816,53 @@ class WolfslideSetThemeTool {
                 `Valid parameters: preset (string), theme (object with navy/blue/cyan/accent/editorCSS), defaultBackground, applyBackground, docUri.\n` +
                 `Common mistake: "overrides" is not valid — use "theme": { navy:"#...", editorCSS:"..." } instead.`
             );
+        }
+
+        // Incremental editorCSS editing (feedback §F) — tweak one rule without
+        // resending the whole ~5KB blob. `editorCSSReplace` runs literal string
+        // substitutions ([{find,replace}] or [[find,replace]] pairs);
+        // `appendEditorCSS` appends a snippet. Both operate on the current
+        // deck.theme.editorCSS and can be standalone or combined with theme/preset.
+        const cssOps = [];
+        if (typeof options.input?.editorCSSReplace !== 'undefined') {
+            const reps = options.input.editorCSSReplace;
+            const list = Array.isArray(reps) ? reps : [reps];
+            let css = deck.theme.editorCSS || '';
+            let applied = 0, missed = 0;
+            for (const rep of list) {
+                const find    = Array.isArray(rep) ? rep[0] : rep?.find;
+                const replace = Array.isArray(rep) ? rep[1] : rep?.replace;
+                if (typeof find !== 'string') continue;
+                if (css.includes(find)) { css = css.split(find).join(replace == null ? '' : String(replace)); applied++; }
+                else missed++;
+            }
+            deck.theme.editorCSS = css;
+            cssOps.push(`editorCSSReplace: ${applied} applied${missed ? `, ${missed} pattern(s) NOT found` : ''}`);
+        }
+        if (typeof options.input?.appendEditorCSS === 'string') {
+            const cur = deck.theme.editorCSS || '';
+            deck.theme.editorCSS = cur + (cur && !cur.endsWith('\n') ? '\n' : '') + options.input.appendEditorCSS;
+            cssOps.push(`appendEditorCSS: +${options.input.appendEditorCSS.length} chars`);
+        }
+        if (cssOps.length > 0 && !presetName && !options.input?.theme &&
+            !(options.input?.stylePresets && typeof options.input.stylePresets === 'object')) {
+            await p.applyDeck(deck, docUri);
+            return _slideResult(`editorCSS updated (${cssOps.join('; ')}). Total length: ${(deck.theme.editorCSS || '').length} chars. Note: editorCSS applies to the Reveal.js export and raw-block iframes, not the editor's built-in slide typography.`);
+        }
+
+        // Handle stylePresets update (can be combined with preset/theme or standalone)
+        if (options.input?.stylePresets && typeof options.input.stylePresets === 'object') {
+            if (!deck.stylePresets) deck.stylePresets = {};
+            Object.assign(deck.stylePresets, options.input.stylePresets);
+            // A null value means delete that preset
+            for (const [k, v] of Object.entries(deck.stylePresets)) {
+                if (v === null) delete deck.stylePresets[k];
+            }
+            if (!presetName && !options.input?.theme) {
+                await p.applyDeck(deck, docUri);
+                const remaining = Object.keys(deck.stylePresets);
+                return _slideResult(`Style presets updated. Active presets: ${remaining.length > 0 ? remaining.map(n => `"${n}"`).join(', ') : '(none)'}.`);
+            }
         }
 
         if (presetName) {
@@ -1606,12 +2136,14 @@ class WolfslideImageAssetTool {
             if (!fs.existsSync(srcPath)) return _slideResult(`Source file not found: ${srcPath}`);
             fs.mkdirSync(imgDir, { recursive: true });
             let fname = options.input?.filename || path.basename(srcPath).replace(/[^a-zA-Z0-9._-]/g, '_');
-            // Avoid collisions
-            if (fs.existsSync(path.join(imgDir, fname))) {
+            const overwrite = !!options.input?.overwrite;
+            // Avoid collisions unless overwrite:true was requested
+            if (!overwrite && fs.existsSync(path.join(imgDir, fname))) {
                 const ext  = path.extname(fname);
                 const base = path.basename(fname, ext);
                 fname = base + '_' + Date.now() + ext;
             }
+            const wasOverwritten = overwrite && fs.existsSync(path.join(imgDir, fname));
             fs.copyFileSync(srcPath, path.join(imgDir, fname));
             const stat = fs.statSync(path.join(imgDir, fname));
             const dims = imageDimensions(path.join(imgDir, fname));
@@ -1626,7 +2158,7 @@ class WolfslideImageAssetTool {
             }
 
             const lines = [
-                `✅ Copied: ${path.basename(srcPath)} → img/${deckName}.wslide/${fname}`,
+                `✅ ${wasOverwritten ? 'Overwrote' : 'Copied'}: ${path.basename(srcPath)} → img/${deckName}.wslide/${fname}`,
                 `   Size: ${humanSize(stat.size)}`,
                 dims ? `   Dimensions: ${dims.w} × ${dims.h} px` : '',
                 '',
@@ -1828,14 +2360,38 @@ class WolfslideBulkInsertTool {
 
         const slides = options.input?.slides;
         if (!slides || !Array.isArray(slides) || slides.length === 0) {
-            return _slideResult('"slides" array is required and must be non-empty.');
+            return _slideResult('"slides" array is required and must be non-empty. Each slide: {label, background, layout, children:[{type, ...}]}. Block types: container, heading, text, image, list, math, box, code, arrow, eval, raw.');
         }
 
-        // Assign IDs recursively
-        function ensureIds(b) {
-            if (!b) return;
-            if (!b.id) b.id = _uid();
-            (b.children || b.items || b.elements || []).forEach(ensureIds);
+        // Normalize authoring shorthands (string list items, eval content→input)
+        // BEFORE validation, so plain-string list items don't trip the "missing
+        // type" check below. See feedback §G.
+        slides.forEach(s => { _normalizeBlockTree(s.children); _normalizeBlockTree(s.items); _normalizeBlockTree(s.elements); });
+
+        // Validate block types across all incoming slides
+        const VALID_BULK_TYPES = new Set(['container','heading','text','image','list','math','box','raw','code','arrow','eval']);
+        const typeWarnings = [];
+        function _checkBulkTypes(blocks, path) {
+            if (!Array.isArray(blocks)) return;
+            for (const b of blocks) {
+                if (!b) continue;
+                if (!b.type) typeWarnings.push(`Block ${path}id=${b.id||'?'} is missing "type" — will not render. Valid types: ${[...VALID_BULK_TYPES].join(', ')}`);
+                else if (!VALID_BULK_TYPES.has(b.type)) typeWarnings.push(`Block ${path}id=${b.id||'?'} has unknown type "${b.type}". Valid types: ${[...VALID_BULK_TYPES].join(', ')}`);
+                _checkBulkTypes(b.children || b.items || b.elements, `${path}${b.id||'?'}/`);
+            }
+        }
+        slides.forEach((s, i) => _checkBulkTypes(s.children || s.items || s.elements, `slide[${i+1}]/`));
+        if (typeWarnings.length > 0) {
+            return _slideResult(`Validation errors in slides — fix before inserting:\n${typeWarnings.map(w => '  ⚠ ' + w).join('\n')}`);
+        }
+
+        // Freshen any block IDs that would collide with existing blocks in the deck
+        const bulkWarnings = [];
+        const existingIdsBulk = _collectDeckIds(deck);
+        for (const s of slides) {
+            _freshenConflicts(existingIdsBulk, s.children, bulkWarnings);
+            _freshenConflicts(existingIdsBulk, s.items, bulkWarnings);
+            _freshenConflicts(existingIdsBulk, s.elements, bulkWarnings);
         }
 
         const afterIndex = options.input?.afterIndex;
@@ -1870,7 +2426,8 @@ class WolfslideBulkInsertTool {
         }
 
         await p.applyDeck(deck, docUri);
-        return _slideResult(`Bulk-inserted ${slides.length} slides at position ${insertAt + 1}–${insertAt + slides.length}. Deck now has ${deck.slides.length} slides.`);
+        const bulkWarnStr = bulkWarnings.length ? `\nWarnings:\n${bulkWarnings.map(w => `  ⚠ ${w}`).join('\n')}` : '';
+        return _slideResult(`Bulk-inserted ${slides.length} slides at position ${insertAt + 1}–${insertAt + slides.length}. Deck now has ${deck.slides.length} slides.${bulkWarnStr}`);
     }
 }
 
@@ -2206,16 +2763,34 @@ class ValidateSyntaxTool {
         // Helper: escape a WL string literal
         const escWl = s => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\r/g, '').replace(/\n/g, '\\n');
 
-        const errors  = [];
-        let checked   = 0;
+        const codeErrors  = [];
+        const katexErrors = [];
+        let codeChecked   = 0;
+        let mdChecked     = 0;
 
         for (let n = from; n <= to; n++) {
-            const cell = notebook.cellAt(n - 1);
-            if (cell.kind === vscode.NotebookCellKind.Markup) continue;
+            const cell   = notebook.cellAt(n - 1);
+            const cellId = getCellToolId(cell);
+
+            if (cell.kind === vscode.NotebookCellKind.Markup) {
+                // ── Markdown cell: check KaTeX math ───────────────────────
+                const src = cell.document.getText();
+                if (!src.trim()) continue;
+                mdChecked++;
+                const errs = checkMarkdownKaTeX(src);
+                if (errs.length) {
+                    for (const { display, latex, message } of errs) {
+                        const delim = display ? '$$' : '$';
+                        katexErrors.push(`  Cell ${n} (${cellId}): ${delim}${latex.slice(0, 80)}${latex.length > 80 ? '…' : ''}${delim}\n    → ${message}`);
+                    }
+                }
+                continue;
+            }
+
+            // ── Code cell: check WL syntax ────────────────────────────────
             const src = cell.document.getText().trim();
             if (!src) continue;
-            checked++;
-            const cellId = getCellToolId(cell);
+            codeChecked++;
 
             if (hasKernel) {
                 // SyntaxQ returns True/False; if False, SyntaxLength gives last valid position
@@ -2228,14 +2803,13 @@ class ValidateSyntaxTool {
                     ]);
                     const val = result?.result?.value || '';
                     if (val && val !== 'OK') {
-                        errors.push(`Cell ${n} (CellId: ${cellId}): ${val}`);
+                        codeErrors.push(`  Cell ${n} (${cellId}): ${val}`);
                     }
                 } catch (_) {
-                    // Kernel unavailable mid-loop — fall through to text check
+                    // Kernel unavailable mid-loop — fall through to bracket check
                 }
             } else {
                 // Offline heuristic checks (no kernel)
-                // Check for common issues: unmatched brackets, string escapes
                 let depth = 0;
                 let inStr = false;
                 let bad   = false;
@@ -2252,24 +2826,43 @@ class ValidateSyntaxTool {
                     }
                 }
                 if (bad || depth !== 0 || inStr) {
-                    errors.push(`Cell ${n} (CellId: ${cellId}): unmatched brackets/string${depth > 0 ? ` (depth=${depth})` : ''}`);
+                    codeErrors.push(`  Cell ${n} (${cellId}): unmatched brackets/string${depth > 0 ? ` (depth=${depth})` : ''}`);
                 }
             }
         }
 
-        if (checked === 0) {
-            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart('No code cells found in range.')]);
+        const totalChecked = codeChecked + mdChecked;
+        if (totalChecked === 0) {
+            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart('No cells found in range.')]);
         }
-        if (errors.length === 0) {
-            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
-                `\u2713 Syntax valid for all ${checked} code cell(s) checked (cells ${from}\u2013${to}).` +
-                (hasKernel ? '' : '\n[Note: kernel not available — ran offline bracket-matching checks only]')
-            )]);
+
+        const lines = [];
+        const noCodeErrors  = codeErrors.length === 0;
+        const noKatexErrors = katexErrors.length === 0;
+
+        if (noCodeErrors && noKatexErrors) {
+            lines.push(`\u2713 All ${totalChecked} cell(s) valid (cells ${from}\u2013${to}: ${codeChecked} code, ${mdChecked} markdown).`);
+            if (!hasKernel && codeChecked > 0)
+                lines.push('[Note: kernel not available — ran offline bracket-matching checks only for code cells]');
+
+        } else {
+            if (codeErrors.length > 0) {
+                lines.push(`\u274C ${codeErrors.length} WL syntax issue(s) in ${codeChecked} code cell(s):`);
+                lines.push(...codeErrors);
+                if (!hasKernel) lines.push('  [Note: kernel not available — offline bracket-check only]');
+            } else if (codeChecked > 0) {
+                lines.push(`\u2713 ${codeChecked} code cell(s): WL syntax OK`);
+            }
+            if (katexErrors.length > 0) {
+                lines.push(`\u274C ${katexErrors.length} KaTeX math error(s) in ${mdChecked} markdown cell(s):`);
+                lines.push(...katexErrors);
+                lines.push('  Fix: check for missing braces (e.g. x_ab → x_{ab}), unsupported commands, or unclosed $ delimiters.');
+            } else if (mdChecked > 0) {
+                lines.push(`\u2713 ${mdChecked} markdown cell(s): KaTeX math OK`);
+            }
         }
-        const note = hasKernel ? '' : '\n[Note: kernel not available — ran offline bracket-matching checks only]';
-        return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
-            `${errors.length} syntax issue(s) found in ${checked} code cell(s):\n${errors.join('\n')}${note}`
-        )]);
+
+        return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(lines.join('\n'))]);
     }
 }
 
@@ -2502,6 +3095,13 @@ class LatexTool {
     }
 }
 
+// ── Simple glob helper (only * is special) ────────────────────────────────
+function _matchGlob(pattern, str) {
+    if (!str) return false;
+    const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+    return new RegExp('^' + escaped + '$').test(str);
+}
+
 // ---------------------------------------------------------------------------
 // Consolidated tool: wolfslide_block — insert, edit, delete, move blocks
 // ---------------------------------------------------------------------------
@@ -2524,16 +3124,18 @@ class WolfslideBlockTool {
     async invoke(options, _token) {
         const action = options.input?.action;
         if (!action) {
-            return _slideResult('Error: action is required. Use "insert", "edit", "delete", "move", or "bulkEdit".');
+            return _slideResult('Error: action is required. Use "insert", "edit", "delete", "move", "bulkEdit", or "getBlock".');
         }
         switch (action) {
-            case 'insert':   return this._insert.invoke(options, _token);
-            case 'edit':     return this._edit.invoke(options, _token);
-            case 'delete':   return this._delete.invoke(options, _token);
-            case 'move':     return this._move.invoke(options, _token);
-            case 'bulkEdit': return this._bulkEdit(options, _token);
+            case 'insert':    return this._insert.invoke(options, _token);
+            case 'edit':      return this._edit.invoke(options, _token);
+            case 'delete':    return this._delete.invoke(options, _token);
+            case 'move':      return this._move.invoke(options, _token);
+            case 'bulkEdit':  return this._bulkEdit(options, _token);
+            case 'getBlock':  return this._getBlock(options, _token);
+            case 'bulkPatch': return this._bulkPatch(options, _token);
             default:
-                return _slideResult(`Unknown action "${action}". Use "insert", "edit", "delete", "move", or "bulkEdit".`);
+                return _slideResult(`Unknown action "${action}". Use "insert", "edit", "delete", "move", "bulkEdit", "getBlock", or "bulkPatch".`);
         }
     }
     async _bulkEdit(options, _token) {
@@ -2580,6 +3182,96 @@ class WolfslideBlockTool {
         if (failed.length) { lines.push(`Failed ${failed.length}:`); lines.push(...failed); }
         return _slideResult(lines.join('\n'));
     }
+
+    _getBlock(options, _token) {
+        const r = _resolveSlide(options);
+        if (!r) return _slideResult('No .wslide editor is open.');
+        if (r.error) return _slideResult(r.error);
+        const ref = _resolveBlockRef(options, r);
+        if (ref.error) return _slideResult(ref.error);
+        const { found, resolvedSlide, resolvedIdx } = ref;
+        const parentLabel = found.parent === resolvedSlide
+            ? `slide root (${resolvedSlide.id || '?'})`
+            : `block ${found.parent.id || '?'} (${found.parent.type || '?'})`;
+        return _slideResult(
+            `Block on slide ${resolvedIdx + 1} "${resolvedSlide.label || resolvedSlide.id}"\n` +
+            `Parent: ${parentLabel}, array: ${found.key}, index: ${found.index}\n` +
+            _blockLabel(found.block) + _blockAnno(found.block) + `  #${found.block.id || ''}\n\n` +
+            `Full JSON:\n\`\`\`json\n${JSON.stringify(found.block, null, 2)}\n\`\`\``
+        );
+    }
+
+    async _bulkPatch(options, _token) {
+        const p = _getSlideProvider();
+        if (!p) return _slideResult('No .wslide editor is open.');
+        const docUri = options.input?.docUri;
+        const deck = p.getDeck(docUri);
+        if (!deck) return _slideResult('No deck found.');
+
+        const selector = options.input?.selector;
+        const patch    = options.input?.patch;
+        if (!selector || typeof selector !== 'object')
+            return _slideResult('selector object is required. Supported keys: blockIds, type, className, namePattern, hasStyle, stylePreset.');
+        if (!patch || typeof patch !== 'object')
+            return _slideResult('patch object is required.');
+
+        // Build matcher from selector
+        function _matches(b) {
+            if (!b || typeof b !== 'object') return false;
+            if (selector.blockIds) {
+                if (!Array.isArray(selector.blockIds)) return false;
+                if (!selector.blockIds.includes(b.id)) return false;
+            }
+            if (selector.type !== undefined) {
+                if (b.type !== selector.type) return false;
+            }
+            if (selector.className !== undefined) {
+                const cls = b.className || '';
+                if (!cls.split(/\s+/).includes(selector.className)) return false;
+            }
+            if (selector.namePattern !== undefined) {
+                if (!_matchGlob(selector.namePattern, b.name || '')) return false;
+            }
+            if (selector.stylePreset !== undefined) {
+                if (b.stylePreset !== selector.stylePreset) return false;
+            }
+            if (selector.hasStyle !== undefined) {
+                if (typeof selector.hasStyle !== 'object' || !b.style) return false;
+                for (const [k, v] of Object.entries(selector.hasStyle)) {
+                    if (b.style[k] !== v) return false;
+                }
+            }
+            return true;
+        }
+
+        const matched = [];
+        for (let si = 0; si < deck.slides.length; si++) {
+            const allBlocks = _collectAllBlocks(deck.slides[si]);
+            for (const b of allBlocks) {
+                if (_matches(b)) matched.push({ block: b, slideIdx: si, slide: deck.slides[si] });
+            }
+        }
+
+        if (matched.length === 0) {
+            return _slideResult(`No blocks matched selector ${JSON.stringify(selector)}.`);
+        }
+
+        for (const { block } of matched) {
+            _deepMerge(block, patch);
+        }
+
+        await p.applyDeck(deck, docUri);
+
+        const selectorDesc = Object.entries(selector).map(([k, v]) => `${k}:${JSON.stringify(v)}`).join(', ');
+        const patchKeys = Object.keys(patch).join(', ');
+        const lines = [
+            `Patched ${matched.length} block(s) matching [${selectorDesc}]. Keys changed: ${patchKeys}.`,
+            '',
+            ...matched.map(({ block: b, slideIdx: si, slide: s }) =>
+                `  slide ${si + 1} "${s.label || s.id}"  ${_blockLabel(b)}  #${b.id}${b.name ? `  name:${b.name}` : ''}`)
+        ];
+        return _slideResult(lines.join('\n'));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2614,15 +3306,200 @@ class WolfslideAdvancedTool {
 }
 
 
+// ── Dedicated single-block patch (discoverability alias for wolfslide_block action:edit) ──
+
+class WolfslidePatchBlockTool {
+    constructor() { this._edit = new WolfslideEditBlockTool(); }
+    prepareInvocation(options) {
+        const patch = options.input?.patch ?? options.input?.updates;
+        const mode = (!patch || Object.keys(patch).length === 0) ? 'inspect' : 'patch';
+        return { invocationMessage: `${mode === 'inspect' ? 'Inspecting' : 'Patching'} block ${options.input?.blockId ?? options.input?.blockName ?? ''}` };
+    }
+    async invoke(options, _token) {
+        const patch = options.input?.patch ?? options.input?.updates;
+        // Inspect mode: no patch — find the block and return its current JSON
+        if (!patch || (typeof patch === 'object' && Object.keys(patch).length === 0)) {
+            const r = _resolveSlide(options);
+            if (!r) return _slideResult('No .wslide editor is open.');
+            if (r.error) return _slideResult(r.error);
+            const ref = _resolveBlockRef(options, r);
+            if (ref.error) return _slideResult(ref.error);
+            const { found, resolvedSlide, resolvedIdx } = ref;
+            return _slideResult(
+                `Block "${found.block.id}" on slide ${resolvedIdx + 1} "${resolvedSlide.label || resolvedSlide.id}":\n` +
+                '```json\n' + JSON.stringify(found.block, null, 2) + '\n```'
+            );
+        }
+        // Normal patch mode: delegate to WolfslideEditBlockTool
+        const wrapped = {
+            input: {
+                blockId:    options.input?.blockId,
+                blockName:  options.input?.blockName,
+                updates:    patch,
+                slideIndex: options.input?.slideIndex,
+                slideId:    options.input?.slideId,
+                docUri:     options.input?.docUri,
+            }
+        };
+        return this._edit.invoke(wrapped, _token);
+    }
+}
+
+// ── Cross-deck slide copy ─────────────────────────────────────────────────
+
+/**
+ * Resolve { deckDir, deckName, imgDir } for a deck URI (or the active entry
+ * when docUri is undefined).  Returns null if the deck is not open.
+ */
+function _deckInfoFromUri(p, docUri) {
+    if (docUri) {
+        const deckDir = p.getDeckDir(docUri);
+        if (!deckDir) return null;
+        try {
+            const deckFsPath = vscode.Uri.parse(docUri).fsPath;
+            const deckName = path.basename(deckFsPath, '.wslide');
+            return { deckDir, deckName, imgDir: path.join(deckDir, 'img', deckName + '.wslide') };
+        } catch (_) { return null; }
+    }
+    const entry = p.getActiveEntry();
+    if (!entry) return null;
+    const deckFsPath = entry.document.uri.fsPath;
+    const deckDir    = path.dirname(deckFsPath);
+    const deckName   = path.basename(deckFsPath, '.wslide');
+    return { deckDir, deckName, imgDir: path.join(deckDir, 'img', deckName + '.wslide') };
+}
+
+class WolfslideCopySlides {
+    prepareInvocation(options) {
+        const inp = options.input || {};
+        const count = Array.isArray(inp.slideIndices)
+            ? inp.slideIndices.length
+            : (inp.from != null ? `${inp.from}–${inp.to}` : '1 slide');
+        return { invocationMessage: `Copying ${count} slide(s) to target deck` };
+    }
+
+    async invoke(options, _token) {
+        const p = _getSlideProvider();
+        if (!p) return _slideResult('No .wslide editor is open.');
+
+        // ── Resolve source ──────────────────────────────────────────────────
+        const srcDocUri = options.input?.sourceDocUri || undefined;
+        const srcDeck   = p.getDeckOnDisk(srcDocUri);
+        if (!srcDeck) return _slideResult('Source deck not found — ensure the source .wslide file is open in the editor.');
+        const srcInfo = _deckInfoFromUri(p, srcDocUri);
+        if (!srcInfo) return _slideResult('Could not resolve source deck path.');
+
+        // ── Resolve target ──────────────────────────────────────────────────
+        const tgtDocUri = options.input?.targetDocUri;
+        if (!tgtDocUri) return _slideResult('targetDocUri is required. Run wolfslide_getContext to see the URIs of all open .wslide files.');
+        const tgtDeck = p.getDeckOnDisk(tgtDocUri);
+        if (!tgtDeck) return _slideResult('Target deck not found — ensure the target .wslide file is open in the editor.');
+        const tgtInfo = _deckInfoFromUri(p, tgtDocUri);
+        if (!tgtInfo) return _slideResult('Could not resolve target deck path.');
+
+        if (srcInfo.imgDir === tgtInfo.imgDir) {
+            return _slideResult('Source and target are the same file. Use wolfslide_duplicateSlide to copy within the same deck.');
+        }
+
+        // ── Resolve slide indices (1-based input → 0-based) ─────────────────
+        const n = srcDeck.slides.length;
+        let indices;
+        if (Array.isArray(options.input?.slideIndices)) {
+            indices = options.input.slideIndices.map(i => Number(i) - 1);
+        } else if (options.input?.from != null && options.input?.to != null) {
+            const from = Number(options.input.from) - 1;
+            const to   = Number(options.input.to)   - 1;
+            if (from < 0 || to >= n || from > to)
+                return _slideResult(`Range from=${options.input.from} to=${options.input.to} out of range (source has ${n} slides).`);
+            indices = Array.from({ length: to - from + 1 }, (_, k) => from + k);
+        } else {
+            // Default: currently visible slide in source
+            const activeEntry = p.getActiveEntry();
+            indices = [activeEntry?.currentSlideIndex ?? 0];
+        }
+        if (indices.some(i => i < 0 || i >= n))
+            return _slideResult(`One or more slideIndices out of range (source has ${n} slides). Use 1-based indices.`);
+
+        // ── Insert position in target ────────────────────────────────────────
+        const wasAtEnd = options.input?.insertAtIndex == null;
+        const insertAt = wasAtEnd
+            ? tgtDeck.slides.length
+            : Math.max(0, Math.min(Number(options.input.insertAtIndex) - 1, tgtDeck.slides.length));
+
+        // ── Clone + remap images + fresh IDs ────────────────────────────────
+        const imgWarnings = [];
+        const copiedSlides = [];
+
+        function _remapImages(node) {
+            if (!node || typeof node !== 'object') return;
+            if (Array.isArray(node)) { node.forEach(_remapImages); return; }
+            if (node.type === 'image' && typeof node.src === 'string') {
+                const srcPrefix = `img/${srcInfo.deckName}.wslide/`;
+                if (node.src.startsWith(srcPrefix)) {
+                    const filename = node.src.slice(srcPrefix.length);
+                    const srcFile  = path.join(srcInfo.imgDir, filename);
+                    const tgtFile  = path.join(tgtInfo.imgDir, filename);
+                    if (fs.existsSync(srcFile)) {
+                        try {
+                            fs.mkdirSync(tgtInfo.imgDir, { recursive: true });
+                            if (!fs.existsSync(tgtFile)) fs.copyFileSync(srcFile, tgtFile);
+                            node.src = `img/${tgtInfo.deckName}.wslide/${filename}`;
+                        } catch (e) {
+                            imgWarnings.push(`Copy failed for "${filename}": ${e.message}`);
+                        }
+                    } else {
+                        imgWarnings.push(`Source image not found: ${srcFile}`);
+                    }
+                }
+                // External http/https or absolute paths: leave unchanged
+            }
+            if (node.children) _remapImages(node.children);
+            if (node.items)    _remapImages(node.items);
+            if (node.elements) _remapImages(node.elements);
+        }
+
+        function _freshIds(node) {
+            if (!node || typeof node !== 'object') return;
+            if (Array.isArray(node)) { node.forEach(_freshIds); return; }
+            if (node.type) node.id = _uid();
+            if (node.children) _freshIds(node.children);
+            if (node.items)    _freshIds(node.items);
+            if (node.elements) _freshIds(node.elements);
+        }
+
+        for (const srcIdx of indices) {
+            const cloned = JSON.parse(JSON.stringify(srcDeck.slides[srcIdx]));
+            cloned.id = _uid();
+            _remapImages(cloned);
+            _freshIds(cloned);
+            copiedSlides.push(cloned);
+        }
+
+        // ── Apply to target ──────────────────────────────────────────────────
+        tgtDeck.slides.splice(insertAt, 0, ...copiedSlides);
+        await p.applyDeck(tgtDeck, tgtDocUri);
+
+        const insertDesc = wasAtEnd ? 'appended to end' : `inserted at position ${insertAt + 1}`;
+        let result = `Copied ${copiedSlides.length} slide(s) from "${srcInfo.deckName}.wslide" → "${tgtInfo.deckName}.wslide" (${insertDesc}). Target now has ${tgtDeck.slides.length} slides.`;
+        if (imgWarnings.length) {
+            result += `\n\nImage warnings (${imgWarnings.length}):\n` + imgWarnings.map(w => `  • ${w}`).join('\n');
+        }
+        return _slideResult(result);
+    }
+}
+
 module.exports = {
     WolfslideGetContextTool,
     WolfslideListSlidesTool,
     WolfslideGetSlideTool,
     WolfslideInsertSlideTool,
+    WolfslideReplaceSlideTool,
     WolfslideEditSlideTool,
     WolfslideDeleteSlideTool,
+    WolfslideDeleteSlidesTool,
     WolfslideMoveSlideTool,
     WolfslideUndoTool,
+    WolfslideReloadTool,
     WolfslideSaveFileTool,
     WolfslideDuplicateSlideTool,
     WolfslideSearchSlidesTool,
@@ -2639,9 +3516,11 @@ module.exports = {
     WolfslideSetThemeTool,
     WolfslideImageAssetTool,
     WolfslideBulkInsertTool,
+    WolfslideCopySlides,
     WolfslideInsertEvalBlockTool,
     WolfslideRunEvalBlockTool,
     WolfslideBlockTool,
+    WolfslidePatchBlockTool,
     WolfslideAdvancedTool,
     // Non-wolfslide tools that ended up in this file
     GetCellOutputTool,

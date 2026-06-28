@@ -54,19 +54,6 @@
     "color": "#CC3333",
     "theme": "dark"
   },
-  "activationEvents": [
-    "onLanguage:wolfram",
-    "onNotebook:extended-wolfram-notebook",
-    "onCommand:wolfbook.OpenNotebook",
-    "onCommand:wolfbook.DownloadWolframEngine",
-    "onCommand:createWolframScriptTerminal",
-    "onCommand:wolfbook.openConfigurations",
-    "onCommand:wolfbook.launchKernel",
-    "onView:wolfbook.watchPanel",
-    "onView:wolfbook.askSpecialist",
-    "onCustomEditor:wolfbook.slideEditor",
-    "onLanguage:wslide"
-  ],
   "main": "./out/extension/extension.js",
   "icon": "images/icon.png",
   "contributes": {
@@ -431,6 +418,386 @@
             }
           },
           "order": 5
+        },
+        "wolfbook.oberon.enabled": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "markdownDescription": "Enable the Oberon research-agent layer. **Experimental.** Guarded execution — not a full security sandbox. Trusted local use only.",
+          "order": 100
+        },
+        "wolfbook.oberon.showControlRoom": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "markdownDescription": "Show the Oberon **Control Room** view in the activity bar. Parked by default while Oberon is under development — use **🧚 Fairy quick compute** in the main Wolfbook (Watch) panel instead. Reload the window after changing.",
+          "order": 101
+        },
+        "wolfbook.oberon.experimentalPipeline": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "markdownDescription": "**Experimental.** Run the full Oberon pipeline (Skeptic critic + Oberon report) after the Fairy. When off (default), **🧚 Fairy quick compute** runs a minimal Fairy only — faster, no critic, no report. Toggle from the **Oberon** switch in the Wolfbook (Watch) panel.",
+          "order": 102
+        },
+        "wolfbook.oberon.providers.deepseek.apiKey": {
+          "type": "string",
+          "default": "",
+          "scope": "application",
+          "markdownDescription": "DeepSeek API key (sk-…). Stored in user settings; consider using `apiKeyEnv` to read from an environment variable instead.",
+          "order": 110
+        },
+        "wolfbook.oberon.providers.deepseek.apiKeyEnv": {
+          "type": "string",
+          "default": "DEEPSEEK_API_KEY",
+          "scope": "application",
+          "markdownDescription": "Environment variable to read the DeepSeek API key from. Used when `apiKey` is empty.",
+          "order": 111
+        },
+        "wolfbook.oberon.providers.deepseek.baseUrl": {
+          "type": "string",
+          "default": "https://api.deepseek.com",
+          "scope": "application",
+          "description": "DeepSeek API base URL.",
+          "order": 112
+        },
+        "wolfbook.oberon.providers.openai.apiKey": {
+          "type": "string",
+          "default": "",
+          "scope": "application",
+          "markdownDescription": "OpenAI API key (sk-…). Stored in user settings; prefer `apiKeyEnv` for env-based loading.",
+          "order": 113
+        },
+        "wolfbook.oberon.providers.openai.apiKeyEnv": {
+          "type": "string",
+          "default": "OPENAI_API_KEY",
+          "scope": "application",
+          "markdownDescription": "Environment variable name to read the OpenAI API key from when `apiKey` is empty.",
+          "order": 114
+        },
+        "wolfbook.oberon.providers.openai.baseUrl": {
+          "type": "string",
+          "default": "https://api.openai.com",
+          "scope": "application",
+          "description": "OpenAI API base URL (override for compatible gateways).",
+          "order": 115
+        },
+        "wolfbook.oberon.providers.anthropic.apiKey": {
+          "type": "string",
+          "default": "",
+          "scope": "application",
+          "markdownDescription": "Anthropic API key (sk-ant-…). Stored in user settings; prefer `apiKeyEnv` for env-based loading.",
+          "order": 116
+        },
+        "wolfbook.oberon.providers.anthropic.apiKeyEnv": {
+          "type": "string",
+          "default": "ANTHROPIC_API_KEY",
+          "scope": "application",
+          "markdownDescription": "Environment variable name to read the Anthropic API key from when `apiKey` is empty.",
+          "order": 117
+        },
+        "wolfbook.oberon.providers.anthropic.baseUrl": {
+          "type": "string",
+          "default": "https://api.anthropic.com",
+          "scope": "application",
+          "description": "Anthropic API base URL.",
+          "order": 118
+        },
+        "wolfbook.oberon.roles.oberon": {
+          "type": "object",
+          "scope": "window",
+          "default": {
+            "provider": "deepseek",
+            "model": "deepseek-v4-pro",
+            "maxTokens": 12000,
+            "contextWindow": 1048576,
+            "pricing": {
+              "cacheMissUSDPerMTok": 0.435,
+              "cacheReadUSDPerMTok": 0.003625,
+              "cacheWriteUSDPerMTok": null,
+              "outputUSDPerMTok": 0.87
+            }
+          },
+          "markdownDescription": "Supervisor (Oberon) model binding. `maxTokens`: max output tokens per LLM call (default 12000; increase further for very complex Quests). `contextWindow`: input context limit in tokens (informational). `pricing` values are USD per **million** tokens: `cacheMissUSDPerMTok` = cache-miss input rate, `cacheReadUSDPerMTok` = cache-hit input rate, `outputUSDPerMTok` = output rate. Use `null` for fields the provider does not report.",
+          "order": 120
+        },
+        "wolfbook.oberon.roles.fairy": {
+          "type": "object",
+          "scope": "window",
+          "default": {
+            "provider": "deepseek",
+            "model": "deepseek-v4-flash",
+            "maxTokens": 12000,
+            "contextWindow": 1048576,
+            "pricing": {
+              "cacheMissUSDPerMTok": 0.14,
+              "cacheReadUSDPerMTok": 0.0028,
+              "cacheWriteUSDPerMTok": null,
+              "outputUSDPerMTok": 0.28
+            }
+          },
+          "markdownDescription": "Default Fairy (worker) model binding. `maxTokens`: max output tokens per LLM call (default 12000). `contextWindow`: input context limit in tokens. `pricing` values are USD per **million** tokens.",
+          "order": 121
+        },
+        "wolfbook.oberon.roles.skeptic": {
+          "type": "object",
+          "scope": "window",
+          "default": {},
+          "markdownDescription": "Optional override for the Skeptic Fairy. Empty object = use `roles.fairy`.",
+          "order": 122
+        },
+        "wolfbook.oberon.roles.postmortem": {
+          "type": "object",
+          "scope": "window",
+          "default": {},
+          "markdownDescription": "Optional override for the postmortem narrative model. Empty object = use `roles.fairy`.",
+          "order": 123
+        },
+        "wolfbook.oberon.budgets.fairyDefault": {
+          "type": "object",
+          "scope": "window",
+          "default": {
+            "maxLlmCalls": 30,
+            "maxToolCalls": 50,
+            "maxOutputTokens": 16000,
+            "maxWallClockMs": 720000
+          },
+          "description": "Hard per-Charm budget. `maxLlmCalls` = number of tool-calling LLM rounds before Fairy is forced to finalise (total LLM calls = maxLlmCalls + 2 for final + repair). `maxToolCalls` is reserved for future per-tool-call throttling. Breach terminates the Charm with a low-confidence Scroll.",
+          "order": 130
+        },
+        "wolfbook.oberon.budgets.run": {
+          "type": "object",
+          "scope": "window",
+          "default": {
+            "runUSD": 15,
+            "runLlmCalls": 120
+          },
+          "description": "Hard per-RUN caps. When exceeded mid-run, Oberon emits a `budget.exhausted` event, aborts in-flight work, and the user still receives a low-confidence fallback Scroll. Set either field to 0 to disable that check.",
+          "order": 131
+        },
+        "wolfbook.oberon.toolLoopMultiplier": {
+          "type": "number",
+          "scope": "window",
+          "default": 2,
+          "minimum": 1,
+          "maximum": 8,
+          "description": "Multiplier for the per-Charm tool-turn cap. Each Charm gets its own fresh counter of `budgets.fairyDefault.maxLlmCalls × toolLoopMultiplier` tool-calling LLM rounds before forced finalisation. Default 2 (effective cap ≈ 60 with the default 30 maxLlmCalls).",
+          "order": 132
+        },
+        "wolfbook.oberon.wardsEnabled": {
+          "type": "boolean",
+          "scope": "window",
+          "default": false,
+          "description": "Enable the Skeptic 'wards' deep-verification chain (boolean / numeric / symbolic / random sampling). Off by default — wards can fire false-failures when the Charm-local kernel state differs from the planner's `validationChecks` expressions.",
+          "order": 133
+        },
+        "wolfbook.oberon.priceTablePath": {
+          "type": "string",
+          "default": "",
+          "scope": "application",
+          "markdownDescription": "Optional path to a YAML price-table file that overrides the per-role pricing in `roles.*`. Empty = use role-embedded pricing.",
+          "order": 140
+        },
+        "wolfbook.oberon.telemetry.saveRawPrompts": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "description": "Persist raw outgoing prompts to .oberon/telemetry/blobs/. Off by default for privacy.",
+          "order": 150
+        },
+        "wolfbook.oberon.telemetry.saveRawResponses": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "description": "Persist raw model responses to .oberon/telemetry/blobs/. Required for replay/fork.",
+          "order": 151
+        },
+        "wolfbook.oberon.telemetry.redactSecrets": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "description": "Apply regex redaction to common API-key shapes before persisting blobs.",
+          "order": 152
+        },
+        "wolfbook.oberon.telemetry.retentionDays": {
+          "type": "number",
+          "default": 30,
+          "minimum": 1,
+          "scope": "window",
+          "description": "Number of days to keep raw blobs before pruning.",
+          "order": 153
+        },
+        "wolfbook.oberon.telemetry.maxBlobSizeMB": {
+          "type": "number",
+          "default": 10,
+          "minimum": 1,
+          "scope": "window",
+          "description": "Drop blobs larger than this size with a warning event.",
+          "order": 154
+        },
+        "wolfbook.oberon.telemetry.mirrorGlobalToolEvents": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "description": "Debug: ingest ALL Wolfbook eventBus events into the active Oberon run, even uncorrelated ones.",
+          "order": 155
+        },
+        "wolfbook.oberon.mathematica.timeConstrainSec": {
+          "type": "number",
+          "default": 120,
+          "minimum": 1,
+          "scope": "window",
+          "description": "TimeConstrained wall-clock cap (seconds) for each Spell.",
+          "order": 160
+        },
+        "wolfbook.oberon.mathematica.memoryConstrainMB": {
+          "type": "number",
+          "default": 4096,
+          "minimum": 64,
+          "scope": "window",
+          "description": "MemoryConstrained cap (MB) for each Spell.",
+          "order": 161
+        },
+        "wolfbook.oberon.mathematica.guardMode": {
+          "type": "string",
+          "enum": [
+            "strict",
+            "escalate",
+            "off"
+          ],
+          "default": "strict",
+          "scope": "window",
+          "markdownDescription": "Guarded-execution mode. **Not a full security sandbox** — see spec §9. `strict` blocks dangerous heads; `escalate` prompts the user; `off` runs anything (unsafe).",
+          "order": 162
+        },
+        "wolfbook.oberon.postmortem.narrativeEnabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "description": "Generate a natural-language postmortem at the end of each run using the `postmortem` role (in addition to the deterministic metrics report).",
+          "order": 170
+        },
+        "wolfbook.oberon.git.autoCommitGrimoire": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "Auto-commit Grimoire writes to the local workspace git repository (no push to remote, no notification).",
+          "order": 180
+        },
+        "wolfbook.oberon.recall.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "When enabled, Fairy searches SkilXiv before each run and presents a matching skill as reference material (RECALL phase). Fail-open — the core Fairy loop runs normally whether or not a skill is found.",
+          "order": 190
+        },
+        "wolfbook.oberon.recall.usageTelemetry": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "When enabled and a skill was consulted, a minimal usage event (skill ref, outcome, environment class — no task content) is submitted to SkilXiv. Confidential charms never submit usage events regardless of this setting.",
+          "order": 191
+        },
+        "wolfbook.oberon.recall.skilxiv.baseUrl": {
+          "type": "string",
+          "default": "https://skilxiv.org",
+          "scope": "window",
+          "markdownDescription": "Base URL for the SkilXiv registry API used by the RECALL phase.",
+          "order": 192
+        },
+        "wolfbook.oberon.recall.skilxiv.apiToken": {
+          "type": "string",
+          "default": "",
+          "scope": "window",
+          "markdownDescription": "Optional SkilXiv API token. If set, usage events are attributed to your account privately.",
+          "order": 193
+        },
+        "wolfbook.oberon.contribution.mode": {
+          "type": "string",
+          "enum": [
+            "off",
+            "draft-on-approval"
+          ],
+          "default": "draft-on-approval",
+          "scope": "window",
+          "markdownDescription": "Stage 2 contribution behaviour. `draft-on-approval` (default): after a delivered run with reusable results, a **local** contribution candidate is raised for your review — nothing is submitted until you explicitly approve it (creating a **private draft** under your SkilXiv account). `off`: never raise candidates. Submission is always human-approved; making a draft public is a separate step.",
+          "order": 196
+        },
+        "wolfbook.oberon.contribution.defaultLicense": {
+          "type": "string",
+          "default": "CC-BY-4.0",
+          "scope": "window",
+          "markdownDescription": "Default license preselected in the contribution review dialog.",
+          "order": 197
+        },
+        "wolfbook.oberon.contribution.shareUsagePublicly": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "markdownDescription": "When a run uses a recalled SkilXiv skill, a usage event is reported to confirm the skill worked. **Off (default):** the report is anonymous — only the aggregate success count is shown on the skill page, your identity is never exposed. **On:** your GitHub identity and a short, content-light agent report (task summary + key result, no notebook or raw query) may appear in the skill page's expandable run list. Aggregate counts are always anonymous regardless of this setting.",
+          "order": 198
+        },
+        "wolfbook.oberon.fairy.askSpecialistEnabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "When enabled (default), the Fairy agent can ask you a clarifying question via a VS Code input box when it is genuinely stuck. Disable to run fully autonomously without interruptions.",
+          "order": 194
+        },
+        "wolfbook.oberon.fairy.rejectRedefinition": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "When enabled (default), the Fairy agent is blocked from re-pasting a definition for a symbol already alive in the kernel (a registered util or a recorded step). This forces incremental, step-by-step calculation instead of rebuilding from scratch. A probe may deliberately redefine a symbol by including a leading `(* redefine: symbolName *)` comment. Disable to allow unrestricted redefinition.",
+          "order": 195
+        },
+        "wolfbook.oberon.notebookFirstExecution": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "When enabled (default), Oberon creates a live `.wb` charm notebook before the Fairy's first LLM turn so computation progress is visible in real time. Disable to run in kernel-only mode (no live notebook) — useful for testing or when VS Code notebook APIs are unavailable.",
+          "order": 185
+        },
+        "wolfbook.oberon.executive.autoDispatch": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "markdownDescription": "When enabled, Oberon's executive-analysis follow-up briefs (`decompose_further`, `retry_subset`, `extract_and_continue`, `reformulate_brief`) are auto-dispatched as a new research run without waiting for the user to click *Run Oberon Follow-up*. Bounded by `executive.maxAutoFollowups` to prevent unbounded chains.",
+          "order": 190
+        },
+        "wolfbook.oberon.executive.maxAutoFollowups": {
+          "type": "number",
+          "default": 2,
+          "minimum": 0,
+          "maximum": 6,
+          "scope": "window",
+          "description": "Maximum recursion depth for auto-dispatched executive follow-ups. 0 disables auto-dispatch even if executive.autoDispatch is on.",
+          "order": 191
+        },
+        "wolfbook.oberon.executive.maxPerQuest": {
+          "type": "number",
+          "default": 2,
+          "minimum": 1,
+          "maximum": 8,
+          "scope": "window",
+          "description": "Maximum number of executive analyses Oberon may run within a single Quest (across failing Charms).",
+          "order": 192
+        },
+        "wolfbook.oberon.memory.extractPartialFacts": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "Extract `verified:false` working facts from non-success Scrolls (confidence ≥ 0.4) into project memory, so future Charms in the same Quest do not redo partially-completed work.",
+          "order": 200
+        },
+        "wolfbook.oberon.replay.perCellTimeoutSeconds": {
+          "type": "number",
+          "default": 30,
+          "minimum": 5,
+          "maximum": 600,
+          "scope": "window",
+          "description": "Per-cell timeout (seconds) used by replayNotebook when re-evaluating a Charm notebook after a kernel restart (revision or Skeptic kernel-busy recovery).",
+          "order": 201
         }
       }
     },
@@ -501,6 +868,10 @@
         "title": "Wolfbook: Configure Cline MCP"
       },
       {
+        "command": "wolfbook.configureRooCode",
+        "title": "Wolfbook: Configure Roo Code MCP"
+      },
+      {
         "command": "wolfbook.registerFileTypes",
         "title": "Wolfbook: Register .wb / .evsnb / .vsnb File Types with Finder (macOS)"
       },
@@ -555,6 +926,22 @@
       {
         "command": "wolfbook.handleEnter",
         "title": "Wolfbook: Handle Enter (auto-format + newline)"
+      },
+      {
+        "command": "wolfbook.formatAndExecute",
+        "title": "Wolfbook: Format and Execute Cell"
+      },
+      {
+        "command": "wolfbook.wrapFraction",
+        "title": "Wolfbook: Wrap as Fraction (sel)/(|)"
+      },
+      {
+        "command": "wolfbook.wrapSqrt",
+        "title": "Wolfbook: Wrap as Sqrt[sel|]"
+      },
+      {
+        "command": "wolfbook.wrapBracket",
+        "title": "Wolfbook: Wrap expression in brackets"
       },
       {
         "command": "wolfbook.formatWithUTFWide",
@@ -675,6 +1062,11 @@
         "title": "Wolfbook: Toggle Auto Enter Edit Mode"
       },
       {
+        "command": "wolfbook.selectSection",
+        "title": "Select Section Cells",
+        "icon": "$(list-selection)"
+      },
+      {
         "command": "wolfbook.clearCellOutput",
         "title": "Clear Output",
         "icon": "$(clear-all)"
@@ -712,6 +1104,64 @@
         "command": "wolfbook.evalMode.refine",
         "title": "Eval: Refine",
         "icon": "$(sync)"
+      },
+      {
+        "command": "wolfbook.oberon.openRunInspector",
+        "title": "Oberon: Open Run Inspector",
+        "category": "Oberon",
+        "icon": "$(window)"
+      },
+      {
+        "command": "wolfbook.oberon.openCharmDebugger",
+        "title": "Oberon: Open Charm Debugger",
+        "category": "Oberon",
+        "icon": "$(bug)"
+      },
+      {
+        "command": "wolfbook.oberon.startResearch",
+        "title": "Oberon: Start Research…",
+        "category": "Oberon",
+        "icon": "$(play)"
+      },
+      {
+        "command": "wolfbook.oberon.abortRun",
+        "title": "Oberon: Abort Active Run",
+        "category": "Oberon",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "wolfbook.oberon.openSettings",
+        "title": "Oberon: Open Settings",
+        "category": "Oberon",
+        "icon": "$(settings-gear)"
+      },
+      {
+        "command": "wolfbook.oberon.configureProviders",
+        "title": "Oberon: Configure Providers & Pricing",
+        "category": "Oberon"
+      },
+      {
+        "command": "wolfbook.oberon.emitMockEvents",
+        "title": "Oberon: Debug — Emit Mock Events",
+        "category": "Oberon"
+      },
+      {
+        "command": "wolfbook.oberon.runTestSuite",
+        "title": "Oberon: Run Standard Test Suite",
+        "category": "Oberon",
+        "icon": "$(beaker)"
+      },
+      {
+        "command": "wolfbook.oberon.bumpAndDeploy",
+        "title": "Oberon: Bump Patch Version & Quick Deploy",
+        "category": "Oberon",
+        "icon": "$(rocket)"
+      },
+      {
+        "command": "wolfbook.oberon.reviewContributions",
+        "title": "Oberon: Review SkilXiv Contributions",
+        "category": "Oberon",
+        "icon": "$(cloud-upload)"
       }
     ],
     "menus": {
@@ -874,6 +1324,16 @@
           "command": "wolfbook.expandTruncatedOutput",
           "when": "notebookType == extended-wolfram-notebook && notebookCellHasOutputs",
           "group": "inline@2"
+        },
+        {
+          "command": "wolfbook.selectSection",
+          "when": "notebookType == extended-wolfram-notebook && notebookCellKind == 1",
+          "group": "inline@10"
+        },
+        {
+          "command": "wolfbook.selectSection",
+          "when": "notebookType == extended-wolfram-notebook",
+          "group": "wolfbook@1"
         }
       ],
       "debug/variables/context": [
@@ -924,6 +1384,34 @@
         "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook' && !wolframInEscapeMode && !suggestWidgetVisible"
       },
       {
+        "command": "wolfbook.wrapFraction",
+        "key": "ctrl+/",
+        "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook' && !wolframInEscapeMode && !suggestWidgetVisible"
+      },
+      {
+        "command": "wolfbook.wrapSqrt",
+        "key": "ctrl+2",
+        "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook' && !wolframInEscapeMode && !suggestWidgetVisible"
+      },
+      {
+        "command": "wolfbook.wrapBracket",
+        "args": "(",
+        "key": "alt+shift+0",
+        "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook' && !wolframInEscapeMode && !suggestWidgetVisible"
+      },
+      {
+        "command": "wolfbook.wrapBracket",
+        "args": "[",
+        "key": "alt+]",
+        "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook' && !wolframInEscapeMode && !suggestWidgetVisible"
+      },
+      {
+        "command": "wolfbook.wrapBracket",
+        "args": "{",
+        "key": "alt+shift+]",
+        "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook' && !wolframInEscapeMode && !suggestWidgetVisible"
+      },
+      {
         "command": "wolfbook.pasteImageCellBelow",
         "key": "ctrl+v",
         "mac": "cmd+v",
@@ -944,6 +1432,11 @@
         "command": "wolfbook.openDialogSubsession",
         "key": "alt+shift+enter",
         "when": "notebookEditorFocused && notebookType == 'extended-wolfram-notebook'"
+      },
+      {
+        "command": "wolfbook.formatAndExecute",
+        "key": "shift+enter",
+        "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook' && !wolframInEscapeMode && !suggestWidgetVisible"
       },
       {
         "command": "wolfbook.executeCell",
@@ -981,6 +1474,26 @@
         "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook' && !wolframInEscapeMode && !suggestWidgetVisible"
       },
       {
+        "command": "cursorUpSelect",
+        "key": "shift+up",
+        "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook' && !wolframInEscapeMode && !suggestWidgetVisible"
+      },
+      {
+        "command": "cursorDownSelect",
+        "key": "shift+down",
+        "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook' && !wolframInEscapeMode && !suggestWidgetVisible"
+      },
+      {
+        "command": "list.expandSelectionUp",
+        "key": "shift+up",
+        "when": "notebookEditorFocused && !editorTextFocus && !inputFocus && notebookType == 'extended-wolfram-notebook'"
+      },
+      {
+        "command": "list.expandSelectionDown",
+        "key": "shift+down",
+        "when": "notebookEditorFocused && !editorTextFocus && !inputFocus && notebookType == 'extended-wolfram-notebook'"
+      },
+      {
         "command": "wolfbook.navLeft",
         "key": "left",
         "when": "notebookEditorFocused && !editorTextFocus && !inputFocus && notebookType == 'extended-wolfram-notebook'"
@@ -996,7 +1509,7 @@
         "when": "notebookEditorFocused && !editorTextFocus && !inputFocus && notebookType == 'extended-wolfram-notebook'"
       },
       {
-        "command": "wolfbook.navRight",
+        "command": "wolfbook.navDown",
         "key": "down",
         "when": "notebookEditorFocused && !editorTextFocus && !inputFocus && notebookType == 'extended-wolfram-notebook'"
       },
@@ -1097,6 +1610,14 @@
           "id": "wolfbook.askSpecialist",
           "name": "Ask Specialist"
         }
+      ],
+      "wolfbook-oberon": [
+        {
+          "type": "webview",
+          "id": "wolfbook.oberon.controlRoom",
+          "name": "Control Room",
+          "when": "config.wolfbook.oberon.showControlRoom"
+        }
       ]
     },
     "notebooks": [
@@ -1123,6 +1644,9 @@
         "label": "Wolfbook File Icons",
         "path": "./icons/wolfbook-icon-theme.json"
       }
+    ],
+    "markdown.previewStyles": [
+      "./media/notebook-headings.css"
     ],
     "notebookRenderer": [
       {
@@ -1238,14 +1762,26 @@
         "displayName": "Wolfbook Remote Checkpoint",
         "modelDescription": "REQUIRED USAGE — agent working memory. Persist a structured checkpoint (plan, decision, finding, summary, or blocker) for the active Wolfbook notebook. The checkpoint is saved to disk under the notebook's .img/ sidecar directory AND mirrored to any paired iOS device watching the workspace. The tool's reply lists prior checkpoints for the same notebook, so the agent should call this tool at session start (with kind='summary' to read prior context) and after every meaningful step (decisions, findings, plan updates, blockers). Treat the checkpoint history as your durable working memory across sessions.",
         "canBeReferencedInPrompt": false,
-        "tags": ["wolfbook", "wolfbook-remote"],
+        "tags": [
+          "wolfbook",
+          "wolfbook-remote"
+        ],
         "inputSchema": {
           "type": "object",
-          "required": ["kind", "summary"],
+          "required": [
+            "kind",
+            "summary"
+          ],
           "properties": {
             "kind": {
               "type": "string",
-              "enum": ["plan", "decision", "finding", "summary", "blocker"],
+              "enum": [
+                "plan",
+                "decision",
+                "finding",
+                "summary",
+                "blocker"
+              ],
               "description": "Checkpoint category. 'plan' = next steps; 'decision' = chosen approach with rationale; 'finding' = empirical result or insight; 'summary' = recap of session/sub-task; 'blocker' = unresolved problem requiring user input."
             },
             "summary": {
@@ -1258,12 +1794,16 @@
             },
             "relatedCells": {
               "type": "array",
-              "items": { "type": "string" },
+              "items": {
+                "type": "string"
+              },
               "description": "Optional list of CellIds this checkpoint references."
             },
             "relatedFiles": {
               "type": "array",
-              "items": { "type": "string" },
+              "items": {
+                "type": "string"
+              },
               "description": "Optional list of workspace-relative file paths this checkpoint references."
             }
           }
@@ -1469,12 +2009,26 @@
               "items": {
                 "type": "object",
                 "properties": {
-                  "cellId":   { "type": "string", "description": "Stable CellId of the cell to edit." },
-                  "cellNumber": { "type": "number", "description": "1-based cell number (fallback if cellId unavailable)." },
-                  "content":  { "type": "string", "description": "New source text for this cell." },
-                  "evaluate": { "type": "boolean", "description": "Override per-cell evaluation (default: inherits top-level evaluate which defaults to true)." }
+                  "cellId": {
+                    "type": "string",
+                    "description": "Stable CellId of the cell to edit."
+                  },
+                  "cellNumber": {
+                    "type": "number",
+                    "description": "1-based cell number (fallback if cellId unavailable)."
+                  },
+                  "content": {
+                    "type": "string",
+                    "description": "New source text for this cell."
+                  },
+                  "evaluate": {
+                    "type": "boolean",
+                    "description": "Override per-cell evaluation (default: inherits top-level evaluate which defaults to true)."
+                  }
                 },
-                "required": ["content"]
+                "required": [
+                  "content"
+                ]
               }
             },
             "evaluate": {
@@ -2088,13 +2642,21 @@
         "displayName": "Wolfslide: Get Deck Context",
         "toolReferenceName": "wolfslideContext",
         "canBeReferencedInPrompt": true,
-        "modelDescription": "Returns full deck context: open files, current theme, available theme presets, renderer capabilities (KaTeX math, fragmentOrder animation, eval blocks, CSS color classes), and best-practice tips. ALWAYS call this first before creating or editing slides — it tells you everything the renderer supports. Use the 'file' parameter to target a specific open .wslide file.",
+        "modelDescription": "Returns full deck context: CURRENTLY VISIBLE SLIDE (index + label + block tree), open files, all slide labels with their indices, current theme, style presets, and renderer capabilities. Call this first — it tells you exactly which slide the user is looking at and lists all slides so you can identify the right index before editing.\n\n🚫 NEVER edit .wslide files directly with file/disk tools. All edits must go through wolfslide_* tools — direct file writes bypass the live editor and corrupt the undo stack.\n\nUse 'scope' to anchor the session: wolfslide_getContext(scope:'Fix slide 21 only'). The scope is shown prominently on every subsequent call. Clear with scope:''.",
         "inputSchema": {
           "type": "object",
           "properties": {
+            "scope": {
+              "type": "string",
+              "description": "Set a task anchor shown at the top of all future getContext calls. Use to stay focused: 'Edit slide 21 only', 'Fix heading styles slides 12-15', etc. Pass empty string to clear."
+            },
             "file": {
               "type": "string",
               "description": "Optional: filename or path of the .wslide file to target. Defaults to the active slide editor."
+            },
+            "includeCss": {
+              "type": "boolean",
+              "description": "Set to true to include the full editorCSS in the response. Omitted by default to keep output compact — only needed when inspecting or modifying the CSS."
             }
           }
         }
@@ -2104,17 +2666,21 @@
         "displayName": "Wolfslide: List Slides",
         "toolReferenceName": "wolfslideList",
         "canBeReferencedInPrompt": true,
-        "modelDescription": "Returns a rich multi-line text summary of all slides in the deck. Each slide entry includes: index, id, label, hidden status, step count (animation fragments), character count, and an indented ASCII block tree showing block types, content excerpts, and image ALT/src info. Pass verbose:true to include the full ASCII block diagram for every slide — useful for inspecting multiple slides at once without calling wolfslide_getSlide in a loop. Use the 'file' parameter to target a specific open .wslide file.",
+        "modelDescription": "Returns a summary of all slides (index, label, background, block count, char count, animation steps). By default (verbose:false) shows compact one-line summaries — fast and context-light. Pass verbose:true to include ASCII block trees for ALL slides — WARNING: dumps the entire deck into context, avoid on large decks. For a single slide's block tree, use slideIndex:N (defaults to verbose:true for that one slide) or use wolfslide_getSlide.",
         "inputSchema": {
           "type": "object",
           "properties": {
-            "file": {
-              "type": "string",
-              "description": "Optional: filename or path of the .wslide file to target. Defaults to the active slide editor."
+            "slideIndex": {
+              "type": "number",
+              "description": "1-based slide number. If given, shows only that one slide (verbose defaults true). Use this instead of verbose:true on the full deck."
             },
             "verbose": {
               "type": "boolean",
-              "description": "If true, include the full ASCII block tree for every slide in the listing. Useful to inspect multiple slides at once without looping wolfslide_getSlide calls."
+              "description": "Include ASCII block trees. Default false (compact). For a single slide use slideIndex:N instead of verbose:true on the full deck."
+            },
+            "file": {
+              "type": "string",
+              "description": "Optional: filename or path of the .wslide file to target."
             },
             "docUri": {
               "type": "string",
@@ -2128,7 +2694,7 @@
         "displayName": "Wolfslide: Get Slide",
         "toolReferenceName": "wolfslideGetSlide",
         "canBeReferencedInPrompt": true,
-        "modelDescription": "Returns the full block tree, ASCII diagram, image summary, and raw JSON for a single slide. Defaults to the currently visible slide when no index is given. Accepts slideIndex (1-based), slideNumber (alias), or slideId. Use this after wolfslide_listSlides to inspect an individual slide.",
+        "modelDescription": "Returns the ASCII diagram, image summary, and raw JSON for a single slide. Call with NO arguments to see the slide the user is currently looking at — the response includes a '▶ CURRENTLY VIEWING' banner confirming the slide number and label. Use this as the first step when the user says 'this slide' or 'the current slide'. Accepts slideIndex (1-based), slideNumber (alias), or slideId to target a specific slide. Use brief:true to skip the raw JSON — saves context when you only need the ASCII layout.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -2144,6 +2710,10 @@
               "type": "string",
               "description": "Slide id (alternative to slideIndex)."
             },
+            "brief": {
+              "type": "boolean",
+              "description": "If true, skip the raw JSON block tree. Use when you only need the ASCII layout diagram — much smaller context footprint."
+            },
             "docUri": {
               "type": "string",
               "description": "Optional: target a specific open .wslide file."
@@ -2153,10 +2723,10 @@
       },
       {
         "name": "wolfslide_getSlideHtml",
-        "displayName": "Wolfslide: Get Slide HTML",
+        "displayName": "Wolfslide: Get Slide Preview",
         "toolReferenceName": "wolfslideGetSlideHtml",
         "canBeReferencedInPrompt": true,
-        "modelDescription": "Renders a single slide to standalone Reveal.js HTML and returns it inline (or writes to outputPath). Much faster than wolfslide_exportHtml for checking one slide's layout. Use this to verify layout, typography, and image sizing without exporting the full deck. Accepts slideIndex (1-based), slideNumber (alias), or slideId. Defaults to the currently visible slide.",
+        "modelDescription": "Preview a slide. Default (format:'image'): captures a JPEG screenshot of the slide at its FINAL state — all animation fragments visible at once. IMPORTANT: outputPath is REQUIRED for format:'image' — omitting it returns ~100KB base64 inline and exhausts context. Pass outputPath:\"/tmp/slide.jpg\" (or any absolute path). Use format:'html' to get standalone static HTML without requiring outputPath. Accepts slideIndex (1-based), slideNumber (alias), or slideId. Defaults to the currently visible slide.\n\n⚠ KNOWN CAPTURE LIMITATIONS (format:'image' uses html2canvas, NOT a real browser render): some things can look WRONG in the screenshot even when the live deck is correct — do NOT treat these as bugs/failures: (1) advanced CSS — gradients, backdrop-filter, some box-shadows/text-shadows, and bare-element rules from theme editorCSS (e.g. a custom h2 title bar) — may not be captured; (2) inline <svg> in raw blocks may be blank. For a faithful check of styling, use format:'html', write it to outputPath, and open it in a browser.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -2172,9 +2742,25 @@
               "type": "string",
               "description": "Slide id (alternative to slideIndex)."
             },
+            "format": {
+              "type": "string",
+              "enum": [
+                "image",
+                "html"
+              ],
+              "description": "Output format. 'image' (default): JPEG screenshot via html2canvas — shows the final slide state with all elements visible, costs zero extra tokens. 'html': standalone static HTML with all elements visible. Use animationSteps:true with 'html' to get Reveal.js with step navigation."
+            },
+            "animationSteps": {
+              "type": "boolean",
+              "description": "Only relevant when format:'html'. If true, generates Reveal.js HTML with step-by-step animation navigation. Default false (all elements visible at once)."
+            },
+            "scale": {
+              "type": "number",
+              "description": "Only for format:'image'. Capture scale factor (default 0.5, giving 960x540px JPEG). Use 1.0 for full 1920x1080."
+            },
             "outputPath": {
               "type": "string",
-              "description": "Optional absolute path to write the HTML file. If omitted, HTML is returned inline."
+              "description": "Optional absolute path to write the output file (.jpg for image, .html for html). If omitted, content is returned inline."
             },
             "docUri": {
               "type": "string",
@@ -2231,7 +2817,7 @@
         "displayName": "Wolfslide: Insert Slide",
         "toolReferenceName": "wolfslideInsert",
         "canBeReferencedInPrompt": true,
-        "modelDescription": "Inserts a single slide. For inserting many slides at once, prefer wolfslide_bulkInsert. Content nodes support: KaTeX math via $...$ (inline) and $$...$$ (display); fragmentOrder:N for step-by-step animation; CSS classes .gl .te .ro .mu .bl .re .cy for colored text (via <span class='gl'>text</span>). Set slide.background to match your theme. If afterIndex is omitted, appends at the end.",
+        "modelDescription": "Inserts a single slide. For inserting many slides at once, prefer wolfslide_bulkInsert. To rebuild an existing slide, use wolfslide_replaceSlide. Block types: container, heading, text, image, list, math, box, code, arrow, eval, raw. list items may be plain strings (auto-wrapped to text blocks) or {type:\"text\",content}; eval blocks accept the expression in `input` (or `content`). Content supports KaTeX math via $...$ (inline) and $$...$$ (display); fragmentOrder:N for animation; CSS classes .gl .te .ro .mu .bl .re .cy for colored text. If afterIndex is omitted, appends at the end.\n\nMinimal example: {label:\"Title\", background:\"#1a1a2e\", layout:\"column\", children:[{type:\"heading\", content:\"Hello\"}, {type:\"text\", content:\"Body text here.\"}]}",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -2241,7 +2827,34 @@
             },
             "slide": {
               "type": "object",
-              "description": "Slide object. Required fields: label. Optional: background, layout, children, gap, padding."
+              "description": "Slide object. Required: label. Optional: background, layout (column/row/grid), gap, padding, children:[{type, content, style, ...}]. Block types: container, heading, text, image, list, math, box, code, arrow, eval, raw."
+            }
+          },
+          "required": [
+            "slide"
+          ]
+        }
+      },
+      {
+        "name": "wolfslide_replaceSlide",
+        "displayName": "Wolfslide: Replace Slide",
+        "toolReferenceName": "wolfslideReplace",
+        "canBeReferencedInPrompt": true,
+        "modelDescription": "Replaces an entire slide's structure in one call — the first-class way to REBUILD a slide (no insert+delete index juggling). The target slide's id is preserved by default so references stay stable; pass slide.id to override. To change only a few block properties, prefer wolfslide_patchBlock; to change only slide metadata (label/background/layout), prefer wolfslide_editSlide. Block types: container, heading, text, image, list, math, box, code, arrow, eval, raw. List items may be plain strings or {type:\"text\",content}. Eval blocks accept the expression in `input` (or `content`).\n\nExample: wolfslide_replaceSlide(slideIndex:3, slide:{label:\"Recap\", layout:\"column\", children:[{type:\"heading\", content:\"Recap\"}, {type:\"list\", items:[\"point one\", \"point two\"]}]})",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "slideIndex": {
+              "type": "number",
+              "description": "1-based slide number to replace (matches wolfslide_listSlides). Omit to target the currently visible slide."
+            },
+            "slideId": {
+              "type": "string",
+              "description": "Slide id to replace (alternative to slideIndex)."
+            },
+            "slide": {
+              "type": "object",
+              "description": "The full replacement slide. Optional: label, background, layout (column/row/grid), gap, padding, children:[{type, content, ...}]. The existing slide id is kept unless you set slide.id."
             }
           },
           "required": [
@@ -2254,13 +2867,13 @@
         "displayName": "Wolfslide: Edit Slide",
         "toolReferenceName": "wolfslideEdit",
         "canBeReferencedInPrompt": true,
-        "modelDescription": "Replaces top-level properties of a slide (label, background, layout, gap, padding, hidden, children). Only keys present in the patch are updated. To rewrite a slide's block tree, pass the complete children array. Merge semantics: in the children array, a block specified as {\"id\":\"...\"}  with no other fields is a no-op stub — the existing block is kept unchanged. Valid block types: container, heading, text, image, list, math, box, raw, code, arrow, eval. Unknown types are silently stored but will not render — a warning is returned. Content supports KaTeX math ($...$, $$...$$) and fragmentOrder:N animation. CSS color classes: .gl .te .ro .mu .bl .re .cy.",
+        "modelDescription": "Updates SLIDE-LEVEL metadata only: label, background, layout, gap, padding, hidden, transition, notes, align, justify, scale, baseFontSize. Omit slideIndex to target the currently visible slide.\n\nLAYOUT/FILL helpers: align (cross-axis: flex-start/center/flex-end/stretch) and justify (main-axis: flex-start/center/flex-end/space-between/space-around) control alignment on the slide root — e.g. patch:{justify:\"center\"} vertically centers a column slide to kill bottom whitespace. scale (number, default 1) multiplies the built-in base text + heading sizes to enlarge a whole slide (e.g. scale:1.2); baseFontSize (px) is an alias (relative to 36). Block-level inline fontSize still overrides.\n\n🚫 NEVER use this to change block properties. For any block change (style, content, position, etc.) use wolfslide_patchBlock — it finds the block anywhere in the tree by id and never risks losing sibling blocks.\n\nChildren arrays: the ONLY safe use is pure id-only stubs {\"id\":\"...\"} for reordering top-level blocks. ANY entry with extra fields (style, offset, content, etc.) is REJECTED with an error before saving — the tool will tell you which blocks to patch and with what call.",
         "inputSchema": {
           "type": "object",
           "properties": {
             "slideIndex": {
               "type": "number",
-              "description": "1-based slide index."
+              "description": "1-based slide number matching the thumbnail panel (same as the number shown as 'Slide N' in wolfslide_listSlides). Pass 15 to target slide 15."
             },
             "slideId": {
               "type": "string",
@@ -2268,7 +2881,11 @@
             },
             "patch": {
               "type": "object",
-              "description": "Object with fields to update on the slide."
+              "description": "Slide metadata fields to update: label, background, layout, gap, padding, hidden, transition, notes, align (cross-axis alignment of the slide root), justify (main-axis alignment — e.g. 'center' to vertically center a column slide), scale (font-size multiplier, default 1), baseFontSize (px alias for scale). For block changes, use wolfslide_patchBlock or wolfslide_block instead."
+            },
+            "dryRun": {
+              "type": "boolean",
+              "description": "When true and patch includes a children/items/elements array: compute the diff (blocks preserved, patched, added, DELETED) and return it WITHOUT saving. Use this to verify no blocks are accidentally deleted before committing. Required when passing a children array to avoid silent data loss."
             }
           },
           "required": [
@@ -2281,15 +2898,47 @@
         "displayName": "Wolfslide: Delete Slide",
         "toolReferenceName": "wolfslideDelete",
         "canBeReferencedInPrompt": true,
-        "modelDescription": "Removes a slide by 1-based index or id.",
+        "modelDescription": "Removes a slide by 1-based panel number (slideIndex, same as 'Slide N' in wolfslide_listSlides) or by id.",
         "inputSchema": {
           "type": "object",
           "properties": {
             "slideIndex": {
-              "type": "number"
+              "type": "number",
+              "description": "1-based slide number matching the thumbnail panel (same as 'Slide N' in wolfslide_listSlides)."
             },
             "slideId": {
               "type": "string"
+            }
+          }
+        }
+      },
+      {
+        "name": "wolfslide_deleteSlides",
+        "displayName": "Wolfslide: Delete Multiple Slides",
+        "toolReferenceName": "wolfslideDeleteSlides",
+        "canBeReferencedInPrompt": true,
+        "modelDescription": "Deletes multiple slides in one call. Provide either slideIndices (array of 1-based slide numbers, e.g. [3,5,7]) OR from+to (1-based inclusive range, e.g. from:5 to:27). At least one slide must remain. Use this instead of repeated wolfslide_deleteSlide calls when removing several slides.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "slideIndices": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              },
+              "description": "Array of 1-based slide indices to delete (e.g. [3, 5, 7])."
+            },
+            "from": {
+              "type": "number",
+              "description": "1-based start of the range to delete (inclusive). Used with 'to'."
+            },
+            "to": {
+              "type": "number",
+              "description": "1-based end of the range to delete (inclusive). Used with 'from'."
+            },
+            "docUri": {
+              "type": "string",
+              "description": "URI of the .wslide document. Defaults to the active editor."
             }
           }
         }
@@ -2305,7 +2954,7 @@
           "properties": {
             "slideIndex": {
               "type": "number",
-              "description": "Current 1-based index."
+              "description": "1-based slide number matching the thumbnail panel (same as 'Slide N' in wolfslide_listSlides). Required unless using slideId."
             },
             "slideId": {
               "type": "string"
@@ -2325,13 +2974,29 @@
         "displayName": "Wolfslide: Undo",
         "toolReferenceName": "wolfslideUndo",
         "canBeReferencedInPrompt": true,
-        "modelDescription": "Triggers undo in the active .wslide editor, reverting the last change. Useful after making a mistake. Optionally specify docUri to target a specific file.",
+        "modelDescription": "Reverts the last programmatic change made to the deck via MCP tools (uses an extension-host undo stack, independent of VS Code Ctrl+Z). Effective for undoing wolfslide_editSlide, wolfslide_insertSlide, wolfslide_deleteSlide, wolfslide_block, and other deck-modifying tools. Stack depth: 20. Optionally specify docUri to target a specific file.",
         "inputSchema": {
           "type": "object",
           "properties": {
             "docUri": {
               "type": "string",
               "description": "Optional URI of the .wslide file to undo in. Defaults to the active editor."
+            }
+          }
+        }
+      },
+      {
+        "name": "wolfslide_reload",
+        "displayName": "Wolfslide: Reload from Disk",
+        "toolReferenceName": "wolfslideReload",
+        "canBeReferencedInPrompt": true,
+        "modelDescription": "Re-reads the .wslide file from disk and resets the in-memory deck to its saved state. Clears the undo stack. Use this after an external tool or script has modified the file directly, or when the in-memory deck has drifted from disk and you need a clean baseline.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "docUri": {
+              "type": "string",
+              "description": "Optional URI of the .wslide file to reload. Defaults to the active editor."
             }
           }
         }
@@ -2454,7 +3119,7 @@
         "displayName": "Wolfslide: Set Theme",
         "toolReferenceName": "wolfslideTheme",
         "canBeReferencedInPrompt": true,
-        "modelDescription": "Sets the deck's color theme from a preset or custom values. Presets: 'academic-light' (white/navy, formal), 'dark-modern' (dark/gold/teal, tech), 'dark-navy' (deep navy/blue), 'solarized-dark' (warm dark), 'high-contrast' (black/neon), 'warm-cream' (light warm). Also updates slide backgrounds to match. Call wolfslide_getContext to see all presets with descriptions. For custom themes, pass a theme object with keys: navy, blue, cyan, accent, editorCSS.",
+        "modelDescription": "Sets the deck's color theme from a preset or custom values. Presets: 'academic-light' (white/navy, formal), 'dark-modern' (dark/gold/teal, tech), 'dark-navy' (deep navy/blue), 'solarized-dark' (warm dark), 'high-contrast' (black/neon), 'warm-cream' (light warm). Also updates slide backgrounds to match. Call wolfslide_getContext to see all presets with descriptions. For custom themes, pass a theme object with keys: navy, blue, cyan, accent, editorCSS.\n\nINCREMENTAL editorCSS edits (avoid resending the whole editorCSS blob): pass appendEditorCSS to append a snippet, or editorCSSReplace as [{find,replace}] (or [[find,replace]]) literal string substitutions on the current editorCSS. Either can be standalone or combined with preset/theme. (editorCSS affects the Reveal.js export and raw-block iframes, not the editor's built-in slide typography.)",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -2474,6 +3139,21 @@
               "type": "boolean",
               "description": "Whether to update slide backgrounds to match the preset. Default: true."
             },
+            "stylePresets": {
+              "type": "object",
+              "description": "Named style bundles stored at deck level. Each key is a preset name; value is a CSS object (background, color, fontSize, etc.) applied as base styles to any block with that stylePreset name. Set a key to null to delete that preset. Example: { \"section-header\": { \"background\": \"rgba(0,0,0,0.4)\", \"color\": \"#fff\" } }"
+            },
+            "appendEditorCSS": {
+              "type": "string",
+              "description": "Append this CSS snippet to the deck's existing editorCSS — lets you add one rule without resending the whole blob."
+            },
+            "editorCSSReplace": {
+              "type": "array",
+              "description": "Literal find/replace edits applied to the current editorCSS, e.g. [{\"find\":\"font-size:48px\",\"replace\":\"font-size:56px\"}] or [[\"old\",\"new\"]]. Each find that is not present is reported as not-found. Tweak one rule without resending everything.",
+              "items": {
+                "type": "object"
+              }
+            },
             "docUri": {
               "type": "string",
               "description": "Document URI (multi-editor)."
@@ -2486,13 +3166,13 @@
         "displayName": "Wolfslide: Bulk Insert Slides",
         "toolReferenceName": "wolfslideBulk",
         "canBeReferencedInPrompt": true,
-        "modelDescription": "Inserts multiple slides in one call — use this when building a presentation from scratch instead of calling insertSlide repeatedly. Accepts an array of slide objects, an optional theme (preset name or object), and optional meta. Content nodes support: KaTeX math via $...$ / $$...$$; fragmentOrder:N for animation; CSS color classes .gl .te .ro .mu .bl .re .cy; eval blocks for Mathematica-generated graphics. Tip: call wolfslide_getContext first to see theme presets and renderer capabilities.",
+        "modelDescription": "Inserts multiple slides in one call — use this when building a presentation from scratch instead of calling insertSlide repeatedly. Block types MUST be one of: container, heading, text, image, list, math, box, code, arrow, eval, raw — passing an unknown type returns a validation error before inserting anything. Content supports KaTeX math via $...$ / $$...$$; fragmentOrder:N for animation; CSS color classes .gl .te .ro .mu .bl .re .cy. Tip: call wolfslide_getContext first to see theme presets.\n\nMinimal slide: {label:\"Slide title\", background:\"#1a1a2e\", layout:\"column\", children:[{type:\"heading\", content:\"Title\"}, {type:\"text\", content:\"Body.\"}]}",
         "inputSchema": {
           "type": "object",
           "properties": {
             "slides": {
               "type": "array",
-              "description": "Array of slide objects. Each slide: {label, background, layout, gap, padding, children:[...blocks]}. Block types: text, heading, image, list, container, code, eval, arrow, raw, box.",
+              "description": "Array of slide objects. Each slide: {label, background, layout (column/row/grid), gap, padding, children:[{type, content, style, ...}]}. REQUIRED per block: type. Block types: container, heading, text, image, list, math, box, code, arrow, eval, raw.",
               "items": {
                 "type": "object"
               }
@@ -2617,7 +3297,7 @@
         "displayName": "Wolfslide: Search Slides",
         "toolReferenceName": "wolfslideSearch",
         "canBeReferencedInPrompt": true,
-        "modelDescription": "Search across all slides for blocks matching a query. Supports three filter dimensions that can be combined: \"query\" (case-insensitive text match against block content, alt, src, label), \"blockType\" (filter by exact block type: \"text\", \"heading\", \"image\", \"container\", \"list\", \"code\", \"eval\", \"arrow\", \"raw\"), \"styleKey\"+\"styleValue\" (find blocks with a specific CSS style property, e.g. styleKey=\"color\" styleValue=\"navy\"). Returns matching slide indices, ids, block ids, types, and content previews. Use this to locate specific blocks for editing without reading the full deck.",
+        "modelDescription": "Search slides by label OR block content — use this to find the correct slideIndex BEFORE editing, especially when slide labels are not unique (e.g. 'N=4 SYM via QSC' on multiple slides). A query matches both slide labels and block text content. Returns slideIndex for every match so you can pass it directly to edit tools.\n\nExamples:\n  wolfslide_searchSlides(query:\"Spectrum from FME\")  ← find which slide number has this label\n  wolfslide_searchSlides(query:\"gamma_cusp\")           ← find which slides contain this equation\n  wolfslide_searchSlides(blockType:\"image\")            ← list all slides with images\n  wolfslide_searchSlides(query:\"red\", styleKey:\"color\")  ← find blocks with color containing 'red'\n\nAlso supports blockType (exact block type filter) and styleKey+styleValue (CSS property search). All filters can be combined.",
         "inputSchema": {
           "type": "object",
           "required": [],
@@ -2650,7 +3330,7 @@
         "displayName": "Wolfslide: Block Operations",
         "toolReferenceName": "wolfslideBlock",
         "canBeReferencedInPrompt": true,
-        "modelDescription": "Block-level operations on slide blocks. action=\"insert\": add a new block to a slide. action=\"edit\": patch a block's properties by blockId (pass updates or patch object). action=\"delete\": remove a block by blockId. action=\"move\": relocate a block within or between containers. action=\"bulkEdit\": apply many block edits in one atomic save — pass edits:[{blockId, updates, slideId?}] for batch layout fixes (e.g. adjusting padding across 10 slides). Only one applyDeck call is made for the whole batch.",
+        "modelDescription": "Block-level operations on slide blocks.\n\naction=\"insert\": add a new block to a slide.\naction=\"edit\": patch a block's properties by blockId or blockName (pass updates or patch object; null value = delete key; childrenOps for precise child array ops).\naction=\"delete\": remove a block by blockId or blockName.\naction=\"move\": relocate a block within or between containers (by blockId or blockName).\naction=\"bulkEdit\": apply many explicit {blockId, updates} edits in one atomic save.\naction=\"getBlock\": retrieve full JSON of one block by blockId or blockName.\naction=\"bulkPatch\": apply the SAME patch to every block matching a selector across the entire deck — the efficient way to normalize styles, apply presets, or fix many blocks at once.\n\nbulkPatch selector keys: type (block type), className, namePattern (glob, e.g. 'title-*'), blockIds (explicit array), hasStyle ({key:value} match), stylePreset. All selector keys are ANDed.\nExample: wolfslide_block({ action:'bulkPatch', selector:{type:'box'}, patch:{stylePreset:'section-header'} })",
         "inputSchema": {
           "type": "object",
           "required": [
@@ -2664,13 +3344,15 @@
                 "edit",
                 "delete",
                 "move",
-                "bulkEdit"
+                "bulkEdit",
+                "getBlock",
+                "bulkPatch"
               ],
-              "description": "insert: add a new block. edit: patch block properties. delete: remove a block. move: relocate a block. bulkEdit: apply multiple block edits in one save."
+              "description": "insert: add a new block. edit: patch block properties. delete: remove a block. move: relocate a block. bulkEdit: many explicit {blockId,updates} edits in one save. getBlock: fetch full JSON of one block. bulkPatch: apply the same patch to all blocks matching a selector across the deck."
             },
             "slideId": {
               "type": "string",
-              "description": "Target slide id."
+              "description": "Target slide id (for insert/edit/delete/move/getBlock)."
             },
             "slideIndex": {
               "type": "number",
@@ -2678,19 +3360,23 @@
             },
             "blockId": {
               "type": "string",
-              "description": "Target block ID (required for edit/delete/move)."
+              "description": "Target block ID (for edit/delete/move/getBlock). Use blockName as a stable alternative."
+            },
+            "blockName": {
+              "type": "string",
+              "description": "Human-readable name of the block (alternative to blockId for edit/delete/move/getBlock). Set via the 'name' field at creation. Searched across all slides."
             },
             "block": {
               "type": "object",
-              "description": "Block object to insert (required for 'insert'). Include type, content, etc."
+              "description": "Block object to insert (required for 'insert'). Include type, content, and optionally a 'name' field for future addressing."
             },
             "updates": {
               "type": "object",
-              "description": "Properties to patch on the block (for \"edit\"). Also accepted as \"patch\" for consistency with wolfslide_editSlide."
+              "description": "Properties to patch on the block (for 'edit'). Also accepted as 'patch'. null value = delete key. Include childrenOps:[{op:'insert',afterId,block},{op:'remove',blockId},{op:'reorder',ids}] for precise child array ops without replacing the whole array."
             },
             "parentBlockId": {
               "type": "string",
-              "description": "Insert/move into a container block."
+              "description": "Insert/move into this container block (for insert/move)."
             },
             "position": {
               "type": "number",
@@ -2710,12 +3396,59 @@
             },
             "edits": {
               "type": "array",
-              "description": "Array of block edits for action=\"bulkEdit\". Each item: {blockId, updates (or patch), slideId? or slideIndex?}. blockId is required; slideId/slideIndex are optional (auto-searched across all slides if omitted).",
+              "description": "Array of block edits for action='bulkEdit'. Each item: {blockId, updates (or patch), slideId? or slideIndex?}. blockId is required; slideId/slideIndex are optional (auto-searched across all slides if omitted).",
               "items": {
                 "type": "object"
               }
+            },
+            "selector": {
+              "type": "object",
+              "description": "Selector for action='bulkPatch'. Supported keys: type (block type string), className (exact CSS class name), namePattern (glob e.g. 'title-*'), blockIds (explicit id array), hasStyle ({cssKey: 'value'} — exact match on style properties), stylePreset (preset name string). All keys are ANDed. Must match at least one block or returns an error."
+            },
+            "patch": {
+              "type": "object",
+              "description": "Patch to apply to each matched block (for action='bulkPatch'). Deep-merged using same rules as wolfslide_patchBlock: nested objects merge key-by-key, null = delete key, arrays replace entirely."
             }
           }
+        }
+      },
+      {
+        "name": "wolfslide_patchBlock",
+        "displayName": "Wolfslide: Patch Block",
+        "toolReferenceName": "wolfslidePatchBlock",
+        "canBeReferencedInPrompt": true,
+        "modelDescription": "Merge a patch into a single block, OR inspect a block's current JSON — both by blockId or blockName. Finds the block recursively across all slides. THE preferred tool for changing any block property (color, style, content, size, position, etc.). Setting a value to null removes that key. Style properties merge deeply: { style: { background: 'red' } } only changes background, leaving other style keys intact.\n\nInspect (no patch): wolfslide_patchBlock(blockId: \"9c0rx643\")  ← returns current JSON without modifying\nPatch by ID: wolfslide_patchBlock(blockId: \"9c0rx643\", patch: {style: {background: \"red\"}})\nPatch by name: wolfslide_patchBlock(blockName: \"slide-title\", patch: {...})  ← stable across re-inserts\n\nStyle preset: add stylePreset:\"preset-name\" to a block patch to apply a named style bundle (created via wolfslide_setTheme(stylePresets:{...})). The preset supplies base styles; block.style always overrides.\n\nSupported block style keys: background, color, borderRadius, border, boxShadow, padding, margin, fontSize, fontWeight, fontStyle, lineHeight, textAlign, letterSpacing, opacity, flex, alignSelf, overflow, whiteSpace, textShadow, backdropFilter, transform.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "blockId": {
+              "type": "string",
+              "description": "ID of the block to patch (e.g. '9c0rx643'). Found in wolfslide_listSlides verbose output or wolfslide_getSlide ASCII tree. Use blockName instead for named blocks."
+            },
+            "blockName": {
+              "type": "string",
+              "description": "Human-readable name of the block (alternative to blockId). Set via the 'name' field at block creation (e.g. name:'slide-title'). Searched across all slides — more stable than ID across re-inserts."
+            },
+            "patch": {
+              "type": "object",
+              "description": "Properties to merge into the block. Deep-merged: nested objects (like style) are merged key-by-key. Set a key to null to delete it. Arrays are replaced entirely. Omit entirely (or pass null) to inspect the block's current JSON without modifying it."
+            },
+            "slideIndex": {
+              "type": "number",
+              "description": "Optional: 1-based slide index to narrow the search. If omitted, searches the currently visible slide first, then all other slides. When the user says 'this slide', omit this and the tool will target the current slide."
+            },
+            "slideId": {
+              "type": "string",
+              "description": "Slide ID to narrow the search (alternative to slideIndex)."
+            },
+            "docUri": {
+              "type": "string",
+              "description": "Optional: target a specific open .wslide file."
+            }
+          },
+          "required": [
+            "patch"
+          ]
         }
       },
       {
@@ -2776,6 +3509,48 @@
             "docUri": {
               "type": "string",
               "description": "Optional: target a specific open .wslide file."
+            }
+          }
+        }
+      },
+      {
+        "name": "wolfslide_copySlides",
+        "displayName": "Wolfslide: Copy Slides to Another Deck",
+        "toolReferenceName": "wolfslideCopySlides",
+        "canBeReferencedInPrompt": true,
+        "modelDescription": "Copies one or more slides from a source .wslide file to a target .wslide file, including all referenced image assets. Images are copied to the target deck's img/ folder and src paths are automatically updated. Both files must be open in the editor. Specify slides with slideIndices (array of 1-based numbers) or from+to (1-based inclusive range). If neither is given, copies the currently visible slide from the source. Use wolfslide_getContext to find the docUri of each open file. After copying, the target deck is saved and its editor refreshes.",
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "targetDocUri"
+          ],
+          "properties": {
+            "sourceDocUri": {
+              "type": "string",
+              "description": "URI of the source .wslide file (as shown in wolfslide_getContext). Defaults to the currently active editor."
+            },
+            "targetDocUri": {
+              "type": "string",
+              "description": "URI of the destination .wslide file. Must be open in the editor. Get URIs from wolfslide_getContext."
+            },
+            "slideIndices": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              },
+              "description": "1-based slide numbers to copy from the source (e.g. [1, 3, 5]). Use this OR from+to."
+            },
+            "from": {
+              "type": "number",
+              "description": "1-based start of a contiguous range to copy (inclusive). Use with 'to'."
+            },
+            "to": {
+              "type": "number",
+              "description": "1-based end of the range to copy (inclusive). Use with 'from'."
+            },
+            "insertAtIndex": {
+              "type": "number",
+              "description": "1-based position in the target deck where the slides should be inserted. Defaults to appending at the end."
             }
           }
         }
@@ -2871,6 +3646,10 @@
               "type": "number",
               "description": "Animation step for the inserted image block."
             },
+            "overwrite": {
+              "type": "boolean",
+              "description": "For action:'copy' — if true, overwrite the destination file if it already exists, keeping the original filename. Default false (safe: appends timestamp to avoid collision). Use overwrite:true when re-exporting a plot so the slide keeps the same src reference."
+            },
             "force": {
               "type": "boolean",
               "description": "For action:'delete' — delete even if the image is still referenced by slide blocks."
@@ -2878,6 +3657,57 @@
             "docUri": {
               "type": "string",
               "description": "Optional: target a specific open .wslide file."
+            }
+          }
+        }
+      },
+      {
+        "name": "wolfbook_runCells",
+        "displayName": "Wolfbook: Run Cell Range",
+        "toolReferenceName": "wolfbookRunCells",
+        "canBeReferencedInPrompt": true,
+        "modelDescription": "Run a contiguous range of notebook cells sequentially and return their combined output. Use startCell/endCell (1-based cell numbers) to specify the range. Cells are run in order; if stopOnError is true (default), execution stops on the first error. Returns a summary line per cell showing output or error. Equivalent to wolfbook_runRange.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "startCell": {
+              "type": "number",
+              "description": "1-based cell number to start from (inclusive). Defaults to 1."
+            },
+            "endCell": {
+              "type": "number",
+              "description": "1-based cell number to end at (inclusive). Defaults to last cell."
+            },
+            "stopOnError": {
+              "type": "boolean",
+              "description": "Stop execution if a cell produces an error. Default true."
+            },
+            "timeoutSeconds": {
+              "type": "number",
+              "description": "Global timeout in seconds for the entire range. Default 120."
+            },
+            "notebook": {
+              "type": "string",
+              "description": "Notebook filename to target. Defaults to the active open notebook."
+            }
+          }
+        }
+      },
+      {
+        "name": "wolfbook_showImage",
+        "displayName": "Wolfbook: Show Image",
+        "toolReferenceName": "wolfbookShowImage",
+        "canBeReferencedInPrompt": true,
+        "modelDescription": "Read a local image file and return it as an inline image so you can visually verify plot output, exported PNGs, etc. Supports PNG, JPEG, GIF, WebP, SVG. Files larger than 4 MB are rejected. Use this after wolfbook_runCell exports a PNG to confirm the visual result before referencing it in a slide.",
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "path"
+          ],
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "Absolute path to the image file to display."
             }
           }
         }
@@ -3504,6 +4334,11 @@
           "id": "wolfbook-debugger",
           "title": "Wolfbook Controls",
           "icon": "media/wolfbook-debug.svg"
+        },
+        {
+          "id": "wolfbook-oberon",
+          "title": "Oberon",
+          "icon": "media/oberon.svg"
         }
       ]
     },
@@ -3557,10 +4392,11 @@
     "webpack-cli": "^4.10.0"
   },
   "dependencies": {
-    "katex": "^0.16.0",
     "domutils": "^2.8.0",
+    "katex": "^0.16.0",
     "open": "8.4.0",
     "path": "^0.12.7",
+    "prismjs": "^1.29.0",
     "uuid": "^8.3.2",
     "vscode-languageclient": "8.0.2"
   },
