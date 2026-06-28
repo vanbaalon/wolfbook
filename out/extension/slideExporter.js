@@ -1131,6 +1131,9 @@ html,body{margin:0;padding:0;}
   .slide-wrap{margin:0!important;box-shadow:none;width:auto!important;height:auto!important;overflow:visible!important;}
   .slide-page{transform:none!important;break-after:page;break-inside:avoid;}
   .slide-wrap:last-child .slide-page{break-after:auto;}
+  /* Drop box/text shadows in print — Chrome's print pipeline renders them as
+     hard grey blocks/banding. The on-screen HTML keeps them. */
+  .slide-page *{box-shadow:none!important;text-shadow:none!important;}
 }
 </style>
 <style>
