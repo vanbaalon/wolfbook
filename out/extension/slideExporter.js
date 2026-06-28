@@ -1193,6 +1193,9 @@ function assembleSerializedReveal(parts, opts) {
 <style>
 /* Reveal shell only — slide CONTENT styling comes from the editor's own CSS below.
    No theme stylesheet is loaded, so nothing recolours/uppercases the content. */
+/* The editor uses border-box globally; without this, width:1920px + padding would
+   overflow the slide (the slide-content/cards size content-box). */
+*{box-sizing:border-box;}
 html,body{margin:0;padding:0;background:#000;}
 .reveal{background:#000;}
 .reveal .slides{text-align:left;}
