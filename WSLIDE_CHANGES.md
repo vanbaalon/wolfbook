@@ -160,6 +160,25 @@ New runtime dependency: **`prismjs ^1.29.0`** (added to `package.json`, same pat
 
 ---
 
+## Architecture — webview-driven export (one renderer)
+The export now prefers to **serialize the webview's own live DOM** instead of
+re-building slides with a separate string renderer:
+- The webview renders every slide with the *real* `renderBlock` (KaTeX + Prism
+  already applied, images inlined as data URIs), strips editor-only chrome, and
+  returns the `.slide-content` DOM + the editor's own slide CSS (read live from its
+  stylesheet) — `serializeDeck`/`serializeDeckResult`.
+- `slideExporter.assembleSerializedDeck()` wraps that DOM in one 1920×1080 page per
+  slide, adding the bundled KaTeX + Prism *theme* CSS (cross-origin in the webview).
+- **HTML export**, **PDF publishing mode** (prints the same HTML via Chrome), and the
+  `wolfslide_exportHtml` tool all use this. So the export is the editor's exact
+  output — drift is structurally impossible.
+- **Fallback:** if the webview round-trip fails or times out, everything falls back
+  to the verified string exporter (`exportDeckPdf`), so export can never break.
+
+This is the foolproof version of the earlier fixes; the string exporter (kept as the
+fallback) was already aligned and verified, but the serialized path removes the
+duplicate-renderer drift entirely.
+
 ## Architecture fix — HTML export no longer uses reveal.js
 The root cause of HTML looking different was that **"Export HTML" wrapped slides in
 reveal.js** — a separate presentation framework with its own CSS reset, scaling, theme,

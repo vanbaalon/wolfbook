@@ -768,6 +768,13 @@ window.addEventListener('message', e => {
         }
         return;
     }
+    if (msg.cmd === 'serializeDeck') {
+        // Export: render every slide with the REAL renderer and hand back the live
+        // DOM (KaTeX + Prism already applied, images inlined) + the slide CSS, so the
+        // HTML/PDF export is the editor's own output — no separate string renderer.
+        serializeDeckForExport(msg.id);
+        return;
+    }
     if (msg.cmd === 'slideClipboard') {
         // Host broadcast: another panel copied/cut slides — sync local clipboard so Cmd+V works here
         _slideClipboard = msg.slides || null;
@@ -3640,6 +3647,84 @@ function renderAll() {
   if (window._syncNotesUI) window._syncNotesUI();
   if (window._syncTransitionUI) window._syncTransitionUI();
   document.title = (deckName || 'Untitled') + (dirty ? ' \u2022' : '') + ' \u2014 Wolfbook Slides';
+}
+
+// ── Export serialization ────────────────────────────────────────────────
+// Render one slide's content with the SAME renderer the editor uses, into a
+// detached .slide-content div (chrome suppressed, all fragments visible).
+function buildSlideContentForExport(slide) {
+  const contentDiv = document.createElement('div');
+  contentDiv.className = 'slide-content';
+  contentDiv.style.cssText = 'width:1920px;height:1080px;position:relative;overflow:hidden;';
+  applyContainerLayout(contentDiv, slide);
+  if (slide.padding) contentDiv.style.padding = slide.padding;
+  const _scale = resolveSlideScale(slide, deck);
+  if (_scale !== 1) contentDiv.style.fontSize = (36 * _scale) + 'px';
+  const prev = _thumbMode; _thumbMode = true;
+  try {
+    (slide.children || []).forEach(block => {
+      const dom = renderBlock(block, slide);
+      if (dom) contentDiv.appendChild(dom);
+    });
+  } finally { _thumbMode = prev; }
+  return contentDiv;
+}
+
+// Convert webview-resource image srcs to data URIs so the exported HTML is portable.
+async function _inlineExportImages(root) {
+  const imgs = [...root.querySelectorAll('img')];
+  await Promise.all(imgs.map(async img => {
+    if (!img.getAttribute('src') || img.src.startsWith('data:')) return;
+    try {
+      const res = await fetch(img.src);
+      const blob = await res.blob();
+      img.src = await new Promise(r => { const fr = new FileReader(); fr.onload = ev => r(ev.target.result); fr.readAsDataURL(blob); });
+    } catch (_) { /* leave src as-is on failure */ }
+  }));
+}
+
+// Collect the slide-relevant CSS rules from same-origin stylesheets (skips editor
+// chrome and cross-origin CDN sheets — KaTeX/Prism CSS are supplied by the host).
+function getSlideExportCSS() {
+  const keep = /\.(slide-content|code-block|eval-block|two-col|block-dom)\b/;
+  const drop = /(:hover|:focus|::after|::before|\.selected|\.ancestor-of-selected|\.panel-highlight|\.has-offset|\.text-editing|has-text-editing|\.dragging|\.resizing|move-handle|\.rh\b|frag-badge|font-warn|eval-spinner|#)/;
+  const out = [];
+  for (const sheet of document.styleSheets) {
+    let rules; try { rules = sheet.cssRules; } catch (_) { continue; }
+    for (const rule of rules) {
+      const sel = rule.selectorText;
+      if (sel && keep.test(sel) && !drop.test(sel)) out.push(rule.cssText);
+    }
+  }
+  return out.join('\n');
+}
+
+async function serializeDeckForExport(id) {
+  let host;
+  try {
+    host = document.createElement('div');
+    host.style.cssText = 'position:fixed;left:-100000px;top:0;width:1920px;height:1080px;overflow:hidden;';
+    document.body.appendChild(host);
+    const slides = [];
+    for (const slide of (deck.slides || [])) {
+      const content = buildSlideContentForExport(slide);
+      host.innerHTML = '';
+      host.appendChild(content);
+      if (window.renderMathInElement) {
+        try { renderMathInElement(content, { delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}], throwOnError:false }); } catch (_) {}
+      }
+      if (window.Prism && Prism.highlightAllUnder) { try { Prism.highlightAllUnder(content); } catch (_) {} }
+      await _inlineExportImages(content);
+      // Drop transient editor-only affordances that renderBlock emits regardless of mode.
+      content.querySelectorAll('.eval-spinner, .frag-badge, .font-warn, .move-handle, .rh').forEach(el => el.remove());
+      slides.push({ background: slide.background || '#fafcff', hidden: !!slide.hidden, html: content.outerHTML });
+    }
+    vscodeApi.postMessage({ cmd: 'serializeDeckResult', id, slides, slideCSS: getSlideExportCSS(), themeVars: getThemeVarsCSS() });
+  } catch (err) {
+    vscodeApi.postMessage({ cmd: 'serializeDeckResult', id, error: String(err && err.message || err) });
+  } finally {
+    if (host && host.parentNode) host.parentNode.removeChild(host);
+  }
 }
 
 // ── Thumbnail rendering ─────────────────────────────────────────────────

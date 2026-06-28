@@ -1753,10 +1753,16 @@ class WolfslideExportHtmlTool {
             const exporter = require('../slideExporter');
             const depWarn = exporter.exportDependencyWarning ? exporter.exportDependencyWarning() : null;
             const warnPrefix = depWarn ? depWarn + '\n\n' : '';
-            // Viewer-accurate static HTML (same renderer as the PDF, not reveal.js).
+            // Preferred: serialize the webview's live DOM (editor-identical). Fall
+            // back to the string renderer if the webview round-trip isn't available.
             const entry0 = docUri ? p._panels?.get(docUri) : p.getActiveEntry();
             const exDeckDir = entry0 ? require('path').dirname(entry0.document.uri.fsPath) : null;
-            const html = exporter.exportDeckPdf(deck, exDeckDir, { finalOnly: true, embedImages: true });
+            const deckName0 = entry0 ? require('path').basename(entry0.document.uri.fsPath, '.wslide') : 'presentation';
+            let html = null;
+            if (entry0 && p._buildSerializedHtml) {
+                html = await p._buildSerializedHtml(entry0, null, deckName0);
+            }
+            if (!html) html = exporter.exportDeckPdf(deck, exDeckDir, { finalOnly: true, embedImages: true });
             const destPath = options.input?.outputPath;
             if (destPath) {
                 require('fs').writeFileSync(destPath, html, 'utf8');

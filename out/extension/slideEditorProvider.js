@@ -628,11 +628,12 @@ class SlideEditorProvider {
                 case 'export': {
                     try {
                         _warnMissingExportDeps();
-                        // Viewer-accurate static HTML (one 1920×1080 page per slide, final
-                        // state) — same renderer as the PDF, NOT reveal.js, so HTML, PDF and
-                        // the editor are visually identical.
                         const exDeckDir = path.dirname(document.uri.fsPath);
-                        const html = exporter.exportDeckPdf(entry.deck, exDeckDir, { finalOnly: true, embedImages: true });
+                        // Preferred: serialize the webview's LIVE rendered DOM so the export
+                        // is byte-for-byte the editor's own output. Fall back to the string
+                        // renderer if the webview round-trip fails for any reason.
+                        let html = await this._buildSerializedHtml(entry, null, deckName);
+                        if (!html) html = exporter.exportDeckPdf(entry.deck, exDeckDir, { finalOnly: true, embedImages: true });
                         const defaultUri = vscode.Uri.file(
                             path.join(path.dirname(document.uri.fsPath), deckName + '.html')
                         );
@@ -717,6 +718,19 @@ class SlideEditorProvider {
                                 title: 'Exporting PDF…',
                                 cancellable: false
                             }, async (progress) => {
+                                // Publishing mode: print the SAME serialized HTML the editor
+                                // produces, so PDF == HTML == editor. (Presenting mode keeps
+                                // the per-step screenshot pipeline.)
+                                let serialHtml = null;
+                                if (finalOnly) {
+                                    progress.report({ message: 'Rendering slides…', increment: 5 });
+                                    serialHtml = await this._buildSerializedHtml(entry, slideIndices, deckName);
+                                }
+                                if (serialHtml) {
+                                    progress.report({ message: 'Writing PDF…', increment: 80 });
+                                    await _exportHtmlToPdf(serialHtml, saveUri.fsPath);
+                                    return;
+                                }
                                 await _exportDeckToPdf(deckSubset, deckDir, saveUri.fsPath,
                                     (msg, increment) => progress.report({ message: msg, increment }),
                                     { finalOnly }
@@ -747,6 +761,14 @@ class SlideEditorProvider {
                     if (msg.id && this._screenshotPending && this._screenshotPending[msg.id]) {
                         this._screenshotPending[msg.id](msg);
                         delete this._screenshotPending[msg.id];
+                    }
+                    break;
+                }
+
+                case 'serializeDeckResult': {
+                    if (msg.id && this._serializePending && this._serializePending[msg.id]) {
+                        this._serializePending[msg.id](msg);
+                        delete this._serializePending[msg.id];
                     }
                     break;
                 }
@@ -1138,6 +1160,55 @@ class SlideEditorProvider {
                 }
             }, 30000);
         });
+    }
+
+    /**
+     * Ask the webview to serialize every slide with the LIVE renderer (KaTeX +
+     * Prism applied, images inlined) and return the DOM + slide CSS. This is the
+     * editor's own output, so the export is guaranteed identical to the viewer.
+     * @returns {Promise<{slides:{background,hidden,html}[], slideCSS:string, themeVars:string}>}
+     */
+    async serializeDeck(entry) {
+        const e = entry || this.getActiveEntry();
+        if (!e) throw new Error('No active .wslide editor found');
+        if (!this._serializePending) this._serializePending = {};
+        if (!this._serializeNextId) this._serializeNextId = 0;
+        const id = ++this._serializeNextId;
+        return new Promise((resolve, reject) => {
+            this._serializePending[id] = (msg) => {
+                if (msg.error) reject(new Error(msg.error));
+                else resolve({ slides: msg.slides || [], slideCSS: msg.slideCSS || '', themeVars: msg.themeVars || '' });
+            };
+            e.webviewPanel.webview.postMessage({ cmd: 'serializeDeck', id });
+            setTimeout(() => {
+                if (this._serializePending[id]) {
+                    delete this._serializePending[id];
+                    reject(new Error('Deck serialization timed out'));
+                }
+            }, 45000);
+        });
+    }
+
+    /**
+     * Build editor-accurate export HTML from the webview's live DOM. Returns the
+     * HTML string, or null if serialization fails (caller falls back to the
+     * string exporter). slideIndices (0-based into deck.slides) optionally limits
+     * the output to a subset, preserving order.
+     */
+    async _buildSerializedHtml(entry, slideIndices, title) {
+        try {
+            const exporter = require('./slideExporter');
+            const parts = await this.serializeDeck(entry);
+            if (!parts || !parts.slides || !parts.slides.length) return null;
+            if (Array.isArray(slideIndices)) {
+                parts.slides = slideIndices.map(i => parts.slides[i]).filter(Boolean);
+                if (!parts.slides.length) return null;
+            }
+            return exporter.assembleSerializedDeck(parts, { title: title || 'Presentation' });
+        } catch (err) {
+            console.warn('[wslide] serialized export unavailable, using string exporter:', err && err.message);
+            return null;
+        }
     }
 }
 

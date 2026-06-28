@@ -973,7 +973,7 @@ ${inner}
 </html>`;
 }
 
-module.exports = { exportDeck, exportDeckPdf, exportSlideStepHtml, slideToHTML, slideToStaticHTML, checkExportDependencies, exportDependencyWarning };
+module.exports = { exportDeck, exportDeckPdf, exportSlideStepHtml, slideToHTML, slideToStaticHTML, assembleSerializedDeck, checkExportDependencies, exportDependencyWarning };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PDF-frames export  —  print-ready HTML: one page per animation step
@@ -1087,6 +1087,78 @@ ${pages.map(p => `<div class="slide-wrap">${p}</div>`).join('\n')}
     });
   }
   if (!matchMedia('print').matches){ fit(); addEventListener('resize', fit); }
+})();
+</script>
+</body>
+</html>`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Serialized-deck export  —  assemble the page from the webview's LIVE rendered
+// DOM (KaTeX + Prism already applied, images inlined) + the editor's own slide
+// CSS. This is the editor's exact output, so the export cannot drift from the
+// viewer. KaTeX/Prism *theme* CSS (cross-origin in the webview) is supplied here
+// from the bundled packages.
+//   parts = { slides:[{background,hidden,html}], slideCSS, themeVars }
+// ─────────────────────────────────────────────────────────────────────────────
+function assembleSerializedDeck(parts, opts) {
+    const all = (parts && parts.slides) || [];
+    const slides = all.filter(s => s && !s.hidden);
+    const pages = slides.map(s =>
+        `<div class="slide-wrap"><div class="slide-page" style="background:${escapeAttr(s.background || '#fafcff')}">${s.html || ''}</div></div>`
+    ).join('\n');
+    const prismCss = _prismThemeCSS();
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>${escapeHtml((opts && opts.title) || 'Presentation')}</title>
+<style>
+@page{size:20in 11.25in;margin:0;}
+*{box-sizing:border-box;-webkit-print-color-adjust:exact;print-color-adjust:exact;}
+${parts.themeVars || ''}
+html,body{margin:0;padding:0;}
+.slide-page{position:relative;width:1920px;height:1080px;overflow:hidden;transform-origin:top left;}
+.slide-page > .slide-content{width:1920px;height:1080px;}
+@media screen{
+  html,body{background:#222;}
+  body{display:flex;flex-direction:column;align-items:center;}
+  .slide-wrap{margin:10px 0;box-shadow:0 2px 16px rgba(0,0,0,.5);overflow:hidden;}
+}
+@media print{
+  .slide-wrap{margin:0;box-shadow:none;}
+  .slide-page{break-after:page;break-inside:avoid;}
+  .slide-wrap:last-child .slide-page{break-after:auto;}
+}
+</style>
+<style>
+/* The editor's own slide CSS, captured live from the webview. */
+${parts.slideCSS || ''}
+</style>
+${prismCss ? `<style>\n${prismCss}\n</style>` : ''}
+${katexHeadAssets(false)}
+<style>
+/* Keep code monospace over Prism's theme font stack (matches the editor). */
+.code-block,.code-block pre,.code-block code,.code-block code *{font-family:'SF Mono','Fira Code','Consolas',monospace!important;}
+</style>
+</head>
+<body>
+${pages}
+<script>
+(function(){
+  if (matchMedia('print').matches) return;
+  function fit(){
+    var vw = document.documentElement.clientWidth;
+    var sc = Math.min(1, (vw - 4) / 1920);
+    document.querySelectorAll('.slide-wrap').forEach(function(w){
+      var p = w.querySelector('.slide-page');
+      p.style.transform = 'scale(' + sc + ')';
+      p.style.transformOrigin = 'top left';
+      w.style.width = (1920 * sc) + 'px';
+      w.style.height = (1080 * sc) + 'px';
+    });
+  }
+  fit(); addEventListener('resize', fit);
 })();
 </script>
 </body>
