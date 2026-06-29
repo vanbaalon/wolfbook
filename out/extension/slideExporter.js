@@ -1225,6 +1225,8 @@ ${katexHeadAssets(false)}
 <div class="reveal"><div class="slides">
 ${sections}
 </div></div>
+<button id="fs-btn" style="position:fixed;top:12px;right:12px;z-index:9999;padding:8px 18px;font-size:14px;font-weight:600;background:rgba(0,0,0,.7);color:#fff;border:1px solid rgba(255,255,255,.3);border-radius:6px;cursor:pointer;font-family:'Helvetica Neue',Arial,sans-serif;backdrop-filter:blur(4px);" onclick="(document.documentElement.requestFullscreen?document.documentElement.requestFullscreen():document.documentElement.webkitRequestFullscreen&&document.documentElement.webkitRequestFullscreen());this.style.display='none';">▶ Present</button>
+<script>document.addEventListener('fullscreenchange',function(){if(!document.fullscreenElement){var b=document.getElementById('fs-btn');if(b)b.style.display='block';}});</script>
 <script src="https://cdn.jsdelivr.net/npm/reveal.js@5/dist/reveal.js"></script>
 <script>Reveal.initialize({hash:true,slideNumber:'c/t',width:1920,height:1080,margin:0,minScale:0.1,maxScale:2,transition:'slide',center:false,controls:true,progress:true});</script>
 </body>
