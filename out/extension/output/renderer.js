@@ -82,10 +82,17 @@ function resolveFormat(self, cell, knownIsGfx, outN) {
     const nbUri = cell.notebook.uri.toString();
     let isGfx = knownIsGfx;
     if (isGfx === undefined) {
-        // Scan registry for the most recent output of this cell
+        // Scan registry for the isGfx flag of this cell's output.
+        // When outN is known, only match entries with the same subIdx — prevents
+        // a preceding plot (isGfx:true) from contaminating the next expression's
+        // format lookup and causing it to be rendered as MathML instead of LaTeX.
         for (const [, entry] of self._outputRegistry) {
             if (entry.cell?.document?.uri?.toString() === cellUri && entry.isGfx !== undefined) {
-                isGfx = entry.isGfx;
+                if (outN !== undefined) {
+                    if (entry.subIdx === outN) isGfx = entry.isGfx;
+                } else {
+                    isGfx = entry.isGfx; // outN unknown: last entry wins
+                }
             }
         }
     }
@@ -399,7 +406,14 @@ function processWLLatexBoxes(self, html, logPath, pageWidthEm = 0, source = '', 
                 // displays immediately at reduced opacity. Phase 2 runs lineBreakLatex in a
                 // worker thread and patches the element via wl-lb-result message.
                 const _lbWouldRun = _lineBreakEnabled && pageWidthEm > 5 && !!_btlAddon.lineBreakLatex;
-                if (_lbWouldRun && _btlAddonPath && self._rendererMessaging) {
+                // The phase-1 → phase-2 swap visibly changes the output height (unbroken
+                // one-liner → multi-line), so it is only worth it for very large formulas.
+                // lineBreakLatex is a fast native call at typical sizes, and the KaTeX
+                // prerender is synchronous in both paths anyway — run small/medium LaTeX
+                // through the synchronous path below so the output arrives at its final,
+                // line-broken size and never changes height afterwards.
+                const _SYNC_LB_MAX_CHARS = 20000;
+                if (_lbWouldRun && latex.length > _SYNC_LB_MAX_CHARS && _btlAddonPath && self._rendererMessaging) {
                     // Phase 1: render unbroken, emit placeholder with reduced opacity
                     let phase1Rendered;
                     try { phase1Rendered = _btlPrerenderLatex(latex, true); }
@@ -474,8 +488,10 @@ function processWLLatexBoxes(self, html, logPath, pageWidthEm = 0, source = '', 
                            errorNoteP1 + `<div class="wl-lb-content">${phase1Rendered}</div></div>`;
                 }
 
-                // ---- Fallback: synchronous line-breaking ----
-                // Used when: line-breaking disabled, no page width, addon unavailable, or no renderer messaging.
+                // ---- Synchronous line-breaking ----
+                // Used for all small/medium LaTeX (≤ _SYNC_LB_MAX_CHARS — the common case,
+                // output arrives at final size), and as the fallback when line-breaking is
+                // disabled, no page width, addon unavailable, or no renderer messaging.
                 let latexFinal = latex;
                 let lineBreakStatus = 'disabled';
                 let lbTotalPages = 1;
@@ -811,6 +827,97 @@ function renderPageForPager(self, pagerId, page) {
 }
 
 // ---------------------------------------------------------------------------
+// Image dimension injection — layout-shift fix
+//
+// Kernel-produced <img> tags carry no width/height, so the webview measures
+// the output at ~zero height and the cell grows when the file loads — the
+// single largest source of visible layout jumps. The kernel writes the file
+// before returning the HTML, so we can read the dimensions here (PNG IHDR /
+// SVG width+height attrs) and inject width/height attributes. Attributes at
+// intrinsic size reproduce the current rendered size exactly; the browser
+// just reserves the space up front.
+
+// path → {w,h} | null. Files are content-hash-named (immutable), so a flat
+// cache with a simple size cap is enough.
+const _imgDimCache = new Map();
+
+function _svgLengthToPx(value, unit) {
+    const v = parseFloat(value);
+    if (!(v > 0)) return 0;
+    switch (unit) {
+        case 'pt': return v * 4 / 3;
+        case 'pc': return v * 16;
+        case 'in': return v * 96;
+        case 'cm': return v * 96 / 2.54;
+        case 'mm': return v * 96 / 25.4;
+        default:   return v;           // px or unitless
+    }
+}
+
+function _readImageDimensions(fsPath) {
+    const lower = fsPath.toLowerCase();
+    if (lower.endsWith('.png')) {
+        const fd = fs.openSync(fsPath, 'r');
+        try {
+            const buf = Buffer.alloc(24);
+            if (fs.readSync(fd, buf, 0, 24, 0) < 24) return null;
+            // PNG signature + IHDR: width/height are big-endian uint32 at 16/20
+            if (buf.readUInt32BE(0) !== 0x89504e47) return null;
+            const w = buf.readUInt32BE(16), h = buf.readUInt32BE(20);
+            return (w > 0 && h > 0) ? { w, h } : null;
+        } finally { fs.closeSync(fd); }
+    }
+    if (lower.endsWith('.svg')) {
+        // render-expr.wl strips newlines from exported SVG, so the opening
+        // <svg …> tag sits within the first few KB.
+        const fd = fs.openSync(fsPath, 'r');
+        let head;
+        try {
+            const buf = Buffer.alloc(4096);
+            const n = fs.readSync(fd, buf, 0, 4096, 0);
+            head = buf.toString('utf8', 0, n);
+        } finally { fs.closeSync(fd); }
+        const openTag = (head.match(/<svg\b[^>]*>/) || [])[0];
+        if (!openTag) return null;
+        const wm = openTag.match(/\bwidth="([\d.]+)(pt|px|pc|in|cm|mm)?"/);
+        const hm = openTag.match(/\bheight="([\d.]+)(pt|px|pc|in|cm|mm)?"/);
+        if (wm && hm) {
+            const w = Math.round(_svgLengthToPx(wm[1], wm[2]));
+            const h = Math.round(_svgLengthToPx(hm[1], hm[2]));
+            if (w > 0 && h > 0) return { w, h };
+        }
+        const vb = openTag.match(/\bviewBox="[-\d.]+[ ,]+[-\d.]+[ ,]+([\d.]+)[ ,]+([\d.]+)"/);
+        if (vb) {
+            const w = Math.round(parseFloat(vb[1])), h = Math.round(parseFloat(vb[2]));
+            if (w > 0 && h > 0) return { w, h };
+        }
+        return null;
+    }
+    return null;
+}
+
+// Inject width/height into every wolfbook <img> tag that lacks them.
+// Non-fatal: any unreadable/missing file simply leaves the tag unchanged.
+function injectImageDimensions(html) {
+    if (!html || html.indexOf('data-wl-img=') === -1) return html;
+    return html.replace(
+        /<img\s+class="vscode-wolfram-(?:svg|png)-output"\s+data-wl-img="([^"]+)"(?![^>]*\bwidth=)/g,
+        (tagPrefix, imgPath) => {
+            try {
+                let dims = _imgDimCache.get(imgPath);
+                if (dims === undefined) {
+                    dims = _readImageDimensions(imgPath);
+                    if (_imgDimCache.size > 500) _imgDimCache.clear();
+                    _imgDimCache.set(imgPath, dims);
+                }
+                if (dims) return `${tagPrefix} width="${dims.w}" height="${dims.h}"`;
+            } catch (_) {}
+            return tagPrefix;
+        }
+    );
+}
+
+// ---------------------------------------------------------------------------
 
 module.exports = {
     EXPR_ONLY_FMTS,
@@ -822,4 +929,5 @@ module.exports = {
     replaceOutputById,
     extractPlainText,
     renderPageForPager,
+    injectImageDimensions,
 };

@@ -69,14 +69,14 @@ button[data-fmt-key]:hover { opacity:0.9 !important; }
 img.vscode-wolfram-svg-output, img.vscode-wolfram-png-output { background: transparent; }
 .vscode-wolfram-svg-output > svg > rect:first-child { fill: none !important; }
 div.mathml-output { overflow-x:auto; }
-div.vscode-wolfram-tex-output { overflow-x:auto; padding: 1px 0; }
+div.vscode-wolfram-tex-output { overflow-x:auto; padding: 0; }
 div.vscode-wolfram-wllatex-prerendered,
 div.vscode-wolfram-wllatex-raw-latex,
 div.vscode-wolfram-tex-output {
   margin: 0;
 }
-.katex-display { margin: 4px 0 !important; }
-.output { margin-top: 1px !important; margin-bottom: 1px !important; }
+.katex-display { margin: 2px 0 !important; }
+.output { margin-top: 0 !important; margin-bottom: 0 !important; }
 /* Inline syntax highlight tokens */
 .wl-hl-str  { color: #ce9178; }
 .wl-hl-cmt  { color: #6a9955; font-style: italic; }

@@ -16,6 +16,7 @@ Docs/**
 # Build scripts (not needed at runtime)
 generate_unicode_allowlist.js
 parse_wolfram_aliases.js
+gen-katex-css.js
 reorder_notebook.py
 
 # Dev docs

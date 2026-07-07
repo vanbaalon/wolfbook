@@ -235,6 +235,7 @@ class WolframNotebookKernel {
         this.config         = new notebook_config_1.NotebookConfig();
         this.executionQueue = new notebook_kernel_1.ExecutionQueue();
         this.selectedNotebooks = new Set();
+        this._quitKernelTimer  = null;
 
         this.thisExtension       = vscode.extensions.getExtension("wolfbook.wolfbook");
         this.diagnosticCollection = vscode.languages.createDiagnosticCollection("wolfram-syntax");
@@ -520,6 +521,8 @@ class WolframNotebookKernel {
         this._controller.supportedLanguages = this._supportedLanguages;
         this._controller.supportsExecutionOrder = true;
         this._controller.executeHandler = this.execute.bind(this);
+        this.preExecuteHook = null; // async (cells) => void — set by extension for pre-exec format
+        this._suppressDirtyTracking = false; // true while preExecuteHook runs
         this.extensionPath = this.thisExtension?.extensionPath || "";
 
         // ---- Auto-associate this controller with every wolfbook notebook ----
@@ -537,6 +540,27 @@ class WolframNotebookKernel {
         for (const nb of vscode.workspace.notebookDocuments) { _claimNotebook(nb); }
         // Claim notebooks opened later
         vscode.workspace.onDidOpenNotebookDocument(nb => _claimNotebook(nb));
+
+        // ---- Eagerly select controller when a wolfbook notebook becomes active ----
+        // updateNotebookAffinity(Preferred) is not enough: VS Code runs its own
+        // auto-selection pass synchronously during notebook open, BEFORE our
+        // onDidOpenNotebookDocument handler fires, so Preferred is set too late
+        // for the initial open.  As a result createNotebookCellExecution() throws
+        // "not associated" on the first Shift+Enter and the cell is skipped.
+        // Calling notebook.selectKernel with a specific id/extension silently
+        // selects our controller (no picker UI) whenever the notebook becomes
+        // the active editor, guaranteeing association before any keystroke.
+        vscode.window.onDidChangeActiveNotebookEditor(editor => {
+            if (!editor) return;
+            const nb = editor.notebook;
+            if (nb.notebookType !== 'extended-wolfram-notebook') return;
+            this._controller.updateNotebookAffinity(nb, vscode.NotebookControllerAffinity.Preferred);
+            vscode.commands.executeCommand('notebook.selectKernel', {
+                id:        this._controller.id,
+                extension: 'wolfbook.wolfbook',
+                label:     this._controller.label,
+            }).then(undefined, () => {});
+        });
 
 
 
@@ -1166,12 +1190,38 @@ class WolframNotebookKernel {
         this._controller.onDidChangeSelectedNotebooks(({ notebook, selected }) => {
             if (selected) {
                 this.selectedNotebooks.add(notebook);
+                // Cancel any pending kernel shutdown (e.g. Save As deselects old notebook
+                // then immediately selects new one — don't kill the kernel in between).
+                if (this._quitKernelTimer) {
+                    clearTimeout(this._quitKernelTimer);
+                    this._quitKernelTimer = null;
+                }
                 if (DEV_MODE) this.outputPanel.print(`Controller selected for: ${notebook.uri.fsPath}`);
             } else {
                 this.selectedNotebooks.delete(notebook);
             }
             if (this.selectedNotebooks.size === 0) {
-                this.quitKernel();
+                // Debounce: Save As fires selected:false for old URI then selected:true for
+                // new URI in rapid succession.  Wait 500 ms so we don't kill the kernel
+                // needlessly; cancel in the selected:true branch above if it arrives first.
+                this._quitKernelTimer = setTimeout(() => {
+                    this._quitKernelTimer = null;
+                    if (this.selectedNotebooks.size === 0) this.quitKernel();
+                }, 500);
+            }
+        });
+
+        // Re-associate controller after "Save As": VS Code does NOT fire
+        // onDidOpenNotebookDocument for Save As — it renames the URI in-place.
+        // onDidRenameFiles IS fired; re-claim any renamed wolfbook notebook.
+        vscode.workspace.onDidRenameFiles(event => {
+            for (const { newUri } of event.files) {
+                const nb = vscode.workspace.notebookDocuments.find(
+                    n => n.uri.toString() === newUri.toString());
+                if (nb && nb.notebookType === 'extended-wolfram-notebook') {
+                    this._controller.updateNotebookAffinity(
+                        nb, vscode.NotebookControllerAffinity.Preferred);
+                }
             }
         });
 
@@ -1192,14 +1242,17 @@ class WolframNotebookKernel {
                     e => e.document.uri.toString() === docUri
                 );
                 if (editor) editor.setDecorations(this.runtimeMsgDecoration, []);
+                this.diagnosticCollection.delete(event.document.uri);
             }
             // Track cell edits for mode auto-detection.
             // Notebook cell documents use the 'vscode-notebook-cell' URI scheme.
             // Any edit marks the cell dirty so that running it for the first time
             // after editing is correctly detected as Refine (source changed), even
             // if it has never been evaluated before.
+            // Suppress during preExecuteHook so formatter edits don't count as user edits.
             if (event.document.uri.scheme === 'vscode-notebook-cell' &&
-                event.contentChanges.length > 0) {
+                event.contentChanges.length > 0 &&
+                !this._suppressDirtyTracking) {
                 this._cellDirty.add(docUri);
             }
         });
@@ -1284,9 +1337,10 @@ class WolframNotebookKernel {
 
     // Relative src= paths (e.g. img/MyNotebook/wl_xxx.svg) resolve correctly
     // in the VS Code webview relative to the notebook directory — no URI
-    // rewriting needed.  Kept as a no-op in case it's called from expand paths.
-    // Relative src= paths resolve correctly in the VS Code webview — no-op passthrough.
-    _fixImageUris(html) { return html; }
+    // rewriting needed.  What DOES need fixing: kernel <img> tags carry no
+    // width/height, so the cell is measured at ~zero height and jumps when
+    // the image loads.  Inject the dimensions from the already-written file.
+    _fixImageUris(html) { return _output.injectImageDimensions(html); }
 
     // Output type sets — delegated to output/renderer constants.
     static get _EXPR_ONLY_FMTS() { return _output.EXPR_ONLY_FMTS; }
@@ -1357,7 +1411,7 @@ class WolframNotebookKernel {
     async _replaceOutputById(cell, outputId, contentHtml, outN, outName, newFormat, bannerHtml = '') { return _output.replaceOutputById(this, cell, outputId, contentHtml, outN, outName, newFormat, bannerHtml); }
 
     // -----------------------------------------------------------------------
-    execute(cells, _notebook, _controller) {
+    async execute(cells, _notebook, _controller) {
         // Reset refine guard flag — set to true below if this is a refine keyboard eval.
         this._refineGuardActive = false;
 
@@ -1366,6 +1420,39 @@ class WolframNotebookKernel {
         const isSilent = !!this._silentExecution;
         if (isSilent) {
             scrollLog('[execute] SILENT mode — skipping keyboard/scroll detection');
+        }
+
+        // ── Snapshot keyboard/selection state BEFORE any await ──
+        // applyEdit inside preExecuteHook can cause VS Code to mutate ed.selections,
+        // changing diff and breaking advance/refine detection if read after the await.
+        let _kbEd = null, _kbSelIdx = -1, _kbCellIdx = -1, _kbDiff = -1, _kbVr = null;
+        if (!isSilent && cells.length === 1) {
+            const _ed0 = vscode.window.activeNotebookEditor;
+            if (_ed0 && _ed0.notebook === cells[0].notebook && _ed0.selections.length > 0) {
+                _kbSelIdx  = _ed0.selections[0].start;
+                _kbCellIdx = cells[0].index;
+                _kbDiff    = _kbSelIdx - _kbCellIdx;
+                if (_kbDiff === 1 || _kbDiff === 0) {
+                    _kbEd = _ed0;
+                    try {
+                        const _vr0 = _ed0.visibleRanges;
+                        _kbVr = (_vr0 && _vr0.length > 0) ? _vr0[0].start : _kbCellIdx;
+                    } catch (_) { _kbVr = _kbCellIdx; }
+                }
+            }
+        }
+
+        // ── Pre-execution hook (auto-format) ──
+        // Suppress dirty tracking so formatter edits don't pollute advance/refine detection.
+        if (!isSilent && this.preExecuteHook) {
+            this._suppressDirtyTracking = true;
+            try { await this.preExecuteHook(cells); }
+            finally { this._suppressDirtyTracking = false; }
+            // Note: workspace.applyEdit on a notebook cell URI can cause VS Code to
+            // reopen the cell's text editor (enter edit mode).
+            // For advance mode we close it below (after mode detection).
+            // For refine mode we intentionally leave it open — _doRefineRestore in
+            // checkout.js takes the "already in edit mode" fast path to restore cursor.
         }
 
         // Clear the pending-exec flag (was used by the now-removed external-tool guard).
@@ -1378,18 +1465,21 @@ class WolframNotebookKernel {
         // Edge case: Shift+Enter on the last cell — no next cell, so selection stays
         // at N and diff = 0.  Both diffs are treated as keyboard-triggered.
         // Multi-cell runs (Run All) or programmatic calls produce diff ≠ 0 or 1.
+        // Selection/diff were captured BEFORE the preExecuteHook await — see above.
         if (!isSilent && cells.length === 1) {
-            const ed = vscode.window.activeNotebookEditor;
-            if (ed && ed.notebook === cells[0].notebook && ed.selections.length > 0) {
-                const selIdx  = ed.selections[0].start;
-                const cellIdx = cells[0].index;
-                const diff    = selIdx - cellIdx;
+            const ed = _kbEd;
+            if (ed) {
+                const selIdx  = _kbSelIdx;
+                const cellIdx = _kbCellIdx;
+                const diff    = _kbDiff;
                 scrollLog('execute() — cell index', cellIdx, '| selection index', selIdx,
                           '| diff', diff);
-                if (diff === 1 || diff === 0) {
+                // diff is always 0 or 1 here — _kbEd is only set for those cases.
+                {
                     // ---- Determine eval mode ----
                     // Auto-detect: if the cell source changed since the last evaluation
                     // → Refine (stay on cell); otherwise → Advance (scroll output + advance focus).
+                    // currentSrc is read AFTER the preExecuteHook so it reflects the formatted text.
                     const currentSrc   = cells[0].document.getText();
                     const cellUri      = cells[0].document.uri.toString();
                     const lastSrc      = this._cellLastSource.get(cellUri);
@@ -1415,14 +1505,8 @@ class WolframNotebookKernel {
 
                     this.markKeyboardExecution(cells[0], effectiveMode);
 
-                    // Snapshot viewport top at the moment Shift+Enter is pressed.
-                    // Used later by checkoutExecutionQueue to decide whether to
-                    // freeze the viewport (cell visible) or let VS Code scroll
-                    // (cell was already above the viewport).
-                    try {
-                        const _vr = ed.visibleRanges;
-                        this._pendingViewportAtExecute = (_vr && _vr.length > 0) ? _vr[0].start : cellIdx;
-                    } catch (_) { this._pendingViewportAtExecute = cellIdx; }
+                    // Viewport snapshot was captured BEFORE the preExecuteHook await.
+                    this._pendingViewportAtExecute = _kbVr;
                     scrollLog('[execute] viewportAtExecute:', this._pendingViewportAtExecute);
 
                     if (effectiveMode === 'refine') {
@@ -1448,6 +1532,10 @@ class WolframNotebookKernel {
 
                     } else {
                         // ---- ADVANCE MODE ----
+                        // preExecuteHook's applyEdit may have reopened the cell editor.
+                        // Close it so the cell exits edit mode as the user expects.
+                        // (Refine mode intentionally skips this — it needs the editor open.)
+                        vscode.commands.executeCommand('notebook.cell.quitEdit').then(undefined, () => {});
                         // In VS Code, the selection is already advanced N→N+1 before
                         // execute() is called (diff === 1).  In Antigravity and some
                         // other hosts the selection is NOT pre-advanced (diff === 0),
@@ -1487,8 +1575,6 @@ class WolframNotebookKernel {
                     }
 
                     scrollLog('[execute] current sel:', ed.selections.map(r => r.start + '-' + r.end).join(', '));
-                } else {
-                    scrollLog('  → programmatic (diff=' + diff + ') — scroll skipped');
                 }
             } else {
                 scrollLog('execute() — no active notebook editor match — programmatic');
@@ -1505,12 +1591,35 @@ class WolframNotebookKernel {
             for (const cell of cells) {
                 // Don't double-queue a cell that already has a pending execution.
                 if (this.executionQueue.hasPendingForCell(cell)) { scrollLog('[execute] cell', cell.index, 'already pending — skipping double-queue'); continue; }
-                // Silent mode (agent tools): use a shim that writes outputs via
-                // WorkspaceEdit instead of the real VS Code execution lifecycle.
-                // This avoids auto-reveal, output clearing, and Executing/Idle events.
-                const execution = isSilent
-                    ? _createSilentExecution(cell, this._controller)
-                    : this._controller.createNotebookCellExecution(cell);
+                // Always use the real VS Code execution API so outputs are written to
+                // the notebook and visible to the user.  Auto-scroll is suppressed by
+                // the scroll guard (_agentGuardActive) which restores the viewport at Idle.
+                let execution;
+                try {
+                    execution = this._controller.createNotebookCellExecution(cell);
+                } catch (e) {
+                    if (!String(e?.message).includes('not associated')) throw e;
+                    // Controller not associated (first run / Save As).  Set up
+                    // selected:true listener BEFORE triggering selection, then call
+                    // notebook.selectKernel with our specific ID so VS Code selects
+                    // silently (no picker UI) and fires selected:true.
+                    // IMPORTANT: check ev.notebook URI matches — not just ev.selected —
+                    // to avoid resolving early when a DIFFERENT open notebook gets selected.
+                    const _cellNbUri = cell.notebook.uri.toString();
+                    const reAssociated = await new Promise(resolve => {
+                        const d = this._controller.onDidChangeSelectedNotebooks(ev => {
+                            if (ev.selected && ev.notebook.uri.toString() === _cellNbUri) { d.dispose(); resolve(true); }
+                        });
+                        vscode.commands.executeCommand('notebook.selectKernel', {
+                            id: this._controller.id,
+                            extension: 'wolfbook.wolfbook',
+                            label: this._controller.label,
+                        }).then(undefined, () => {});
+                        setTimeout(() => { d.dispose(); resolve(false); }, 3000);
+                    });
+                    if (!reAssociated) { vscode.commands.executeCommand('notebook.selectKernel'); continue; }
+                    execution = this._controller.createNotebookCellExecution(cell);
+                }
                 const queueId   = this.executionQueue.push(execution);
                 execution.token.onCancellationRequested(() => {
                     this.outputPanel.print("Cell execution cancelled by user");
@@ -1531,7 +1640,26 @@ class WolframNotebookKernel {
                 // Don't double-queue a cell that already has a pending execution
                 // (guards against rapid Shift+Enter before kernel is ready).
                 if (this.executionQueue.hasPendingForCell(cell)) { scrollLog('[execute] cell', cell.index, 'already pending — skipping'); continue; }
-                const execution = this._controller.createNotebookCellExecution(cell);
+                let execution;
+                try {
+                    execution = this._controller.createNotebookCellExecution(cell);
+                } catch (e) {
+                    if (!String(e?.message).includes('not associated')) throw e;
+                    const _cellNbUri2 = cell.notebook.uri.toString();
+                    const reAssociated = await new Promise(resolve => {
+                        const d = this._controller.onDidChangeSelectedNotebooks(ev => {
+                            if (ev.selected && ev.notebook.uri.toString() === _cellNbUri2) { d.dispose(); resolve(true); }
+                        });
+                        vscode.commands.executeCommand('notebook.selectKernel', {
+                            id: this._controller.id,
+                            extension: 'wolfbook.wolfbook',
+                            label: this._controller.label,
+                        }).then(undefined, () => {});
+                        setTimeout(() => { d.dispose(); resolve(false); }, 3000);
+                    });
+                    if (!reAssociated) { vscode.commands.executeCommand('notebook.selectKernel'); continue; }
+                    execution = this._controller.createNotebookCellExecution(cell);
+                }
                 const queueId   = this.executionQueue.push(execution);
                 scrollLog('[execute] queued cell', cell.index, 'as', queueId, '| queue size now:', this.executionQueue.queueLength());
                 // Show the running spinner immediately — don't wait for launchKernel to finish.

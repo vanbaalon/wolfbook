@@ -176,6 +176,7 @@ export function activate(context) {
         el.classList.remove('wl-lb-pending');
         el.style.opacity = '';
         el.style.transition = '';
+        el.style.minHeight = '';   // drop the height reservation — final content is in place
     }
 
     // Listen for replies from the extension (open-text-done / open-text-error / session-changed / kernel-offline / kernel-online)
@@ -638,6 +639,25 @@ export function activate(context) {
                 });
             }
 
+            // ---- Reserve estimated height for pending line-broken outputs ----
+            // Phase 1 shows the formula unbroken (one wide line); phase 2 swaps in
+            // the line-broken version, which is roughly N lines tall. Estimate N
+            // from the overflow ratio and reserve that height NOW, so VS Code's
+            // initial (synchronous) measure already includes it and the phase-2
+            // swap barely moves the layout.
+            element.querySelectorAll('.wl-lb-pending').forEach(el => {
+                try {
+                    const content = el.querySelector('.wl-lb-content') || el;
+                    const contentW = content.scrollWidth || 0;
+                    const containerW = _preRenderWidth > 0 ? _preRenderWidth : (element.clientWidth || 0);
+                    if (containerW > 0 && contentW > containerW) {
+                        const lines = Math.min(30, Math.ceil(contentW / containerW));
+                        const lineH = content.getBoundingClientRect().height || 0;
+                        if (lines > 1 && lineH > 0) el.style.minHeight = Math.round(lines * lineH) + 'px';
+                    }
+                } catch (_) {}
+            });
+
             // ---- Hover output → send source-line highlight request to extension ----
             // ---- Double-click output header → navigate cursor to source line ----
             // Attach once per element; reads header data lazily at event time so it
@@ -769,33 +789,8 @@ export function activate(context) {
                 });
             });
 
-            // ---- Fix: VS Code output-height truncation after loading from file ----
-            // VS Code measures the output cell height immediately after renderOutputItem
-            // returns. When outputs are loaded from a saved notebook, MathML web-fonts may
-            // not be cached yet. Unmeasured fonts cause the browser to use fallback metrics
-            // (wrong, smaller size) → VS Code caches a too-small height → the output
-            // appears truncated to 2-3 lines until the user collapses/uncollapses the cell.
-            //
-            // Fix: after all document fonts have loaded (fonts.ready), append and immediately
-            // remove a zero-height sentinel element. This DOM mutation re-triggers VS Code's
-            // internal ResizeObserver with the now-correct, font-loaded scrollHeight, causing
-            // VS Code to update the displayed cell height without any visible flicker.
-            {
-                const _ownerDoc = element.ownerDocument || document;
-                const _triggerHeightFix = () => {
-                    try {
-                        const sentinel = _ownerDoc.createElement('div');
-                        sentinel.style.cssText = 'height:0;width:0;overflow:hidden;position:absolute;pointer-events:none;';
-                        element.appendChild(sentinel);
-                        requestAnimationFrame(() => { try { sentinel.remove(); } catch(_) {} });
-                    } catch(_) {}
-                };
-                if (_ownerDoc.fonts && typeof _ownerDoc.fonts.ready === 'object') {
-                    _ownerDoc.fonts.ready.then(_triggerHeightFix);
-                } else {
-                    setTimeout(_triggerHeightFix, 300);
-                }
-            }
+            // (Height re-measure for late font loads / async content is handled by
+            // the change-gated sentinel at the end of renderOutputItem.)
             // DEBUG: global click spy on the whole element
             element.addEventListener('click', (e) => {
                 console.log('[WolframRenderer] CLICK on element — target:', e.target.tagName,
@@ -1285,50 +1280,18 @@ export function activate(context) {
                 if (typeof window !== 'undefined' && window.katex) {
                     renderWithKatex(window.katex);
                 } else {
-                    const KATEX_VER = '0.16.9';
-                    const KATEX_BASE = `https://cdn.jsdelivr.net/npm/katex@${KATEX_VER}/dist/`;
-                    const injectKatexCSS = () => {
-                        if (document.querySelector('link[data-katex-css]')) return;
-                        const link = document.createElement('link');
-                        link.rel = 'stylesheet'; link.href = KATEX_BASE + 'katex.min.css';
-                        link.setAttribute('data-katex-css', '1');
-                        document.head.appendChild(link);
-                    };
-                    const loadKatexJS = (cb) => {
-                        if (document.querySelector('script[data-katex-js]')) {
-                            let tries = 0;
-                            const poll = setInterval(() => {
-                                if (window.katex || ++tries > 50) {
-                                    clearInterval(poll);
-                                    if (window.katex) cb(window.katex);
-                                    else texDivs.forEach(d => {
-                                        d.textContent = d.getAttribute('data-tex-src') || '';
-                                    });
-                                }
-                            }, 100);
-                            return;
-                        }
-                        const script = document.createElement('script');
-                        script.src = KATEX_BASE + 'katex.min.js'; script.setAttribute('data-katex-js', '1');
-                        script.onload = () => cb(window.katex);
-                        script.onerror = () => texDivs.forEach(d => {
+                    // Bundled katex.mjs (copied from node_modules by gen-katex-css.js
+                    // workflow) — no CDN, works offline, same version as the
+                    // server-side prerenderer. CSS is already injected by
+                    // injectRendererCSS (katex-css.js with inlined fonts).
+                    import('./katex.mjs')
+                        .then(m => {
+                            window.katex = m.default || m;
+                            renderWithKatex(window.katex);
+                        })
+                        .catch(() => texDivs.forEach(d => {
                             d.textContent = d.getAttribute('data-tex-src') || '';
-                        });
-                        document.head.appendChild(script);
-                    };
-                    injectKatexCSS();
-                    loadKatexJS(renderWithKatex);
-                }
-            }
-
-            // ---- KaTeX CSS for WLLatex pre-rendered outputs ----
-            if (element.querySelector('.vscode-wolfram-wllatex-prerendered')) {
-                if (!document.querySelector('link[data-katex-css]')) {
-                    const _klnk = document.createElement('link');
-                    _klnk.rel = 'stylesheet';
-                    _klnk.href = 'https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css';
-                    _klnk.setAttribute('data-katex-css', '1');
-                    document.head.appendChild(_klnk);
+                        }));
                 }
             }
 
@@ -1341,25 +1304,35 @@ export function activate(context) {
                 if (el.tagName === 'PRE') addLineNumberGutter(el);
             });
 
-            // ---- Multi-stage height sentinel ----
+            // ---- Change-gated height sentinel ----
             // VS Code measures output height right after renderOutputItem returns
-            // (synchronously). Async content (fonts, KaTeX CDN, format buttons
-            // growing the header) can change the height afterwards.  Firing the
-            // sentinel at 0 ms, 250 ms and 800 ms ensures VS Code re-measures at
-            // each stage and the displayed cell height stays correct when scrolling.
-            // The fonts.ready sentinel above already handles the web-font case;
-            // these timeouts add belt-and-suspenders coverage for all other paths.
+            // (synchronously). Anything that changes the content height afterwards
+            // (font loads, async KaTeX for Mode-B TeX divs, phase-2 line-break swaps
+            // that beat the checks) needs VS Code to re-measure, which a zero-size
+            // sentinel append/remove triggers. Unlike the old unconditional
+            // 0/250/800 ms firing, the sentinel now fires ONLY when scrollHeight
+            // actually differs from the last measured value — outputs whose size is
+            // already final (the common case now that KaTeX CSS/fonts are bundled
+            // and images carry dimensions) cause zero extra re-measures and zero
+            // extra layout shifts.
             {
-                const _triggerNow = () => {
+                const _ownerDoc = element.ownerDocument || document;
+                let _lastH = element.scrollHeight;
+                const _pokeIfHeightChanged = () => {
                     try {
-                        const _d = element.ownerDocument || document;
-                        const s = _d.createElement('div');
+                        const h = element.scrollHeight;
+                        if (h === _lastH) return;
+                        _lastH = h;
+                        const s = _ownerDoc.createElement('div');
                         s.style.cssText = 'height:0;width:0;overflow:hidden;position:absolute;pointer-events:none;';
                         element.appendChild(s);
                         requestAnimationFrame(() => { try { s.remove(); } catch(_){} });
                     } catch(_) {}
                 };
-                [0, 250, 800].forEach(delay => setTimeout(_triggerNow, delay));
+                if (_ownerDoc.fonts && typeof _ownerDoc.fonts.ready === 'object') {
+                    _ownerDoc.fonts.ready.then(_pokeIfHeightChanged);
+                }
+                [250, 800, 2000].forEach(delay => setTimeout(_pokeIfHeightChanged, delay));
             }
 
             // (scroll-to-top button removed — not achievable from inside per-cell iframe)

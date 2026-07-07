@@ -6,6 +6,7 @@
  */
 
 import { WL_CSS } from './renderer-css.js';
+import { KATEX_CSS } from './katex-css.js';
 
 // ---- Inline syntax highlighter — no CDN required ----
 function applyInlineHighlight(pre, lang) {
@@ -74,6 +75,13 @@ function injectRendererCSS(doc) {
     s.setAttribute('data-wolfram-renderer', '1');
     s.textContent = WL_CSS;
     (doc.head || doc.body || doc.documentElement).appendChild(s);
+    // KaTeX CSS with inlined fonts must be present BEFORE output HTML is set:
+    // VS Code measures the cell height synchronously after renderOutputItem,
+    // and a stylesheet arriving later re-sizes every math output (visible jump).
+    const k = doc.createElement('style');
+    k.setAttribute('data-katex-css', '1');
+    k.textContent = KATEX_CSS;
+    (doc.head || doc.body || doc.documentElement).appendChild(k);
     console.log('[WolframRenderer] CSS injected into document');
 }
 
