@@ -21,6 +21,7 @@
         ABORT_RUN:            'abortRun',
         START_RESEARCH:       'startResearch',
         START_FAIRY:          'startFairy',
+        START_DIRECTOR:       'startDirector',
         OPEN_RUN_INSPECTOR:   'openRunInspector',
         OPEN_CHARM_DEBUGGER:  'openCharmDebugger',
         OPEN_SETTINGS:        'openSettings',
@@ -45,6 +46,7 @@
         briefInput:    $('briefInput'),
         modeBtnResearch: $('modeBtnResearch'),
         modeBtnFairy:    $('modeBtnFairy'),
+        modeBtnDirector: $('modeBtnDirector'),
         modeHintText:    $('modeHintText'),
         configBanner:  $('configBanner'),
         warningBanner: $('warningBanner'),
@@ -61,22 +63,27 @@
     };
 
     // ── Mode toggle (Research / Quick Compute) ────────────────────────────
-    let _mode = 'research';  // 'research' | 'fairy'
+    let _mode = 'research';  // 'research' | 'fairy' | 'director'
     const MODE_HINTS = {
         research: 'Full Oberon pipeline: Planner scopes the task, Fairy computes, Skeptic reviews. Best for open-ended research questions.',
         fairy:    'Direct computation only: Fairy runs a single focused task and delivers a clean verified notebook. No planning or critique — fastest path for well-defined calculations.',
+        director: 'Multi-stage programme: the Director plans stages, runs the research agent per stage, assesses the evidence between stages, and ALWAYS finishes with a LaTeX report (+ PDF when pdflatex is available).',
     };
     function setMode(m) {
         _mode = m;
         els.modeBtnResearch.classList.toggle('briefBox__mode-btn--active', m === 'research');
         els.modeBtnFairy.classList.toggle('briefBox__mode-btn--active', m === 'fairy');
+        if (els.modeBtnDirector) els.modeBtnDirector.classList.toggle('briefBox__mode-btn--active', m === 'director');
         if (els.modeHintText) els.modeHintText.textContent = MODE_HINTS[m] || '';
         els.briefInput.placeholder = m === 'fairy'
             ? 'Describe a self-contained computation… (Cmd+Enter to run)'
-            : 'Describe a research task… (Cmd+Enter to start)';
+            : m === 'director'
+                ? 'Describe a multi-stage research programme… (Cmd+Enter to start)'
+                : 'Describe a research task… (Cmd+Enter to start)';
     }
     if (els.modeBtnResearch) els.modeBtnResearch.addEventListener('click', () => setMode('research'));
     if (els.modeBtnFairy)    els.modeBtnFairy.addEventListener('click',    () => setMode('fairy'));
+    if (els.modeBtnDirector) els.modeBtnDirector.addEventListener('click', () => setMode('director'));
 
     // ── Fairy FSM strip state ──────────────────────────────────────────────
     // Derived incrementally from incoming events; fully rebuilt on snapshot.full.
@@ -677,6 +684,8 @@
             if (!brief) return;
             if (_mode === 'fairy') {
                 vscode.postMessage({ command: FROM.START_FAIRY, brief });
+            } else if (_mode === 'director') {
+                vscode.postMessage({ command: FROM.START_DIRECTOR, brief });
             } else {
                 vscode.postMessage({ command: FROM.START_RESEARCH, brief });
             }
@@ -739,6 +748,8 @@
             if (brief && !els.startBtn.disabled) {
                 if (_mode === 'fairy') {
                     vscode.postMessage({ command: FROM.START_FAIRY, brief });
+                } else if (_mode === 'director') {
+                    vscode.postMessage({ command: FROM.START_DIRECTOR, brief });
                 } else {
                     vscode.postMessage({ command: FROM.START_RESEARCH, brief });
                 }

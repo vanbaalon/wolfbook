@@ -30,7 +30,9 @@ const project = require('./project');
 function _factsDir({ quest }) {
     const root = project.getWorkspaceRoot();
     if (!root) return null;
-    return path.join(root, 'quests', `${quest.id}_${quest.shortName}`, 'facts');
+    // Canonical folder name — the inline `${quest.shortName}` (no fallback) wrote
+    // quick-compute facts to `Qxx_undefined/`, split from the quest's other artefacts.
+    return path.join(root, 'quests', require('./quests').questFolderName(quest), 'facts');
 }
 
 async function _nextFactId(dir) {

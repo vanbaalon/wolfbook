@@ -130,7 +130,8 @@ VsCodeRenderExpr[expr_, format_String, scale_?NumericQ, searchPat_String:""] :=
      rasImg, rasData, rasStr, rasFname, rasFpath, texStr,
      fname, fpath, hashStr},
     fmt = If[format === "Auto",
-             If[UseSvgQ[] && graphicsQ[expr], "SVG", "MathML"],
+             If[UseSvgQ[] && graphicsQ[expr], "SVG",
+                If[graphicsQ[expr], "MathML", "WLLatex"]],
              format];
 
     (* For graphics expressions: expression-only formats make no visual sense.
@@ -493,7 +494,25 @@ VsCodeRenderExpr[expr_, format_String, scale_?NumericQ, searchPat_String:""] :=
         ]
     ];
 
-    (* ---- MathML path: for all algebraic / symbolic expressions ---- *)
+    (* ---- MathML → WLLatex redirect for non-graphics ---- *)
+    (* Expressions should never be rendered as MathML regardless of how fmt ended up
+       as "MathML" (explicit user setting, Auto fallback when UseSvgQ is false, or
+       TeX-path fallback).  Try WLLatex first; only fall through to MathML if
+       MakeBoxes itself fails (truly last resort). *)
+    If[fmt === "MathML" && !graphicsQ[expr],
+        Module[{boxes, boxStr, b64},
+            boxes = CheckAbort[Quiet[Check[MakeBoxes[expr, TraditionalForm], $Failed]], $Failed];
+            If[boxes =!= $Failed,
+                boxes = expandAllTemplateBoxes[boxes];
+                boxStr = ToString[boxes, InputForm];
+                b64 = Quiet[BaseEncode[StringToByteArray[boxStr, "UTF-8"], "Base64"]];
+                b64 = StringReplace[b64, WhitespaceCharacter -> ""];
+                Return["<div class=\"vscode-wolfram-wllatex-boxes\" data-boxes-b64=\"" <> b64 <> "\"></div>"]
+            ]
+        ]
+    ];
+
+    (* ---- MathML path: graphics fallback only ---- *)
     (* CheckAbort wraps ExportString so that a $RecursionLimit abort caused by
        user Format rules (e.g. Format[x]=Style[x,Red]) does not silently abort
        the entire rendering call and produce no output. *)
@@ -552,9 +571,5 @@ VsCodeRenderExpr[expr_, format_String, scale_?NumericQ, searchPat_String:""] :=
  ] (* end Module *)
 ]; (* end Block *)
 
-(* ===== Protect all wolfbook render-expr symbols from ClearAll["Global`*"] ===== *)
-Protect[
-    WBVersion, makeWrapButton, UseSvgQ, cleanMathML, vscodeStripSVGFonts,
-    expandAllTemplateBoxes, mathematicaformatResult, expandInlineBoxes,
-    prepareExprForBoxes, graphicsQ, VsCodeRenderExpr
-];
+(* Protect user-facing Global` symbol; private-context symbols need no Protect *)
+Protect[WBVersion];

@@ -97,7 +97,7 @@ function buildCharm(quest) {
 async function writeCharm(quest, charm) {
     const root = project.getWorkspaceRoot();
     if (!root) throw new Error('No workspace open; cannot write Charm.');
-    const dir = path.join(root, 'quests', `${quest.id}_${quest.shortName}`, 'charms');
+    const dir = path.join(root, 'quests', require('../memory/quests').questFolderName(quest), 'charms');   // O12: one canonical folder for all quest artifacts
     await fsp.mkdir(dir, { recursive: true });
     const file = path.join(dir, `${charm.id}.json`);
     const json = JSON.stringify(charm, null, 2) + '\n';

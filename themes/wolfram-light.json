@@ -1781,6 +1781,9 @@
 		}
 	],
 	"colors": {
+		"notebook.selectedCellBackground": "#1790d430",
+		"notebook.selectedCellBorder": "#1790d4",
+		"notebook.inactiveSelectedCellBorder": "#1790d4",
 		"activityBar.background": "#fafafa",
 		"activityBar.foreground": "#121417",
 		"activityBarBadge.background": "#526fff",

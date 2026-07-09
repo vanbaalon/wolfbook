@@ -62,7 +62,7 @@ class WolframMCPServer {
         // Session targets: one target per MCP session (SSE connection)
         // Map: sessionId → { clientId, notebook } | null
         // 'copilot' is a synthetic sessionId used when Copilot auto-sets a target
-        this._sessionTargets = new Map();  // sessionId → { clientId, notebook }
+        this._sessionTargets = new Map();  // sessionId → { clientId, notebook, ts }
     }
 
     /** Start listening. Returns the actual port used.
@@ -316,12 +316,14 @@ class WolframMCPServer {
                         'all subsequent tool calls are routed to automatically. Once set, you do ' +
                         'not need to pass client_id or notebook on every call — they are injected ' +
                         'automatically. The active [Target] is shown at the bottom of each response. ' +
-                        'Omit both client_id and notebook to clear the target.',
+                        'Omit both client_id and notebook to clear the target. ' +
+                        'Use force:true to evict a stale lock held by a dead session.',
                     inputSchema: {
                         type: 'object',
                         properties: {
                             client_id: { type: 'string', description: 'Client to target (from wolfbook_list_clients). Omit to target own window.' },
                             notebook:  { type: 'string', description: 'Notebook filename to switch to and target (e.g. "proto2.wb"). Omit to leave notebook selection unchanged.' },
+                            force:     { type: 'boolean', description: 'If true, evict any existing session lock on this notebook and claim it for this session. Use when wolfbook_list_clients shows a stale lock from a dead session.' },
                         },
                         required: [],
                     },
@@ -357,7 +359,9 @@ class WolframMCPServer {
                         err.code = -32602;
                         throw err;
                     }
-                    return this._invokeWorker(worker.port, name, args);
+                    const result = await this._invokeWorker(worker.port, name, args);
+                    const newTarget = this._maybeTargetNewNotebook(name, args, sessionId, targetClientId, result);
+                    return newTarget ? this._appendTargetFooter(result, newTarget) : result;
                 }
 
                 // ── Auto-route by notebook name in args ──────────────────────
@@ -376,7 +380,8 @@ class WolframMCPServer {
                         const worker = this._workers.get(stClientId);
                         if (worker) {
                             const result = await this._invokeWorker(worker.port, name, args);
-                            return this._appendTargetFooter(result, sessionTarget);
+                            const newTarget = this._maybeTargetNewNotebook(name, args, sessionId, stClientId, result);
+                            return this._appendTargetFooter(result, newTarget || sessionTarget);
                         }
                     }
                 }
@@ -425,15 +430,29 @@ class WolframMCPServer {
                     setMcpCallActive(false);
                 }
 
-                // Extract text from LanguageModelToolResult (content items have .value)
-                const text = (toolResult?.content || [])
-                    .map(p => p.value ?? p.text ?? '')
-                    .join('');
+                // Convert LanguageModelToolResult parts to MCP content blocks.
+                // Text parts with a data:image/... value become MCP image content blocks
+                // so Claude can actually see the image (e.g. from wolfbook_showImage).
+                const mcpContent = [];
+                for (const part of (toolResult?.content || [])) {
+                    const val = part.value ?? part.text ?? '';
+                    if (typeof val === 'string' && val.startsWith('data:image/') && val.includes(';base64,')) {
+                        const comma = val.indexOf(',');
+                        const mimeType = val.slice('data:'.length, val.indexOf(';base64,'));
+                        const data = val.slice(comma + 1);
+                        mcpContent.push({ type: 'image', data, mimeType });
+                    } else if (val) {
+                        mcpContent.push({ type: 'text', text: String(val) });
+                    }
+                }
+                if (mcpContent.length === 0) mcpContent.push({ type: 'text', text: '' });
 
-                return this._appendTargetFooter({
-                    content: [{ type: 'text', text }],
+                const result = {
+                    content: mcpContent,
                     isError: false,
-                }, this._sessionTargets.get(sessionId) || null);
+                };
+                const newTarget = this._maybeTargetNewNotebook(name, args, sessionId, targetClientId || this._ownClientId, result);
+                return this._appendTargetFooter(result, newTarget || this._sessionTargets.get(sessionId) || null);
             }
 
             default: {
@@ -446,10 +465,25 @@ class WolframMCPServer {
 
     // ── Session target helpers ─────────────────────────────────────────
 
+    _maybeTargetNewNotebook(name, args, sessionId, clientId, result) {
+        if (name !== 'wolfbook_newNotebook' || args?.target === false || result?.isError) return null;
+        const firstText = String(result?.content?.find?.(p => p?.type === 'text')?.text || '');
+        if (!/^Created and opened\b/.test(firstText)) return null;
+        const raw = String(args?.path || args?.filename || '').trim();
+        if (!raw) return null;
+        const withExt = raw.match(/\.(wb|evsnb|vsnb)$/i) ? raw : `${raw}.wb`;
+        const notebook = withExt.replace(/\\/g, '/').split('/').pop();
+        if (!notebook) return null;
+        const target = { clientId: clientId || null, notebook, ts: Date.now() };
+        this._sessionTargets.set(sessionId, target);
+        return target;
+    }
+
     /** Handle wolfbook_setTarget: validate, check conflicts, then persist per-session target. */
     _handleSetTarget(args, sessionId = 'mcp') {
         const targetCid = (args.client_id || '').trim() || null;
         const targetNb  = (args.notebook  || '').trim() || null;
+        const force     = !!args.force;
 
         // Omit both → clear this session's target
         if (!targetCid && !targetNb) {
@@ -468,24 +502,32 @@ class WolframMCPServer {
 
         // Conflict check: is this notebook already claimed by another session?
         if (targetNb) {
+            const evicted = [];
             for (const [sid, t] of this._sessionTargets) {
                 if (sid === sessionId) continue;  // same session updating its own target
                 const sameClient = !targetCid || !t.clientId || t.clientId === targetCid;
                 if (sameClient && t.notebook && t.notebook.toLowerCase() === targetNb.toLowerCase()) {
-                    const who = sid === 'copilot' ? 'Copilot (in-editor agent)' : `another MCP session (${sid.slice(0, 8)}…)`;
-                    return {
-                        content: [{ type: 'text', text:
-                            `Cannot claim "${targetNb}" — it is already targeted by ${who}.\n` +
-                            `Use wolfbook_list_clients to see current targets. ` +
-                            `If that session is dead, it will be released automatically when it disconnects.`
-                        }],
-                        isError: false,
-                    };
+                    if (force) {
+                        // Evict the stale lock
+                        evicted.push(sid);
+                    } else {
+                        const who = sid === 'copilot' ? 'Copilot (in-editor agent)' : `another MCP session (${sid.slice(0, 8)}…)`;
+                        const age = t.ts ? ` [locked ${Math.round((Date.now() - t.ts) / 60000)} min ago]` : '';
+                        return {
+                            content: [{ type: 'text', text:
+                                `Cannot claim "${targetNb}" — it is already targeted by ${who}${age}.\n` +
+                                `Use wolfbook_list_clients to see current targets. ` +
+                                `If that session is dead, use wolfbook_setTarget with force:true to evict the lock.`
+                            }],
+                            isError: false,
+                        };
+                    }
                 }
             }
+            for (const sid of evicted) this._sessionTargets.delete(sid);
         }
 
-        this._sessionTargets.set(sessionId, { clientId: targetCid, notebook: targetNb });
+        this._sessionTargets.set(sessionId, { clientId: targetCid, notebook: targetNb, ts: Date.now() });
 
         const parts = [];
         if (targetNb)  parts.push(`notebook: **${targetNb}**`);
@@ -533,10 +575,20 @@ class WolframMCPServer {
                 res.on('end', () => {
                     try {
                         const r = JSON.parse(data);
-                        resolve({
-                            content: [{ type: 'text', text: r.isError ? `Error: ${r.error}` : (r.text || '') }],
-                            isError: !!r.isError,
-                        });
+                        if (r.isError) {
+                            resolve({ content: [{ type: 'text', text: `Error: ${r.error || ''}` }], isError: true });
+                            return;
+                        }
+                        // Reconstruct MCP content blocks from worker parts (supports text + image).
+                        const content = (r.parts || (r.text != null ? [{ kind: 'text', value: r.text }] : []))
+                            .map(p => p.kind === 'image'
+                                ? (() => {
+                                    const comma = p.value.indexOf(',');
+                                    const mimeType = p.value.slice('data:'.length, p.value.indexOf(';base64,'));
+                                    return { type: 'image', data: p.value.slice(comma + 1), mimeType };
+                                })()
+                                : { type: 'text', text: p.value ?? '' });
+                        resolve({ content: content.length ? content : [{ type: 'text', text: '' }], isError: false });
                     } catch (e) {
                         reject(new Error(`Worker response parse error: ${e.message}`));
                     }
@@ -624,9 +676,11 @@ class WolframMCPServer {
             for (const [sid, t] of this._sessionTargets) {
                 const who   = sid === 'copilot' ? 'Copilot' : `session ${sid.slice(0, 6)}…`;
                 const label = [t.notebook, t.clientId].filter(Boolean).join(' @ ');
-                targetLines.push(`  ${who} → ${label}`);
+                const age   = t.ts ? ` [locked ${Math.round((Date.now() - t.ts) / 60000)} min ago]` : '';
+                targetLines.push(`  ${who} → ${label}${age}`);
             }
             lines.push(`\n**Active targets:**\n${targetLines.join('\n')}`);
+            lines.push('*Use wolfbook_setTarget with force:true to evict a stale lock.*');
         } else {
             lines.push('\n*No session targets set. Use wolfbook_setTarget to pick a default client/notebook.*');
         }
@@ -700,21 +754,65 @@ function resolveNodeBinary() {
         const shellCmd = process.platform === 'win32'
             ? 'where node'
             : 'source ~/.zshrc 2>/dev/null || source ~/.bashrc 2>/dev/null || true; which node';
-        const resolved = execSync(shellCmd, { encoding: 'utf8', shell: '/bin/zsh', timeout: 5000 }).trim().split('\n')[0].trim();
+        const resolved = execSync(shellCmd, { encoding: 'utf8', shell: process.platform === 'win32' ? undefined : '/bin/zsh', timeout: 5000 }).trim().split('\n')[0].trim();
         if (resolved && fs.existsSync(resolved)) return resolved;
     } catch {}
     // Hard-coded fallbacks for common macOS/Linux installations
+    const home = process.env.HOME || process.env.USERPROFILE || '';
     const fallbacks = [
         '/opt/anaconda3/bin/node',
         '/usr/local/bin/node',
         '/opt/homebrew/bin/node',
         '/usr/bin/node',
-        `${process.env.HOME || ''}/.nvm/versions/node/$(ls ${process.env.HOME || ''}/.nvm/versions/node/ 2>/dev/null | sort -V | tail -1)/bin/node`,
     ];
+    // nvm: scan ~/.nvm/versions/node/ for the highest version
+    try {
+        const nvmDir = path.join(home, '.nvm', 'versions', 'node');
+        if (fs.existsSync(nvmDir)) {
+            const versions = fs.readdirSync(nvmDir)
+                .filter(d => /^v\d+/.test(d))
+                .sort((a, b) => {
+                    const pa = a.slice(1).split('.').map(Number);
+                    const pb = b.slice(1).split('.').map(Number);
+                    for (let i = 0; i < 3; i++) { if ((pa[i]||0) !== (pb[i]||0)) return (pb[i]||0) - (pa[i]||0); }
+                    return 0;
+                });
+            for (const v of versions) {
+                const p = path.join(nvmDir, v, 'bin', 'node');
+                if (fs.existsSync(p)) return p;
+            }
+        }
+    } catch {}
+    // fnm: ~/.local/share/fnm/node-versions/
+    try {
+        const fnmDir = path.join(home, '.local', 'share', 'fnm', 'node-versions');
+        if (fs.existsSync(fnmDir)) {
+            const versions = fs.readdirSync(fnmDir).sort().reverse();
+            for (const v of versions) {
+                const p = path.join(fnmDir, v, 'installation', 'bin', 'node');
+                if (fs.existsSync(p)) return p;
+            }
+        }
+    } catch {}
     for (const fb of fallbacks) {
         try { if (fs.existsSync(fb)) return fb; } catch {}
     }
     return 'node';  // rely on PATH as last resort
+}
+
+/**
+ * Validate that a node binary actually works by running `node --version`.
+ * Returns { ok: true, version: 'v20.x.x' } or { ok: false, error: '...' }.
+ */
+function validateNodeBinary(nodeBin) {
+    try {
+        const { execSync } = require('child_process');
+        const ver = execSync(`"${nodeBin}" --version`, { encoding: 'utf8', timeout: 5000 }).trim();
+        if (/^v\d+/.test(ver)) return { ok: true, version: ver };
+        return { ok: false, error: `Unexpected output: ${ver}` };
+    } catch (e) {
+        return { ok: false, error: e.message || String(e) };
+    }
 }
 
 /** Update Claude Desktop and Claude Code config with the wolfbook MCP server.
@@ -983,6 +1081,71 @@ function needsClineConfigUpdate(bridgePath, nodeBin) {
 }
 
 // ---------------------------------------------------------------------------
+// Roo Code (rooveterinaryinc.roo-cline) MCP config
+// Path: ~/Library/Application Support/Code/User/globalStorage/
+//         rooveterinaryinc.roo-cline/settings/cline_mcp_settings.json  (macOS/Linux)
+//       %APPDATA%\Code\User\globalStorage\rooveterinaryinc.roo-cline\settings\cline_mcp_settings.json  (Windows)
+// Format identical to Cline's — same key, different extension folder.
+// ---------------------------------------------------------------------------
+
+/** Resolve the Roo Code MCP settings file path for the current platform. */
+function _rooCodeConfigPath() {
+    const isWin = process.platform === 'win32';
+    const base  = isWin
+        ? (process.env.APPDATA || path.join(process.env.USERPROFILE || '~', 'AppData', 'Roaming'))
+        : (process.env.HOME || '~');
+    return isWin
+        ? path.join(base, 'Code', 'User', 'globalStorage', 'rooveterinaryinc.roo-cline', 'settings', 'cline_mcp_settings.json')
+        : path.join(base, 'Library', 'Application Support', 'Code', 'User', 'globalStorage', 'rooveterinaryinc.roo-cline', 'settings', 'cline_mcp_settings.json');
+}
+
+/** Write the wolfbook MCP entry into Roo Code's settings file.
+ *  Only writes if Roo Code is installed (settings directory exists or file exists).
+ *  Returns { updated: bool, configPath: string, skipped: bool }.
+ */
+function writeRooCodeConfig(bridgePath, nodeBin) {
+    const configPath = _rooCodeConfigPath();
+    const dir = path.dirname(configPath);
+    if (!fs.existsSync(dir)) {
+        return { updated: false, configPath, skipped: true };
+    }
+    try {
+        let config = { mcpServers: {} };
+        try {
+            if (fs.existsSync(configPath)) {
+                const raw = fs.readFileSync(configPath, 'utf8');
+                if (raw.trim()) config = JSON.parse(raw);
+            }
+        } catch {}
+        if (!config.mcpServers) config.mcpServers = {};
+        config.mcpServers.wolfbook = {
+            command:     nodeBin,
+            args:        [bridgePath],
+            disabled:    false,
+            autoApprove: [],
+        };
+        fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf8');
+        return { updated: true, configPath, skipped: false };
+    } catch (e) {
+        console.warn('[Wolfbook MCP] Could not write Roo Code config:', e.message);
+        return { updated: false, configPath, skipped: false };
+    }
+}
+
+/** Returns true if the Roo Code config needs writing (entry missing or stale). */
+function needsRooCodeConfigUpdate(bridgePath, nodeBin) {
+    const configPath = _rooCodeConfigPath();
+    if (!fs.existsSync(path.dirname(configPath))) return false;
+    try {
+        const raw = fs.readFileSync(configPath, 'utf8');
+        if (!raw.trim()) return true;
+        const cfg   = JSON.parse(raw);
+        const entry = cfg?.mcpServers?.wolfbook;
+        return !entry || entry.command !== nodeBin || entry.args?.[0] !== bridgePath;
+    } catch { return true; }
+}
+
+// ---------------------------------------------------------------------------
 // MCP info payload — used by the watchPanel sidebar info popup
 // ---------------------------------------------------------------------------
 
@@ -1011,6 +1174,9 @@ function getMcpInfoPayload(bridgePath, nodeBin, port, isSecondary, isDisabled) {
         cline: isWin
             ? path.join(appData, 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'settings', 'cline_mcp_settings.json')
             : path.join(home, 'Library', 'Application Support', 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'settings', 'cline_mcp_settings.json'),
+        rooCode: isWin
+            ? path.join(appData, 'Code', 'User', 'globalStorage', 'rooveterinaryinc.roo-cline', 'settings', 'cline_mcp_settings.json')
+            : path.join(home, 'Library', 'Application Support', 'Code', 'User', 'globalStorage', 'rooveterinaryinc.roo-cline', 'settings', 'cline_mcp_settings.json'),
         antigravity: path.join(home, '.gemini', 'antigravity', 'mcp_config.json'),
         codex:       path.join(home, '.codex', 'config.toml'),
     };
@@ -1019,10 +1185,11 @@ function getMcpInfoPayload(bridgePath, nodeBin, port, isSecondary, isDisabled) {
     try { configured.claudeDesktop = !!(JSON.parse(fs.readFileSync(configPaths.claudeDesktop, 'utf8'))?.mcpServers?.wolfbook); } catch { configured.claudeDesktop = false; }
     try { configured.claudeCode    = !!(JSON.parse(fs.readFileSync(configPaths.claudeCode, 'utf8'))?.mcpServers?.wolfbook); }    catch { configured.claudeCode  = false; }
     try { configured.cline         = !!(JSON.parse(fs.readFileSync(configPaths.cline, 'utf8'))?.mcpServers?.wolfbook); }         catch { configured.cline        = false; }
+    try { configured.rooCode       = !!(JSON.parse(fs.readFileSync(configPaths.rooCode, 'utf8'))?.mcpServers?.wolfbook); }       catch { configured.rooCode      = false; }
     try { configured.antigravity   = !!(JSON.parse(fs.readFileSync(configPaths.antigravity, 'utf8'))?.wolfbook); }               catch { configured.antigravity  = false; }
     try { configured.codex         = fs.readFileSync(configPaths.codex, 'utf8').includes('[mcp_servers.wolfbook]'); }            catch { configured.codex        = false; }
 
     return { port: port || 0, bridgePath, nodeBin, isSecondary: !!isSecondary, isDisabled: !!isDisabled, configPaths, configured };
 }
 
-module.exports = { WolframMCPServer, loadMCPSchemas, configureClaudeDesktop, writeClaudeConfig, needsConfigUpdate, resolveNodeBinary, probeExistingServer, writeAntigravityConfig, needsAntigravityConfigUpdate, installAntigravitySkill, needsSkillInstall, writeClineConfig, needsClineConfigUpdate, getMcpInfoPayload };
+module.exports = { WolframMCPServer, loadMCPSchemas, configureClaudeDesktop, writeClaudeConfig, needsConfigUpdate, resolveNodeBinary, validateNodeBinary, probeExistingServer, writeAntigravityConfig, needsAntigravityConfigUpdate, installAntigravitySkill, needsSkillInstall, writeClineConfig, needsClineConfigUpdate, writeRooCodeConfig, needsRooCodeConfigUpdate, getMcpInfoPayload };

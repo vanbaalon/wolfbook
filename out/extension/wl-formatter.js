@@ -212,6 +212,18 @@ function tokenize(src) {
       continue;
     }
 
+    // /; (Condition) and /: (TagSet) — must come before single-/ fallthrough
+    if (ch === '/' && i + 1 < n && src[i + 1] === ';') {
+      tokens.push({ type: T.OTHER, value: '/;' });
+      i += 2;
+      continue;
+    }
+    if (ch === '/' && i + 1 < n && src[i + 1] === ':') {
+      tokens.push({ type: T.OTHER, value: '/:' });
+      i += 2;
+      continue;
+    }
+
     // /. and //.  and // (order matters: check //. before //)
     if (ch === '/' && i + 1 < n && src[i + 1] === '/') {
       if (i + 2 < n && src[i + 2] === '.') {
@@ -276,9 +288,19 @@ function tokenize(src) {
       continue;
     }
     // == != >= <=  (comparison operators — must come before = check)
+    if (ch === '=' && i + 1 < n && src[i + 1] === '=' && i + 2 < n && src[i + 2] === '=') {
+      tokens.push({ type: T.COMPARE, value: '===' });
+      i += 3;
+      continue;
+    }
     if (ch === '=' && i + 1 < n && src[i + 1] === '=') {
       tokens.push({ type: T.COMPARE, value: '==' });
       i += 2;
+      continue;
+    }
+    if (ch === '=' && i + 1 < n && src[i + 1] === '!' && i + 2 < n && src[i + 2] === '=') {
+      tokens.push({ type: T.COMPARE, value: '=!=' });
+      i += 3;
       continue;
     }
     if (ch === '!' && i + 1 < n && src[i + 1] === '=') {
@@ -318,6 +340,16 @@ function tokenize(src) {
     if (ch === '=') {
       tokens.push({ type: T.ASSIGN, value: '=' });
       i++;
+      continue;
+    }
+
+    // <| (Association open) — treat like a bracket so it tokenizes atomically
+    // and the formatter never splits it into "< |". Unambiguous in WL: nothing
+    // else begins with <| (Alternatives can't start an expression).
+    if (ch === '<' && i + 1 < n && src[i + 1] === '|') {
+      tokens.push({ type: T.OPEN, value: '<|', bracket: 'assoc' });
+      bracketStack.push('<|');
+      i += 2;
       continue;
     }
 
@@ -367,6 +399,15 @@ function tokenize(src) {
       i += 2;
       continue;
     }
+    // |> (Association close) — pairs with <| above; keep atomic so it never
+    // splits into "| >". Unambiguous: > can't be a prefix operator.
+    if (ch === '|' && i + 1 < n && src[i + 1] === '>') {
+      tokens.push({ type: T.CLOSE, value: '|>', bracket: 'assoc' });
+      if (bracketStack.length > 0) bracketStack.pop();
+      i += 2;
+      continue;
+    }
+
     // || (Or)
     if (ch === '|' && i + 1 < n && src[i + 1] === '|') {
       tokens.push({ type: T.LOGICAL, value: '||' });
@@ -435,6 +476,13 @@ function tokenize(src) {
       }
       tokens.push({ type: T.WORD, value: src.slice(i, j) });
       i = j;
+      continue;
+    }
+
+    // ** (NonCommutativeTimes — non-commutative multiplication in WL)
+    if (ch === '*' && i + 1 < n && src[i + 1] === '*') {
+      tokens.push({ type: T.OTHER, value: '**' });
+      i += 2;
       continue;
     }
 
@@ -537,7 +585,8 @@ function splitStatements(src) {
       const peekTwo = peekPos + 1 < n ? src.slice(peekPos, peekPos + 2) : peekCh;
       const endsWithOp  = trimmed.length > 0 && ENDS_OP.test(trimmed);
       const startsWithOp = trimmed.length > 0 && peekCh.length > 0 && (
-        '=+-*/,|~@?'.includes(peekCh) ||
+        '=+*/,|~@?'.includes(peekCh) ||
+        (peekCh === '-' && peekPos + 1 < n && src[peekPos + 1] === ' ') ||
         peekTwo === '&&' || peekTwo === '||' || peekTwo === '->' || peekTwo === ':>' ||
         peekTwo === '//' || peekTwo === '<>' || peekTwo === '!=' || peekTwo === '>=' || peekTwo === '<='
       );
@@ -788,8 +837,8 @@ function _formatSingle(src, opts) {
     if (b.type === T.OTHER && (b.value === '+' || b.value === '-')) return true;
     if (a.type === T.OTHER && (a.value === '>' || a.value === '<' || a.value === '<<' || a.value === '>>' || a.value === '>>>')) return true;
     if (b.type === T.OTHER && (b.value === '>' || b.value === '<' || b.value === '<<' || b.value === '>>' || b.value === '>>>')) return true;
-    if (a.type === T.OTHER && (a.value === '*' || a.value === '/')) return true;
-    if (b.type === T.OTHER && (b.value === '*' || b.value === '/')) return true;
+    if (a.type === T.OTHER && (a.value === '*' || a.value === '**' || a.value === '/' || a.value === '/;' || a.value === '/:')) return true;
+    if (b.type === T.OTHER && (b.value === '*' || b.value === '**' || b.value === '/' || b.value === '/;' || b.value === '/:')) return true;
     if (a.value === '^' || b.value === '^') return false;
     if ((a.type === T.WORD || a.type === T.NAMEDCHAR || a.type === T.STRING || a.type === T.CLOSE || a.type === T.AMP) &&
         (b.type === T.WORD || b.type === T.NAMEDCHAR || b.type === T.STRING ||
@@ -907,6 +956,8 @@ function _formatSingle(src, opts) {
     (t) => t.type === T.ASSIGN && t.value !== '=.',
     // //              (Postfix application, prec ~70)
     (t) => t.type === T.POSTFIX,
+    // /;              (Condition, prec ~70-110)
+    (t) => t.type === T.OTHER && t.value === '/;',
     // /., //.          (ReplaceAll / ReplaceRepeated, prec ~110)
     (t) => t.type === T.RULE_APPLY,
     // ->, :>           (Rule / RuleDelayed, prec ~120)
@@ -919,8 +970,8 @@ function _formatSingle(src, opts) {
     (t) => t.type === T.COMPARE,
     // +, -             (Plus / Minus, prec ~310)
     (t) => t.type === T.OTHER && (t.value === '+' || t.value === '-'),
-    // *, /             (Times / Divide, prec ~400)
-    (t) => t.type === T.OTHER && (t.value === '*' || t.value === '/'),
+    // *, /, **         (Times / Divide / NonCommutativeTimes, prec ~400)
+    (t) => t.type === T.OTHER && (t.value === '*' || t.value === '/' || t.value === '**'),
     // <>               (StringJoin, prec ~600)
     (t) => t.type === T.STRJOIN,
     // @, @@, @@@, /@   (Prefix / Apply, prec ~640)
@@ -1152,7 +1203,8 @@ function _formatSingle(src, opts) {
           if (prev && needsSpace(prev, t)) pieces.push(D.text(' '));
           // Determine separator kind inside this bracket.
           const isArgBracket = (t.value === '[' || t.value === '[[' ||
-                                t.value === '{' || t.value === '(');
+                                t.value === '{' || t.value === '(' ||
+                                t.value === '<|');
           // For parentheses used as grouping (no commas), argList=false.
           const inner = docForRange(i + 1, close - 1, isArgBracket);
           // Rendering style:

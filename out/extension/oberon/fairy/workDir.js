@@ -265,6 +265,11 @@ class WorkDir {
         return out;
     }
 
+    /** H2: every persisted probe of this run, in chronological (p001…) order. */
+    async loadAllProbes() {
+        return this.loadRecentProbes(10000);
+    }
+
     // ── Steps ──────────────────────────────────────────────────────────────
 
     /**
@@ -310,6 +315,22 @@ class WorkDir {
         all.push(full);
         await fsp.writeFile(this.stepsFile, JSON.stringify(all, null, 2), 'utf8');
         return full;
+    }
+
+    /**
+     * I4: patch an existing step in place (e.g. sync polish-edited cell code back
+     * into the recorded chain). Returns the updated step or null if not found.
+     *
+     * @param {string} stepId
+     * @param {object} patch   fields to merge (e.g. { code, editedInPolish: true })
+     */
+    async updateStep(stepId, patch) {
+        const all = await this.loadAllSteps();
+        const idx = all.findIndex(s => s && s.id === stepId);
+        if (idx < 0) return null;
+        all[idx] = { ...all[idx], ...patch, updatedAt: new Date().toISOString() };
+        await fsp.writeFile(this.stepsFile, JSON.stringify(all, null, 2), 'utf8');
+        return all[idx];
     }
 
     /**
@@ -563,8 +584,12 @@ class WorkDir {
      * Persist the fairy's execution plan.
      * @param {{ steps: string[], note?: string }} plan
      */
-    async savePlan({ steps, note = '' }) {
-        const data = { steps: steps.map(String), note: String(note || ''), createdAt: new Date().toISOString() };
+    async savePlan({ steps, note = '', revision = 0 }) {
+        const data = {
+            steps: steps.map(String), note: String(note || ''),
+            revision: Number(revision) || 0,
+            createdAt: new Date().toISOString(),
+        };
         await fsp.writeFile(this.planFile, JSON.stringify(data, null, 2), 'utf8');
         return data;
     }
@@ -618,6 +643,50 @@ class WorkDir {
         if (idx >= 0) all[idx] = entry; else all.push(entry);
         await fsp.writeFile(this.literatureFile, JSON.stringify(all, null, 2), 'utf8');
         return entry;
+    }
+
+    // ── Paper cache + lit_read log (I10 deep-read tool) ─────────────────────
+
+    get papersDir()    { return path.join(this._dir, 'papers'); }
+    get litReadsFile() { return path.join(this._dir, 'lit_reads.json'); }
+
+    _paperCachePath(arxivId) {
+        // Old-style ids contain '/' (e.g. hep-th/9605187) — keep the path flat.
+        const safe = String(arxivId || '').replace(/[^A-Za-z0-9.\-]/g, '_');
+        return path.join(this.papersDir, `${safe}.json`);
+    }
+
+    /** Load a cached extracted paper ({ arxivId, source, hasFullText, sections }) or null. */
+    async loadPaperCache(arxivId) {
+        try { return JSON.parse(await fsp.readFile(this._paperCachePath(arxivId), 'utf8')); }
+        catch (_) { return null; }
+    }
+
+    /** Persist the extracted full text of a paper for repeated lit_read calls. */
+    async savePaperCache(arxivId, data) {
+        await fsp.mkdir(this.papersDir, { recursive: true });
+        await fsp.writeFile(this._paperCachePath(arxivId), JSON.stringify(data, null, 2), 'utf8');
+    }
+
+    /** Load the lit_read call log ([{ arxivId, question, at }]). */
+    async loadLitReads() {
+        try {
+            const arr = JSON.parse(await fsp.readFile(this.litReadsFile, 'utf8'));
+            return Array.isArray(arr) ? arr : [];
+        } catch (_) { return []; }
+    }
+
+    /** Append one lit_read call to the log (drives the per-run cap).
+     *  `direct` marks a read of an id NOT surfaced by research_literature
+     *  (user-provided or model-known reference) — drives its own 2/run cap. */
+    async addLitRead({ arxivId, question, direct }) {
+        const all = await this.loadLitReads();
+        all.push({
+            arxivId: String(arxivId || ''), question: String(question || '').slice(0, 400),
+            direct: direct ? true : undefined, at: new Date().toISOString(),
+        });
+        await fsp.writeFile(this.litReadsFile, JSON.stringify(all, null, 2), 'utf8');
+        return all.length;
     }
 
     /**

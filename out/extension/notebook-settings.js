@@ -75,6 +75,13 @@ const BACKGROUND_COLORS_LIGHT = [
     { label: "Light Coral",    value: "#FFF5F0" },
 ];
 
+// Neutral gray painted on notebooks that were never given a background colour
+// (e.g. created by wolfbook_newNotebook). Without this, VS Code's default BLUE
+// focused/selected-cell highlight leaks through — the notebook looks half-styled.
+// Picking "Default (None)" explicitly still strips to the raw VS Code theme.
+const DEFAULT_BG_GRAY_LIGHT = "#F3F3F3";
+const DEFAULT_BG_GRAY_DARK  = "#262626";
+
 const BACKGROUND_COLORS_DARK = [
     { label: "Dark Cream",     value: "#2A2520" },
     { label: "Dark Peach",     value: "#2E2020" },
@@ -694,8 +701,35 @@ async function applyNotebookSettings(notebook) {
         }
 
     } else if (!settings.backgroundImagePath) {
-        // No color and no image — strip custom notebook colors
-        if (_NOTEBOOK_COLOR_KEYS.some(k => currentColors[k])) {
+        // No colour and no image. Distinguish a never-configured notebook (fresh,
+        // e.g. created by wolfbook_newNotebook) from an explicit "Default (None)" pick:
+        //   • never configured  → paint a neutral gray so VS Code's default BLUE
+        //                          focused/selected-cell highlight does not leak through.
+        //   • explicit '' (None) → strip custom notebook colours (raw VS Code theme).
+        const everConfigured = notebookSettingsStore.has(uri) ||
+            !!(notebook.metadata && notebook.metadata.wolframSettings);
+        if (!everConfigured) {
+            const isDark = _isDarkTheme();
+            const base   = isDark ? DEFAULT_BG_GRAY_DARK : DEFAULT_BG_GRAY_LIGHT;
+            const outer  = adjustColor(base, isDark ? 0.03 : 0.08);
+            const cellBg = adjustColor(base, isDark ? -0.06 : 0.35);
+            const border = createBorderColor(base, isDark);
+            const updated = {
+                ...currentColors,
+                'notebook.editorBackground':               outer,
+                'notebook.cellEditorBackground':           cellBg,
+                'notebook.cellBorderColor':                border,
+                'notebook.inactiveFocusedCellBorder':      border,
+                'notebook.collapsedCellBackground':        cellBg,
+                'notebook.focusedCellBackground':          outer,
+                'notebook.selectedCellBackground':         outer,
+                'notebook.inactiveSelectedCellBackground': outer,
+                'notebook.cellHoverBackground':            outer,
+            };
+            if (!_notebookColorsUnchanged(currentColors, updated)) {
+                await config.update('colorCustomizations', updated, vscode.ConfigurationTarget.Workspace);
+            }
+        } else if (_NOTEBOOK_COLOR_KEYS.some(k => currentColors[k])) {
             const updated = { ...currentColors };
             for (const k of _NOTEBOOK_COLOR_KEYS) delete updated[k];
             await config.update('colorCustomizations', updated, vscode.ConfigurationTarget.Workspace);
@@ -835,3 +869,8 @@ function _showSystemPromptEditor(initialText, promptName) {
 }
 
 exports.BACKGROUND_COLORS = BACKGROUND_COLORS;
+// Canonical list of workbench.colorCustomizations keys this module writes.
+// Exported so the kernel-offline gray/restore cycle (kernel/lifecycle.js) operates
+// on the EXACT same set — otherwise coloured cell elements are left un-grayed while
+// the kernel reloads, or only partially restored once it is alive again.
+exports.NOTEBOOK_COLOR_KEYS = _NOTEBOOK_COLOR_KEYS;

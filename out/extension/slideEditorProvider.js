@@ -728,8 +728,19 @@ class SlideEditorProvider {
                                 }
                                 if (serialHtml) {
                                     progress.report({ message: 'Writing PDF…', increment: 80 });
-                                    await _exportHtmlToPdf(serialHtml, saveUri.fsPath);
-                                    return;
+                                    try {
+                                        await _exportHtmlToPdf(serialHtml, saveUri.fsPath);
+                                        return;
+                                    } catch (printErr) {
+                                        // Chrome headless --print-to-pdf can fail ("Printing failed")
+                                        // when a single whole-deck print exceeds its memory/complexity
+                                        // ceiling — many large 20in pages with heavy styled content.
+                                        // Individual slides render fine, so fall back to the robust
+                                        // per-slide screenshot→assemble pipeline (same one presenting
+                                        // mode uses) instead of hard-failing the export.
+                                        console.warn('[wslide] whole-deck print failed, falling back to per-slide render:', printErr && printErr.message);
+                                        progress.report({ message: 'Large deck — rendering slide-by-slide…', increment: 0 });
+                                    }
                                 }
                                 await _exportDeckToPdf(deckSubset, deckDir, saveUri.fsPath,
                                     (msg, increment) => progress.report({ message: msg, increment }),

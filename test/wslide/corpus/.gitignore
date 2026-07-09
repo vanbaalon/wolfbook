@@ -1,0 +1,5 @@
+# Real decks dropped here for local regression coverage are not committed
+# (private/large). The synthetic fixtures/ + golden/ baselines are committed.
+*.wslide
+img/
+!README.md

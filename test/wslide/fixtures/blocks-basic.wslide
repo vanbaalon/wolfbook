@@ -1,0 +1,40 @@
+{
+  "formatVersion": 3,
+  "meta": { "title": "Blocks Basic" },
+  "theme": { "navy": "#0a244a", "blue": "#0064b4", "cyan": "#009ac8", "accent": "#be1e2d" },
+  "slides": [
+    {
+      "id": "s1",
+      "label": "Every block type",
+      "background": "#fafcff",
+      "layout": "column",
+      "children": [
+        { "id": "h1", "type": "heading", "level": 1, "content": "Heading One" },
+        { "id": "h2", "type": "heading", "level": 2, "content": "Heading Two" },
+        { "id": "t1", "type": "text", "content": "Plain text with <b>bold</b>, <i>italic</i> and inline math $E=mc^2$.", "fontSize": 36, "color": "#1a1a2e" },
+        { "id": "t2", "type": "text", "content": "Edge case math: $a < b$ and $x > y$ stay verbatim.", "style": { "color": "#333", "fontWeight": "bold" } },
+        { "id": "l1", "type": "list", "ordered": false, "items": [
+          { "content": "First bullet" },
+          { "content": "Second bullet with $\\alpha + \\beta$" }
+        ] },
+        { "id": "c1", "type": "code", "language": "python", "content": "def f(x):\n    return x * x" },
+        { "id": "a1", "type": "arrow", "color": "#be1e2d", "strokeWidth": 3, "x0": 200, "y0": 400, "mx": 500, "my": 200, "x1": 800, "y1": 400 }
+      ]
+    },
+    {
+      "id": "s2",
+      "label": "Containers + image",
+      "background": "#0a1628",
+      "layout": "column",
+      "children": [
+        { "id": "row1", "type": "container", "layout": "row", "gap": 40, "children": [
+          { "id": "rt1", "type": "text", "content": "Left column", "style": { "flex": "1", "color": "#e2e8f0" } },
+          { "id": "rt2", "type": "text", "content": "Right column", "style": { "flex": "1", "color": "#e2e8f0" } }
+        ] },
+        { "id": "free1", "type": "container", "layout": "free", "children": [
+          { "id": "fimg", "type": "image", "src": "img/blocks-basic.wslide/sample.png", "w": 600, "h": 400, "fit": "contain", "alt": "sample", "position": "absolute", "x": 100, "y": 80 }
+        ] }
+      ]
+    }
+  ]
+}

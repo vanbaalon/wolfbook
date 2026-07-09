@@ -158,6 +158,122 @@ function summariseEvalOutputs(outs, hasError) {
 }
 
 
+class NewNotebookTool {
+    async prepareInvocation(options, _token) {
+        const target = options.input?.path || options.input?.filename || 'new notebook';
+        return { invocationMessage: `Create Wolfbook notebook: ${path.basename(target)}` };
+    }
+
+    _resolveNotebookPath(input) {
+        const raw = String(input?.path || input?.filename || '').trim();
+        if (!raw) throw new Error('Required: path (absolute or workspace-relative .wb filename).');
+        const withExt = NB_EXTS.some(ext => raw.toLowerCase().endsWith(ext)) ? raw : `${raw}.wb`;
+        if (path.isAbsolute(withExt)) return path.normalize(withExt);
+
+        const baseDir =
+            input?.directory ? String(input.directory)
+            : vscode.window.activeNotebookEditor?.notebook?.uri?.fsPath ? path.dirname(vscode.window.activeNotebookEditor.notebook.uri.fsPath)
+            : vscode.workspace.workspaceFolders?.[0]?.uri?.fsPath;
+        if (!baseDir) throw new Error('Relative notebook paths require an open workspace or an active notebook.');
+        return path.resolve(baseDir, withExt);
+    }
+
+    _cellToJson(cell) {
+        const kindName = String(cell?.kind || 'code').toLowerCase();
+        const isMarkdown = kindName === 'markdown' || kindName === 'markup';
+        return {
+            kind: isMarkdown ? vscode.NotebookCellKind.Markup : vscode.NotebookCellKind.Code,
+            value: normalizeToolContent(cell?.content ?? cell?.value ?? ''),
+            languageId: isMarkdown ? 'markdown' : 'wolfram',
+            outputs: [],
+            metadata: {},
+        };
+    }
+
+    async _openWithTimeout(uri, ms) {
+        return Promise.race([
+            vscode.workspace.openNotebookDocument(uri),
+            new Promise((_, reject) => setTimeout(() => reject(new Error(`openNotebookDocument timed out after ${ms} ms`)), ms)),
+        ]);
+    }
+
+    async _waitUntilVisible(uri, ms) {
+        const deadline = Date.now() + ms;
+        while (Date.now() < deadline) {
+            const ed = vscode.window.visibleNotebookEditors.find(e => e.notebook.uri.toString() === uri.toString());
+            if (ed && ed.notebook.notebookType === 'extended-wolfram-notebook') return ed;
+            await new Promise(resolve => setTimeout(resolve, 100));
+        }
+        return null;
+    }
+
+    async invoke(options, _token) {
+        const input = options.input || {};
+        let nbPath;
+        try {
+            nbPath = this._resolveNotebookPath(input);
+        } catch (err) {
+            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(`Cannot create notebook: ${err.message}`)]);
+        }
+
+        if (!NB_EXTS.some(ext => nbPath.toLowerCase().endsWith(ext))) {
+            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart('Notebook path must end in .wb, .evsnb, or .vsnb.')]);
+        }
+
+        const overwrite = !!input.overwrite;
+        const waitMs = Math.max(1000, Math.min(Number(input.waitMs || 10000), 60000));
+        const cells = Array.isArray(input.cells) ? input.cells.map(c => this._cellToJson(c)) : [];
+        const notebookJson = {
+            cells,
+            metadata: {
+                ...(input.metadata && typeof input.metadata === 'object' ? input.metadata : {}),
+                createdBy: 'wolfbook_newNotebook',
+                createdAt: new Date().toISOString(),
+            },
+        };
+
+        try {
+            if (fs.existsSync(nbPath) && !overwrite) {
+                return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
+                    `Notebook already exists: ${nbPath}. Pass overwrite:true to replace it.`
+                )]);
+            }
+            fs.mkdirSync(path.dirname(nbPath), { recursive: true });
+            fs.writeFileSync(nbPath, JSON.stringify(notebookJson, null, 1), 'utf8');
+        } catch (err) {
+            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(`Failed to write notebook: ${err.message}`)]);
+        }
+
+        const uri = vscode.Uri.file(nbPath);
+        try {
+            const doc = await this._openWithTimeout(uri, waitMs);
+            await vscode.window.showNotebookDocument(doc, { preserveFocus: false, viewColumn: vscode.ViewColumn.Active });
+            const ed = await this._waitUntilVisible(uri, waitMs);
+            if (!ed) {
+                return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
+                    `Created ${path.basename(nbPath)}, but VS Code did not make the notebook editor visible within ${waitMs} ms.`
+                )]);
+            }
+
+            // Reuse the shared resolver so Copilot/in-editor targeting hooks see
+            // the new active notebook too.
+            try { await resolveNotebookEditor(path.basename(nbPath), { skipConfirm: true }); } catch (_) {}
+
+            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
+                `Created and opened **${path.basename(nbPath)}**.\n` +
+                `Path: ${nbPath}\n` +
+                `Ready: notebook editor is visible (${ed.notebook.cellCount} cells).\n` +
+                `Target: this notebook is ready for subsequent Wolfbook MCP editing tools.`
+            )]);
+        } catch (err) {
+            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
+                `Created ${path.basename(nbPath)}, but failed to open it as a Wolfbook notebook: ${err.message}`
+            )]);
+        }
+    }
+}
+
+
 class GetNotebookContextTool {
     async prepareInvocation(options, _token) {
         const action = options.input?.action || 'read';
@@ -3276,16 +3392,73 @@ class PaperSearchTool {
         try {
             switch (action) {
                 case 'search':     return await this._search(options);
+                case 'read':       return await this._read(options);
                 case 'bibtex':     return await this._bibtex(options);
                 case 'bibitem':    return await this._bibitem(options);
                 case 'references': return await this._references(options);
                 case 'citations':  return await this._citations(options);
                 default:
-                    return this._result(`Unknown action "${action}". Use: search, bibtex, bibitem, references, citations.`);
+                    return this._result(`Unknown action "${action}". Use: search, read, bibtex, bibitem, references, citations.`);
             }
         } catch (e) {
             return this._result(`Error: ${e.message}`);
         }
+    }
+
+    /**
+     * action:'read' — fetch a paper's FULL TEXT (ar5iv / arXiv-HTML; abstract page as
+     * last resort) and return headings, numbered display equations (LaTeX), and the
+     * body text most relevant to an optional focus query. Closes the gap where agents
+     * could find/cite papers but not actually read them.
+     */
+    async _read(options) {
+        const id = String(options.input?.identifier || '').replace(/^arXiv:/i, '').trim();
+        if (!/^\d{4}\.\d{4,5}(v\d+)?$/.test(id) && !/^[a-z][a-z.-]+\/\d{7}(v\d+)?$/i.test(id)) {
+            return this._result('Error: action "read" requires an arXiv ID (e.g. "2103.15840" or "hep-th/0212208"). Use action "search" first to find it.');
+        }
+        const fetched = await paperSearch.fetchPaperHtml(id);
+        if (!fetched.html) return this._result(`Could not fetch any text for arXiv:${id}.`);
+
+        const maxEqs = Math.min(Number(options.input?.maxEquations) || 40, 120);
+        const sections = paperSearch.extractSections(fetched.html, { maxText: 24000, maxEqs, maxSections: 40 });
+
+        // Optional focus query: return the most relevant text chunks instead of the head.
+        const query = String(options.input?.query || '').trim();
+        const text = sections.textSample || '';
+        let excerpt;
+        if (query && text.length > 3000) {
+            const kw = new Set(query.toLowerCase().match(/[a-z0-9$-]+/g) || []);
+            const CHUNK = 2000;
+            const chunks = [];
+            for (let i = 0; i < text.length; i += CHUNK) chunks.push({ i, c: text.slice(i, i + CHUNK) });
+            const scored = chunks.map(({ i, c }) => {
+                const toks = new Set(c.toLowerCase().match(/[a-z0-9$-]+/g) || []);
+                let hit = 0; for (const t of kw) if (toks.has(t)) hit++;
+                return { i, c, score: kw.size ? hit / kw.size : 0 };
+            }).sort((a, b) => b.score - a.score).slice(0, 3).sort((a, b) => a.i - b.i);
+            excerpt = scored.map(s => `…${s.c}…`).join('\n\n---\n\n');
+        } else {
+            excerpt = text.slice(0, 6000);
+        }
+
+        const eqLines = (sections.equationsTagged && sections.equationsTagged.length)
+            ? sections.equationsTagged.map(e => (e.eqNumber ? `(${e.eqNumber})  ` : '      ') + e.latex)
+            : (sections.equations || []);
+
+        const lines = [
+            `**arXiv:${id}** — full text: ${fetched.hasFullText ? 'YES' : 'NO (abstract page only — equations unreliable)'} (source: ${fetched.source})`,
+            '',
+            '**Sections:** ' + (sections.headings || []).slice(0, 30).join(' | '),
+            '',
+            `**Display equations (${eqLines.length}${sections.equationsTagged ? ', numbered where the paper numbers them' : ''}):**`,
+            ...eqLines.map(l => '  ' + l),
+            '',
+            query ? `**Text most relevant to "${query}":**` : '**Text (beginning):**',
+            excerpt,
+            '',
+            '_Equations are HTML-extracted transcriptions — verify in the kernel before relying on them._',
+        ];
+        return this._result(lines.join('\n'));
     }
 
     async _search(options) {
@@ -3381,6 +3554,53 @@ class PaperSearchTool {
 
     _result(text) {
         return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(text)]);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// wolfbook_fairy_dispatch / wolfbook_fairy_status — the Oberon Fairy as a
+// background computation sub-agent for outside agents (Claude, Codex, …).
+//
+// The Fairy is a cheap (DeepSeek-priced) LLM loop over the LIVE Wolfram kernel
+// with a heavy verification harness (recorded chain → fresh-kernel replay →
+// validation checks → deterministic self-verify). Dispatch is fire-and-forget;
+// the caller polls status. Both tools are thin wrappers over headless
+// wolfbook.oberon.* commands so all run logic stays in the oberon module.
+// ---------------------------------------------------------------------------
+
+class FairyDispatchTool {
+    async prepareInvocation(options, _token) {
+        const t = String(options.input?.task || '').slice(0, 80);
+        return { invocationMessage: `Fairy dispatch: ${t}` };
+    }
+
+    async invoke(options, _token) {
+        const task = String(options.input?.task || '').trim();
+        if (!task) return new vscode.LanguageModelToolResult([
+            new vscode.LanguageModelTextPart('task is required — a complete, self-contained computation spec.')]);
+        const args = {
+            task,
+            validationChecks: Array.isArray(options.input?.validationChecks) ? options.input.validationChecks : [],
+        };
+        let res;
+        try { res = await vscode.commands.executeCommand('wolfbook.oberon.fairyDispatch', args); }
+        catch (e) { res = { ok: false, error: `Oberon is not available: ${e.message}` }; }
+        return new vscode.LanguageModelToolResult([
+            new vscode.LanguageModelTextPart(JSON.stringify(res, null, 2))]);
+    }
+}
+
+class FairyStatusTool {
+    async prepareInvocation(options, _token) {
+        return { invocationMessage: `Fairy status: ${options.input?.runId || 'latest run'}` };
+    }
+
+    async invoke(options, _token) {
+        let res;
+        try { res = await vscode.commands.executeCommand('wolfbook.oberon.fairyStatus', { runId: options.input?.runId }); }
+        catch (e) { res = { ok: false, error: `Oberon is not available: ${e.message}` }; }
+        return new vscode.LanguageModelToolResult([
+            new vscode.LanguageModelTextPart(JSON.stringify(res, null, 2))]);
     }
 }
 
@@ -3539,6 +3759,7 @@ ${detail}
 function registerTools(context, getController, debugCtrl, getAskPanel) {
     const tools = [
         // Core notebook tools (visible in chat panel)
+        { name: 'wolfbook_newNotebook',        impl: new NewNotebookTool() },
         { name: 'wolfbook_getNotebookContext', impl: new GetNotebookContextTool() },
         { name: 'wolfbook_evaluateExpression', impl: new EvaluateExpressionTool(getController) },
         { name: 'wolfbook_lookupSymbol',       impl: new LookupSymbolTool(getController) },
@@ -3564,6 +3785,8 @@ function registerTools(context, getController, debugCtrl, getAskPanel) {
         { name: 'wolfbook_showImage',          impl: new ShowImageTool() },
         { name: 'wolfbook_runTerminal',        impl: new RunTerminalTool() },
         { name: 'wolfbook_paperSearch',        impl: new PaperSearchTool() },
+        { name: 'wolfbook_fairy_dispatch',     impl: new FairyDispatchTool() },
+        { name: 'wolfbook_fairy_status',       impl: new FairyStatusTool() },
         // Wolfteam tools
         { name: 'wolfteam_proposePlan',        impl: new ProposePlanTool() },
         { name: 'wolfteam_askDecision',        impl: new AskDecisionTool() },
@@ -3701,7 +3924,12 @@ function registerTools(context, getController, debugCtrl, getAskPanel) {
             try {
                 context.subscriptions.push(vscode.lm.registerTool(name, impl));
             } catch (regErr) {
-                console.error(`[wolfbook] Failed to register LM tool "${name}":`, regErr?.message ?? regErr);
+                const msg = regErr?.message ?? String(regErr);
+                if (/was not contributed/i.test(msg)) {
+                    console.warn(`[wolfbook] Skipping LM tool "${name}" because this VS Code build requires contributed tools.`);
+                } else {
+                    console.error(`[wolfbook] Failed to register LM tool "${name}":`, msg);
+                }
             }
         }
     }

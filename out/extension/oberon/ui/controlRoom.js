@@ -170,6 +170,10 @@ class ControlRoomProvider {
             this._onCommand('startFairy', { brief: String(msg.brief || '').trim() });
             return;
         }
+        if (c === FROM_WEBVIEW.START_DIRECTOR) {
+            this._onCommand('startDirector', { brief: String(msg.brief || '').trim() });
+            return;
+        }
         if (c === FROM_WEBVIEW.OPEN_RUN_INSPECTOR) {
             this._onCommand('openRunInspector');
             return;
@@ -409,6 +413,7 @@ class ControlRoomProvider {
       <div class="briefBox__mode-row">
         <button class="briefBox__mode-btn briefBox__mode-btn--active" id="modeBtnResearch" title="Full pipeline: Planner → Fairy → Skeptic → verified notebook">Research</button>
         <button class="briefBox__mode-btn" id="modeBtnFairy" title="Direct computation only: Fairy runs a single focused task and delivers a verified clean notebook — no planning or critique">Quick Compute</button>
+        <button class="briefBox__mode-btn" id="modeBtnDirector" title="Multi-stage programme: Director plans stages, runs the Fairy per stage, assesses evidence, and always ends with a LaTeX report (+ PDF when pdflatex is available)">Director</button>
       </div>
       <div id="modeHint" class="briefBox__mode-hint">
         <span id="modeHintText">Full Oberon pipeline: Planner scopes the task, Fairy computes, Skeptic reviews. Best for open-ended research questions.</span>

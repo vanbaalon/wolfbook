@@ -19,7 +19,7 @@ const project = require('./project');
 function scrollsDirFor(quest) {
     const root = project.getWorkspaceRoot();
     if (!root) return null;
-    return path.join(root, 'quests', `${quest.id}_${quest.shortName}`, 'scrolls');
+    return path.join(root, 'quests', require('./quests').questFolderName(quest), 'scrolls');   // O12: keep all quest artifacts in ONE folder
 }
 
 /**

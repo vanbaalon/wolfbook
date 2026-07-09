@@ -25,6 +25,9 @@
 		"constant.unused": "#D4D4D4"
 	},
     "colors": {
+        "notebook.selectedCellBackground": "#4e94ce40",
+        "notebook.selectedCellBorder": "#4e94ce",
+        "notebook.inactiveSelectedCellBorder": "#4e94ce",
         "activityBar.background": "#3c3f41",
         "activityBar.border": "#4b4b4b",
         "activityBar.foreground": "#ffffff",

@@ -10,7 +10,7 @@ const settings = require('./settings');
 
 /** @typedef {import('../core/types')} _types */
 
-const ALL_ROLES = ['oberon', 'fairy', 'skeptic', 'postmortem', 'fairy_summariser', 'literature'];
+const ALL_ROLES = ['oberon', 'fairy', 'postmortem', 'fairy_summariser', 'literature', 'director'];
 
 /**
  * @param {string} role
@@ -34,15 +34,33 @@ function resolveRole(role) {
         }
     }
 
+    // director: the planning/analysis layer ABOVE the fairy (Oberon Director).
+    // Falls back to the oberon binding — the strongest configured planner model.
+    // Override via wolfbook.oberon.roles.director to pin a stronger/cheaper model.
+    if (role === 'director') {
+        const override = settings.roleBinding('director');
+        if (!(override && Object.keys(override).length)) {
+            const oberon = resolveRole('oberon');
+            return {
+                role, provider: oberon.provider, model: oberon.model,
+                pricing: oberon.pricing, maxTokens: oberon.maxTokens,
+                contextWindow: oberon.contextWindow, configured: oberon.configured,
+            };
+        }
+    }
+
     // literature: fast/cheap model for ranking + equation extraction (many calls).
-    // Falls back to the summariser/fairy binding with a short output cap.
+    // Falls back to the summariser/fairy binding. R8: cap raised 800 → 2000 —
+    // run Q_42CQ3G showed DeepSeek's plan/reformulate JSON replies truncating at
+    // exactly 800 output tokens, silently degrading the whole search pipeline
+    // (fallback plan, dead rescue round).
     if (role === 'literature') {
         const override = settings.roleBinding('literature');
         if (!(override && Object.keys(override).length)) {
             const fairy = resolveRole('fairy');
             return {
                 role, provider: fairy.provider, model: fairy.model,
-                pricing: fairy.pricing, maxTokens: 800,
+                pricing: fairy.pricing, maxTokens: 2000,
                 contextWindow: fairy.contextWindow, configured: fairy.configured,
             };
         }
@@ -66,8 +84,11 @@ function resolveRole(role) {
 
 function providerConfigured(provider) {
     if (!provider) return false;
-    if (provider === 'deepseek') return !!settings.deepseekApiKey();
-    // Other providers default to "not configured" until adapters land.
+    if (provider === 'deepseek')  return !!settings.deepseekApiKey();
+    // O1: the anthropic/openai adapters are complete (tool mapping, retries,
+    // prompt caching) — a role binds to them as soon as an API key is present.
+    if (provider === 'anthropic') return !!settings.anthropicApiKey();
+    if (provider === 'openai')    return !!settings.openaiApiKey();
     return false;
 }
 

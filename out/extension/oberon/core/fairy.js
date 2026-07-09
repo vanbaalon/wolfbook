@@ -36,12 +36,11 @@ const { FAIRY_TOOL_SPECS, EXPLORE_FAIRY_TOOL_SPECS, POLISH_FAIRY_TOOL_SPECS, FAI
 // invalidate, which deletes the verified clean.wb) is rejected before dispatch.
 const POLISH_ALLOWED = new Set(['run_clean', 'edit_cell', 'probe', 'chain', 'finalize']);
 const { dispatchFairyTool }  = require('../fairy/tools');
+const { analyzeCode, WL_BUILTINS } = require('../fairy/depAnalyzer');
 const { createWorkDir }      = require('../fairy/workDir');
-const { compile, verify, autoCorrectMissingStep } = require('../fairy/harness');
+const { compile } = require('../fairy/harness');   // verify/autoCorrect: legacy subprocess-verify path, unused since run_clean
 const { buildSkillsUsedMarkdown, buildLiteratureCitations, buildLiteratureBriefMarkdown } = require('../fairy/skillCitation');
 const { reasoningTail } = require('../fairy/notebookBanners');
-const { resolveWolframscript } = require('../fairy/kernelVerifier');
-const FindKernel = require('../../find-kernel');
 const {
     FAIRY_SYSTEM_PROMPT,
     buildExploreUserMessage,
@@ -54,8 +53,94 @@ const {
 } = require('../fairy/prompts');
 const { runRecall }      = require('../fairy/recall');
 const { SkilXivClient }  = require('../fairy/skilxivClient');
+const skillGaps          = require('../memory/skillGaps');
 
 // ── Constants ─────────────────────────────────────────────────────────────────
+
+// I18: build stamp — run Q_38X439 executed a stale deploy silently (old code,
+// old bugs, user assumed fixes were live). Every run now records which build ran.
+const BUILD_INFO = (() => {
+    try {
+        const fs = require('fs');
+        let version = null;
+        try { version = require('../../../../package.json').version || null; } catch (_) {}
+        return { version, codeMtime: new Date(fs.statSync(__filename).mtimeMs).toISOString() };
+    } catch (_) { return { version: null, codeMtime: null }; }
+})();
+
+// ── Skill-draft author (I14) ─────────────────────────────────────────────────
+// One cheap LLM call that turns a DELIVERED, verified chain into a reviewable
+// SKILL.draft.md — a stated, generalised method rather than the raw ledger dump
+// the inbox candidate carries. Only runs for novel results (I15 gate).
+
+function buildSkillAuthorPrompt({ task, definitionsLedger, factsLedger }) {
+    return [
+        'You are turning a VERIFIED Wolfram Language derivation into a draft reusable skill.',
+        'Reply ONLY with JSON:',
+        '{"name": "kebab-case-name (≤50 chars, method-oriented, not task-verbatim)",',
+        ' "summary": "one sentence, ≤160 chars, states METHOD + what it computes",',
+        ' "method": "markdown, 3-8 sentences: the REUSABLE method/algorithm, stated generally (which objects to build, in what order, what to verify) — not just this instance",',
+        ' "keyResult": "one sentence stating the verified result of this instance"}',
+        '',
+        `TASK SOLVED: ${String(task || '').slice(0, 500)}`,
+        '',
+        'VERIFIED DEFINITIONS (from the clean notebook):',
+        String(definitionsLedger || '').slice(0, 5000),
+        '',
+        'ESTABLISHED RESULTS:',
+        String(factsLedger || '').slice(0, 1500),
+    ].join('\n');
+}
+
+function parseSkillAuthorReply(text) {
+    try {
+        const o = JSON.parse(String(text || '').match(/\{[\s\S]*\}/)[0]);
+        const name = String(o.name || '').toLowerCase()
+            .replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 50);
+        if (!name || !o.summary || !o.method) return null;
+        return {
+            name,
+            summary:   String(o.summary).slice(0, 160),
+            method:    String(o.method).slice(0, 2500),
+            keyResult: String(o.keyResult || '').slice(0, 300),
+        };
+    } catch (_) { return null; }
+}
+
+function composeSkillDraftMd({ authored, task, definitionsLedger, model }) {
+    return [
+        '---',
+        'schema_version: "1.0"',
+        `name: ${authored.name}`,
+        'namespace: "@draft"',
+        'version: 0.1.0',
+        'license: CC-BY-4.0',
+        `summary: ${JSON.stringify(authored.summary)}`,
+        'runtime: wolfram',
+        'visibility: private',
+        `generated_with: "wolfbook-fairy/${model || 'unknown'}"`,
+        '---',
+        '',
+        `# ${authored.name}`,
+        '',
+        '## Method',
+        '',
+        authored.method,
+        '',
+        ...(authored.keyResult ? ['## Verified result', '', authored.keyResult, ''] : []),
+        '## Task instance',
+        '',
+        String(task || '').slice(0, 600),
+        '',
+        '## Verified definitions',
+        '',
+        '```wolfram',
+        String(definitionsLedger || '').slice(0, 8000),
+        '```',
+        '',
+        '> Draft authored automatically from a delivered run — review before publishing.',
+    ].join('\n');
+}
 
 /**
  * Append text to the content of the most recent tool or user message in the
@@ -391,22 +476,12 @@ function truncateArgsForUi(args) {
 async function callOnce({ bus, adapter, binding, messages, tools, toolChoice, signal, spanId, prefixSha256, quest, charm, turnIndex }) {
     const tel = settings.telemetry();
 
-    const FRESH_TURNS = 3;
-    const MID_TURNS   = 7;
-    const CAP_MID     = 600;
-    const CAP_STALE   = 200;
-    for (const m of messages) {
-        if (m.role !== 'tool' || typeof m.content !== 'string') continue;
-        if (m._turnIndex == null) continue;
-        const age = turnIndex - m._turnIndex;
-        if (age < FRESH_TURNS) continue;
-        const cap = age < MID_TURNS ? CAP_MID : CAP_STALE;
-        if (m._trimmedCap != null && m._trimmedCap <= cap) continue;
-        if (m.content.length <= cap) { m._trimmedCap = m.content.length; continue; }
-        const head = m.content.slice(0, cap);
-        m.content = `${head}\n…[trimmed: full output in notebook turn ${m._turnIndex}]`;
-        m._trimmedCap = cap;
-    }
+    // O3: the old retroactive age-based trimming of tool messages mutated the
+    // prompt PREFIX on every turn (each turn another message crossed the age-3 /
+    // age-7 boundary), which invalidated the provider prompt cache from that point
+    // on — twice per message. Tool outputs are already capped at insertion time
+    // (probe 400 / inspect 800 chars); any further trimming now happens ONLY in
+    // compactMessages, where the prefix breaks anyway.
 
     const turnMaxTokens = binding.maxTokens || 8000;
     const req = {
@@ -425,6 +500,8 @@ async function callOnce({ bus, adapter, binding, messages, tools, toolChoice, si
     try {
         let _reasoningAccum = '';
         let _responseAccum  = '';
+        let _reasoningSent = 0, _responseSent = 0;   // delta cursors (Run Inspector live view)
+        let _reasoningSeq = 0, _responseSeq = 0;     // seq===0 → viewer starts a fresh buffer
         let _lastEmitMs = 0;
         const REASONING_FLUSH_MS = 200;
         const onChunk = (chunk) => {
@@ -433,17 +510,23 @@ async function callOnce({ bus, adapter, binding, messages, tools, toolChoice, si
                 _reasoningAccum += chunk.text;
                 if (now - _lastEmitMs < REASONING_FLUSH_MS) return;
                 _lastEmitMs = now;
+                const delta = _reasoningAccum.slice(_reasoningSent);
+                _reasoningSent = _reasoningAccum.length;
                 bus.appendEvent('llm.reasoning_progress', {
                     role: 'fairy', questId: quest.id, charmId: charm.id, turnIndex,
                     preview: _reasoningAccum.slice(-1800),   // fills the scrolling status box
+                    delta, seq: _reasoningSeq++,
                 }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
             } else if ((chunk.type === 'content' || chunk.type === 'text') && chunk.text) {
                 _responseAccum += chunk.text;
                 if (now - _lastEmitMs < REASONING_FLUSH_MS) return;
                 _lastEmitMs = now;
+                const delta = _responseAccum.slice(_responseSent);
+                _responseSent = _responseAccum.length;
                 bus.appendEvent('llm.response_progress', {
                     role: 'fairy', questId: quest.id, charmId: charm.id, turnIndex,
                     preview: _responseAccum.slice(-400),
+                    delta, seq: _responseSeq++,
                 }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
             }
         };
@@ -517,7 +600,7 @@ async function callOnceWithRetry(params) {
 function resolveCharmDir(quest, charm) {
     const qDir = project.questsDir();
     if (!qDir) throw new Error('No workspace open; cannot resolve charmDir');
-    const questFolder = `${quest.id}_${quest.shortName || quest.id}`;
+    const questFolder = require('../memory/quests').questFolderName(quest);
     return path.join(qDir, questFolder, 'charms', charm.id);
 }
 
@@ -585,7 +668,9 @@ async function setupWorkingKernel({ workDir, inputs, assumptions, bus, signal, s
         for (const a of assumptions) {
             await workDir.upsertAssumption(a).catch(() => {});
         }
-        const wlExprs = assumptions.map(a => a.wlAssumption || a.statement).filter(Boolean);
+        // O2: declared-parameter assumptions (prose: true) are documentation for the
+        // model and the deliverable — never WL expressions for $Assumptions.
+        const wlExprs = assumptions.filter(a => !a.prose).map(a => a.wlAssumption || a.statement).filter(Boolean);
         if (wlExprs.length > 0) {
             const expr = wlExprs.length === 1
                 ? `$Assumptions = ${wlExprs[0]};`
@@ -609,7 +694,7 @@ async function setupWorkingKernel({ workDir, inputs, assumptions, bus, signal, s
  */
 async function runModelTurns({
     phase, messages, fsm, adapter, binding, summaryBinding, bus, signal, spanId, quest, charm, workDir, getWorkingNbDoc,
-    steerQueue, recallRef, recallState, metrics, paperTools, literatureLlm,
+    steerQueue, recallLive, recallState, metrics, paperTools, literatureLlm, recordSkillGapFn,
 }) {
     const M = metrics || {};  // R10: metric counters (mutated in place)
     const fairySettings = settings.fairy();
@@ -627,9 +712,27 @@ async function runModelTurns({
         getWorkingNbDoc: getWorkingNbDoc || (() => null),
         askUser,
         rejectRedefinition: fairySettings.rejectRedefinition,  // M8
-        recalledSkillRefs: recallRef ? [recallRef] : [],       // cite_skill validation
-        paperTools,                                            // research_literature
+        // cite_skill validation — LIVE array: a late-arriving recall (I12) pushes
+        // its ref here so the citation stays valid mid-run.
+        recalledSkillRefs: recallLive ? recallLive.refs : [],
+        paperTools,                                            // research_literature + lit_read
         literatureLlm,                                         // research_literature (optional)
+        // Live progress from the literature sub-agent → working.wb status cell, so a
+        // long discovery (search rounds + paper reads) shows a thinking stream instead
+        // of looking frozen/broken while the tool call blocks.
+        emitLiteratureProgress: (p) => {
+            try {
+                bus.appendEvent('literature.progress', {
+                    questId: quest.id, charmId: charm.id,
+                    stage: (p && p.stage) || '', detail: (p && p.detail) || '',
+                }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+            } catch (_) {}
+        },
+        // R8: the original task text — research_literature extracts pasted arXiv
+        // ids/URLs from it even when the fairy's question omits them.
+        taskText: String(charm.task || charm.goal || charm.title || ''),
+        fsm,                                                   // I9: read-only (late-lit gate)
+        recordSkillGap: recordSkillGapFn || null,              // I20: note_skill_gap tool
     };
     const exploreTools = askSpecialistEnabled
         ? EXPLORE_FAIRY_TOOL_SPECS
@@ -640,6 +743,9 @@ async function runModelTurns({
     let consecutiveFailures = 0;   // triggers a forced reflection message after 3 in a row
     let probesSinceCheckpoint = 0; // nudges the fairy to checkpoint after accumulating sub-results
     let planRecorded = false;      // enforces plan-once-only guard
+    let crosscheckNudged = false;  // B7: one-shot done_exploring gate (crosscheck step required)
+    let citationNudged = false;    // I16: one-shot cite-or-decline gate for a consulted skill
+    let missingDepsNudged = false; // H3: one-shot chain-completeness gate (unrecorded definers)
     const rebuildCounts = {};      // M9: symbol → # of times rebuilt without recording
     const REBUILD_THRESHOLD = 3;   // M9: nudge after this many rebuilds of one symbol
     // R4: track clean, symbol-defining probes that were not yet recorded/amended.
@@ -658,7 +764,56 @@ async function runModelTurns({
     // not merely forgetting to record). A few firm nudges, then leave the agent alone.
     let recordGateCoolingDown = false;
     const RECORD_GATE_THRESHOLD = 6;
-    const MAX_RECORD_GATES = 3;
+    // Raised 3→5 now that record/note_fact clears only the MATCHING backlog
+    // entries: the gate re-fires on genuinely unrecorded work instead of
+    // re-nagging about a backlog that one record used to (wrongly) wipe.
+    const MAX_RECORD_GATES = 5;
+
+    // O11: run-level caps, enforced cooperatively HERE (the RunManager emits
+    // budget.exhausted but nothing in this loop observed it). An 8-call reserve is
+    // kept for the partial-report phase so a cap-hit degrades to a partial
+    // deliverable, not a dead run. `metrics.runCapBonus` is raised when the user
+    // chooses to continue past exhaustion.
+    let runCaps = { runUSD: 0, runLlmCalls: 0 };
+    try { runCaps = settings.runBudget() || runCaps; } catch (_) {}
+    // Run-LEVEL usage from the telemetry bus (per-run buffer, cleared on beginRun).
+    // In a multi-charm run the cap is consumed ACROSS charms, so the per-charm
+    // counter (M.llmCalls) never reaches the reserve threshold — run Q25's charm 3
+    // overshot the RunManager cap by 24 calls and shipped without review. A
+    // `budget.effective` event (Director budget overrides) takes precedence over
+    // the settings caps; a RunManager `budget.exhausted` stops the loop within
+    // one turn regardless of counters.
+    const runLevelUsage = () => {
+        let calls = 0, cost = 0, exhausted = false, effective = null;
+        try {
+            for (const ev of bus.recent(10000)) {
+                if (ev.type === 'llm.call') {
+                    calls += 1;
+                    cost  += Number(ev.payload && ev.payload.costUSD) || 0;
+                } else if (ev.type === 'budget.effective' && ev.payload) {
+                    effective = ev.payload;
+                } else if (ev.type === 'budget.exhausted' && ev.payload
+                           && String(ev.payload.kind || '').startsWith('run_')
+                           && ev.payload.scope !== 'fairy_loop') {
+                    exhausted = true;
+                }
+            }
+        } catch (_) {}
+        return { calls, cost, exhausted, effective };
+    };
+    const overRunCap = () => {
+        const run = runLevelUsage();
+        if (run.exhausted) return 'run_budget_event';
+        const caps = run.effective || runCaps;
+        const bonus   = M.runCapBonus || 0;
+        const callCap = Number(caps.runLlmCalls) > 0 ? Number(caps.runLlmCalls) + bonus : 0;
+        const usdCap  = Number(caps.runUSD) > 0 ? Number(caps.runUSD) * (1 + bonus / 60) : 0;
+        const calls = Math.max(M.llmCalls || 0, run.calls);
+        const cost  = Math.max(M.costUSD  || 0, run.cost);
+        if (callCap > 0 && calls >= Math.max(4, callCap - 8)) return 'run_llm_calls';
+        if (usdCap  > 0 && cost  >= usdCap)                   return 'run_usd';
+        return null;
+    };
 
     const canContinue = () => {
         if (!fsm.canTurn()) return false;
@@ -667,6 +822,18 @@ async function runModelTurns({
     };
 
     while (canContinue()) {
+        // O11: cap check before spending another LLM call.
+        const capHit = overRunCap();
+        if (capHit) {
+            M.runCapHits = (M.runCapHits || 0) + 1;
+            bus.appendEvent('budget.exhausted', {
+                kind: capHit, scope: 'fairy_loop',
+                llmCalls: M.llmCalls || 0, costUSD: M.costUSD || 0,
+                message: `Run-level cap (${capHit}) reached inside the fairy loop — routing to partial report.`,
+            }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+            return { type: 'exhausted' };
+        }
+
         // O6: compact when the context grows past a size budget (token estimate),
         // not on a fixed turn count. Skip while the last message is an unanswered
         // assistant tool_calls (must never compact mid tool-call/response pair).
@@ -674,13 +841,49 @@ async function runModelTurns({
         const lastIsPendingCalls = lastMsg && lastMsg.role === 'assistant'
             && Array.isArray(lastMsg.tool_calls) && lastMsg.tool_calls.length > 0;
         const contextChars = estimateContextChars(messages);
-        const COMPACT_CHAR_BUDGET = 60000;  // ≈ 15k tokens
+        // O3: compact at context PRESSURE, not early. With cached input pricing a
+        // long stable prefix is cheaper than repeated compaction, and each compaction
+        // is an information cliff. Budget ≈ 60% of the model's context window
+        // (chars ≈ tokens × 4), floor 60k chars, cap 400k.
+        const COMPACT_CHAR_BUDGET = Math.min(
+            Math.max(60000, ((binding.contextWindow || 128000) * 4) * 0.6),
+            400000);
         if (!lastIsPendingCalls && fsm.turnsUsed > 0 && contextChars > COMPACT_CHAR_BUDGET) {
             messages = await compactMessages(messages, 6, adapter, summaryBinding, bus, spanId, quest, charm, workDir);
             bus.appendEvent('fairy.history_compacted', {
                 questId: quest.id, charmId: charm.id, turnsCompacted: fsm.turnsUsed,
                 contextCharsBefore: contextChars,
             }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+        }
+
+        // I12: late recall injection — the skill search resolved after run start.
+        // Inject the reference block and/or the gap list once, at the next turn
+        // boundary (each gated separately: the fast path may have shown one already).
+        if (phase === 'explore' && recallLive) {
+            const wantBlock = !recallLive.injected && recallLive.block;
+            const wantGaps  = !recallLive.gapsShown && recallLive.gaps && recallLive.gaps.length;
+            if (wantBlock || wantGaps) {
+                const parts = [];
+                if (wantBlock) {
+                    recallLive.injected = true;
+                    parts.push('[A relevant SkilXiv skill arrived after run start — read it before deriving ' +
+                        'the same method from scratch. If you have already covered this ground, continue.]\n' +
+                        recallLive.block);
+                }
+                if (wantGaps) {
+                    recallLive.gapsShown = true;
+                    parts.push('[Known skill gaps — the registry has NO skill for: ' +
+                        recallLive.gaps.join('; ') +
+                        '. Derive these cleanly (record/note_fact) — a delivered run banks them as candidate new skills.]');
+                }
+                appendToLastToolOrUser(messages, parts.join('\n\n'));
+                bus.appendEvent('fairy.recall_late_injected', {
+                    questId: quest.id, charmId: charm.id,
+                    skillRef: recallLive.refs[recallLive.refs.length - 1] || null,
+                    gaps: wantGaps ? recallLive.gaps : [],
+                    turnsUsed: fsm.turnsUsed,
+                }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+            }
         }
 
         // Drain one steering message per turn (newest user directive goes first).
@@ -785,7 +988,18 @@ async function runModelTurns({
         if (signal && signal.aborted) throw new Error('aborted');
 
         // Accumulate run cost for the live status line.
-        M.costUSD = (M.costUSD || 0) + (Number(result.costUSD) || 0);
+        M.costUSD  = (M.costUSD || 0) + (Number(result.costUSD) || 0);
+        M.llmCalls = (M.llmCalls || 0) + 1;   // O11: cooperative run-cap counter
+        // O3: prompt-cache effectiveness (deepseek: prompt_cache_hit/miss_tokens;
+        // anthropic: cache_read_input_tokens). Providers without caching count all
+        // input as miss, which is the honest hit-rate denominator.
+        {
+            const u = result.usage || {};
+            M.cacheRead = (M.cacheRead || 0) + (Number(u.cacheReadTokens) || 0);
+            M.cacheMiss = (M.cacheMiss || 0) + (u.cacheMissTokens != null
+                ? (Number(u.cacheMissTokens) || 0)
+                : Math.max(0, (Number(u.inputTokens) || 0) - (Number(u.cacheReadTokens) || 0)));
+        }
 
         // P7: live status — stream phase, remaining budget, cost/probes/turns, and the
         // tail of the model's reasoning into a pinned working.wb cell (throttled in UI).
@@ -834,6 +1048,17 @@ async function runModelTurns({
                     continue;
                 }
 
+                // I20: note_skill_gap capped at 2/run.
+                if (call.name === 'note_skill_gap' && (M.skillGapNotes || 0) >= 2) {
+                    messages.push({ role: 'tool', tool_call_id: call.id,
+                        content: JSON.stringify({
+                            rejected: true,
+                            reason:   'note_skill_gap cap reached (2 per run).',
+                            suggestedAction: 'Continue with the task — the recorded gaps are already filed.',
+                        }) });
+                    continue;
+                }
+
                 // Guard: plan may only be called once
                 if (call.name === 'plan' && planRecorded) {
                     messages.push({ role: 'tool', tool_call_id: call.id,
@@ -879,6 +1104,20 @@ async function runModelTurns({
                             note:     planPayload.note   || (callArgs && callArgs.note)  || '',
                         }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
                     }
+                }
+                // O7: a plan revision posts an updated roadmap cell (revision > 0).
+                if (call.name === 'revise_plan' && toolResult.ok !== false) {
+                    let rp = {};
+                    try { rp = JSON.parse(toolResult.modelPayload || '{}'); } catch (_) {}
+                    M.planRevisions = (M.planRevisions || 0) + 1;
+                    bus.appendEvent('plan.created', {
+                        questId:  quest.id,
+                        charmId:  charm.id,
+                        charmDir: workDir.dir,
+                        steps:    (callArgs && callArgs.steps) || [],
+                        note:     (callArgs && callArgs.changes) || '',
+                        revision: rp.revision || 1,
+                    }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
                 }
                 if (call.name === 'checkpoint' && toolResult.ok !== false) {
                     probesSinceCheckpoint = 0;
@@ -1023,10 +1262,25 @@ async function runModelTurns({
 
                 // M9: a successful record means a step was locked in — progress was made,
                 // so clear all rebuild counters (the model is extending, not stuck).
-                // R4: a record/note_fact clears the pending-record backlog too.
+                // R4: a record/note_fact clears the MATCHING pending-record entries.
+                // (It used to wipe the whole backlog — one record after 10 unrecorded
+                // probes silently dropped the other 9 from tracking, which is how run
+                // Q32/C02 accumulated 28 unrecorded clean results and delivered at 0.45.)
                 if ((call.name === 'record' || call.name === 'note_fact') && toolResult.ok !== false) {
                     for (const k of Object.keys(rebuildCounts)) delete rebuildCounts[k];
-                    pendingRecords.length = 0;
+                    const clearedProbeId = (call.name === 'record')
+                        ? ((callArgs && callArgs.probeId) || toolResult.probeId || null)
+                        : null;
+                    const clearedSyms = new Set([
+                        ...(Array.isArray(toolResult.definesSymbols) ? toolResult.definesSymbols : []),
+                        ...(call.name === 'note_fact' && callArgs && callArgs.key ? [String(callArgs.key)] : []),
+                    ]);
+                    for (let i = pendingRecords.length - 1; i >= 0; i--) {
+                        const p = pendingRecords[i];
+                        if ((clearedProbeId && p.probeId === clearedProbeId) || clearedSyms.has(p.symbol)) {
+                            pendingRecords.splice(i, 1);
+                        }
+                    }
                     if (call.name === 'record')    M.records   = (M.records || 0) + 1;
                     if (call.name === 'note_fact') M.noteFacts = (M.noteFacts || 0) + 1;
 
@@ -1054,6 +1308,14 @@ async function runModelTurns({
                     }
                 }
                 if (call.name === 'inspect') M.inspects = (M.inspects || 0) + 1;
+                if (call.name === 'lit_read' && toolResult.ok !== false) M.litReads = (M.litReads || 0) + 1;
+                if (call.name === 'note_skill_gap' && toolResult.ok !== false) {
+                    M.skillGapNotes = (M.skillGapNotes || 0) + 1;
+                    bus.appendEvent('skill.gap_recorded', {
+                        questId: quest.id, charmId: charm.id, source: 'agent',
+                        topic: (callArgs && callArgs.topic) || '',
+                    }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+                }
 
                 // cite_skill — the agent explicitly declared it used a recalled skill.
                 // This is the authoritative "skill used" signal (drives used_reproduced).
@@ -1140,6 +1402,107 @@ async function runModelTurns({
             const control = tryParseControlSignal(content);
             if (control) {
                 if (control.control === 'done_exploring') {
+                    // One-shot finishing gates (explore only). Each fires at most once;
+                    // re-emitting done_exploring always passes afterwards.
+                    if (phase === 'explore') {
+                        const deferrals = [];
+                        // B7: cross-check gate — a finished chain must contain at least
+                        // one step recorded with role:'crosscheck'.
+                        if (!crosscheckNudged) {
+                            let hasCrosscheck = false;
+                            try {
+                                const vs = await workDir.loadValidSteps();
+                                hasCrosscheck = vs.some(s => s && s.role === 'crosscheck');
+                            } catch (_) { hasCrosscheck = true; /* fail-open: never block on an I/O error */ }
+                            if (!hasCrosscheck) {
+                                crosscheckNudged = true;
+                                M.crosscheckGates = (M.crosscheckGates || 0) + 1;
+                                bus.appendEvent('fairy.crosscheck_gate', {
+                                    questId: quest.id, charmId: charm.id, turnsUsed: fsm.turnsUsed,
+                                }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+                                deferrals.push(
+                                    'No cross-check step is recorded (rule 24). Verify the headline result by an ' +
+                                    'INDEPENDENT path (numeric spot-check of a symbolic result, a second method, a ' +
+                                    'limiting case, or a trace/symmetry identity): probe it, then `record` it with ' +
+                                    'role: "crosscheck". If an already-recorded step genuinely serves as that ' +
+                                    'cross-check, simply re-emit done_exploring — it will be accepted.');
+                            }
+                        }
+                        // H3 (run Q_3VRPXL): chain-completeness gate. Symbols the recorded
+                        // chain USES but never RECORDS a definer for will be auto-recovered
+                        // at compile (H2), but a properly-recorded step carries the agent's
+                        // note and intent — nudge once, naming the defining probes.
+                        if (!missingDepsNudged) {
+                            try {
+                                const vs = await workDir.loadValidSteps();
+                                const defined = new Set();
+                                for (const s of vs) for (const sym of (s.definesSymbols || [])) defined.add(sym);
+                                try { for (const u of await workDir.loadUtils()) if (u && u.name) defined.add(u.name); } catch (_) {}
+                                // Handoff-seeded inputs define symbols too (the record-time
+                                // check counts them; this gate must agree — run Q32 flagged
+                                // symbols the previous charm had seeded).
+                                try {
+                                    for (const inp of await workDir.loadInputs()) {
+                                        for (const sym of analyzeCode((inp && inp.code) || '').definesSymbols) defined.add(sym);
+                                    }
+                                } catch (_) {}
+                                const missing = [];
+                                for (const s of vs) {
+                                    for (const sym of (s.usesSymbols || [])) {
+                                        // usesSymbols may predate additions to WL_BUILTINS
+                                        // (steps.json is persisted) — re-filter here so a
+                                        // built-in never blocks done_exploring.
+                                        if (WL_BUILTINS.has(sym)) continue;
+                                        if (!defined.has(sym) && !missing.includes(sym)) missing.push(sym);
+                                    }
+                                }
+                                if (missing.length) {
+                                    const recent = await workDir.loadRecentProbes(200).catch(() => []);
+                                    const hints = [];
+                                    for (const sym of missing.slice(0, 4)) {
+                                        const definer = recent.filter(rp => rp && rp.ok && rp.code)
+                                            .reverse()
+                                            .find(rp => extractTargetSymbol(rp.code) === sym
+                                                || new RegExp(`(?:^|\\n)\\s*${sym}\\s*(?:\\[[^\\]]*\\])?\\s*:?=`).test(rp.code));
+                                        hints.push(definer ? `\`${sym}\` (probe ${definer.probeId} defines it — \`record\` that probe)` : `\`${sym}\``);
+                                    }
+                                    missingDepsNudged = true;
+                                    M.missingDepGates = (M.missingDepGates || 0) + 1;
+                                    bus.appendEvent('fairy.missing_deps_gate', {
+                                        questId: quest.id, charmId: charm.id, missing: missing.slice(0, 6),
+                                    }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+                                    deferrals.push(
+                                        `Your recorded chain uses symbols that NO recorded step, util, or input defines: ${hints.join(', ')}. ` +
+                                        'The fresh-kernel replay would fail on them. Record the defining probes now (the harness can ' +
+                                        'auto-recover them, but a recorded step carries your note and intent) — then re-emit done_exploring.');
+                                }
+                            } catch (_) { /* completeness check is best-effort */ }
+                        }
+                        // I16: citation reconciliation — a skill was consulted (injected into
+                        // context) but never cited or declined. Two consecutive runs consulted
+                        // the same skill without a verdict; the usage feedback is meaningless
+                        // without one.
+                        if (!citationNudged && recallLive && recallLive.injected
+                            && recallState && recallState.cited && recallState.cited.size === 0) {
+                            citationNudged = true;
+                            M.citationGates = (M.citationGates || 0) + 1;
+                            bus.appendEvent('fairy.citation_gate', {
+                                questId: quest.id, charmId: charm.id,
+                                skillRef: recallLive.refs[recallLive.refs.length - 1] || null,
+                            }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+                            deferrals.push(
+                                `You consulted the skill ${recallLive.refs[recallLive.refs.length - 1] || ''} this run. ` +
+                                'If its METHOD or a formula it states genuinely shaped your derivation, call ' +
+                                '`cite_skill` now (stating HOW). If it did not help, simply re-emit done_exploring — ' +
+                                'no citation will be recorded.');
+                        }
+                        if (deferrals.length) {
+                            messages.push({ role: 'user', content:
+                                '[done_exploring deferred — resolve the following, then re-emit:]\n\n- ' +
+                                deferrals.join('\n\n- ') });
+                            continue;
+                        }
+                    }
                     return {
                         type:         'done_exploring',
                         targetStepId: control.targetStepId,
@@ -1165,15 +1528,24 @@ async function runModelTurns({
  *
  * Returns one of:
  *   { type: 'clean_verified' }
+ *   { type: 'reopen_chain', stepId, reason }   — B4: a recorded step is wrong (once per run)
  *   { type: 'failed', summary, reason }
  *   { type: 'escalate', reason }
  *   { type: 'exhausted' }
  */
 async function runPolishTurns({
-    messages, fsm, adapter, binding, bus, signal, spanId, quest, charm, workDir,
+    messages, fsm, adapter, binding, bus, signal, spanId, quest, charm, workDir, allowReopen,
 }) {
-    const fairyCtx = { workDir, shim: wolframShim, signal };
+    // I5: charm carries validationChecks (run by run_clean); polishState carries the
+    // validation fail-streak across run_clean calls within this polish phase.
+    const fairyCtx = { workDir, shim: wolframShim, signal, charm, polishState: {} };
     let cleanVerified = false; // set to true when run_clean returned allClean: true
+    // I6: redundant-run_clean guard + identical-failure detection (run Q_2N8616:
+    // a second run_clean after a pass wasted 32s; two runs failed IDENTICALLY
+    // because a disk-only edit never reached the open document).
+    let lastRunCleanPassed  = false;
+    let editsSinceRunClean  = 0;
+    let lastFailureSig      = null;
 
     const STEER_POLISH =
         'No tool call or control signal found. ' +
@@ -1241,6 +1613,21 @@ async function runPolishTurns({
                     continue;
                 }
 
+                // I6: a second run_clean after a PASS with nothing edited since is pure
+                // waste (30+ seconds of kernel restart + full replay). Reject it.
+                if (call.name === 'run_clean' && lastRunCleanPassed && editsSinceRunClean === 0) {
+                    messages.push({ role: 'tool', tool_call_id: call.id,
+                        content: JSON.stringify({
+                            rejected: true,
+                            reason:   'clean.wb already verified (allClean: true) and no cell was edited since. Re-running changes nothing.',
+                            suggestedAction: 'Emit { "control": "clean_verified" } as plain JSON now.',
+                        }) });
+                    await bus.appendEvent('correlated.tool', {
+                        correlationId, name: call.name, ok: false, error: 'run_clean_redundant',
+                    }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+                    continue;
+                }
+
                 // probe budget guard (uses remaining diagnose budget)
                 if (call.name === 'probe' && !fsm.canProbe()) {
                     messages.push({ role: 'tool', tool_call_id: call.id,
@@ -1260,11 +1647,37 @@ async function runPolishTurns({
                 // Track run_clean budget and whether we got allClean: true
                 if (call.name === 'run_clean') {
                     try { fsm.consumePolishRunClean(); } catch (_) {}
+                    editsSinceRunClean = 0;
                     if (toolResult.ok) {
                         let payload;
                         try { payload = JSON.parse(toolResult.modelPayload || '{}'); } catch (_) { payload = {}; }
                         if (payload.allClean === true) cleanVerified = true;
+                        lastRunCleanPassed = payload.allClean === true;
+                        // I6: identical-failure detection — the same cells failing with the
+                        // same errors twice in a row means the edit did not address the root
+                        // cause (or never reached the executed document). Force a diagnosis
+                        // step before the next blind edit.
+                        if (payload.allClean !== true) {
+                            const sig = (payload.failures || [])
+                                .map(f => `${f.cellIndex}:${String(f.error || f.messages || '').slice(0, 60)}`)
+                                .join('|');
+                            if (sig && sig === lastFailureSig) {
+                                appendToLastToolOrUser(messages,
+                                    '[System: the SAME cells failed with the SAME errors as the previous run_clean — ' +
+                                    'your edit did not address the root cause. Before the next edit_cell, use `probe` ' +
+                                    'to evaluate the failing expression in the live kernel and understand WHY it fails. ' +
+                                    'If a recorded step is mathematically wrong, emit reopen_chain instead of editing around it.]');
+                            }
+                            lastFailureSig = sig || null;
+                        } else {
+                            lastFailureSig = null;
+                        }
                     }
+                }
+
+                // I6: count edits between run_cleans (feeds the redundancy guard).
+                if (call.name === 'edit_cell' && toolResult.ok !== false) {
+                    editsSinceRunClean++;
                 }
 
                 // probe budget tracking in polish
@@ -1318,6 +1731,22 @@ async function runPolishTurns({
                     continue;
                 }
                 return { type: 'clean_verified' };
+            }
+
+            // B4: the model diagnosed a wrong RECORDED step (not a cell-text issue).
+            // Route back to Explore via the outer loop — once per run.
+            if (control && control.control === 'reopen_chain') {
+                if (!allowReopen) {
+                    messages.push({ role: 'user', content:
+                        '**reopen_chain rejected**: the one-per-run chain reopen has already been used. ' +
+                        'Fix the remaining issues with `edit_cell` + `run_clean`, or call finalize(failed).' });
+                    continue;
+                }
+                return {
+                    type:   'reopen_chain',
+                    stepId: String(control.stepId || ''),
+                    reason: String(control.reason || ''),
+                };
             }
 
             if (control && (control.control === 'escalate' || control.control === 'done_exploring')) {
@@ -1426,6 +1855,40 @@ async function runPartialReportTurns({
 }
 
 /**
+ * B2: build executable evidence items from recorded steps so the Skeptic can
+ * re-verify the chain. `tool` MUST be 'wolfram_eval' — the Skeptic's Layer-1
+ * loop skips any other tool name. Output prefers the probe's agentValue
+ * (kernel InputForm — the same rendering the Skeptic's re-eval produces) over
+ * the human/LaTeX value so compareOutputs can match exactly or by substring.
+ *
+ * @param {object[]} steps                             valid steps, recorded order
+ * @param {(probeId: string) => Promise<object|null>} getProbe
+ * @param {number} [maxItems]
+ * @returns {Promise<object[]>}
+ */
+async function buildEvidenceFromSteps(steps, getProbe, maxItems = 12) {
+    const out = [];
+    for (const s of (steps || []).slice(-maxItems)) {
+        if (!s || !s.probeId || !s.code) continue;
+        let probe = null;
+        try { probe = await getProbe(s.probeId); } catch (_) { probe = null; }
+        if (!probe || !probe.ok) continue;
+        const value = (typeof probe.agentValue === 'string' && probe.agentValue.length)
+            ? probe.agentValue
+            : (probe.value || '');
+        if (!value) continue;
+        out.push({
+            tool:       'wolfram_eval',
+            stepId:     s.id,
+            expression: s.code,
+            output:     String(value).slice(0, 2000),
+            ok:         true,
+        });
+    }
+    return out;
+}
+
+/**
  * Build and persist a Scroll from the terminal FSM result.
  * Returns { scroll, fileRef }.
  */
@@ -1435,13 +1898,23 @@ async function buildAndPersistScroll({ terminalResult, workDir, quest, charm, bu
     let steps = [];
     try { steps = await workDir.loadValidSteps(); } catch (_) {}
 
-    const confidence = status === 'delivered' ? 0.95
-        : status === 'partial_delivered' ? 0.3
-        : status === 'failed'   ? 0.1
-        :                         0.05;
+    // Record of what executed. The clean.wb replay (run_clean) is the
+    // verification; this evidence list is the trace behind it, not a re-checked
+    // claim (there is no longer a Skeptic/Wards layer to re-verify against).
+    let evidence = [];
+    try { evidence = await buildEvidenceFromSteps(steps, (id) => workDir.getProbe(id)); } catch (_) { evidence = []; }
+
+    // Confidence is derived purely from the terminal status set by the Fairy's
+    // own clean.wb run: `delivered` means the fresh-kernel replay was clean.
+    // There is no separate self-verify re-eval (its encoding-only false
+    // mismatches were the Q25/Q32 confidence-collapse root cause).
+    const confidence = status === 'delivered'         ? 0.9
+        : status === 'partial_delivered'              ? 0.6
+        : status === 'failed'                         ? 0.1
+        :                                               0.05;
 
     const statusNote =
-        status === 'delivered'         ? 'Verification passed.'
+        status === 'delivered'         ? 'Clean-run verification passed (clean.wb re-ran cleanly on a fresh kernel).'
         : status === 'partial_delivered' ? `Partial results written to clean_partial.wb: ${((terminalResult && terminalResult.reason) || '').slice(0, 200)}`
         : status === 'failed'          ? `Failed: ${((terminalResult && terminalResult.summary) || '').slice(0, 200)}`
         :                                `Escalated: ${((terminalResult && terminalResult.reason)  || '').slice(0, 200)}`;
@@ -1451,10 +1924,14 @@ async function buildAndPersistScroll({ terminalResult, workDir, quest, charm, bu
         steps.length > 0 ? `${steps.length} recorded step(s).` : 'No steps recorded.',
     ].join(' ').slice(0, 1000);
 
+    // Mark cut-off code explicitly: downstream LLM narrators judged "the construction
+    // appears incomplete (truncated bond sums)" from a display ellipsis (run Q25).
     const findings = steps.length > 0
-        ? steps.map(s =>
-            `**Step ${s.id}** (${(s.definesSymbols || []).join(', ') || 'no new symbols'}): \`${(s.code || '').slice(0, 200)}\``
-          ).slice(0, 32)
+        ? steps.map(s => {
+            const code = String(s.code || '');
+            const snippet = code.length > 200 ? code.slice(0, 200) + ' …[snippet truncated for display — full code in the notebook]' : code;
+            return `**Step ${s.id}** (${(s.definesSymbols || []).join(', ') || 'no new symbols'}): \`${snippet}\``;
+          }).slice(0, 32)
         : [`Run terminated with status '${status}'.`];
 
     const openQuestions = status !== 'delivered'
@@ -1470,13 +1947,15 @@ async function buildAndPersistScroll({ terminalResult, workDir, quest, charm, bu
         openQuestions,
         confidence,
         selfChecks:    [],
-        evidence:      [],
+        evidence,
         createdAt:     new Date().toISOString(),
         fairyArtifact: {
             status,
             charmDir:        workDir.dir,
-            cleanNbPath:     status === 'delivered'         ? ((terminalResult && terminalResult.cleanNbPath)   || null) : null,
-            partialNbPath:   status === 'partial_delivered' ? ((terminalResult && terminalResult.partialNbPath) || null) : null,
+            // B4: a polish-failed partial_delivered run still carries its compiled
+            // clean.wb — include the path whenever the terminal result has one.
+            cleanNbPath:     (terminalResult && terminalResult.cleanNbPath)   || null,
+            partialNbPath:   (terminalResult && terminalResult.partialNbPath) || null,
             candidateNbPath: (terminalResult && terminalResult.candidateNbPath) || null,
             phaseHistory:    fsm.phaseHistory,
             budget:          fsm.getBudgetStatus(),
@@ -1501,8 +1980,9 @@ async function buildAndPersistScroll({ terminalResult, workDir, quest, charm, bu
         fileRef,
         phaseHistory: fsm.phaseHistory,
         budget:      fsm.getBudgetStatus(),
-        cleanNbPath:   status === 'delivered'         ? ((terminalResult && terminalResult.cleanNbPath)   || null) : null,
-        partialNbPath: status === 'partial_delivered' ? ((terminalResult && terminalResult.partialNbPath) || null) : null,
+        evidenceCount: evidence.length,
+        cleanNbPath:   (terminalResult && terminalResult.cleanNbPath)   || null,
+        partialNbPath: (terminalResult && terminalResult.partialNbPath) || null,
         steps: steps.map(s => ({
             id:             s.id,
             probeId:        s.probeId,
@@ -1561,6 +2041,9 @@ async function runFairy(args) {
             paperSearch.searchPapers({ ...params, query: (params && (params.q || params.query)) || '' }, max, opts),
         searchArxiv:     (params, max, opts) => paperSearch.searchArxiv(params, max, opts),
         searchInspire:   (params, max, opts) => paperSearch.searchInspire(params, max, opts),
+        // R6: Semantic Scholar relevance search — rescues prose/method queries that
+        // arXiv's exact AND-grammar returns nothing for; supplies citation counts.
+        searchSemanticScholar: (params, max) => paperSearch.searchSemanticScholar(params, max),
         fetchPaperHtml:  paperSearch.fetchPaperHtml,
         extractSections: paperSearch.extractSections,
         getInspireBibtex: paperSearch.getInspireBibtex,
@@ -1580,7 +2063,8 @@ async function runFairy(args) {
                     ],
                     model:       litBinding.model,
                     temperature: 0.1,
-                    maxTokens:   litBinding.maxTokens || 800,
+                    // R8: 800 truncated DeepSeek's plan/reformulate JSON mid-reply
+                    maxTokens:   litBinding.maxTokens || 2000,
                     signal,
                 }, { pricing: litBinding.pricing });
                 bus.appendEvent('llm.call', {
@@ -1637,19 +2121,27 @@ async function runFairy(args) {
         provider: binding.provider, model: binding.model,
         charmDir,
         workingNbPath: workDir.workingNb,
+        build: BUILD_INFO,   // I18: which code actually ran (catches stale deploys)
     }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
 
-    // ── RECALL phase — R5: kick off concurrently with kernel setup so its ~15s
-    // latency overlaps the kernel warm-up instead of blocking run start. ──────
+    // ── RECALL phase — R5: kick off concurrently with kernel setup. I12: NON-
+    // BLOCKING — 17.8s and 54s recalls were observed; a hard timeout drops skills,
+    // blocking stalls the run. Instead: wait briefly (fast path → skill lands in the
+    // first, cacheable message); otherwise start exploring and inject the skill
+    // MID-RUN when it arrives. ────────────────────────────────────────────────
     const recallCfg = settings.recall();
+    const skilxivClient = recallCfg.enabled
+        ? new SkilXivClient({ baseUrl: recallCfg.skilxivBaseUrl, apiToken: recallCfg.skilxivApiToken })
+        : null;
     let recallPromise = Promise.resolve({ mode: 'none', recallLog: { error: 'recall disabled' } });
     if (recallCfg.enabled && !charm.confidential) {
-        const skilxivClient = new SkilXivClient({
-            baseUrl:  recallCfg.skilxivBaseUrl,
-            apiToken: recallCfg.skilxivApiToken,
-        });
         const taskText = String(charm.task || charm.goal || charm.title || '');
-        recallPromise = runRecall(taskText, { client: skilxivClient, signal }).catch(e => ({
+        recallPromise = runRecall(taskText, {
+            client:    skilxivClient,
+            signal,
+            timeoutMs: 60000,                    // I12: generous — no longer blocks run start
+            llm:       literatureLlm || null,    // I11: triage across all candidates
+        }).catch(e => ({
             mode: 'none',
             recallLog: { error: (e && e.message) || String(e) },
         }));
@@ -1657,20 +2149,114 @@ async function runFairy(args) {
 
     const { kernelFresh, inputsLoaded } = await setupWorkingKernel({ workDir, inputs, assumptions, bus, signal, spanId, quest, charm });
 
-    const recallResult = await recallPromise;
-    if (recallResult.mode !== 'none' || recallResult.skillRef) {
-        await bus.appendEvent('recall.completed', {
-            questId:    quest.id,
-            charmId:    charm.id,
-            mode:       recallResult.mode,
-            skillRef:   recallResult.skillRef || null,
-            recallLog:  recallResult.recallLog,
+    // ── O6: cross-charm handoff — charm N's verified utils are re-evaluated into
+    // the fresh kernel and its established facts seeded into the ledger, so charm
+    // N+1 EXTENDS prior work instead of re-deriving it from a prose summary. ────
+    const handoff = args.handoff || null;
+    const handoffSeeded = { utils: [], facts: [] };
+    if (handoff) {
+        for (const u of (handoff.utils || []).slice(0, 12)) {
+            if (!u || !u.name || !u.code) continue;
+            try {
+                const r = await wolframShim.evalOnce({ expression: u.code, signal });
+                if (r && r.ok) {
+                    await workDir.addUtil({ name: u.name, code: u.code, note: u.note || 'from previous sub-task' });
+                    handoffSeeded.utils.push(u.name);
+                }
+            } catch (_) { /* a failing util is simply not carried over */ }
+        }
+        for (const f of (handoff.facts || []).slice(0, 20)) {
+            if (!f || !f.key) continue;
+            try {
+                await workDir.addFact({
+                    key: f.key, value: f.value, confidence: f.confidence,
+                    provenance: `handoff:${f.provenance || 'previous sub-task'}`,
+                });
+                handoffSeeded.facts.push(f.key);
+            } catch (_) {}
+        }
+        if (handoffSeeded.utils.length || handoffSeeded.facts.length) {
+            bus.appendEvent('fairy.handoff_seeded', {
+                questId: quest.id, charmId: charm.id,
+                utils: handoffSeeded.utils, facts: handoffSeeded.facts,
+            }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+        }
+    }
+
+    // I12: fast path (5s) — a fast backend behaves exactly as before.
+    const FAST_RECALL_MS = 5000;
+    let recallResult = await Promise.race([
+        recallPromise,
+        new Promise(resolve => setTimeout(() => resolve(null), FAST_RECALL_MS)),
+    ]);
+    // recallLive: mutable view shared with the model loop. `refs` feeds cite_skill
+    // validation (live array — late arrivals push into it); `block` is the reference
+    // material; `injected` records whether the model ever actually SAW the skill
+    // (usage feedback and the skills-used block key off this, not off mode alone).
+    const recallLive = { refs: [], block: null, gaps: [], injected: false };
+    const _applyRecall = (res) => {
+        if (!res) return;
+        recallResult = res;
+        // S1: capabilities with NO fitting registry skill — surfaced to the model
+        // ("derive it cleanly") and auto-filed as skill requests on delivery. Gaps
+        // exist even when a skill WAS found (a marginal hit must not mask them).
+        recallLive.gaps = Array.isArray(res.gaps) ? res.gaps.slice(0, 4) : [];
+        if (res.mode !== 'none' || res.skillRef) {
+            bus.appendEvent('recall.completed', {
+                questId:    quest.id,
+                charmId:    charm.id,
+                mode:       res.mode,
+                skillRef:   res.skillRef || null,
+                skillCount: Array.isArray(res.skills) ? res.skills.length : (res.skillRef ? 1 : 0),
+                gaps:       recallLive.gaps,
+                recallLog:  res.recallLog,
+            }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+        }
+        if (res.mode === 'consult' && res.skillRef) {
+            // S1: up to 2 picked skills, each with its graded-fit annotation so the
+            // model knows what the skill covers and what it must derive itself.
+            const skillList = (Array.isArray(res.skills) && res.skills.length) ? res.skills : [res];
+            const blocks = [];
+            for (const sk of skillList) {
+                if (!sk || !sk.skillRef) continue;
+                recallLive.refs.push(sk.skillRef);
+                let block = buildRecallContextBlock({ ...sk, mode: 'consult' });
+                if (sk.fit) {
+                    block += `\nFIT ASSESSMENT for ${sk.skillRef}: ${sk.fit.toUpperCase()}` +
+                        (sk.capability ? ` (serves: ${sk.capability})` : '') +
+                        (sk.covers ? `. Covers: ${sk.covers}` : '') +
+                        (sk.lacks ? `. LACKS: ${sk.lacks} — adapt the method or derive that part yourself.` : '') + '\n';
+                }
+                blocks.push(block);
+            }
+            recallLive.block = blocks.join('\n');
+        }
+    };
+    if (recallResult) {
+        _applyRecall(recallResult);
+    } else {
+        recallResult = { mode: 'none', recallLog: { pending: true } };
+        recallPromise.then(res => _applyRecall(res)).catch(() => {});
+        bus.appendEvent('omen', {
+            kind: 'recall_slow',
+            message: `SkilXiv recall still pending after ${FAST_RECALL_MS}ms — starting the run; the skill will be injected when it arrives.`,
         }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
     }
-    const recallBlock = buildRecallContextBlock(recallResult);
+    const recallBlock = recallLive.block;   // fast path only — goes into the first message
+    if (recallBlock) recallLive.injected = true;
+    if (recallLive.gaps && recallLive.gaps.length) recallLive.gapsShown = true;   // in the first message via skillGaps
     // Skill use is declared by the agent (cite_skill), not inferred. recallState.cited
     // accumulates the skillRefs the agent explicitly cited as used.
     const recallState = { referenced: false, cited: new Set() };
+
+    // I13/I20: skill-gap recorder — shared by the note_skill_gap tool and the
+    // end-of-run harness trigger. Local ledger always; registry request best-effort.
+    const recordSkillGapFn = async ({ topic, why, source }) => skillGaps.recordSkillGap({
+        topic, why, source: source || 'agent',
+        task:    String(charm.task || charm.goal || charm.title || ''),
+        questId: quest.id, charmId: charm.id,
+        client:  skilxivClient,
+    });
 
     const fsm = new FairyFSM();
     // Instrument transitionTo to fire UI phase-change events (fire-and-forget).
@@ -1691,6 +2277,14 @@ async function runFairy(args) {
             taskDescription: String(charm.task || charm.goal || charm.title || 'Perform the computation described in this Charm.'),
             inputs,
             assumptions,
+            // B2: show the planner's validation checks up front so the agent names
+            // its symbols to match — the Skeptic executes these after delivery.
+            validationChecks: Array.isArray(charm.validationChecks) ? charm.validationChecks : [],
+            // O6: names of utils/facts seeded from the previous sub-task.
+            handoff: (handoffSeeded.utils.length || handoffSeeded.facts.length) ? handoffSeeded : null,
+            // S1: capabilities the registry has NO skill for (fast-path recall only;
+            // late-resolving recalls inject gaps mid-run instead).
+            skillGaps: recallLive.gaps,
             budget: {
                 exploreProbesRemaining: fsm.exploreProbesRemaining,
                 backtracksRemaining:    fsm.backtracksRemaining,
@@ -1708,6 +2302,11 @@ async function runFairy(args) {
     let currentExcludeSteps = [];
     let terminalResult      = null;
     let lastCompileResult   = null;
+    // B4: polish salvage state — one structural chain reopen per run, and the
+    // compiled clean.wb + failure context carried into a polish-failure partial report.
+    let polishReopensUsed   = 0;
+    let pendingCleanNbPath  = null;
+    let polishFailureContext = null;
 
     // Create steer queue for this run. Index.js will expose setSteerQueue so the UI
     // can push text; messages are drained one-per-turn in runModelTurns.
@@ -1739,6 +2338,8 @@ async function runFairy(args) {
         if (!want) return false;
         continuations++;
         fsm.grantMoreBudget(CONTINUE_GRANT);
+        // O11: also raise the run-level cap, or the loop would re-trigger immediately.
+        metrics.runCapBonus = (metrics.runCapBonus || 0) + CONTINUE_GRANT.turns;
         messages.push({ role: 'user', content:
             `[The user chose to CONTINUE. Fresh budget granted: +${CONTINUE_GRANT.probes} probes, +${CONTINUE_GRANT.turns} turns. ` +
             `You have ${metrics.records || 0} recorded step(s) and ${metrics.noteFacts || 0} fact(s) so far. ` +
@@ -1784,8 +2385,8 @@ async function runFairy(args) {
                 loopResult = await runModelTurns({
                     phase, messages, fsm, adapter, binding, summaryBinding, bus, signal, spanId, quest, charm, workDir, getWorkingNbDoc,
                     steerQueue: phase === 'explore' ? steerQueue : null,
-                    recallRef: recallResult.skillRef || null, recallState,
-                    metrics, paperTools, literatureLlm,
+                    recallLive, recallState,
+                    metrics, paperTools, literatureLlm, recordSkillGapFn,
                 });
             } catch (e) {
                 if (signal && signal.aborted) {
@@ -1843,8 +2444,9 @@ async function runFairy(args) {
             // Skills-used + citation block for the clean notebook (and working.wb).
             // A skill is shown as USED only if the agent cited it (cite_skill); otherwise
             // it was merely consulted. The "how it helped" comes from the citation itself.
+            // I12: only a skill the model actually SAW (injected) counts as consulted.
             let skillsBlock = '';
-            if (recallResult && recallResult.skillRef) {
+            if (recallResult && recallResult.skillRef && recallLive.injected) {
                 const ref = recallResult.skillRef;
                 const cited = await workDir.loadCitedSkills().catch(() => []);
                 const citation = cited.find(c => c.skillRef === ref);
@@ -1945,6 +2547,7 @@ async function runFairy(args) {
             try {
                 polishResult = await runPolishTurns({
                     messages, fsm, adapter, binding, bus, signal, spanId, quest, charm, workDir,
+                    allowReopen: polishReopensUsed < 1,
                 });
             } catch (e) {
                 if (signal && signal.aborted) {
@@ -1969,12 +2572,45 @@ async function runFairy(args) {
                 terminalResult = { status: 'delivered', cleanNbPath };
                 fsm.transitionTo('delivered');
 
+            } else if (polishResult.type === 'reopen_chain') {
+                // B4: the model diagnosed a wrong RECORDED step during polish. Allow ONE
+                // structural reopen: invalidate the step (and dependents), return to
+                // Explore, rebuild, recompile. Does not consume a backtrack.
+                const stepId = polishResult.stepId;
+                let pruned = null;
+                if (stepId) {
+                    try { pruned = await workDir.markStale(stepId); } catch (_) { pruned = null; }
+                }
+                if (!pruned) {
+                    messages.push({ role: 'user', content:
+                        `[reopen_chain: step '${stepId || '?'}' was not found among valid steps — nothing was invalidated. ` +
+                        'Staying in polish: fix the notebook with edit_cell + run_clean, or name a valid stepId.]' });
+                    continue;  // re-enter polish (reopen not consumed)
+                }
+                polishReopensUsed++;
+                bus.appendEvent('fairy.chain_reopened', {
+                    questId: quest.id, charmId: charm.id, stepId,
+                    prunedStepIds: pruned.prunedStepIds || [],
+                    reason: polishResult.reason || '',
+                }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+                metrics.chainReopens = (metrics.chainReopens || 0) + 1;
+                messages.push({ role: 'user', content:
+                    `[Chain reopened from polish: step '${stepId}'` +
+                    ((pruned.prunedStepIds || []).length > 1 ? ` (with dependents: ${pruned.prunedStepIds.join(', ')})` : '') +
+                    ` was invalidated because: ${polishResult.reason || 'unspecified'}. You are back in Explore. ` +
+                    `Probes remaining: ${Math.max(0, fsm.exploreProbesRemaining)}. ` +
+                    'Re-probe the corrected computation, record it (keep your crosscheck step), then emit done_exploring again.]' });
+                fsm.transitionTo('explore');
+
             } else if (polishResult.type === 'failed') {
                 // The clean notebook still has unresolved warnings/errors. Offer to keep
                 // fixing (more polish budget) before giving up — the deliverable must be clean.
                 if (await _maybeContinuePolish(polishResult.reason || 'clean.wb still has unresolved warnings')) continue;
-                terminalResult = { status: 'failed', summary: polishResult.summary, reason: polishResult.reason, cleanNbPath };
-                fsm.transitionTo('failed');
+                // B4: a compiled clean.wb exists — deliver it as a PARTIAL result with an
+                // honest failure report instead of discarding the run as bare 'failed'.
+                pendingCleanNbPath   = cleanNbPath || workDir.cleanNb;
+                polishFailureContext = `Polish could not fully verify clean.wb: ${polishResult.reason || polishResult.summary || 'unresolved warnings/errors'}.`;
+                fsm.transitionTo('partial_report');
 
             } else if (polishResult.type === 'escalate') {
                 terminalResult = { status: 'escalate', reason: polishResult.reason, cleanNbPath };
@@ -1983,17 +2619,21 @@ async function runFairy(args) {
             } else {
                 // exhausted — offer to extend polish so the agent can finish cleaning up.
                 if (await _maybeContinuePolish('ran out of polish budget before clean.wb verified')) continue;
-                terminalResult = { status: 'failed', reason: 'polish phase exhausted without clean verification', cleanNbPath };
-                fsm.transitionTo('failed');
+                pendingCleanNbPath   = cleanNbPath || workDir.cleanNb;
+                polishFailureContext = 'Polish budget was exhausted before clean.wb verified cleanly.';
+                fsm.transitionTo('partial_report');
             }
 
         } else if (phase === 'partial_report') {
-            // Bonus turns to write clean_partial.wb after budget exhaustion
+            // Bonus turns to write clean_partial.wb after budget exhaustion — or after
+            // a polish failure (B4: polishFailureContext explains which; the compiled
+            // clean.wb is then attached to the partial result).
             const stepsRecorded = (await workDir.loadAllSteps().catch(() => [])).filter(s => s.status === 'valid').length;
             messages.push({ role: 'user', content: buildPartialReportUserMessage({
                 stepsRecorded,
                 probesUsed:                  fsm.probesUsed,
                 partialReportTurnsRemaining: fsm.partialReportTurnsRemaining,
+                contextNote:                 polishFailureContext || undefined,
             }) });
 
             let partialResult;
@@ -2021,11 +2661,24 @@ async function runFairy(args) {
             terminalResult = {
                 status:        'partial_delivered',
                 partialNbPath: partialNbPath || workDir.partialNb,
-                reason:        'probe budget exhausted; partial results written to clean_partial.wb',
+                // B4: carry the compiled-but-unverified clean.wb when polish failed.
+                cleanNbPath:   pendingCleanNbPath || null,
+                reason:        polishFailureContext
+                    ? `${polishFailureContext} Partial results written to clean_partial.wb; the unverified clean.wb is attached.`
+                    : 'probe budget exhausted; partial results written to clean_partial.wb',
             };
             fsm.transitionTo('partial_delivered');
         }
     }
+
+    // ── Verification note ─────────────────────────────────────────────────────
+    // The Fairy's own run_clean already restarted a fresh kernel and re-ran the
+    // whole clean.wb through the notebook controller; `terminalResult.status ===
+    // 'delivered'` means that replay was clean (allClean). That IS the
+    // verification — there is deliberately no separate evidence re-eval here (the
+    // old I17 verifyEvidenceQuick pass demoted confidence on encoding-only diffs
+    // and caused the Q25/Q32 false-partial cascades). Confidence is derived from
+    // the terminal status in buildAndPersistScroll.
 
     // ── End-of-run: persist scroll, raise candidate, report usage + metrics ──
     // O2/O3/O5: usage feedback, run metrics, and seeder cleanup run in a `finally`
@@ -2067,6 +2720,52 @@ async function runFairy(args) {
                         questId: quest.id, charmId: charm.id, candidateId: cand.id, dir: cand.dir,
                         derivedFrom, isNewSkill: !derivedFrom,
                     }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+
+                    // I15: novelty gate — only author a skill draft when the delivered
+                    // result actually adds something. Reproducing a cited skill, or a
+                    // near-duplicate of an existing registry entry, is not new work.
+                    let novelty = 'novel';
+                    if (citedRecalled) {
+                        novelty = `reproduction of ${recallResult.skillRef}`;
+                    } else if (skilxivClient) {
+                        try {
+                            const sr  = await skilxivClient.search(taskText.slice(0, 300), { limit: 3, minTier: 0 });
+                            const t0r = (sr.results || [])[0];
+                            const sc  = t0r && (typeof t0r.score === 'number' ? t0r.score : t0r.similarity);
+                            if (typeof sc === 'number' && sc >= 0.75) {
+                                novelty = `near-duplicate of @${t0r.namespace}/${t0r.name} (score ${sc.toFixed(2)})`;
+                            }
+                        } catch (_) { /* registry unreachable → treat as novel; human reviews anyway */ }
+                    }
+
+                    // I14: author a human-reviewable SKILL.draft.md (method stated
+                    // generally) from the verified chain — one cheap LLM call.
+                    let draftPath = null;
+                    if (novelty === 'novel' && summaryBinding.configured) {
+                        try {
+                            const reply = await callSummariser(adapter, summaryBinding,
+                                buildSkillAuthorPrompt({ task: taskText, definitionsLedger: defsLedger, factsLedger }),
+                                bus, spanId, quest, charm);
+                            const authored = parseSkillAuthorReply(reply);
+                            if (authored) {
+                                const md = composeSkillDraftMd({
+                                    authored, task: taskText,
+                                    definitionsLedger: defsLedger, model: binding.model,
+                                });
+                                draftPath = path.join(cand.dir, 'SKILL.draft.md');
+                                await fsp.writeFile(draftPath, md, 'utf8');
+                                metrics.skillDraftAuthored = true;
+                            }
+                        } catch (_) { /* authoring is best-effort — the raw candidate remains */ }
+                    }
+                    try {
+                        await fsp.writeFile(path.join(cand.dir, 'novelty.json'),
+                            JSON.stringify({ novelty, draftPath, at: new Date().toISOString() }, null, 2), 'utf8');
+                    } catch (_) {}
+                    bus.appendEvent('contribution.draft', {
+                        questId: quest.id, charmId: charm.id, candidateId: cand.id,
+                        novelty, draftAuthored: !!draftPath,
+                    }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
                 } else if (cand) {
                     await bus.appendEvent('contribution.skipped', {
                         questId: quest.id, charmId: charm.id, reasons: cand.reasons,
@@ -2075,13 +2774,23 @@ async function runFairy(args) {
             } catch (_) { /* fail-open: candidate creation never blocks the run */ }
         }
     } finally {
+        // I12: give a still-pending recall 2 more seconds to settle so the final
+        // recallResult (usage feedback + metrics) reflects what actually happened.
+        try {
+            const finalRes = await Promise.race([
+                recallPromise, new Promise(r => setTimeout(() => r(null), 2000)),
+            ]);
+            if (finalRes && !(finalRes.recallLog && finalRes.recallLog.pending)) recallResult = finalRes;
+        } catch (_) {}
+
         // ── O3 + F1/F2/F5: SkilXiv usage feedback. The recalled skill is credited as
         // USED only when the agent EXPLICITLY cited it (cite_skill) — never inferred from
         // tokens. used_reproduced requires (cited AND delivered); otherwise the skill was
-        // merely consulted.
+        // merely consulted. I12: a skill the model never SAW (late arrival, never
+        // injected) is not "consulted" — skip reporting entirely.
         try {
             const skillRef = recallResult.skillRef;
-            if (recallResult.mode === 'consult' && skillRef && !charm.confidential) {
+            if (recallResult.mode === 'consult' && skillRef && !charm.confidential && recallLive.injected) {
                 const status   = terminalResult && terminalResult.status;
                 const cited     = !!(recallState && recallState.cited && recallState.cited.has(skillRef));
                 // Valid SkilXiv outcomes: consulted | used_reproduced | diverged.
@@ -2144,6 +2853,43 @@ async function runFairy(args) {
             }
         } catch (_) { /* usage feedback never blocks the run */ }
 
+        // ── I13/S3: harness-detected skill gaps. The task DELIVERED (the knowledge
+        // provably exists now); file demand signals for what the registry lacked.
+        // S3: capability-level gaps from the triage (run Q_3VRPXL: "SU(N) generators
+        // in arbitrary irreps") are filed EVEN when some other skill was consulted —
+        // a marginal hit must not mask real gaps. Legacy fallback: whole-task gap
+        // when recall found nothing at all (timeouts/network errors never count).
+        try {
+            if (terminalResult && terminalResult.status === 'delivered'
+                && !charm.confidential && recallCfg.enabled && skilxivClient
+                && !(metrics.skillGapNotes > 0)) {
+                const taskShort = String(charm.title || charm.goal || charm.task || '').slice(0, 120);
+                const gapsList = (recallResult && Array.isArray(recallResult.gaps)) ? recallResult.gaps : [];
+                const legacyGapWorthy = recallResult && recallResult.mode === 'none'
+                    && /no skills found|below relevance floor|triage: no candidate/i
+                        .test(String((recallResult.recallLog && recallResult.recallLog.error) || ''));
+                const wanted = gapsList.length
+                    ? gapsList.slice(0, 2).map(g => ({
+                        topic: String(g).slice(0, 200),
+                        why:   `Capability needed by a DELIVERED task with no fitting registry skill (task: ${taskShort}).`,
+                    }))
+                    : (legacyGapWorthy ? [{
+                        topic: String(charm.title || charm.goal || charm.task || '').slice(0, 200),
+                        why:   `Task delivered with no suitable skill in the registry (${String(recallResult.recallLog.error).slice(0, 120)}).`,
+                    }] : []);
+                for (const w of wanted) {
+                    const gap = await recordSkillGapFn({ ...w, source: 'harness' });
+                    if (gap && gap.recorded) {
+                        metrics.skillGapsAuto = (metrics.skillGapsAuto || 0) + 1;
+                        await bus.appendEvent('skill.gap_recorded', {
+                            questId: quest.id, charmId: charm.id, source: 'harness',
+                            topic: gap.entry.topic, remote: !!gap.remote,
+                        }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
+                    }
+                }
+            }
+        } catch (_) { /* gap recording never blocks the run */ }
+
         // ── O5: run-efficiency metrics — emit even on error/abort. ───────────
         try {
             const okN = metrics.probesOk || 0, failN = metrics.probesFailed || 0;
@@ -2162,13 +2908,32 @@ async function runFairy(args) {
                 utilForkRejections: metrics.utilForkRejections || 0,                     // P10
                 nearDuplicateRejections: metrics.nearDuplicateRejections || 0,           // R6 dup-probe guard
                 recordGates: metrics.recordGates || 0,                                   // R10 record-rate gate
+                crosscheckGates: metrics.crosscheckGates || 0,                           // B7 crosscheck gate firings
+                missingDepGates: metrics.missingDepGates || 0,                           // H3 completeness gate firings
+                chainReopens: metrics.chainReopens || 0,                                 // B4 polish→explore reopens
                 continuations: continuations,                                            // R11 user "continue" grants
                 literatureQueries: metrics.literatureQueries || 0,                       // R4 lit
+                litReads: metrics.litReads || 0,                                          // I10 deep reads
                 reDerivations: metrics.repeatAbandon || 0,
                 inspects: metrics.inspects || 0,
                 inspectsPerProbe: okN ? +((metrics.inspects || 0) / okN).toFixed(2) : null,
                 recallSkill: (recallResult && recallResult.skillRef) || null,
                 recallUsed: !!(recallState && recallState.cited && recallState.cited.size),
+                recallInjected: !!(recallLive && recallLive.injected),                                             // I12
+                recallMs: (recallResult && recallResult.recallLog && recallResult.recallLog.durationMs) || null,   // I8
+                recallTopScore: (recallResult && recallResult.recallLog && recallResult.recallLog.topScore) ?? null,
+                recallTriage: (recallResult && recallResult.recallLog && recallResult.recallLog.triage) || null,   // I11
+                citationGates: metrics.citationGates || 0,                                                         // I16
+                skillGapNotes: metrics.skillGapNotes || 0,                                                         // I20
+                skillGapsAuto: metrics.skillGapsAuto || 0,                                                         // I13
+                skillDraftAuthored: !!metrics.skillDraftAuthored,                                                  // I14
+                llmCalls: metrics.llmCalls || 0,                                                                   // O11
+                runCapHits: metrics.runCapHits || 0,
+                handoffUtils: (args.handoff && (args.handoff.utils || []).length) || 0,                            // O6
+                build: BUILD_INFO,                                                                                 // I18
+                cacheHitRate: (metrics.cacheRead || metrics.cacheMiss)                                             // O3
+                    ? +((metrics.cacheRead || 0) / ((metrics.cacheRead || 0) + (metrics.cacheMiss || 0))).toFixed(3)
+                    : null,
                 candidateRaised: !!metrics.candidateRaised,
                 status: (terminalResult && terminalResult.status) || 'unknown',
             }, { spanId, questId: quest.id, charmId: charm.id }).catch(() => {});
@@ -2184,12 +2949,27 @@ async function runFairy(args) {
         wolframShim.setPostRestartSeeder(null);
     }
 
+    // O6: export the verified utils + established facts for the next charm in a
+    // multi-charm quest (research.js threads this into the next runFairy call).
+    let handoffOut = null;
+    try {
+        const [hUtils, hFacts] = await Promise.all([
+            workDir.loadUtils().catch(() => []),
+            workDir.loadFacts().catch(() => []),
+        ]);
+        if (hUtils.length || hFacts.length) handoffOut = { utils: hUtils, facts: hFacts };
+    } catch (_) {}
+
     return {
         scroll,
         fileRef,
+        // Terminal status from the Fairy's own clean.wb run — the verification
+        // signal Oberon derives its verdict from (delivered = clean replay).
+        status:         (scroll && scroll.fairyArtifact && scroll.fairyArtifact.status) || 'escalate',
         workingNbPath:  workDir.workingNb,
         cleanNbPath:    scroll && scroll.fairyArtifact && scroll.fairyArtifact.cleanNbPath    || null,
         partialNbPath:  scroll && scroll.fairyArtifact && scroll.fairyArtifact.partialNbPath  || null,
+        handoff:        handoffOut,
     };
 }
 
@@ -2198,6 +2978,8 @@ module.exports = {
     SteerQueue,
     _internals: {
         tryParseControlSignal, tryParseJson, resolveCharmDir, findRecordedValue, buildAndPersistScroll,
+        buildEvidenceFromSteps,
+        buildSkillAuthorPrompt, parseSkillAuthorReply, composeSkillDraftMd, BUILD_INFO,
         appendToLastToolOrUser, collapseFailed, compactMessages, extractTargetSymbol, shouldAutoCheckpoint,
         findSafeTailStart, sanitizeToolPairing, estimateContextChars,
     },

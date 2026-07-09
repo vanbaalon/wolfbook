@@ -52,6 +52,10 @@ VsCodeRender[outN_Integer, format_String, scale_?NumericQ] := Module[
         limitBytes = $getKernelConfig["outputSizeLimit", 1000] * 1024;
         bc  = ByteCount[expr];
         lc  = LeafCount[expr];
+        (* Guard: if $getKernelConfig returned unevaluated (e.g. cleared by ClearAll["Global`*"]),
+           treat limitBytes as if it were very large so we fall through to the else branch and
+           assign displayExpr = expr rather than leaving displayExpr unbound. *)
+        If[!NumberQ[limitBytes], limitBytes = 1024000];
         If[bc > limitBytes || lc > 1000,
             (* Breadth = 500 elements at each level initially; +... steps by +500.
                Depth = Infinity so nested structures are visible. *)
@@ -302,8 +306,8 @@ VsCodeSyntaxCheck[text_String] := Module[
 VsCodeSplitCode[code_String] := Module[{remaining, parts, len, part},
     remaining = code;
     parts     = {};
-    While[StringLength[StringTrimLeft[remaining]] > 0,
-        remaining = StringTrimLeft[remaining];  (* strip leading whitespace/newlines *)
+    While[StringLength[StringReplace[remaining, RegularExpression["^\\s+"] -> ""]] > 0,
+        remaining = StringReplace[remaining, RegularExpression["^\\s+"] -> ""];  (* strip leading whitespace/newlines *)
         If[StringLength[remaining] == 0, Break[]];
         len = SyntaxLength[remaining];
         (* SyntaxLength returns the number of characters consumed by the first
@@ -410,11 +414,9 @@ VsCodeRenderLast[format_String, scale_?NumericQ] :=
 
 VsCodeRenderLast[] := VsCodeRenderLast["Auto", 0.8];
 
-(* ===== Protect all wolfbook API symbols from ClearAll["Global`*"] ===== *)
+(* Protect user-facing Global` symbols; private-context state vars need no Protect *)
 Protect[
     VsCodeDynExportValue, VsCodeRender, VsCodeRenderFull, VsCodeRenderShallow,
-    VsCodeOpenAsText,
-    VsCodeSyntaxCheck, VsCodeSplitCode, VsCodeEvalWrapper, VsCodeRenderNth,
-    VsCodeRenderLast,
-    $vsCodeLastResult, $vsCodeLastResultList, $vsCodeLastStatuses
+    VsCodeOpenAsText, VsCodeSyntaxCheck, VsCodeSplitCode, VsCodeEvalWrapper,
+    VsCodeRenderNth, VsCodeRenderLast
 ];

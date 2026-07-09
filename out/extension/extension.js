@@ -30,6 +30,7 @@ const node_1 = require("vscode-languageclient/node");
 const configCompat = require('./config-compat');
 const _tools = require('./tools/index');
 const { wlSanitizeForLSP } = require('./namedchars');
+const { splitIntoSubexpressions } = require('./utils/wl-parse');
 
 /** Convert hover Markdown text to a minimal HTML string for the Watch panel. */
 
@@ -202,6 +203,10 @@ async function activate(context) {
     require('./execution/global-symbols').register(context);
 
     // ── WL Code Formatter ──────────────────────────────────────────────────
+    // Callable from outside the try block (e.g. wolfbook.executeCell) once
+    // the formatter module loads.  Null if the module failed to load.
+    let _autoFormatCell = null;
+
     try {
         const { format: wlFormat } = require('./wl-formatter');
 
@@ -232,6 +237,9 @@ async function activate(context) {
             return vscode.workspace.applyEdit(wsEdit);
         }
 
+        _autoFormatCell = (editor) => _formatDocument(editor,
+            _getFormatterOpts({ replaceNamedChars: true, replaceMultiply: true, replacePartBrackets: true }));
+
         context.subscriptions.push(vscode.commands.registerCommand('wolfbook.format', () => {
             const editor = vscode.window.activeTextEditor;
             if (!editor) return;
@@ -241,7 +249,7 @@ async function activate(context) {
         context.subscriptions.push(vscode.commands.registerCommand('wolfbook.formatWithUTF', () => {
             const editor = vscode.window.activeTextEditor;
             if (!editor) return;
-            _formatDocument(editor, _getFormatterOpts({ replaceNamedChars: true, replaceMultiply: true, replacePartBrackets: true }));
+            return _formatDocument(editor, _getFormatterOpts({ replaceNamedChars: true, replaceMultiply: true, replacePartBrackets: true }));
         }));
 
         context.subscriptions.push(vscode.commands.registerCommand('wolfbook.formatWithUTFWide', () => {
@@ -367,10 +375,118 @@ async function activate(context) {
             }
         }));
 
+        // ── Format + Execute (Shift+Enter in edit mode) ────────────────────────
+        // Bound to shift+enter when editorTextFocus is true, so activeTextEditor
+        // is guaranteed to be the cell's Monaco editor.  Format first, then
+        // delegate to wolfbook.executeCell for the actual cell execution.
+        context.subscriptions.push(vscode.commands.registerCommand('wolfbook.formatAndExecute', async () => {
+            const _cfg = vscode.workspace.getConfiguration('wolfbook');
+            if (_cfg.get('formatter.autoFormat', false)) {
+                const _ed = vscode.window.activeTextEditor;
+                if (_ed) {
+                    const _doc = _ed.document;
+                    const _isWolfram = _doc.languageId === 'wolfram' ||
+                        _doc.fileName.endsWith('.evsnb') || _doc.fileName.endsWith('.vsnb');
+                    if (_isWolfram) {
+                        await _formatDocument(_ed, _getFormatterOpts({
+                            replaceNamedChars: true, replaceMultiply: true, replacePartBrackets: true
+                        }));
+                    }
+                }
+            }
+            await vscode.commands.executeCommand('wolfbook.executeCell');
+        }));
+
         devLog(LOG_CHANNELS.EXTENSION, '[Extension] WL code formatter registered');
     } catch (e) {
         console.error('[Extension] WL formatter failed to load, skipping:', e.message);
     }
+
+    // ── Wolfram math insertion shortcuts ──────────────────────────────────────
+
+    // Ctrl+/ — wrap selection as fraction: (selection)/(|)
+    //          or, with no selection, append /(|) to everything left of cursor on the line
+    context.subscriptions.push(vscode.commands.registerCommand('wolfbook.wrapFraction', () => {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) return;
+        const sel = editor.selection;
+        if (sel.isEmpty) {
+            // No selection: take from line start to cursor, append /(|) without extra parens
+            const lineStart = new vscode.Position(sel.active.line, 0);
+            const leftText  = editor.document.getText(new vscode.Range(lineStart, sel.active));
+            const newText   = `${leftText}/()`;
+            const startOffset = editor.document.offsetAt(lineStart);
+            editor.edit(eb => eb.replace(new vscode.Range(lineStart, sel.active), newText)).then(() => {
+                const cursorPos = editor.document.positionAt(startOffset + newText.length - 1);
+                editor.selection = new vscode.Selection(cursorPos, cursorPos);
+            });
+        } else {
+            // Selection: wrap in parens → (selection)/(|)
+            const selectedText = editor.document.getText(sel);
+            const newText = `(${selectedText})/()`;
+            const startOffset = editor.document.offsetAt(sel.start);
+            editor.edit(eb => eb.replace(sel, newText)).then(() => {
+                const cursorPos = editor.document.positionAt(startOffset + newText.length - 1);
+                editor.selection = new vscode.Selection(cursorPos, cursorPos);
+            });
+        }
+    }));
+
+    // Cmd+2 — wrap selection as Sqrt[selection|]
+    context.subscriptions.push(vscode.commands.registerCommand('wolfbook.wrapSqrt', () => {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) return;
+        const sel = editor.selection;
+        const selectedText = editor.document.getText(sel);
+        const newText = `Sqrt[${selectedText}]`;
+        const startOffset = editor.document.offsetAt(sel.start);
+        editor.edit(eb => eb.replace(sel, newText)).then(() => {
+            const cursorPos = editor.document.positionAt(startOffset + newText.length - 1);
+            editor.selection = new vscode.Selection(cursorPos, cursorPos);
+        });
+    }));
+
+    // option+) / option+] / option+} — wrap expression-to-the-left in matching brackets
+    // option+) / option+] / option+} — wrap the sub-expression containing the cursor in brackets.
+    // Uses the same splitIntoSubexpressions logic as the kernel execution path to find boundaries.
+    context.subscriptions.push(vscode.commands.registerCommand('wolfbook.wrapBracket', (openBracket) => {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) return;
+        const CLOSE = { '(': ')', '[': ']', '{': '}' };
+        const closeBracket = CLOSE[openBracket];
+        if (!closeBracket) return;
+
+        const doc = editor.document;
+        const cursorLine = editor.selection.active.line;
+        const cursorChar = editor.selection.active.character;
+
+        // Split the full cell text into top-level sub-expressions using the shared parser.
+        const cellText = doc.getText();
+        const parts = splitIntoSubexpressions(cellText);
+
+        // Find which part the cursor is in (cursor line falls within [startLine, endLine]).
+        const part = parts.find(p => cursorLine >= p.startLine && cursorLine <= p.endLine)
+                  || parts[parts.length - 1];
+
+        // Find where the part starts in the document — skip leading whitespace.
+        const partStartLineText = doc.lineAt(part.startLine).text;
+        const leadingSpaces = partStartLineText.length - partStartLineText.trimStart().length;
+        const insertStart = new vscode.Position(part.startLine, leadingSpaces);
+
+        // Insert openBracket at expression start, closeBracket at cursor.
+        const cursorPos = editor.selection.active;
+        editor.edit(eb => {
+            eb.insert(cursorPos, closeBracket);
+            eb.insert(insertStart, openBracket);
+        }).then(() => {
+            const sameLineShift = (insertStart.line === cursorPos.line) ? 1 : 0;
+            const finalPos = new vscode.Position(
+                cursorPos.line,
+                cursorPos.character + sameLineShift + 1
+            );
+            editor.selection = new vscode.Selection(finalPos, finalPos);
+        });
+    }));
 
     // Register the Watch Panel webview view provider
     context.subscriptions.push(
@@ -383,6 +499,26 @@ async function activate(context) {
         vscode.window.registerWebviewViewProvider(ASK_VIEW_ID, _askPanel,
             { webviewOptions: { retainContextWhenHidden: true } })
     );
+
+    // ── Oberon (research-agent layer) ─────────────────────────────────────
+    // Foundation surface: activity-bar container, sidebar Control Room,
+    // editor-tab Run Inspector, telemetry bus, RunManager, settings & roles.
+    // Real Planner / Fairy / Reviewer / Wards land in MVP-1+.
+    let _oberon = null;
+    try {
+        const oberon = require('./oberon');
+        _oberon = oberon.activate(context);
+        devLog(LOG_CHANNELS.EXTENSION, '[Extension] Oberon foundation activated');
+        // Feed Fairy telemetry (steps/cost/status) into the watch panel's Agents-tab
+        // history so a launched run's metrics land on its prompt entry.
+        if (_oberon && _oberon.bus && typeof _oberon.bus.on === 'function') {
+            _oberon.bus.on('event', ev => {
+                try { _watchPanel.onFairyEvent(ev); } catch (_) { /* never break the run */ }
+            });
+        }
+    } catch (e) {
+        console.error('[Extension] Oberon failed to activate, skipping:', e && e.stack || e);
+    }
 
     // ── Watch panel background: track active .wb notebook ─────────────────
     function _updateWatchPanelBg() {
@@ -554,6 +690,18 @@ async function activate(context) {
     let nbKernelenabled = config.get("notebook.kernelEnabled", true);
     let controller = new controller_1.WolframNotebookKernel(context);
     _activeController = controller;  // expose for deactivate()
+
+    // Wire auto-format hook: formats cells before execution when autoFormat is on.
+    // _autoFormatCell is set inside the formatter try block; null if module failed.
+    if (_autoFormatCell) {
+        controller.preExecuteHook = async (cells) => {
+            if (!vscode.workspace.getConfiguration('wolfbook').get('formatter.autoFormat', false)) return;
+            for (const cell of cells) {
+                if (cell.kind !== vscode.NotebookCellKind.Code) continue;
+                await _autoFormatCell({ document: cell.document });
+            }
+        };
+    }
     // Refresh watch panel once kernel is fully ready (guards against early eval during init.wl)
     controller._onKernelReady = () => _debugCtrl.refreshLiveWatch();
     if (nbKernelenabled && kernelAvailable) {
@@ -567,8 +715,41 @@ async function activate(context) {
             if (controller.kernelStatusString === 'resolved') _debugCtrl.refreshLiveWatch();
         }).catch(() => {});
     }
+    // Late-bind the Oberon Wolfram-shim to the live controller so the Fairy
+    // can call `wolfram_eval` (MVP-2b). Safe no-op if Oberon failed to load.
+    try { if (_oberon && typeof _oberon.setKernelController === 'function') _oberon.setKernelController(() => controller); } catch (_) {}
+
     // Register Copilot language model tools (Phase 4)
     const _toolMap = _tools.registerTools(context, () => controller, _debugCtrl, () => _askPanel);
+
+    // Late-bind notebook tools for Oberon's Fairy so it can read/edit the
+    // charm notebook during revision runs. Uses the same tool implementations
+    // as the wolfbook MCP tools but extracts plain text from the LM result.
+    try {
+        if (_oberon && _toolMap) {
+            const _extractToolText = (result) => {
+                if (!result) return '(no result)';
+                const parts = result.content || [];
+                return parts.map(p => (p && p.value) || '').join('').trim() || '(empty)';
+            };
+            const _getContextImpl = _toolMap.get('wolfbook_getNotebookContext');
+            const _editCellImpl   = _toolMap.get('wolfbook_editCell');
+            if (_getContextImpl || _editCellImpl) {
+                const toolRegistry = require('./oberon/core/toolRegistry');
+                toolRegistry.setNotebookToolProvider({
+                    getNotebookContext: _getContextImpl
+                        ? (opts) => _getContextImpl.invoke({ input: opts }).then(_extractToolText)
+                        : () => Promise.resolve('(not available)'),
+                    editCell: _editCellImpl
+                        ? (opts) => _editCellImpl.invoke({ input: opts }).then(_extractToolText)
+                        : () => Promise.resolve('(not available)'),
+                });
+            }
+        }
+    } catch (e) {
+        console.warn('[Extension] Oberon notebook tool wiring failed (non-fatal):', e && e.message || e);
+    }
+
     // Register @wolfbook chat participant
     _tools.registerChatParticipant(context, () => controller);
     // Register @wolfteam collaborative chat participant
@@ -594,9 +775,39 @@ async function activate(context) {
     if (_mcpDisabled) {
         devLog(LOG_CHANNELS.EXTENSION, '[Wolfbook MCP] MCP server disabled via wolfbook.mcpEnabled setting');
     }
-    const { WolframMCPServer, loadMCPSchemas, configureClaudeDesktop, writeClaudeConfig, needsConfigUpdate, resolveNodeBinary, writeAntigravityConfig, needsAntigravityConfigUpdate, installAntigravitySkill, needsSkillInstall, writeClineConfig, needsClineConfigUpdate, getMcpInfoPayload } = require('./claude-mcp/server');
-    const { WorkerServer }  = require('./claude-mcp/worker');
-    const { assignClientId } = require('./claude-mcp/registry');
+    let WolframMCPServer, loadMCPSchemas, configureClaudeDesktop, writeClaudeConfig, needsConfigUpdate, resolveNodeBinary, validateNodeBinary, writeAntigravityConfig, needsAntigravityConfigUpdate, installAntigravitySkill, needsSkillInstall, writeClineConfig, needsClineConfigUpdate, writeRooCodeConfig, needsRooCodeConfigUpdate, getMcpInfoPayload, WorkerServer, assignClientId;
+    let _mcpUnavailable = false;
+    try {
+        ({ WolframMCPServer, loadMCPSchemas, configureClaudeDesktop, writeClaudeConfig, needsConfigUpdate, resolveNodeBinary, validateNodeBinary, writeAntigravityConfig, needsAntigravityConfigUpdate, installAntigravitySkill, needsSkillInstall, writeClineConfig, needsClineConfigUpdate, writeRooCodeConfig, needsRooCodeConfigUpdate, getMcpInfoPayload } = require('./claude-mcp/server'));
+        ({ WorkerServer } = require('./claude-mcp/worker'));
+        ({ assignClientId } = require('./claude-mcp/registry'));
+    } catch (err) {
+        _mcpUnavailable = true;
+        console.warn('[Wolfbook MCP] Optional MCP modules unavailable; notebook editor will still activate:', err && err.message || err);
+        loadMCPSchemas = () => ({});
+        resolveNodeBinary = () => process.execPath || 'node';
+        validateNodeBinary = () => ({ ok: true });
+        needsConfigUpdate = needsAntigravityConfigUpdate = needsSkillInstall = needsClineConfigUpdate = needsRooCodeConfigUpdate = () => false;
+        writeClaudeConfig = () => ({ configPaths: [], bridgePath: '' });
+        writeAntigravityConfig = writeClineConfig = writeRooCodeConfig = () => ({ skipped: true });
+        installAntigravitySkill = () => ({});
+        configureClaudeDesktop = () => ({});
+        getMcpInfoPayload = (bridgePath, nodeBin, port, isSecondary, isDisabled) => ({ bridgePath, nodeBin, port, isSecondary, isDisabled, unavailable: true });
+        assignClientId = () => 'VSCode[Wolfbook]';
+        WolframMCPServer = class {
+            constructor() { this.port = 0; this.isSecondary = false; this._sessionTargets = new Map(); }
+            start() { return Promise.reject(new Error('Wolfbook MCP modules are unavailable')); }
+            stop() {}
+            updateOwnNotebooks() {}
+            setOwnClientInfo() {}
+        };
+        WorkerServer = class {
+            updateNotebooks() {}
+            onPromoted() {}
+            start() { return Promise.resolve(); }
+            stop() {}
+        };
+    }
     const _pkgJson   = path.join(context.extensionPath, 'package.json');
     const _mcpSchema = loadMCPSchemas(_pkgJson);
     let   _mcpServer = new WolframMCPServer(_toolMap, _mcpSchema);
@@ -648,6 +859,26 @@ async function activate(context) {
         const _bridgePath = path.join(context.extensionPath, 'out', 'extension', 'claude-mcp', 'stdio-bridge.js');
         const _nodeBin    = resolveNodeBinary();
         const _wsPaths    = _getWsPaths();
+
+        // If resolveNodeBinary() fell through to the bare 'node' last-resort fallback it means
+        // we couldn't locate a Node.js installation at all.  Show a one-time notice so the user
+        // understands why AI agent tools will report a cryptic "spawn ENOENT" error.
+        // We skip the notice if the user has already seen and dismissed it (globalState flag).
+        // We do NOT run `node --version` here — that adds an execSync to the hot startup path.
+        if (_nodeBin === 'node' && !context.globalState.get('wolfbook.nodeMissingNoticeSeen')) {
+            setTimeout(() => {
+                vscode.window.showWarningMessage(
+                    'Wolfbook MCP: Node.js not found. AI agent tools (Claude Code, Cline, Roo Code) need Node.js to connect — install it from nodejs.org, then reload VS Code.',
+                    'Open nodejs.org', 'Reload Window', 'Dismiss'
+                ).then(choice => {
+                    if (choice === 'Open nodejs.org') vscode.env.openExternal(vscode.Uri.parse('https://nodejs.org/en/download'));
+                    if (choice === 'Reload Window') vscode.commands.executeCommand('workbench.action.reloadWindow');
+                    // Any interaction (including Dismiss) silences future startup warnings.
+                    if (choice) context.globalState.update('wolfbook.nodeMissingNoticeSeen', true);
+                });
+            }, 4000);
+        }
+
         if (needsConfigUpdate(_bridgePath, _nodeBin, _wsPaths)) {
             try {
                 writeClaudeConfig(_bridgePath, _nodeBin, undefined, undefined, _wsPaths);
@@ -680,6 +911,14 @@ async function activate(context) {
                 console.warn('[Wolfbook MCP] Cline eager config write failed:', e.message);
             }
         }
+        if (needsRooCodeConfigUpdate(_bridgePath, _nodeBin)) {
+            try {
+                const r = writeRooCodeConfig(_bridgePath, _nodeBin);
+                if (!r.skipped) devLog(LOG_CHANNELS.EXTENSION, '[Wolfbook MCP] Roo Code config written eagerly at activate()');
+            } catch (e) {
+                console.warn('[Wolfbook MCP] Roo Code eager config write failed:', e.message);
+            }
+        }
     }
 
     // Re-register whenever workspace folders change (user opens a new project)
@@ -690,6 +929,7 @@ async function activate(context) {
         try { writeClaudeConfig(_bridgePath, _nodeBin, undefined, _mcpServer.port, _wsPaths); } catch {}
         try { writeAntigravityConfig(_bridgePath, _nodeBin); } catch {}
         try { writeClineConfig(_bridgePath, _nodeBin); } catch {}
+        try { writeRooCodeConfig(_bridgePath, _nodeBin); } catch {}
     }));
 
     // Track the "active" MCP server — may be replaced on election win
@@ -719,8 +959,8 @@ async function activate(context) {
         return ws;
     };
 
-    if (_mcpDisabled) {
-        devLog(LOG_CHANNELS.EXTENSION, '[Wolfbook MCP] Skipping MCP server start (disabled)');
+    if (_mcpDisabled || _mcpUnavailable) {
+        devLog(LOG_CHANNELS.EXTENSION, _mcpUnavailable ? '[Wolfbook MCP] Skipping MCP server start (modules unavailable)' : '[Wolfbook MCP] Skipping MCP server start (disabled)');
         try {
             const _bp = path.join(context.extensionPath, 'out', 'extension', 'claude-mcp', 'stdio-bridge.js');
             _watchPanel.setMcpInfo(getMcpInfoPayload(_bp, resolveNodeBinary(), 0, false, true));
@@ -796,13 +1036,25 @@ async function activate(context) {
             vscode.window.showErrorMessage('Wolfbook MCP server is not running. Try reloading the window.');
             return;
         }
+        const nodeBin   = resolveNodeBinary();
+        const nodeCheck = validateNodeBinary(nodeBin);
+        if (!nodeCheck.ok) {
+            const choice = await vscode.window.showErrorMessage(
+                `Cannot configure MCP: Node.js not found or not working (${nodeCheck.error}). ` +
+                `Install Node.js from nodejs.org, then reload VS Code and try again.`,
+                'Open nodejs.org', 'Reload Window'
+            );
+            if (choice === 'Open nodejs.org') vscode.env.openExternal(vscode.Uri.parse('https://nodejs.org/en/download'));
+            if (choice === 'Reload Window') vscode.commands.executeCommand('workbench.action.reloadWindow');
+            return;
+        }
         try {
             const { configPaths, bridgePath } = writeClaudeConfig(
                 path.join(context.extensionPath, 'out', 'extension', 'claude-mcp', 'stdio-bridge.js'),
-                resolveNodeBinary(), undefined, port, _getWsPaths()
+                nodeBin, undefined, port, _getWsPaths()
             );
             const action = await vscode.window.showInformationMessage(
-                `Claude configured ✓ (${configPaths.length} file(s) updated, bridge: ${path.basename(bridgePath)}). Restart Claude to apply.`,
+                `Claude configured ✓ (${configPaths.length} file(s) updated). Restart Claude to apply.`,
                 'Open Claude Code Settings'
             );
             if (action === 'Open Claude Code Settings') {
@@ -835,10 +1087,30 @@ async function activate(context) {
         }
     }));
 
+    // Shared Node.js check for Cline / Roo Code configure commands
+    async function _checkNodeForMcpConfig() {
+        const nodeBin   = resolveNodeBinary();
+        const nodeCheck = validateNodeBinary(nodeBin);
+        if (!nodeCheck.ok) {
+            // Reset the "seen" flag so the startup notice reappears after install+reload.
+            context.globalState.update('wolfbook.nodeMissingNoticeSeen', false);
+            const choice = await vscode.window.showErrorMessage(
+                `Cannot configure MCP: Node.js not found or not working (${nodeCheck.error}). ` +
+                `Install Node.js from nodejs.org, then reload VS Code and try again.`,
+                'Open nodejs.org', 'Reload Window'
+            );
+            if (choice === 'Open nodejs.org') vscode.env.openExternal(vscode.Uri.parse('https://nodejs.org/en/download'));
+            if (choice === 'Reload Window') vscode.commands.executeCommand('workbench.action.reloadWindow');
+            return null;
+        }
+        return nodeBin;
+    }
+
     // Command: write wolfbook MCP entry into Cline's settings file
     context.subscriptions.push(vscode.commands.registerCommand('wolfbook.configureCline', async () => {
         const bridgePath = path.join(context.extensionPath, 'out', 'extension', 'claude-mcp', 'stdio-bridge.js');
-        const nodeBin    = resolveNodeBinary();
+        const nodeBin    = await _checkNodeForMcpConfig();
+        if (!nodeBin) return;
         try {
             const { updated, configPath, skipped } = writeClineConfig(bridgePath, nodeBin);
             if (skipped) {
@@ -861,7 +1133,35 @@ async function activate(context) {
             vscode.window.showErrorMessage(`Failed to configure Cline: ${e.message}`);
         }
     }));
-    ;
+
+    // Command: write wolfbook MCP entry into Roo Code's settings file
+    context.subscriptions.push(vscode.commands.registerCommand('wolfbook.configureRooCode', async () => {
+        const bridgePath = path.join(context.extensionPath, 'out', 'extension', 'claude-mcp', 'stdio-bridge.js');
+        const nodeBin    = await _checkNodeForMcpConfig();
+        if (!nodeBin) return;
+        try {
+            const { updated, configPath, skipped } = writeRooCodeConfig(bridgePath, nodeBin);
+            if (skipped) {
+                vscode.window.showWarningMessage(
+                    'Roo Code does not appear to be installed (settings folder not found). ' +
+                    'Install the Roo Code extension (rooveterinaryinc.roo-cline) and try again.'
+                );
+                return;
+            }
+            const action = await vscode.window.showInformationMessage(
+                `Roo Code configured ✓ wolfbook MCP server entry written to cline_mcp_settings.json. Reload the VS Code window to apply.`,
+                'Open Settings File', 'Reload Window'
+            );
+            if (action === 'Open Settings File') {
+                vscode.commands.executeCommand('vscode.open', vscode.Uri.file(configPath));
+            } else if (action === 'Reload Window') {
+                vscode.commands.executeCommand('workbench.action.reloadWindow');
+            }
+        } catch (e) {
+            vscode.window.showErrorMessage(`Failed to configure Roo Code: ${e.message}`);
+        }
+    }));
+
     // Update WBDirectory[] and NotebookDirectory[] whenever the active notebook changes
     function _updateKernelNotebookDir(ed) {
         if (!ed || ed.notebook?.notebookType !== 'extended-wolfram-notebook') return;
@@ -870,11 +1170,11 @@ async function activate(context) {
         if (process.platform === 'win32') _nbDir = _nbDir.replace(/\\/g, '/');
         const _esc = _nbDir.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
         controller.session?.evaluate(
-            `Unprotect[NotebookDirect.then(() => {
-                if (controller.kernelStatusString === 'resolved') _debugCtrl.refreshLiveWatch();
-            }).catch(() => {})ory, WBDirectory]; NotebookDirectory[] = "${_esc}"; Protect[NotebookDirectory]; WBDirectory[] = "${_esc}"; Protect[WBDirectory]`,
+            `Unprotect[NotebookDirectory, WBDirectory]; NotebookDirectory[] = "${_esc}"; Protect[NotebookDirectory]; WBDirectory[] = "${_esc}"; Protect[WBDirectory]`,
             { interactive: false }
-        ).catch(() => {});
+        ).then(() => {
+            if (controller.kernelStatusString === 'resolved') _debugCtrl.refreshLiveWatch();
+        }).catch(() => {});
     }
     context.subscriptions.push(vscode_1.window.onDidChangeActiveNotebookEditor(ed => _updateKernelNotebookDir(ed)));
     context.subscriptions.push(vscode_1.commands.registerCommand("wolfbook.launchKernel", () => {
@@ -996,15 +1296,14 @@ async function activate(context) {
         const sel = editor.selections;
         if (!sel || sel.length === 0) return;
         const cell = editor.notebook.cellAt(sel[0].start);
-        // If the current cell is a markup (markdown) cell, advance to the next
-        // code cell rather than getting stuck. Keep skipping consecutive markup cells.
         if (!cell) return;
+        // Markup (markdown) cell: Shift+Enter renders it (exit edit mode →
+        // rendered view) and advances to the cell below — the standard notebook
+        // behavior. Markdown cells are never routed through controller.execute()
+        // (that is code-cell only), so we render and return here.
         if (cell.kind !== vscode.NotebookCellKind.Code) {
-            let nextIdx = sel[0].start + 1;
-            while (nextIdx < editor.notebook.cellCount &&
-                   editor.notebook.cellAt(nextIdx).kind !== vscode.NotebookCellKind.Code) {
-                nextIdx++;
-            }
+            try { await vscode.commands.executeCommand('notebook.cell.quitEdit'); } catch (_) {}
+            const nextIdx = sel[0].start + 1;
             if (nextIdx < editor.notebook.cellCount) {
                 const RC = vscode.NotebookRange ?? vscode.NotebookCellRange;
                 editor.selections = [new RC(nextIdx, nextIdx + 1)];
@@ -1367,6 +1666,55 @@ async function activate(context) {
         await vscode.commands.executeCommand('notebook.focusPreviousCell');
     }));
 
+    // wolfbook.navDown — ↓ key in nav mode: walk to the nearest code cell below.
+    context.subscriptions.push(vscode.commands.registerCommand('wolfbook.navDown', async () => {
+        const editor = vscode.window.activeNotebookEditor;
+        if (!editor) return;
+        const nb     = editor.notebook;
+        const selEnd = editor.selection.end;  // exclusive end
+
+        // Bounce-back (↓ after up-exit): re-enter the same cell at line 0.
+        if (_lastArrowExit && _lastArrowExit.direction === 'up' &&
+            Date.now() - _lastArrowExit.time < BOUNCE_BACK_MS &&
+            _lastArrowExit.cellIndex >= 0 && _lastArrowExit.cellIndex < nb.cellCount) {
+            const idx = _lastArrowExit.cellIndex;
+            _lastArrowExit = null;
+            const cell = nb.cellAt(idx);
+            if (cell && cell.kind === vscode.NotebookCellKind.Code) {
+                editor.selection = new vscode.NotebookRange(idx, idx + 1);
+                await vscode.commands.executeCommand('notebook.cell.edit');
+                const txtEditor = vscode.window.activeTextEditor;
+                if (txtEditor) {
+                    const startPos = new vscode.Position(0, 0);
+                    txtEditor.selection = new vscode.Selection(startPos, startPos);
+                }
+                return;
+            }
+        }
+        _lastArrowExit = null;
+
+        // Walk downward to find the nearest code cell.
+        for (let i = selEnd; i < nb.cellCount; i++) {
+            const cell = nb.cellAt(i);
+            if (cell.kind === vscode.NotebookCellKind.Code) {
+                editor.selection = new vscode.NotebookRange(i, i + 1);
+                await vscode.commands.executeCommand('notebook.cell.edit');
+                const txtEditor = vscode.window.activeTextEditor;
+                if (txtEditor) {
+                    const startPos = new vscode.Position(0, 0);
+                    txtEditor.selection = new vscode.Selection(startPos, startPos);
+                }
+                return;
+            }
+        }
+        // No code cell below — insert a new one at the bottom and start editing.
+        await vscode.commands.executeCommand('notebook.cell.insertCodeCellBelow');
+        await vscode.commands.executeCommand('notebook.cell.edit');
+    }));
+
+    // shift+up/down cell selection is handled natively by list.expandSelectionUp/Down
+    // (keybindings in package.json) — no custom commands needed here.
+
     // wolfram.cursorLeft / cursorRight / cursorUp / cursorDown
     // At cell boundaries, an isolated key press exits edit mode (like Escape).
     // A repeated press (user holding the key) is treated as auto-repeat and
@@ -1443,6 +1791,107 @@ async function activate(context) {
             }
         }
         await vscode.commands.executeCommand('cursorDown');
+    }));
+
+    // Select all cells belonging to the current section (heading cell + all cells
+    // below it until the next heading of the same or higher level).
+    // Works from any cell in the section — walks up to find the heading if needed.
+    context.subscriptions.push(vscode.commands.registerCommand('wolfbook.selectSection', async () => {
+        const nbEd = vscode.window.activeNotebookEditor;
+        if (!nbEd) return;
+        const cells = nbEd.notebook.getCells();
+        if (cells.length === 0) return;
+
+        const getHeadingLevel = (cell) => {
+            if (cell.kind !== vscode.NotebookCellKind.Markup) return 0;
+            const m = cell.document.getText().match(/^(#{1,6})[ \t]/m);
+            return m ? m[1].length : 0;
+        };
+
+        const startIdx = nbEd.selection.start;
+
+        // If the focused cell is itself a heading, use it; otherwise walk up.
+        let sectionStart = -1;
+        let sectionLevel = 0;
+        const focusLevel = getHeadingLevel(cells[startIdx]);
+        if (focusLevel > 0) {
+            sectionStart = startIdx;
+            sectionLevel = focusLevel;
+        } else {
+            for (let i = startIdx - 1; i >= 0; i--) {
+                const lvl = getHeadingLevel(cells[i]);
+                if (lvl > 0) { sectionStart = i; sectionLevel = lvl; break; }
+            }
+        }
+        if (sectionStart < 0) return; // no enclosing heading found
+
+        // Walk down until the next heading of the same or higher level.
+        let sectionEnd = sectionStart;
+        for (let i = sectionStart + 1; i < cells.length; i++) {
+            const lvl = getHeadingLevel(cells[i]);
+            if (lvl > 0 && lvl <= sectionLevel) break;
+            sectionEnd = i;
+        }
+
+        // Exit cell edit mode, then set the notebook selection range.
+        try { await vscode.commands.executeCommand('notebook.cell.quitEdit'); } catch (_) {}
+        nbEd.selection = new vscode.NotebookRange(sectionStart, sectionEnd + 1);
+        // Reveal the heading cell so the selection is visible.
+        nbEd.revealRange(new vscode.NotebookRange(sectionStart, sectionStart + 1),
+                         vscode.NotebookEditorRevealType.Default);
+    }));
+
+    // Auto-expand section when user shift+clicks (or shift+arrows) from a heading cell.
+    // Only fires ONCE per heading session: once expanded, subsequent partial selections
+    // within the section are left alone (prevents the user getting "trapped" inside the section).
+    // Resets when the user single-clicks any cell (navigation without shift).
+    let _suppressSectionAutoExpand = false;
+    let _lastAutoExpandedHeadingIdx = -1;
+    context.subscriptions.push(vscode.window.onDidChangeNotebookEditorSelection(event => {
+        if (_suppressSectionAutoExpand) return;
+        const editor = event.notebookEditor;
+        if (!editor || !editor.notebook) return;
+        if (editor.notebook.notebookType !== 'extended-wolfram-notebook') return;
+        const selArr = event.selections;
+        const sel = (selArr && selArr.length > 0) ? selArr[0] : editor.selection;
+
+        // Single-cell navigation: reset heading session so the next shift+action can re-expand.
+        if ((sel.end - sel.start) <= 1) {
+            _lastAutoExpandedHeadingIdx = -1;
+            return;
+        }
+
+        const cells = editor.notebook.getCells();
+        const startIdx = sel.start;
+        if (startIdx >= cells.length) return;
+
+        // Already expanded from this heading in this session — don't fight the user.
+        if (startIdx === _lastAutoExpandedHeadingIdx) return;
+
+        const startCell = cells[startIdx];
+        if (startCell.kind !== vscode.NotebookCellKind.Markup) return;
+        const m = startCell.document.getText().match(/^(#{1,6})[ \t]/m);
+        if (!m) return; // not a heading cell
+        const headingLevel = m[1].length;
+
+        // Find the end of this section.
+        let sectionEnd = startIdx;
+        for (let i = startIdx + 1; i < cells.length; i++) {
+            const c = cells[i];
+            if (c.kind === vscode.NotebookCellKind.Markup) {
+                const hm = c.document.getText().match(/^(#{1,6})[ \t]/m);
+                if (hm && hm[1].length <= headingLevel) break;
+            }
+            sectionEnd = i;
+        }
+
+        const targetEnd = sectionEnd + 1; // exclusive
+        if (sel.end >= targetEnd) return; // already covers full section or beyond
+
+        _lastAutoExpandedHeadingIdx = startIdx; // record: expanded from this heading
+        _suppressSectionAutoExpand = true;
+        editor.selection = new vscode.NotebookRange(startIdx, targetEnd);
+        setTimeout(() => { _suppressSectionAutoExpand = false; }, 150);
     }));
 
     // Hover doc expand command: triggered when user clicks the 📖 stub in a hover.
@@ -1973,6 +2422,7 @@ async function activate(context) {
                         if (msg.includes('Operands') && msg.includes('different lines')) return false;
                         if (/expected.*operand/i.test(msg)) return false;
                         if (msg.includes('Non-ASCII character')) return false;
+                        if (msg.includes('Unknown word')) return false;
                         // Suppress any diagnostic whose range contains ONLY non-ASCII characters
                         // (these are our \[Name] → Unicode replacements — fully valid WL).
                         if (doc) {

@@ -15,6 +15,118 @@
 
     refreshBtn.addEventListener('click', () => vscode.postMessage({ command: 'refresh' }));
 
+    // ── Tabs (Watch / Agents) ──────────────────────────────────────────────
+    var tabButtons = Array.prototype.slice.call(document.querySelectorAll('.wb-tab'));
+    function activateTab(name) {
+        tabButtons.forEach(function(b) { b.classList.toggle('active', b.dataset.tab === name); });
+        var panels = document.querySelectorAll('.tab-panel');
+        Array.prototype.forEach.call(panels, function(pnl) {
+            pnl.classList.toggle('active', pnl.id === 'tab-' + name);
+        });
+        if (name === 'agents') vscode.postMessage({ command: 'requestFairyHistory' });
+    }
+    tabButtons.forEach(function(b) {
+        b.addEventListener('click', function() { activateTab(b.dataset.tab); });
+    });
+
+    // ── Agents tab: Fairy quick compute ────────────────────────────────────
+    // Bigger prompt field → the Oberon fairy agent (no input box). By default this
+    // is a MINIMAL fairy run (no critic, no report); the Oberon toggle enables the
+    // full experimental pipeline. ⚙ opens its settings. Runs are logged to History.
+    var fairyPrompt = document.getElementById('fairy-prompt');
+    var fairyRunBtn = document.getElementById('fairy-run-btn');
+    function submitFairy() {
+        if (!fairyPrompt) return;
+        var text = fairyPrompt.value.trim();
+        if (!text) { fairyPrompt.focus(); return; }
+        vscode.postMessage({ command: 'fairyRun', prompt: text });
+        // Optimistic: clear the field; the run appears in History immediately.
+        fairyPrompt.value = '';
+    }
+    if (fairyRunBtn) fairyRunBtn.addEventListener('click', submitFairy);
+    if (fairyPrompt) fairyPrompt.addEventListener('keydown', function(e) {
+        // Cmd/Ctrl+Enter submits (plain Enter inserts a newline in the textarea).
+        if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); submitFairy(); }
+    });
+    var fairyConfigBtn = document.getElementById('fairy-config-btn');
+    if (fairyConfigBtn) fairyConfigBtn.addEventListener('click', function() {
+        vscode.postMessage({ command: 'runVSCodeCommand', id: 'wolfbook.oberon.openSettings' });
+    });
+    var fairyHistClear = document.getElementById('fairy-history-clear');
+    if (fairyHistClear) fairyHistClear.addEventListener('click', function() {
+        vscode.postMessage({ command: 'fairyHistoryClear' });
+    });
+    // Oberon (experimental) toggle — when on, the full pipeline (Skeptic critic + Oberon
+    // report) runs after the fairy; off (default) is a minimal fairy run.
+    window._oberonToggle = document.getElementById('oberon-toggle');
+    if (window._oberonToggle) window._oberonToggle.addEventListener('change', function() {
+        vscode.postMessage({ command: 'oberonToggle', enabled: window._oberonToggle.checked });
+    });
+
+    // ── Fairy history rendering ────────────────────────────────────────────
+    function fmtCost(c) {
+        if (typeof c !== 'number' || !isFinite(c)) return null;
+        return '$' + (c < 0.01 ? c.toFixed(4) : c.toFixed(3));
+    }
+    function fmtAge(ts) {
+        if (!ts) return '';
+        var s = Math.max(0, (Date.now() - ts) / 1000);
+        if (s < 90) return 'just now';
+        var m = s / 60; if (m < 60) return Math.round(m) + 'm ago';
+        var h = m / 60; if (h < 24) return Math.round(h) + 'h ago';
+        var d = h / 24; if (d < 30) return Math.round(d) + 'd ago';
+        return Math.round(d / 30) + 'mo ago';
+    }
+    function statusBadge(status) {
+        var st = String(status || '').toLowerCase();
+        var cls = 'b-other', label = st || 'unknown';
+        if (st === 'running') { cls = 'b-running'; label = 'running…'; }
+        else if (st === 'delivered') { cls = 'b-delivered'; label = 'delivered'; }
+        return '<span class="badge ' + cls + '">' + label + '</span>';
+    }
+    function renderFairyHistory(entries, devMode) {
+        var listEl  = document.getElementById('fairy-history-list');
+        var emptyEl = document.getElementById('fairy-history-empty');
+        var countEl = document.getElementById('fairy-history-count');
+        if (!listEl) return;
+        entries = Array.isArray(entries) ? entries : [];
+        if (countEl) countEl.textContent = entries.length ? '(' + entries.length + ')' : '';
+        if (emptyEl) emptyEl.style.display = entries.length ? 'none' : '';
+        listEl.innerHTML = '';
+        entries.forEach(function(e) {
+            var item = document.createElement('div');
+            item.className = 'fairy-hist-item';
+            item.title = 'Click to load this prompt into the field';
+            var prompt = document.createElement('div');
+            prompt.className = 'fairy-hist-prompt';
+            prompt.textContent = e.prompt || '';
+            var meta = document.createElement('div');
+            meta.className = 'fairy-hist-meta';
+            var bits = [];
+            if (typeof e.steps === 'number')  bits.push('<span class="m-steps">' + e.steps + ' steps</span>');
+            var cost = fmtCost(e.costUSD);
+            if (cost) bits.push('<span class="m-cost">' + cost + '</span>');
+            bits.push(statusBadge(e.status));
+            if (e.seed) bits.push('<span class="badge b-seed" title="seeded baseline">seed</span>');
+            bits.push('<span style="opacity:0.6;">' + fmtAge(e.ts) + '</span>');
+            meta.innerHTML = bits.join(' ');
+            var del = document.createElement('span');
+            del.className = 'del'; del.textContent = '×'; del.title = 'Remove from history';
+            del.addEventListener('click', function(ev) {
+                ev.stopPropagation();
+                vscode.postMessage({ command: 'fairyHistoryDelete', id: e.id });
+            });
+            meta.appendChild(del);
+            item.appendChild(prompt);
+            item.appendChild(meta);
+            item.addEventListener('click', function() {
+                if (fairyPrompt) { fairyPrompt.value = e.prompt || ''; fairyPrompt.focus(); }
+                activateTab('agents');
+            });
+            listEl.appendChild(item);
+        });
+    }
+
     var bpClearBtn = document.getElementById('bp-clear-btn');
     if (bpClearBtn) {
         bpClearBtn.addEventListener('click', function() {
@@ -215,6 +327,14 @@
             if (window._collabToggle) {
                 window._collabToggle.checked = !!msg.enabled;
             }
+        }
+        else if (msg.command === 'oberonState') {
+            if (window._oberonToggle) {
+                window._oberonToggle.checked = !!msg.enabled;
+            }
+        }
+        else if (msg.command === 'fairyHistory') {
+            renderFairyHistory(msg.entries, msg.devMode);
         }
         else if (msg.command === 'remoteStatus') {
             var rd = document.getElementById('remote-dot');

@@ -619,7 +619,11 @@ async function runLiteratureAgent() {
         assert.strictEqual((b.uncertain || []).length, 1, 'the unjudged paper is kept as uncertain, not silently dropped');
         assert.ok(b.considered.some(c => c.relevant === 'uncertain' && /unparseable/i.test(c.reason || '')), 'considered records the uncertain verdict + reason');
     });
-    await ok('preselect "none" → honest empty brief without any full read', async () => {
+    // L2 (run Q_3VRPXL): preselect is an ORDERING device, never a terminator. A
+    // "none" from the abstract judge no longer skips reading — the top-ranked
+    // candidates are read anyway and the FULL-TEXT judge decides (abstracts
+    // under-describe methods; 11 on-topic papers were once rejected unread).
+    await ok('preselect "none" → top candidates are STILL read; full-text judge decides', async () => {
         let reads = 0;
         const pt = fakePaperTools();
         const origFetch = pt.fetchPaperHtml;
@@ -627,11 +631,13 @@ async function runLiteratureAgent() {
         const llm = async (prompt) => {
             if (/SEARCH PLAN/.test(prompt)) return '{"keywords":"su3","categories":["hep-th"]}';
             if (/pick up to/i.test(prompt)) return 'none';
-            return '{"relevant":true}';
+            // Full-text judge overrules the abstract-level decline.
+            return '{"relevance":"method","reason":"general method applies","key_relations":[],"observations":[]}';
         };
         const b = await literature.runResearch({ question: Q, paperTools: pt, llm });
-        assert.deepStrictEqual(b.papers, []);
-        assert.strictEqual(reads, 0, 'no full reads when preselect says none');
+        assert.ok(reads >= 1 && reads <= 2, `read-anyway fallback is bounded (got ${reads})`);
+        assert.ok(b.papers.length >= 1, 'full-text judge accepted a method-grade paper');
+        assert.strictEqual(b.diagnostics.preselectDeclined, true, 'the decline is recorded in diagnostics');
     });
     await ok('honest empty brief when ALL papers judged irrelevant', async () => {
         const offTopic = [{ title: 'Slowly rotating neutron stars in chiral SU(3)', abstract: 'neutron stars hadronic', arxivId: '9.9', year: 2009, authors: [] }];

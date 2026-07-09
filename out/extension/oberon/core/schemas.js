@@ -67,6 +67,11 @@ function validateQuest(q) {
     if (q.validationChecks !== undefined && !isStrArray(q.validationChecks, 8, 500)) {
         errors.push('validationChecks: must be string[] (≤8, each ≤500 chars)');
     }
+    // O2: optional list of missing/contradictory parameters, each phrased
+    // "<parameter> (default: <value>)" — drives the clarification gate.
+    if (q.missingInfo !== undefined && !isStrArray(q.missingInfo, 8, 200)) {
+        errors.push('missingInfo: must be string[] (≤8, each ≤200 chars)');
+    }
 
     if (errors.length) return { ok: false, errors };
 
@@ -79,6 +84,7 @@ function validateQuest(q) {
         risks:            q.risks.slice(),
         subtasks:         Array.isArray(q.subtasks) && q.subtasks.length > 0 ? q.subtasks.map(String) : [],
         validationChecks: Array.isArray(q.validationChecks) ? q.validationChecks.slice() : [],
+        missingInfo:      Array.isArray(q.missingInfo) ? q.missingInfo.slice() : [],
         status:           q.status || 'open',
         createdAt:        q.createdAt || new Date().toISOString(),
     };
@@ -121,6 +127,14 @@ function validateCharm(c) {
     if (c.createdAt !== undefined && !isStr(c.createdAt, 40)) {
         errors.push('createdAt: must be ISO string');
     }
+    // O2: optional pre-registered assumptions ({ id, statement, wlAssumption?, prose? }).
+    // Declared-parameter assumptions from the clarify gate ride through here.
+    if (c.assumptions !== undefined) {
+        if (!Array.isArray(c.assumptions) || c.assumptions.length > 8
+            || c.assumptions.some(a => !a || typeof a !== 'object' || typeof a.statement !== 'string' || a.statement.length > 500)) {
+            errors.push('assumptions: must be Array<{statement: string ≤500}> (≤8 items)');
+        }
+    }
     if (errors.length) return { ok: false, errors };
 
     const value = {
@@ -131,6 +145,7 @@ function validateCharm(c) {
         deliverables:     Array.isArray(c.deliverables)     ? c.deliverables.slice()     : [],
         constraints:      Array.isArray(c.constraints)      ? c.constraints.slice()      : [],
         validationChecks: Array.isArray(c.validationChecks) ? c.validationChecks.slice() : [],
+        assumptions:      Array.isArray(c.assumptions)      ? c.assumptions.slice()      : [],
         createdAt:        c.createdAt || new Date().toISOString(),
     };
     return { ok: true, value };
@@ -323,6 +338,9 @@ function validateOberonVerdict(v) {
             ...(v.verificationLevel ? { verificationLevel: String(v.verificationLevel) } : {}),
             ...(v.verificationLabel ? { verificationLabel: String(v.verificationLabel) } : {}),
             ...(v.wardSummary       ? { wardSummary: { ...v.wardSummary } }              : {}),
+            // Confidence-floor fields (independent verification outranks self-check).
+            ...(typeof v.effectiveConfidence === 'number' ? { effectiveConfidence: v.effectiveConfidence } : {}),
+            ...(v.confidenceFloored !== undefined ? { confidenceFloored: !!v.confidenceFloored } : {}),
         },
     };
 }

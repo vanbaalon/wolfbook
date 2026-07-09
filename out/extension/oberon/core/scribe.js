@@ -171,7 +171,11 @@ async function runScribe(opts) {
             sha256:   ref.sha256,
             bytesWritten:     ref.bytesWritten,
             bytesTotal:       ref.bytesTotal,
-            findingsWritten:  kind === 'verified' ? verifiedFindings.length : unverifiedFindings.length,
+            // findingsWritten counts VERIFIED findings only. Unverified findings go
+            // into the entry as open questions and are counted once, in
+            // findingsExcluded — the old double-count produced postmortems reading
+            // "written: 5, excluded as unverified: 5" for the same five findings.
+            findingsWritten:  verifiedFindings.length,
             findingsExcluded,
             verdict:          verdict || null,
             wardSummary:      wardSummary || null,
@@ -179,7 +183,7 @@ async function runScribe(opts) {
         return {
             wrote: true, kind,
             path: ref.path, sha256: ref.sha256,
-            findingsWritten:  kind === 'verified' ? verifiedFindings.length : unverifiedFindings.length,
+            findingsWritten:  verifiedFindings.length,
             findingsExcluded,
         };
     } catch (e) {

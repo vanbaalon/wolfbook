@@ -46,6 +46,7 @@ const FROM_WEBVIEW = Object.freeze({
     ABORT_RUN:               'abortRun',
     START_RESEARCH:          'startResearch',
     START_FAIRY:             'startFairy',
+    START_DIRECTOR:          'startDirector',
     OPEN_RUN_INSPECTOR:      'openRunInspector',
     OPEN_SETTINGS:           'openSettings',
     CONFIGURE_PROVIDERS:     'configureProviders',

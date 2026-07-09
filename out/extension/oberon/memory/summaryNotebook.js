@@ -47,7 +47,7 @@ async function prepareSummaryNotebook({ quest, charm, scroll, reviewOut, charmNo
     const root = project.getWorkspaceRoot();
     if (!root) return null;
 
-    const dir    = path.join(root, 'quests', `${quest.id}_${quest.shortName}`);
+    const dir    = path.join(root, 'quests', require('./quests').questFolderName(quest));
     const nbPath = path.join(dir, `${quest.id}_summary.wb`);
 
     await fsp.mkdir(dir, { recursive: true });

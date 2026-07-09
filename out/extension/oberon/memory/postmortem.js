@@ -78,6 +78,68 @@ async function writePostmortem(opts) {
     return { path: fp };
 }
 
+/**
+ * Minimal postmortem for a run that died before producing a Scroll (planner
+ * failure, provider outage, crash during BRIEFING). Deterministic, no LLM.
+ * Without this, an errored run leaves no trace outside the JSONL telemetry —
+ * run_2026-07-03T23-38 failed in BRIEFING and simply vanished.
+ *
+ * @param {{
+ *   runSummary?: object|null,
+ *   brief?:      string,
+ *   error?:      Error|null,
+ *   bus?:        { recent: (n: number) => object[] }|null,
+ * }} opts
+ * @returns {Promise<{ path: string } | null>}
+ */
+async function writeErrorPostmortem(opts) {
+    const dir = project.postmortemsDir();
+    if (!dir) return null;
+    await fsp.mkdir(dir, { recursive: true });
+
+    const o     = opts || {};
+    const rs    = o.runSummary || {};
+    const runId = rs.runId || `run-${Date.now()}`;
+    const safe  = String(runId).replace(/[^A-Za-z0-9._-]/g, '_');
+    const fp    = path.join(dir, `${safe}.md`);
+
+    const omens = [];
+    try {
+        for (const ev of (o.bus && o.bus.recent(500)) || []) {
+            if (ev && ev.type === 'omen' && ev.payload) {
+                omens.push(`- \`${ev.payload.kind || 'omen'}\` — ${_truncate(String(ev.payload.message || ''), 300)}`);
+            }
+        }
+    } catch (_) {}
+
+    const lines = [
+        `# Run postmortem — \`${runId}\` (FAILED)`,
+        '',
+        `_Generated ${new Date().toISOString()}._`,
+        '',
+        '| Field | Value |',
+        '|-------|-------|',
+        `| Run ID | \`${runId}\` |`,
+        `| Brief | ${esc(_truncate(String(o.brief || rs.brief || ''), 300))} |`,
+        `| End state | ${rs.state || 'ERROR'} |`,
+        `| LLM calls | ${rs.llmCallCount != null ? rs.llmCallCount : '—'} |`,
+        `| Total cost | ${typeof rs.totalCostUSD === 'number' ? '$' + rs.totalCostUSD.toFixed(4) : '—'} |`,
+        `| Error | ${esc(_truncate(String((o.error && o.error.message) || o.error || 'unknown'), 400))} |`,
+        '',
+        '## Omens',
+        '',
+        omens.length ? omens.join('\n') : '_none recorded_',
+        '',
+        '## Next suggested action',
+        '',
+        'The run failed before producing any Scroll. Check the omens above (provider outage,',
+        'timeout, invalid planner output) and retry the same brief.',
+        '',
+    ];
+    await fsp.writeFile(fp, lines.join('\n'), 'utf8');
+    return { path: fp };
+}
+
 function _renderMarkdown(opts) {
     const o = opts || {};
     const ts = new Date().toISOString();
@@ -85,7 +147,6 @@ function _renderMarkdown(opts) {
     const c  = o.charm  || {};
     const s  = o.scroll || {};
     const rv = o.reviewOut && o.reviewOut.oberonVerdict;
-    const ws = o.wardOut && o.wardOut.summary;
     const gr = o.grimoireResult || {};
     const rs = o.runSummary || {};
 
@@ -121,6 +182,37 @@ function _renderMarkdown(opts) {
     }
     if (rs.state) lines.push(`| End state | ${esc(rs.state)} |`);
 
+    // Per-charm outcome table (multi-charm runs). The old single-charm header
+    // above only reflects the LAST charm — run Q25 showed "Verdict UNKNOWN"
+    // while two of its three charms were fully verified.
+    const charms = Array.isArray(o.charmOutcomes) ? o.charmOutcomes : [];
+    if (charms.length > 1 || (charms.length === 1 && o.budgetInfo && o.budgetInfo.charmsSkippedOnBudget)) {
+        lines.push('');
+        lines.push('## Charms');
+        lines.push('');
+        lines.push('| Charm | Status | Verdict | Confidence |');
+        lines.push('|-------|--------|---------|------------|');
+        for (const co of charms) {
+            const cconf = (typeof co.confidence === 'number') ? co.confidence.toFixed(2) : '?';
+            lines.push(`| \`${esc(co.id || '?')}\` ${esc(_truncate(co.title || '', 60))} | ${esc(co.status || '?')} | ${esc(co.verdict || '—')} | ${cconf} |`);
+        }
+    }
+
+    // Budget outcome — say plainly when the run was cut short and what never ran.
+    const bi = o.budgetInfo;
+    if (bi && (bi.exhausted || bi.charmsSkippedOnBudget)) {
+        lines.push('');
+        lines.push('## Budget');
+        lines.push('');
+        lines.push(`- Per-run budget was **exhausted** during this run.`);
+        if (typeof bi.charmsCompleted === 'number' && typeof bi.totalCharms === 'number') {
+            lines.push(`- Charms completed: ${bi.charmsCompleted} of ${bi.totalCharms} planned.`);
+        }
+        if (bi.charmsSkippedOnBudget) {
+            lines.push(`- **${bi.charmsSkippedOnBudget} planned charm(s) never ran.** Banked facts carry over — raise the \`wolfbook.oberon.budgets.run\` setting or re-run to continue.`);
+        }
+    }
+
     // R10: Fairy efficiency metrics (from the fairy.run_metrics event), if supplied.
     const fm = o.fairyMetrics;
     if (fm && typeof fm === 'object') {
@@ -142,33 +234,14 @@ function _renderMarkdown(opts) {
         if (typeof fm.candidateRaised === 'boolean')  lines.push(`| Contribution candidate | ${fm.candidateRaised ? 'raised (pending review)' : 'no'} |`);
     }
 
-    // Wards summary.
+    // Clean-run verification: the Fairy's fresh-kernel clean.wb replay is the
+    // only verification (the Skeptic/Wards layer was removed 2026-07-07).
     lines.push('');
-    lines.push('## Wards');
+    lines.push('## Verification');
     lines.push('');
-    if (ws) {
-        const parts = [`total ${ws.total || 0}`];
-        for (const k of ['passed', 'failed', 'skipped', 'errored']) {
-            if (ws[k]) parts.push(`${k} ${ws[k]}`);
-        }
-        lines.push(parts.join(' · '));
-
-        // List failed/errored ward details so failures are debuggable without
-        // opening the Run Inspector.
-        const wardResults = (o.wardOut && o.wardOut.results) || [];
-        const failedWards = wardResults.filter(w => w.status === 'failed' || w.status === 'errored');
-        if (failedWards.length > 0) {
-            lines.push('');
-            for (const w of failedWards) {
-                const expr   = w.expression ? `\`${w.expression}\`` : '(no expression)';
-                const detail = w.detail ? ` — ${w.detail}` : '';
-                const err    = w.error  ? ` [err: ${w.error}]` : '';
-                lines.push(`- **${w.wardId}** ${expr}${detail}${err}`);
-            }
-        }
-    } else {
-        lines.push('_No wards were run for this scroll._');
-    }
+    lines.push(rv && rv.verdict
+        ? `Clean-run verdict: **${esc(rv.verdict)}** — derived from the fresh-kernel clean.wb replay.`
+        : '_No verdict recorded._');
 
     // Grimoire outcome.
     lines.push('');
@@ -176,9 +249,9 @@ function _renderMarkdown(opts) {
     lines.push('');
     if (gr && gr.wrote) {
         lines.push(`- Wrote **${gr.kind}** entry to \`${esc(gr.path || '?')}\`.`);
-        lines.push(`- Findings written: ${gr.findingsWritten || 0}.`);
+        lines.push(`- Verified findings written: ${gr.findingsWritten || 0}.`);
         if (gr.findingsExcluded) {
-            lines.push(`- Findings excluded as unverified: ${gr.findingsExcluded}.`);
+            lines.push(`- Unverified findings recorded as open questions (not promoted): ${gr.findingsExcluded}.`);
         }
         if (gr.sha256) lines.push(`- File sha256: \`${esc(gr.sha256)}\`.`);
     } else if (gr && gr.kind === 'skipped') {
@@ -189,8 +262,6 @@ function _renderMarkdown(opts) {
 
     // What was skipped.
     const skipReasons = [];
-    if (ws && ws.failed)        skipReasons.push(`${ws.failed} ward failure(s)`);
-    if (ws && ws.skipped)       skipReasons.push(`${ws.skipped} ward(s) skipped (no applicable method)`);
     if (rv && rv.verdict && rv.verdict !== 'success') skipReasons.push(`verdict was \`${rv.verdict}\``);
     if (skipReasons.length) {
         lines.push('');
@@ -203,7 +274,7 @@ function _renderMarkdown(opts) {
     lines.push('');
     lines.push('## Next suggested action');
     lines.push('');
-    lines.push(esc(_nextAction({ rv, ws, gr })));
+    lines.push(esc(_nextAction({ rv, gr, budgetInfo: o.budgetInfo })));
 
     // Provenance.
     lines.push('');
@@ -217,11 +288,18 @@ function _renderMarkdown(opts) {
     return lines.join('\n') + '\n';
 }
 
-function _nextAction({ rv, ws, gr }) {
+function _nextAction({ rv, gr, budgetInfo }) {
+    // Budget exhaustion trumps everything: "sharpen the brief" is the wrong
+    // remedy when the plan simply ran out of calls (run Q25).
+    if (budgetInfo && (budgetInfo.exhausted || budgetInfo.charmsSkippedOnBudget)) {
+        const skipped = budgetInfo.charmsSkippedOnBudget || 0;
+        return skipped > 0
+            ? `Budget exhausted — ${skipped} planned charm(s) never ran. Raise the wolfbook.oberon.budgets.run setting (or re-run; banked facts carry over) to finish the plan.`
+            : 'Budget exhausted during the final charm. Raise the wolfbook.oberon.budgets.run setting and re-run to complete verification.';
+    }
     if (!rv || !rv.verdict) return 'Review the scroll and re-run with a more specific brief.';
-    if (rv.verdict === 'failed')        return 'Re-run with a sharper brief or stronger guidance; the Skeptic rejected the cohort.';
-    if (rv.verdict === 'needs_review')  return 'Open the Run Inspector, inspect the Skeptic objections, then revise the brief.';
-    if (ws && ws.failed)                return 'Inspect failed Wards in the Run Inspector before promoting findings.';
+    if (rv.verdict === 'failed')        return 'Re-run with a sharper brief or stronger guidance; clean.wb did not reach a clean deliverable.';
+    if (rv.verdict === 'needs_review')  return 'Open the Run Inspector and review the clean.wb run output, then revise the brief.';
     if (rv.verdict === 'partial_success') return 'Investigate the unverified findings recorded in the Grimoire under “Open Questions”.';
     if (gr && gr.wrote)                 return 'Commit the Grimoire entry once you have reviewed it.';
     return 'No further action required.';
@@ -278,4 +356,4 @@ function _truncate(s, n) {
     return str.length > n ? (str.slice(0, n - 1) + '…') : str;
 }
 
-module.exports = { writePostmortem, POSTMORTEM_SYSTEM_PROMPT };
+module.exports = { writePostmortem, writeErrorPostmortem, POSTMORTEM_SYSTEM_PROMPT };

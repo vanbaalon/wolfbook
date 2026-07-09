@@ -277,6 +277,20 @@ function splitSystemAndConvert(messages) {
             content: [{ type: 'text', text: String(m.content || '') }],
         });
     }
+    // O1: also mark the LAST content block of the LAST message as a cache
+    // breakpoint. With only the system block marked, Anthropic caches just the
+    // system prompt; marking the conversation tail makes the ENTIRE history up
+    // to the current turn cacheable across consecutive Fairy turns (Anthropic
+    // allows up to 4 breakpoints; we use 2).
+    if (out.length) {
+        const lastMsg = out[out.length - 1];
+        if (Array.isArray(lastMsg.content) && lastMsg.content.length) {
+            const lastBlock = lastMsg.content[lastMsg.content.length - 1];
+            if (lastBlock && typeof lastBlock === 'object') {
+                lastBlock.cache_control = { type: 'ephemeral' };
+            }
+        }
+    }
     if (!systemText) return { system: null, messages: out };
     // One ephemeral cache_control marker on the system block enables prefix
     // caching for the (large, stable) Fairy/Skeptic/Executive system prompts.

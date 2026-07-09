@@ -528,6 +528,33 @@ class WolfslideGetContextTool {
             lines.push('Style presets: none defined yet. Create with wolfslide_setTheme(stylePresets:{ "preset-name": { color:"#fff", fontSize:"32px" } })');
         }
 
+        // ── Style coverage + duplicate-inline-style nudge (Phase 3, Item 8b) ──
+        // Steers toward global styles by surfacing how much of the deck is on a
+        // preset and flagging identical inline styles worth promoting.
+        if (activeDeck && (activeDeck.slides || []).length > 0) {
+            const allBlocks = [];
+            for (const s of activeDeck.slides) for (const b of _collectAllBlocks(s)) if (b) allBlocks.push(b);
+            const total      = allBlocks.length;
+            const withPreset = allBlocks.filter(b => b.stylePreset).length;
+            const styled     = allBlocks.filter(b => b.style && typeof b.style === 'object' && Object.keys(b.style).length > 0);
+            const pct = total ? Math.round((withPreset / total) * 100) : 0;
+            lines.push('');
+            lines.push(`Style coverage: ${withPreset}/${total} block(s) use a stylePreset (${pct}%); ${styled.length} carry an inline style object.`);
+            // Find inline styles repeated byte-identically on ≥3 blocks.
+            const sig = new Map();
+            for (const b of styled) { const k = JSON.stringify(b.style); sig.set(k, (sig.get(k) || 0) + 1); }
+            const dups = [...sig.entries()].filter(([, n]) => n >= 3).sort((a, b) => b[1] - a[1]);
+            if (dups.length) {
+                lines.push(`⚠ ${dups.length} inline style(s) are repeated on ≥3 blocks — promote each to a stylePreset so ONE edit restyles all of them:`);
+                dups.slice(0, 4).forEach(([k, n], i) => {
+                    const name = `shared${i + 1}`;
+                    lines.push(`   ${n}× ${k}`);
+                    lines.push(`     → wolfslide_setTheme(stylePresets:{ "${name}": ${k} })`);
+                    lines.push(`     → then wolfslide_patchBlock per matching block: { "stylePreset":"${name}" }  (and remove the now-duplicated style keys)`);
+                });
+            }
+        }
+
         // ── Critical reminders (non-obvious traps only) ──────────────────
         lines.push('');
         lines.push('=== Key Reminders ===');
@@ -573,11 +600,21 @@ class WolfslideGetContextTool {
             lines.push('• Each visual element = its own block. Do NOT concatenate multiple divs into one text block.');
             lines.push('• Every block gets a unique ID automatically — do not set "id" in bulkInsert (will be overwritten).');
             lines.push('');
-            lines.push('── INLINE STYLES ARE MANDATORY ────────────────────────────────');
-            lines.push('CSS classes like .prob, .sol, .stepbox only work if they are defined in editorCSS.');
-            lines.push('For robust decks: use inline style objects on every block, e.g.:');
-            lines.push('  { "type":"text", "content":"...", "style":{"color":"#22d3ee","fontWeight":"bold"} }');
-            lines.push('Inline styles never depend on editorCSS and always render correctly.');
+            lines.push('── STYLING: PREFER GLOBAL STYLE PRESETS ───────────────────────');
+            lines.push('Define a small "house style" ONCE, then reference it. Do NOT copy an inline style');
+            lines.push('object onto every block — that produces decks the user cannot restyle globally.');
+            lines.push('Step A — after setTheme, create 3–6 named stylePresets for your recurring roles:');
+            lines.push('  wolfslide_setTheme(stylePresets:{');
+            lines.push('    "lead":    { color:"#0f172a", fontSize:"44px", fontWeight:"bold" },');
+            lines.push('    "body":    { color:"#1e293b", fontSize:"32px" },');
+            lines.push('    "caption": { color:"#64748b", fontSize:"22px", fontStyle:"italic" } })');
+            lines.push('Step B — reference them on blocks via stylePreset (NOT a copied style object):');
+            lines.push('  { "type":"text", "content":"...", "stylePreset":"body" }');
+            lines.push('Use an inline "style" object ONLY for a genuine one-off override (it wins over the preset).');
+            lines.push('Why: stylePresets resolve to the SAME inline CSS at render AND export — just as robust as');
+            lines.push('inline styling, but the user (and you) can restyle the whole deck by editing ONE preset.');
+            lines.push('NOTE: editorCSS *classes* (.prob, .sol …) are the fragile ones — they need the editorCSS');
+            lines.push('blob to be defined. stylePresets are NOT fragile; prefer them over both classes and inline.');
             lines.push('');
             lines.push('── ANIMATION / FRAGMENTS ──────────────────────────────────────');
             lines.push('Add "fragmentOrder": N (integer ≥1) to any block to reveal it on click N.');

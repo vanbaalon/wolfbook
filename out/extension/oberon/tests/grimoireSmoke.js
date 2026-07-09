@@ -186,21 +186,8 @@ function wardOut(summary, results) {
         assert(text.includes('kind="unverified"'));
     });
 
-    // 7. Scribe: success but a ward failed → cohort moved to unverified
-    await t('Scribe: success + ward failed → cohort unverified', async () => {
-        await wipe();
-        const bus = new FakeBus();
-        const r = await runScribe({
-            quest: quest(), charm: charm(), scroll: scroll(),
-            reviewOut: reviewOut('success'),
-            wardOut: wardOut({ total: 2, passed: 1, failed: 1, skipped: 0, errored: 0 }),
-            runId: 'R-3', bus,
-        });
-        assert.strictEqual(r.kind, 'unverified', 'kind downgraded');
-        assert.strictEqual(r.findingsExcluded, 1, 'one finding excluded');
-        const ev = bus.events.find(e => e.type === 'grimoire.updated');
-        assert(ev && ev.payload.findingsExcluded === 1);
-    });
+    // (7. Scribe ward-failure downgrade removed — the Wards/Skeptic layer was
+    //  deleted; the Fairy's clean.wb run is now the only verification.)
 
     // 8. Scribe: idempotent — same runId+scrollId skips on second call
     await t('Scribe: repeated run is idempotent (skipped)', async () => {
@@ -295,10 +282,10 @@ function wardOut(summary, results) {
         assert(pm && pm.path && pm.path.endsWith('R-pm-1.md'));
         const text = await fsp.readFile(pm.path, 'utf8');
         assert(text.includes('# Run postmortem'), 'has title');
-        assert(text.includes('Wards'), 'has Wards section');
+        assert(text.includes('## Verification'), 'has Verification section');
         assert(text.includes('Grimoire'), 'has Grimoire section');
         assert(text.includes('Next suggested action'), 'has next action');
-        assert(text.includes('failed 1'), 'reports ward failure');
+        assert(text.includes('Clean-run verdict'), 'reports clean-run verdict');
     });
 
     // 13. Postmortem: failed-verdict run gets a re-run recommendation

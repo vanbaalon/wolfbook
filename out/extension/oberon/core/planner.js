@@ -96,6 +96,20 @@ async function runPlanner(args) {
     // Allocate id if Planner reused a placeholder we already have on disk.
     quest.id = await pickFreeId(quest.id);
 
+    // Deterministic guard (run Q29): snake_case identifiers in validationChecks are
+    // WL PATTERNS (exact_energies ≡ Pattern[exact, Blank[energies]]), never definable
+    // symbols — such a check fails every run no matter what the agent does. Rewrite
+    // them to camelCase; the fairy sees the same sanitised text in its brief, so the
+    // expected names stay consistent end-to-end.
+    const vcFixes = sanitizeValidationChecks(quest);
+    if (vcFixes.length) {
+        await bus.appendEvent('omen', {
+            kind:    'validation_checks_sanitised',
+            message: `Planner wrote ${vcFixes.length} validation check(s) with snake_case identifiers (WL pattern syntax, unsatisfiable) — rewritten to camelCase.`,
+            detail:  { fixes: vcFixes },
+        }, { spanId, questId: quest.id }).catch(() => {});
+    }
+
     fileRef = await questsFs.writeQuest(quest);
 
     await bus.appendEvent('quest.accepted', {
@@ -128,7 +142,7 @@ async function callOnce({ bus, adapter, binding, messages, signal, spanId, prefi
         const onChunk = makeOnChunk({ bus, role: 'oberon', spanId });
         result = await adapter.chatComplete(req, { pricing: binding.pricing, onChunk });
     } catch (e) {
-        const kind = e && e.kind === 'provider_error' ? 'provider_error' : 'provider_error';
+        const kind = (e && e.kind) || 'planner_failed';
         await bus.appendEvent('omen', {
             kind,
             message: e && e.message || String(e),
@@ -139,6 +153,9 @@ async function callOnce({ bus, adapter, binding, messages, signal, spanId, prefi
                 retryAfterMs: e && e.retryAfterMs || null,
             },
         }, { spanId });
+        // Tell upstream catch blocks this failure is already in the telemetry —
+        // the run_2026-07-03T23-38 log carried the same provider_error twice.
+        try { e._omened = true; } catch (_) {}
         throw e;
     }
 
@@ -169,6 +186,33 @@ async function callOnce({ bus, adapter, binding, messages, signal, spanId, prefi
     return result;
 }
 
+/**
+ * Rewrite snake_case identifiers in quest.validationChecks to camelCase, in
+ * place. In WL `a_b` is Pattern[a, Blank[b]] — it can never hold a value, so a
+ * check written with such a "symbol" is unsatisfiable by construction (run Q29:
+ * `Length[exact_energies] == 216` disputed a fully verified charm and burned
+ * the whole revision budget). Segments after `_` starting with an UPPERCASE
+ * letter are left alone — `x_Integer` is intentional pattern syntax. String
+ * literals are preserved verbatim.
+ * @returns {Array<{ from: string, to: string }>} the rewrites performed
+ */
+function sanitizeValidationChecks(quest) {
+    const fixes = [];
+    if (!quest || !Array.isArray(quest.validationChecks)) return fixes;
+    const camelize = (expr) => expr.split(/("(?:[^"\\]|\\.)*")/).map((seg, i) => {
+        if (i % 2 === 1) return seg;   // inside a string literal
+        return seg.replace(/\b([a-zA-Z][A-Za-z0-9]*(?:_[a-z][A-Za-z0-9]*)+)\b/g,
+            (m) => m.split('_').map((p, j) => j === 0 ? p : p.charAt(0).toUpperCase() + p.slice(1)).join(''));
+    }).join('');
+    quest.validationChecks = quest.validationChecks.map((expr) => {
+        if (typeof expr !== 'string') return expr;
+        const fixed = camelize(expr);
+        if (fixed !== expr) fixes.push({ from: expr.slice(0, 200), to: fixed.slice(0, 200) });
+        return fixed;
+    });
+    return fixes;
+}
+
 function tryParseJson(text) {
     const s = String(text || '').trim();
     // Strip accidental ```json fences if the model added them despite instructions.
@@ -190,4 +234,4 @@ async function pickFreeId(suggested) {
     return next;
 }
 
-module.exports = { runPlanner };
+module.exports = { runPlanner, sanitizeValidationChecks };

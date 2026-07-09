@@ -17,7 +17,7 @@ const { TO_WEBVIEW, FROM_WEBVIEW } = require('./stateProtocol');
 const roles    = require('../config/roles');
 const settings = require('../config/settings');
 const project  = require('../memory/project');
-const { FAIRY_SYSTEM_PROMPT }    = require('../agents/fairy.prompt');
+const { FAIRY_SYSTEM_PROMPT }    = require('../fairy/prompts');
 const { buildPlannerSystemPrompt } = require('../agents/oberonPlanner.prompt');
 const { POSTMORTEM_SYSTEM_PROMPT } = require('../memory/postmortem');
 
@@ -39,9 +39,23 @@ class RunInspectorManager {
         this._onCommand  = deps.onCommand;
         /** @type {vscode.WebviewPanel | null} */
         this._panel = null;
+        /** @type {import('../core/fairy').SteerQueue | null} live steering queue */
+        this._steerQueue = null;
 
         this._runManager.on('summary', () => this._postSnapshot());
         this._bus.on('event', (ev) => this._postEvent(ev));
+    }
+
+    /**
+     * Set the active steer queue for the current fairy run (null when none).
+     * Mirrors the Control Room sidebar; the Inspector's steer bar enables when
+     * a queue is present.
+     */
+    setSteerQueue(queue) {
+        this._steerQueue = queue;
+        if (this._panel) {
+            this._panel.webview.postMessage({ command: 'steer.state', active: !!queue });
+        }
     }
 
     /** Reveal an existing panel or create a new one. */
@@ -138,9 +152,11 @@ class RunInspectorManager {
                     out.push(ev);
                 }
             }
-            return out;
+            // Disk flush order and the in-memory tail can interleave — the UI
+            // must always see chronological order (ISO ts sorts lexically).
+            return stableSortByTs(out);
         } catch (_) {
-            return tail;
+            return stableSortByTs(tail.slice());
         }
     }
 
@@ -166,9 +182,24 @@ class RunInspectorManager {
 
     _onMessage(msg) {
         const c = msg.command;
-        if (c === FROM_WEBVIEW.SCRIPT_LOADED) return this._postSnapshot();
+        if (c === FROM_WEBVIEW.SCRIPT_LOADED) {
+            this._postSnapshot();
+            // Late-arriving webview must learn whether steering is live.
+            if (this._panel) this._panel.webview.postMessage({ command: 'steer.state', active: !!this._steerQueue });
+            return;
+        }
         if (c === FROM_WEBVIEW.ABORT_RUN)            return this._onCommand('abortRun');
         if (c === FROM_WEBVIEW.START_RESEARCH)       return this._onCommand('startResearch', { brief: String(msg.brief || '').trim() });
+        if (c === 'startFairy')                      return this._onCommand('startFairy',    { brief: String(msg.brief || '').trim() });
+        if (c === 'startDirector')                   return this._onCommand('startDirector', { brief: String(msg.brief || '').trim() });
+        if (c === 'submitSteer' && typeof msg.text === 'string') {
+            const text = msg.text.trim().slice(0, 500);
+            if (text && this._steerQueue) {
+                this._steerQueue.push(text);
+                if (this._panel) this._panel.webview.postMessage({ command: 'steer.queued', text });
+            }
+            return;
+        }
         if (c === FROM_WEBVIEW.OPEN_SETTINGS)        return this._onCommand('openSettings');
         if (c === FROM_WEBVIEW.CONFIGURE_PROVIDERS)  return this._onCommand('configureProviders');
         if (c === FROM_WEBVIEW.EMIT_MOCK_EVENTS)     return this._onCommand('emitMockEvents');
@@ -201,15 +232,70 @@ class RunInspectorManager {
     async _listHistoricalRuns() {
         const runsDir = project.telemetryRunsDir();
         if (!runsDir) return [];
+        let ids;
         try {
             const files = await fsp.readdir(runsDir);
-            return files
+            ids = files
                 .filter(f => f.endsWith('.jsonl'))
                 .map(f => f.replace('.jsonl', ''))
                 .sort()
                 .reverse()
                 .slice(0, 50);
         } catch (_) { return []; }
+        // Enrich the newest runs with a cheap outcome summary: read head + tail
+        // slices of each JSONL (not the whole file) and pull the brief + the
+        // final status out of them. Older entries stay id-only.
+        const out = [];
+        for (let i = 0; i < ids.length; i++) {
+            const rec = { runId: ids[i], brief: '', status: '', costUSD: null };
+            if (i < 10) {
+                try {
+                    Object.assign(rec, await this._runOutcomeSummary(path.join(runsDir, ids[i] + '.jsonl')));
+                } catch (_) {}
+            }
+            out.push(rec);
+        }
+        return out;
+    }
+
+    /** Head+tail scan of one run log → { brief, status, costUSD, questId }. */
+    async _runOutcomeSummary(filePath) {
+        const fh = await fsp.open(filePath, 'r');
+        try {
+            const { size } = await fh.stat();
+            const headBuf = Buffer.alloc(Math.min(16384, size));
+            await fh.read(headBuf, 0, headBuf.length, 0);
+            let tailStr = '';
+            if (size > headBuf.length) {
+                const tailBuf = Buffer.alloc(Math.min(32768, size - headBuf.length));
+                await fh.read(tailBuf, 0, tailBuf.length, size - tailBuf.length);
+                tailStr = tailBuf.toString('utf8');
+            }
+            const parse = (str, fromPartial) => {
+                const lines = str.split('\n');
+                if (fromPartial) lines.shift();   // first tail line may be cut mid-JSON
+                return lines.filter(Boolean).map(l => { try { return JSON.parse(l); } catch (_) { return null; } }).filter(Boolean);
+            };
+            const head = parse(headBuf.toString('utf8'), false);
+            const tail = tailStr ? parse(tailStr, true) : [];
+            const res = { brief: '', status: '', costUSD: null, questId: null };
+            for (const ev of head) {
+                if (ev.type === 'circle.transition' && ev.payload && ev.payload.brief) { res.brief = String(ev.payload.brief).slice(0, 160); }
+                if (ev.type === 'quest.accepted' && ev.payload) { res.questId = ev.payload.questId || null; if (!res.brief) res.brief = String(ev.payload.title || '').slice(0, 160); }
+                if (res.brief && res.questId) break;
+            }
+            for (let i = tail.length - 1; i >= 0; i--) {
+                const ev = tail[i]; const p = ev.payload || {};
+                // A run whose final transition is ERROR/ABORTED must say so —
+                // failed-in-BRIEFING runs used to show a blank status here.
+                if (!res.status && ev.type === 'circle.transition' && (p.to === 'ERROR' || p.to === 'ABORTED')) res.status = p.to === 'ERROR' ? '⚠ error' : 'aborted';
+                if (!res.status && ev.type === 'director.finished') res.status = 'director ' + ((p.outcome && p.outcome.status) || 'done');
+                if (!res.status && ev.type === 'scroll.submitted')  res.status = p.status || '';
+                if (res.costUSD == null && ev.type === 'fairy.run_metrics' && typeof p.costUSD === 'number') res.costUSD = p.costUSD;
+                if (res.status && res.costUSD != null) break;
+            }
+            return res;
+        } finally { await fh.close().catch(() => {}); }
     }
 
     async _loadHistoricalRun(runId) {
@@ -218,10 +304,10 @@ class RunInspectorManager {
         const filePath = path.join(runsDir, `${runId}.jsonl`);
         try {
             const content = await fsp.readFile(filePath, 'utf8');
-            return content.trim().split('\n')
+            return stableSortByTs(content.trim().split('\n')
                 .filter(l => l.trim())
                 .map(l => { try { return JSON.parse(l); } catch (_) { return null; } })
-                .filter(Boolean);
+                .filter(Boolean));
         } catch (_) { return []; }
     }
 
@@ -250,15 +336,57 @@ class RunInspectorManager {
 </head>
 <body>
   <header class="topbar">
-    <div class="topbar__title">Oberon · Run Inspector</div>
+    <div class="topbar__title">Oberon</div>
     <div class="topbar__pill" id="statePill" data-state="IDLE">idle</div>
+    <span class="topbar__meta" id="topbarMeta"></span>
     <select id="runPicker" title="Switch run view" style="font-size:11px;max-width:220px">
       <option value="live">⬤ Live</option>
     </select>
     <div class="topbar__spacer"></div>
-    <button data-cmd="abortRun" id="abortBtn" disabled>Abort</button>
+    <span class="topbar__cost" id="topbarCost" title="Run cost so far"></span>
+    <button data-cmd="abortRun" id="abortBtn" data-variant="danger" disabled>Abort</button>
     <button data-cmd="openSettings" data-variant="secondary">Settings</button>
   </header>
+
+  <!-- Idle dashboard: launcher + recent runs. Shown when no run is active. -->
+  <section class="hero hero--idle" id="idleHero" hidden>
+    <div class="idle-launch">
+      <div class="hero-title">Start a run</div>
+      <textarea id="launchBrief" rows="2"
+        placeholder="Describe a computation or research goal for the agent…"></textarea>
+      <div class="idle-launch__row">
+        <button id="launchFairy"    title="One fairy run: explore → verified clean.wb (5–30 min)">✦ Quick Compute</button>
+        <button id="launchDirector" title="Multi-stage Director programme: plan → fairy stages → LaTeX report">◆ Director Research</button>
+        <button id="launchResearch" data-variant="secondary" title="Single-quest pipeline with planner + skeptic">Research</button>
+      </div>
+    </div>
+    <div class="idle-recent">
+      <div class="hero-title">Recent runs</div>
+      <div id="recentRuns" class="recent-runs"><span class="muted small">loading…</span></div>
+    </div>
+  </section>
+
+  <!-- Live strip: what the agent is doing right now + steering. -->
+  <section class="hero hero--live" id="liveHero" hidden>
+    <div class="now-strip">
+      <div class="now-head">
+        <span class="now-phase" id="nowPhase">—</span>
+        <span class="now-meta" id="nowMeta"></span>
+        <span class="now-spacer"></span>
+        <span class="now-activity" id="nowActivity"></span>
+        <button class="now-toggle" id="nowToggle" title="Expand/collapse the live model stream">▾</button>
+      </div>
+      <div class="now-stream" id="nowStream">
+        <div class="now-stream__label" id="nowStreamLabel">model stream</div>
+        <pre class="now-stream__body" id="nowStreamBody"></pre>
+      </div>
+    </div>
+    <div class="steer-bar">
+      <textarea id="steerInput" rows="1" placeholder="Steer the agent — your note reaches it at its next turn…" disabled></textarea>
+      <button id="steerBtn" disabled title="Queue a steering note for the fairy">Send</button>
+      <span class="steer-ack muted small" id="steerAck"></span>
+    </div>
+  </section>
 
   <nav class="tabs" role="tablist">
     <button class="tab active" data-tab="timeline">Timeline</button>
@@ -281,25 +409,8 @@ class RunInspectorManager {
           <button class="view-toggle__btn"        data-view="raw"        title="Every event as a single row">Raw events</button>
         </div>
         <input id="filterText"  placeholder="Filter (substring)" />
-        <select id="filterType">
+        <select id="filterType" title="Filter by event type — populated from this run's events">
           <option value="">All types</option>
-          <option>circle.transition</option>
-          <option>llm.call</option>
-          <option>quest.accepted</option>
-          <option>charm.dispatched</option>
-          <option>fairy.started</option>
-          <option>tool.call</option>
-          <option>spell.exec</option>
-          <option>ward.requested</option>
-          <option>ward.result</option>
-          <option>scroll.submitted</option>
-          <option>oberon.decision</option>
-          <option>grimoire.write</option>
-          <option>grimoire.updated</option>
-          <option>postmortem.written</option>
-          <option>omen</option>
-          <option>budget.exhausted</option>
-          <option>correlated.tool</option>
         </select>
         <div class="filters__spacer"></div>
         <span class="muted" id="eventCount">0 events</span>
@@ -404,6 +515,18 @@ class RunInspectorManager {
 
 function readSync(p) {
     try { return fs.readFileSync(p, 'utf8'); } catch (_) { return ''; }
+}
+/** Stable chronological sort (ISO ts strings compare lexically; missing ts keeps arrival order). */
+function stableSortByTs(events) {
+    return events
+        .map((ev, i) => ({ ev, i }))
+        .sort((a, b) => {
+            const ta = (a.ev && a.ev.ts) || '';
+            const tb = (b.ev && b.ev.ts) || '';
+            if (ta && tb && ta !== tb) return ta < tb ? -1 : 1;
+            return a.i - b.i;
+        })
+        .map(x => x.ev);
 }
 function makeNonce() {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';

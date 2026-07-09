@@ -422,6 +422,9 @@
 
 		"editor.background": "#ffffff",
 		"notebook.cellEditorBackground": "#FFFFFF",
+		"notebook.selectedCellBackground": "#b4947155",
+		"notebook.selectedCellBorder": "#b49471",
+		"notebook.inactiveSelectedCellBorder": "#b49471",
 		"editorWidget.background": "#EEE8D5",
 		"editorCursor.foreground": "#657B83",
 		"editorWhitespace.foreground": "#586E7580",

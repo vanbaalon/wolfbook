@@ -22,6 +22,17 @@ const settings                           = require('../config/settings');
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 
+/** Request timeout — configurable via settings (providers.deepseek.timeoutMs);
+ *  reasoning models (deepseek-v4-pro) can legitimately take longer than 120s
+ *  to first byte on a long planning prompt. */
+function requestTimeoutMs() {
+    try {
+        const v = Number(settings.deepseekTimeoutMs && settings.deepseekTimeoutMs());
+        if (Number.isFinite(v) && v >= 10_000) return v;
+    } catch (_) {}
+    return DEFAULT_TIMEOUT_MS;
+}
+
 // Transient-error retry policy for 429/5xx + network blips. Total attempts = 1 + RETRY_BACKOFFS.length.
 // Caller signal still aborts immediately between retries.
 const RETRY_BACKOFFS = [1000, 3000, 8000];
@@ -30,9 +41,13 @@ const RETRYABLE_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
 function isRetryable(e) {
     if (!e) return false;
     if (e.status && RETRYABLE_STATUSES.has(e.status)) return true;
-    // Network-layer failures land as providerError with no status.
+    // Network-layer failures land as providerError with no status. Mid-stream
+    // drops ("stream read error: …", SSE stall, socket resets) are transient the
+    // same way a pre-flight network error is — the whole request is simply
+    // re-issued. Caller aborts are NOT retryable ("request aborted…" messages
+    // never match these patterns, and chatComplete checks req.signal first).
     const msg = String(e.message || '');
-    if (/network error/i.test(msg)) return true;
+    if (/network error|stream read error|SSE stream stalled|ECONNRESET|ETIMEDOUT|socket hang ?up|premature close|fetch failed|terminated/i.test(msg)) return true;
     return false;
 }
 
@@ -111,7 +126,7 @@ class DeepSeekAdapter extends ProviderAdapter {
             if (req.signal.aborted) localAbort.abort();
             else req.signal.addEventListener('abort', onAbort, { once: true });
         }
-        const timeout = setTimeout(() => localAbort.abort(new Error('timeout')), DEFAULT_TIMEOUT_MS);
+        const timeout = setTimeout(() => localAbort.abort(new Error('timeout')), requestTimeoutMs());
 
         const url = `${baseUrl}/v1/chat/completions`;
         const t0  = Date.now();
@@ -230,7 +245,7 @@ class DeepSeekAdapter extends ProviderAdapter {
         if (req.signal.aborted) localAbort.abort();
         else req.signal.addEventListener('abort', onAbort, { once: true });
     }
-    const timeout = setTimeout(() => localAbort.abort(new Error('timeout')), DEFAULT_TIMEOUT_MS);
+    const timeout = setTimeout(() => localAbort.abort(new Error('timeout')), requestTimeoutMs());
 
     const url = `${baseUrl}/v1/chat/completions`;
     const t0  = Date.now();
@@ -283,11 +298,17 @@ class DeepSeekAdapter extends ProviderAdapter {
 
     const decoder = new TextDecoder();
     let buf = '';
-    // Stage-2 SSE stall detector. The overall request timeout (DEFAULT_TIMEOUT_MS)
-    // only fires if the connection is idle since open. A hung stream that
-    // keeps the TCP connection alive but stops sending data would otherwise
-    // wedge the Fairy indefinitely. We arm a per-chunk timer that aborts the
-    // local controller if no SSE bytes arrive for STALL_MS.
+    // The overall request timeout has done its job once the server starts
+    // responding — disarm it here. A healthy stream can legitimately run far
+    // longer than the request timeout (a reasoning model writing a long plan
+    // streamed for >120s and was killed mid-flight: "stream read error:
+    // timeout", run_2026-07-03T23-38-54). From this point liveness is owned
+    // by the stall detector below.
+    clearTimeout(timeout);
+    // Stage-2 SSE stall detector. A hung stream that keeps the TCP connection
+    // alive but stops sending data would otherwise wedge the Fairy
+    // indefinitely. We arm a per-chunk timer that aborts the local controller
+    // if no SSE bytes arrive for STALL_MS.
     const STALL_MS = 60_000;
     let stallTimer = setTimeout(
         () => localAbort.abort(new Error(`SSE stream stalled (no data for ${STALL_MS}ms)`)),

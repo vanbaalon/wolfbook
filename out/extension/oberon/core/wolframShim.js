@@ -38,6 +38,13 @@ const PRINT_CAP       = 2000;     // chars (combined)
 const MSG_CAP         = 1000;     // chars (combined)
 const DEFAULT_TIMEOUT = 15;       // seconds
 const MAX_TIMEOUT     = 60;       // seconds
+// A cold WolframKernel (spawn + WSTP handshake + first-eval autoloads) can take
+// far longer than a few seconds to become responsive. These bound how long we
+// wait for a (re)start to resolve — deliberately generous so a slow boot is never
+// mistaken for a failed restart (which used to cascade into escalate) and so a
+// probe fired during startup waits for the kernel instead of "timing out".
+const KERNEL_RESUME_TIMEOUT = 60000;   // ms — wait for restart to become ready
+const KERNEL_BOOT_TIMEOUT   = 60000;   // ms — probe waits this long for a booting kernel
 
 // ── Non-critical kernel messages ─────────────────────────────────────────────
 // Numerical-solver convergence/tolerance warnings that USUALLY still return a
@@ -163,8 +170,10 @@ async function _attemptKernelRestart() {
     } catch (e) {
         return { ok: false, reason: 'restartKernel_threw: ' + ((e && e.message) || String(e)) };
     }
-    // Wait up to ~12s for the kernel to come back to `resolved` state.
-    const deadline = Date.now() + 12000;
+    // Wait for the kernel to come back to `resolved` state. A cold restart can
+    // take 30s+; too short a deadline reports `kernel_did_not_resume` while the
+    // kernel is still launching, which then cascaded run_clean into escalate.
+    const deadline = Date.now() + KERNEL_RESUME_TIMEOUT;
     while (Date.now() < deadline) {
         const s = kernelStatus();
         if (s.available) {
@@ -184,29 +193,58 @@ async function _attemptKernelRestart() {
 
 function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+/** True when a kernelStatus().reason means "a kernel is coming up" (worth waiting
+ *  for) rather than "no kernel infrastructure exists" (nothing to wait for). */
+function _isKernelStarting(reason) {
+    const r = String(reason || '');
+    return r === 'no_session' || r.startsWith('kernel_');
+}
+
 /** @private — internal single-shot evaluation. */
 async function _attemptEval(args) {
     const expression = String((args && args.expression) || '').trim();
     const timeoutSeconds = clampInt(args && args.timeoutSeconds, DEFAULT_TIMEOUT, 1, MAX_TIMEOUT);
-    const t0 = Date.now();
+    const signal = args && args.signal;
+    let t0 = Date.now();
 
     if (!expression) {
         return mkResult({ ok: false, kind: 'error', durationMs: 0, timeoutSeconds, error: 'expression is empty' });
     }
 
-    const status = kernelStatus();
+    // Wait for the kernel to finish (re)starting before the evaluation begins.
+    // A cold kernel can take tens of seconds to resolve; firing a probe at it and
+    // counting that startup against the probe's timeout made the first probe of a
+    // run spuriously "time out". Block here (up to KERNEL_BOOT_TIMEOUT) so the
+    // timeout clock only starts once the kernel is actually ready — but only while
+    // the kernel is genuinely starting up (a session exists / is resolving). If
+    // there's no controller at all, there's nothing to wait for, so fail fast.
+    let status = kernelStatus();
     if (!status.available) {
-        return mkResult({
-            ok: false, kind: 'kernel_unavailable', durationMs: 0, timeoutSeconds,
-            error: `kernel not available (${status.reason})`,
-        });
+        const bootDeadline = Date.now() + KERNEL_BOOT_TIMEOUT;
+        while (!status.available && _isKernelStarting(status.reason) && Date.now() < bootDeadline) {
+            if (signal && signal.aborted) {
+                return mkResult({ ok: false, kind: 'aborted', durationMs: Date.now()-t0, timeoutSeconds, error: 'aborted while waiting for kernel' });
+            }
+            await _sleep(300);
+            status = kernelStatus();
+        }
+        if (!status.available) {
+            return mkResult({
+                ok: false, kind: 'kernel_unavailable', durationMs: Date.now()-t0, timeoutSeconds,
+                error: `kernel not available (${status.reason})`,
+            });
+        }
     }
     const controller = status.controller;
 
     if (controller._evalDispatched || controller.executionQueue.queueLength() > 0) {
-        // Wait up to 15 s for the kernel to become idle before giving up.
-        const idleDeadline = Date.now() + Math.min(timeoutSeconds * 1000 * 0.5, 15000);
+        // Wait for the kernel to become idle. This is bounded generously (not by the
+        // probe timeout) so a busy/queued kernel doesn't count against eval time.
+        const idleDeadline = Date.now() + Math.max(KERNEL_BOOT_TIMEOUT, timeoutSeconds * 1000);
         while (controller._evalDispatched || controller.executionQueue.queueLength() > 0) {
+            if (signal && signal.aborted) {
+                return mkResult({ ok: false, kind: 'aborted', durationMs: Date.now()-t0, timeoutSeconds, error: 'aborted while waiting for idle kernel' });
+            }
             if (Date.now() >= idleDeadline) {
                 return mkResult({
                     ok: false, kind: 'busy', durationMs: Date.now()-t0, timeoutSeconds,
@@ -217,6 +255,10 @@ async function _attemptEval(args) {
         }
     }
 
+    // Kernel is ready and idle — (re)start the clock HERE so neither startup nor
+    // queue-wait time is charged to this evaluation's timeout.
+    t0 = Date.now();
+
     const wlSec   = Math.max(1, timeoutSeconds - 1);
     const wrapped =
         `Block[{$wbR$}, $wbR$ = TimeConstrained[(${expression}), ${wlSec}, "$WBTIMEOUT$"]; ` +
@@ -225,7 +267,6 @@ async function _attemptEval(args) {
 
     const prints = [];
     let abortOnSignal = null;
-    const signal = args && args.signal;
     if (signal) {
         if (signal.aborted) {
             return mkResult({ ok: false, kind: 'aborted', durationMs: Date.now()-t0, timeoutSeconds, error: 'aborted before dispatch' });
@@ -627,6 +668,48 @@ async function _runNotebookFallback(nbPath, opts) {
     return { allClean, cellCount: allResults.length, failures, allResults, usedFallback: true };
 }
 
+/**
+ * I2 (run Q_2N8616): apply a cell edit THROUGH the open VS Code notebook document
+ * when the target notebook is open, so the on-disk file and the in-memory document
+ * can never diverge. A disk-only JSON write is invisible to an already-open (and
+ * possibly dirty) document — run_clean then executes STALE cells and reports the
+ * same failures the edit was meant to fix.
+ *
+ * Preserves the cell's metadata (step tags/ids) and saves the document, so disk
+ * and editor stay in lockstep.
+ *
+ * @param {string} nbPath        absolute path to the .wb file
+ * @param {number} absCellIndex  ABSOLUTE cell index in the notebook (not code-only)
+ * @param {string} newCode
+ * @returns {Promise<{ applied: boolean, reason?: string }>}  applied:false → caller
+ *          should fall back to the disk-JSON write.
+ */
+async function editNotebookCell(nbPath, absCellIndex, newCode) {
+    let vscode;
+    try { vscode = require('vscode'); } catch (_) { return { applied: false, reason: 'no vscode' }; }
+    try {
+        const doc = (vscode.workspace.notebookDocuments || [])
+            .find(d => d && d.uri && d.uri.fsPath === nbPath);
+        if (!doc) return { applied: false, reason: 'document not open' };
+        if (absCellIndex < 0 || absCellIndex >= doc.cellCount) {
+            return { applied: false, reason: `cell index ${absCellIndex} out of range (${doc.cellCount})` };
+        }
+        const cell = doc.cellAt(absCellIndex);
+        const data = new vscode.NotebookCellData(cell.kind, newCode, cell.document.languageId || 'wolfram');
+        data.metadata = cell.metadata;   // preserve step tags / ids
+        const nbEdit = vscode.NotebookEdit.replaceCells(
+            new vscode.NotebookRange(absCellIndex, absCellIndex + 1), [data]);
+        const we = new vscode.WorkspaceEdit();
+        we.set(doc.uri, [nbEdit]);
+        const ok = await vscode.workspace.applyEdit(we);
+        if (!ok) return { applied: false, reason: 'applyEdit rejected' };
+        await doc.save();
+        return { applied: true };
+    } catch (e) {
+        return { applied: false, reason: (e && e.message) || String(e) };
+    }
+}
+
 /** @private — no-op snapshot helper; real one lives in tools/index.js */
 function _snapshotViewport() { return null; }
 
@@ -752,6 +835,27 @@ const AGENT_VIEW_SEED =
  * @param {number|null} outN  the kernel Out[] line of the result, if known
  * @returns {Promise<{ inputForm:string, length:number, shape:string }|null>}
  */
+/**
+ * Decode a "byte string" (all code points ≤ 0xFF, produced when a UTF-8 byte
+ * stream is wrapped char-per-byte, e.g. by ExportString[..., "JSON"]) back to
+ * proper UTF-8 text. Returns the input unchanged when it is not byte-shaped or
+ * when the bytes are not valid UTF-8 (no U+FFFD is ever introduced).
+ * @param {string} s
+ * @returns {string}
+ */
+function decodeUtf8ByteString(s) {
+    if (typeof s !== 'string') return s;
+    let hasHigh = false;
+    for (let i = 0; i < s.length; i++) {
+        const c = s.charCodeAt(i);
+        if (c > 0xFF) return s;          // real Unicode text, not a byte stream
+        if (c >= 0x80) hasHigh = true;
+    }
+    if (!hasHigh) return s;              // pure ASCII — nothing to decode
+    const decoded = Buffer.from(s, 'latin1').toString('utf8');
+    return decoded.includes('\uFFFD') ? s : decoded;
+}
+
 async function computeAgentView(controller, cap = 300, outN = null) {
     try {
         if (!controller || !controller.session) return null;
@@ -760,7 +864,12 @@ async function computeAgentView(controller, cap = 300, outN = null) {
         const res = await controller.session.evaluate(expr, { interactive: false });
         const r = res && res.result;
         if (!r || r.type !== 'string' || typeof r.value !== 'string') return null;
-        const parsed = JSON.parse(r.value);
+        // ExportString[..., "JSON"] returns a BYTE string: every non-ASCII char in the
+        // payload arrives as its UTF-8 bytes mapped to U+0080–U+00FF code points ("≈" →
+        // "â"). Parsing that directly mojibakes every recorded probe output,
+        // which then fails self-verification against a clean re-eval (run Q25: confidence
+        // demoted to 0.6 on all three charms from this alone). Re-decode before parsing.
+        const parsed = JSON.parse(decodeUtf8ByteString(r.value));
         if (!parsed || typeof parsed.shape !== 'string') return null;
         return {
             inputForm: String(parsed.iv != null ? parsed.iv : ''),
@@ -893,10 +1002,16 @@ async function evalInNotebook(nbDoc, code, opts = {}) {
     // non-interactive read of the cell's Out[N] to give the agent InputForm + a shape
     // line. outN is parsed from the cell's own "Out[N]=" output text (deterministic);
     // computeAgentView falls back to $Line-1 if it's not present.
-    let agentValue = null, agentValueLen = 0, agentShape = null;
+    let agentValue = null, agentValueLen = 0, agentShape = null, multiOutput = false;
     if (agentView && !hasError) {
-        const m = raw.match(/(?:^|\n)\s*Out\[(\d+)\]/);
-        const outN = m ? parseInt(m[1], 10) : null;
+        // A multi-statement cell produces several Out[N] lines. The agent view must
+        // mirror what a re-evaluation of the WHOLE cell returns — the LAST expression's
+        // value (CompoundExpression semantics) — so parse the LAST Out[N], not the
+        // first. Run Q32: agentValue picked Out[91] ("216") while the self-verify
+        // recheck returned Out[94]'s value → guaranteed false mismatch → 0.45 cascade.
+        const outMatches = [...raw.matchAll(/(?:^|\n)\s*Out\[(\d+)\]/g)];
+        multiOutput = outMatches.length > 1;
+        const outN = outMatches.length ? parseInt(outMatches[outMatches.length - 1][1], 10) : null;
         const av = await computeAgentView(ctrl, 300, outN);
         if (av) { agentValue = av.inputForm; agentValueLen = av.length; agentShape = av.shape; }
     }
@@ -914,6 +1029,7 @@ async function evalInNotebook(nbDoc, code, opts = {}) {
         agentValue,
         agentValueLen,
         agentShape,
+        multiOutput,
     };
 }
 
@@ -933,4 +1049,4 @@ async function removeLastCells(nbDoc, count) {
     await vscode.workspace.applyEdit(edit).catch(() => {});
 }
 
-module.exports = { setControllerProvider, setPostRestartSeeder, kernelStatus, evalOnce, associateNotebook, evalInNotebook, computeAgentView, removeLastCells, restartKernel, replayNotebook, runNotebook, classifyMessages, buildSuppressionCode, NON_CRITICAL_MESSAGE_TAGS, OUTPUT_HARD_CAP, MAX_TIMEOUT, DEFAULT_TIMEOUT, AGENT_VIEW_SEED };
+module.exports = { setControllerProvider, setPostRestartSeeder, kernelStatus, evalOnce, associateNotebook, evalInNotebook, computeAgentView, decodeUtf8ByteString, removeLastCells, restartKernel, replayNotebook, runNotebook, editNotebookCell, classifyMessages, buildSuppressionCode, NON_CRITICAL_MESSAGE_TAGS, OUTPUT_HARD_CAP, MAX_TIMEOUT, DEFAULT_TIMEOUT, AGENT_VIEW_SEED };

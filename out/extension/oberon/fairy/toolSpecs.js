@@ -204,6 +204,16 @@ const FAIRY_TOOL_SPECS = Object.freeze([
                         description: 'Optional one-line description of how this step was verified (e.g. "cross-checked against L=2 closed form").',
                         maxLength: 200,
                     },
+                    role: {
+                        type: 'string',
+                        enum: ['step', 'crosscheck'],
+                        description:
+                            'Mark this step\'s role in the chain. Use "crosscheck" for a step that ' +
+                            'independently verifies the main result (numeric spot-check of a symbolic ' +
+                            'result, a second method, a limiting case, a conservation/symmetry identity). ' +
+                            'Every finished chain needs at least one crosscheck step — done_exploring is ' +
+                            'deferred until one is recorded.',
+                    },
                 },
                 required: ['stepId', 'probeId'],
             },
@@ -314,6 +324,10 @@ const FAIRY_TOOL_SPECS = Object.freeze([
                         type: 'string',
                         description: 'Optional one sentence: why you need the literature here and what you will do with it.',
                         maxLength: 300,
+                    },
+                    force: {
+                        type: 'boolean',
+                        description: 'Set true ONLY to override the late-run gate when a named published method is genuinely required and cannot be derived.',
                     },
                 },
                 required: ['question'],
@@ -564,7 +578,11 @@ const FAIRY_TOOL_SPECS = Object.freeze([
             description:
                 'FREE. Ask the human specialist (user) a specific question when you are ' +
                 'genuinely stuck or need clarifying information that cannot be obtained by probing. ' +
-                'Use sparingly — only when a blocking ambiguity prevents you from proceeding. ' +
+                'Use it when: (a) the TASK STATEMENT is ambiguous or underspecified (which ' +
+                'representation? which convention/normalization? which boundary conditions?) — ask ' +
+                'EARLY, before building on a guess; (b) literature search is exhausted and a known ' +
+                'published method is essential — ask the user for a concrete reference (author, ' +
+                'title, or arXiv id), then lit_read it. Use sparingly for everything else. ' +
                 'The user may reply or dismiss; if dismissed, proceed with your best judgment.',
             parameters: {
                 type: 'object',
@@ -583,6 +601,99 @@ const FAIRY_TOOL_SPECS = Object.freeze([
                     },
                 },
                 required: ['question'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'note_skill_gap',
+            description:
+                'FREE (max 2 per run). Flag a MISSING skill: you solved (or struggled through) a ' +
+                'sub-problem where a reusable SkilXiv skill would have helped, but none was recalled ' +
+                'or the recalled one did not apply. Records a skill request so the gap gets filled. ' +
+                'Does not affect the current run — continue working after calling it.',
+            parameters: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                    topic: {
+                        type: 'string',
+                        description: 'What the missing skill should cover (e.g. "nested Bethe ansatz solver for su(3) fundamental chains").',
+                        minLength: 8,
+                        maxLength: 200,
+                    },
+                    why: {
+                        type: 'string',
+                        description: 'One sentence on the gap you observed (what you had to derive from scratch, or why the recalled skill did not fit).',
+                        minLength: 10,
+                        maxLength: 400,
+                    },
+                },
+                required: ['topic', 'why'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'revise_plan',
+            description:
+                'FREE (max 2 per run). Replace your plan when the EVIDENCE has genuinely invalidated it — ' +
+                'state what changed and why, referencing a probe result. Do not silently drift from the ' +
+                'plan; do not use this for cosmetic reordering.',
+            parameters: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                    changes: {
+                        type: 'string',
+                        description: 'One sentence referencing the evidence that invalidated the plan (e.g. "p014 showed the nested-BAE route diverges; switching to the QQ-system").',
+                        minLength: 15,
+                        maxLength: 400,
+                    },
+                    steps: {
+                        type: 'array',
+                        items: { type: 'string' },
+                        description: 'The revised ordered sub-task list (2–10 items).',
+                        minItems: 2,
+                        maxItems: 10,
+                    },
+                },
+                required: ['changes', 'steps'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'lit_read',
+            description:
+                'FREE — does not count against the 3-search literature budget (own cap: 6 reads/run). ' +
+                'Deep-read ONE specific paper that research_literature already surfaced: ask a focused ' +
+                'question ("what normalisation does the QQ-relation use?", "give the full form of eq (3.12) ' +
+                'and the definitions around it") and get back relevant excerpts, equations WITH numbers, ' +
+                'and a direct answer mined from the cached full text. Use this to mine a found paper ' +
+                'progressively — do NOT re-run research_literature for details of a paper you already have. ' +
+                'Everything returned is an UNVERIFIED transcription: reproduce in the kernel before recording.',
+            parameters: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                    arxivId: {
+                        type: 'string',
+                        description: 'The arXiv id of a paper returned by research_literature this run (e.g. "1608.06504").',
+                        minLength: 5,
+                        maxLength: 40,
+                    },
+                    question: {
+                        type: 'string',
+                        description: 'A focused question about THIS paper — the specific relation, convention, definition, or derivation detail you need.',
+                        minLength: 8,
+                        maxLength: 400,
+                    },
+                },
+                required: ['arxivId', 'question'],
             },
         },
     },
@@ -647,6 +758,7 @@ const FROZEN_POLISH_TOOLS = Object.freeze(
 
 const EXPLORE_DESCRIPTIONS = {
     plan:        'FREE. Call ONCE as your very first tool call. List the ordered sub-tasks you plan to work through. Posts a roadmap into the working notebook.',
+    revise_plan: 'FREE (max 2/run). Replace the plan when evidence invalidated it — state what changed, referencing a probe result. Never silently drift from the plan.',
     probe:       'COSTS 1 PROBE. Run a WL expression in the live kernel. Returns probeId, resultPreview (≤400 chars), structuralSummary. Full result available via inspect.',
     amend_probe: 'CHEAP (first 2 free). Revise the immediately-preceding probe IN PLACE — to fix a failure OR refine unsatisfactory output (numeric vs symbolic, cleaner form). Iterate here instead of re-pasting the block into a new probe.',
     inspect:     'FREE. Apply a WL op to a stored probe result by probeId without re-running the kernel. Use for large outputs.',
@@ -654,14 +766,16 @@ const EXPLORE_DESCRIPTIONS = {
     record:      'FREE. Commit a successful, warning-free probe as a named step in the working chain. Supply stepId and probeId.',
     note_fact:   'FREE. Save an established RESULT (value/conclusion) to durable memory so you never re-derive it. Shown every turn under "Established results".',
     cite_skill:  'FREE. Cite a recalled SkilXiv skill ONLY if its method/formula genuinely helped (state how). The only way a skill is credited as "used". Do not cite by coincidence.',
+    note_skill_gap: 'FREE (max 2/run). Flag a MISSING skill: a reusable method you had to derive from scratch because no (fitting) skill was recalled. Records a registry request; continue working after.',
     research_literature: 'FREE. Dispatch a bounded sub-agent to search papers (arXiv/INSPIRE) and return candidate equations + methods. Every equation is UNVERIFIED — reproduce with a probe before recording. Papers auto-cited at run end. Max 3 searches/run; rephrasing an empty query is rejected.',
+    lit_read:    'FREE (own cap: 6/run). Deep-read ONE paper research_literature already found: focused question in, excerpts + numbered equations + direct answer out (cached full text). Mine a found paper here instead of re-searching. Also accepts up to 2 ids per run from OUTSIDE the search results (a reference the user gave via ask_specialist, or a canonical paper you know). All output is UNVERIFIED — reproduce in the kernel.',
     define_util: 'FREE. Register a verified helper used in 2+ later probes. Evaluated into the live kernel ONCE — call it BY NAME afterward; never re-paste its body.',
     assume:      'FREE. Register a mathematical side-condition (e.g. "n ∈ Integers"). Rebuilds $Assumptions in the kernel.',
     chain:       'FREE. Read current chain state: inputs, recorded steps, assumptions, and registered utilities.',
     checkpoint:  'FREE. Commit a set of valid recorded steps as a named section in clean_in_progress.wb. Call after each completed sub-result.',
     invalidate:     'COSTS 1 BACKTRACK. Mark a step and all dependents as stale. Use when a step is genuinely wrong.',
     finalize:       'Terminate this run with status "failed" or "escalate". Only call when computation is genuinely impossible.',
-    ask_specialist: 'FREE. Ask the human specialist a specific question when genuinely stuck on a blocking ambiguity. Waits for user reply; proceed with best judgment if dismissed.',
+    ask_specialist: 'FREE. Ask the human specialist (user) when: the task statement is ambiguous (which rep/convention/boundary conditions? — ask EARLY, not after building on a guess); or literature failed and you need a concrete reference (author/title/arXiv id → lit_read it). Waits for user reply; proceed with best judgment if dismissed.',
 };
 
 const EXPLORE_TOOL_NAMES = new Set(Object.keys(EXPLORE_DESCRIPTIONS));

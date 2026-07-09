@@ -1,0 +1,45 @@
+{
+  "formatVersion": 3,
+  "meta": {
+    "title": "Legacy elements key"
+  },
+  "theme": {},
+  "slides": [
+    {
+      "id": "s1",
+      "label": "Uses legacy elements[]",
+      "background": "#fafcff",
+      "layout": "column",
+      "children": [
+        {
+          "id": "e1",
+          "type": "heading",
+          "level": 2,
+          "content": "Migrated heading"
+        },
+        {
+          "id": "e2",
+          "type": "text",
+          "content": "This slide stores blocks under the legacy \"elements\" key; parseDeck migrates it to \"children\"."
+        },
+        {
+          "id": "e3",
+          "type": "container",
+          "layout": "row",
+          "children": [
+            {
+              "id": "e4",
+              "type": "text",
+              "content": "nested legacy left"
+            },
+            {
+              "id": "e5",
+              "type": "text",
+              "content": "nested legacy right"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

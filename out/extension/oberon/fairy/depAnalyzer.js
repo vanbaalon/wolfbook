@@ -135,6 +135,50 @@ const WL_BUILTINS = new Set([
     'Timing', 'AbsoluteTiming', 'TimeConstrained', 'MemoryConstrained',
     'Dynamic', 'Manipulate', 'Plot', 'Plot3D', 'ListPlot', 'MatrixPlot',
     'Show', 'Graphics', 'Graphics3D', 'Axes', 'AxesLabel', 'PlotRange',
+    // List/structure editing (run Q32: `Nothing` was flagged as a missing dep)
+    'Nothing', 'Thread', 'Through', 'Identity', 'Composition', 'RightComposition',
+    'Insert', 'Delete', 'DeleteCases', 'ReplacePart', 'Splice',
+    'PadLeft', 'PadRight', 'RotateLeft', 'RotateRight',
+    'Split', 'SplitBy', 'TakeWhile', 'LengthWhile', 'Tally', 'Counts', 'CountsBy',
+    'AnyTrue', 'AllTrue', 'NoneTrue', 'Subdivide', 'CenterArray',
+    // Evaluation control
+    'Evaluate', 'Unevaluated', 'Inactive', 'Activate', 'Inactivate',
+    'Definition', 'Information', 'Names', 'Symbol', 'Context',
+    // Numbers & polynomials
+    'Chop', 'Rationalize', 'Threshold', 'Boole', 'Piecewise', 'ConditionalExpression',
+    'Refine', 'Root', 'RootSum', 'RootReduce', 'ToRadicals', 'MinimalPolynomial',
+    'Numerator', 'Denominator', 'Variables', 'Eliminate', 'GroebnerBasis',
+    'Resultant', 'Discriminant', 'Decompose', 'PolynomialRemainder', 'PolynomialQuotient',
+    'PolynomialGCD', 'PolynomialLCM', 'Cyclotomic', 'MonomialList',
+    'Divisible', 'CoprimeQ', 'PowerMod', 'ModularInverse', 'ContinuedFraction', 'Convergents',
+    'IntegerPartitions', 'PartitionsP', 'PartitionsQ', 'FrobeniusNumber', 'SquaresR',
+    // Linear algebra (additions)
+    'CharacteristicPolynomial', 'KroneckerProduct', 'ArrayFlatten', 'Band',
+    'UnitVector', 'Normalize', 'Orthogonalize', 'ConjugateTranspose',
+    'HermitianMatrixQ', 'UnitaryMatrixQ', 'PositiveDefiniteMatrixQ',
+    'Tr', 'Minors', 'Adjugate', 'SchurDecomposition', 'JordanDecomposition',
+    'QRDecomposition', 'LUDecomposition', 'CholeskyDecomposition',
+    // Randomness
+    'RandomReal', 'RandomInteger', 'RandomComplex', 'RandomChoice', 'RandomSample',
+    'RandomVariate', 'SeedRandom', 'BlockRandom', 'NormalDistribution', 'UniformDistribution',
+    // Special functions (math-physics staples)
+    'ChebyshevT', 'ChebyshevU', 'LegendreP', 'LegendreQ', 'HermiteH', 'LaguerreL',
+    'GegenbauerC', 'JacobiP', 'SphericalHarmonicY', 'ClebschGordan', 'ThreeJSymbol',
+    'SixJSymbol', 'WignerD', 'KroneckerDelta', 'DiracDelta', 'UnitStep', 'HeavisideTheta',
+    'Signature', 'LeviCivitaTensor', 'PolyLog', 'HurwitzZeta', 'StieltjesGamma',
+    'EllipticK', 'EllipticE', 'EllipticF', 'EllipticPi', 'EllipticTheta',
+    'JacobiSN', 'JacobiCN', 'JacobiDN', 'JacobiAmplitude', 'InverseJacobiSN',
+    'WeierstrassP', 'WeierstrassPPrime', 'DedekindEta', 'KleinInvariantJ',
+    'ModularLambda', 'QPochhammer', 'QGamma', 'QFactorial', 'QBinomial',
+    'InverseFunction', 'ProductLog', 'AiryAi', 'AiryBi',
+    'MathieuC', 'MathieuS', 'SpheroidalPS', 'SpheroidalQS',
+    // Interpolation / data
+    'Interpolation', 'ListInterpolation', 'InterpolatingPolynomial', 'Fit', 'FindFit',
+    'Nearest', 'FindSequenceFunction', 'FindLinearRecurrence',
+    // I/O & formatting
+    'Export', 'Import', 'ExportString', 'ImportString',
+    'MatrixForm', 'TableForm', 'Grid', 'Row', 'Column', 'Style', 'Text', 'Framed',
+    'BinCounts', 'HistogramList',
 ]);
 
 // ── Internal helpers ────────────────────────────────────────────────────────

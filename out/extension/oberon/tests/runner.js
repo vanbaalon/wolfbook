@@ -15,7 +15,6 @@
  */
 
 const { EventEmitter } = require('events');
-const { runOneResearch } = require('../core/research');
 const { getAdapter }     = require('../providers');
 const roles              = require('../config/roles');
 const wolframShim        = require('../core/wolframShim');
@@ -126,8 +125,11 @@ class TestSuiteRunner extends EventEmitter {
         await runManager.beginRun({ brief: test.brief });
         let scroll = null;
         try {
-            const res = await runOneResearch({ brief: test.brief, bus, runManager, signal });
-            scroll = res.scroll;
+            // The former shared `runOneResearch` orchestrator was removed with the
+            // Skeptic layer; the live pipeline now runs inline in index.js's dispatch
+            // handler. This in-UI suite runner is not wired to it — use the Control
+            // Room / `wolfbook.oberon.startResearch` to run a brief instead.
+            throw new Error('Oberon in-UI test-suite runner is unavailable after the pipeline refactor — dispatch briefs via the Control Room (startResearch) instead.');
 
             // Capture stats BEFORE endRun closes the bus run.
             const snap   = { ...runManager.summary };

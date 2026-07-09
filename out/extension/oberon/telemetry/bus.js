@@ -27,6 +27,14 @@ const project = require('../memory/project');
 
 const RECENT_BUFFER_SIZE = 10000;       // tail kept in memory for new subscribers / Inspector snapshot
 
+// Watchdog for a single JSONL append. The workspace often lives inside a
+// Dropbox-synced folder where a sync lock can stall one fs write indefinitely;
+// because appends are chained sequentially, ONE hung write used to starve the
+// entire run log (run at 2026-07-03T19:57 persisted 1 of 1123 events) while
+// state.json — written through a separate path — kept advancing. On timeout we
+// reopen the handle once and carry on; the failed line is counted, not retried.
+const WRITE_TIMEOUT_MS = 5000;
+
 // High-frequency streaming events that are pure noise in the JSONL archive.
 // They are still emitted in-process (UI live preview), just not persisted.
 const SKIP_PERSIST_TYPES = new Set(['llm.reasoning_progress', 'llm.response_progress']);
@@ -59,6 +67,8 @@ class TelemetryBus extends EventEmitter {
         this._recent = [];
         /** @type {boolean} */
         this._memoryOnly = false;
+        /** @type {number} events that could not be persisted this run */
+        this._droppedWrites = 0;
     }
 
     /**
@@ -70,6 +80,7 @@ class TelemetryBus extends EventEmitter {
         await this.endRun();
         this._runId  = runId;
         this._recent = [];
+        this._droppedWrites = 0;
         const runsDir = project.telemetryRunsDir();
         if (!runsDir) {
             this._memoryOnly = true;
@@ -129,19 +140,59 @@ class TelemetryBus extends EventEmitter {
         }
         try { this.emit('event', ev); } catch (_) {}
 
-        // Persist sequentially.
+        // Persist sequentially, with a per-write watchdog so one hung fs write
+        // (Dropbox sync lock) can never starve every subsequent event.
         this._tail = this._tail.then(async () => {
-            if (this._memoryOnly || !this._handle) return;
+            if (this._memoryOnly || !this._handle) {
+                if (!this._memoryOnly && !SKIP_PERSIST_TYPES.has(ev.type)) this._countDrop(ev, 'no_handle');
+                return;
+            }
             if (SKIP_PERSIST_TYPES.has(ev.type)) return;
             const line = JSON.stringify(ev) + '\n';
             try {
-                await this._handle.write(line);
+                await this._writeWithTimeout(line);
             } catch (e) {
-                this.emit('writeError', { error: String(e && e.message || e), event: ev });
+                this._countDrop(ev, String(e && e.message || e));
+                // Recovery: reopen the handle once so the NEXT event has a chance.
+                await this._reopenHandle();
             }
         });
         return this._tail.then(() => ev);
     }
+
+    /** @private — one append, bounded by WRITE_TIMEOUT_MS. */
+    _writeWithTimeout(line) {
+        const handle = this._handle;
+        if (!handle) return Promise.reject(new Error('no_handle'));
+        return new Promise((resolve, reject) => {
+            let done = false;
+            const timer = setTimeout(() => {
+                if (!done) { done = true; reject(new Error(`write_timeout_${WRITE_TIMEOUT_MS}ms`)); }
+            }, WRITE_TIMEOUT_MS);
+            handle.write(line).then(
+                () => { if (!done) { done = true; clearTimeout(timer); resolve(); } },
+                (e) => { if (!done) { done = true; clearTimeout(timer); reject(e); } },
+            );
+        });
+    }
+
+    /** @private — count + surface a dropped event (never throws). */
+    _countDrop(ev, reason) {
+        this._droppedWrites += 1;
+        try { this.emit('writeError', { error: reason, event: ev, dropped: this._droppedWrites }); } catch (_) {}
+    }
+
+    /** @private — best-effort handle reopen after a failed/hung write. */
+    async _reopenHandle() {
+        if (!this._filePath) return;
+        const old = this._handle;
+        this._handle = null;
+        try { if (old) old.close().catch(() => {}); } catch (_) {}
+        try { this._handle = await fsp.open(this._filePath, 'a'); } catch (_) { this._handle = null; }
+    }
+
+    /** Events that failed to persist during this run (0 = healthy). */
+    get droppedWrites() { return this._droppedWrites; }
 
     /** Await pending writes and fsync. Call at Circle transitions. */
     async flush() {

@@ -175,9 +175,15 @@ class WorkerServer {
                 setMcpCallActive(false);
             }
 
-            const text = (toolResult?.content || []).map(p => p.value ?? p.text ?? '').join('');
+            // Serialise content parts preserving type (text vs image data URIs).
+            const parts = (toolResult?.content || []).map(p => {
+                const val = p.value ?? p.text ?? '';
+                return typeof val === 'string' && val.startsWith('data:image/') && val.includes(';base64,')
+                    ? { kind: 'image', value: val }
+                    : { kind: 'text',  value: String(val) };
+            });
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ text, isError: false }));
+            res.end(JSON.stringify({ parts, isError: false }));
         });
     }
 

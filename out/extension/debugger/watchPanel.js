@@ -14,9 +14,36 @@
 const vscode = require('vscode');
 const path   = require('path');
 const fs     = require('fs');
-const { scrollLog } = require('../utils/dev-logger');
+const { scrollLog, DEV_MODE } = require('../utils/dev-logger');
+const os = require('os');
 
 const VIEW_ID = 'wolfbook.watchPanel';
+
+// Fairy quick-compute prompt history — persisted to the user's home directory so
+// it survives version deploys (each new version is a fresh extension folder), the
+// same pattern as the dev-log prefs. Tracks steps + cost per run so a developer can
+// watch whether the agent gets more efficient over time.
+const FAIRY_HISTORY_PATH = path.join(os.homedir(), '.wolfbook-fairy-history.json');
+const FAIRY_HISTORY_MAX  = 60;
+
+// Seed entries for dev machines — real prompts from past runs paired with their
+// actual telemetry metrics, so the History panel is populated on first open and the
+// "does it improve over time" comparison has a baseline. Written once, then editable
+// like any other entry. Timestamps are spread across the preceding weeks.
+function _fairySeedEntries() {
+    const DAY = 86400000, now = Date.now();
+    const mk = (daysAgo, prompt, steps, probes, cost, status) => ({
+        id: 'seed_' + daysAgo, ts: now - daysAgo * DAY, prompt,
+        steps, probes, costUSD: cost, status, seed: true,
+    });
+    return [
+        mk(31, 'Define and diagonalize the spin-1/2 Heisenberg XXX Hamiltonian for L=4 sites with periodic boundary conditions.', 30, 13, 0.0374, 'delivered'),
+        mk(24, 'Compute the lowest 20 energy eigenvalues of the quantum anharmonic oscillator with potential V(x) = -x^2 + x^4.', 55, 17, 0.0528, 'delivered'),
+        mk(17, 'Find the exact spectrum of the periodic SU(2) Heisenberg spin chain with L=4 sites (all eigenvalues + degeneracies).', 32, 9, 0.0292, 'delivered'),
+        mk(9,  'Compute all energy eigenvalues of the SU(2) Heisenberg spin chain for L=4 and compare with Bethe Ansatz results.', 62, 33, 0.0771, 'delivered'),
+        mk(3,  'Find the spectrum of the SU(3) XXX Heisenberg spin chain via the QQ-system / quantum Wronskian and verify against exact diagonalization.', 79, 53, 0.1114, 'delivered'),
+    ];
+}
 
 class WatchPanelProvider {
     constructor() {
@@ -38,6 +65,9 @@ class WatchPanelProvider {
         this._widthPx        = 0;     // panel pixel width reported by webview ResizeObserver
         this._mcpInfo        = null;  // last setMcpInfo payload — resent on visibility change
         this._remoteConnected = false; // whether remote host is connected
+        this._fairyHistory   = null;  // lazily-loaded [{id,ts,prompt,steps,probes,costUSD,status,seed}]
+        this._pendingFairyId = null;  // id of the history entry for the run currently in flight
+        this._fairySaveTimer = null;  // debounce timer for history persistence
     }
 
     // Called by extension.js when registering:
@@ -129,6 +159,11 @@ class WatchPanelProvider {
                         await vscode.commands.executeCommand('workbench.action.reloadWindow');
                     }
                 });
+            } else if (msg.command === 'oberonToggle') {
+                // Persist the experimental-pipeline preference (window scope).
+                vscode.workspace.getConfiguration('wolfbook')
+                    .update('oberon.experimentalPipeline', !!msg.enabled, vscode.ConfigurationTarget.Window)
+                    .then(undefined, () => {});
             } else if (msg.command === 'collabToggle') {
                 const newState = !!msg.enabled;
                 console.log('[wolfbook-collab] received collabToggle, newState=' + newState);
@@ -181,6 +216,18 @@ class WatchPanelProvider {
                 vscode.commands.executeCommand(msg.id).then(undefined, e => {
                     vscode.window.showErrorMessage(`Command ${msg.id} failed: ${e?.message || e}`);
                 });
+            } else if (msg.command === 'fairyRun' && typeof msg.prompt === 'string') {
+                this._dispatchFairy(msg.prompt);
+            } else if (msg.command === 'fairyHistoryDelete' && msg.id) {
+                this._deleteFairyHistory(msg.id);
+            } else if (msg.command === 'fairyHistoryClear') {
+                this._loadFairyHistory();
+                this._fairyHistory = [];
+                this._pendingFairyId = null;
+                this._saveFairyHistory();
+                this._sendFairyHistory();
+            } else if (msg.command === 'requestFairyHistory') {
+                this._sendFairyHistory();
             } else {
                 console.log('[wolfbook-watch] unhandled webview msg:', JSON.stringify(msg));
             }
@@ -271,6 +318,130 @@ class WatchPanelProvider {
         this._view.webview.postMessage({ command: 'setBackground', color: this._bgColor });
     }
 
+    // ── Fairy quick-compute prompt history ────────────────────────────────
+    /** Lazily load history from disk; seed on first use for dev machines. */
+    _loadFairyHistory() {
+        if (this._fairyHistory) return this._fairyHistory;
+        let loaded = null;
+        try {
+            const raw = fs.readFileSync(FAIRY_HISTORY_PATH, 'utf8');
+            const parsed = JSON.parse(raw);
+            if (Array.isArray(parsed)) loaded = parsed;
+            else if (parsed && Array.isArray(parsed.entries)) loaded = parsed.entries;
+        } catch (_) { /* missing/corrupt → treat as empty */ }
+        if (!loaded) {
+            // First run: on a dev machine, seed with real past prompts + metrics.
+            loaded = DEV_MODE ? _fairySeedEntries() : [];
+            this._fairyHistory = loaded;
+            this._saveFairyHistory();
+            return this._fairyHistory;
+        }
+        this._fairyHistory = loaded;
+        return this._fairyHistory;
+    }
+
+    /** Persist history (debounced) so rapid metric updates don't thrash the disk. */
+    _saveFairyHistory() {
+        if (this._fairySaveTimer) clearTimeout(this._fairySaveTimer);
+        this._fairySaveTimer = setTimeout(() => {
+            this._fairySaveTimer = null;
+            try {
+                const entries = (this._fairyHistory || []).slice(0, FAIRY_HISTORY_MAX);
+                fs.writeFileSync(FAIRY_HISTORY_PATH, JSON.stringify({ version: 1, entries }, null, 2), 'utf8');
+            } catch (_) { /* best-effort */ }
+        }, 400);
+    }
+
+    /** Push the full history list to the webview. */
+    _sendFairyHistory() {
+        if (!this._view) return;
+        this._view.webview.postMessage({
+            command: 'fairyHistory',
+            entries: this._loadFairyHistory(),
+            devMode: DEV_MODE,
+        });
+    }
+
+    /** Record a new run and dispatch it to the Fairy agent (skips the input box). */
+    _dispatchFairy(prompt) {
+        const brief = String(prompt || '').trim();
+        if (!brief) return;
+        this._loadFairyHistory();
+        const entry = {
+            id: 'r_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
+            ts: Date.now(), prompt: brief,
+            steps: null, probes: null, costUSD: null, status: 'running',
+        };
+        this._fairyHistory.unshift(entry);
+        this._pendingFairyId = entry.id;
+        this._saveFairyHistory();
+        this._sendFairyHistory();
+        vscode.commands.executeCommand('wolfbook.oberon.startFairy', { brief }).then(
+            () => this._finalizeStuckFairy(entry.id, 'done'),
+            (e) => {
+                this._finalizeStuckFairy(entry.id, 'error');
+                vscode.window.showErrorMessage(`Fairy run failed to start: ${e?.message || e}`);
+            }
+        );
+    }
+
+    /** If a run's entry is still 'running' after dispatch settles (e.g. the command
+     *  bailed out before any telemetry), stop showing it as in-flight. */
+    _finalizeStuckFairy(id, fallbackStatus) {
+        const e = (this._fairyHistory || []).find(x => x.id === id);
+        if (e && e.status === 'running') {
+            // 'done' here means the command resolved but no scroll/status event ever
+            // set a real terminal status — treat as unknown rather than success.
+            e.status = fallbackStatus === 'error' ? 'error' : (e.steps != null ? 'done' : 'aborted');
+            if (this._pendingFairyId === id) this._pendingFairyId = null;
+            this._saveFairyHistory();
+            this._sendFairyHistory();
+        } else if (this._pendingFairyId === id) {
+            this._pendingFairyId = null;
+        }
+    }
+
+    _deleteFairyHistory(id) {
+        this._loadFairyHistory();
+        const idx = this._fairyHistory.findIndex(x => x.id === id);
+        if (idx !== -1) {
+            this._fairyHistory.splice(idx, 1);
+            if (this._pendingFairyId === id) this._pendingFairyId = null;
+            this._saveFairyHistory();
+            this._sendFairyHistory();
+        }
+    }
+
+    /**
+     * Fold a live Oberon telemetry event into the in-flight history entry.
+     * Wired from extension.js (`_oberon.bus.on('event', …)`). Only one Fairy run
+     * is ever active (runManager guards this), so every fairy event maps to the
+     * single pending entry.
+     */
+    onFairyEvent(ev) {
+        if (!ev || !ev.type || !this._pendingFairyId) return;
+        this._loadFairyHistory();
+        const entry = this._fairyHistory.find(x => x.id === this._pendingFairyId);
+        if (!entry) return;
+        const p = ev.payload || {};
+        let dirty = false, terminal = false;
+        if (ev.type === 'fairy.status') {
+            if (typeof p.turnsUsed === 'number') { entry.steps  = p.turnsUsed;  dirty = true; }
+            if (typeof p.probesUsed === 'number') { entry.probes = p.probesUsed; dirty = true; }
+            if (typeof p.costUSD === 'number')   { entry.costUSD = p.costUSD;    dirty = true; }
+            if (p.done) { if (p.status) entry.status = p.status; terminal = true; dirty = true; }
+        } else if (ev.type === 'scroll.submitted') {
+            if (p.status) { entry.status = p.status; dirty = true; }
+        } else if (ev.type === 'fairy.run_metrics') {
+            if (typeof p.records === 'number') { entry.records = p.records; dirty = true; }
+            if (typeof p.llmCalls === 'number') { entry.llmCalls = p.llmCalls; dirty = true; }
+            if (p.status && entry.status === 'running') { entry.status = p.status; dirty = true; }
+            terminal = true;
+        }
+        if (terminal && this._pendingFairyId === entry.id) this._pendingFairyId = null;
+        if (dirty) { this._saveFairyHistory(); this._sendFairyHistory(); }
+    }
+
     /** Re-send current accumulated state to the webview (called on visibility change). */
     _sendCurrentState() {
         if (!this._view) return;
@@ -283,7 +454,10 @@ class WatchPanelProvider {
         if (this._mcpInfo) this._view.webview.postMessage({ command: 'mcpInfo', ...this._mcpInfo });
         const collabEnabled = vscode.workspace.getConfiguration('wolfbook').get('collabMode', false);
         this._view.webview.postMessage({ command: 'collabState', enabled: collabEnabled });
+        const oberonExp = vscode.workspace.getConfiguration('wolfbook').get('oberon.experimentalPipeline', false);
+        this._view.webview.postMessage({ command: 'oberonState', enabled: oberonExp });
         this._view.webview.postMessage({ command: 'remoteStatus', connected: this._remoteConnected });
+        this._sendFairyHistory();
         // Show watch list placeholder names immediately (before kernel values arrive)
         if (this._watchList.length > 0) {
             this._view.webview.postMessage({ command: 'initWatchList', names: this._watchList });
@@ -775,6 +949,94 @@ class WatchPanelProvider {
     padding: 1px 4px; border-radius: 3px;
     font-family: var(--vscode-editor-font-family, monospace); font-size: 0.92em;
   }
+  /* ── Tab bar ─────────────────────────────────────────────────────────── */
+  #wb-tabs {
+    display: flex; gap: 2px; margin: 2px 0 8px;
+    border-bottom: 1px solid var(--vscode-panel-border, #444);
+  }
+  .wb-tab {
+    flex: 1; padding: 5px 8px; cursor: pointer; text-align: center;
+    background: none; border: none; border-bottom: 2px solid transparent;
+    color: var(--vscode-descriptionForeground); font-size: 12px;
+    font-family: inherit; opacity: 0.75; transition: color 0.15s, opacity 0.15s;
+  }
+  .wb-tab:hover { opacity: 1; }
+  .wb-tab.active {
+    color: var(--vscode-editor-foreground);
+    border-bottom-color: var(--vscode-focusBorder, #0e7afe);
+    opacity: 1; font-weight: 600;
+  }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+  /* ── Agents tab: Fairy quick compute ──────────────────────────────────── */
+  #fairy-prompt {
+    width: 100%; box-sizing: border-box; min-height: 84px; resize: vertical;
+    padding: 7px 8px; border-radius: 4px; font-size: 12px; line-height: 1.45;
+    font-family: var(--vscode-editor-font-family, monospace);
+    color: var(--vscode-input-foreground);
+    background: var(--vscode-input-background);
+    border: 1px solid var(--vscode-input-border, rgba(128,128,128,0.35));
+  }
+  #fairy-prompt:focus { outline: 1px solid var(--vscode-focusBorder, #0e7afe); }
+  #fairy-run-row { display: flex; gap: 6px; align-items: center; margin: 6px 0 4px; }
+  #fairy-run-btn {
+    flex: 1; padding: 6px 8px; cursor: pointer; border: none; border-radius: 4px;
+    font-size: 12px; background: var(--vscode-button-background, #0e7afe);
+    color: var(--vscode-button-foreground, #fff);
+  }
+  #fairy-run-btn:hover { background: var(--vscode-button-hoverBackground, #0e7afe); }
+  #fairy-run-btn:disabled { opacity: 0.5; cursor: default; }
+  #fairy-config-btn {
+    padding: 6px 9px; cursor: pointer; border-radius: 4px; font-size: 12px;
+    background: var(--vscode-button-secondaryBackground, rgba(128,128,128,0.18));
+    color: inherit; border: 1px solid rgba(128,128,128,0.3);
+  }
+  #agents-oberon-row {
+    display: flex; align-items: center; gap: 6px; margin: 2px 0 8px;
+    font-size: 11px; color: var(--vscode-descriptionForeground);
+  }
+  #fairy-hint { font-size: 10.5px; opacity: 0.6; margin: 2px 0 6px; }
+  #fairy-history-header {
+    display: flex; align-items: center; gap: 6px;
+    margin: 12px 0 4px; font-size: 0.82em; font-weight: bold;
+    letter-spacing: 0.05em; color: var(--vscode-descriptionForeground);
+  }
+  #fairy-history-header .count { font-weight: normal; opacity: 0.6; }
+  #fairy-history-clear {
+    margin-left: auto; background: none; border: none; cursor: pointer;
+    color: var(--vscode-descriptionForeground); font-size: 0.9em; opacity: 0.7;
+  }
+  #fairy-history-clear:hover { opacity: 1; color: var(--vscode-errorForeground); }
+  #fairy-history-empty { font-size: 11px; opacity: 0.6; padding: 4px 0; }
+  .fairy-hist-item {
+    border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.25));
+    border-radius: 4px; padding: 6px 7px; margin-bottom: 5px;
+    cursor: pointer; transition: background 0.12s;
+  }
+  .fairy-hist-item:hover { background: var(--vscode-list-hoverBackground, rgba(128,128,128,0.12)); }
+  .fairy-hist-prompt {
+    font-size: 11.5px; line-height: 1.35; color: var(--vscode-editor-foreground);
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .fairy-hist-meta {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    margin-top: 4px; font-size: 10.5px; color: var(--vscode-descriptionForeground);
+  }
+  .fairy-hist-meta .m-steps  { color: var(--vscode-charts-blue, #4e94ce); }
+  .fairy-hist-meta .m-cost   { color: var(--vscode-charts-green, #3fb950); }
+  .fairy-hist-meta .badge {
+    padding: 0 5px; border-radius: 8px; font-size: 9.5px;
+    border: 1px solid currentColor; opacity: 0.85;
+  }
+  .fairy-hist-meta .b-delivered { color: var(--vscode-charts-green, #3fb950); }
+  .fairy-hist-meta .b-running   { color: var(--vscode-charts-yellow, #d7ba7d); }
+  .fairy-hist-meta .b-other     { color: var(--vscode-descriptionForeground); }
+  .fairy-hist-meta .b-seed      { color: var(--vscode-descriptionForeground); opacity: 0.6; }
+  .fairy-hist-meta .del {
+    margin-left: auto; opacity: 0.5; padding: 0 3px; cursor: pointer;
+  }
+  .fairy-hist-meta .del:hover { opacity: 1; color: var(--vscode-errorForeground); }
 </style>
 </head>
 <body>
@@ -808,7 +1070,15 @@ class WatchPanelProvider {
     background: white; border-radius:50%; transition: transform 0.2s;
   }
   #collab-toggle:checked + .collab-slider::before { transform: translateX(14px); }
+  #oberon-toggle:checked + .collab-slider { background: #2ea043 !important; }
+  #oberon-toggle:checked + .collab-slider::before { transform: translateX(14px); }
 </style>
+<div id="wb-tabs">
+  <button class="wb-tab active" id="tab-btn-watch"  data-tab="watch">Watch</button>
+  <button class="wb-tab"        id="tab-btn-agents" data-tab="agents">🧚 Agents</button>
+</div>
+
+<div id="tab-watch" class="tab-panel active">
 <div id="header-row">
   <span id="step-header">Live watch</span>
   <button id="refresh-btn" title="Refresh values">⟳</button>
@@ -857,6 +1127,31 @@ class WatchPanelProvider {
   <div id="hover-doc-symbol"></div>
   <div id="hover-doc-content"></div>
 </div>
+</div><!-- /#tab-watch -->
+
+<div id="tab-agents" class="tab-panel">
+  <div style="font-weight:bold; margin-bottom:4px;">🧚 Fairy quick compute</div>
+  <div id="fairy-hint">Describe a self-contained computation. The Fairy agent works it out in a scratch notebook and verifies the result against the kernel.</div>
+  <textarea id="fairy-prompt" placeholder="e.g. Compute all energy eigenvalues of the L=4 SU(2) Heisenberg spin chain (periodic) and compare with the Bethe Ansatz."></textarea>
+  <div id="fairy-run-row">
+    <button id="fairy-run-btn" title="Dispatch this prompt to the Fairy agent">🧚 Run Fairy</button>
+    <button id="fairy-config-btn" title="Configure Fairy / Oberon (provider &amp; model)">⚙</button>
+  </div>
+  <div id="agents-oberon-row">
+    <span title="Oberon (EXPERIMENTAL): when ON, the full pipeline runs after the Fairy — a Skeptic critic reviews the result and an Oberon report is written. OFF (default) runs a minimal Fairy quick-compute only: faster, no critic, no report." style="cursor:help; border-bottom:1px dotted currentColor;">Oberon full pipeline<sup style="opacity:0.6; font-size:8px;">exp</sup></span>
+    <label class="mcp-switch" style="position:relative; display:inline-block; width:32px; height:18px; cursor:pointer; flex-shrink:0;">
+      <input type="checkbox" id="oberon-toggle" style="opacity:0; width:0; height:0;">
+      <span class="collab-slider" style="position:absolute; inset:0; border-radius:9px; transition:background 0.2s;"></span>
+    </label>
+  </div>
+  <div id="fairy-history-header">
+    <span>HISTORY <span class="count" id="fairy-history-count"></span></span>
+    <button id="fairy-history-clear" title="Clear all history">Clear</button>
+  </div>
+  <div id="fairy-history-empty">No Fairy runs yet. Your prompts, steps &amp; cost will appear here.</div>
+  <div id="fairy-history-list"></div>
+</div><!-- /#tab-agents -->
+
 <script>
   // ── Hover tooltip for .wb-hint elements ───────────────────────────────────
   // Acquire VS Code API once — stored globally so the external script can reuse it

@@ -92,6 +92,33 @@ You lose context between turns and sessions. Use `wolfbook_remote_checkpoint` as
 - To span lines: wrap in `(…)`, `[…]`, or `Module[…]`. Or join with `;` on one line.
 - In `#wolfbookEval` (multiLine:false default): newlines mean `Times`. Use `;` or set `multiLine:true`.
 
+## Notebook authoring conventions
+
+### Equations — always LaTeX, never Unicode quasi-math
+Markdown cells are rendered. Use proper LaTeX for all mathematical content.
+
+- **Inline:** `$\alpha^2 + \beta^2 = \gamma^2$` — wrap in single `$…$`.
+- **Display:** wrap in `$$…$$` on its own line for numbered/prominent expressions.
+- **Never** write equations as Unicode characters or ASCII art: `α²+β²=γ²`, `E=mc^2`, `∑_{k=1}^{n}`, `x -> 0`. These render as plain text and look broken.
+
+### Follow derivations with code — compute, don't type
+After any analytical derivation or formula in a markdown cell, the **next cell** should be a code cell that verifies or computes the result programmatically:
+
+- Substitute symbols into each other using Wolfram: `FullSimplify[lhs - rhs]`, `NSolve[…]`, `Series[…]`.
+- Do **not** type numerical values by hand into code — have Wolfram substitute them: `f[x_] := …; f[3.14]` rather than copy-pasting a decimal approximation from a prior result.
+- If a markdown cell derives a closed form, the code cell should confirm it: `FullSimplify[closedForm - summedSeries] == 0`.
+- Copy symbolic results directly from cell output into markdown via `$result$` — wolfbook renders them as LaTeX automatically.
+
+### Notebook structure for research
+A well-structured derivation notebook reads:
+1. **Markdown cell** — problem statement or sub-goal (with LaTeX).
+2. **Code cell(s)** — computation leading to the result.
+3. **Markdown cell** — interpretation, conclusion, or transition to next step (LaTeX for any formula stated).
+
+Avoid leaving a sequence of code cells with no explanatory markdown between them.
+
+---
+
 ## Cell kinds
 - `kind:"code"` — Wolfram Language, sent to kernel.
 - `kind:"markdown"` — text/headings/LaTeX (`$…$`) — never sent to kernel.
@@ -123,8 +150,7 @@ Grid[{
 }, Frame -> All, Alignment -> Left]
 ```
 - Add a header row for clarity. Use `Background -> {{}, {GrayLevel[0.85], None}}` for a shaded header.
-- Use `Association` for named intermediate data you'll `Lookup` later — not for display.
-- Never use `Print["label:", val]` for structured output.
+- Use `Print["label:", val]` for quick inline output; use `Grid[]` for structured multi-value results.
 
 ## #wolfbookEval — outputForm
 - `"Short"` — `Short[result, 5]`, quick preview.

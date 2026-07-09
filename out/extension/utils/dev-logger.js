@@ -16,7 +16,7 @@
 const DEV_MODE = (() => {
     try {
         const _u = require('os').userInfo().username;
-        return _u === 'k0959535' || _u === 'nikolay';
+        return _u === 'k0959535' || _u === 'nikolay' || _u === 'nikolayold';
     } catch (_) { return false; }
 })();
 

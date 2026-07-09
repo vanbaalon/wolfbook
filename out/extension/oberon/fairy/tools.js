@@ -19,7 +19,7 @@
 
 const crypto       = require('crypto');
 const { analyzeCode } = require('./depAnalyzer');
-const { runResearch } = require('./literature');
+const { runResearch, readPaper: runReadPaper, extractArxivIds } = require('./literature');
 const { classifyMessages } = require('../core/wolframShim');
 
 // ── Result helpers ──────────────────────────────────────────────────────────
@@ -115,6 +115,25 @@ function utilSimilarity(a, b) {
     let inter = 0;
     for (const t of A) if (B.has(t)) inter++;
     return inter / (A.size + B.size - inter);
+}
+
+// ── Literal-lint (B7 / prompt rule 20) ───────────────────────────────────────
+
+/**
+ * Fraction of a code body's tokens that are numeric literals. Used to warn when a
+ * recorded step looks like a hand-typed answer instead of a computation (rule 20:
+ * "record computation, not hand-encoded answers"). Comments are stripped first.
+ *
+ * @param {string} code
+ * @returns {{ fraction: number, numeric: number, total: number }}
+ */
+function literalFraction(code) {
+    const toks = String(code || '')
+        .replace(/\(\*[\s\S]*?\*\)/g, ' ')
+        .match(/[A-Za-z$][A-Za-z0-9$]*|\d+(?:\.\d+)?(?:`\d*)?/g) || [];
+    if (!toks.length) return { fraction: 0, numeric: 0, total: 0 };
+    const numeric = toks.filter(t => /^\d/.test(t)).length;
+    return { fraction: numeric / toks.length, numeric, total: toks.length };
 }
 
 // ── Redefinition detection (M8) ──────────────────────────────────────────────
@@ -518,6 +537,8 @@ async function handleProbe(args, ctx) {
         structuralSummary: structural,
         agentValue:       agentValue || undefined,   // compact InputForm (agent layer)
         agentShape:       agentShape || undefined,
+        multiOutput:      r.multiOutput || undefined, // cell produced >1 Out[N] line
+
         softWarning:      r.softWarning || undefined, // non-critical solver warning (kept, non-failing)
         error:            r.ok ? null : (r.error || r.kind),
         note:             args.note || null,
@@ -649,16 +670,35 @@ async function handleInspect(args, ctx) {
     if (!probe)   return mkErr(name, Date.now() - t0, 'not_found', `No probe with id '${resultRef}'`);
     if (!probe.ok) return mkErr(name, Date.now() - t0, 'probe_failed', `Probe '${resultRef}' did not succeed — cannot inspect`);
 
-    const op   = args.op ? String(args.op).trim() : null;
-    const expr = op
-        ? `With[{$inspectTarget$ = TimeConstrained[(${probe.code}), 20, $Failed]}, (${op})[$inspectTarget$]]`
-        : `Short[TimeConstrained[(${probe.code}), 20, $Failed], 20]`;
+    const op    = args.op ? String(args.op).trim() : null;
+    const effOp = op || '(Short[#, 20] &)';
 
-    let r;
-    try {
-        r = await ctx.shim.evalOnce({ expression: expr, timeoutSeconds: 25, signal: ctx.signal });
-    } catch (e) {
-        return mkErr(name, Date.now() - t0, 'eval_error', e && e.message || String(e));
+    // O8: apply the op to the STORED result first. Re-running the probe code re-pays
+    // the full compute cost and used to time out at 20s — precisely for the expensive
+    // results one most needs to inspect. The stored InputForm string round-trips via
+    // ToExpression; a sentinel routes to re-evaluation when it cannot (LaTeX-rendered
+    // values, huge outputs, parse failures).
+    let r = null;
+    const stored = (typeof probe.value === 'string' && probe.value.trim()) ? probe.value : null;
+    if (stored && stored.length < 100000 && !/\\(frac|left|right|begin|text)/.test(stored)) {
+        const esc = stored.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+        const fastExpr =
+            `With[{$inspectTarget$ = Quiet[Check[ToExpression["${esc}"], $Failed]]}, ` +
+            `If[$inspectTarget$ === $Failed, "WB_INSPECT_REEVAL", (${effOp})[$inspectTarget$]]]`;
+        try {
+            const rs = await ctx.shim.evalOnce({ expression: fastExpr, timeoutSeconds: 25, signal: ctx.signal });
+            if (rs && rs.ok && rs.value !== 'WB_INSPECT_REEVAL' && rs.value !== '"WB_INSPECT_REEVAL"') r = rs;
+        } catch (_) { /* fall through to re-evaluation */ }
+    }
+    if (!r) {
+        const expr = op
+            ? `With[{$inspectTarget$ = TimeConstrained[(${probe.code}), 60, $Failed]}, (${op})[$inspectTarget$]]`
+            : `Short[TimeConstrained[(${probe.code}), 60, $Failed], 20]`;
+        try {
+            r = await ctx.shim.evalOnce({ expression: expr, timeoutSeconds: 65, signal: ctx.signal });
+        } catch (e) {
+            return mkErr(name, Date.now() - t0, 'eval_error', e && e.message || String(e));
+        }
     }
 
     const durationMs = Date.now() - t0;
@@ -805,6 +845,93 @@ async function handleRecord(args, ctx) {
         }
     }
 
+    // Multi-output honesty (run Q32): a cell with several unterminated statements
+    // produces several Out[N] lines, but only the LAST expression's value is what a
+    // re-evaluation of the step returns — that is what self-verification will compare.
+    // Warn so the agent puts the result it cares about LAST (or terminates the rest
+    // with semicolons).
+    const outLines = String(probe.value || '').match(/(?:^|\n)\s*Out\[\d+\]/g) || [];
+    if (probe.multiOutput || outLines.length > 1) {
+        warnings.push(
+            `This probe produced ${outLines.length || 'several'} outputs (multiple unterminated ` +
+            'statements). Only the LAST expression\'s value is the step\'s canonical, verifiable ' +
+            'result — make sure the headline result is the final expression, or end intermediate ' +
+            'statements with `;`.');
+    }
+
+    // B7: literal lint — a recorded step that is mostly numeric literals is usually a
+    // hand-typed copy of a computed result, which breaks reproducibility (rule 20).
+    // Warn (never reject): small literal inputs like Pauli matrices are legitimate.
+    const lf = literalFraction(probe.code);
+    if (definesSymbols.length && lf.numeric >= 8 && lf.fraction >= 0.6) {
+        warnings.push(
+            `This step is ${Math.round(lf.fraction * 100)}% numeric literals (${lf.numeric} numbers). ` +
+            'If these values were computed by an earlier probe, do NOT re-type them — record the ' +
+            'computation referencing live symbols (e.g. `fullSpectrum = {m0, m1, m2}`), not a literal copy.');
+    }
+
+    // I7 (run Q_2N8616): missing-dependency check. A recorded step whose code uses a
+    // symbol that no input/util/recorded step defines WILL fail on the fresh-kernel
+    // replay of clean.wb (the `eigs` cascade: Tally::list, First::normal, …). Warn at
+    // record time and point at the live probe that defines the symbol.
+    const selfDefined  = new Set(definesSymbols);
+    const knownDefined = new Set();
+    for (const s of existingSteps) for (const sym of (s.definesSymbols || [])) knownDefined.add(sym);
+    try { for (const u of await ctx.workDir.loadUtils()) if (u && u.name) knownDefined.add(u.name); } catch (_) {}
+    try {
+        for (const inp of await ctx.workDir.loadInputs()) {
+            for (const sym of extractDefinedSymbols((inp && inp.code) || '')) knownDefined.add(sym);
+        }
+    } catch (_) {}
+    const missingSyms = usesSymbols.filter(sym => !selfDefined.has(sym) && !knownDefined.has(sym)).slice(0, 3);
+    if (missingSyms.length) {
+        let recentProbes = [];
+        try { recentProbes = await ctx.workDir.loadRecentProbes(15); } catch (_) {}
+        for (const sym of missingSyms) {
+            const definer = recentProbes.find(rp =>
+                rp && rp.ok && rp.probeId !== probeId && extractDefinedSymbols(rp.code || '').includes(sym));
+            if (definer) {
+                warnings.push(
+                    `This step uses \`${sym}\`, which no recorded step, util, or input defines — the ` +
+                    `fresh-kernel replay of clean.wb WILL fail on it. Probe ${definer.probeId} defines ` +
+                    `\`${sym}\`: record that probe as a step first (before finishing).`);
+            } else {
+                warnings.push(
+                    `This step uses \`${sym}\`, which no recorded step, util, or input defines. ` +
+                    'If it is not a Wolfram built-in, the fresh-kernel replay of clean.wb will fail — ' +
+                    'record the step that defines it before finishing.');
+            }
+        }
+    }
+
+    // B7: crosscheck role — the done_exploring gate requires ≥1 such step.
+    // I19: auto-tag steps that are OBVIOUSLY cross-checks by name/note but were
+    // recorded without role (run Q_38X439 named its check "step_ba_eigenvalues …
+    // Verify" — models often name the check but forget the field).
+    const noteText = String(args.note || probe.note || '');
+    // Underscores are word characters in JS regex, so \b never fires inside
+    // snake_case ids like verify_hermiticity — normalise them to spaces first.
+    const roleHay  = (stepId + ' ' + noteText).replace(/_/g, ' ');
+    const stepRole = args.role === 'crosscheck' ? 'crosscheck'
+        : (!args.role && /\b(cross-?check|verif(y|ies|ied|ication)|sanity[ -]?check)\b/i.test(roleHay))
+            ? 'crosscheck' : undefined;
+    const autoTagged = stepRole === 'crosscheck' && args.role !== 'crosscheck';
+
+    // Crosscheck honesty (run Q25/C03): a "Bethe vs exact" check that hardcodes
+    // betheCounts = {50,128,10,10,18} verifies nothing — both sides must be
+    // computed. Soft warning only: literal lists are sometimes legitimate inputs.
+    let crosscheckNotice;
+    if (stepRole === 'crosscheck') {
+        const numListAssign = /([A-Za-z][A-Za-z0-9]*)\s*=\s*\{\s*[+-]?\d+(?:\/\d+|\.\d+)?(?:\s*,\s*[+-]?\d+(?:\/\d+|\.\d+)?){3,}\s*\}/;
+        const m = numListAssign.exec(String(probe.code || ''));
+        if (m) {
+            crosscheckNotice = `⚠️ This crosscheck assigns a hardcoded numeric list to '${m[1]}'. ` +
+                'A cross-check must COMPUTE both sides independently — if these numbers came from an ' +
+                'earlier probe, reference that step\'s symbols by name; if from theory, derive them in ' +
+                'the kernel. A hand-typed expected list verifies nothing.';
+        }
+    }
+
     // Append to steps.json
     await ctx.workDir.addStep({
         id:             stepId,
@@ -818,6 +945,7 @@ async function handleRecord(args, ctx) {
         // R9: confidence metadata, optional.
         confidence:     ['high', 'medium', 'low'].includes(args.confidence) ? args.confidence : undefined,
         verifiedBy:     args.verifiedBy ? String(args.verifiedBy).slice(0, 200) : undefined,
+        role:           stepRole,
     });
 
     const durationMs = Date.now() - t0;
@@ -826,15 +954,20 @@ async function handleRecord(args, ctx) {
         stepId,
         probeId,
         recorded:           true,
+        role:               stepRole,
+        autoTaggedCrosscheck: autoTagged || undefined,
         inferredDependsOn,
         mergedDependsOn,
         definesSymbols,
         usesSymbols:        usesSymbols.slice(0, 20),
         warnings:           warnings.length ? warnings : undefined,
         durationMs,
-        notice: warnings.length
+        notice: warnings.some(w => w.startsWith('Redefinition conflict'))
             ? '⚠️ Redefinition conflict(s) detected (see warnings). The fresh-kernel verification may fail; consider invalidating the conflicting step first.'
-            : undefined,
+            : warnings.length
+                ? '⚠️ See warnings — they name conditions under which the fresh-kernel verification of this step may fail.'
+                : crosscheckNotice
+                    || (autoTagged ? 'This step was auto-tagged role:"crosscheck" (its name/note describes a verification).' : undefined),
     }, `record '${stepId}' from probe '${probeId}' ok in ${durationMs}ms`);
 }
 
@@ -983,11 +1116,24 @@ async function handleRunClean(_args, ctx) {
     const { workDir, shim, signal } = ctx;
     const t0 = Date.now();
 
-    // Restart the working kernel first (fresh state, no prior definitions)
-    const restart = await shim.restartKernel().catch(e => ({ ok: false, reason: e.message }));
+    // Restart the working kernel first (fresh state, no prior definitions). With the
+    // longer resume window a slow cold boot is no longer mistaken for a failure.
+    // If the restart still doesn't resolve, DON'T abort the whole run: clean.wb is
+    // self-contained (it redefines everything it uses), so verify it in the current
+    // kernel rather than dragging an otherwise-good run into escalate over a kernel
+    // hiccup. run_clean's job is to check that clean.wb runs — not to require a
+    // perfectly fresh kernel.
+    let restart = await shim.restartKernel().catch(e => ({ ok: false, reason: e && e.message }));
     if (!restart.ok) {
+        // One more attempt — cold-boot flakiness is usually transient.
+        restart = await shim.restartKernel().catch(e => ({ ok: false, reason: e && e.message }));
+    }
+    const freshKernel = !!(restart && restart.ok);
+    if (!freshKernel && typeof shim.kernelStatus === 'function' && !shim.kernelStatus().available) {
+        // Kernel is genuinely unavailable (not merely un-restarted) — verification
+        // truly cannot run. Surface honestly so polish degrades to a partial delivery.
         return mkErr(name, Date.now() - t0, 'restart_failed',
-            `Kernel restart failed: ${restart.reason || 'unknown'}. Cannot verify.`);
+            `Kernel is not available (${(restart && restart.reason) || 'unknown'}); could not verify clean.wb.`);
     }
 
     // Use the VS Code NotebookController path (runNotebook) so cells are executed
@@ -1006,14 +1152,113 @@ async function handleRunClean(_args, ctx) {
             'clean.wb has no Wolfram code cells. Was compile successful?');
     }
 
-    const { allClean, cellCount, failures, allResults } = runResult;
+    let { allClean } = runResult;
+    const { cellCount, failures, allResults } = runResult;
+
+    // I5 (run Q_2N8616): execute the planner's validationChecks in the SAME kernel
+    // that just ran the notebook. This puts first-principles correctness checks
+    // inside the fairy loop — including on the quick-compute path where the Skeptic
+    // never runs. Failing validations block allClean for the first 2 attempts; after
+    // that they downgrade to loud warnings (the check itself may be ill-posed).
+    const vChecks = (ctx.charm && Array.isArray(ctx.charm.validationChecks))
+        ? ctx.charm.validationChecks.filter(s => typeof s === 'string' && s.trim())
+        : [];
+    const validationResults = [];
+    if (allClean && vChecks.length && typeof shim.evalOnce === 'function') {
+        for (const expr of vChecks) {
+            if (signal && signal.aborted) break;
+            let vr;
+            try { vr = await shim.evalOnce({ expression: expr, timeoutSeconds: 25, signal }); }
+            catch (e) { vr = { ok: false, value: '', error: (e && e.message) || String(e) }; }
+            const valStr = String(vr.value || '').trim();
+            const num    = parseFloat(valStr);
+            const passed = !!vr.ok && (valStr === 'True' || (Number.isFinite(num) && Math.abs(num) < 1e-8));
+
+            // Adjudicability guard (run Q29): a failing check that references
+            // symbols not present in the just-replayed kernel cannot judge the
+            // chain. Underscored names (exact_energies) are WL patterns — never
+            // definable — so blocking allClean on them wedges the run for good.
+            let unresolved = null;
+            if (!passed && vr.ok) {
+                try {
+                    const { findUndefinedCheckSymbols } = require('../core/checkUtils');
+                    const undef = await findUndefinedCheckSymbols(expr, signal);
+                    if (undef.length) unresolved = undef;
+                } catch (_) { /* fail-open */ }
+            }
+            validationResults.push({
+                check:  expr.slice(0, 200),
+                passed,
+                unresolvedSymbols: unresolved || undefined,
+                value:  unresolved
+                    ? `NOT ADJUDICABLE — undefined symbol(s): ${unresolved.join(', ')}` +
+                      (unresolved.some(s => s.includes('_')) ? ' (underscored names are WL patterns; planner artifact)' : ' — if this names your headline result, assign it: e.g. ' + unresolved[0] + ' = <your symbol>')
+                    : (valStr.slice(0, 120) || (vr.error ? String(vr.error).slice(0, 120) : '')),
+            });
+        }
+    }
+    // Checks that reference symbols which cannot exist do not block delivery —
+    // they are surfaced to the agent (assign the expected name if it is merely
+    // a naming mismatch) and reported as skipped.
+    const failedValidations = validationResults.filter(v => !v.passed && !v.unresolvedSymbols);
+    let validationNotice;
+    if (failedValidations.length) {
+        const ps = ctx.polishState || (ctx.polishState = {});
+        ps.validationFailStreak = (ps.validationFailStreak || 0) + 1;
+        if (ps.validationFailStreak <= 2) {
+            allClean = false;
+            validationNotice =
+                `❌ ${failedValidations.length} validation check(s) FAILED (cells ran cleanly, but the ` +
+                'result does not satisfy the task\'s first-principles checks). Fix the chain — if a recorded ' +
+                'step is wrong, emit reopen_chain. Do NOT delete or weaken the checks.';
+        } else {
+            validationNotice =
+                `⚠️ ${failedValidations.length} validation check(s) still failing after ` +
+                `${ps.validationFailStreak} attempts — downgraded to warnings (the check itself may be ` +
+                'ill-posed). They will be reported with the delivery; state in your final summary why ' +
+                'each failing check does not invalidate the result.';
+        }
+    } else if (validationResults.length && ctx.polishState) {
+        ctx.polishState.validationFailStreak = 0;
+    }
+
+    // I4 (run Q_2N8616): after a fully-clean verification, sync any polish-edited
+    // cell code back into the recorded steps (matched via the ['step', <id>] tag),
+    // so steps.json, the Skeptic's evidence, and the deliverable never diverge.
+    const syncedSteps = [];
+    if (allClean && typeof workDir.updateStep === 'function') {
+        try {
+            const fsp2  = require('fs/promises');
+            const nb    = JSON.parse(await fsp2.readFile(workDir.cleanNb, 'utf8'));
+            const steps = await workDir.loadValidSteps();
+            for (const c of (nb.cells || [])) {
+                if (c.kind !== 2) continue;
+                const tags = (c.metadata && c.metadata.tags) || [];
+                if (tags[0] !== 'step' || !tags[1]) continue;
+                const step = steps.find(s => s && s.id === tags[1]);
+                if (!step) continue;
+                const expected = (step.note ? `(* ${step.note} *)\n` : '') + step.code;
+                if (c.value === expected) continue;
+                // Invert the `note + code` composition: strip one leading comment block.
+                const stripped = String(c.value).replace(/^\(\*[\s\S]*?\*\)\n/, '');
+                await workDir.updateStep(step.id, { code: stripped, editedInPolish: true });
+                syncedSteps.push(step.id);
+            }
+        } catch (_) { /* sync is best-effort — never blocks delivery */ }
+    }
 
     return mkOk(name, Date.now() - t0, {
         allClean,
         cellCount,
+        kernelFresh: freshKernel,
+        kernelNote: freshKernel ? undefined
+            : 'Kernel could not be freshly restarted; clean.wb was verified in the existing kernel. Results are valid but not proven self-contained from a pristine session.',
         summary: allClean
-            ? `All ${cellCount} code cell(s) ran cleanly — no errors or warnings.`
-            : `${failures.length} of ${cellCount} cell(s) had errors or warnings.`,
+            ? `All ${cellCount} code cell(s) ran cleanly — no errors or warnings.` +
+              (validationResults.length ? ` ${validationResults.filter(v => v.passed).length}/${validationResults.length} validation check(s) passed${validationResults.some(v => v.unresolvedSymbols) ? ` (${validationResults.filter(v => v.unresolvedSymbols).length} not adjudicable — see values)` : ''}.` : '')
+            : (failures.length
+                ? `${failures.length} of ${cellCount} cell(s) had errors or warnings.`
+                : `Cells ran cleanly, but ${failedValidations.length} validation check(s) failed.`),
         failures: failures.map(f => ({
             cellIndex: f.cellIndex,
             cellId:    f.cellId,
@@ -1021,19 +1266,28 @@ async function handleRunClean(_args, ctx) {
             messages:  f.messages,
             output:    f.output ? f.output.slice(0, 300) : null,
         })),
+        validationResults: validationResults.length ? validationResults : undefined,
+        validationNotice,
+        syncedSteps: syncedSteps.length ? syncedSteps : undefined,
         allResults: allClean ? [] : allResults.map(f => ({
             cellIndex: f.cellIndex, cellId: f.cellId,
             clean: f.clean, output: f.output ? f.output.slice(0, 200) : null,
             messages: f.messages, error: f.error,
         })),
     }, allClean
-        ? `run_clean: all ${cellCount} cells OK`
-        : `run_clean: ${failures.length} failure(s) in clean.wb`);
+        ? `run_clean: all ${cellCount} cells OK${validationResults.length ? ` + ${validationResults.length} validation(s)` : ''}`
+        : `run_clean: ${failures.length} cell failure(s), ${failedValidations.length} validation failure(s)`);
 }
 
 /**
  * edit_cell: replace the code in a cell (by index among code cells) in either
  * clean.wb or working.wb. Use this to fix errors or warnings found by run_clean.
+ *
+ * I2/I3 (run Q_2N8616): the edit is applied THROUGH the open VS Code notebook
+ * document when possible (disk-only writes are invisible to an open document, so
+ * run_clean re-executed stale cells), and a cell belonging to a `crosscheck`-role
+ * recorded step may not be gutted — the edit must keep defining the step's symbols,
+ * otherwise the verification is being deleted rather than fixed.
  */
 async function handleEditCell(args, ctx) {
     const name = 'edit_cell';
@@ -1066,38 +1320,91 @@ async function handleEditCell(args, ctx) {
 
     // Find the nth code cell (by index among code cells, ignoring markup cells)
     let codeIdx = 0;
-    let found = false;
+    let absIndex = -1;
+    let targetCell = null;
     for (let i = 0; i < nb.cells.length; i++) {
         const c = nb.cells[i];
         if (c.kind === 2) {
-            if (codeIdx === cellIndex) {
-                nb.cells[i] = { ...c, value: newCode };
-                found = true;
-                break;
-            }
+            if (codeIdx === cellIndex) { absIndex = i; targetCell = c; break; }
             codeIdx++;
         }
     }
 
-    if (!found) {
+    if (absIndex < 0) {
         const totalCode = (nb.cells || []).filter(c => c.kind === 2).length;
         return mkErr(name, Date.now() - t0, 'out_of_range',
             `cellIndex ${cellIndex} is out of range — ${notebook}.wb has ${totalCode} code cell(s) (0 to ${totalCode - 1})`);
     }
 
-    try {
-        await fsp.writeFile(nbPath, JSON.stringify(nb, null, 2), 'utf8');
-    } catch (e) {
-        return mkErr(name, Date.now() - t0, 'write_error',
-            `Cannot write ${notebook}.wb: ${e.message}`);
+    // I3: map the cell to its recorded step via the ['step', <id>] metadata tag.
+    const tags   = (targetCell.metadata && targetCell.metadata.tags) || [];
+    const stepId = (tags[0] === 'step' && tags[1]) ? String(tags[1]) : null;
+    let step = null;
+    if (stepId && notebook === 'clean') {
+        try { step = (await workDir.loadValidSteps()).find(s => s && s.id === stepId) || null; } catch (_) {}
+    }
+
+    let warning;
+    if (step) {
+        const newDefs  = extractDefinedSymbols(newCode);
+        const required = step.definesSymbols || [];
+        const dropped  = required.filter(sym => !newDefs.includes(sym));
+
+        if (step.role === 'crosscheck' && dropped.length) {
+            return {
+                name, ok: false, kind: 'crosscheck_protected', durationMs: Date.now() - t0,
+                summary: `edit_cell rejected: would gut crosscheck step '${stepId}'`,
+                modelPayload: JSON.stringify({
+                    rejected: true,
+                    reason:
+                        `Cell ${cellIndex} is the CROSSCHECK step '${stepId}'. Your edit no longer defines ` +
+                        `${dropped.join(', ')} — that deletes the independent verification instead of fixing it.`,
+                    suggestedAction:
+                        'Fix the cross-check so it still verifies the result (keep its symbols and comparison). ' +
+                        'If the RECORDED step itself is mathematically wrong, emit ' +
+                        '{ "control": "reopen_chain", "stepId": "' + stepId + '", "reason": "..." } instead — ' +
+                        'deleting a failing verification is never acceptable.',
+                }),
+                error: 'crosscheck_protected', raw: null,
+            };
+        }
+        if (dropped.length) {
+            warning =
+                `This edit drops the definition(s) of ${dropped.join(', ')} from step '${stepId}'. ` +
+                'Cell-level edits are for FIXES; structural rewrites of the chain belong in reopen_chain. ' +
+                'The recorded chain will be synced from the notebook after a clean run.';
+        }
+    }
+
+    // I2: prefer editing through the OPEN notebook document (keeps the in-memory
+    // document, the editor tab, and the disk file coherent). Fall back to the raw
+    // JSON write when the document is not open (background runs, tests).
+    let appliedVia = 'disk';
+    if (ctx.shim && typeof ctx.shim.editNotebookCell === 'function') {
+        try {
+            const r = await ctx.shim.editNotebookCell(nbPath, absIndex, newCode);
+            if (r && r.applied) appliedVia = 'document';
+        } catch (_) { /* fall back to disk */ }
+    }
+    if (appliedVia === 'disk') {
+        nb.cells[absIndex] = { ...targetCell, value: newCode };
+        try {
+            await fsp.writeFile(nbPath, JSON.stringify(nb, null, 2), 'utf8');
+        } catch (e) {
+            return mkErr(name, Date.now() - t0, 'write_error',
+                `Cannot write ${notebook}.wb: ${e.message}`);
+        }
     }
 
     return mkOk(name, Date.now() - t0, {
         ok:        true,
         notebook,
         cellIndex,
-        summary:   `Updated code cell ${cellIndex} in ${notebook}.wb`,
-    }, `edit_cell: ${notebook}.wb[${cellIndex}] updated`);
+        stepId:    stepId || undefined,
+        appliedVia,
+        warning,
+        summary:   `Updated code cell ${cellIndex} in ${notebook}.wb (${appliedVia})`,
+    }, `edit_cell: ${notebook}.wb[${cellIndex}] updated via ${appliedVia}`);
 }
 
 // ── Dispatcher ────────────────────────────────────────────────────────────────
@@ -1166,6 +1473,52 @@ async function handlePlan(args, ctx) {
     }, `plan: ${steps.length} steps recorded`);
 }
 
+// ── revise_plan (O7 / B10) ────────────────────────────────────────────────────
+
+const PLAN_REVISION_CAP = 2;
+
+/**
+ * Bounded re-planning: the initial plan is made at the moment of maximum
+ * ignorance — when the evidence genuinely invalidates it, the agent revises it
+ * (max 2×) with an explicit, evidence-referencing justification instead of
+ * silently drifting from the roadmap.
+ */
+async function handleRevisePlan(args, ctx) {
+    const t0      = Date.now();
+    const name    = 'revise_plan';
+    const steps   = Array.isArray(args.steps) ? args.steps.map(String) : [];
+    const changes = String(args.changes || '').trim();
+
+    if (steps.length < 2)  return mkErr(name, 0, 'bad_args', 'steps must have at least 2 items');
+    if (steps.length > 10) return mkErr(name, 0, 'bad_args', 'steps must have at most 10 items');
+    if (changes.length < 15) {
+        return mkErr(name, 0, 'bad_args',
+            'changes is required: one sentence referencing the EVIDENCE that invalidated the plan ' +
+            '(e.g. "p014 showed the nested-BAE route diverges; switching to the QQ-system").');
+    }
+
+    const existing = await ctx.workDir.loadPlan();
+    if (!existing) {
+        return mkErr(name, 0, 'no_plan', 'No plan exists yet — call `plan` first (this run has not planned).');
+    }
+    const revision = (Number(existing.revision) || 0) + 1;
+    if (revision > PLAN_REVISION_CAP) {
+        return mkErr(name, 0, 'revision_cap',
+            `Plan already revised ${PLAN_REVISION_CAP}× — no further re-planning. Adapt within your ` +
+            'probes, or if the task is genuinely infeasible use finalize/escalate.');
+    }
+
+    await ctx.workDir.savePlan({ steps, note: changes, revision });
+    const durationMs = Date.now() - t0;
+    return mkOk(name, durationMs, {
+        ok:        true,
+        revision,
+        stepCount: steps.length,
+        revisionsLeft: PLAN_REVISION_CAP - revision,
+        message:   `Plan revised (v${revision + 1}). The new roadmap is recorded — proceed with it.`,
+    }, `revise_plan: v${revision + 1} (${steps.length} steps)`);
+}
+
 // ── note_fact (R2) ────────────────────────────────────────────────────────────
 
 /**
@@ -1192,6 +1545,42 @@ async function handleNoteFact(args, ctx) {
         confidence,
         message:    `Fact '${key}' saved (${confidence}). It will appear under "Established results" every turn — reference it instead of re-deriving.`,
     }, `note_fact: '${key}' saved (${confidence})`);
+}
+
+// ── note_skill_gap (I20: agent-declared missing-skill request) ───────────────
+
+/**
+ * The agent observed that a reusable skill WOULD have helped but none was
+ * recalled (no skill, or an off-topic one). Records the gap to the workspace
+ * ledger + best-effort SkilXiv skill-request via ctx.recordSkillGap (injected
+ * by the harness). Max 2 per run (enforced in the loop).
+ */
+async function handleNoteSkillGap(args, ctx) {
+    const t0    = Date.now();
+    const name  = 'note_skill_gap';
+    const topic = String(args.topic || '').trim();
+    const why   = String(args.why || '').trim();
+    if (topic.length < 8) return mkErr(name, 0, 'bad_args', 'topic is required (≥8 chars) — what should the missing skill cover?');
+    if (why.length < 10)  return mkErr(name, 0, 'bad_args', 'why is required — one sentence on the gap you observed.');
+
+    if (typeof ctx.recordSkillGap !== 'function') {
+        return mkOk(name, Date.now() - t0, {
+            ok: true, recorded: false,
+            message: 'Skill-gap recording is not wired in this run — noted in the transcript only. Continue.',
+        }, 'note_skill_gap: not wired');
+    }
+    let res;
+    try { res = await ctx.recordSkillGap({ topic, why, source: 'agent' }); }
+    catch (e) { return mkErr(name, Date.now() - t0, 'failed', (e && e.message) || String(e)); }
+
+    return mkOk(name, Date.now() - t0, {
+        ok: true,
+        recorded: !!(res && res.recorded),
+        deduped:  (res && res.deduped) || undefined,
+        message: res && res.deduped
+            ? 'A near-identical gap is already recorded — no duplicate created. Continue with the task.'
+            : 'Skill gap recorded (and requested from the registry when available). Continue with the task.',
+    }, `note_skill_gap: ${topic.slice(0, 60)}`);
 }
 
 // ── cite_skill (skill attribution) ────────────────────────────────────────────
@@ -1253,30 +1642,70 @@ async function handleResearchLiterature(args, ctx) {
     // were the failure mode in run_2026-06-22T19-41-13 (7 near-identical queries).
     let priorBriefs = [];
     try { if (ctx.workDir && ctx.workDir.loadLiteratureBriefs) priorBriefs = await ctx.workDir.loadLiteratureBriefs(); } catch (_) {}
-    if (priorBriefs.length >= LITERATURE_QUERY_CAP) {
-        return mkErr(name, Date.now() - t0, 'budget_spent',
-            `Literature budget spent (${priorBriefs.length} searches already). Do NOT search again — ` +
-            `derive the result directly with probes. Re-running search will not help.`);
-    }
-    for (const b of priorBriefs) {
-        if (b && b.question && utilSimilarity(b.question, question) >= 0.6) {
-            return mkErr(name, Date.now() - t0, 'duplicate_query',
-                `This is nearly the same as a literature search you already ran ("${String(b.question).slice(0, 80)}"), ` +
-                `which returned ${((b.papers || []).length)} papers / ${((b.key_equations || []).length)} equations. ` +
-                `Rephrasing will not find new results — proceed with probes.`);
+
+    // I9/B13: late-run soft gate. A FIRST literature search deep into the run is
+    // usually budget panic, not research (R5 #9) — it displaces the remaining
+    // derivation work. Reject once; an explicit force:true overrides.
+    if (ctx.fsm && !args.force && priorBriefs.length === 0) {
+        const used  = Number(ctx.fsm.turnsUsed) || 0;
+        const total = used + (Number(ctx.fsm.turnsRemaining) || 0);
+        if (total > 0 && used / total > 0.6) {
+            return mkErr(name, Date.now() - t0, 'late_literature',
+                `You are ${Math.round(100 * used / total)}% through the turn budget and have not needed ` +
+                'literature until now — a late first search rarely helps and displaces the remaining ' +
+                'derivation work. Continue with probes. If the task genuinely requires a KNOWN published ' +
+                'method you cannot derive, re-call research_literature with force: true.');
         }
     }
 
+    if (priorBriefs.length >= LITERATURE_QUERY_CAP) {
+        return mkErr(name, Date.now() - t0, 'budget_spent',
+            `Literature budget spent (${priorBriefs.length} searches already). Do NOT search again — ` +
+            `derive the result directly with probes. Re-running search will not help.` +
+            (typeof ctx.askUser === 'function'
+                ? ' If a specific published reference is truly essential, ask_specialist for it ' +
+                  '(author/title/arXiv id) and lit_read the id the user gives you.'
+                : ''));
+    }
+    for (const b of priorBriefs) {
+        // L4 (run Q_3VRPXL): a prior brief where NOTHING was read (read: 0) is a
+        // pipeline failure, not evidence of absence — allow a rephrased retry.
+        const priorRead = (b && b.diagnostics && b.diagnostics.read) || 0;
+        if (priorRead === 0 && (b.papers || []).length === 0) continue;
+        if (b && b.question && utilSimilarity(b.question, question) >= 0.6) {
+            return mkErr(name, Date.now() - t0, 'duplicate_query',
+                `This is nearly the same as a literature search you already ran ("${String(b.question).slice(0, 80)}"), ` +
+                `which returned ${((b.papers || []).length)} papers / ${((b.key_equations || []).length)} equations ` +
+                `after actually reading ${priorRead} paper(s). Rephrasing will not find new results — proceed with probes.`);
+        }
+    }
+
+    // R8: arXiv ids named ANYWHERE in the task reach the pipeline
+    // deterministically — the fairy's question, its note, or the original
+    // task text (run Q_42CQ3G: the user pasted an arxiv.org URL in the brief
+    // and the search never saw it). These are fetched directly and read first.
+    const seedIds = extractArxivIds(
+        [question, String(args.note || ''), String(ctx.taskText || '')].join('\n'));
     let brief;
     try {
         brief = await runResearch({
             question,
+            seedIds,
             paperTools: ctx.paperTools,
             llm:        ctx.literatureLlm,   // may be undefined → keyword/top-k fallback
             signal:     ctx.signal,
+            onProgress: ctx.emitLiteratureProgress || null,   // live thinking stream → working.wb
         });
     } catch (e) {
+        if (typeof ctx.emitLiteratureProgress === 'function') ctx.emitLiteratureProgress({ stage: 'done', detail: 'search failed' });
         return mkErr(name, Date.now() - t0, 'failed', `literature research failed: ${e && e.message || e}`);
+    }
+    if (typeof ctx.emitLiteratureProgress === 'function') {
+        const d = (brief && brief.diagnostics) || {};
+        ctx.emitLiteratureProgress({
+            stage: 'done',
+            detail: `${(brief.papers || []).length} relevant, ${(brief.key_equations || []).length} relation(s) (read ${d.read || 0})`,
+        });
     }
 
     // Persist the full brief; cite papers at run end.
@@ -1290,28 +1719,53 @@ async function handleResearchLiterature(args, ctx) {
     const uncertain    = (brief.uncertain || []);   // #5: judge couldn't classify — surfaced, not dropped
     const searchesUsed = priorBriefs.length + 1;
     const searchesLeft = Math.max(0, LITERATURE_QUERY_CAP - searchesUsed);
+    // R9: ids the TASK names must never silently drop out. If one is missing from
+    // the delivered papers, order a direct lit_read of it before anything else.
+    const missingNamed = seedIds.filter(id =>
+        !papers.some(p => String(p.arxivId || '').replace(/v\d+$/, '') === id));
+    const missingNamedNote = missingNamed.length
+        ? ` THE TASK NAMES ${missingNamed.map(id => 'arXiv:' + id).join(', ')} — not delivered above; ` +
+          `call lit_read("${missingNamed[0]}") NOW and ground your work in THAT paper before deriving ` +
+          'from anything else or from memory.'
+        : '';
 
     if (!papers.length) {
         // #6: after the budget is nearly gone, tell the model to STOP searching.
         const stop = searchesLeft <= 1;
+        const rounds = (brief.diagnostics && brief.diagnostics.rounds) || brief.rounds || 1;
         const readNote = considered.length
             ? `Read ${considered.length} paper(s); none were judged relevant to this task.`
             : (brief.note || 'no papers found');
+        // R6: the pipeline already retried internally with reformulated queries —
+        // show WHAT was tried so the agent does not waste its remaining searches
+        // on rephrasings that were effectively already covered.
+        const triedQueries = (brief.queries || []).map(qq => qq.label).slice(0, 10);
         return mkOk(name, Date.now() - t0, {
             ok: true, question, papers: [], key_equations: [], observations: [],
             note: readNote,
+            searchRounds: rounds,
+            triedQueries,
             // #5: a glitchy judge no longer silently deletes papers — surface the unjudged
             // ones so the agent can decide, instead of seeing a bare "0 relevant".
             uncertain: uncertain.slice(0, 4).map(u => ({ ref: u.ref, title: u.title, why: u.reason })),
-            reminder: stop
+            reminder: (stop
                 ? 'No relevant literature found and the search budget is nearly spent. STOP searching — ' +
                   'derive the result directly with probes.'
                 : (uncertain.length
                     ? `No paper was confidently judged relevant, but ${uncertain.length} could not be classified ` +
                       '(judge parse failure) — they are listed under "uncertain"; skim them before searching again.'
-                    : 'No relevant literature found for this phrasing. Proceed with your own derivation; ' +
-                      'only search again if you can name a clearly different method or model.'),
-        }, `research_literature: 0 relevant, ${uncertain.length} uncertain (read ${considered.length}) for "${question.slice(0, 50)}"`, { brief });
+                    : `No relevant literature found: the pipeline already tried ${rounds} search round(s) ` +
+                      'including reformulated queries (see triedQueries). Proceed with your own derivation; ' +
+                      'only search again if you can name a clearly different method, alias, or author ' +
+                      'not covered by triedQueries.'))
+                // R7: literature exhausted + a human is available → the user often
+                // KNOWS the canonical reference. Asking beats guessing or giving up.
+                + (typeof ctx.askUser === 'function'
+                    ? ' If a known published method/reference is essential here, use ask_specialist to ask ' +
+                      'the user for a concrete reference (author, title, or arXiv id) — then lit_read it directly.'
+                    : '')
+                + missingNamedNote,
+        }, `research_literature: 0 relevant, ${uncertain.length} uncertain (read ${considered.length}, ${rounds} rounds) for "${question.slice(0, 50)}"`, { brief });
     }
 
     // Condense for the model: relevant papers (with WHY), extracted relations, observations.
@@ -1321,12 +1775,18 @@ async function handleResearchLiterature(args, ctx) {
         papers: papers.slice(0, 5).map(p => ({
             title: p.title, year: p.year, ref: p.ref,
             authors: (p.authors || []).slice(0, 3),
+            grade: p.grade || undefined,   // 'direct' | 'method' (general — specialize it)
             relevant_because: p.reason,
             fullTextRead: !!p.fullText,
         })),
         key_relations: equations.slice(0, 12).map(e => ({
-            statement: String(e.statement || '').slice(0, 200) || undefined,
-            latex:     String(e.latex || '').slice(0, 240) || undefined,
+            statement: String(e.statement || '').slice(0, 300) || undefined,
+            // I9: 240 chars truncated real TQ/QQ systems mid-equation — carry more.
+            latex:     String(e.latex || '').slice(0, 600) || undefined,
+            eqNumber:  e.eqNumber || undefined,
+            // L3: how to adapt a GENERAL (method-grade) relation to this task's instance.
+            specializeHint: e.specializeHint || undefined,
+            grade:     e.grade || undefined,
             source:    e.source,
         })),
         observations: observations.slice(0, 8).map(o => ({ text: String(o.text || '').slice(0, 200), source: o.source })),
@@ -1334,12 +1794,17 @@ async function handleResearchLiterature(args, ctx) {
         searchesLeft,
         reminder:
             'These relations/equations are UNVERIFIED transcriptions from the literature. Reproduce ' +
-            'each one with a probe before you record or note_fact it. Only the RELEVANT papers above ' +
-            'are returned (off-topic ones were read and rejected) and are cited automatically at run end.' +
-            (searchesLeft === 0 ? ' Literature budget is now spent — do not search again.' : ''),
+            'each one with a probe before you record or note_fact it. Papers graded "method" give ' +
+            'GENERAL relations — do not expect your exact model instance in them: SPECIALIZE the ' +
+            'relation to your case (follow specializeHint: fix the rank, the representation, the ' +
+            'length) and verify the specialized form in the kernel. Use lit_read on a paper\'s ' +
+            'arXiv id for the definitions/conventions around any relation. Only the RELEVANT papers ' +
+            'above are returned and are cited automatically at run end.' +
+            (searchesLeft === 0 ? ' Literature budget is now spent — do not search again.' : '') +
+            missingNamedNote,
     };
 
-    if (JSON.stringify(payload).length > 4200) {
+    if (JSON.stringify(payload).length > 6000) {
         payload.key_relations = payload.key_relations.slice(0, 6);
         payload.observations  = payload.observations.slice(0, 4);
         payload.rejected      = payload.rejected.slice(0, 2);
@@ -1348,6 +1813,88 @@ async function handleResearchLiterature(args, ctx) {
     return mkOk(name, Date.now() - t0, payload,
         `research_literature: ${papers.length} relevant (read ${considered.length}), ${equations.length} relations`,
         { brief });
+}
+
+// ── lit_read (I10: targeted deep-read of one already-found paper) ─────────────
+
+const LIT_READ_CAP = 6;   // own budget — does NOT consume the 3-search cap
+
+async function handleLitRead(args, ctx) {
+    const t0   = Date.now();
+    const name = 'lit_read';
+    const arxivId  = String(args.arxivId || '').trim().replace(/^arXiv:/i, '');
+    const question = String(args.question || '').trim();
+    if (!arxivId)            return mkErr(name, 0, 'bad_args', 'arxivId is required');
+    if (question.length < 8) return mkErr(name, 0, 'bad_args', 'question is required (≥8 chars)');
+    if (!ctx.paperTools)     return mkErr(name, 0, 'unavailable', 'literature tools are not wired in this run.');
+
+    // Whitelist: papers this run surfaced via research_literature are always
+    // allowed. R7: up to 2 DIRECT reads per run for ids from elsewhere — the user
+    // (via ask_specialist) or the model's own knowledge of a canonical paper.
+    // Bounded so lit_read stays a mining tool, not open-ended id roulette.
+    const DIRECT_READ_CAP = 2;
+    let briefs = [];
+    try { briefs = await ctx.workDir.loadLiteratureBriefs(); } catch (_) {}
+    const known = new Set();
+    for (const b of briefs) {
+        for (const p of (b.papers || []))    if (p && p.arxivId) known.add(String(p.arxivId).replace(/v\d+$/, ''));
+        for (const u of (b.uncertain || [])) if (u && u.arxivId) known.add(String(u.arxivId).replace(/v\d+$/, ''));
+    }
+    const bareId = arxivId.replace(/v\d+$/, '');
+
+    // Per-run cap (persisted — survives compaction and phase changes).
+    let reads = [];
+    try { reads = await ctx.workDir.loadLitReads(); } catch (_) {}
+
+    const isDirect = !known.has(bareId);
+    if (isDirect) {
+        const directUsed = reads.filter(r => r && r.direct).length;
+        if (directUsed >= DIRECT_READ_CAP) {
+            return mkErr(name, Date.now() - t0, 'not_surfaced',
+                `arXiv:${arxivId} was not returned by research_literature this run, and the ` +
+                `${DIRECT_READ_CAP} direct-read allowance (for user-provided or known references) is spent. ` +
+                `Papers you have found: ${[...known].slice(0, 6).join(', ') || 'none'}. ` +
+                'Run research_literature if you need to find more papers.');
+        }
+    }
+
+    if (reads.length >= LIT_READ_CAP) {
+        return mkErr(name, Date.now() - t0, 'budget_spent',
+            `lit_read budget spent (${reads.length}/${LIT_READ_CAP}). You have the material — ` +
+            'reproduce what you extracted with probes and finish the derivation.');
+    }
+
+    let result;
+    try {
+        result = await runReadPaper({
+            arxivId: bareId, question,
+            paperTools: ctx.paperTools,
+            llm:        ctx.literatureLlm,
+            loadCache:  (id) => ctx.workDir.loadPaperCache(id),
+            saveCache:  (id, data) => ctx.workDir.savePaperCache(id, data),
+        });
+    } catch (e) {
+        return mkErr(name, Date.now() - t0, 'failed', `lit_read failed: ${(e && e.message) || e}`);
+    }
+    try { await ctx.workDir.addLitRead({ arxivId: bareId, question, direct: isDirect || undefined }); } catch (_) {}
+
+    return mkOk(name, Date.now() - t0, {
+        ok: true,
+        arxivId:     bareId,
+        direct:      isDirect || undefined,   // R7: read outside the surfaced set (user/known reference)
+        hasFullText: result.hasFullText,
+        source:      result.source,
+        answer:      result.answer,
+        equations:   (result.equations || []).map(e => ({
+            latex: e.latex, eqNumber: e.eqNumber || undefined, context: e.context || undefined,
+        })),
+        excerpts:    (result.excerpts || []).map(x => ({ text: String(x.text || '').slice(0, 1200) })),
+        readsLeft:   Math.max(0, LIT_READ_CAP - reads.length - 1),
+        reminder:
+            'UNVERIFIED transcription — reproduce every relation in the kernel with a probe before ' +
+            'you record or note_fact it.' + (result.hasFullText ? '' :
+            ' NOTE: only the abstract was available for this paper — transcription risk is higher.'),
+    }, `lit_read arXiv:${bareId}: ${(result.equations || []).length} equation(s), ${(result.excerpts || []).length} excerpt(s)`);
 }
 
 // ── Define utility function ───────────────────────────────────────────────────
@@ -1494,6 +2041,7 @@ async function handleAskSpecialist(args, ctx) {
 
 const HANDLERS = {
     plan:                 handlePlan,
+    revise_plan:          handleRevisePlan,
     probe:                handleProbe,
     amend_probe:          handleAmendProbe,
     inspect:              handleInspect,
@@ -1501,7 +2049,9 @@ const HANDLERS = {
     record:               handleRecord,
     note_fact:            handleNoteFact,
     cite_skill:           handleCiteSkill,
+    note_skill_gap:       handleNoteSkillGap,
     research_literature:  handleResearchLiterature,
+    lit_read:             handleLitRead,
     assume:               handleAssume,
     chain:                handleChain,
     define_util:          handleDefineUtil,
@@ -1540,10 +2090,12 @@ module.exports = {
     dispatchFairyTool,
     detectRedefinition,
     lintWolfram,
+    literalFraction,
     utilSimilarity,
     extractDefinedSymbols,
     extractRedefineWhitelist,
     handlePlan,
+    handleRevisePlan,
     handleProbe,
     handleAmendProbe,
     handleInspect,
@@ -1551,7 +2103,9 @@ module.exports = {
     handleRecord,
     handleNoteFact,
     handleCiteSkill,
+    handleNoteSkillGap,
     handleResearchLiterature,
+    handleLitRead,
     handleAssume,
     handleChain,
     handleDefineUtil,

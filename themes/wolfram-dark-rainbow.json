@@ -539,6 +539,9 @@
 		}
 	],
 	"colors": {
+		"notebook.selectedCellBackground": "#4e94ce40",
+		"notebook.selectedCellBorder": "#4e94ce",
+		"notebook.inactiveSelectedCellBorder": "#4e94ce",
 		"editor.background": "#1E1E1E",
 		"editorCursor.foreground": "#F8F8F0",
 		"editor.foreground": "#F8F8F2",

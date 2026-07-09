@@ -7,8 +7,13 @@
  * and to give a single point-of-edit for tunables such as
  * `EXPR_PREVIEW_CHARS`.
  *
- * No side effects, no external deps. Safe to import from anywhere.
+ * Pure helpers here have no side effects. `findUndefinedCheckSymbols` is the
+ * one kernel-touching helper (it probes the live kernel via wolframShim) — it
+ * lives here because it is a validation-check utility shared by run_clean /
+ * probe adjudication, and its former home (skeptic.js) was removed.
  */
+
+const wolframShim = require('./wolframShim');
 
 const EXPR_PREVIEW_CHARS = 240;
 
@@ -100,6 +105,40 @@ function splitTopLevelEquality(expr) {
     return null;
 }
 
+/**
+ * Return the symbols in a validation-check expression that are undefined in
+ * the live kernel: snake_case tokens (WL pattern names, never symbols) plus
+ * plain tokens that are neither System` builtins nor carry any own/down/up
+ * values. A check referencing any of these is not adjudicable and should be
+ * skipped rather than disputed. Fail-open: kernel errors return only the
+ * deterministic snake_case set. (Relocated from the removed skeptic.js; the
+ * Q29 fix — shared by run_clean + probe adjudication in fairy/tools.js.)
+ *
+ * @param {string} expr
+ * @param {AbortSignal|null} signal
+ * @returns {Promise<string[]>}
+ */
+async function findUndefinedCheckSymbols(expr, signal) {
+    const noStrings = String(expr || '').replace(/"(?:[^"\\]|\\.)*"/g, ' ');
+    const tokens = [...new Set((noStrings.match(/[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)*/g) || []))];
+    const snake  = tokens.filter(t => /_[a-z]/.test(t));
+    const plain  = tokens.filter(t => !t.includes('_'));
+    const undef  = [...snake];
+    if (plain.length) {
+        const listWL = '{' + plain.map(t => `"${t}"`).join(', ') + '}';
+        const probe =
+            `Select[${listWL}, Function[n, !NameQ["System\`" <> n] && ` +
+            `ToExpression[n, InputForm, Function[s, OwnValues[s] === {} && DownValues[s] === {} && UpValues[s] === {}, HoldAll]] === True]]`;
+        try {
+            const r = await wolframShim.evalOnce({ expression: probe, timeoutSeconds: 10, signal });
+            if (r && r.ok && typeof r.value === 'string') {
+                for (const m of r.value.matchAll(/"([A-Za-z][A-Za-z0-9]*)"/g)) undef.push(m[1]);
+            }
+        } catch (_) { /* fail-open */ }
+    }
+    return undef;
+}
+
 module.exports = {
     EXPR_PREVIEW_CHARS,
     previewExpr,
@@ -107,4 +146,5 @@ module.exports = {
     parseFiniteNumber,
     formatNum,
     splitTopLevelEquality,
+    findUndefinedCheckSymbols,
 };

@@ -73,4 +73,67 @@ function escapeWL(code) {
     return code.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
-module.exports = { escapeHtml, decodeWolframOctal, decodeWstpText, escapeWL };
+// Optional box-to-LaTeX provider — injected by tools/index.js at load time so encoding.js
+// stays dependency-free.  fn receives the raw BoxData[...] string and returns a LaTeX string
+// or null/undefined on failure.
+let _boxToLatexProvider = null;
+function setBoxToLatexProvider(fn) { _boxToLatexProvider = fn; }
+
+/**
+ * cleanPrintLine — convert a raw WSTP TextPacket (onPrint callback) into human-readable text.
+ *
+ * Handles:
+ *  - *STR* prefix: kernel-tagged string value — strip prefix, decode WSTP escaping
+ *  - BoxData[InterpretationBox["display", expr, ...]]: extract second arg (the expr text)
+ *  - BoxData[...]: opaque typeset formula — return '[formula]' placeholder
+ *  - *SVG* / *HTML* / *WBP*: binary/rich content — return descriptive placeholder
+ *  - Multi-arg Print: args separated by ASCII File Separator (\x1c) — process each part
+ *  - Plain text: decode WSTP octal byte sequences and backslash doubling
+ *  - \\012: newline escape from WSTP TextPacket
+ * @param {string} rawLine  Raw string from the onPrint callback
+ * @returns {string}
+ */
+function cleanPrintLine(rawLine) {
+    const s = rawLine.replace(/\\012/g, '\n');
+    // Multi-arg Print separates args with ASCII File Separator (\x1c)
+    const parts = s.split('\x1c');
+    const cleaned = parts.map(t => {
+        // *STR* prefix: the kernel tagged this as a plain string value
+        if (t.startsWith('*STR*')) {
+            return decodeWstpText(t.slice(5));
+        }
+        // BoxData[...]: try the injected BTL provider first (converts boxes → LaTeX via C++ addon)
+        if (t.startsWith('BoxData[')) {
+            if (_boxToLatexProvider) {
+                try {
+                    const latex = _boxToLatexProvider(t);
+                    if (latex != null && latex !== '') return latex;
+                } catch (_) {}
+            }
+            // Fallback: InterpretationBox second arg is readable without BTL
+            if (t.startsWith('BoxData[InterpretationBox[')) {
+                const inner = t.slice('BoxData[InterpretationBox['.length);
+                if (inner.startsWith('"')) {
+                    let i = 1;
+                    while (i < inner.length) {
+                        if (inner[i] === '"' && inner[i - 1] !== '\\') break;
+                        i++;
+                    }
+                    const rest = inner.slice(i + 1).replace(/^\s*,\s*/, '');
+                    const m = rest.match(/^([\s\S]*?),\s*(?:Editable|AutoDelete)\s*->/);
+                    if (m) return decodeWstpText(m[1].trim());
+                }
+            }
+            return '[formula]';
+        }
+        // Binary/rich content — not useful as plain text
+        if (t.startsWith('*SVG*')) return '[graphics]';
+        if (t.startsWith('*HTML*')) return '[info]';
+        if (t.startsWith('*WBP*')) return t.slice(5);
+        // Plain text: decode WSTP octal byte sequences (\316\223 → Γ) and backslash doubling
+        return decodeWstpText(t);
+    });
+    return cleaned.join('');
+}
+
+module.exports = { escapeHtml, decodeWolframOctal, decodeWstpText, escapeWL, cleanPrintLine, setBoxToLatexProvider };

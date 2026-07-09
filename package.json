@@ -3,7 +3,7 @@
   "displayName": "Mathematica & Wolfram Language Notebooks for VS Code — Wolfbook",
   "description": "Mathematica-style Wolfram Language notebooks in VS Code. Run a live Wolfram kernel, render LaTeX/graphics, debug code, and let Copilot, Claude Code or MCP agents evaluate cells.",
   "publisher": "wolfbook",
-  "version": "2.7.20",
+  "version": "2.7.22",
   "engines": {
     "vscode": "^1.95.0"
   },
@@ -94,10 +94,7 @@
           ".m",
           ".wls",
           ".wlt",
-          ".mt",
-          ".vsnb",
-          ".evsnb",
-          ".wb"
+          ".mt"
         ],
         "configuration": "./wolfram.language-configuration.json"
       },
@@ -461,6 +458,14 @@
           "description": "DeepSeek API base URL.",
           "order": 112
         },
+        "wolfbook.oberon.providers.deepseek.timeoutMs": {
+          "type": "number",
+          "default": 120000,
+          "minimum": 10000,
+          "scope": "application",
+          "markdownDescription": "Per-request timeout in milliseconds for DeepSeek calls. On streaming calls this bounds time-to-first-byte only — a live stream is guarded by the SSE stall detector instead. Raise it if long reasoning-model calls (deepseek-v4-pro) time out.",
+          "order": 112.5
+        },
         "wolfbook.oberon.providers.openai.apiKey": {
           "type": "string",
           "default": "",
@@ -539,19 +544,17 @@
           "markdownDescription": "Default Fairy (worker) model binding. `maxTokens`: max output tokens per LLM call (default 12000). `contextWindow`: input context limit in tokens. `pricing` values are USD per **million** tokens.",
           "order": 121
         },
-        "wolfbook.oberon.roles.skeptic": {
-          "type": "object",
-          "scope": "window",
-          "default": {},
-          "markdownDescription": "Optional override for the Skeptic Fairy. Empty object = use `roles.fairy`.",
-          "order": 122
-        },
         "wolfbook.oberon.roles.postmortem": {
           "type": "object",
           "scope": "window",
           "default": {},
           "markdownDescription": "Optional override for the postmortem narrative model. Empty object = use `roles.fairy`.",
           "order": 123
+        },
+        "wolfbook.oberon.roles.director": {
+          "type": "object",
+          "default": {},
+          "markdownDescription": "Role binding for the **Oberon Director** (the planning/analysis layer above the Fairy): `{ \"provider\": \"anthropic|openai|deepseek\", \"model\": \"...\", \"maxTokens\": 8000, \"pricing\": {...} }`. Empty → falls back to the `oberon` role binding."
         },
         "wolfbook.oberon.budgets.fairyDefault": {
           "type": "object",
@@ -583,13 +586,6 @@
           "maximum": 8,
           "description": "Multiplier for the per-Charm tool-turn cap. Each Charm gets its own fresh counter of `budgets.fairyDefault.maxLlmCalls × toolLoopMultiplier` tool-calling LLM rounds before forced finalisation. Default 2 (effective cap ≈ 60 with the default 30 maxLlmCalls).",
           "order": 132
-        },
-        "wolfbook.oberon.wardsEnabled": {
-          "type": "boolean",
-          "scope": "window",
-          "default": false,
-          "description": "Enable the Skeptic 'wards' deep-verification chain (boolean / numeric / symbolic / random sampling). Off by default — wards can fire false-failures when the Charm-local kernel state differs from the planner's `validationChecks` expressions.",
-          "order": 133
         },
         "wolfbook.oberon.priceTablePath": {
           "type": "string",
@@ -760,7 +756,7 @@
         },
         "wolfbook.oberon.executive.autoDispatch": {
           "type": "boolean",
-          "default": false,
+          "default": true,
           "scope": "window",
           "markdownDescription": "When enabled, Oberon's executive-analysis follow-up briefs (`decompose_further`, `retry_subset`, `extract_and_continue`, `reformulate_brief`) are auto-dispatched as a new research run without waiting for the user to click *Run Oberon Follow-up*. Bounded by `executive.maxAutoFollowups` to prevent unbounded chains.",
           "order": 190
@@ -782,6 +778,56 @@
           "scope": "window",
           "description": "Maximum number of executive analyses Oberon may run within a single Quest (across failing Charms).",
           "order": 192
+        },
+        "wolfbook.oberon.director.maxStages": {
+          "type": "number",
+          "default": 6,
+          "markdownDescription": "Director: maximum fairy stages per programme (1–12)."
+        },
+        "wolfbook.oberon.director.maxReplans": {
+          "type": "number",
+          "default": 4,
+          "markdownDescription": "Director: maximum plan mutations (revise/insert/drop) per programme."
+        },
+        "wolfbook.oberon.director.maxLitConsults": {
+          "type": "number",
+          "default": 2,
+          "markdownDescription": "Director: maximum literature consults per programme."
+        },
+        "wolfbook.oberon.director.maxAskUser": {
+          "type": "number",
+          "default": 1,
+          "markdownDescription": "Director: maximum questions to the human per programme (0 = fully autonomous)."
+        },
+        "wolfbook.oberon.director.maxUSD": {
+          "type": "number",
+          "default": 15,
+          "markdownDescription": "Director: per-programme cost cap in USD (replaces the per-run budget for Director runs). A 15% reserve is kept for synthesis + report."
+        },
+        "wolfbook.oberon.director.maxLlmCalls": {
+          "type": "number",
+          "default": 400,
+          "markdownDescription": "Director: per-programme LLM-call cap."
+        },
+        "wolfbook.oberon.director.compilePdf": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Director: try to compile report.tex to PDF with pdflatex (best-effort; the .tex is always written)."
+        },
+        "wolfbook.oberon.director.skillCandidate": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Director: raise a SkilXiv skill candidate when the synthesis judges the result considerable and novel (goes to the review inbox; never auto-submits unless autoSubmitSkill)."
+        },
+        "wolfbook.oberon.director.autoSubmitSkill": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Director: auto-submit the authored skill draft to SkilXiv when signed in (default off — drafts wait in the review panel)."
+        },
+        "wolfbook.oberon.director.stageContinuations": {
+          "type": "number",
+          "default": 1,
+          "markdownDescription": "Director: fairy budget continuations auto-granted per stage (no dialogs)."
         },
         "wolfbook.oberon.memory.extractPartialFacts": {
           "type": "boolean",
@@ -1122,6 +1168,18 @@
         "title": "Oberon: Start Research…",
         "category": "Oberon",
         "icon": "$(play)"
+      },
+      {
+        "command": "wolfbook.oberon.startDirector",
+        "title": "Oberon: Director Research (multi-stage)…",
+        "category": "Oberon",
+        "icon": "$(organization)"
+      },
+      {
+        "command": "wolfbook.oberon.resumeDirector",
+        "title": "Oberon: Resume Director Programme…",
+        "category": "Oberon",
+        "icon": "$(debug-continue)"
       },
       {
         "command": "wolfbook.oberon.abortRun",
@@ -1760,7 +1818,7 @@
       {
         "name": "wolfbook_remote_checkpoint",
         "displayName": "Wolfbook Remote Checkpoint",
-        "modelDescription": "REQUIRED USAGE — agent working memory. Persist a structured checkpoint (plan, decision, finding, summary, or blocker) for the active Wolfbook notebook. The checkpoint is saved to disk under the notebook's .img/ sidecar directory AND mirrored to any paired iOS device watching the workspace. The tool's reply lists prior checkpoints for the same notebook, so the agent should call this tool at session start (with kind='summary' to read prior context) and after every meaningful step (decisions, findings, plan updates, blockers). Treat the checkpoint history as your durable working memory across sessions.",
+        "modelDescription": "Agent working memory for LONG sessions (recommended, not required for quick tasks). Persist a structured checkpoint (plan, decision, finding, summary, or blocker) for the active Wolfbook notebook. The checkpoint is saved to disk under the notebook's .img/ sidecar directory AND mirrored to any paired iOS device watching the workspace. The tool's reply lists prior checkpoints for the same notebook, so the agent should call this tool at session start (with kind='summary' to read prior context) and after every meaningful step (decisions, findings, plan updates, blockers). Treat the checkpoint history as your durable working memory across sessions.",
         "canBeReferencedInPrompt": false,
         "tags": [
           "wolfbook",
@@ -1805,6 +1863,70 @@
                 "type": "string"
               },
               "description": "Optional list of workspace-relative file paths this checkpoint references."
+            }
+          }
+        }
+      },
+      {
+        "name": "wolfbook_newNotebook",
+        "displayName": "Wolfbook: New Notebook",
+        "toolReferenceName": "wolfbookNewNotebook",
+        "canBeReferencedInPrompt": true,
+        "modelDescription": "Create a new Wolfbook .wb/.evsnb/.vsnb notebook file, open it in VS Code as a notebook editor, wait until the editor is visible and ready, and make it the current MCP session target for subsequent Wolfbook editing tools. Use this before building a notebook from scratch. Pass path as an absolute path or workspace-relative filename; relative paths are resolved against the active notebook directory or workspace root. By default existing files are not overwritten.",
+        "inputSchema": {
+          "type": "object",
+          "required": [],
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "Absolute path or workspace-relative notebook filename/path. Extension may be omitted; .wb is added by default."
+            },
+            "filename": {
+              "type": "string",
+              "description": "Alias for path, useful when creating in the active notebook directory or workspace root."
+            },
+            "directory": {
+              "type": "string",
+              "description": "Optional base directory for relative path/filename. Defaults to the active notebook directory, then workspace root."
+            },
+            "overwrite": {
+              "type": "boolean",
+              "description": "If true, replace an existing notebook at the target path. Default false."
+            },
+            "target": {
+              "type": "boolean",
+              "description": "If false, create/open the notebook but do not make it the MCP session target. Default true."
+            },
+            "waitMs": {
+              "type": "number",
+              "description": "Maximum time to wait for VS Code to open and show the notebook editor. Default 10000, max 60000."
+            },
+            "cells": {
+              "type": "array",
+              "description": "Optional initial cells. Each item: {kind:'code'|'markdown', content:string}.",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "code",
+                      "markdown"
+                    ]
+                  },
+                  "content": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "content"
+                ]
+              }
+            },
+            "metadata": {
+              "type": "object",
+              "description": "Optional notebook-level metadata to include in the new file."
             }
           }
         }
@@ -2046,7 +2168,7 @@
         "name": "wolfbook_runCell",
         "displayName": "Wolfbook: Run Cell(s)",
         "toolReferenceName": "wolfbookRun",
-        "modelDescription": "Execute cells in the notebook. SINGLE CELL MODE: provide 'cellId' (stable identifier, preferred) or 'cellNumber' (1-based) — the cell is re-run with its existing source. There is no 'code' parameter; to run different code use wolfbook_evaluateExpression or first edit the cell with wolfbook_editCell. RANGE MODE: omit cellId/cellNumber and provide 'startCell' and 'endCell' to execute a block of cells. Set 'stopOnError':true (default) to halt on first error. Returns cell output after execution.",
+        "modelDescription": "Execute cells in the notebook. SINGLE CELL MODE: provide 'cellId' (stable identifier, preferred) or 'cellNumber' (1-based) — the cell is re-run with its existing source. There is no 'code' parameter; to run different code use wolfbook_evaluateExpression or first edit the cell with wolfbook_editCell. RANGE MODE (prefer wolfbook_runCells for this): omit cellId/cellNumber and provide 'startCell' and 'endCell' to execute a block of cells. Set 'stopOnError':true (default) to halt on first error. Returns cell output after execution.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
@@ -2452,10 +2574,52 @@
         }
       },
       {
+        "name": "wolfbook_fairy_dispatch",
+        "displayName": "Wolfbook: Fairy Dispatch",
+        "toolReferenceName": "wolfbookFairyDispatch",
+        "modelDescription": "Dispatch the Oberon Fairy — a background Wolfram-computation SUB-AGENT running on a cheap local LLM with a heavy verification harness — and return immediately with a runId. USE IT FOR: well-specified, self-contained symbolic/numeric computations that would take many kernel iterations (build+diagonalise a Hamiltonian, solve Bethe-ansatz equations, verify an identity across parameter ranges). It explores in the LIVE kernel, records a reproducible derivation chain, replays it on a fresh kernel, executes your validationChecks, and delivers a verified notebook (clean.wb) plus distilled facts — typical duration 5–30 min, cost ~$0.05. WRITE THE TASK LIKE A CONTRACT: state every parameter (L, boundary conditions, couplings, representation), the exact deliverables, and pass 2–6 validationChecks (Wolfram expressions that must return True or a numeric |value|<1e-8) — the checks are YOUR quality gate over the sub-agent; a vague task wastes the run. CRITICAL: the run RESTARTS the shared Wolfram kernel — do not use wolfbook_evaluateExpression/runCell while it works (your kernel session state is lost), and only one run can be active at a time. Poll wolfbook_fairy_status (~every 60s) for progress and results. Do NOT dispatch tasks needing literature judgment or ambiguous specs — resolve those yourself first.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "task": {
+              "type": "string",
+              "description": "Complete, self-contained computation spec: every parameter fixed, deliverables explicit, symbol names suggested (so validationChecks can reference them). 1–2 paragraphs."
+            },
+            "validationChecks": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "2–6 Wolfram Language expressions that independently verify correctness (each must evaluate to True or to a number with |value| < 1e-8), e.g. \"Abs[Tr[H]] < 1*^-8\", \"HermitianMatrixQ[H]\". Executed against the delivered chain's kernel; failures block delivery."
+            }
+          },
+          "required": [
+            "task"
+          ]
+        }
+      },
+      {
+        "name": "wolfbook_fairy_status",
+        "displayName": "Wolfbook: Fairy Status",
+        "toolReferenceName": "wolfbookFairyStatus",
+        "modelDescription": "Check the progress/result of a Fairy sub-agent run started with wolfbook_fairy_dispatch. Returns phase (explore/compile/polish/delivered/...), status, probes/turns/cost so far, recent probe notes, the established facts (the distilled results — often all you need), artifact paths (clean.wb = verified deliverable notebook; clean_partial.wb = honest partial report), run metrics, and the build stamp. Omit runId to query the latest run. Poll roughly once a minute while active; when status is 'delivered', read the facts here and open clean.wb (wolfbook_getNotebookContext with the notebook name) if you need the full derivation. 'partial_delivered' means budget ran out or verification failed — the partial report lists what worked, what failed, and how to re-scope a retry.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "runId": {
+              "type": "string",
+              "description": "Run id from wolfbook_fairy_dispatch (e.g. \"run_2026-07-02T08-31-53-589Z\"). Omit for the most recent run."
+            }
+          }
+        }
+      },
+      {
         "name": "wolfbook_paperSearch",
         "displayName": "Wolfbook: Paper Search",
         "toolReferenceName": "wolfbookPaper",
-        "modelDescription": "Search academic papers (HEP/math/physics) via INSPIRE-HEP with arXiv fallback. Five actions: (1) 'search' — find papers by title, author, abstract, arXiv ID, INSPIRE texkey, or freeform query; results include title, authors, year, INSPIRE citation count, abstract, ar5iv HTML link, and INSPIRE URL. (2) 'bibtex' — fetch a full BibTeX @article record from INSPIRE. (3) 'bibitem' — fetch a LaTeX \\bibitem record (INSPIRE latex-us format). (4) 'references' — list all papers cited BY a paper from INSPIRE (34+ entries typical); add includeContexts:true to also fetch from Semantic Scholar the exact sentences in which each reference is cited. (5) 'citations' — list papers that CITE a given paper, with citation context sentences from Semantic Scholar. Identifier formats accepted: new arXiv IDs ('2103.15840'), old arXiv IDs ('hep-th/0212208'), INSPIRE texkeys ('Gromov:2013pga'), or numeric INSPIRE record IDs. arXiv IDs are resolved via the INSPIRE /api/arxiv/<id> endpoint for reliable lookup. Falls back to arXiv API search for non-HEP papers. Use this tool any time you need to find, cite, or survey academic papers.",
+        "modelDescription": "Search AND read academic papers (HEP/math/physics) via INSPIRE-HEP with arXiv fallback. Six actions: (1) 'search' — find papers by title, author, abstract, arXiv ID, INSPIRE texkey, or freeform query; results include title, authors, year, INSPIRE citation count, abstract, ar5iv HTML link, and INSPIRE URL. (2) 'bibtex' — fetch a full BibTeX @article record from INSPIRE. (3) 'bibitem' — fetch a LaTeX \\bibitem record (INSPIRE latex-us format). (4) 'references' — list all papers cited BY a paper from INSPIRE (34+ entries typical); add includeContexts:true to also fetch from Semantic Scholar the exact sentences in which each reference is cited. (5) 'citations' — list papers that CITE a given paper, with citation context sentences from Semantic Scholar. (6) 'read' — fetch a paper's FULL TEXT (ar5iv/arXiv HTML) and return section headings, numbered display equations (LaTeX), and the body text most relevant to an optional 'query' focus; requires an arXiv ID; equations are transcriptions — verify before relying on them. Identifier formats accepted: new arXiv IDs ('2103.15840'), old arXiv IDs ('hep-th/0212208'), INSPIRE texkeys ('Gromov:2013pga'), or numeric INSPIRE record IDs. arXiv IDs are resolved via the INSPIRE /api/arxiv/<id> endpoint for reliable lookup. Falls back to arXiv API search for non-HEP papers. Use this tool any time you need to find, cite, or survey academic papers.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
@@ -2464,6 +2628,7 @@
               "type": "string",
               "enum": [
                 "search",
+                "read",
                 "bibtex",
                 "bibitem",
                 "references",
@@ -2502,6 +2667,10 @@
             "maxResults": {
               "type": "number",
               "description": "Maximum number of results (default: 5 for search, 10 for citations, max 20/50)."
+            },
+            "maxEquations": {
+              "type": "number",
+              "description": "For action 'read': max display equations to return (default 40, cap 120)."
             }
           }
         }
@@ -3330,7 +3499,7 @@
         "displayName": "Wolfslide: Block Operations",
         "toolReferenceName": "wolfslideBlock",
         "canBeReferencedInPrompt": true,
-        "modelDescription": "Block-level operations on slide blocks.\n\naction=\"insert\": add a new block to a slide.\naction=\"edit\": patch a block's properties by blockId or blockName (pass updates or patch object; null value = delete key; childrenOps for precise child array ops).\naction=\"delete\": remove a block by blockId or blockName.\naction=\"move\": relocate a block within or between containers (by blockId or blockName).\naction=\"bulkEdit\": apply many explicit {blockId, updates} edits in one atomic save.\naction=\"getBlock\": retrieve full JSON of one block by blockId or blockName.\naction=\"bulkPatch\": apply the SAME patch to every block matching a selector across the entire deck — the efficient way to normalize styles, apply presets, or fix many blocks at once.\n\nbulkPatch selector keys: type (block type), className, namePattern (glob, e.g. 'title-*'), blockIds (explicit array), hasStyle ({key:value} match), stylePreset. All selector keys are ANDed.\nExample: wolfslide_block({ action:'bulkPatch', selector:{type:'box'}, patch:{stylePreset:'section-header'} })",
+        "modelDescription": "Block-level operations on slide blocks.\n\naction=\"insert\": add a new block to a slide.\naction=\"edit\": patch a block's properties by blockId or blockName (for SIMPLE property changes prefer wolfslide_patchBlock; this action adds childrenOps for precise child-array edits; null value = delete key).\naction=\"delete\": remove a block by blockId or blockName.\naction=\"move\": relocate a block within or between containers (by blockId or blockName).\naction=\"bulkEdit\": apply many explicit {blockId, updates} edits in one atomic save.\naction=\"getBlock\": retrieve full JSON of one block by blockId or blockName.\naction=\"bulkPatch\": apply the SAME patch to every block matching a selector across the entire deck — the efficient way to normalize styles, apply presets, or fix many blocks at once.\n\nbulkPatch selector keys: type (block type), className, namePattern (glob, e.g. 'title-*'), blockIds (explicit array), hasStyle ({key:value} match), stylePreset. All selector keys are ANDed.\nExample: wolfslide_block({ action:'bulkPatch', selector:{type:'box'}, patch:{stylePreset:'section-header'} })",
         "inputSchema": {
           "type": "object",
           "required": [
@@ -3456,7 +3625,7 @@
         "displayName": "Wolfslide: Advanced Operations",
         "toolReferenceName": "wolfslideAdvanced",
         "canBeReferencedInPrompt": true,
-        "modelDescription": "Advanced slide operations. Actions: 'duplicate' deep-copies a slide (new ids assigned), 'check' audits the entire deck for issues (empty slides, missing alt-text, fragment gaps, duplicate labels), 'reorderFragments' sets animation step order on a slide, 'measure' returns rendered block sizes and detects overflow.",
+        "modelDescription": "Advanced slide operations. Actions: 'duplicate' deep-copies a slide (alias of wolfslide_duplicateSlide — prefer that tool), 'check' audits the entire deck for issues (empty slides, missing alt-text, fragment gaps, duplicate labels), 'reorderFragments' sets animation step order on a slide, 'measure' returns rendered block sizes and detects overflow.",
         "inputSchema": {
           "type": "object",
           "required": [
@@ -3666,7 +3835,7 @@
         "displayName": "Wolfbook: Run Cell Range",
         "toolReferenceName": "wolfbookRunCells",
         "canBeReferencedInPrompt": true,
-        "modelDescription": "Run a contiguous range of notebook cells sequentially and return their combined output. Use startCell/endCell (1-based cell numbers) to specify the range. Cells are run in order; if stopOnError is true (default), execution stops on the first error. Returns a summary line per cell showing output or error. Equivalent to wolfbook_runRange.",
+        "modelDescription": "Run a contiguous range of notebook cells sequentially and return their combined output. Use startCell/endCell (1-based cell numbers) to specify the range. Cells are run in order; if stopOnError is true (default), execution stops on the first error. Returns a summary line per cell showing output or error. Prefer this over repeated wolfbook_runCell calls when executing consecutive cells.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -3715,6 +3884,11 @@
     ],
     "configurationDefaults": {
       "wolfbook.editor.globalSymbolColor": "",
+      "workbench.editorAssociations": {
+        "*.wb": "extended-wolfram-notebook",
+        "*.evsnb": "extended-wolfram-notebook",
+        "*.vsnb": "extended-wolfram-notebook"
+      },
       "workbench.colorCustomizations": {
         "editor.wordHighlightBackground": "#3399ff18",
         "editor.wordHighlightStrongBackground": "#3399ff28",
@@ -4362,11 +4536,22 @@
     "lint": "eslint src --ext ts",
     "watch": "concurrently \"tsc -b --watch\" \"webpack --mode development --watch\"",
     "pretest": "webpack --mode development && npm run lint",
-    "test": "node ./out/test/runTest.js"
+    "test": "node ./out/test/runTest.js",
+    "wslide:lint": "node test/wslide/harness.js lint",
+    "wslide:roundtrip": "node test/wslide/harness.js roundtrip",
+    "wslide:golden": "node test/wslide/harness.js golden",
+    "wslide:check": "node test/wslide/harness.js check",
+    "wslide:sanitize-unit": "node test/wslide/sanitize-unit.js",
+    "wslide:sanitize": "node test/wslide/sanitize-gate.js",
+    "wslide:layout-unit": "node test/wslide/layout-unit.js",
+    "wslide:snap-unit": "node test/wslide/snap-unit.js",
+    "wslide:shape-unit": "node test/wslide/shape-unit.js",
+    "wslide:verb-unit": "node test/wslide/verb-unit.js"
   },
   "devDependencies": {
     "@types/glob": "^8.1.0",
     "@types/mocha": "^8.2.3",
+    "linkedom": "^0.18.12",
     "@types/node": "18.11.9",
     "@types/uuid": "^9.0.8",
     "@types/vscode": "^1.95.0",

@@ -173,8 +173,19 @@ Discipline:
 23. **Call \`plan\` as your very first tool call.** Before any probe, call \`plan\`
     with an ordered list of 2–10 sub-tasks you intend to work through. This posts
     a visible roadmap into the working notebook for the user. You may call \`plan\`
-    only once — commit to your plan and proceed. If the task turns out to be
-    different than expected, adapt within your probes; do not attempt to re-plan.
+    only once — commit to your plan and proceed. If the EVIDENCE genuinely
+    invalidates the plan (a probe shows the chosen method cannot work), call
+    \`revise_plan\` (max 2 per run) stating what changed and why, referencing the
+    probe. Never silently drift from the posted plan.
+24. **Record ONE cross-check step before finishing.** Verify the headline result by an
+    INDEPENDENT path — a numeric spot-check of a symbolic result, a second method, a
+    limiting case, or a trace/Casimir/symmetry identity — and \`record\` that probe with
+    \`role: "crosscheck"\`. Plan for it from the start (make it a step in your \`plan\`).
+    The harness defers your first \`done_exploring\` if no crosscheck step exists.
+    A cross-check must COMPUTE both sides. Hand-typing the expected values
+    (e.g. \`betheCounts = {50, 128, 10, 10, 18}\`) and comparing against them proves
+    nothing — if the reference numbers came from an earlier probe, call that step's
+    symbols by name; if they come from theory, derive them in the kernel first.
 25. **Register reusable helpers with \`define_util\`.** If you define a helper
     function, pattern, or constant that you expect to call in 2 or more future
     probes, register it once with \`define_util\` (verified by eval). Then call it
@@ -217,6 +228,26 @@ Discipline:
     equation as a literal, and never treat the brief's output as established. The papers it
     surfaces are cited automatically in the run's "Literature consulted" block — you do not
     cite them by hand.
+    **Mine a found paper with \`lit_read\`, not with more searches.** Once
+    \`research_literature\` has surfaced the right paper, ask \`lit_read\` focused follow-up
+    questions about THAT paper ("what normalisation does eq (3.12) use?", "give the full
+    QQ-relation and the definitions around it"). It reads the cached full text, returns
+    numbered equations and excerpts, and does NOT consume the 3-search budget (own cap:
+    6 reads). Re-running \`research_literature\` for details of a paper you already found
+    wastes a search and is rejected as a near-duplicate.
+    **When literature fails, ask the human.** If the searches come back empty or
+    irrelevant and a known published method is essential, use \`ask_specialist\` (when
+    available) to ask the user for a concrete reference — author, title, or arXiv id —
+    then \`lit_read\` that id directly (up to 2 such direct reads per run). The same tool
+    is the right move EARLY when the task statement itself is ambiguous (which
+    representation? which convention? which boundary conditions?): ask before building
+    on a guess, not after.
+
+30. **Flag missing skills — \`note_skill_gap\`.** If you solve (or struggle through) a
+    sub-problem where a reusable SkilXiv skill WOULD have helped but none was recalled —
+    or the recalled one covered a different model/algebra — call \`note_skill_gap\` with
+    the topic and one sentence on what the skill should contain (max 2 per run). This
+    files a request so the gap gets authored; it does not affect your current run.
 
 The single most common failure is re-pasting a helper you already defined into the
 top of every probe. The helper is ALREADY ALIVE in the kernel — calling it by name
@@ -244,7 +275,8 @@ notebook is ALL your recorded steps run top-to-bottom on a fresh kernel** (with 
 \`define_util\` helper emitted first), not just the final step. So confirm: (a) the chain
 starts from inputs/utils and each step builds on prior symbols; (b) your final/summary
 step REFERENCES computed symbols rather than re-typing literal values; (c) there are no
-dead-end steps left recorded (invalidate any that should not appear). \`excludeSteps\` may
+dead-end steps left recorded (invalidate any that should not appear); (d) at least one
+recorded step has \`role: "crosscheck"\` (rule 24). \`excludeSteps\` may
 prune a step from the clean notebook; you rarely need it if you recorded cleanly.
 
 When your chain is complete, emit ONE of these control signals as plain JSON text
@@ -362,7 +394,7 @@ function buildRecallContextBlock(recallResult) {
  * }} params
  * @returns {string}
  */
-function buildExploreUserMessage({ taskDescription, inputs, assumptions, budget, charmId, kernelFresh, inputsLoaded, recallBlock }) {
+function buildExploreUserMessage({ taskDescription, inputs, assumptions, budget, charmId, kernelFresh, inputsLoaded, recallBlock, validationChecks, handoff, skillGaps }) {
     const lines = [];
 
     lines.push(`## Task (charm: ${charmId})`);
@@ -389,6 +421,27 @@ function buildExploreUserMessage({ taskDescription, inputs, assumptions, budget,
         lines.push('$Assumptions has been set in your kernel.');
     }
 
+    if (handoff && ((handoff.utils && handoff.utils.length) || (handoff.facts && handoff.facts.length))) {
+        lines.push('');
+        lines.push('## Results from completed sub-tasks (already in your kernel)');
+        if (handoff.utils && handoff.utils.length) {
+            lines.push(`Utilities loaded — call BY NAME, do NOT redefine: ${handoff.utils.join(', ')}`);
+        }
+        if (handoff.facts && handoff.facts.length) {
+            lines.push(`Established results (see the "Established results" ledger): ${handoff.facts.join(', ')}`);
+        }
+        lines.push('Build on these — re-deriving them wastes your probe budget.');
+    }
+
+    if (validationChecks && validationChecks.length > 0) {
+        lines.push('');
+        lines.push('## Validation checks (run automatically after delivery — make them pass)');
+        lines.push('These Wolfram expressions will be executed against your final chain\'s kernel state.');
+        lines.push('Each must return True, or a numeric value with |value| < 1e-8.');
+        validationChecks.forEach((vc, i) => lines.push(`  vc${i + 1}: ${vc}`));
+        lines.push('Use the SAME symbol names in your recorded steps so these checks can find your results.');
+    }
+
     lines.push('');
     lines.push('## Kernel state');
     if (kernelFresh === false) {
@@ -403,6 +456,14 @@ function buildExploreUserMessage({ taskDescription, inputs, assumptions, budget,
 
     if (recallBlock) {
         lines.push(recallBlock);
+    }
+
+    if (skillGaps && skillGaps.length > 0) {
+        lines.push('');
+        lines.push('## Known skill gaps (the registry has NO skill for these)');
+        for (const g of skillGaps) lines.push(`- ${g}`);
+        lines.push('You must derive these capabilities yourself — do it CLEANLY (record the steps,');
+        lines.push('note_fact the results): a delivered run banks them as candidate NEW skills.');
     }
 
     lines.push('');
@@ -511,12 +572,14 @@ function buildPolishEntryMessage({ cleanNbPath, runCleansRemaining, polishTurnsR
         '',
         '### Required steps',
         '',
-        '1. Call `run_clean` — this restarts the kernel and runs every code cell in clean.wb.',
-        '   You will receive per-cell results including any errors or warnings.',
+        '1. Call `run_clean` — this restarts the kernel, runs every code cell in clean.wb,',
+        '   and then executes the task\'s VALIDATION CHECKS in the same kernel. You will',
+        '   receive per-cell results and per-check pass/fail results.',
         '2. If `allClean: true` → emit `{ "control": "clean_verified" }` to deliver.',
-        '3. If there are errors or warnings:',
-        '   - Use `edit_cell` to fix the affected cell(s) in clean.wb.',
-        '   - You may also use `probe` to test a fix in the kernel before committing it.',
+        '   Do NOT call `run_clean` again after a pass — a repeat with no edits is rejected.',
+        '3. If there are errors, warnings, or failing validation checks:',
+        '   - Use `probe` FIRST to evaluate the failing expression and understand why it fails.',
+        '   - Then use `edit_cell` to fix the affected cell(s) in clean.wb.',
         '   - After editing, call `run_clean` again to verify.',
         '   - Repeat until `allClean: true`.',
         '',
@@ -527,8 +590,16 @@ function buildPolishEntryMessage({ cleanNbPath, runCleansRemaining, polishTurnsR
         '- Every warning is a failure. Wolfram Language warnings like `::wrsym`, `::set`,',
         '  or `::shdw` must be eliminated, not suppressed.',
         '- Do NOT use `Quiet[...]` to hide warnings — fix the root cause.',
+        '- NEVER delete or weaken a failing check to make the run pass. A cell belonging',
+        '  to a crosscheck step is protected: an edit that removes its verification is',
+        '  rejected. Failing validation checks mean the RESULT is wrong — fix the chain.',
         '- If a cell defines a symbol that wolfbook already protects, rename your symbol.',
         '- If a fix breaks a different cell downstream, fix that too.',
+        '- If a RECORDED STEP itself is mathematically wrong (the error is in the chain,',
+        '  not in a cell\'s text), emit `{ "control": "reopen_chain", "stepId": "<step>",',
+        '  "reason": "..." }` as plain JSON (no tool call). Available ONCE per run: it',
+        '  invalidates that step, returns you to Explore to fix and re-record it, then',
+        '  recompiles. Do NOT use it for warnings that `edit_cell` can fix.',
         '',
         '### Budget',
         `- run_clean calls remaining: **${runCleansRemaining}**`,
@@ -622,17 +693,30 @@ function buildCompactionPrompt(messages) {
 // ── Partial-report phase entry message ────────────────────────────────────────
 
 /**
- * Message sent to the agent when it enters the partial_report phase after budget exhaustion.
+ * Message sent to the agent when it enters the partial_report phase — after budget
+ * exhaustion, or after a polish failure (contextNote explains which).
  *
- * @param {{ stepsRecorded: number, probesUsed: number, partialReportTurnsRemaining: number }} status
+ * @param {{ stepsRecorded: number, probesUsed: number, partialReportTurnsRemaining: number, contextNote?: string }} status
  * @returns {string}
  */
-function buildPartialReportUserMessage({ stepsRecorded, probesUsed, partialReportTurnsRemaining }) {
+function buildPartialReportUserMessage({ stepsRecorded, probesUsed, partialReportTurnsRemaining, contextNote }) {
+    const opening = contextNote
+        ? [
+            '## Run Could Not Complete — Write Partial Report',
+            '',
+            `**Context:** ${contextNote}`,
+            `You have recorded **${stepsRecorded}** step(s) and used ${probesUsed} probe(s).`,
+            'A compiled clean.wb exists but did NOT verify cleanly — reference it in your',
+            'summary and state exactly what remains unverified. Do NOT claim full verification.',
+        ]
+        : [
+            '## Probe Budget Exhausted — Write Partial Report',
+            '',
+            `You have used all ${probesUsed} probe(s) without completing the task.`,
+            `You have recorded **${stepsRecorded}** step(s) so far.`,
+        ];
     const lines = [
-        '## Probe Budget Exhausted — Write Partial Report',
-        '',
-        `You have used all ${probesUsed} probe(s) without completing the task.`,
-        `You have recorded **${stepsRecorded}** step(s) so far.`,
+        ...opening,
         '',
         'Your job now is to write **clean_partial.wb** — a structured partial-results report',
         'that Oberon can use to refactor or re-scope this task for a future run.',

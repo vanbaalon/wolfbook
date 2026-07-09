@@ -466,6 +466,16 @@ function slideToHTML(slide, defaultBg, deck) {
 
 // ── v2 block → HTML ───────────────────────────────────────────────────────
 
+// Combines offset (animation nudge) + rotation into one `transform:` CSS
+// declaration, in a fixed order, mirroring _blockTransform() in
+// wslide-editor.html so exported HTML/PDF matches the editor/present-mode.
+function _blockTransformCSS(block) {
+    let t = '';
+    if (block.offset && (block.offset.dx || block.offset.dy)) t += `translate(${block.offset.dx||0}px,${block.offset.dy||0}px)`;
+    if (block.rotation) t += (t ? ' ' : '') + `rotate(${block.rotation}deg)`;
+    return t ? `transform:${t};` : '';
+}
+
 function blockToHTML(block) {
     if (!block) return '';
     const fo        = (!_allVisible && block.fragmentOrder != null && block.fragmentOrder >= 1) ? block.fragmentOrder : null;
@@ -481,9 +491,7 @@ function blockToHTML(block) {
     if (block.w    != null) posStyle += `width:${block.w}px;`;
     if (block.h    != null) posStyle += `height:${block.h}px;`;
     if (block.flex)         posStyle += `flex:${block.flex};`;
-    if (block.offset && (block.offset.dx || block.offset.dy)) {
-        posStyle += `transform:translate(${block.offset.dx||0}px,${block.offset.dy||0}px);`;
-    }
+    posStyle += _blockTransformCSS(block);
 
     let inlineCSS = '';
     if (block.style && typeof block.style === 'object') {
@@ -576,6 +584,9 @@ function blockToHTML(block) {
             const chip = block.language ? `<span class="code-lang">${escapeHtml(block.language)}</span>` : '';
             return `<div class="code-block${fragClass}${cls}" style="${s}"${fragAttr}><pre style="margin:0;"><code${langClass}>${codeHtml}</code></pre>${chip}</div>`;
         }
+        case 'shape': {
+            return buildShapeHTML(block, `${fragClass}${cls}`, fragAttr, style);
+        }
         case 'arrow': {
             return buildArrowSVG(block, `${fragClass.trim()}${cls}`, fragAttr, posStyle);
         }
@@ -632,6 +643,90 @@ function elToHTML(el) {
  * units that is: length 10·sw, half-height 3.5·sw, tip 1·sw beyond the path
  * vertex (refX 9 of 10), base 9·sw behind it.
  */
+// ── Shapes (Stage 2) — IDENTICAL copy of buildShapeSVG in media/wslide-editor.html
+// (keep them in sync). buildShapeHTML wraps it + optional centred text for export.
+function _shapeArrowMarker(id, type, color) {
+    const refX = (type === 'arrow' || type === 'triangle') ? 8 : 5;
+    const common = `id="${id}" markerWidth="10" markerHeight="10" refX="${refX}" refY="5" orient="auto" markerUnits="strokeWidth"`;
+    let m = '';
+    if (type === 'arrow')         m = `<path d="M0,0 L9,5 L0,10 L3,5 Z" fill="${color}"/>`;
+    else if (type === 'triangle') m = `<path d="M0,0 L9,5 L0,10 Z" fill="${color}"/>`;
+    else if (type === 'dot')      m = `<circle cx="5" cy="5" r="4" fill="${color}"/>`;
+    else if (type === 'bar')      m = `<rect x="4" y="0" width="2" height="10" fill="${color}"/>`;
+    else if (type === 'diamond')  m = `<path d="M5,0 L9,5 L5,10 L1,5 Z" fill="${color}"/>`;
+    return `<marker ${common}>${m}</marker>`;
+}
+function _shapeCloudPath(w, h) {
+    const X = f => +(f * w).toFixed(1), Y = f => +(f * h).toFixed(1);
+    return `M ${X(.10)} ${Y(.72)} C ${X(-.02)} ${Y(.60)} ${X(.04)} ${Y(.40)} ${X(.22)} ${Y(.44)} `
+         + `C ${X(.20)} ${Y(.18)} ${X(.46)} ${Y(.14)} ${X(.50)} ${Y(.36)} `
+         + `C ${X(.58)} ${Y(.14)} ${X(.86)} ${Y(.18)} ${X(.80)} ${Y(.44)} `
+         + `C ${X(1.02)} ${Y(.40)} ${X(1.02)} ${Y(.68)} ${X(.86)} ${Y(.72)} `
+         + `C ${X(.94)} ${Y(.92)} ${X(.60)} ${Y(.96)} ${X(.54)} ${Y(.80)} `
+         + `C ${X(.46)} ${Y(.98)} ${X(.14)} ${Y(.94)} ${X(.10)} ${Y(.72)} Z`;
+}
+function buildShapeSVG(block) {
+    const w = Math.max(1, Math.round(block.w || 200));
+    const h = Math.max(1, Math.round(block.h || 120));
+    const shape = block.shape || 'rect';
+    const fill = block.fill != null ? block.fill
+        : (shape === 'highlight' ? 'rgba(255,214,10,.4)' : shape === 'line' ? 'none' : 'rgba(79,70,229,.12)');
+    const stroke = block.stroke != null ? block.stroke : (shape === 'highlight' ? 'none' : '#4f46e5');
+    const sw = block.strokeWidth != null ? block.strokeWidth : 2;
+    const dash = block.strokeDash ? ` stroke-dasharray="${block.strokeDash}"` : '';
+    const strokeAttr = (stroke && stroke !== 'none') ? ` stroke="${stroke}" stroke-width="${sw}" stroke-linejoin="round"${dash}` : '';
+    const fillAttr = ` fill="${fill}"`;
+    const p = Math.ceil(sw / 2) + 1, iw = Math.max(1, w - 2 * p), ih = Math.max(1, h - 2 * p);
+    const open = `<svg width="100%" height="100%" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg" style="display:block;overflow:visible;">`;
+    let body;
+    switch (shape) {
+        case 'ellipse':  body = `<ellipse cx="${w/2}" cy="${h/2}" rx="${iw/2}" ry="${ih/2}"${fillAttr}${strokeAttr}/>`; break;
+        case 'triangle': body = `<polygon points="${w/2},${p} ${w-p},${h-p} ${p},${h-p}"${fillAttr}${strokeAttr}/>`; break;
+        case 'diamond':  body = `<polygon points="${w/2},${p} ${w-p},${h/2} ${w/2},${h-p} ${p},${h/2}"${fillAttr}${strokeAttr}/>`; break;
+        case 'highlight':body = `<rect x="0" y="0" width="${w}" height="${h}" rx="6" fill="${fill}"/>`; break;
+        case 'line': {
+            const pts = (block.points && block.points.length >= 2) ? block.points : [[0, 0.5], [1, 0.5]];
+            const x1 = pts[0][0]*w, y1 = pts[0][1]*h, x2 = pts[1][0]*w, y2 = pts[1][1]*h;
+            const col = (stroke && stroke !== 'none') ? stroke : (block.color || '#4f46e5');
+            let defs = '', ms = '', me = '';
+            if (block.headStart && block.headStart !== 'none') { const id = 'hs_' + (block.id || 'x'); defs += _shapeArrowMarker(id, block.headStart, col); ms = ` marker-start="url(#${id})"`; }
+            if (block.headEnd   && block.headEnd   !== 'none') { const id = 'he_' + (block.id || 'x'); defs += _shapeArrowMarker(id, block.headEnd, col);   me = ` marker-end="url(#${id})"`; }
+            body = `<defs>${defs}</defs><line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${col}" stroke-width="${sw}" stroke-linecap="round"${dash}${ms}${me}/>`;
+            break;
+        }
+        case 'callout': {
+            const r = block.radius != null ? block.radius : 16;
+            const tail = block.tail || { x: 0.28, y: 1.32 };
+            const tx = tail.x*w, ty = tail.y*h, bx = Math.max(r + 14, Math.min(w - r - 14, tail.x*w));
+            body = `<rect x="${p}" y="${p}" width="${iw}" height="${ih}" rx="${r}"${fillAttr}${strokeAttr}/>`
+                 + `<path d="M ${bx-22} ${h-p} L ${tx} ${ty} L ${bx+6} ${h-p} Z"${fillAttr}${strokeAttr}/>`;
+            break;
+        }
+        case 'cloud':    body = `<path d="${_shapeCloudPath(w, h)}"${fillAttr}${strokeAttr}/>`; break;
+        case 'roundRect':{ const r = block.radius != null ? block.radius : 18; body = `<rect x="${p}" y="${p}" width="${iw}" height="${ih}" rx="${r}" ry="${r}"${fillAttr}${strokeAttr}/>`; break; }
+        default:         body = `<rect x="${p}" y="${p}" width="${iw}" height="${ih}"${fillAttr}${strokeAttr}/>`; break;
+    }
+    return open + body + '</svg>';
+}
+function buildShapeHTML(block, cls, fragAttr, extraStyle) {
+    let s = extraStyle || '';
+    if (!/position:/.test(s)) s += 'position:relative;';
+    if (block.opacity != null) s += `opacity:${block.opacity};`;
+    // Rotation/offset transform already composed into extraStyle by the caller
+    // (blockToHTML / blockToHTMLAtStep via _blockTransformCSS).
+    const svg = `<div style="position:absolute;inset:0;pointer-events:none;">${buildShapeSVG(block)}</div>`;
+    let text = '';
+    if (block.content) {
+        const va = block.textValign === 'top' ? 'flex-start' : block.textValign === 'bottom' ? 'flex-end' : 'center';
+        const ha = block.textAlign === 'left' ? 'flex-start' : block.textAlign === 'right' ? 'flex-end' : 'center';
+        let ts = `width:100%;text-align:${block.textAlign || 'center'};`;
+        if (block.color) ts += `color:${block.color};`;
+        if (block.fontSize) ts += `font-size:${block.fontSize}px;`;
+        text = `<div class="slide-content" style="position:absolute;inset:0;display:flex;align-items:${va};justify-content:${ha};padding:14px;overflow:hidden;"><div style="${ts}">${renderMathInContent(renderMarkdownInContent(block.content || ''))}</div></div>`;
+    }
+    return `<div class="wel shape-block${cls || ''}" style="${s}"${fragAttr || ''}>${svg}${text}</div>`;
+}
+
 function buildArrowSVG(block, cls, extraAttr, extraStyle) {
     const color = block.color || '#be1e2d';
     const sw    = block.strokeWidth || 3;
@@ -1294,9 +1389,7 @@ function blockToHTMLAtStep(block, step) {
     if (block.w    != null) posStyle += `width:${block.w}px;`;
     if (block.h    != null) posStyle += `height:${block.h}px;`;
     if (block.flex)         posStyle += `flex:${block.flex};`;
-    if (block.offset && (block.offset.dx || block.offset.dy)) {
-        posStyle += `transform:translate(${block.offset.dx||0}px,${block.offset.dy||0}px);`;
-    }
+    posStyle += _blockTransformCSS(block);
 
     let inlineCSS = '';
     if (block.style && typeof block.style === 'object') {
@@ -1384,6 +1477,9 @@ function blockToHTMLAtStep(block, step) {
             if (block.fontSize) s += `font-size:${block.fontSize}px;`;
             const chip = block.language ? `<span class="code-lang">${escapeHtml(block.language)}</span>` : '';
             return `<div class="code-block${cls}" style="${s}"><pre style="margin:0;"><code${langClass}>${codeHtml}</code></pre>${chip}</div>`;
+        }
+        case 'shape': {
+            return buildShapeHTML(block, cls, '', style);
         }
         case 'arrow': {
             return buildArrowSVG(block, cls, '', style);

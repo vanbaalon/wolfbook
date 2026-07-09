@@ -426,25 +426,35 @@ function buildTranscript(notebook, startCell, endCell, editor) {
 
     const selEditor = editor && editor.notebook.uri.toString() === notebook.uri.toString() ? editor : null;
     if (selEditor && Array.isArray(selEditor.selections) && selEditor.selections.length > 0) {
-        lines.push('Selected cells in active editor:');
-        for (const r of selEditor.selections) {
-            const start0 = Math.max(0, Math.min(r.start, Math.max(0, total - 1)));
-            const endExclusive0 = Math.max(r.start, Math.min(r.end, total));
-            const end0 = Math.max(start0, Math.min(total - 1, endExclusive0 - 1));
-            if (start0 >= total) continue;
-            if (start0 === end0) {
-                const cell = notebook.cellAt(start0);
-                lines.push(`- internal index ${start0} => Cell ${start0 + 1}, CellId: ${getCellToolId(cell)}`);
-            } else {
-                lines.push(`- internal indices ${start0}-${end0} => Cells ${start0 + 1}-${end0 + 1}`);
-                for (let i = start0; i <= end0; i++) {
-                    const cell = notebook.cellAt(i);
-                    lines.push(`  - Cell ${i + 1} (CellId: ${getCellToolId(cell)})`);  
+        // The primary selection's start is the "current" (focused) cell
+        const activeCellIdx = selEditor.selections[0].start;
+        if (activeCellIdx >= 0 && activeCellIdx < total) {
+            const activeCell = notebook.cellAt(activeCellIdx);
+            lines.push(`Current cell: Cell ${activeCellIdx + 1} (cellId: ${getCellToolId(activeCell)})`);
+        }
+        // Full selection list — only show when more than a single cell is selected
+        const hasMultiOrRange = selEditor.selections.some(r => (r.end - r.start) > 1) || selEditor.selections.length > 1;
+        if (hasMultiOrRange) {
+            lines.push('Selected cell range(s):');
+            for (const r of selEditor.selections) {
+                const start0 = Math.max(0, Math.min(r.start, Math.max(0, total - 1)));
+                const endExclusive0 = Math.max(r.start, Math.min(r.end, total));
+                const end0 = Math.max(start0, Math.min(total - 1, endExclusive0 - 1));
+                if (start0 >= total) continue;
+                if (start0 === end0) {
+                    const cell = notebook.cellAt(start0);
+                    lines.push(`- Cell ${start0 + 1} (cellId: ${getCellToolId(cell)})`);
+                } else {
+                    lines.push(`- Cells ${start0 + 1}–${end0 + 1}`);
+                    for (let i = start0; i <= end0; i++) {
+                        const cell = notebook.cellAt(i);
+                        lines.push(`  - Cell ${i + 1} (cellId: ${getCellToolId(cell)})`);
+                    }
                 }
             }
         }
     } else {
-        lines.push('Selected cells in active editor: (none / different notebook)');
+        lines.push('Current cell: (none selected / different notebook)');
     }
     lines.push('');
 
@@ -458,6 +468,18 @@ function buildTranscript(notebook, startCell, endCell, editor) {
             lines.push(`### Cell ${cellNo} [markdown]`);
             lines.push(`CellId: ${cellId}`);
             lines.push(src || '*(empty)*');
+            // Check for KaTeX rendering errors and flag them so the agent fixes them
+            if (src) {
+                const katexErrs = checkMarkdownKaTeX(src);
+                if (katexErrs.length > 0) {
+                    lines.push('');
+                    lines.push('⛔ LATEX ERRORS — broken math in this markdown cell (must be fixed):');
+                    for (const { display, latex, message } of katexErrs.slice(0, 5)) {
+                        const d = display ? '$$' : '$';
+                        lines.push(`  ${d}${latex.slice(0, 80)}${d} → ${message}`);
+                    }
+                }
+            }
             lines.push('');
             continue;
         }
@@ -862,6 +884,20 @@ async function resolveNotebookEditor(targetName, opts = {}) {
 // wolfbook_getNotebookContext
 // ---------------------------------------------------------------------------
 
+/**
+ * Build an actionable "no editor" error message that lists open notebooks
+ * so the user knows what to open/focus rather than just seeing a bare error.
+ */
+function noEditorMsg(targetName) {
+    const open = [...(_allNotebookUris?.() ?? new Map()).keys()]
+        .map(p => p.split('/').pop())
+        .filter(Boolean);
+    const openList = open.length ? ` Open notebooks: ${open.join(', ')}.` : ' No Wolfram notebooks are open.';
+    const hint = targetName
+        ? `Notebook "${targetName}" not found or could not be opened.${openList}`
+        : `No Wolfram notebook editor is available.${openList} Open a .wb file and ensure it is visible in VS Code, then retry.`;
+    return hint;
+}
 
 module.exports = {
     clearEvalLog,
@@ -890,5 +926,6 @@ module.exports = {
     setNotebookResolvedCallback,
     _allNotebookUris,
     resolveNotebookEditor,
+    noEditorMsg,
     setMcpCallActive,
 };

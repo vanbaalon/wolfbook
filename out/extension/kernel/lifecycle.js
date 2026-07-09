@@ -150,13 +150,13 @@ function _setNotebookCellColorsOffline(self, offline) {
     try {
         const config = vscode.workspace.getConfiguration('workbench');
         const currentColors = config.get('colorCustomizations') || {};
-        const KEYS = [
-            'notebook.cellEditorBackground',
-            'notebook.editorBackground',
-            'notebook.cellBorderColor',
-            'notebook.inactiveFocusedCellBorder',
-            'notebook.collapsedCellBackground'
-        ];
+        // Single source of truth: gray/restore EXACTLY the keys applyNotebookSettings
+        // writes (notebook-settings.js), so no coloured element (focused/selected/
+        // hover cell background, etc.) is left un-grayed while the kernel reloads or
+        // only partially restored once it is alive again. Lazily required to avoid any
+        // module load-order coupling.
+        const { NOTEBOOK_COLOR_KEYS } = require('../notebook-settings');
+        const KEYS = NOTEBOOK_COLOR_KEYS;
         const hasAny = KEYS.some(k => currentColors[k]);
         if (!hasAny) return;
         if (offline) {
@@ -559,6 +559,13 @@ async function launchKernel(self, WstpSession) {
         // is already 'started').
         scrollLog('[launchKernel] resolved — calling checkoutExecutionQueue | queue:', self.executionQueue.queueLength());
         self.checkoutExecutionQueue();
+
+        // Pre-warm the SVG/graphics renderer.  The first ExportString[…,"SVG"] call
+        // initialises Mathematica's internal MathematicaServer (~4 s cold-start).
+        // subWhenIdle fires only when the kernel is idle (no user cell executing),
+        // so this never races with queued user cells.
+        self.session.subWhenIdle('Quiet[ExportString[Graphics[{}],"SVG"]]').catch(() => {});
+        scrollLog('[launchKernel] graphics warmup scheduled via subWhenIdle');
 
         // Start keepalive heartbeat: pings kernel every 3 minutes via subWhenIdle.
         // Prevents macOS App Nap suspension; auto-relaunches if the kernel dies.

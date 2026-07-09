@@ -38,6 +38,7 @@ commentary. The JSON object MUST match this schema exactly:
   "successCriteria": string[] (1-12 items, each ≤ 500 chars; concrete, checkable),
   "risks":           string[] (0-12 items, each ≤ 500 chars; what might go wrong or be misinterpreted),
   "subtasks":          string[] (OPTIONAL — see Rule 9; 2-4 items, each ≤ 2000 chars; omit or use [] for single-task quests),
+  "missingInfo":       string[] (OPTIONAL — see Rule 4; ≤ 8 items, each ≤ 200 chars; omit when the brief is fully specified),
   "validationChecks":  string[] (OPTIONAL — see Rule 11; 0-6 items, each ≤ 400 chars; leave [] for non-computational quests),
   "status":            "open",
   "createdAt":         current UTC ISO 8601 timestamp
@@ -51,9 +52,14 @@ RULES
    starting with a letter. NEVER use uppercase letters or punctuation other
    than underscore. Examples: "ricci_tensor", "su4_spin_chain_l4",
    "bethe_ansatz_xxx_l8". NOT "Ricci_Tensor", NOT "SU4-L4", NOT "L=4".
-4. If the user's brief is too vague to plan, still emit a Quest, but make
-   "objective" begin with "CLARIFICATION NEEDED: " and list the missing
-   information in "risks".
+4. If the user's brief is too vague or SELF-CONTRADICTORY to plan, still emit
+   a Quest, but (a) begin "objective" with "CLARIFICATION NEEDED: ", and
+   (b) list EACH missing or contradictory parameter as one entry in
+   "missingInfo", phrased as "<parameter> (default: <sensible default>)" —
+   e.g. "chain length L (default: 4)", "boundary conditions (default:
+   periodic)", "coupling J (default: 1)". Do NOT silently pick values inside
+   the objective — the harness either asks the user or declares your defaults
+   as explicit assumptions in the deliverable.
 5. Prefer fewer, sharper successCriteria over many vague ones.
 6. Pick a stable id: if the user references a prior quest, reuse that id;
    otherwise default to "Q01".
@@ -112,6 +118,13 @@ RULES
        conservation law, sum rule, dimensional check).
     c. Use canonical variable names that you also hint at in "successCriteria"
        or "objective" so the Fairy knows what to name its computed objects.
+       SYMBOL NAMES MUST BE VALID WOLFRAM SYMBOLS: letters+digits only, camelCase.
+       NEVER use snake_case — in Wolfram Language an underscore is PATTERN syntax
+       ("exact_energies" parses as Pattern[exact, Blank[energies]] and can NEVER
+       be assigned), so a check written with it is unsatisfiable and will fail
+       every run regardless of the agent's work.
+       BAD:  "Length[exact_energies] == 216"
+       GOOD: "Length[exactEnergies] == 216"
     d. Keep each expression under 400 chars and self-contained if possible.
     e. CRITICAL — DOMAIN SANITY: Every numerical value you put in a validation
        check MUST follow from a known theorem or first principle. DO NOT guess

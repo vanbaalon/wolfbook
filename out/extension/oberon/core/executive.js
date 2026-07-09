@@ -44,7 +44,7 @@ const { SYSTEM_PROMPT }           = require('../agents/oberonExecutive.prompt');
  * }>}
  */
 async function runExecutiveAnalysis(args) {
-    const { quest, charm, scroll, reviewOut, budgetInfo, bus, signal } = args;
+    const { quest, charm, scroll, reviewOut, cleanNotebook, budgetInfo, bus, signal } = args;
     const spanId = makeSpanId('exec');
 
     // If the Oberon role is unconfigured we cannot run the LLM — bail.
@@ -61,7 +61,7 @@ async function runExecutiveAnalysis(args) {
     let grimoireSnippet = '';
     try { grimoireSnippet = await grimoire.recentEntriesSummary({ limit: 4, maxChars: 1600 }); }
     catch (_) { /* best-effort */ }
-    const userPayload = _buildUserPayload({ quest, charm, scroll, reviewOut, budgetInfo, priorFacts: await facts.readFacts({ quest }), grimoireSnippet });
+    const userPayload = _buildUserPayload({ quest, charm, scroll, reviewOut, cleanNotebook, budgetInfo, priorFacts: await facts.readFacts({ quest }), grimoireSnippet });
     const messages = [
         { role: 'system', content: SYSTEM_PROMPT },
         { role: 'user',   content: userPayload },
@@ -155,14 +155,7 @@ async function runExecutiveAnalysis(args) {
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
-function _buildUserPayload({ quest, charm, scroll, reviewOut, budgetInfo, priorFacts, grimoireSnippet }) {
-    const objections = (reviewOut && reviewOut.skeptic && Array.isArray(reviewOut.skeptic.objections))
-        ? reviewOut.skeptic.objections : [];
-    const checks = (reviewOut && reviewOut.skeptic && Array.isArray(reviewOut.skeptic.checks))
-        ? reviewOut.skeptic.checks : [];
-    const passedChecks = checks.filter(c => c && c.match === true).slice(0, 8);
-    const failedChecks = checks.filter(c => c && c.match === false).slice(0, 8);
-
+function _buildUserPayload({ quest, charm, scroll, reviewOut, cleanNotebook, budgetInfo, priorFacts, grimoireSnippet }) {
     const findings = Array.isArray(scroll && scroll.findings) ? scroll.findings : [];
     const openQs   = Array.isArray(scroll && scroll.openQuestions) ? scroll.openQuestions : [];
 
@@ -189,23 +182,12 @@ function _buildUserPayload({ quest, charm, scroll, reviewOut, budgetInfo, priorF
             openQuestions: openQs.slice(0, 8),
             fallback:     !!scroll.fallback,
         } : null,
-        skeptic: reviewOut && reviewOut.skeptic ? {
-            verdict:     reviewOut.skeptic.verdict,
-            objections:  objections.slice(0, 12),
-            passedChecks: passedChecks.map(c => ({
-                expression: String(c.expression || c.expr || '').slice(0, 240),
-                result: String(c.result || '').slice(0, 120),
-            })),
-            failedChecks: failedChecks.map(c => ({
-                expression: String(c.expression || c.expr || '').slice(0, 240),
-                result: String(c.result || '').slice(0, 120),
-                error:  c.error || null,
-            })),
-            verificationLevel:  reviewOut.skeptic.verificationLevel || null,
-            verificationCounts: reviewOut.skeptic.verificationCounts || null,
-        } : null,
+        // Verification is the Fairy's clean.wb run (fresh-kernel replay). The
+        // digest below is the actual per-cell code + output of that run — reason
+        // from what really executed, not from a critic's objections.
+        verdict: (reviewOut && reviewOut.oberonVerdict && reviewOut.oberonVerdict.verdict) || null,
+        cleanNotebook: cleanNotebook ? String(cleanNotebook).slice(0, 4000) : null,
         budget: budgetInfo || null,
-        revisionsUsed: (reviewOut && reviewOut.revisionsUsed) || 0,
         priorFacts: (priorFacts || []).map(f => ({
             id: f.id, claim: f.claim, confidence: f.confidence, verified: f.verified,
             sourceCharmId: f.sourceCharmId,

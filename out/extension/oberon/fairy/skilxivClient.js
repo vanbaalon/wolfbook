@@ -133,6 +133,31 @@ class SkilXivClient {
         return resp.json();
     }
 
+    /**
+     * I13: post a SKILL REQUEST — "a skill covering <topic> was needed but does not
+     * exist". Fills the registry's demand signal so gaps get authored. Best-effort:
+     * callers must tolerate failure (the endpoint may not exist yet — the local
+     * `.oberon/skill_gaps.jsonl` ledger is the durable record either way).
+     *
+     * @param {{ topic: string, context?: string }} req
+     */
+    async requestSkill({ topic, context = '' }) {
+        const resp = await fetch(`${this._base}/api/v1/skill-requests`, {
+            method:  'POST',
+            headers: this._headers(),
+            body:    JSON.stringify({
+                topic:        String(topic || '').slice(0, 200),
+                context:      String(context || '').slice(0, 800),
+                requested_by: 'wolfbook-fairy',
+            }),
+        });
+        if (!resp.ok) {
+            const text = await resp.text().catch(() => '');
+            throw new Error(`SkilXiv requestSkill HTTP ${resp.status}: ${text.slice(0, 200)}`);
+        }
+        return resp.json();
+    }
+
     /** Stage 2: revise a private draft before publishing. PATCH /api/v1/drafts/{id} */
     async updateDraft(id, { skillMd }) {
         const resp = await fetch(`${this._base}/api/v1/drafts/${encodeURIComponent(id)}`, {

@@ -58,6 +58,23 @@
         detailTitle:  $('detailTitle'),
         detailBody:   $('detailBody'),
         detailClose:  $('detailClose'),
+        // dashboard hero
+        topbarMeta:   $('topbarMeta'),
+        topbarCost:   $('topbarCost'),
+        idleHero:     $('idleHero'),
+        liveHero:     $('liveHero'),
+        launchBrief:  $('launchBrief'),
+        recentRuns:   $('recentRuns'),
+        nowPhase:     $('nowPhase'),
+        nowMeta:      $('nowMeta'),
+        nowActivity:  $('nowActivity'),
+        nowToggle:    $('nowToggle'),
+        nowStream:    $('nowStream'),
+        nowStreamLabel: $('nowStreamLabel'),
+        nowStreamBody:  $('nowStreamBody'),
+        steerInput:   $('steerInput'),
+        steerBtn:     $('steerBtn'),
+        steerAck:     $('steerAck'),
     };
 
     /** @type {{run:any, settings:any, roles:any[], events:any[], filter:{text:string,type:string}, viewMode:string, iconBase:string, prompts:any, openSteps:Set<string>}} */
@@ -67,9 +84,14 @@
         viewMode: 'structured',
         iconBase: '', prompts: null,
         openSteps: new Set(),   // persistent open/close memory for structured nodes
+        steerActive: false,
+        recentRuns: [],         // enriched { runId, brief, status, costUSD }
+        lastStatus: null,       // last fairy.status payload (phase/budget for the Now strip)
     };
     /** True when viewing a past run (live updates suppressed). */
     let isHistorical = false;
+    /** Auto-load the latest historical run once when the panel opens idle. */
+    let autoLoadedLatest = false;
 
     const ICON_MAP = {
         'circle.transition': 'Circle.svg',
@@ -92,12 +114,37 @@
         'correlated.tool':     'Spell.svg',
         'quest.accepted':      'Quest.svg',
         'charm.dispatched':    'Charm.svg',
+        'charm.started':       'Charm.svg',
         'fairy.started':       'Fairy.svg',
         'provider.error':      'Omen.svg',
         'research.conclusion': 'Scroll.svg',
     };
+    // Family fallbacks so new event types get a sensible icon without a map entry.
+    const ICON_PREFIX = [
+        ['director.',     'Oberon.svg'],
+        ['executive.',    'Oberon.svg'],
+        ['fact',          'Grimoire.svg'],
+        ['facts',         'Grimoire.svg'],
+        ['skill',         'Grimoire.svg'],
+        ['literature.',   'Scroll.svg'],
+        ['recall.',       'Grimoire.svg'],
+        ['contribution.', 'Grimoire.svg'],
+        ['fairy.',        'Fairy.svg'],
+        ['quest.',        'Quest.svg'],
+        ['notebook.',     'Scroll.svg'],
+        ['plan.',         'Quest.svg'],
+        ['checkpoint.',   'Charm.svg'],
+        ['util.',         'Spell.svg'],
+        ['probe.',        'Spell.svg'],
+        ['critic.',       'Ward.svg'],
+        ['skeptic.',      'Ward.svg'],
+    ];
     function iconFor(type) {
-        const file = ICON_MAP[type];
+        let file = ICON_MAP[type];
+        if (!file) {
+            const hit = ICON_PREFIX.find(([pre]) => type.startsWith(pre));
+            if (hit) file = hit[1];
+        }
         if (!file || !state.iconBase) return '';
         return `<img class="ev-icon" src="${state.iconBase}/${file}" alt="" />`;
     }
@@ -112,6 +159,14 @@
     });
 
     // ── render ─────────────────────────────────────────────────────────────
+    // Full render is coalesced: rapid event streams schedule ONE render per
+    // ~250 ms instead of re-rendering the whole timeline per event.
+    let _renderTimer = null;
+    function scheduleRender() {
+        if (_renderTimer) return;
+        _renderTimer = setTimeout(() => { _renderTimer = null; render(); }, 250);
+    }
+
     function render() {
         const run = state.run;
 
@@ -120,6 +175,25 @@
         els.statePill.dataset.state = isHistorical ? 'HISTORICAL' : s;
         els.statePill.textContent = isHistorical ? 'historical' : String(s).toLowerCase();
         els.abortBtn.disabled = isHistorical || !isActiveState(s);
+
+        // topbar meta + cost ticker
+        const live = !isHistorical && run && isActiveState(s);
+        if (els.topbarMeta) {
+            const bits = [];
+            if (run && run.questId) bits.push(run.questId);
+            if (run && run.charmId) bits.push(run.charmId);
+            els.topbarMeta.textContent = bits.join(' · ');
+        }
+        if (els.topbarCost) {
+            els.topbarCost.textContent = run && run.totalCostUSD
+                ? `$${Number(run.totalCostUSD).toFixed(3)}` : '';
+        }
+
+        // hero visibility: live Now strip during a run, launcher otherwise
+        if (els.liveHero) els.liveHero.hidden = !live;
+        if (els.idleHero) els.idleHero.hidden = !!live;
+        if (live) renderNowStrip();
+        else renderRecentRuns();
 
         // overview
         els.ovRunId.textContent    = run ? run.runId : '—';
@@ -154,7 +228,7 @@
                 <td>${fmtPrice(p.cacheReadUSDPerMTok)}</td>
                 <td>${fmtPrice(p.cacheWriteUSDPerMTok)}</td>
                 <td>${fmtPrice(p.outputUSDPerMTok)}</td>
-                <td>${r.configured ? '<span style="color:#22c55e">ready</span>' : '<span style="color:#ef4444">missing</span>'}</td>
+                <td>${r.configured ? '<span style="color:var(--acc-green)">ready</span>' : '<span style="color:var(--acc-red)">missing</span>'}</td>
             </tr>`;
         }).join('');
 
@@ -251,10 +325,10 @@
             }
             els.wardsSummary.textContent = parts.join(' · ');
         }
-        const statusColor = { passed: '#22c55e', failed: '#ef4444', skipped: '#9ca3af', errored: '#f59e0b' };
+        const statusColor = { passed: 'var(--acc-green)', failed: 'var(--acc-red)', skipped: 'var(--vscode-descriptionForeground)', errored: 'var(--acc-yellow)' };
         els.wardsBody.innerHTML = wards.map(e => {
             const p = e.payload || {};
-            const col = statusColor[p.status] || '#9ca3af';
+            const col = statusColor[p.status] || 'var(--vscode-descriptionForeground)';
             return '<tr>' +
                 '<td>' + escapeHtml(p.wardId || '') + '</td>' +
                 '<td>' + escapeHtml(p.method || '') + '</td>' +
@@ -268,14 +342,163 @@
 
     // ── Fairy FSM pane ─────────────────────────────────────────────────────────
 
-    const FAIRY_PHASE_TRACK  = ['explore', 'compile', 'verify'];
+    // Live FSM track (fsm.js): intake → explore → compile → polish. 'verify' is
+    // the legacy name of polish — old logs are aliased so their stepper still fills.
+    const FAIRY_PHASE_TRACK  = ['intake', 'explore', 'compile', 'polish'];
     const FAIRY_STATUS_COLOR = {
-        delivered: '#22c55e', failed: '#ef4444', escalate: '#f59e0b',
+        delivered: 'var(--acc-green)', failed: 'var(--acc-red)', escalate: 'var(--acc-yellow)',
+        partial_delivered: 'var(--acc-yellow)',
     };
     const FAIRY_PHASE_COLOR  = {
-        explore: '#93c5fd', compile: '#c4b5fd', verify: '#86efac',
-        diagnose: '#fcd34d', delivered: '#86efac', failed: '#fca5a5', escalate: '#fcd34d',
+        intake: 'var(--acc-blue)', explore: 'var(--acc-blue)', compile: 'var(--acc-purple)',
+        polish: 'var(--acc-green)', verify: 'var(--acc-green)',
+        diagnose: 'var(--acc-yellow)', delivered: 'var(--acc-green)', failed: 'var(--acc-red)',
+        escalate: 'var(--acc-yellow)', partial_delivered: 'var(--acc-yellow)',
     };
+    const _normPhase = (ph) => ph === 'verify' ? 'polish' : ph;
+    const _clipText  = (s, n) => String(s == null ? '' : s).replace(/\s+/g, ' ').slice(0, n || 110);
+
+    /**
+     * Quest → charms board: every charm the planner dispatched, its live status,
+     * verdict, confidence and self-verify health, plus the fairy's latest plan
+     * per charm. This is the "what is the plan / which fairies completed" view.
+     */
+    function buildCharmsVM(events) {
+        const quests = new Map();   // questId → { id, title, charms: Map<charmId, charm> }
+        const questOrder = [];
+        let lastQuestId = null;
+        const q = (id) => {
+            const qid = id || lastQuestId || '?';
+            if (!quests.has(qid)) { quests.set(qid, { id: qid, title: '', charms: new Map(), charmOrder: [] }); questOrder.push(qid); }
+            lastQuestId = qid;
+            return quests.get(qid);
+        };
+        const charm = (questId, charmId) => {
+            if (!charmId) return null;
+            const qq = q(questId);
+            if (!qq.charms.has(charmId)) {
+                qq.charms.set(charmId, {
+                    id: charmId, title: '', status: 'planned', phase: null,
+                    verdict: null, skeptic: null, confidence: null,
+                    selfVerify: null, plan: null, index: null, total: null,
+                });
+                qq.charmOrder.push(charmId);
+            }
+            return qq.charms.get(charmId);
+        };
+        for (const ev of events) {
+            if (!ev) continue;
+            const t = ev.type, p = ev.payload || {};
+            const qid = p.questId || ev.questId || null;
+            const cid = p.charmId || ev.charmId || null;
+            if (t === 'quest.accepted') {
+                const qq = q(qid);
+                if (p.title || p.shortName) qq.title = p.title || p.shortName;
+            } else if (t === 'circle.transition' && p.questId && p.to === 'QUEST_DEFINED') {
+                q(p.questId);
+            } else if (t === 'charm.dispatched') {
+                const c = charm(qid, cid);
+                if (c && p.title) c.title = p.title;
+            } else if (t === 'charm.started') {
+                const c = charm(qid, cid);
+                if (c) { c.status = 'running'; c.index = p.index || null; c.total = p.total || null; }
+            } else if (t === 'fairy.phase') {
+                const c = charm(qid, cid);
+                if (c && c.status === 'running') c.phase = _normPhase(p.phase || null);
+            } else if (t === 'plan.created') {
+                const c = charm(qid, cid);
+                if (c) c.plan = { steps: Array.isArray(p.steps) ? p.steps : [], note: p.note || '', revision: p.revision || 0 };
+            } else if (t === 'fairy.self_verify') {
+                const c = charm(qid, cid);
+                if (c) c.selfVerify = { checked: p.checked || 0, matched: p.matched || 0, mismatched: (p.mismatched || []).length };
+            } else if (t === 'scroll.submitted') {
+                const c = charm(qid, cid);
+                if (c) {
+                    c.status = p.status || 'delivered';
+                    if (typeof p.confidence === 'number') c.confidence = p.confidence;
+                    c.phase = null;
+                }
+            } else if (t === 'skeptic.verdict') {
+                const c = charm(qid, cid);
+                if (c) c.skeptic = p.verdict || null;
+            } else if (t === 'oberon.verdict') {
+                const c = charm(qid, cid);
+                if (c) c.verdict = p.verdict || null;
+            } else if (t === 'omen' && p.kind === 'charms_skipped_executive') {
+                const ids = (p.detail && p.detail.skippedCharmIds) || [];
+                for (const sid of ids) {
+                    const c = charm(qid, sid);
+                    if (c && c.status === 'planned') c.status = 'skipped';
+                }
+            }
+        }
+        if (!questOrder.length) return null;
+        return questOrder.map(id => quests.get(id));
+    }
+
+    const CHARM_STATUS_META = {
+        planned:           { icon: '○', color: 'var(--vscode-descriptionForeground)', label: 'planned' },
+        running:           { icon: '▶', color: 'var(--acc-blue)',   label: 'running' },
+        delivered:         { icon: '✓', color: 'var(--acc-green)',  label: 'delivered' },
+        partial_delivered: { icon: '◑', color: 'var(--acc-yellow)', label: 'partial' },
+        failed:            { icon: '✗', color: 'var(--acc-red)',    label: 'failed' },
+        escalate:          { icon: '↑', color: 'var(--acc-yellow)', label: 'escalated' },
+        skipped:           { icon: '⏭', color: 'var(--vscode-descriptionForeground)', label: 'skipped' },
+    };
+
+    function renderCharmsBoard(questsVM) {
+        if (!questsVM || !questsVM.length) return '';
+        const blocks = questsVM.map(qq => {
+            const rows = qq.charmOrder.map(cid => {
+                const c = qq.charms.get(cid);
+                const meta = CHARM_STATUS_META[c.status] || CHARM_STATUS_META.planned;
+                const statusBits = [meta.label];
+                if (c.status === 'running' && c.phase) statusBits.push(c.phase);
+                if (c.verdict) statusBits.push(c.verdict.replace(/_/g, ' '));
+                else if (c.skeptic) statusBits.push('skeptic: ' + c.skeptic);
+                const conf = typeof c.confidence === 'number' ? c.confidence.toFixed(2) : '';
+                const sv = c.selfVerify
+                    ? (c.selfVerify.mismatched > 0
+                        ? `<span style="color:var(--acc-red)" title="self-verify: ${c.selfVerify.mismatched} of ${c.selfVerify.checked} evidence re-evaluations mismatched">⚠ ${c.selfVerify.mismatched}/${c.selfVerify.checked}</span>`
+                        : `<span style="color:var(--acc-green)" title="self-verify: all ${c.selfVerify.checked} evidence re-evaluations matched">✓ ${c.selfVerify.checked}/${c.selfVerify.checked}</span>`)
+                    : '';
+                return `<div class="fairy-pi-charm-row ${c.status === 'running' ? 'is-running' : ''}">
+                    <span class="fairy-pi-charm-icon" style="color:${meta.color}">${meta.icon}</span>
+                    <code class="fairy-pi-charm-id">${escapeHtml(c.id)}</code>
+                    <span class="fairy-pi-charm-title" title="${escapeHtml(c.title)}">${escapeHtml(_clipText(c.title, 90))}</span>
+                    <span class="fairy-pi-charm-status" style="color:${meta.color}">${escapeHtml(statusBits.join(' · '))}</span>
+                    <span class="fairy-pi-charm-conf" title="confidence">${conf}</span>
+                    <span class="fairy-pi-charm-sv">${sv}</span>
+                </div>`;
+            }).join('');
+            const done  = qq.charmOrder.filter(cid => ['delivered', 'partial_delivered', 'failed', 'escalate'].includes(qq.charms.get(cid).status)).length;
+            const title = qq.title ? ` — ${escapeHtml(_clipText(qq.title, 90))}` : '';
+            return `<div class="fairy-pi-quest-block">
+                <div class="fairy-pi-quest-head"><code>${escapeHtml(qq.id)}</code>${title}
+                    <span class="muted small" style="margin-left:8px">${done}/${qq.charmOrder.length} charm(s) finished</span></div>
+                ${rows}
+            </div>`;
+        }).join('');
+        return `<div class="fairy-pi-section">
+            <div class="fairy-pi-section-title">Plan &amp; Charms</div>
+            ${blocks}
+        </div>`;
+    }
+
+    function renderCharmPlan(questsVM, charmId) {
+        if (!questsVM || !charmId) return '';
+        let c = null;
+        for (const qq of questsVM) if (qq.charms.has(charmId)) c = qq.charms.get(charmId);
+        if (!c || !c.plan || !c.plan.steps.length) return '';
+        const items = c.plan.steps.map(s => `<li>${escapeHtml(String(s))}</li>`).join('');
+        const rev  = c.plan.revision ? ` <span class="muted small">(revision ${c.plan.revision})</span>` : '';
+        const note = c.plan.note ? `<div class="muted small" style="margin-top:4px">${escapeHtml(_clipText(c.plan.note, 200))}</div>` : '';
+        return `<div class="fairy-pi-section">
+            <div class="fairy-pi-section-title">Fairy plan — ${escapeHtml(charmId)}${rev}</div>
+            <ol class="fairy-pi-plan">${items}</ol>
+            ${note}
+        </div>`;
+    }
 
     function buildFairyVM(events) {
         // Derive state from events (left-to-right scan; last fairy.started wins)
@@ -306,11 +529,11 @@
 
         if (!started) return null;
 
-        // Latest phase from the last fairy.phase event
+        // Latest phase from the last fairy.phase event ('verify' aliased → 'polish')
         const lastPhaseEv = phaseEvs[phaseEvs.length - 1];
-        const currentPhase = (lastPhaseEv && lastPhaseEv.payload && lastPhaseEv.payload.phase) || 'explore';
-        const phaseHistory  = (lastPhaseEv && lastPhaseEv.payload && lastPhaseEv.payload.phaseHistory) ||
-                              (scrollEv && scrollEv.payload && scrollEv.payload.phaseHistory) || [];
+        const currentPhase = _normPhase((lastPhaseEv && lastPhaseEv.payload && lastPhaseEv.payload.phase) || 'explore');
+        const phaseHistory  = ((lastPhaseEv && lastPhaseEv.payload && lastPhaseEv.payload.phaseHistory) ||
+                              (scrollEv && scrollEv.payload && scrollEv.payload.phaseHistory) || []).map(_normPhase);
         const status  = (scrollEv && scrollEv.payload && scrollEv.payload.status) || null;
         const steps   = (scrollEv && scrollEv.payload && scrollEv.payload.steps) || [];
         const cleanNbPath = (scrollEv && scrollEv.payload && scrollEv.payload.cleanNbPath) || null;
@@ -319,7 +542,7 @@
         // Phase events with timestamps (for stepper with timestamps)
         const phaseTimestamps = {};
         for (const pev of phaseEvs) {
-            const ph = (pev.payload || {}).phase;
+            const ph = _normPhase((pev.payload || {}).phase);
             if (ph && !phaseTimestamps[ph]) phaseTimestamps[ph] = pev.ts || '';
         }
 
@@ -330,9 +553,14 @@
         const pane = document.getElementById('fairyPaneContent');
         if (!pane) return;
 
+        const questsVM = buildCharmsVM(state.events);
+        const charmsBoardHtml = renderCharmsBoard(questsVM);
+
         const vm = buildFairyVM(state.events);
         if (!vm) {
-            pane.innerHTML = '<p class="muted small" style="padding:12px">No Fairy run yet — start a quest to see FSM activity here.</p>';
+            pane.innerHTML = charmsBoardHtml
+                ? `<div class="fairy-pi-wrap">${charmsBoardHtml}</div>`
+                : '<p class="muted small" style="padding:12px">No Fairy run yet — start a quest to see FSM activity here.</p>';
             return;
         }
 
@@ -360,7 +588,7 @@
             }
         }
         // Terminal node
-        const termLabel  = status ? ({ delivered: '✓ Delivered', failed: '✗ Failed', escalate: '↑ Escalated' }[status] || status) : '—';
+        const termLabel  = status ? ({ delivered: '✓ Delivered', failed: '✗ Failed', escalate: '↑ Escalated', partial_delivered: '◑ Partial' }[status] || status) : '—';
         const termClass  = status ? (status === 'delivered' ? 'done' : 'done-fail') : '';
         stepperHtml += `<div class="fairy-pi-connector ${status ? 'done' : ''}"></div>`;
         stepperHtml += `<div class="fairy-pi-node ${termClass}" style="color:${statusColor}">
@@ -421,10 +649,12 @@
         let verifyHtml = '';
         if (status) {
             const label = status === 'delivered'
-                ? `<span style="color:#22c55e;font-weight:700">✓ Verification passed</span>`
+                ? `<span style="color:var(--acc-green);font-weight:700">✓ Verification passed</span>`
                 : status === 'failed'
-                    ? `<span style="color:#ef4444;font-weight:700">✗ Failed to verify</span>`
-                    : `<span style="color:#f59e0b;font-weight:700">↑ Escalated (no clean notebook)</span>`;
+                    ? `<span style="color:var(--acc-red);font-weight:700">✗ Failed to verify</span>`
+                    : status === 'partial_delivered'
+                        ? `<span style="color:var(--acc-yellow);font-weight:700">◑ Partial — unverified clean.wb attached</span>`
+                        : `<span style="color:var(--acc-yellow);font-weight:700">↑ Escalated (no clean notebook)</span>`;
             const nbBtn = cleanNbPath
                 ? `<button class="fairy-pi-btn" data-cmd="openFile" data-target="${escapeHtml(cleanNbPath)}" title="${escapeHtml(cleanNbPath)}">Open clean.wb ↗</button>`
                 : '';
@@ -442,11 +672,15 @@
             &nbsp;·&nbsp;${escapeHtml(started.provider || '—')}
         </div>`;
 
+        const planHtml = renderCharmPlan(questsVM, started.charmId);
+
         pane.innerHTML = `
             <div class="fairy-pi-wrap">
+                ${charmsBoardHtml}
                 ${metaHtml}
                 ${stepperHtml}
                 ${diagnoseHtml}
+                ${planHtml}
                 ${budgetHtml}
                 ${stepsHtml}
                 ${verifyHtml}
@@ -457,7 +691,7 @@
         const frac = total > 0 ? used / total : 0;
         const pct  = (frac * 100).toFixed(1);
         const remaining = 1 - frac;
-        const barColor = remaining < 0.1 ? '#ef4444' : remaining < 0.3 ? '#f59e0b' : 'var(--vscode-progressBar-background, #007acc)';
+        const barColor = remaining < 0.1 ? 'var(--acc-red)' : remaining < 0.3 ? 'var(--acc-yellow)' : 'var(--vscode-progressBar-background, #007acc)';
         return `<div class="fairy-pi-budget-row">
             <span class="fairy-pi-budget-label">${escapeHtml(label)}</span>
             <div class="fairy-pi-budget-bar">
@@ -465,6 +699,115 @@
             </div>
             <span class="fairy-pi-budget-count">${used}/${total}</span>
         </div>`;
+    }
+
+    // ── Live "Now" strip ───────────────────────────────────────────────────
+    // What the agent is doing right now: phase + budget + last activity + the
+    // model's streaming reasoning/response (delta-accumulated, scrollable).
+
+    const _stream = { key: '', text: '', done: false };   // key = role|kind
+
+    function _feedStream(ev) {
+        const p = ev.payload || {};
+        const kind = ev.type === 'llm.reasoning_progress' ? 'thinking' : 'responding';
+        const key  = `${p.role || ''}|${kind}`;
+        const hasDelta = typeof p.delta === 'string';
+        if (key !== _stream.key || (hasDelta && p.seq === 0) || _stream.done) {
+            _stream.key = key; _stream.text = ''; _stream.done = false;
+        }
+        if (hasDelta) _stream.text += p.delta;
+        else _stream.text = String(p.preview || '');      // old logs: preview fallback
+        if (_stream.text.length > 60000) _stream.text = _stream.text.slice(-60000);
+        if (els.nowStreamLabel) els.nowStreamLabel.textContent = `${p.role || 'model'} · ${kind}…`;
+        if (els.nowStreamBody) {
+            const b = els.nowStreamBody;
+            // Follow the stream only while the user is at the bottom — a manual
+            // scroll-up to read is never yanked back down.
+            const follow = b.scrollHeight - b.scrollTop - b.clientHeight < 40;
+            b.textContent = _stream.text;
+            if (follow) b.scrollTop = b.scrollHeight;
+        }
+    }
+
+    function _endStream() {
+        _stream.done = true;
+        if (els.nowStreamLabel && _stream.key) {
+            els.nowStreamLabel.textContent = _stream.key.replace('|', ' · ') + ' — turn complete';
+        }
+    }
+
+    function _setActivity(text) {
+        if (els.nowActivity) els.nowActivity.textContent = String(text || '').slice(0, 120);
+    }
+
+    function renderNowStrip() {
+        const st = state.lastStatus || {};
+        if (els.nowPhase) {
+            els.nowPhase.textContent = st.phase ? st.phase : (state.run ? String(state.run.state).toLowerCase() : '—');
+            els.nowPhase.dataset.phase = st.phase || '';
+        }
+        if (els.nowMeta) {
+            const bits = [];
+            if (st.probesUsed != null) bits.push(`probes ${st.probesUsed}`);
+            if (st.turnsUsed  != null) bits.push(`turns ${st.turnsUsed}`);
+            if (typeof st.costUSD === 'number') bits.push(`$${st.costUSD.toFixed(2)}`);
+            els.nowMeta.textContent = bits.join(' · ');
+        }
+        // steering availability
+        if (els.steerInput) {
+            els.steerInput.disabled = !state.steerActive;
+            els.steerInput.placeholder = state.steerActive
+                ? 'Steer the agent — your note reaches it at its next turn…'
+                : 'Steering opens while the fairy explores…';
+        }
+        if (els.steerBtn) els.steerBtn.disabled = !state.steerActive;
+    }
+
+    // ── Idle dashboard: recent runs list ───────────────────────────────────
+    function renderRecentRuns() {
+        if (!els.recentRuns) return;
+        const runs = state.recentRuns || [];
+        if (!runs.length) {
+            els.recentRuns.innerHTML = '<span class="muted small">No runs recorded yet — start one above.</span>';
+            return;
+        }
+        const STATUS_CLS = (s) => /deliver|success|done/.test(s) ? 'ok' : (/partial/.test(s) ? 'warn' : (s ? 'bad' : ''));
+        els.recentRuns.innerHTML = runs.slice(0, 8).map(r => {
+            const label = String(r.runId).replace(/^run_/, '').replace('T', ' ').replace(/-\d{3}Z$/, '').replace(/-/g, (m, off) => off > 9 ? ':' : '-');
+            const brief = r.brief ? escapeHtml(r.brief) : '<span class="muted">(no brief captured)</span>';
+            const chips = [];
+            if (r.status)  chips.push(`<span class="rr-chip rr-chip--${STATUS_CLS(r.status)}">${escapeHtml(r.status)}</span>`);
+            if (typeof r.costUSD === 'number') chips.push(`<span class="rr-chip">$${r.costUSD.toFixed(2)}</span>`);
+            return `<div class="rr-card" data-run="${escapeHtml(r.runId)}" title="Open this run in the Inspector">
+                <div class="rr-card__top"><span class="rr-card__time">${escapeHtml(label)}</span>${chips.join('')}</div>
+                <div class="rr-card__brief">${brief}</div>
+            </div>`;
+        }).join('');
+        els.recentRuns.querySelectorAll('.rr-card[data-run]').forEach(card => {
+            card.addEventListener('click', () => _openHistorical(card.dataset.run));
+        });
+    }
+
+    function _openHistorical(runId) {
+        if (!runId) return;
+        if (els.runPicker && Array.from(els.runPicker.options).some(o => o.value === runId)) {
+            els.runPicker.value = runId;
+        }
+        state.events = [];
+        render();
+        vscode.postMessage({ command: FROM.LOAD_HISTORICAL_RUN, runId });
+    }
+
+    // ── dynamic type filter options ────────────────────────────────────────
+    let _knownTypes = new Set();
+    function refreshTypeOptions() {
+        if (!els.filterType) return;
+        const types = new Set(state.events.map(e => e.type));
+        if (types.size === _knownTypes.size) return;
+        _knownTypes = types;
+        const current = els.filterType.value;
+        els.filterType.innerHTML = '<option value="">All types</option>' +
+            [...types].sort().map(t => `<option${t === current ? ' selected' : ''}>${escapeHtml(t)}</option>`).join('');
     }
 
     /**
@@ -506,6 +849,7 @@
     }
 
     function renderEvents() {
+        refreshTypeOptions();
         const f = state.filter;
         const filtered = state.events.filter(ev => {
             if (f.type && ev.type !== f.type) return false;
@@ -1003,6 +1347,7 @@
     }
     function oneLineSummary(ev) {
         const p = ev.payload || {};
+        const clip = (s, n) => String(s == null ? '' : s).replace(/\s+/g, ' ').slice(0, n || 110);
         switch (ev.type) {
             case 'circle.transition': return `${p.from || ''} → ${p.to || ''}`;
             case 'llm.call': {
@@ -1016,25 +1361,93 @@
                 return `${p.role || ''} · ${p.model || ''} · in ${human(u.inputTokens || 0)} · out ${human(u.outputTokens || 0)}${cache}${thinkingNote}${streamNote}${lat}`;
             }
             case 'tool.call':         return p.name ? `${p.name}(${summariseArgs(p.args)})` : 'tool';
-            case 'correlated.tool':   return `${p.name || 'tool'} ${p.ok ? '✓' : '✗'} ${p.durationMs || 0}ms${p.kind && p.kind !== 'ok' ? ` · ${p.kind}` : ''}${p.error ? ` · ${String(p.error).slice(0, 80)}` : ''}`;
+            case 'correlated.tool':   return `${p.name || 'tool'} ${p.ok ? '✓' : '✗'} ${p.durationMs || 0}ms${p.kind && p.kind !== 'ok' ? ` · ${p.kind}` : ''}${p.error ? ` · ${clip(p.error, 80)}` : ''}`;
             case 'spell.exec':        return p.summary || 'spell';
-            case 'ward.requested':    return `${p.method || p.wardType || ''} · ${(p.expression || '').slice(0, 80)}`;
+            case 'ward.requested':    return `${p.method || p.wardType || ''} · ${clip(p.expression, 80)}`;
             case 'ward.result':       return `${p.wardType || ''} → ${p.passed ? 'pass' : 'fail'} · ${p.detail || ''}`;
             case 'quest.accepted':    return `${p.questId || ''} · ${p.title || ''}`;
+            case 'quest.clarify':     return p.answered ? 'user answered the clarification' : `needs: ${clip((p.missingInfo || []).join(' · '), 110)}`;
+            case 'quest.assumed_parameters': return `assumed: ${clip((p.assumptions || []).join(' · ').replace(/ASSUMED:\s*/g, ''), 120)}`;
             case 'charm.dispatched':  return `${p.charmId || ''} · ${p.title || ''}`;
-            case 'fairy.started':     return `${p.charmId || ''} · ${p.model || ''}`;
-            case 'scroll.submitted':  return `${p.scrollId || ''} · conf ${typeof p.confidence === 'number' ? p.confidence.toFixed(2) : '?'}${typeof p.evidenceCount === 'number' ? ` · ${p.evidenceCount} ev` : ''}`;
+            case 'charm.started':     return `charm ${p.index || '?'} of ${p.total || '?'}${p.priorFactsCount ? ` · builds on ${p.priorFactsCount} prior facts` : ''}`;
+            case 'fairy.started':     return `${p.charmId || ''} · ${p.model || ''}${p.build && p.build.version ? ` · v${p.build.version}` : ''}`;
+            case 'fairy.status':      return p.done ? `finished: ${p.status || ''}` : `${p.phase || ''} · probes ${p.probesUsed ?? '?'} · turns ${p.turnsUsed ?? '?'}${typeof p.costUSD === 'number' ? ` · $${p.costUSD.toFixed(2)}` : ''}`;
+            case 'fairy.phase':       return `phase → ${p.phase || ''}`;
+            case 'fairy.steer':       return `user steering picked up: “${clip(p.text, 100)}”`;
+            case 'fairy.self_verify': return `evidence re-check: ${p.matched ?? '?'} of ${p.checked ?? '?'} matched${(p.mismatched && p.mismatched.length) ? ' — MISMATCHES!' : ''}`;
+            case 'fairy.run_metrics': return `probes ${p.probes ?? p.probesUsed ?? '?'} · turns ${p.turns ?? p.turnsUsed ?? '?'}${typeof p.costUSD === 'number' ? ` · $${p.costUSD.toFixed(2)}` : ''}`;
+            case 'fairy.continued':   return `budget extended (continuation #${p.continuation || 1})`;
+            case 'fairy.error':       return clip(p.message || p.error, 140);
+            case 'fairy.handoff_seeded': return `${p.utils ?? p.utilCount ?? 0} utils + ${p.facts ?? p.factCount ?? 0} facts from the previous stage loaded into the kernel`;
+            case 'fairy.history_compacted': return 'conversation compacted to fit the context window';
+            case 'probe.appended':    return `${p.probeId || 'probe'}${p.note ? ` · ${clip(p.note, 100)}` : ''}`;
+            case 'plan.created':      return `plan: ${clip((p.steps || []).join(' → '), 130)}`;
+            case 'checkpoint.recorded': return `checkpoint: ${clip(p.sectionTitle, 90)} (${(p.stepsIncluded || []).length} steps)`;
+            case 'util.registered':   return `defined ${p.name || 'utility'}${p.note ? ` — ${clip(p.note, 80)}` : ''}`;
+            case 'scroll.submitted':  return `${p.status ? p.status + ' · ' : ''}${p.scrollId || ''} · conf ${typeof p.confidence === 'number' ? p.confidence.toFixed(2) : '?'}${typeof p.evidenceCount === 'number' ? ` · ${p.evidenceCount} evidence` : ''}`;
             case 'skeptic.verdict':   return `${p.verdict || ''}${p.verificationLevel ? ` (${p.verificationLevel})` : ''} · matched ${(p.summary && p.summary.matched) || 0}/${(p.summary && p.summary.total) || 0}${p.summary && p.summary.failed ? ` · failed ${p.summary.failed}` : ''}${p.wardSummary && p.wardSummary.total ? ` · wards ${p.wardSummary.passed}/${p.wardSummary.total}` : ''}`;
-            case 'oberon.verdict':    return `${String(p.verdict || '').replace(/_/g, ' ').toUpperCase()}${p.verificationLevel ? ` [${p.verificationLevel}]` : ''} · ${(p.narrative || '').slice(0, 100)}`;
-            case 'research.conclusion': return `conf ${typeof p.confidence === 'number' ? p.confidence.toFixed(2) : '?'} · ${typeof p.findingsCount === 'number' ? p.findingsCount : '?'} findings · ${(p.summary || '').slice(0, 80)}`;
+            case 'oberon.verdict':    return `${String(p.verdict || '').replace(/_/g, ' ').toUpperCase()}${p.verificationLevel ? ` [${p.verificationLevel}]` : ''} · ${clip(p.narrative, 100)}`;
+            case 'research.conclusion': return `conf ${typeof p.confidence === 'number' ? p.confidence.toFixed(2) : '?'} · ${typeof p.findingsCount === 'number' ? p.findingsCount : '?'} findings · ${clip(p.summary, 80)}`;
             case 'oberon.decision':   return `${p.verdict || ''}: ${p.rationale || ''}`;
             case 'grimoire.write':    return `+${p.added || 0} facts (${p.narrativePatchBytes || 0} bytes)`;
             case 'grimoire.updated':  return `${p.kind || ''} · ${p.findingsWritten || 0} written${p.findingsExcluded ? ` · ${p.findingsExcluded} excluded` : ''}${p.path ? ` · ${shortPath(p.path)}` : ''}`;
             case 'postmortem.written': return p.path ? shortPath(p.path) : 'postmortem written';
             case 'omen':              return `${p.kind || ''}: ${p.message || ''}`;
-            case 'llm.reasoning_progress': return `thinking… ${(p.preview || '').slice(0, 80)}`;
-            case 'llm.response_progress':  return `responding… ${(p.preview || '').slice(0, 80)}`;
-            default: return JSON.stringify(p).slice(0, 160);
+            case 'budget.exhausted':  return clip(p.message || `budget cap hit (${p.kind || ''})`, 140);
+            case 'llm.reasoning_progress': return `thinking… ${clip(p.preview, 90)}`;
+            case 'llm.response_progress':  return `responding… ${clip(p.preview, 90)}`;
+            // ── facts & memory ──
+            case 'fact.established': {
+                const claim = clip(String(p.claim || '').replace(/\*\*/g, ''), 120);
+                return `${p.factId || 'fact'}${p.verified === false ? ' (unverified)' : ''}: ${claim}`;
+            }
+            case 'facts.extracted':   return `${p.count || 0} ${p.kind === 'partial' ? 'working ' : ''}fact(s) banked for the next charm`;
+            // ── executive (P-9) ──
+            case 'executive.requested': return `Oberon reviews the outcome (reason: ${p.reason || '?'})`;
+            case 'executive.decided': return `decision: ${String(p.action || '').replace(/_/g, ' ')}${p.factsWritten ? ` · ${p.factsWritten} facts banked` : ''}${p.diagnosisPreview ? ` — ${clip(p.diagnosisPreview, 90)}` : ''}`;
+            case 'executive.auto_dispatched': return `auto follow-up ${p.depth || 1}/${p.maxDepth || '?'} (${String(p.action || '').replace(/_/g, ' ')})`;
+            // ── literature ──
+            case 'literature.brief':  return 'literature brief added to the notebook';
+            case 'literature.progress': return `${p.stage || ''}${p.detail ? ` · ${clip(p.detail, 100)}` : ''}`;
+            case 'literature.searched': return `searched: ${clip(p.query || p.question, 100)}`;
+            case 'literature.cited':  return `${p.count || ''} paper(s) cited in the deliverable`;
+            // ── recall / skills ──
+            case 'recall.completed':  return p.mode === 'consult' ? `skill recalled: ${p.skillRef || ''}` : `no matching skill (${p.mode || 'none'})`;
+            case 'skill.cited':       return `cited ${p.skillRef || p.ref || 'skill'}`;
+            case 'skill.gap_recorded': return `skill gap filed: ${clip(p.topic || p.title, 100)}`;
+            case 'skills.used':       return 'skills-used summary written to the notebook';
+            case 'skill.usage_reported': return `usage reported: ${p.outcome || ''} (${p.skillRef || ''})`;
+            case 'contribution.candidate': return `new skill candidate raised${p.isNewSkill === false ? ' (derived)' : ''} — review before submitting`;
+            case 'contribution.draft': return `SKILL.draft.md ${p.draftAuthored ? 'authored' : 'not authored'} · novelty: ${clip(p.novelty, 80)}`;
+            case 'contribution.skipped': return `no skill candidate: ${clip((p.reasons || []).join('; '), 110)}`;
+            // ── director (the layer above the fairy) ──
+            case 'director.started':  return `${p.programmeId || ''}${p.resumed ? ' (resumed)' : ''} · ${clip(p.goalPreview, 100)}`;
+            case 'director.plan':     return `${(p.stages || []).length} stages: ${clip((p.stages || []).map(s => s.title).join(' → '), 120)}`;
+            case 'director.assumed_parameters': return `assumed: ${clip((p.assumptions || []).join(' · ').replace(/ASSUMED:\s*/g, ''), 120)}`;
+            case 'director.stage_started':  return `${p.stageId || ''} “${clip(p.title, 80)}”${p.attempt > 1 ? ` (attempt ${p.attempt})` : ''}`;
+            case 'director.stage_finished': return `${p.stageId || ''} → ${p.status || ''}${p.questId ? ` · ${p.questId}` : ''}`;
+            case 'director.stage_assessed': return `${p.stageId || ''}: ${p.verdict || ''}${p.surprise && p.surprise !== 'none' ? ` (${p.surprise} surprise)` : ''} → ${String(p.action || '').replace(/_/g, ' ')}${p.reason ? ` — ${clip(p.reason, 80)}` : ''}`;
+            case 'director.replan':   return `${String(p.kind || '').replace(/_/g, ' ')} ${p.stageId || ''}${p.reason ? ` — ${clip(p.reason, 90)}` : ''}`;
+            case 'director.literature_started': return `consulting literature: ${clip(p.question, 110)}`;
+            case 'director.literature_done':    return `literature brief ${p.briefId || ''} · ${p.papers || 0} relevant paper(s)`;
+            case 'director.asked_user': return `asked you: ${clip(p.question, 100)} — ${p.answered ? 'answered' : 'no answer'}`;
+            case 'director.synthesis_started': return 'synthesising programme findings…';
+            case 'director.synthesised': return `outcome: ${(p.outcome && p.outcome.status) || '?'} · ${p.conclusionsCount || 0} conclusions${p.novelty && p.novelty.considerable ? ' · NOVEL result' : ''}`;
+            case 'director.finished': return `${(p.outcome && p.outcome.status) || 'done'} · ${p.keyResults || 0} key results · report ${p.report && p.report.pdfPath ? 'PDF ready' : 'written'}`;
+            case 'director.aborted':  return 'programme aborted';
+            case 'director.failed':   return clip(p.message, 140);
+            // ── notebooks / misc ──
+            case 'notebook.created':  return shortPath(p.path || '');
+            case 'notebook.replayed': return `replayed ${p.cellCount ?? '?'} cells${p.failures ? ` · ${p.failures} failed` : ' · clean'}`;
+            case 'notebook.checkpoint': return `checkpoint saved${p.path ? ` · ${shortPath(p.path)}` : ''}`;
+            case 'critic.replay_summary': return clip(p.summary || JSON.stringify(p), 130);
+            default: {
+                // Prefer obvious human fields before falling back to raw JSON.
+                for (const k of ['message', 'summary', 'note', 'title', 'detail', 'reason']) {
+                    if (typeof p[k] === 'string' && p[k]) return clip(p[k], 140);
+                }
+                return clip(JSON.stringify(p), 140);
+            }
         }
     }
     function summariseArgs(a) {
@@ -1060,21 +1473,65 @@
                 state.events   = Array.isArray(msg.recentEvents) ? msg.recentEvents.slice() : [];
                 if (msg.iconBase) state.iconBase = String(msg.iconBase);
                 if (msg.prompts)  state.prompts  = msg.prompts;
+                // Seed the Now strip from the last known status.
+                for (let i = state.events.length - 1; i >= 0; i--) {
+                    if (state.events[i].type === 'fairy.status') { state.lastStatus = state.events[i].payload || null; break; }
+                }
                 render();
+                // Run just ended (or none active): refresh the recent-runs list
+                // so the finished run shows up on the idle dashboard.
+                if (!(state.run && isActiveState(state.run.state))) {
+                    vscode.postMessage({ command: FROM.LIST_HISTORICAL_RUNS });
+                }
+                // Panel opened with nothing live to show → bring up the most
+                // recent past run so the Inspector is useful between runs.
+                if (!autoLoadedLatest && !state.events.length
+                    && !(state.run && isActiveState(state.run.state))) {
+                    autoLoadedLatest = true;
+                    const latest = (state.recentRuns || [])[0];
+                    if (latest) _openHistorical(latest.runId);
+                }
                 break;
             case TO.EVENT_APPEND:
                 if (!isHistorical && msg.event) {
+                    const ev = msg.event;
                     // Guard against snapshot/append race: SNAPSHOT_FULL may already contain this event
-                    if (msg.event.eventId && state.events.some(e => e.eventId === msg.event.eventId)) break;
-                    state.events.push(msg.event);
+                    if (ev.eventId && state.events.some(e => e.eventId === ev.eventId)) break;
+                    // Keep chronological order even when producers flush late.
+                    let at = state.events.length;
+                    const ts = ev.ts || '';
+                    while (at > 0 && ts && (state.events[at - 1].ts || '') > ts) at--;
+                    state.events.splice(at, 0, ev);
                     if (state.events.length > 50000) state.events.splice(0, state.events.length - 50000);
                     if (state.run) {
                         state.run.eventCount = (state.run.eventCount || 0) + 1;
-                        if (msg.event.type === 'llm.call' && msg.event.payload) {
+                        if (ev.type === 'llm.call' && ev.payload) {
                             state.run.llmCallCount = (state.run.llmCallCount || 0) + 1;
+                            if (typeof ev.payload.costUSD === 'number') {
+                                state.run.totalCostUSD = (state.run.totalCostUSD || 0) + ev.payload.costUSD;
+                                if (els.topbarCost) els.topbarCost.textContent = `$${state.run.totalCostUSD.toFixed(3)}`;
+                            }
                         }
                     }
-                    render();
+                    // High-frequency stream events feed the Now strip directly and
+                    // never trigger a full timeline re-render.
+                    if (ev.type === 'llm.reasoning_progress' || ev.type === 'llm.response_progress') {
+                        _feedStream(ev);
+                        break;
+                    }
+                    if (ev.type === 'fairy.status') {
+                        state.lastStatus = ev.payload || null;
+                        renderNowStrip();
+                        scheduleRender();
+                        break;
+                    }
+                    if (ev.type === 'llm.call') _endStream();
+                    if (ev.type === 'tool.call' || ev.type === 'correlated.tool'
+                        || ev.type === 'probe.appended' || ev.type === 'director.stage_started'
+                        || ev.type === 'literature.progress' || ev.type === 'fairy.steer') {
+                        _setActivity(oneLineSummary(ev));
+                    }
+                    scheduleRender();
                 }
                 break;
             case TO.EVENT_BATCH:
@@ -1095,23 +1552,43 @@
                 render();
                 break;
             case 'historicalRun.list': {
-                // Rebuild picker options: keep 'live', then add historical entries
+                // runs: enriched [{ runId, brief, status, costUSD }] (older builds sent bare ids)
+                state.recentRuns = (msg.runs || []).map(r =>
+                    typeof r === 'string' ? { runId: r, brief: '', status: '', costUSD: null } : r);
                 if (els.runPicker) {
                     const current = els.runPicker.value;
-                    // Remove old historical options
                     Array.from(els.runPicker.options).forEach(o => { if (o.value !== 'live') o.remove(); });
-                    (msg.runs || []).forEach(runId => {
+                    state.recentRuns.forEach(r => {
                         const opt = document.createElement('option');
                         // runId looks like "run_2026-05-30T18-15-54-251Z" — pretty-print the date
-                        const label = runId.replace(/^run_/, '').replace('T', ' ').replace(/-(?=\d{3}Z$)/, '.');
-                        opt.value = runId;
-                        opt.textContent = label;
+                        const label = r.runId.replace(/^run_/, '').replace('T', ' ').replace(/-(?=\d{3}Z$)/, '.');
+                        opt.value = r.runId;
+                        opt.textContent = r.brief ? `${label} — ${r.brief.slice(0, 40)}` : label;
                         els.runPicker.appendChild(opt);
                     });
-                    // Restore selection if still valid
                     if (current !== 'live' && Array.from(els.runPicker.options).some(o => o.value === current)) {
                         els.runPicker.value = current;
                     }
+                }
+                renderRecentRuns();
+                // If the panel is idle and we haven't shown anything yet, surface
+                // the latest run now that we know it exists.
+                if (!autoLoadedLatest && !state.events.length
+                    && !(state.run && isActiveState(state.run.state)) && state.recentRuns.length) {
+                    autoLoadedLatest = true;
+                    _openHistorical(state.recentRuns[0].runId);
+                }
+                break;
+            }
+            case 'steer.state': {
+                state.steerActive = !!msg.active;
+                renderNowStrip();
+                break;
+            }
+            case 'steer.queued': {
+                if (els.steerAck) {
+                    els.steerAck.textContent = 'queued — the agent sees it at its next turn';
+                    setTimeout(() => { if (els.steerAck) els.steerAck.textContent = ''; }, 6000);
                 }
                 break;
             }
@@ -1176,7 +1653,7 @@
                 <span class="meta-chip">${escapeHtml(p.name || 'tool')}</span>
                 <span class="meta-chip">${p.ok ? '\u2713 ok' : '\u2717 ' + escapeHtml(p.kind || 'error')}</span>
                 ${typeof p.durationMs === 'number' ? `<span class="meta-chip">${p.durationMs}ms</span>` : ''}
-                ${p.error ? `<span class="meta-chip" style="color:#ef4444">${escapeHtml(String(p.error).slice(0, 120))}</span>` : ''}
+                ${p.error ? `<span class="meta-chip" style="color:var(--acc-red)">${escapeHtml(String(p.error).slice(0, 120))}</span>` : ''}
             </div>`);
             if (p.value != null) {
                 parts.push(`<div class="detail-section">
@@ -1425,6 +1902,40 @@
             document.querySelectorAll('.view-toggle__btn').forEach(x => x.classList.toggle('active', x === b));
             renderEvents();
         });
+    });
+
+    // ── launcher (idle dashboard) ──────────────────────────────────────────
+    function _launch(command) {
+        const brief = els.launchBrief ? els.launchBrief.value.trim() : '';
+        if (!brief) { if (els.launchBrief) els.launchBrief.focus(); return; }
+        vscode.postMessage({ command, brief });
+        if (els.launchBrief) els.launchBrief.value = '';
+    }
+    const _lf = $('launchFairy'), _ld = $('launchDirector'), _lr = $('launchResearch');
+    if (_lf) _lf.addEventListener('click', () => _launch('startFairy'));
+    if (_ld) _ld.addEventListener('click', () => _launch('startDirector'));
+    if (_lr) _lr.addEventListener('click', () => _launch(FROM.START_RESEARCH));
+    if (els.launchBrief) els.launchBrief.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) _launch('startFairy');
+    });
+
+    // ── steering ───────────────────────────────────────────────────────────
+    function _sendSteer() {
+        if (!els.steerInput) return;
+        const text = els.steerInput.value.trim();
+        if (!text || !state.steerActive) return;
+        vscode.postMessage({ command: 'submitSteer', text });
+        els.steerInput.value = '';
+    }
+    if (els.steerBtn)   els.steerBtn.addEventListener('click', _sendSteer);
+    if (els.steerInput) els.steerInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); _sendSteer(); }
+    });
+
+    // ── live stream expand/collapse ────────────────────────────────────────
+    if (els.nowToggle) els.nowToggle.addEventListener('click', () => {
+        const collapsed = els.nowStream.classList.toggle('collapsed');
+        els.nowToggle.textContent = collapsed ? '▸' : '▾';
     });
 
     vscode.postMessage({ command: FROM.SCRIPT_LOADED });

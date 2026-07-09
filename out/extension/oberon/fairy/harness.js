@@ -14,6 +14,154 @@
  */
 
 const { verifyCleanNotebook } = require('./kernelVerifier');
+const { analyzeCode } = require('./depAnalyzer');
+
+// ── Topological ordering (H1, run Q_3VRPXL) ────────────────────────────────
+//
+// Steps are recorded in EXPLORATION order, which is NOT dependency order: the
+// model routinely records a corrected definition (gmGens) AFTER the steps that
+// use it. clean.wb replays cells top-to-bottom, so exploration order fails on a
+// fresh kernel with "symbol undefined" cascades that polish cannot repair
+// (edit_cell cannot move cells). Sort the closure by symbol-level dependency
+// edges (definer → user), stable w.r.t. recorded order; on a cycle, fall back
+// to recorded order for the tangled remainder and emit a diagnostic.
+
+/**
+ * @param {object[]} steps        closure steps in recorded order
+ * @param {object[]} diagnostics  mutated: receives {type:'reordered'|'dependency_cycle'}
+ * @returns {object[]}            dependency-ordered steps
+ */
+function topoSortSteps(steps, diagnostics = []) {
+    const n = steps.length;
+    if (n <= 1) return steps.slice();
+
+    // Last definer wins (matches the redefinition resolution): symbol → step index.
+    const definerOf = new Map();
+    steps.forEach((s, i) => {
+        for (const sym of (s.definesSymbols || [])) definerOf.set(sym, i);
+    });
+
+    // Edges: definer → user (symbol-level) ∪ dependsOn (id-level).
+    const idIndex = new Map(steps.map((s, i) => [s.id, i]));
+    const adj = Array.from({ length: n }, () => new Set());
+    const indeg = new Array(n).fill(0);
+    const addEdge = (from, to) => {
+        if (from === to || adj[from].has(to)) return;
+        adj[from].add(to);
+        indeg[to]++;
+    };
+    steps.forEach((s, i) => {
+        for (const sym of (s.usesSymbols || [])) {
+            const d = definerOf.get(sym);
+            if (d !== undefined && d !== i && !(s.definesSymbols || []).includes(sym)) addEdge(d, i);
+        }
+        for (const dep of (s.dependsOn || [])) {
+            const d = idIndex.get(dep);
+            if (d !== undefined) addEdge(d, i);
+        }
+    });
+
+    // Kahn's algorithm, tie-broken by recorded order (stable).
+    const out = [];
+    const ready = [];
+    for (let i = 0; i < n; i++) if (indeg[i] === 0) ready.push(i);
+    while (ready.length) {
+        ready.sort((a, b) => a - b);
+        const i = ready.shift();
+        out.push(i);
+        for (const j of adj[i]) if (--indeg[j] === 0) ready.push(j);
+    }
+    if (out.length < n) {
+        // Cycle (mutual redefinition) — append the remainder in recorded order.
+        const placed = new Set(out);
+        for (let i = 0; i < n; i++) if (!placed.has(i)) out.push(i);
+        diagnostics.push({
+            type: 'dependency_cycle',
+            details: 'Dependency cycle among recorded steps — cyclic part left in recorded order.',
+        });
+    }
+    const changed = out.some((v, k) => v !== k);
+    if (changed) {
+        diagnostics.push({
+            type: 'reordered',
+            details: `Steps reordered by dependency: ${out.map(i => steps[i].id).join(' → ')}`,
+        });
+    }
+    return out.map(i => steps[i]);
+}
+
+// ── Probe auto-recovery (H2, run Q_3VRPXL) ─────────────────────────────────
+//
+// The model records a fraction of its clean probes (6 of 37 in Q_3VRPXL); the
+// rest live only in probe history. When a closure step USES a symbol that no
+// recorded step / util / input defines, the derivation exists — it just was
+// never recorded. Recover it: find the latest clean probe that defines the
+// symbol and inject it as a synthetic step (auto:true, visibly marked in the
+// notebook). Iterates because a recovered probe may itself use further
+// unrecorded symbols.
+
+/**
+ * @param {object[]} ordered      current closure steps
+ * @param {object[]} allProbes    all persisted probes (any order; must carry .ok/.code)
+ * @param {Set<string>} known     symbols defined outside steps (utils, inputs)
+ * @param {object[]} diagnostics  mutated with {type:'auto_recovered_probe'} entries
+ * @returns {object[]}            steps including synthetic recovered ones
+ */
+function recoverMissingDefiners(ordered, allProbes, known, diagnostics = []) {
+    const steps = ordered.slice();
+    const okProbes = (allProbes || []).filter(p => p && p.ok && p.code);
+    // Latest clean probe defining each symbol (probe ids sort chronologically: p001…).
+    const probeDefiner = new Map();
+    for (const p of okProbes.sort((a, b) => String(a.probeId).localeCompare(String(b.probeId)))) {
+        const { definesSymbols } = analyzeCode(p.code);
+        for (const sym of definesSymbols) probeDefiner.set(sym, p);
+    }
+
+    for (let round = 0; round < 10; round++) {
+        const defined = new Set(known);
+        for (const s of steps) for (const sym of (s.definesSymbols || [])) defined.add(sym);
+        const inChain = new Set(steps.map(s => s.probeId).filter(Boolean));
+
+        const missing = [];
+        for (const s of steps) {
+            for (const sym of (s.usesSymbols || [])) {
+                if (!defined.has(sym) && !missing.includes(sym)) missing.push(sym);
+            }
+        }
+        const recoverable = missing.filter(sym => {
+            const p = probeDefiner.get(sym);
+            return p && !inChain.has(p.probeId);
+        });
+        if (!recoverable.length) break;
+
+        const added = new Set();
+        for (const sym of recoverable) {
+            const p = probeDefiner.get(sym);
+            if (added.has(p.probeId)) continue;
+            added.add(p.probeId);
+            const a = analyzeCode(p.code);
+            steps.push({
+                id:             `auto_${p.probeId}`,
+                probeId:        p.probeId,
+                code:           p.code,
+                resultRef:      p.probeId,
+                dependsOn:      [],
+                usesSymbols:    a.usesSymbols.slice(0, 40),
+                definesSymbols: a.definesSymbols,
+                note:           `auto-recovered from probe ${p.probeId} (defines ${a.definesSymbols.slice(0, 4).join(', ')}) — the agent used this result but never recorded it`,
+                status:         'valid',
+                auto:           true,
+            });
+            diagnostics.push({
+                type:    'auto_recovered_probe',
+                probeId: p.probeId,
+                symbols: a.definesSymbols.slice(0, 6),
+                details: `Unrecorded probe ${p.probeId} injected — closure needed ${sym}.`,
+            });
+        }
+    }
+    return steps;
+}
 
 // ── Compile ───────────────────────────────────────────────────────────────
 
@@ -281,11 +429,38 @@ async function compile(workDir, targetStepId, opts = {}) {
         }
     }
 
+    // H2 (run Q_3VRPXL): recover unrecorded definer probes — the model records a
+    // fraction of its clean probes; symbols the chain USES but never RECORDED are
+    // pulled in from probe history as clearly-marked synthetic steps.
+    try {
+        const allProbes = typeof workDir.loadAllProbes === 'function'
+            ? await workDir.loadAllProbes()
+            : await workDir.loadRecentProbes(500).catch(() => []);
+        const known = new Set();
+        for (const u of loadedUtils)  if (u && u.name) known.add(u.name);
+        for (const inp of loadedInputs) {
+            const a = analyzeCode((inp && inp.code) || '');
+            for (const sym of a.definesSymbols) known.add(sym);
+        }
+        ordered = recoverMissingDefiners(ordered, allProbes, known, allDiagnostics);
+    } catch (_) { /* recovery is best-effort — compile proceeds with recorded steps */ }
+
+    // H1 (run Q_3VRPXL): dependency-order the closure. Exploration order put a
+    // gmGens-USING cell four cells before the gmGens-DEFINING cell; polish cannot
+    // move cells, so the run died. Recorded order is only a tie-breaker now.
+    ordered = topoSortSteps(ordered, allDiagnostics);
+
     // Step 1: Always write clean.wb as raw JSON to disk first.
     // run_clean reads the file via fsp.readFile, so it must be on disk before the
     // polish phase starts. The VS Code writeNotebook callback (step 2) may overwrite
     // the file, but step 1 guarantees a readable file at polish entry.
-    const suppressionCode = require('../core/wolframShim').buildSuppressionCode();
+    //
+    // I1 (run Q_2N8616): the deliverable no longer embeds an Off[...] suppression
+    // cell — shipping "## Suppressed non-critical warnings" in a verified notebook
+    // reads as hiding problems. Verification behaviour is unchanged: run_clean's
+    // kernel restart re-applies the suppression via the post-restart seeder, and the
+    // message classifier already treats those tags as non-failing. A user re-running
+    // clean.wb may see the soft solver warnings — that is honest.
     const cleanNbPath = await workDir.writeCleanNotebook({
         steps:       ordered,
         inputs:      loadedInputs,
@@ -293,7 +468,6 @@ async function compile(workDir, targetStepId, opts = {}) {
         taskTitle,
         utils:       loadedUtils,
         skillsBlock,
-        suppressionCode,
     });
 
     // Step 2: If a VS Code API callback is provided, open the notebook as a live
@@ -301,7 +475,7 @@ async function compile(workDir, targetStepId, opts = {}) {
     // Non-fatal: run_clean still works even if the callback fails.
     if (typeof writeNotebook === 'function') {
         const { buildCleanCells } = require('./workDir');
-        const cells = buildCleanCells({ steps: ordered, inputs: loadedInputs, assumptions: loadedAssumptions, taskTitle, utils: loadedUtils, skillsBlock, suppressionCode });
+        const cells = buildCleanCells({ steps: ordered, inputs: loadedInputs, assumptions: loadedAssumptions, taskTitle, utils: loadedUtils, skillsBlock });
         await writeNotebook(cells, workDir.cleanNb).catch(() => {});
     }
 
@@ -377,4 +551,4 @@ function autoCorrectMissingStep(verifyResult, allValidSteps, currentIncludeSteps
     return null;
 }
 
-module.exports = { compile, verify, computeClosure, staticCheck, autoCorrectMissingStep };
+module.exports = { compile, verify, computeClosure, staticCheck, autoCorrectMissingStep, topoSortSteps, recoverMissingDefiners };

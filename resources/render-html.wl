@@ -53,21 +53,21 @@ handleStyles[head_,styles_]:=Module[{keys},
 ];
 
 SetAttributes[renderWrapper,HoldAll];
-renderWrapper[state_Association,styles_,expr_]:=Module[{return,stateModifier,pop},
-  stackPush[$statestack,Join[<|"head"->Null,"mutable"->False,"bracket"->False|>,<|"head"->state["head"]|>]];
+renderWrapper[state_Association,styles_,expr_]:=Module[{retVal,stateModifier,pop},
+  If[ListQ[$statestack] && Length[$statestack] > 0,
+    $statestack = Append[$statestack, Join[<|"head"->Null,"mutable"->False,"bracket"->False|>,<|"head"->state["head"]|>]]];
   If[Length[styles]==0,$localStyle=<||>;,
     stateModifier=handleStyles[state["head"],styles];
     AssociateTo[$inheritedStyle,stateModifier[[1]]];
   ];
 
-  return=expr;
+  retVal=expr;
   If[Length[styles]==0,$localStyle=<||>;,
     AssociateTo[$inheritedStyle,Select[stateModifier[[2]],Not@*MissingQ]];
     KeyDropFrom[$inheritedStyle,Keys@Select[stateModifier[[2]],MissingQ]];
   ];
-  pop=stackPop[$statestack];
-  If[pop["mutable"]===True&&Length[$statestack]>0,Null(*$statestack[[-1,"mutable"]]=True*)];
-  return
+  If[ListQ[$statestack] && Length[$statestack] > 0, $statestack = Most[$statestack]];
+  retVal
 ];
 renderWrapper[head_Symbol,styles_,expr_]:=renderWrapper[<|"head"->head|>,styles,expr];
 
@@ -84,7 +84,7 @@ rasterizeAsImage[boxes_]:=Module[{expr=RawBoxes[boxes],black,white,alpha,image},
   ]
 ]
 
-renderHTMLimage[x_,resizable_:True]:=Module[{img=rasterizeAsImage[x] ,dim, final,imageInBase64},
+renderHTMLimage[x_,resizable_:True]:=Module[{img=rasterizeAsImage[x], dim, final, imageInBase64, ba, disableInvert},
 
   Export[FileNameJoin[{$TemporaryDirectory,"img.jpg"}], img];
   ba = ExportByteArray[img, "PNG"];
@@ -133,9 +133,5 @@ renderInputForm[boxes_]:=Module[{text},
   StringJoin["<div class=\"wexpr\"><pre style=\"font-family:monospace;white-space:pre-wrap;\">",text,"</pre></div>"]
 ]
 
-(* ===== Protect all wolfbook render symbols from ClearAll["Global`*"] ===== *)
-Protect[
-    $statestack, $inheritedStyle, inheritedStyleNames,
-    handleStyles, renderWrapper, rasterizeAsImage,
-    renderHTMLimage, renderImage, renderHTML, renderMathML, renderInputForm
-];
+(* All symbols here are in Wolfbook`Private` context (loaded via Begin in init.wl)
+   and are immune to ClearAll["Global`*"] without needing Protect. *)

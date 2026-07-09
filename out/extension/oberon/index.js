@@ -24,10 +24,9 @@ const { ControlRoomProvider, VIEW_ID: SIDEBAR_VIEW_ID } = require('./ui/controlR
 const { RunInspectorManager }                            = require('./ui/runInspector');
 const { CharmDebuggerManager }                           = require('./ui/charmDebugger');
 const { runPlanner }                                     = require('./core/planner');
-const { dispatchCharm, dispatchCharms }                  = require('./core/dispatcher');
+const { dispatchCharm, dispatchCharms, buildCharms }     = require('./core/dispatcher');
 const { runFairy }                                       = require('./core/fairy');
-const { runReviewLoop }                                  = require('./core/reviewLoop');
-const { runOneResearch }                                 = require('./core/research');
+const { clarifyQuestGate, applyDeclaredAssumptions }     = require('./core/research');
 const { runExecutiveAnalysis }                           = require('./core/executive');
 const establishedFacts                                   = require('./memory/establishedFacts');
 const wolframShim                                        = require('./core/wolframShim');
@@ -36,9 +35,9 @@ const { TestResultsPanel }                               = require('./ui/testRes
 const { prepareCharmNotebook }                           = require('./memory/charmNotebook');
 const { prepareSummaryNotebook }                         = require('./memory/summaryNotebook');
 const { populateResearchNotebooks }                      = require('./memory/populateNotebooks');
-const { runWards, synthesizeWardOutFromSkeptic }         = require('./core/wards');
 const { runScribe }                                      = require('./core/scribe');
-const { writePostmortem }                                = require('./memory/postmortem');
+const analyst                                            = require('./director/analyst');
+const { writePostmortem, writeErrorPostmortem }          = require('./memory/postmortem');
 const toolRegistry                                       = require('./core/toolRegistry');
 
 /**
@@ -55,6 +54,22 @@ const toolRegistry                                       = require('./core/toolR
  */
 function activate(context, opts = {}) {
     const bus             = new TelemetryBus();
+    // Telemetry drops were previously invisible: a Dropbox sync lock could hang
+    // the JSONL append chain and silently lose a whole run's events. Surface the
+    // first drop of each run to the user; log every one to the console.
+    let _telemetryDropWarned = false;
+    bus.on('writeError', ({ error, dropped }) => {
+        try { console.warn(`[oberon] telemetry write failed (${dropped} dropped so far): ${error}`); } catch (_) {}
+        if (!_telemetryDropWarned) {
+            _telemetryDropWarned = true;
+            try {
+                vscode.window.showWarningMessage(
+                    `Oberon: telemetry events are failing to persist (${error}). ` +
+                    'The run continues, but the JSONL log will be incomplete.');
+            } catch (_) {}
+        }
+    });
+    bus.on('runBegin', () => { _telemetryDropWarned = false; });
     const runManager      = new RunManager(bus);
     const inspector       = new RunInspectorManager({ context, runManager, bus, onCommand: dispatch });
     const charmDebugger   = new CharmDebuggerManager({ context, bus, onCommand: dispatch });
@@ -104,12 +119,18 @@ function activate(context, opts = {}) {
         // Minimal Fairy run — no Planner, no Skeptic critic, no Oberon report. The default
         // quick-compute path. Routes to the full pipeline only when the experimental
         // Oberon mode is enabled (wolfbook.oberon.experimentalPipeline).
-        ['wolfbook.oberon.startFairy',    async () => {
-            const brief = await vscode.window.showInputBox({
-                prompt: 'Fairy quick compute — what should it compute?',
-                placeHolder: 'Eigenvalues of the L=4 Heisenberg Hamiltonian …',
-                ignoreFocusOut: true,
-            });
+        ['wolfbook.oberon.startFairy',    async (arg) => {
+            // The Agents panel passes the prompt directly ({ brief } or a raw string);
+            // the command-palette invocation (no arg) falls back to an input box.
+            let brief = (typeof arg === 'string') ? arg
+                      : (arg && typeof arg.brief === 'string') ? arg.brief : '';
+            if (!brief.trim()) {
+                brief = await vscode.window.showInputBox({
+                    prompt: 'Fairy quick compute — what should it compute?',
+                    placeHolder: 'Eigenvalues of the L=4 Heisenberg Hamiltonian …',
+                    ignoreFocusOut: true,
+                }) || '';
+            }
             if (!(brief && brief.trim())) return;
             const fullPipeline = !!vscode.workspace.getConfiguration('wolfbook').get('oberon.experimentalPipeline');
             await dispatch(fullPipeline ? 'startResearch' : 'startFairy', { brief: brief.trim() });
@@ -137,6 +158,192 @@ function activate(context, opts = {}) {
         }],
         ['wolfbook.oberon.bumpAndDeploy', () => dispatch('bumpAndDeploy')],
         ['wolfbook.oberon.reviewContributions', () => contributionReviewPanel.open()],
+
+        // ── Headless agent API (MCP: wolfbook_fairy_dispatch / wolfbook_fairy_status) ──
+        // No dialogs, structured returns — an outside agent (Claude/Codex/…) uses the
+        // Fairy as a cheap, kernel-verified computation sub-agent.
+        ['wolfbook.oberon.fairyDispatch', async (args) => {
+            const brief = String((args && args.task) || '').trim();
+            if (!brief) return { ok: false, error: 'task is required (a complete, self-contained computation spec).' };
+            if (!roles.minimallyConfigured()) {
+                return { ok: false, error: 'Oberon LLM roles are not configured — set a provider API key + model under wolfbook.oberon settings.' };
+            }
+            if (runManager.isActive) {
+                return { ok: false, error: `A run is already active (${(runManager.summary && runManager.summary.runId) || 'unknown'}). Poll wolfbook_fairy_status or abort it (command: Oberon: Abort Run).` };
+            }
+            // Numbered, descriptive folder name (short LLM slug + heuristic fallback):
+            // quests/Q05_heisenberg_l4_spectrum/. Derived up front so the charmDir we
+            // return matches the folder the run actually creates.
+            let naming = { id: null, shortName: null };
+            try { naming = await require('./core/questNaming').deriveQuestNaming(brief); } catch (_) {}
+            const questId   = naming.id || ('Q_' + Date.now().toString(36).slice(-6).toUpperCase());
+            const shortName = naming.shortName || questId;
+            const validationChecks = Array.isArray(args && args.validationChecks)
+                ? args.validationChecks.map(String).filter(s => s.trim()).slice(0, 8) : [];
+            // Fire-and-forget: the run takes minutes; the caller polls fairyStatus.
+            dispatch('startFairy', { brief, questId, shortName, validationChecks }).catch(() => {});
+            // Wait briefly for the run to register so the caller gets a runId.
+            let runId = null;
+            for (let i = 0; i < 30 && !runId; i++) {
+                await new Promise(r => setTimeout(r, 100));
+                runId = bus.runId || null;
+            }
+            const qDir = project.questsDir();
+            const pth = require('path');
+            const charmDir = qDir ? pth.join(qDir, `${questId}_${shortName}`, 'charms', 'C01') : null;
+            return {
+                ok: true, runId, questId, charmDir,
+                artifacts: charmDir ? {
+                    workingNb: pth.join(charmDir, 'working.wb'),
+                    cleanNb:   pth.join(charmDir, 'clean.wb'),
+                    partialNb: pth.join(charmDir, 'clean_partial.wb'),
+                } : null,
+                note: 'Run started in the background (typical duration 5–30 min). Poll wolfbook_fairy_status. ' +
+                      'The run RESTARTS the shared Wolfram kernel — interactive kernel state is lost while it works.',
+            };
+        }],
+        ['wolfbook.oberon.fairyStatus', async (args) => {
+            const fs  = require('fs');
+            const pth = require('path');
+            const runsDir = project.telemetryRunsDir();
+            if (!runsDir) return { ok: false, error: 'No telemetry directory (no workspace open?).' };
+            let runId = String((args && args.runId) || '').replace(/\.jsonl$/, '');
+            if (!runId) {
+                let files = [];
+                try { files = fs.readdirSync(runsDir).filter(f => f.endsWith('.jsonl')).sort(); } catch (_) {}
+                if (!files.length) return { ok: false, error: 'No runs found.' };
+                runId = files[files.length - 1].replace(/\.jsonl$/, '');
+            }
+            const file = pth.join(runsDir, runId + '.jsonl');
+            let lines;
+            try { lines = fs.readFileSync(file, 'utf8').trim().split('\n'); }
+            catch (_) { return { ok: false, error: `Run '${runId}' not found.` }; }
+            const events = lines.map(l => { try { return JSON.parse(l); } catch (_) { return null; } }).filter(Boolean);
+
+            const started  = events.find(e => e.type === 'fairy.started');
+            const phases   = events.filter(e => e.type === 'fairy.phase');
+            const scroll   = events.find(e => e.type === 'scroll.submitted');
+            const metricsEv = events.find(e => e.type === 'fairy.run_metrics');
+            const statusEvs = events.filter(e => e.type === 'fairy.status');
+            const probeEvs  = events.filter(e => e.type === 'probe.appended');
+            const p = (e) => (e && e.payload) || {};
+
+            const charmDir = p(started).charmDir || null;
+            const artifacts = {};
+            if (charmDir) {
+                for (const [k, f] of [['workingNb', 'working.wb'], ['cleanNb', 'clean.wb'], ['partialNb', 'clean_partial.wb'], ['checkpointNb', 'clean_in_progress.wb']]) {
+                    const fp = pth.join(charmDir, f);
+                    if (fs.existsSync(fp)) artifacts[k] = fp;
+                }
+            }
+            let facts = [];
+            try { facts = JSON.parse(fs.readFileSync(pth.join(charmDir, 'facts.json'), 'utf8')); } catch (_) {}
+
+            const lastStatus = statusEvs.length ? p(statusEvs[statusEvs.length - 1]) : {};
+            const done = !!scroll || !!lastStatus.done;
+            return {
+                ok: true, runId,
+                active: !done && runManager.isActive,
+                phase: phases.length ? p(phases[phases.length - 1]).phase : (started ? 'starting' : 'unknown'),
+                status: scroll ? p(scroll).status : (done ? (lastStatus.status || 'unknown') : 'running'),
+                build: p(started).build || null,
+                progress: {
+                    probesUsed: lastStatus.probesUsed ?? null,
+                    turnsUsed:  lastStatus.turnsUsed ?? null,
+                    costUSD:    lastStatus.costUSD ?? null,
+                },
+                metrics: metricsEv ? p(metricsEv) : null,
+                artifacts,
+                facts: facts.slice(0, 10).map(f => ({ key: f.key, value: String(f.value).slice(0, 300), confidence: f.confidence })),
+                recentActivity: probeEvs.slice(-3).map(e => ({ probeId: p(e).probeId, note: String(p(e).note || '').slice(0, 160) })),
+                note: done
+                    ? (scroll && p(scroll).status === 'delivered'
+                        ? 'Delivered: clean.wb is the verified notebook; facts carry the headline results.'
+                        : 'Run ended — inspect artifacts and metrics; a partial run still leaves clean_partial.wb / checkpoints.')
+                    : 'Still running — poll again in ~60s.',
+            };
+        }],
+
+        // ── Oberon Director: multi-stage research programmes (LLM above the Fairy) ──
+        ['wolfbook.oberon.startDirector', async (arg) => {
+            let brief = (typeof arg === 'string') ? arg
+                      : (arg && typeof arg.brief === 'string') ? arg.brief : '';
+            if (!brief.trim()) {
+                brief = await vscode.window.showInputBox({
+                    prompt: 'Oberon Director — describe the research programme goal',
+                    placeHolder: 'Compute the SU(3) spin-chain spectrum via the QQ-system, verify against exact diagonalization, extend to L=8 …',
+                    ignoreFocusOut: true,
+                }) || '';
+            }
+            if (brief && brief.trim()) await dispatch('startDirector', { brief: brief.trim() });
+        }],
+        ['wolfbook.oberon.resumeDirector', async () => {
+            const dstate = require('./director/state');
+            const root = project.getWorkspaceRoot();
+            if (!root) { vscode.window.showWarningMessage('Oberon: no workspace open.'); return; }
+            const progs = (await dstate.listProgrammes(root)).filter(p => p.status !== 'done');
+            if (!progs.length) { vscode.window.showInformationMessage('Oberon: no resumable Director programmes.'); return; }
+            const pick = await vscode.window.showQuickPick(progs.map(p => ({
+                label: `${p.id} — ${p.title}`.slice(0, 80),
+                description: `${p.status} · ${p.stages} stage(s) · updated ${String(p.updatedAt || '').slice(0, 16)}`,
+                dir: p.dir,
+            })), { placeHolder: 'Resume which Director programme?' });
+            if (pick) await dispatch('startDirector', { resumeDir: pick.dir });
+        }],
+        // Headless status (MCP-ready): structured snapshot from programme.json.
+        ['wolfbook.oberon.directorStatus', async (args) => {
+            const dstate = require('./director/state');
+            const root = project.getWorkspaceRoot();
+            if (!root) return { ok: false, error: 'No workspace open.' };
+            let dir = args && args.programmeDir;
+            if (!dir) {
+                const progs = await dstate.listProgrammes(root);
+                if (!progs.length) return { ok: false, error: 'No Director programmes found.' };
+                dir = progs[0].dir;
+            }
+            try {
+                const p = await dstate.loadProgramme(dir);
+                return {
+                    ok: true, programmeId: p.id, title: p.title, status: p.status,
+                    outcome: p.outcome, dir: p.dir, active: runManager.isActive,
+                    stages: ((p.plan && p.plan.stages) || []).map(s => ({
+                        id: s.id, title: s.title, status: s.status,
+                        questId: s.questId, cleanNbPath: s.cleanNbPath,
+                        verdict: s.assessment && s.assessment.verdict || null,
+                    })),
+                    keyResults: (p.keyResults || []).slice(0, 12).map(k => ({
+                        statement: String(k.statement).slice(0, 300), confidence: k.confidence,
+                    })),
+                    report: p.report || null,
+                    contribution: p.contribution || null,
+                    note: p.status === 'done'
+                        ? 'Programme finished — report.tex is the deliverable; per-stage clean.wb notebooks re-execute in a fresh kernel.'
+                        : (runManager.isActive ? 'Programme running — poll again in ~120s.' : 'Programme is not running (resumable via Oberon: Resume Director Programme).'),
+                };
+            } catch (e) { return { ok: false, error: (e && e.message) || String(e) }; }
+        }],
+        // Headless dispatch (MCP-ready): fire-and-forget, poll directorStatus.
+        ['wolfbook.oberon.directorDispatch', async (args) => {
+            const brief = String((args && args.goal) || (args && args.task) || '').trim();
+            if (!brief) return { ok: false, error: 'goal is required (the research programme brief).' };
+            if (!roles.minimallyConfigured()) {
+                return { ok: false, error: 'Oberon LLM roles are not configured — set a provider API key + model under wolfbook.oberon settings.' };
+            }
+            if (runManager.isActive) {
+                return { ok: false, error: `A run is already active (${(runManager.summary && runManager.summary.runId) || 'unknown'}).` };
+            }
+            dispatch('startDirector', { brief }).catch(() => {});
+            let runId = null;
+            for (let i = 0; i < 30 && !runId; i++) {
+                await new Promise(r => setTimeout(r, 100));
+                runId = bus.runId || null;
+            }
+            return {
+                ok: true, runId,
+                note: 'Director programme started in the background (typical duration 30–120 min; it runs several ' +
+                      'fairy stages and RESTARTS the shared Wolfram kernel repeatedly). Poll wolfbook.oberon.directorStatus.',
+            };
+        }],
     ];
     for (const [id, handler] of cmds) {
         context.subscriptions.push(vscode.commands.registerCommand(id, handler));
@@ -212,14 +419,30 @@ function activate(context, opts = {}) {
                 if (!brief.trim()) return;
 
                 // Build minimal quest + charm directly from the brief (no Planner/Dispatcher).
-                const _qId = 'Q_' + Date.now().toString(36).slice(-6).toUpperCase();
+                // fairyDispatch (headless agent API) may pre-assign questId + shortName (so
+                // it can return the charmDir before the run registers) and supply
+                // validationChecks — the dispatching agent's quality contract, executed
+                // by run_clean and the delivered-run self-verify.
+                //
+                // Folder name = `<id>_<shortName>` → e.g. Q05_heisenberg_l4_spectrum.
+                // Derive a numbered, descriptive name (short LLM slug + heuristic fallback)
+                // unless the caller already supplied one.
+                let _qId   = payload && payload.questId;
+                let _short = payload && payload.shortName;
+                if (!_qId || !_short) {
+                    let naming = { id: null, shortName: null };
+                    try { naming = await require('./core/questNaming').deriveQuestNaming(brief); } catch (_) {}
+                    _qId   = _qId   || naming.id       || ('Q_' + Date.now().toString(36).slice(-6).toUpperCase());
+                    _short = _short || naming.shortName || _qId;
+                }
                 const quest = {
-                    id: _qId, title: brief.slice(0, 60), objective: brief,
+                    id: _qId, shortName: _short, title: brief.slice(0, 60), objective: brief,
                     successCriteria: [], subtasks: [],
                 };
                 const charm = {
                     id: 'C01', title: brief.slice(0, 60), task: brief,
-                    deliverables: [], constraints: [], validationChecks: [],
+                    deliverables: [], constraints: [],
+                    validationChecks: Array.isArray(payload && payload.validationChecks) ? payload.validationChecks : [],
                 };
 
                 inspector.show();
@@ -277,6 +500,8 @@ function activate(context, opts = {}) {
                             _insertUtilBanner(_probeNbDoc, ev.payload).catch(() => {});
                         } else if (ev.type === 'literature.brief' && _probeNbDoc) {
                             _insertLiteratureBrief(_probeNbDoc, ev.payload).catch(() => {});
+                        } else if (ev.type === 'literature.progress' && _probeNbDoc) {
+                            _appendLiteratureProgress(_probeNbDoc, ev.payload).catch(() => {});
                         } else if (ev.type === 'fairy.status' && _probeNbDoc) {
                             if (!ev.payload || !ev.payload.done) {
                                 const p = ev.payload || {};
@@ -294,11 +519,12 @@ function activate(context, opts = {}) {
                         signal: ctrl.signal,
                         getWorkingNbDoc: () => _probeNbDoc,
                         writeNotebook: async (_cells, destPath) => destPath,
-                        onSteerQueueReady: (q) => sidebar.setSteerQueue(q),
+                        onSteerQueueReady: (q) => { sidebar.setSteerQueue(q); inspector.setSteerQueue(q); },
                         askContinue: _askFairyContinue,
                     });
 
                     sidebar.setSteerQueue(null);
+                    inspector.setSteerQueue(null);
                     bus.removeListener('event', _onFairyStarted);
 
                     await runManager.transition('SCROLL_SUBMITTED', {
@@ -318,6 +544,34 @@ function activate(context, opts = {}) {
                         } catch (_) {}
                     }
 
+                    // On a clean delivery, tidy up: the agent's scratchpad (working.wb)
+                    // and the Run Inspector have served their purpose — close both so the
+                    // user is left with just the delivered clean.wb. Only on 'delivered':
+                    // partial/escalate/failed runs keep them open for debugging.
+                    const _finalStatus = fairyOut && fairyOut.scroll && fairyOut.scroll.fairyArtifact
+                        && fairyOut.scroll.fairyArtifact.status;
+                    if (_finalStatus === 'delivered') {
+                        try {
+                            // Save first so closing a dirty scratchpad tab never prompts.
+                            if (_probeNbDoc && typeof _probeNbDoc.save === 'function') {
+                                await _probeNbDoc.save().then(undefined, () => {});
+                            }
+                            const _wpath = _probeNbDoc && _probeNbDoc.uri && _probeNbDoc.uri.fsPath;
+                            if (_wpath) {
+                                for (const tabGroup of vscode.window.tabGroups.all) {
+                                    for (const tab of tabGroup.tabs) {
+                                        if (tab.input instanceof vscode.TabInputNotebook &&
+                                            tab.input.uri.fsPath === _wpath) {
+                                            await vscode.window.tabGroups.close(tab, true).catch(() => {});
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (_) {}
+                        // The Inspector intentionally stays open: after a run it
+                        // shows the finished timeline + recent-runs dashboard.
+                    }
+
                     await runManager.endRun({ state: 'IDLE' });
                     vscode.window.showInformationMessage('Quick Compute: done.');
                 } catch (e) {
@@ -326,6 +580,213 @@ function activate(context, opts = {}) {
                         await runManager.endRun({ state: aborted ? 'ABORTED' : 'ERROR' });
                     }
                     if (!aborted) vscode.window.showErrorMessage(`Quick Compute failed: ${e && e.message || String(e)}`);
+                }
+                return;
+            }
+
+            // ── Oberon Director: plan → [fairy stage → analyse clean.wb → adjust
+            //    plan]* → synthesis → skill candidate → concise LaTeX report ──
+            if (cmd === 'startDirector') {
+                if (!roles.minimallyConfigured()) {
+                    const choice = await vscode.window.showWarningMessage(
+                        'Oberon: Configure a provider and the Oberon/Fairy role bindings before starting.',
+                        'Configure',
+                    );
+                    if (choice === 'Configure') await settings.openProviderSettingsUI();
+                    return;
+                }
+                if (runManager.isActive) {
+                    vscode.window.showWarningMessage('Oberon: a run is already active. Abort it first.');
+                    return;
+                }
+                const brief     = (payload && payload.brief)     || '';
+                const resumeDir = (payload && payload.resumeDir) || null;
+                if (!brief.trim() && !resumeDir) return;
+                const root = project.getWorkspaceRoot();
+                if (!root) { vscode.window.showWarningMessage('Oberon: no workspace open.'); return; }
+
+                const { runDirector } = require('./director/director');
+                const questNaming     = require('./core/questNaming');
+                const dirCfg = settings.director();
+
+                inspector.show();
+                await runManager.beginRun({
+                    brief: brief.trim() || `[resume Director programme] ${resumeDir}`,
+                    budgetOverride: { runUSD: dirCfg.maxUSD, runLlmCalls: dirCfg.maxLlmCalls },
+                });
+                const ctrl = runManager.newAbortController();
+
+                // One fairy stage = one quest+charm run inside THIS run, with the
+                // same live working.wb / clean.wb UX as the quick-compute path.
+                const runStage = async ({ stage, task, handoff, signal }) => {
+                    let naming = { id: null, shortName: null };
+                    try { naming = await questNaming.deriveQuestNaming(task); } catch (_) {}
+                    const questId   = naming.id || ('Q_' + Date.now().toString(36).slice(-6).toUpperCase());
+                    const shortName = naming.shortName || questId;
+                    const quest = {
+                        id: questId, shortName, title: String(stage.title || task).slice(0, 60),
+                        objective: task, successCriteria: stage.successCriteria || [], subtasks: [],
+                    };
+                    const charm = {
+                        id: 'C01', title: String(stage.title || task).slice(0, 60), task,
+                        deliverables: (stage.successCriteria || []).slice(0, 12), constraints: [],
+                        validationChecks: (stage.validationChecks || []).slice(0, 8),
+                    };
+                    await runManager.transition('QUEST_DEFINED',    { questId: quest.id, directorStage: stage.id });
+                    await runManager.transition('CHARM_DISPATCHED', { questId: quest.id, charmId: charm.id });
+                    await runManager.transition('FAIRY_WORKING',    { questId: quest.id, charmId: charm.id });
+
+                    const live = _makeFairyLiveView(bus);
+                    try {
+                        const fairyOut = await runFairy({
+                            quest, charm, bus,
+                            signal: signal || ctrl.signal,
+                            handoff: handoff || null,
+                            getWorkingNbDoc: () => live.getDoc(),
+                            writeNotebook: async (_cells, destPath) => destPath,
+                            onSteerQueueReady: (q) => { sidebar.setSteerQueue(q); inspector.setSteerQueue(q); },
+                            // Autonomous: auto-grant a bounded number of fairy budget
+                            // continuations per stage; never pop a modal mid-programme.
+                            askContinue: async (info) =>
+                                ((info && info.continuation) || 1) <= dirCfg.stageContinuations,
+                        });
+                        await runManager.transition('SCROLL_SUBMITTED', {
+                            questId: quest.id, charmId: charm.id,
+                            scrollId: fairyOut.scroll && fairyOut.scroll.id,
+                        });
+                        await runManager.transition('REVIEWING', { questId: quest.id, charmId: charm.id });
+
+                        // Delivery UX: fresh kernel + open clean.wb + run all cells.
+                        if (fairyOut.cleanNbPath) {
+                            try {
+                                await wolframShim.restartKernel().catch(() => {});
+                                const _cleanUri = vscode.Uri.file(fairyOut.cleanNbPath);
+                                const _cleanDoc = await vscode.workspace.openNotebookDocument(_cleanUri);
+                                await vscode.window.showNotebookDocument(_cleanDoc, {
+                                    viewColumn: vscode.ViewColumn.Active, preserveFocus: false,
+                                });
+                                await new Promise(r => setTimeout(r, 1200));
+                                await vscode.commands.executeCommand('notebook.executeAll');
+                                // Persist outputs to disk so the Director's clean.wb
+                                // digest sees them (best-effort; digest also reads facts).
+                                await new Promise(r => setTimeout(r, 800));
+                                await _cleanDoc.save().then(undefined, () => {});
+                            } catch (_) {}
+                            // Tidy: a delivered stage's scratchpad has served its
+                            // purpose — close it so tabs don't pile up stage after stage.
+                            try {
+                                const wdoc = live.getDoc();
+                                if (wdoc) {
+                                    await wdoc.save().then(undefined, () => {});
+                                    const wpath = wdoc.uri && wdoc.uri.fsPath;
+                                    for (const tabGroup of vscode.window.tabGroups.all) {
+                                        for (const tab of tabGroup.tabs) {
+                                            if (tab.input instanceof vscode.TabInputNotebook &&
+                                                tab.input.uri.fsPath === wpath) {
+                                                await vscode.window.tabGroups.close(tab, true).catch(() => {});
+                                            }
+                                        }
+                                    }
+                                }
+                            } catch (_) {}
+                        }
+                        return {
+                            questId: quest.id,
+                            charmDir: (fairyOut.scroll && fairyOut.scroll.fairyArtifact
+                                       && fairyOut.scroll.fairyArtifact.charmDir) || null,
+                            scroll:        fairyOut.scroll,
+                            cleanNbPath:   fairyOut.cleanNbPath,
+                            partialNbPath: fairyOut.partialNbPath,
+                            handoff:       fairyOut.handoff,
+                        };
+                    } catch (e) {
+                        // Unwedge the FSM so the next stage's transitions stay legal.
+                        await runManager.transition('SCROLL_SUBMITTED', { questId: quest.id, charmId: charm.id }).catch(() => {});
+                        await runManager.transition('REVIEWING',        { questId: quest.id, charmId: charm.id }).catch(() => {});
+                        throw e;
+                    } finally {
+                        sidebar.setSteerQueue(null);
+                        inspector.setSteerQueue(null);
+                        live.dispose();
+                    }
+                };
+
+                try {
+                    const { programme } = await runDirector({
+                        brief: brief.trim() || null,
+                        resumeDir, root, bus,
+                        signal: ctrl.signal,
+                        deps: {
+                            runStage,
+                            literature:    _makeDirectorLiterature({ bus, signal: ctrl.signal }),
+                            skilxivSearch: _directorSkillSearch,
+                            askUser: async ({ question }) => vscode.window.showInputBox({
+                                title: 'Oberon Director asks',
+                                prompt: String(question || '').slice(0, 500),
+                                placeHolder: 'Answer here — or press Esc to let the Director proceed on its own judgment',
+                                ignoreFocusOut: true,
+                            }),
+                            submitSkill: async ({ candidateId }) => {
+                                const contributionSubmit = require('./memory/contributionSubmit');
+                                return contributionSubmit.submitCandidate({
+                                    id: candidateId, secrets: context.secrets, agentModel: 'wolfbook-director',
+                                });
+                            },
+                            onTransition: async (phase) => {
+                                try {
+                                    if (phase === 'stage_assessed') await runManager.transition('DECISION', {});
+                                    else if (phase === 'synthesis') await runManager.transition('GRIMOIRE_UPDATED', {});
+                                } catch (_) {}
+                            },
+                            shouldAbort: () => runManager.isAborting,
+                            budgetStatus: () => ({
+                                exhausted: runManager.isBudgetExhausted,
+                                costUSD: (runManager.summary && runManager.summary.totalCostUSD) || 0,
+                            }),
+                            openArtifact: async (p, kind) => {
+                                if (kind !== 'report') return;
+                                try {
+                                    const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(p));
+                                    await vscode.window.showTextDocument(doc, { preserveFocus: false });
+                                } catch (_) {}
+                            },
+                        },
+                    });
+
+                    await runManager.endRun({ state: 'IDLE' });
+
+                    const outcome = (programme && programme.outcome) || {};
+                    const head = `Oberon Director: ${String(outcome.status || 'done').toUpperCase()} — ` +
+                        `${programme.title}`.slice(0, 160) +
+                        ` (${(programme.keyResults || []).length} key results, ${programme.stagesRun} stages)`;
+                    const actions = [];
+                    if (programme.report && programme.report.pdfPath) actions.push('Open PDF');
+                    if (programme.report && programme.report.texPath) actions.push('Open Report');
+                    if (programme.contribution && programme.contribution.candidateId) actions.push('Review Skill Draft');
+                    vscode.window.showInformationMessage(head, ...actions).then(async choice => {
+                        if (choice === 'Open Report' && programme.report && programme.report.texPath) {
+                            const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(programme.report.texPath));
+                            await vscode.window.showTextDocument(doc);
+                        }
+                        if (choice === 'Open PDF' && programme.report && programme.report.pdfPath) {
+                            vscode.env.openExternal(vscode.Uri.file(programme.report.pdfPath));
+                        }
+                        if (choice === 'Review Skill Draft') contributionReviewPanel.open();
+                    });
+                } catch (e) {
+                    const aborted = runManager.isAborting || (e && e.kind === 'aborted') || /abort/i.test(String(e && e.message));
+                    if (runManager.isActive) {
+                        if (!aborted) {
+                            await bus.appendEvent('omen', {
+                                kind:    (e && e.kind) || 'director_failed',
+                                message: e && e.message || String(e),
+                            }).catch(() => {});
+                        }
+                        await runManager.endRun({ state: aborted ? 'ABORTED' : 'ERROR' });
+                    }
+                    if (!aborted) vscode.window.showErrorMessage(`Oberon Director failed: ${e && e.message || String(e)}`);
+                } finally {
+                    runManager.clearAbortController();
                 }
                 return;
             }
@@ -358,11 +819,28 @@ function activate(context, opts = {}) {
                 const ctrl = runManager.newAbortController();
                 try {
                     // ── Phase 1: Planner — brief → Quest ─────────────────────
-                    const { quest, fileRef } = await runPlanner({
+                    let { quest, fileRef } = await runPlanner({
                         brief,
                         bus: bus,
                         signal: ctrl.signal,
                     });
+
+                    // O2: clarification gate — ask the user for missing parameters
+                    // (one round), or declare the Planner's defaults as explicit
+                    // assumptions instead of running on silent guesses.
+                    const clarifyGate = await clarifyQuestGate({
+                        quest, questFileRef: fileRef, brief, bus, signal: ctrl.signal,
+                        askClarify: async ({ missingInfo }) => vscode.window.showInputBox({
+                            title:          'Oberon needs clarification',
+                            prompt:         `Missing: ${missingInfo.join(' · ')}`.slice(0, 500),
+                            placeHolder:    'Answer here — or press Enter/Esc to accept the shown defaults',
+                            ignoreFocusOut: true,
+                        }),
+                    });
+                    quest = clarifyGate.quest;
+                    fileRef = clarifyGate.questFileRef;
+                    const declaredAssumptions = clarifyGate.declaredAssumptions;
+
                     await runManager.transition('QUEST_DEFINED', { questId: quest.id, file: fileRef });
 
                     // Open the quest notebook immediately so the user can watch.
@@ -385,7 +863,9 @@ function activate(context, opts = {}) {
                     // into the next Charm.
                     let dispatched;
                     try {
-                        dispatched = await dispatchCharms({ quest, bus });
+                        // O2: declared assumptions ride into every charm (banner + array).
+                        const charms = applyDeclaredAssumptions(buildCharms(quest), declaredAssumptions);
+                        dispatched = await dispatchCharms({ quest, bus, charms });
                     } catch (e) {
                         await bus.appendEvent('omen', {
                             kind: (e && e.kind) || 'dispatcher_failed',
@@ -407,10 +887,41 @@ function activate(context, opts = {}) {
                     let lastCharmNotebookPath = null, lastSummaryNotebookPath = null;
                     let executiveOut = null;
                     let executiveRunCount = 0;
+                    let charmsSkippedOnBudget = 0;   // charms never attempted (cap hit)
+                    let charmsCompleted = 0;
+                    const charmOutcomes = [];        // per-charm rows for the postmortem
                     const execCfg = settings.executive();
                     const memCfg  = settings.memory();
 
                     const totalCharms = dispatched.length;
+
+                    // Budget planning check (run Q25): a 120-call run cap split over
+                    // 4 charms leaves ~30 calls each INCLUDING review/executive —
+                    // charm 1 alone used 36 and charm 3 died mid-derivation. Warn up
+                    // front so the user can raise the cap or narrow the brief instead
+                    // of discovering the shortfall three charms in.
+                    try {
+                        const capInfo = settings.runBudget() || {};
+                        const callCap = Number(capInfo.runLlmCalls) || 0;
+                        const usedSoFar = (runManager.summary && runManager.summary.llmCallCount) || 0;
+                        const MIN_CALLS_PER_CHARM = 30;
+                        if (callCap > 0 && totalCharms > 0) {
+                            const perCharm = Math.floor((callCap - usedSoFar) / totalCharms);
+                            await bus.appendEvent('budget.plan', {
+                                questId: quest.id, charms: totalCharms,
+                                callCap, usedSoFar, perCharmAllowance: perCharm,
+                                tight: perCharm < MIN_CALLS_PER_CHARM,
+                            }, { questId: quest.id });
+                            if (perCharm < MIN_CALLS_PER_CHARM) {
+                                await bus.appendEvent('omen', {
+                                    kind: 'budget_plan_tight',
+                                    message: `Run cap of ${callCap} LLM calls across ${totalCharms} charms leaves ~${perCharm} calls per charm (recommended ≥${MIN_CALLS_PER_CHARM}). Later charms may be cut short — consider raising the wolfbook.oberon.budgets.run setting (runLlmCalls) or narrowing the brief.`,
+                                }, { questId: quest.id });
+                            }
+                        }
+                    } catch (_) { /* planning check is advisory */ }
+
+                    let charmHandoff = null;   // O6: verified utils+facts carried between charms
                     for (let charmIdx = 0; charmIdx < totalCharms; charmIdx++) {
                         const { charm: rawCharm, fileRef: charmFileRef } = dispatched[charmIdx];
 
@@ -498,6 +1009,8 @@ function activate(context, opts = {}) {
                                 _insertUtilBanner(_probeNbDoc, ev.payload).catch(() => {});
                             } else if (ev.type === 'literature.brief' && _probeNbDoc) {
                                 _insertLiteratureBrief(_probeNbDoc, ev.payload).catch(() => {});
+                            } else if (ev.type === 'literature.progress' && _probeNbDoc) {
+                                _appendLiteratureProgress(_probeNbDoc, ev.payload).catch(() => {});
                             } else if (ev.type === 'fairy.status' && _probeNbDoc) {
                                 if (!ev.payload || !ev.payload.done) {
                                     _lastStatusMeta = { phase: ev.payload && ev.payload.phase, budgetLeft: ev.payload && ev.payload.budgetLeft };
@@ -512,6 +1025,7 @@ function activate(context, opts = {}) {
                         const fairyOut = await runFairy({
                             quest, charm, bus,
                             signal: ctrl.signal,
+                            handoff: charmHandoff,   // O6: prior charm's utils+facts
                             getWorkingNbDoc: () => _probeNbDoc,
                             writeNotebook: async (_cells, destPath) => {
                                 // Harness already wrote the JSON to disk. Do not open/show
@@ -519,11 +1033,13 @@ function activate(context, opts = {}) {
                                 // column after runFairy() returns.
                                 return destPath;
                             },
-                            onSteerQueueReady: (q) => sidebar.setSteerQueue(q),
+                            onSteerQueueReady: (q) => { sidebar.setSteerQueue(q); inspector.setSteerQueue(q); },
                             askContinue: _askFairyContinue,
                         });
+                        if (fairyOut && fairyOut.handoff) charmHandoff = fairyOut.handoff;
 
                         sidebar.setSteerQueue(null);
+                        inspector.setSteerQueue(null);
                         bus.removeListener('event', _onFairyStarted);
 
                         if (runManager.isAborting) return;
@@ -553,55 +1069,43 @@ function activate(context, opts = {}) {
                             } catch (_) {}
                         }
 
-                        // ── Phase 4: Skeptic + revision loop + Oberon verdict ───
-                        let reviewOut = null;
-                        if (runManager.isBudgetExhausted) {
-                            await bus.appendEvent('omen', {
-                                kind:    'review_skipped_budget',
-                                message: 'Per-run budget exhausted; Skeptic skipped to deliver fallback Scroll.',
-                            }, { questId: quest.id, charmId: charm.id });
-                        } else {
-                            try {
-                                reviewOut = await runReviewLoop({
-                                    quest, charm,
-                                    scroll, scrollFileRef,
-                                    bus, runManager,
-                                    signal: ctrl.signal,
-                                    maxRevisions: 1,
-                                    // BUGFIX: runFairy returns cleanNbPath (not notebookPath) — the
-                                    // old `fairyOut.notebookPath` was always null, so the Skeptic
-                                    // reviewed nothing and concluded "failed" on successful runs.
-                                    charmNotebookPath: fairyOut.cleanNbPath || fairyOut.partialNbPath || fairyOut.workingNbPath || null,
-                                });
-                                scroll        = reviewOut.scroll;
-                                scrollFileRef = reviewOut.scrollFileRef;
-                            } catch (e) {
-                                await bus.appendEvent('omen', {
-                                    kind:    'review_loop_failed',
-                                    message: e && e.message || String(e),
-                                });
-                            }
-                        }
+                        // ── Phase 4: Oberon verdict from the Fairy's clean.wb run ──
+                        // The Fairy already restarted a fresh kernel and re-ran the
+                        // whole clean.wb (run_clean); `fairyOut.status === 'delivered'`
+                        // means that replay was clean. That IS the verification — the
+                        // Skeptic/Wards critic layer was removed (it only re-ran clean.wb
+                        // and counted warnings). The verdict is derived from the terminal
+                        // status; a small shim keeps the Scribe / facts / telemetry
+                        // consumers (which read `reviewOut.oberonVerdict.verdict` and
+                        // `skResult.verdict`) working unchanged.
+                        const verdict =
+                            fairyOut.status === 'delivered'         ? 'success'
+                            : fairyOut.status === 'partial_delivered' ? 'partial_success'
+                            :                                           'failed';
+                        let reviewOut = { oberonVerdict: { verdict }, skeptic: { verdict }, revisionsUsed: 0 };
+
+                        // Oberon ingests the full clean.wb (per-cell code + actual
+                        // output) so the executive follow-up reasons from what really
+                        // ran, not a summary. Reuses the Director's deterministic reader.
+                        let cleanDigest = '';
+                        try {
+                            cleanDigest = await analyst.digestCleanNotebook(
+                                fairyOut.cleanNbPath || fairyOut.partialNbPath || null);
+                        } catch (_) { cleanDigest = ''; }
+
+                        await bus.appendEvent('research.verified', {
+                            questId: quest.id, charmId: charm.id,
+                            status:  fairyOut.status, verdict,
+                            cleanRan: !!fairyOut.cleanNbPath,
+                        }, { questId: quest.id, charmId: charm.id }).catch(() => {});
+
                         if (runManager.isAborting) return;
                         lastScroll        = scroll;
                         lastScrollFileRef = scrollFileRef;
                         lastReviewOut     = reviewOut;
 
-                        // ── Phase 4b: Wards synthesis ───────────────────────────
+                        // Wards removed with the Skeptic layer — nothing to synthesise.
                         let wardOut = null;
-                        try {
-                            wardOut = synthesizeWardOutFromSkeptic({
-                                skeptic: reviewOut && reviewOut.skeptic,
-                                quest, charm, scroll,
-                            });
-                        } catch (e) {
-                            try {
-                                await bus.appendEvent('omen', {
-                                    kind:    'wards_synthesise_failed',
-                                    message: e && e.message || String(e),
-                                }, { questId: quest.id, charmId: charm.id });
-                            } catch (_) {}
-                        }
                         lastWardOut = wardOut;
 
                         // ── Phase 4c: Scribe — Grimoire entry ───────────────────
@@ -637,12 +1141,9 @@ function activate(context, opts = {}) {
                                 ? scroll.findings.map(f => ({ claim: typeof f === 'string' ? f : (f.claim || ''), confidence: typeof f === 'string' ? scroll.confidence : (f.confidence || 0) }))
                                 : [],
                             openQuestions:      scroll.openQuestions || [],
-                            skepticVerdict:     reviewOut && reviewOut.skeptic && reviewOut.skeptic.verdict || null,
-                            verificationLevel:  reviewOut && reviewOut.skeptic && reviewOut.skeptic.verificationLevel || null,
-                            verificationCounts: reviewOut && reviewOut.skeptic && reviewOut.skeptic.verificationCounts || null,
                             oberonVerdict:      reviewOut && reviewOut.oberonVerdict && reviewOut.oberonVerdict.verdict || null,
-                            revisionsUsed:      reviewOut && reviewOut.revisionsUsed || 0,
-                            wardSummary:        wardOut && wardOut.summary || null,
+                            cleanRan:           !!fairyOut.cleanNbPath,
+                            cleanCellCount:     (scroll.fairyArtifact && Array.isArray(scroll.fairyArtifact.steps)) ? scroll.fairyArtifact.steps.length : 0,
                             grimoire:           grimoireResult
                                 ? { wrote: !!grimoireResult.wrote, kind: grimoireResult.kind,
                                     findingsWritten: grimoireResult.findingsWritten || 0,
@@ -704,10 +1205,20 @@ function activate(context, opts = {}) {
                             || runManager.isBudgetExhausted
                             || (scroll && scroll.fallback);
                         const isLastCharm = (charmIdx === totalCharms - 1);
+                        charmsCompleted = charmIdx + 1;   // pipeline for this charm is done
+                        charmOutcomes.push({
+                            id:             charm.id,
+                            title:          charm.title || '',
+                            status:         (scroll && scroll.fairyArtifact && scroll.fairyArtifact.status) || 'unknown',
+                            skepticVerdict: skepticV || null,
+                            verdict:        (reviewOut && reviewOut.oberonVerdict && reviewOut.oberonVerdict.verdict) || null,
+                            confidence:     scroll ? scroll.confidence : null,
+                        });
                         if (isFailure && executiveRunCount < execCfg.maxPerQuest) {
                             try {
                                 executiveOut = await runExecutiveAnalysis({
                                     quest, charm, scroll, reviewOut,
+                                    cleanNotebook: cleanDigest,
                                     budgetInfo: {
                                         budgetExhausted: !!runManager.isBudgetExhausted,
                                     },
@@ -737,10 +1248,38 @@ function activate(context, opts = {}) {
                                              || _execAction === 'retry_subset'
                                              || _execAction === 'reformulate_brief';
                             if (_forceBreak || (_execAction === 'extract_and_continue' && isLastCharm)) {
+                                // Transparency (run Q29): a force-break on charm 1 of 4
+                                // abandoned three planned charms without a trace.
+                                if (_forceBreak && !isLastCharm) {
+                                    const skippedIds = dispatched.slice(charmIdx + 1)
+                                        .map(d => d.charm && d.charm.id).filter(Boolean);
+                                    await bus.appendEvent('omen', {
+                                        kind:    'charms_skipped_executive',
+                                        message: `Executive action '${_execAction}' after charm ${charmIdx + 1}/${totalCharms} — ` +
+                                                 `${skippedIds.length} planned charm(s) abandoned (${skippedIds.join(', ')}). ` +
+                                                 'The follow-up brief replaces them.',
+                                        detail:  { action: _execAction, skippedCharmIds: skippedIds },
+                                    }, { questId: quest.id }).catch(() => {});
+                                }
                                 break;
                             }
                         }
-                        if (!isLastCharm && runManager.isBudgetExhausted) break;
+                        if (!isLastCharm && runManager.isBudgetExhausted) {
+                            // Never skip silently (run Q25: charm 4 of 4 vanished and the
+                            // postmortem suggested "re-run with a sharper brief" — wrong
+                            // remedy). Name the skipped charms and the actual cause.
+                            charmsSkippedOnBudget = totalCharms - charmsCompleted;
+                            const skippedIds = dispatched.slice(charmIdx + 1)
+                                .map(d => d.charm && d.charm.id).filter(Boolean);
+                            await bus.appendEvent('omen', {
+                                kind:    'charms_skipped_budget',
+                                message: `Per-run budget exhausted after charm ${charmsCompleted}/${totalCharms} — ` +
+                                         `${charmsSkippedOnBudget} planned charm(s) never ran (${skippedIds.join(', ')}). ` +
+                                         `Raise the wolfbook.oberon.budgets.run setting or re-run to continue; banked facts will carry over.`,
+                                detail:  { skippedCharmIds: skippedIds, charmsCompleted, totalCharms },
+                            }, { questId: quest.id });
+                            break;
+                        }
                     } // end per-charm loop
 
                     // Aliases used by remaining code (postmortem, toast, follow-up).
@@ -775,6 +1314,13 @@ function activate(context, opts = {}) {
                                 charmNotebookPath,
                                 scrollFileRef,
                                 runSummary: _capturedRunSummary,
+                                charmOutcomes,
+                                budgetInfo: {
+                                    exhausted: !!runManager.isBudgetExhausted,
+                                    charmsCompleted,
+                                    totalCharms,
+                                    charmsSkippedOnBudget,
+                                },
                             });
                             if (pmRef && pmRef.path) {
                                 try {
@@ -918,7 +1464,9 @@ function activate(context, opts = {}) {
                     // If the user abort handler already ended the run, do not re-end it.
                     if (runManager.isActive) {
                         const targetState = aborted ? 'ABORTED' : 'ERROR';
-                        if (!aborted) {
+                        // Skip the omen when the failing layer already reported it
+                        // (planner marks e._omened) — one failure, one omen.
+                        if (!aborted && !(e && e._omened)) {
                             await bus.appendEvent('omen', {
                                 kind:    (e && e.kind) || 'planner_failed',
                                 message: e && e.message || String(e),
@@ -927,6 +1475,23 @@ function activate(context, opts = {}) {
                         }
                         try { await runManager.transition(targetState); } catch (_) {}
                         await runManager.endRun({ state: targetState });
+                    }
+                    if (!aborted) {
+                        // A failed run must not vanish: leave a postmortem stub and
+                        // offer a retry (auto-dispatched follow-up chains previously
+                        // died silently here — run_2026-07-03T23-38).
+                        try {
+                            await writeErrorPostmortem({
+                                runSummary: runManager.summary, brief,
+                                error: e, bus,
+                            });
+                        } catch (_) {}
+                        const msg = `Oberon run failed: ${String(e && e.message || e).slice(0, 300)}`;
+                        vscode.window.showErrorMessage(msg, 'Retry brief').then(choice => {
+                            if (choice === 'Retry brief') {
+                                setImmediate(() => dispatch('startResearch', { brief, __autoFollowupDepth: autoFollowupDepth }));
+                            }
+                        });
                     }
                 } finally {
                     runManager.clearAbortController();
@@ -1299,6 +1864,42 @@ async function _applyStatusEdit(nbDoc, payload) {
     await vscode.workspace.applyEdit(edit);
 }
 
+// Live literature-discovery stream → status cell. The literature sub-agent blocks in
+// one tool call for a long time (search rounds + full-text reads); without this the
+// status cell freezes and the run looks broken. We accumulate the sub-agent's stage
+// progress into a scrolling log and render it through the same status cell.
+let _litLog = [];
+function _formatLitLine(payload) {
+    const stage  = String((payload && payload.stage) || '');
+    const detail = String((payload && payload.detail) || '').trim();
+    const glyph = {
+        start:     '🔎', plan: '🧭', search: '🔎', graph: '🕸️',
+        preselect: '📑', read: '📖', judge: '⚖️', done: '✅',
+    }[stage] || '•';
+    const label = {
+        start: 'Literature search', plan: 'Query plan', search: 'Searching',
+        graph: 'Citation graph', preselect: 'Preselect', read: 'Reading',
+        judge: 'Judging', done: 'Literature done',
+    }[stage] || stage;
+    return `${glyph} ${label}${detail ? ': ' + detail : ''}`;
+}
+async function _appendLiteratureProgress(nbDoc, payload) {
+    const line = _formatLitLine(payload);
+    if (!line) return;
+    // A new search restarts the log so stages from a prior call don't pile up.
+    if (payload && payload.stage === 'start') _litLog = [];
+    _litLog.push(line);
+    if (_litLog.length > 60) _litLog = _litLog.slice(-60);
+    await _updateStatusCell(nbDoc, {
+        phase:       'literature',
+        budgetLeft:  _lastStatusMeta.budgetLeft,
+        probesUsed:  _lastStatusMeta.probesUsed,
+        turnsUsed:   _lastStatusMeta.turnsUsed,
+        costUSD:     _lastStatusMeta.costUSD,
+        thinkingTail: _litLog.join('\n'),
+    });
+}
+
 // Live reasoning stream → status cell. Merges the streaming preview with the last
 // known phase/budget so the user watches the model think between turns, not just at
 // the end of each turn.
@@ -1312,6 +1913,143 @@ async function _streamStatusReasoning(nbDoc, payload) {
         costUSD:     _lastStatusMeta.costUSD,
         thinkingTail: (payload && payload.preview) || '',
     });
+}
+
+/**
+ * Director stage live view: replicate the quick-compute working.wb wiring for
+ * ONE fairy stage — recreate + open the scratchpad on fairy.started, stream
+ * plan/checkpoint/skills/util/literature/status events into it. Returns
+ * { getDoc, dispose }; create one per stage and dispose when the stage ends.
+ */
+function _makeFairyLiveView(bus) {
+    let _doc = null;
+    const handler = async (ev) => {
+        if (ev.type === 'fairy.started' && !_doc) {
+            const nbPath = ev.payload && ev.payload.workingNbPath;
+            if (!nbPath) return;
+            try {
+                const fsp = require('fs/promises');
+                const nbUri = vscode.Uri.file(nbPath);
+                await fsp.writeFile(nbPath, JSON.stringify({ cells: [], metadata: { wolframSettings: { backgroundColor: '#F0F8FF' } } }, null, 2), 'utf8');
+                for (const tabGroup of vscode.window.tabGroups.all) {
+                    for (const tab of tabGroup.tabs) {
+                        if (tab.input instanceof vscode.TabInputNotebook &&
+                            tab.input.uri.fsPath === nbPath) {
+                            await vscode.window.tabGroups.close(tab, true).catch(() => {});
+                        }
+                    }
+                }
+                _doc = await vscode.workspace.openNotebookDocument(nbUri);
+                await vscode.window.showNotebookDocument(_doc, {
+                    viewColumn: vscode.ViewColumn.Active, preserveFocus: true,
+                });
+                await wolframShim.associateNotebook(_doc).catch(() => {});
+                try {
+                    const supp = wolframShim.buildSuppressionCode && wolframShim.buildSuppressionCode();
+                    if (supp) await wolframShim.evalInNotebook(_doc, supp, { note: 'Suppress non-critical solver warnings (Off[…])' }).catch(() => {});
+                } catch (_) {}
+            } catch (_) {}
+        } else if (ev.type === 'plan.created' && _doc) {
+            _insertPlanRoadmap(_doc, ev.payload).catch(() => {});
+        } else if (ev.type === 'checkpoint.recorded' && _doc) {
+            _insertCheckpointBanner(_doc, ev.payload).catch(() => {});
+        } else if (ev.type === 'skills.used' && _doc) {
+            _insertSkillsUsed(_doc, ev.payload).catch(() => {});
+        } else if (ev.type === 'util.registered' && _doc) {
+            _insertUtilBanner(_doc, ev.payload).catch(() => {});
+        } else if (ev.type === 'literature.brief' && _doc) {
+            _insertLiteratureBrief(_doc, ev.payload).catch(() => {});
+        } else if (ev.type === 'literature.progress' && _doc) {
+            _appendLiteratureProgress(_doc, ev.payload).catch(() => {});
+        } else if (ev.type === 'fairy.status' && _doc) {
+            if (!ev.payload || !ev.payload.done) {
+                const p = ev.payload || {};
+                _lastStatusMeta = { phase: p.phase, budgetLeft: p.budgetLeft, probesUsed: p.probesUsed, turnsUsed: p.turnsUsed, costUSD: p.costUSD };
+            }
+            _updateStatusCell(_doc, ev.payload).catch(() => {});
+        } else if ((ev.type === 'llm.reasoning_progress' || ev.type === 'llm.response_progress') && _doc) {
+            _streamStatusReasoning(_doc, ev.payload).catch(() => {});
+        }
+    };
+    bus.on('event', handler);
+    return {
+        getDoc: () => _doc,
+        dispose: () => { try { bus.removeListener('event', handler); } catch (_) {} },
+    };
+}
+
+/**
+ * Director-level literature consult: same bounded sub-agent the fairy uses
+ * (arXiv + Semantic Scholar + INSPIRE, read-then-judge, citation graph), wired
+ * with the `literature` role LLM. Returns an async ({question}) → brief, or a
+ * fn that resolves null when the paper tools are unavailable.
+ */
+function _makeDirectorLiterature({ bus, signal }) {
+    let paperSearch;
+    try { paperSearch = require('../tools/paperSearch'); } catch (_) { return async () => null; }
+    const paperTools = {
+        searchPapers: (params, max, opts) =>
+            paperSearch.searchPapers({ ...params, query: (params && (params.q || params.query)) || '' }, max, opts),
+        searchArxiv:     (params, max, opts) => paperSearch.searchArxiv(params, max, opts),
+        searchInspire:   (params, max, opts) => paperSearch.searchInspire(params, max, opts),
+        searchSemanticScholar: (params, max) => paperSearch.searchSemanticScholar(params, max),
+        fetchPaperHtml:  paperSearch.fetchPaperHtml,
+        extractSections: paperSearch.extractSections,
+        getInspireBibtex: paperSearch.getInspireBibtex,
+        getInspireReferences: paperSearch.getInspireReferences,
+        getCitationContexts:  paperSearch.getCitationContexts,
+    };
+    const roles = require('./config/roles');
+    const { getAdapter } = require('./providers');
+    const litBinding = roles.resolveRole('literature');
+    const litAdapter = litBinding.configured ? getAdapter(litBinding.provider) : null;
+    const litLlm = litAdapter
+        ? async (prompt) => {
+            try {
+                const res = await litAdapter.chatComplete({
+                    messages: [
+                        { role: 'system', content: 'You are a precise literature-extraction assistant for physics/math papers. Answer tersely and exactly as instructed.' },
+                        { role: 'user',   content: String(prompt) },
+                    ],
+                    model:       litBinding.model,
+                    temperature: 0.1,
+                    maxTokens:   litBinding.maxTokens || 2000,
+                    signal,
+                }, { pricing: litBinding.pricing });
+                bus.appendEvent('llm.call', {
+                    role: 'literature', model: litBinding.model,
+                    usage: res.usage || {}, costUSD: res.costUSD || null,
+                }).catch(() => {});
+                return res.content || '';
+            } catch (_) { return ''; }
+        }
+        : null;
+    return async ({ question }) => {
+        const { runResearch, extractArxivIds } = require('./fairy/literature');
+        return runResearch({
+            question: String(question || ''),
+            seedIds: extractArxivIds(String(question || '')),
+            paperTools, llm: litLlm, signal,
+            onProgress: (p) => bus.appendEvent('literature.progress', p).catch(() => {}),
+        });
+    };
+}
+
+/** Director-level SkilXiv recon for the plan step (fail-open, ≤5 hits). */
+async function _directorSkillSearch(query) {
+    try {
+        const settings = require('./config/settings');
+        const cfg = settings.recall();
+        if (!cfg.enabled) return '';
+        const { SkilXivClient } = require('./fairy/skilxivClient');
+        const client = new SkilXivClient({ baseUrl: cfg.skilxivBaseUrl, apiToken: cfg.skilxivApiToken });
+        const res = await client.search(String(query || ''), { limit: 5, minTier: 0 });
+        const results = (res && res.results) || [];
+        if (!results.length) return '';
+        return results.map(r =>
+            `- @${r.namespace}/${r.name}${r.version ? ' v' + r.version : ''} — ${String(r.summary || '').slice(0, 200)}`
+        ).join('\n');
+    } catch (_) { return ''; }
 }
 
 /**

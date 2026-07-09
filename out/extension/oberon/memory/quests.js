@@ -15,11 +15,23 @@ const fsp  = require('fs/promises');
 const crypto = require('crypto');
 const project = require('./project');
 
+/**
+ * THE canonical quest folder name. Every artefact writer must use this —
+ * before it existed, call sites re-derived the name with different fallbacks
+ * (`|| quest.id`, `|| 'quest'`, none at all), splitting one quest's artefacts
+ * across `Q18_Q18/`, `Q18_undefined/`, and `Q18_quest/`.
+ * @param {{ id: string, shortName?: string }} quest
+ * @returns {string} e.g. "Q25_su4_xxx_l3_6rep"
+ */
+function questFolderName(quest) {
+    const id = (quest && quest.id) || 'Q00';
+    return `${id}_${(quest && quest.shortName) || id}`;
+}
+
 function questDirFor(quest) {
     const root = project.getWorkspaceRoot();
     if (!root) return null;
-    const folder = `${quest.id}_${quest.shortName}`;
-    return path.join(root, 'quests', folder);
+    return path.join(root, 'quests', questFolderName(quest));
 }
 
 /**
@@ -82,4 +94,4 @@ function buildInitialNotebook(quest) {
     };
 }
 
-module.exports = { questDirFor, nextQuestId, writeQuest };
+module.exports = { questFolderName, questDirFor, nextQuestId, writeQuest };

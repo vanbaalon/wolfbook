@@ -34,6 +34,8 @@ class RunManager extends EventEmitter {
         this._abort = null;
         /** @type {boolean} true once a per-run budget cap has been breached */
         this._budgetExhausted = false;
+        /** @type {{runUSD?:number,runLlmCalls?:number}|null} per-run budget override (Director runs) */
+        this._budgetOverride = null;
 
         // Mirror every bus event into our own listeners and update the summary.
         bus.on('event', (ev) => this._onBusEvent(ev));
@@ -50,11 +52,15 @@ class RunManager extends EventEmitter {
             && this._summary.state !== 'ABORTED' && this._summary.state !== 'ERROR';
     }
 
-    /** Begin a new run. Resolves once telemetry is open. */
-    async beginRun({ brief = null } = {}) {
+    /** Begin a new run. Resolves once telemetry is open.
+     *  `budgetOverride` ({ runUSD, runLlmCalls }) replaces settings.runBudget()
+     *  for this run only — used by Director programmes, which span several
+     *  fairy stages inside one run and need a higher cap. */
+    async beginRun({ brief = null, budgetOverride = null } = {}) {
         if (this.isActive) {
             throw new Error('Oberon: a run is already active. Abort it first.');
         }
+        this._budgetOverride = (budgetOverride && typeof budgetOverride === 'object') ? budgetOverride : null;
         const runId = project.makeRunId();
         await this._bus.beginRun(runId);
         this._summary = {
@@ -79,6 +85,19 @@ class RunManager extends EventEmitter {
         await this._bus.appendEvent('circle.transition', {
             from: 'IDLE', to: 'BRIEFING', brief: brief ? String(brief).slice(0, 4000) : null,
         });
+        // Publish the caps that will actually be enforced for THIS run so
+        // downstream loops (fairy reserve check) budget against the right
+        // numbers — a Director override differs from settings.runBudget().
+        try {
+            const effective = this._budgetOverride || settings.runBudget() || null;
+            if (effective) {
+                await this._bus.appendEvent('budget.effective', {
+                    runUSD:      Number(effective.runUSD)      || 0,
+                    runLlmCalls: Number(effective.runLlmCalls) || 0,
+                    source:      this._budgetOverride ? 'override' : 'settings',
+                });
+            }
+        } catch (_) { /* best-effort */ }
         this.emit('summary', this._summary);
         await this._persistState();
         return this._summary;
@@ -87,9 +106,14 @@ class RunManager extends EventEmitter {
     /** End the active run cleanly. */
     async endRun({ state = 'IDLE' } = {}) {
         if (!this._summary) return;
-        await this._bus.appendEvent('circle.transition', {
-            from: this._summary.state, to: state,
-        });
+        // A caller may already have transitioned into the terminal state
+        // (index.js error path: transition('ERROR') then endRun) — don't log a
+        // no-op ERROR→ERROR transition on top of it.
+        if (this._summary.state !== state) {
+            await this._bus.appendEvent('circle.transition', {
+                from: this._summary.state, to: state,
+            });
+        }
         this._summary.state   = state;
         this._summary.endedAt = new Date().toISOString();
         await this._bus.flush();
@@ -227,7 +251,8 @@ class RunManager extends EventEmitter {
     _checkRunBudget() {
         if (this._budgetExhausted || !this._summary) return;
         let budget;
-        try { budget = settings.runBudget(); } catch (_) { return; }
+        if (this._budgetOverride) budget = this._budgetOverride;
+        else { try { budget = settings.runBudget(); } catch (_) { return; } }
         if (!budget) return;
         const overUSD   = Number(budget.runUSD)      > 0 && this._summary.totalCostUSD  >= Number(budget.runUSD);
         const overCalls = Number(budget.runLlmCalls) > 0 && this._summary.llmCallCount  >= Number(budget.runLlmCalls);

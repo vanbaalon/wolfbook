@@ -1,0 +1,68 @@
+{
+  "formatVersion": 3,
+  "meta": {
+    "title": "Styles & Presets"
+  },
+  "theme": {
+    "navy": "#1e3a6a",
+    "blue": "#1e5aaa",
+    "cyan": "#00bcd4",
+    "accent": "#e67820",
+    "scale": 1
+  },
+  "stylePresets": {
+    "lead": {
+      "color": "#0f172a",
+      "fontSize": "44px",
+      "fontWeight": "bold"
+    },
+    "caption": {
+      "color": "#64748b",
+      "fontSize": "22px",
+      "fontStyle": "italic"
+    },
+    "callout": {
+      "color": "#ffffff",
+      "background": "rgba(230,120,32,0.9)",
+      "padding": "12px 18px",
+      "borderRadius": "8px"
+    }
+  },
+  "slides": [
+    {
+      "id": "s1",
+      "label": "Preset usage",
+      "background": "#ffffff",
+      "layout": "column",
+      "children": [
+        {
+          "id": "p1",
+          "type": "text",
+          "stylePreset": "lead",
+          "content": "Lead line via preset"
+        },
+        {
+          "id": "p2",
+          "type": "text",
+          "stylePreset": "caption",
+          "content": "Caption via preset"
+        },
+        {
+          "id": "p3",
+          "type": "text",
+          "stylePreset": "callout",
+          "content": "Callout via preset"
+        },
+        {
+          "id": "p4",
+          "type": "text",
+          "stylePreset": "lead",
+          "style": {
+            "color": "#be1e2d"
+          },
+          "content": "Lead preset + inline colour override"
+        }
+      ]
+    }
+  ]
+}

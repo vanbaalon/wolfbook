@@ -4,18 +4,34 @@
 (* Ensure consistent UTF-8 encoding, important on non-Western systems *)
 $CharacterEncoding = "UTF-8";
 
+(* ===== Context isolation ===== *)
+(* Touching user-facing symbols here (while $Context = "Global`") creates them in
+   Global` before Begin switches $Context to Wolfbook`Private`.
+   Every symbol NOT listed here is created in Wolfbook`Private`, so internal helpers,
+   state variables, and Module pattern-variables never appear in Global`.
+   This makes ClearAll["Global`*"] safe: it cannot reach Wolfbook`Private` symbols,
+   so $wolframImgDir, $config, graphicsQ, etc. all survive intact. *)
+WBPrint; WBVersion; WBInclude; WBExport; WBPrompt;
+VsCodeRender; VsCodeRenderFull; VsCodeRenderShallow;
+VsCodeRenderNth; VsCodeRenderLast; VsCodeEvalWrapper;
+VsCodeSyntaxCheck; VsCodeSplitCode; VsCodeOpenAsText; VsCodeDynExportValue;
+VsCodeSetImgDir; VsCodeCleanupImgDir; VsCodeSymbolMarkdown;
+$setKernelConfig;   (* called from lifecycle.js + controller.js after init.wl loads *)
+ClearGlobals;
+Begin["Wolfbook`Private`"];
+
 (* ===== Logging ===== *)
 $logDir = FileNameJoin[{$UserBaseDirectory, "ApplicationData", "wolfbook"}];
 If[!DirectoryQ[$logDir], Quiet[CreateDirectory[$logDir, CreateIntermediateDirectories -> True]]];
 $logPath = FileNameJoin[{$logDir, "kernel.log"}];
 
-logWrite[msg_String] := Quiet[Module[{s},
+$wbLog[msg_String] := Quiet[Module[{s},
     s = OpenAppend[$logPath];
     WriteString[s, DateString[] <> " " <> msg <> "\n"];
     Close[s]
 ]];
-logWriteFile[msg_String, file_String] := logWrite["[" <> file <> "] " <> msg];
-logError[msg_String]  := logWrite["ERROR: " <> msg];
+$wbLogFile[msg_String, file_String] := $wbLog["[" <> file <> "] " <> msg];
+$wbLogError[msg_String] := $wbLog["ERROR: " <> msg];
 
 (* ===== Temporary output directory ===== *)
 $wolframOutputTempDir = FileNameJoin[{$TemporaryDirectory, "wolfbook_output"}];
@@ -64,7 +80,7 @@ VsCodeCleanupImgDir[keepPaths_List] := Quiet[Module[{all},
 
 (* ===== Version check ===== *)
 If[$VersionNumber < 12,
-    logError["Wolfram version " <> ToString[$VersionNumber] <> " < 12, some features may not work"]];
+    $wbLogError["Wolfram version " <> ToString[$VersionNumber] <> " < 12, some features may not work"]];
 
 (* ===== CodeParser availability ===== *)
 (* Actual Needs["CodeParser`"] is deferred to first use (VsCodeSyntaxCheck) or
@@ -85,22 +101,23 @@ $config = <|
 |>;
 
 $setKernelConfig[name_String, value_] := ($config[name] = value; Null);
-$getKernelConfig[name_String]           := Lookup[$config, name, Missing["NotFound", name]];
-$getKernelConfig[name_String, default_] := Lookup[$config, name, default];
+(* Guard: if $config was cleared by ClearAll["Global`*"], return the default instead of failing *)
+$getKernelConfig[name_String]           := If[AssociationQ[$config], Lookup[$config, name, Missing["NotFound", name]], Missing["NotFound", name]];
+$getKernelConfig[name_String, default_] := If[AssociationQ[$config], Lookup[$config, name, default], default];
 
 
 (* ===== Render engine: helpers + VsCodeRenderExpr ===== *)
 (* $wolframResourceDir is injected by lifecycle.js via Block before Get[init.wl] *)
 Check[Get[FileNameJoin[{$wolframResourceDir, "render-expr.wl"}]],
-      logError["Failed to load render-expr.wl from: " <> ToString[$wolframResourceDir]]];
+      $wbLogError["Failed to load render-expr.wl from: " <> ToString[$wolframResourceDir]]];
 
 (* ===== VS Code API functions: VsCodeRender, VsCodeSyntaxCheck, etc. ===== *)
 Check[Get[FileNameJoin[{$wolframResourceDir, "api.wl"}]],
-      logError["Failed to load api.wl from: " <> ToString[$wolframResourceDir]]];
+      $wbLogError["Failed to load api.wl from: " <> ToString[$wolframResourceDir]]];
 
 (* ===== Load rendering primitives ===== *)
 Check[Get[FileNameJoin[{$wolframResourceDir, "render-html.wl"}]],
-      logError["Failed to load render-html.wl from: " <> ToString[$wolframResourceDir]]];
+      $wbLogError["Failed to load render-html.wl from: " <> ToString[$wolframResourceDir]]];
 
 (* ===== Print / $PageWidth ===== *)
 (* The WSTP $Output stream is a pseudo-stream; setting PageWidth on it via
@@ -291,7 +308,7 @@ Quiet[Internal`AddHandler["Interrupt", Function[{}, Dialog[]]]];
 (* SVG/typesetting pipeline and CodeParser are prewarmed in the background by
    lifecycle.js via subWhenIdle() after the kernel is declared ready.          *)
 
-logWrite["init.wl loaded (WSTP mode, no ZMQ)"];
+$wbLog["init.wl loaded (WSTP mode, no ZMQ)"];
 
 (* ===== AI/Copilot helper — symbol documentation for wolfbook_lookupSymbol tool ===== *)
 (* longForm: if True (default), appends a link to the online Wolfram documentation for System symbols *)
@@ -354,3 +371,43 @@ VsCodeSymbolMarkdown[symName_String, longForm_: True] :=
         HoldFirst]
     ];
 
+
+(* ===== Oberon utilities ===== *)
+(* Clears user-defined Global` symbols; skips Protected/Locked symbols and any
+   symbol whose name contains "$" (state variables, WB internals). *)
+ClearGlobals[] := ClearAll @@ Select[Names["Global`*"],
+    FreeQ[Attributes[#], Protected | Locked] && Not[StringMatchQ[#, "*$*"]] &];
+
+(* ===== Clean up any Global` shadows of System` symbols created during loading ===== *)
+(* Loading render-expr.wl / render-html.wl / api.wl in Global` context can         *)
+(* cause the kernel to intern certain System` symbols into Global` before the       *)
+(* corresponding System` definition is loaded (especially in -wstp mode without     *)
+(* the front-end). The most common offender is `Absolute`, which Wolfram uses for   *)
+(* notebook styling; if Global`Absolute is present it triggers Absolute::shdw the   *)
+(* first time any plotting function touches System`Absolute.                         *)
+(* Strategy: remove the Global` shadow after init is complete so the symbol table   *)
+(* is clean before the user evaluates anything.  Using Remove (not ClearAll) so the *)
+(* symbol is fully deleted, not just unvalued.                                       *)
+Quiet[
+    If[MemberQ[Names["Global`*"], "Absolute"],
+       Remove["Global`Absolute"]
+    ];
+    (* Use full context to avoid accidentally creating Global`Absolute if System`Absolute
+       hasn't been loaded yet — Off with an unqualified name would intern the symbol in
+       the current context instead of System`. *)
+    Off[System`Absolute::shdw]
+];
+
+(* ===== Protect user-facing Global` symbols ===== *)
+(* Internal symbols (now in Wolfbook`Private`) are immune to ClearAll["Global`*"]
+   and do not need Protect.  We only protect the Global`-context user-facing symbols
+   to prevent accidental redefinition from user code. *)
+Protect[
+    $setKernelConfig,
+    VsCodeSetImgDir, VsCodeCleanupImgDir,
+    VsCodeSymbolMarkdown,
+    WBPrint, WBInclude, WBExport, WBPrompt,
+    ClearGlobals
+];
+
+End[]; (* Wolfbook`Private` *)

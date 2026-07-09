@@ -1,0 +1,31 @@
+{
+  "formatVersion": 3,
+  "meta": { "title": "Animation & Transitions" },
+  "theme": { "navy": "#0a244a", "blue": "#0064b4", "cyan": "#009ac8", "accent": "#be1e2d" },
+  "slides": [
+    {
+      "id": "s1",
+      "label": "Fragments",
+      "background": "#0a1628",
+      "layout": "column",
+      "transition": "fade",
+      "children": [
+        { "id": "f0", "type": "heading", "level": 2, "content": "Revealed in order", "style": { "color": "#e2e8f0" } },
+        { "id": "f1", "type": "text", "content": "Point 1", "fragmentOrder": 1, "style": { "color": "#cbd5e1" } },
+        { "id": "f2", "type": "text", "content": "Point 2", "fragmentOrder": 2, "style": { "color": "#cbd5e1" } },
+        { "id": "f3", "type": "text", "content": "Point 3", "fragmentOrder": 3, "style": { "color": "#cbd5e1" } }
+      ]
+    },
+    {
+      "id": "s2",
+      "label": "Hidden slide",
+      "background": "#111827",
+      "layout": "column",
+      "transition": "slide",
+      "hidden": true,
+      "children": [
+        { "id": "hh", "type": "text", "content": "This slide is hidden", "style": { "color": "#9ca3af" } }
+      ]
+    }
+  ]
+}

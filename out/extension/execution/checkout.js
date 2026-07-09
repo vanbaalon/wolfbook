@@ -7,6 +7,7 @@ const path    = require('path');
 const fs      = require('fs');
 const { scrollLog, wstpLog } = require('../utils/dev-logger');
 const _output = require('../output/renderer');
+const { splitIntoSubexpressions } = require('../utils/wl-parse');
 
 async function checkoutExecutionQueue(self) {
     let currentExecution;
@@ -144,79 +145,7 @@ async function checkoutExecutionQueue(self) {
         //
         // Algorithm: walk char-by-char tracking bracket depth, string literals,
         // and nestable block comments.  Split on bare newlines at depth 0.
-        const subExprs = (() => {
-            const parts = [];
-            let current = "";
-            let depth   = 0;        // bracket nesting ( [ {
-            let inStr    = false;    // inside "..."
-            let cDepth   = 0;       // inside (* ... *) — nestable
-            let i = 0;
-            let lineNum = 0;           // current line in `code` (counts all \n)
-            let exprStartLine = 0;     // line where the current expression started
-            while (i < code.length) {
-                const ch   = code[i];
-                const next = i + 1 < code.length ? code[i + 1] : "";
-                if (inStr) {
-                    if (ch === '\n') lineNum++;
-                    current += ch;
-                    if      (ch === "\\") { if (i + 1 < code.length) { current += next; i++; } }
-                    else if (ch === '"')  { inStr = false; }
-                    i++; continue;
-                }
-                if (cDepth > 0) {
-                    if (ch === '\n') lineNum++;
-                    current += ch;
-                    if      (ch === "(" && next === "*") { cDepth++; current += next; i += 2; }
-                    else if (ch === "*" && next === ")") { cDepth--; current += next; i += 2; }
-                    else i++;
-                    continue;
-                }
-                if (ch === '"')                    { inStr = true;  current += ch; i++; }
-                else if (ch === "(" && next === "*") { cDepth = 1; current += ch + next; i += 2; }
-                else if (ch === "<" && next === "|") { depth++; current += ch + next; i += 2; }  // <| Association open
-                else if (ch === "|" && next === ">") { depth--; current += ch + next; i += 2; }  // |> Association close
-                else if (ch === "(" || ch === "[" || ch === "{") { depth++; current += ch; i++; }
-                else if (ch === ")" || ch === "]" || ch === "}") { depth--; current += ch; i++; }
-                else if ((ch === "\n" || ch === "\r") && depth === 0 && cDepth === 0) {
-                    // potential split point
-                    const t = current.trim();
-                    // Keep lines together when current ends with a continuation operator
-                    const endsWithOp = t.length > 0 && /(&&|\|\||->|:>|\/\/\.|\/\/|\/\/@|\/@|@@|<>|~~|;;|\^:=|:=|\+=|-=|\*=|\/=|[+\-*\/=,&|~@?])$/.test(t);
-                    // Peek at first non-whitespace char(s) of the next line
-                    let peekPos = i + 1;
-                    if (ch === '\r' && next === '\n') peekPos = i + 2;
-                    while (peekPos < code.length && (code[peekPos] === ' ' || code[peekPos] === '\t')) peekPos++;
-                    const peekCh  = peekPos < code.length ? code[peekPos] : '';
-                    const peekTwo = (peekPos + 1 < code.length) ? code.slice(peekPos, peekPos + 2) : peekCh;
-                    const startsWithOp = t.length > 0 && peekCh.length > 0 && (
-                        '=+-*/,|~@?'.includes(peekCh) ||
-                        peekTwo === '&&' || peekTwo === '||' || peekTwo === '->' || peekTwo === ':>' ||
-                        peekTwo === '//' || peekTwo === '<>' || peekTwo === '!=' || peekTwo === '>=' || peekTwo === '<='
-                    );
-                    if (endsWithOp || startsWithOp) {
-                        // Continuation line — replace newline with space so WL
-                        // sees "a + b +c" (one expression), not "a + b\n+c" (two).
-                        current += ' ';
-                        if (ch === '\r' && next === '\n') i++; // skip \r of CRLF
-                        i++;
-                        lineNum++;
-                    } else {
-                    if (t.length > 0) parts.push({ text: t, startLine: exprStartLine, endLine: lineNum });
-                    current = "";
-                    if (ch === "\r" && next === "\n") i++; // CRLF
-                    i++;
-                    lineNum++;
-                    exprStartLine = lineNum;
-                    }
-                } else {
-                    if (ch === '\n') lineNum++;   // newlines inside nested brackets
-                    current += ch; i++;
-                }
-            }
-            const t = current.trim();
-            if (t.length > 0) parts.push({ text: t, startLine: exprStartLine, endLine: lineNum });
-            return parts.length > 0 ? parts : [{ text: code, startLine: 0, endLine: code.split('\n').length - 1 }];
-        })();
+        const subExprs = splitIntoSubexpressions(code);
         // Per-cell format override takes precedence over the global setting.
         const format = self._resolveFormat(currentExecution.execution.cell);
         const scale  = Number(self.config.get("imageScale")   || 0.8);
@@ -358,11 +287,11 @@ async function checkoutExecutionQueue(self) {
             self.writeDebugLog(`[CHECKOUT] cell ${currentExecution.execution.cell.index} | interrupt handler reinstall skipped (already installed)`);
         }
 
-        let firstLineNum  = 0;
-        let anyAborted    = false;
-        let anyMessages   = false;   // true if any kernel message was emitted this cell
-        let msgTexts      = [];      // message texts, accumulated for the consolidated AI-context output at cell end
-        let _runtimeDiags = [];      // vscode.Diagnostic entries for runtime kernel messages (set after loop)
+        let firstLineNum   = 0;
+        let anyAborted     = false;
+        let anyMessages    = false;   // true if any kernel message was emitted this cell
+        let msgTexts       = [];      // message texts, accumulated for the consolidated AI-context output at cell end
+        let _firstMsgRange = null;    // range of first runtime message — used to anchor the combined diagnostic
 
         // Detect keyboard-initiated execution (set by wolfram.executeCell command).
         // We compare by cell INDEX (number) + notebook reference rather than
@@ -863,17 +792,13 @@ async function checkoutExecutionQueue(self) {
                     msgTexts.push(msg);
                     // Highlight the source line(s) in the input with a pink background.
                     self.applyRuntimeMsgDecoration(execCell, _subStartLine, _subEndLine);
-                    // Register as a VS Code diagnostic so Copilot's "Fix using Copilot" badge appears.
-                    // Runtime errors (not syntax errors) are registered here; syntax errors
-                    // are intentionally NOT registered (see errors.js) to avoid Copilot deprioritising
-                    // kernel errors in favour of UTF / session-usage hints.
-                    const _msgRng = new vscode.Range(
-                        new vscode.Position(Math.max(0, _subStartLine), 0),
-                        new vscode.Position(Math.max(0, _subEndLine), 9999)
-                    );
-                    const _diag = new vscode.Diagnostic(_msgRng, msg, vscode.DiagnosticSeverity.Error);
-                    _diag.source = 'Wolfram Kernel';
-                    _runtimeDiags.push(_diag);
+                    // Track the range of the first message so we can anchor the combined diagnostic.
+                    if (!_firstMsgRange) {
+                        _firstMsgRange = new vscode.Range(
+                            new vscode.Position(Math.max(0, _subStartLine), 0),
+                            new vscode.Position(Math.max(0, _subEndLine), 9999)
+                        );
+                    }
                     msgHtmlParts.push(msg);
                     const groupedMsgHtml = buildMsgGroupHtml(msgHtmlParts);
                     const plainMsgText   = msgHtmlParts.join('\n');
@@ -1332,7 +1257,25 @@ async function checkoutExecutionQueue(self) {
                                 outputCollapsed: true
                             })
                         ]);
+                        // Snapshot selection before the metadata edit — applyEdit can
+                        // clear ed.selections as a side-effect of notebook re-layout.
+                        const _selBeforeCollapse = (() => {
+                            try {
+                                for (const _e of vscode.window.visibleNotebookEditors)
+                                    if (_e.notebook === execCell.notebook) return _e.selections.slice();
+                            } catch (_) {}
+                            return null;
+                        })();
                         await vscode.workspace.applyEdit(_collapseEdit);
+                        // Restore selection if the edit cleared it.
+                        if (_selBeforeCollapse && _selBeforeCollapse.length > 0) {
+                            try {
+                                for (const _e of vscode.window.visibleNotebookEditors) {
+                                    if (_e.notebook === execCell.notebook && _e.selections.length === 0)
+                                        _e.selections = _selBeforeCollapse;
+                                }
+                            } catch (_) {}
+                        }
                         _nextCellCollapsed = true;
                         scrollLog('[pre-end-collapse-next] collapsed output of cell', _nextCellCollapseIdx,
                                   'to suppress [n,n+2) scroll');
@@ -1350,10 +1293,29 @@ async function checkoutExecutionQueue(self) {
         self._cellEpoch = (self._cellEpoch + 1) & 0xFFFFFF;
         scrollLog('[checkout-end] execution.end() about to fire — cell', execCell.index,
                   '| wasRefine:', _wasRefine, '| viewportAtExecute:', _viewportAtExecute, '| cellEpoch', self._cellEpoch);
-        // Register runtime kernel-message diagnostics so Copilot's "Fix using Copilot"
-        // badge appears in the cell editor gutter.  Accumulated above in _runtimeDiags.
-        if (_runtimeDiags.length > 0) {
-            self.diagnosticCollection.set(currentExecution.execution.cell.document.uri, _runtimeDiags);
+        // Register a single combined diagnostic so Copilot's "Fix using Copilot" badge appears
+        // and the hover tooltip stays readable even with many warnings.
+        // First message is shown in full; extras are summarised as grouped Symbol::tag counts.
+        if (msgTexts.length > 0 && _firstMsgRange) {
+            const _getMsgTag = (m) => { const r = /^([\w`]+::[\w`]+)/.exec(m); return r ? r[1] : null; };
+            let diagMsg = msgTexts[0];
+            if (msgTexts.length > 1) {
+                const rest = msgTexts.slice(1);
+                const tagCounts = {};
+                let untagged = 0;
+                for (const m of rest) {
+                    const tag = _getMsgTag(m);
+                    if (tag) tagCounts[tag] = (tagCounts[tag] || 0) + 1;
+                    else untagged++;
+                }
+                const parts = Object.entries(tagCounts)
+                    .map(([t, c]) => c > 1 ? `${t} (${c}×)` : t);
+                if (untagged > 0) parts.push(`${untagged} other`);
+                diagMsg += `\n… and ${rest.length} more: ${parts.join(', ')}`;
+            }
+            const _combinedDiag = new vscode.Diagnostic(_firstMsgRange, diagMsg, vscode.DiagnosticSeverity.Error);
+            _combinedDiag.source = 'Wolfram Kernel';
+            self.diagnosticCollection.set(currentExecution.execution.cell.document.uri, [_combinedDiag]);
         }
         // Append a hidden consolidated error output: wolfram-html sentinel first so our
         // renderer claims the output (user sees nothing) but VS Code still detects the
@@ -1434,7 +1396,24 @@ async function checkoutExecutionQueue(self) {
                     _restEdit.set(_restNb2.uri, [
                         vscode.NotebookEdit.updateCellMetadata(_restIdx2, { ..._restMeta })
                     ]);
+                    // Snapshot + restore selection around the restore edit for the same
+                    // reason as the collapse edit: applyEdit may clear ed.selections.
+                    const _selBefore = (() => {
+                        try {
+                            for (const _e of vscode.window.visibleNotebookEditors)
+                                if (_e.notebook === _restNb2) return _e.selections.slice();
+                        } catch (_) {}
+                        return null;
+                    })();
                     await vscode.workspace.applyEdit(_restEdit);
+                    if (_selBefore && _selBefore.length > 0) {
+                        try {
+                            for (const _e of vscode.window.visibleNotebookEditors) {
+                                if (_e.notebook === _restNb2 && _e.selections.length === 0)
+                                    _e.selections = _selBefore;
+                            }
+                        } catch (_) {}
+                    }
                     scrollLog('[post-end-restore-next] t=20ms: uncollapsed cell', _restIdx2);
                 } catch (_e) {
                     scrollLog('[post-end-restore-next] error:', _e.message);
