@@ -1,7 +1,7 @@
 # Wolfslide changes — session summary
 
 Work driven by the Day2 King's Summer School feedback
-(`/Users/nikolay/Dropbox/2026 Kings Summer School/Day2/wslide_recomendations.md`),
+(`wslide_recomendations.md`, kept locally — not in this repo),
 plus a new PDF publishing mode and a full export↔viewer parity pass.
 
 **Status:** all changes syntax-checked (`node --check` / JSON parse) and the export

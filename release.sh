@@ -4,9 +4,10 @@
 
 set -e
 
-BTL_DIR="/Users/k0959535/Dropbox/MY/Programming/VSCodeWolfbookLaTeX"
-EXT_DIR="/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/Extension Development"
-VSIX_OUT_DIR="/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/Extension Production VSIX"
+WORKSPACE="${WOLFBOOK_WORKSPACE:-$HOME/Dropbox/MY/Programming}"
+BTL_DIR="$WORKSPACE/VSCodeWolfbookLaTeX"
+EXT_DIR="$WORKSPACE/VSCodeWolframExtension/Extension Development"
+VSIX_OUT_DIR="$WORKSPACE/VSCodeWolframExtension/Extension Production VSIX"
 PKG_FILE="$EXT_DIR/package.json"
 
 # 1. Get current versions

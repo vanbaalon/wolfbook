@@ -80,7 +80,8 @@ Extension dyn log:    tail -f "VSCodeWolframExtension/Temporary Docs/wolfbook-dy
 Extension console:    Help -> Toggle Developer Tools -> Console
 
 All three debug logs are truncated automatically on each kernel start.
-They are written only on the dev machine (username k0959535); no-op on user installs.
+They are written only on a dev machine (see utils/dev-logger.js; set WOLFBOOK_DEV=1 to
+force it on); no-op on user installs.
 
 note: console.log() output never appears in VS Code Output panel
 

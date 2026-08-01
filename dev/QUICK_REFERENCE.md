@@ -20,7 +20,7 @@ Active install: ~/.vscode/extensions/wolfbook.wolfbook-2.2.0/
 ## Quick Deploy (no repackage)
 
 ```
-cd /Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension
+cd ~/Dropbox/MY/Programming/VSCodeWolframExtension
 ./deploy-extension.sh quick
 ```
 

@@ -121,7 +121,7 @@ The `watch-and-rebuild.ps1` script detects the highest installed engine automati
 Always use `--target win32-x64 --allow-missing-repository`:
 
 ```powershell
-cd C:\Users\k0959535\wolfbook-win
+cd %USERPROFILE%\wolfbook-win
 vsce package --allow-missing-repository --target win32-x64 -o wolfbook-<version>-win32-x64.vsix
 ```
 
@@ -141,10 +141,10 @@ Expand the VSIX into the running extension folder so you don't need to restart V
 
 ```powershell
 $ver = "2.6.0"
-$vsix = "C:\Users\k0959535\wolfbook-win\wolfbook-$ver-win32-x64.vsix"
+$vsix = "$env:USERPROFILE\wolfbook-win\wolfbook-$ver-win32-x64.vsix"
 $zip  = "$vsix.zip"
-$tmp  = "C:\Users\k0959535\wolfbook-win\.tmp-vsix-expand"
-$dest = "C:\Users\k0959535\.vscode\extensions\wolfbook.wolfbook-$ver"
+$tmp  = "$env:USERPROFILE\wolfbook-win\.tmp-vsix-expand"
+$dest = "$env:USERPROFILE\.vscode\extensions\wolfbook.wolfbook-$ver"
 
 Copy-Item $vsix $zip -Force
 Expand-Archive $zip $tmp -Force
