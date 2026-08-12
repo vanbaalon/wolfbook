@@ -38,6 +38,7 @@ commentary. The JSON object MUST match this schema exactly:
   "successCriteria": string[] (1-12 items, each ≤ 500 chars; concrete, checkable),
   "risks":           string[] (0-12 items, each ≤ 500 chars; what might go wrong or be misinterpreted),
   "subtasks":          string[] (OPTIONAL — see Rule 9; 2-4 items, each ≤ 2000 chars; omit or use [] for single-task quests),
+  "suggestedSteps":    string[] (OPTIONAL — 3-6 items, each ≤ 300 chars; a CONCRETE Wolfram-level micro-plan for the executor: name the method, the formulas/conventions pinned, the natural intermediate symbols. Advisory — the executor may deviate. Omit for trivial quests.),
   "missingInfo":       string[] (OPTIONAL — see Rule 4; ≤ 8 items, each ≤ 200 chars; omit when the brief is fully specified),
   "validationChecks":  string[] (OPTIONAL — see Rule 11; 0-6 items, each ≤ 400 chars; leave [] for non-computational quests),
   "status":            "open",

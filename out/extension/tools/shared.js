@@ -1,10 +1,11 @@
 "use strict";
 // Wolfbook Tool Utilities — shared helpers extracted from tools/index.js
 
-const vscode = require("vscode");
-const util   = require("util");
-const fs     = require("fs");
-const path   = require("path");
+const vscode   = require("vscode");
+const util     = require("util");
+const fs       = require("fs");
+const path     = require("path");
+const logPaths = require("../utils/log-paths");
 
 // ---------------------------------------------------------------------------
 // MCP context flag — set true during MCP tool calls so _confirmSwitch is
@@ -14,48 +15,49 @@ let _mcpCallActive = false;
 function setMcpCallActive(v) { _mcpCallActive = v; }
 
 // ---------------------------------------------------------------------------
-// Shared: append an entry to the evaluation log next to the active notebook
-// Log lives at:  <notebook-dir>/img/<notebook-name>/ai_eval_log.md
+// Shared: append an entry to the evaluation log for the active notebook.
+// The log lives under globalStorage (see utils/log-paths.js), NOT beside the
+// notebook — writing it into the notebook folder littered every Dropbox-synced
+// project with an img/<nb>/ai_eval_log.md that re-synced on every evaluation.
+// Off unless wolfbook.advanced.diagnosticLogs is enabled.
 // ---------------------------------------------------------------------------
+
+/**
+ * Resolve the eval-log path + notebook name for the active notebook.
+ * @returns {{logPath: string, notebookName: string}|null} null when logging is off
+ */
+function _evalLog() {
+    const editor = vscode.window.activeNotebookEditor || vscode.window.visibleNotebookEditors[0];
+    if (!editor || editor.notebook.uri.scheme !== 'file') return null;
+    const notebookPath = editor.notebook.uri.fsPath;
+    const logPath = logPaths.notebookLogFile(notebookPath, 'ai_eval_log.md');
+    if (!logPath) return null;
+    return { logPath, notebookName: path.basename(notebookPath, path.extname(notebookPath)) };
+}
 
 // Called from lifecycle.js on every kernel launch — appends a restart marker
 // so the full action history is preserved across kernel reboots.
 function clearEvalLog() {
     try {
-        const editor = vscode.window.activeNotebookEditor || vscode.window.visibleNotebookEditors[0];
-        if (!editor) return;
-        const notebookPath = editor.notebook.uri.fsPath;
-        const notebookDir  = path.dirname(notebookPath);
-        const notebookName = path.basename(notebookPath, path.extname(notebookPath));
-        const logDir       = path.join(notebookDir, 'img', notebookName);
-        const logPath      = path.join(logDir, 'ai_eval_log.md');
-        fs.mkdirSync(logDir, { recursive: true });
+        const log = _evalLog();
+        if (!log) return;
         const stamp   = new Date().toISOString().replace('T', ' ').slice(0, 19);
-        const isFirst = !fs.existsSync(logPath);
+        const isFirst = !fs.existsSync(log.logPath);
         const entry   = isFirst
-            ? `# AI Action Log — ${notebookName}\n\n## ${stamp} — 🌟 KERNEL START\n\n`
+            ? `# AI Action Log — ${log.notebookName}\n\n## ${stamp} — 🌟 KERNEL START\n\n`
             : `\n---\n\n## ${stamp} — 🔄 KERNEL RESTART\n\n`;
-        fs.appendFileSync(logPath, entry, 'utf8');
+        fs.appendFileSync(log.logPath, entry, 'utf8');
     } catch (_) {}
 }
 
 function appendEvalLog(expression, output) {
     try {
-        const editor = vscode.window.activeNotebookEditor || vscode.window.visibleNotebookEditors[0];
-        if (!editor) return;
-        const notebookPath = editor.notebook.uri.fsPath;
-        const notebookDir  = path.dirname(notebookPath);
-        const notebookName = path.basename(notebookPath, path.extname(notebookPath));
-        const logDir       = path.join(notebookDir, 'img', notebookName);
-        const logPath      = path.join(logDir, 'ai_eval_log.md');
-
-        // Ensure directory exists
-        fs.mkdirSync(logDir, { recursive: true });
-
+        const log = _evalLog();
+        if (!log) return;
         const stamp   = new Date().toISOString().replace('T', ' ').slice(0, 19);
-        const isFirst = !fs.existsSync(logPath);
+        const isFirst = !fs.existsSync(log.logPath);
         const entry = [
-            isFirst ? `# AI Evaluation Log — ${notebookName}\n` : '',
+            isFirst ? `# AI Evaluation Log — ${log.notebookName}\n` : '',
             `## ${stamp}`,
             '**Input:**',
             '```wolfram',
@@ -67,7 +69,7 @@ function appendEvalLog(expression, output) {
             '```',
             ''
         ].join('\n');
-        fs.appendFileSync(logPath, entry, 'utf8');
+        fs.appendFileSync(log.logPath, entry, 'utf8');
     } catch (_) {
         // Logging is best-effort; never crash the tool
     }
@@ -76,19 +78,13 @@ function appendEvalLog(expression, output) {
 // Append a structural action event (insert/edit/delete cell, save, etc.) to the same log.
 function appendEventLog(action, detail) {
     try {
-        const editor = vscode.window.activeNotebookEditor || vscode.window.visibleNotebookEditors[0];
-        if (!editor) return;
-        const notebookPath = editor.notebook.uri.fsPath;
-        const notebookDir  = path.dirname(notebookPath);
-        const notebookName = path.basename(notebookPath, path.extname(notebookPath));
-        const logDir       = path.join(notebookDir, 'img', notebookName);
-        const logPath      = path.join(logDir, 'ai_eval_log.md');
-        fs.mkdirSync(logDir, { recursive: true });
+        const log = _evalLog();
+        if (!log) return;
         const stamp   = new Date().toISOString().replace('T', ' ').slice(0, 19);
-        const isFirst = !fs.existsSync(logPath);
-        const header  = isFirst ? `# AI Action Log — ${notebookName}\n\n` : '';
+        const isFirst = !fs.existsSync(log.logPath);
+        const header  = isFirst ? `# AI Action Log — ${log.notebookName}\n\n` : '';
         const body    = detail ? `\n${detail.trim()}\n` : '';
-        fs.appendFileSync(logPath, `${header}## ${stamp} — ${action}${body}\n`, 'utf8');
+        fs.appendFileSync(log.logPath, `${header}## ${stamp} — ${action}${body}\n`, 'utf8');
     } catch (_) {}
 }
 
@@ -524,10 +520,11 @@ function buildTranscript(notebook, startCell, endCell, editor) {
     // the user or agent has touched the notebook since the last context read.
     // Only action headers are shown — no code/output — to keep context small.
     try {
-        const notebookDir  = path.dirname(notebook.uri.fsPath);
-        const notebookName = path.basename(notebook.uri.fsPath, path.extname(notebook.uri.fsPath));
-        const logPath      = path.join(notebookDir, 'img', notebookName, 'ai_eval_log.md');
-        if (fs.existsSync(logPath)) {
+        // Read-only: use notebookLogDir (not notebookLogFile) so a context read never
+        // creates the log directory. null when diagnostic logs are disabled.
+        const logDir  = logPaths.notebookLogDir(notebook.uri.fsPath);
+        const logPath = logDir ? path.join(logDir, 'ai_eval_log.md') : null;
+        if (logPath && fs.existsSync(logPath)) {
             const logContent = fs.readFileSync(logPath, 'utf8');
             const cutoff     = Date.now() - 60 * 60 * 1000;
             // Extract only the "## timestamp — ACTION" header lines within the last hour

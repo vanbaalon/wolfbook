@@ -106,10 +106,11 @@ Discipline:
     Do NOT record a failed probe. Do NOT proceed to the next subtask while a warning
     is unresolved. \`General::stop\` means earlier warnings were suppressed — fix the
     root cause shown in the first messages, not just the stop message.
-    **To fix a small/local mistake (typo, wrong head, missing argument, stray \`;\`),
-    call \`amend_probe\` — it corrects the SAME probe in place and the first two amends
-    are FREE. Use a fresh \`probe\` only when you are genuinely trying a different
-    approach, not to retype a one-line fix.**
+    **To fix a mistake, call \`amend_probe\` — it corrects the SAME probe in place and
+    the first two amends are FREE. The failing cell STAYS in the notebook with its
+    error until your amend replaces it; abandoning it for a fresh \`probe\` leaves a
+    broken ❌ cell in your work. Use a fresh \`probe\` only when you are genuinely
+    switching to a different approach, not to retype a fix.**
 18. **After EVERY probe you MUST write a mandatory analysis block before your next tool call.**
     This is not optional. Every probe result — success or failure — requires this block
     (write it verbatim, replacing the angle-bracket fields):
@@ -118,6 +119,12 @@ Discipline:
       EXPECTED:        <what you expected this expression to return>
       ASSESSMENT:      <MATCH | MISMATCH | EMPTY | ERROR — one sentence explaining why>
       NEXT ACTION:     <record | fix-and-reprobe | inspect | abandon — and why>
+
+    A prose EXPECTED line is weak evidence — YOU are the one being checked. Whenever the
+    result is not eyeball-verifiable (dimensions, counts, sum rules, symmetries), put the
+    expectation in the probe's \`expect\` field instead: a WL boolean the kernel adjudicates
+    immediately (e.g. \`expect: "Max[dims] <= 16 && Total[dims^2] == 720"\`). A plausible-but-
+    wrong result then FAILS the probe instead of contaminating everything downstream.
 
     Rules for each assessment case:
     - **MATCH**: output type, shape, and value are consistent with what the task requires
@@ -214,6 +221,15 @@ Discipline:
     skill actually applied, do not cite anything — your verified result is then banked as
     NEW work (a fresh skill), which is the correct outcome.
 
+29a. **Hand-rolling a textbook algorithm counts as "needs literature".** If you are
+    implementing a KNOWN published method from memory (a combinatorial rule like
+    Murnaghan–Nakayama, a recursion, an integral identity, a special-function
+    algorithm) and it fails TWICE, the defect is almost certainly your recollection
+    of the method, not your code. Do not debug further — get the precise statement:
+    \`lookup\` for a built-in that already does it, \`research_literature\`/\`lit_read\`
+    for the published formulation, or a SkilXiv skill. Run ejiy7g burned 8 probes
+    debugging a mis-remembered rim-hook rule that one reference would have fixed.
+
 29. **Literature is a lead, never a fact — \`research_literature\`.** If the task names a
     KNOWN published method, model, or named equation (a Baxter T-Q relation, a QQ-system,
     a specific paper's result), call \`research_literature\` EARLY — before grinding it out
@@ -248,6 +264,34 @@ Discipline:
     or the recalled one covered a different model/algebra — call \`note_skill_gap\` with
     the topic and one sentence on what the skill should contain (max 2 per run). This
     files a request so the gap gets authored; it does not affect your current run.
+
+31. **Batch your tool calls — every turn is expensive.** Emit SEVERAL tool calls in one
+    reply whenever they are independent or naturally sequential: a \`probe\` together
+    with the \`record\` of the PREVIOUS result, several \`record\`/\`note_fact\` calls at
+    once, \`assume\` + \`probe\`. Better still, attach \`record: {stepId, checks}\` directly
+    to a probe you already trust. One tool per turn is the slowest possible mode.
+
+32. **Bundle related quantities into ONE probe.** Compute the pieces you need together
+    and return a single Association: \`<|"energies" -> …, "degeneracies" -> …,
+    "residual" -> …|>\` — then record it once. Ten one-liner probes cost ten kernel
+    round-trips and ten turns; one bundled probe costs one. (One Out[] value only —
+    do not leave multiple unterminated statements.) For several DISTINCT steps, use a
+    multi-cell probe — \`probe({cells: [c1, c2, c3]})\` runs them as separate cells in
+    one call (1 probe): a failure stops at the exact cell that caused it, earlier
+    cells' results stand, and you fix the failing cell in place with \`amend_probe\`.
+
+33. **Verify with machine checks, not extra probes.** Give \`record\` (or \`probe.record\`)
+    2–3 \`checks\` — kernel-run expressions that must return True or a tiny residual
+    (trace identities, symmetry, count/dimension matches, method cross-agreement).
+    A passing check IS your crosscheck: no separate verification probe is needed, and
+    the harness — not you — adjudicates it.
+
+34. **The kernel is your calculator — don't DERIVE results by hand.** If your
+    reasoning starts multi-step arithmetic, algebra expansion, or root-tracking:
+    stop and probe it — a probe is exact and costs seconds; hand derivation costs
+    thousands of tokens and hallucinates digits. This is about RESULTS, not
+    parameters: writing seeds, tolerances, indices, or small input matrices by hand
+    is normal and fine. Reasoning decides WHAT to compute; the kernel computes it.
 
 The single most common failure is re-pasting a helper you already defined into the
 top of every probe. The helper is ALREADY ALIVE in the kernel — calling it by name
@@ -353,8 +397,16 @@ function buildRecallContextBlock(recallResult) {
     const tierLabel  = TIER_LABELS[tier] || String(tier ?? '?');
     const DIVIDER    = '═'.repeat(70);
     const bodyText   = (fullBody || '');
-    const body       = bodyText.length > 4000
-        ? bodyText.slice(0, 4000) + '\n… [body truncated at 4000 chars]'
+    // 12000 (was 4000, run QG_TS03_dfjqcb): the 4000 cap cut the revised Bethe
+    // skill off right before its singular-case section and ready-made solver —
+    // the agent then re-derived everything from scratch. Skills are curated,
+    // math-dense reference; the excerpt must reach the executable Steps.
+    const SKILL_BODY_CAP = 12000;
+    const body       = bodyText.length > SKILL_BODY_CAP
+        ? bodyText.slice(0, SKILL_BODY_CAP) +
+          `\n… [body truncated at ${SKILL_BODY_CAP} chars — the REST OF THIS SKILL IS STILL AVAILABLE: ` +
+          'call `read_skill_section` (no arguments) to list its sections, then read the one you need ' +
+          '(the tail usually holds Verification and worked anchors).]'
         : bodyText;
 
     return [
@@ -394,7 +446,7 @@ function buildRecallContextBlock(recallResult) {
  * }} params
  * @returns {string}
  */
-function buildExploreUserMessage({ taskDescription, inputs, assumptions, budget, charmId, kernelFresh, inputsLoaded, recallBlock, validationChecks, handoff, skillGaps }) {
+function buildExploreUserMessage({ taskDescription, inputs, assumptions, budget, charmId, kernelFresh, inputsLoaded, recallBlock, validationChecks, handoff, skillGaps, lessonsBlock }) {
     const lines = [];
 
     lines.push(`## Task (charm: ${charmId})`);
@@ -458,6 +510,13 @@ function buildExploreUserMessage({ taskDescription, inputs, assumptions, budget,
         lines.push(recallBlock);
     }
 
+    // Stage 3 (2026-08-04): cross-run lessons. Placed in the FIRST user message
+    // so it sits inside the cacheable prefix — never injected mid-history.
+    if (lessonsBlock) {
+        lines.push('');
+        lines.push(lessonsBlock);
+    }
+
     if (skillGaps && skillGaps.length > 0) {
         lines.push('');
         lines.push('## Known skill gaps (the registry has NO skill for these)');
@@ -471,6 +530,24 @@ function buildExploreUserMessage({ taskDescription, inputs, assumptions, budget,
     lines.push(`- Probe budget remaining (Explore): **${budget.exploreProbesRemaining}** probes`);
     lines.push(`- Backtracks remaining: **${budget.backtracksRemaining}**`);
     lines.push(`- Turns remaining: **${budget.turnsRemaining}**`);
+    lines.push('');
+    lines.push('## The efficient pattern (imitate this — every turn is expensive)');
+    lines.push('One bundled probe that computes related things together, self-records with');
+    lines.push('machine checks, batched with the previous step\'s bookkeeping:');
+    lines.push('```');
+    lines.push('probe({');
+    lines.push('  code: "ed = <|\\"energies\\" -> Sort[Eigenvalues[N[H]]], \\"dims\\" -> Dimensions[H]|>",');
+    lines.push('  note: "Diagonalise H; bundle spectrum + sanity data in one Association.",');
+    lines.push('  record: { stepId: "step_spectrum",');
+    lines.push('            checks: ["Length[ed[\\"energies\\"]] == 256", "Abs[Total[ed[\\"energies\\"]] - Tr[N[H]]] < 10^-8"] }');
+    lines.push('})');
+    lines.push('```');
+    lines.push('For a staged construction (build → restrict → diagonalise), use a MULTI-CELL probe —');
+    lines.push('`probe({cells: ["H = …", "sub = …", "ed = Eigenvalues[sub]"], note: …})` runs the stages');
+    lines.push('as separate cells in ONE call (1 probe): a failure stops at the exact cell that caused');
+    lines.push('it, earlier cells stand, and you amend only the broken one.');
+    lines.push('A passing check IS your cross-check (kernel-adjudicated). Batch several tool');
+    lines.push('calls per reply when independent. Ten tiny single-value probes = the slow way.');
     lines.push('');
     lines.push('Start exploring. When your chain is complete, emit the `done_exploring` control signal.');
 

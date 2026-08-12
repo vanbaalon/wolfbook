@@ -126,6 +126,15 @@ function makeStage(spec) {
         rationale:        String(spec.rationale || '').slice(0, 500),
         status:           'pending',
         attempt:          0,
+        // Stage B3: harness-gated verification flag. Flipped ONLY by observed
+        // evidence (plan-time validationChecks passing an un-downgraded
+        // fresh-kernel replay) — never by an LLM assessment.
+        passes:           false,
+        passesEvidence:   null,
+        // Escalation state (one per stage, max): set when the Director retries a
+        // repeatedly-failing stage on the stronger judgment binding.
+        escalated:        !!spec.escalated,
+        bindingRole:      spec.bindingRole || null,
         // Execution artifacts (filled after the fairy run).
         questId:      null,
         charmDir:     null,

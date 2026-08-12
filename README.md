@@ -12,6 +12,7 @@
   <a href="docs/using_cline.md">Using Cline</a> ·
   <a href="docs/deepseek-copilot.md">DeepSeek + Copilot</a> ·
   <a href="docs/presentations.md">Presentations (.wslide)</a> ·
+  <a href="docs/oberon-agent.md">Oberon Agent 🧪</a> ·
   <a href="docs/best-practices.md">Best Practices</a> ·
   <a href="docs/wb-functions.md">WB Functions</a> ·
   <a href="#citing-wolfbook">Citing</a>
@@ -111,6 +112,25 @@ The same tools are exposed as an **MCP (Model Context Protocol) server**, so any
 
 Wolfbook includes a `.wslide` presentation format: JSON-based slides rendered via Reveal.js inside VS Code, with LaTeX math, live Wolfram Language eval blocks, and the same btl math renderer as the notebook. The entire slide format is editable by AI agents via 12 dedicated MCP tools. See [Presentations](docs/presentations.md). Drop your pictures and a bit of text and get a full slide deck in seconds. Refine it with AI and create a masterpiece.
 
+**Reworked in this release:** the slide editor has been substantially reworked — a cleaner canvas with proper selection, alignment and arrange tooling, and a redesigned side panel. It now has **AI editing built into the editor itself**: select any block (or several) and press **⌘K** to say what you want — *"tidy this"*, *"make these equal width"*, *"turn into 3 bullets"* — and the assistant proposes concrete changes you accept or reject before anything is written. Deterministic one-click actions for the common tidy-ups need no model at all.
+
+### 🧪 Experimental: the Oberon research agent
+
+> **This is an experimental preview and it is off by default.** Oberon requires
+> *your own* third-party LLM API key, spends real money per run, writes files
+> into your workspace, and its commands and settings will change between
+> releases. With no API key configured it never runs and nothing leaves your
+> machine. Nothing else in Wolfbook depends on it — ignore this section entirely
+> and the notebook, kernel and slide features work exactly as before.
+
+Wolfbook ships an early preview of **Oberon**, an autonomous research agent that lives inside the extension. Where the tools above let an AI *assist* you, Oberon takes a brief and does the work: it plans the calculation, probes the live kernel, records the steps that survive, compiles them into a clean notebook, and then **restarts the kernel and re-runs that notebook from scratch** to verify it. The model is allowed to be wrong; the kernel is the judge.
+
+It is also integrated with **[SkilXiv.org](https://skilxiv.org)**, a public registry of versioned, citeable, executable know-how. Oberon looks up a relevant *skill* before it starts — which on hard problems is the difference between rediscovering a method by trial and error and simply applying it — and can draft new skills from verified results for you to review and publish.
+
+Oberon is **opt-in and off until you configure an API key**; with none set, it never runs and nothing leaves your machine. It costs real money per run (typically cents, on DeepSeek) and its interface will change between releases.
+
+→ **[Oberon — the experimental research agent](docs/oberon-agent.md)**: what it does, how to configure providers, roles, budgets, the SkilXiv integration, and exactly what data goes where.
+
 ---
 
 ## Quick Start
@@ -156,12 +176,35 @@ Both addons are prebuilt for macOS (Apple Silicon and Intel) and Windows and bun
 | [Getting Started](docs/getting-started.md) | Installation, first notebook, setup checklist |
 | [AI Integration](docs/ai-integration.md) | GitHub Copilot agent tools — full reference |
 | [MCP & Agent Tools](docs/mcp-and-agent-tools.md) | Using Wolfbook with Claude Code, Codex, and other MCP clients |
+| [Oberon Agent (experimental)](docs/oberon-agent.md) | The autonomous research agent: setup, providers, budgets, SkilXiv, privacy |
 | [Features](docs/features.md) | Notebook interface, kernel control, editor, debugger, Dynamic |
 | [Presentations (.wslide)](docs/presentations.md) | The AI-native slide format |
 | [DeepSeek + Copilot](docs/deepseek-copilot.md) | Using DeepSeek models with VS Code Copilot |
 | [Best Practices](docs/best-practices.md) | How to work effectively with the agent |
 | [Building from Source](docs/building.md) | Compile the native addons, package the extension |
 | [WB Functions](docs/wb-functions.md) | Custom WL functions: WBVersion, WBDirectory, WBPrint, WBInclude, WBExport, WBPrompt |
+
+---
+
+## Data and privacy
+
+**Wolfbook does not collect analytics and has no telemetry of its own.** Your
+notebooks, kernel session and slides stay on your machine.
+
+Network access happens in exactly two places, both under your control:
+
+| What | When | Where it goes |
+|---|---|---|
+| Wolfram kernel | Always local | Nothing leaves your machine — the kernel runs on your computer via WSTP |
+| **Oberon agent** (experimental, off by default) | Only when *you* configure an API key and start a run | Your task text and code excerpts go to the LLM provider **you** chose (DeepSeek, Anthropic or OpenAI), under that provider's terms |
+| **SkilXiv** skill lookup (part of Oberon) | Only during an Oberon run, when recall is enabled | A search query derived from your task. Anonymous outcome reports (did a skill help) contain no task content. Skill contributions are **never** published without your explicit review and approval |
+
+With no Oberon API key configured, **none of the above happens** — no LLM calls,
+no SkilXiv requests, nothing. To disable the SkilXiv parts while still using the
+agent, set `wolfbook.oberon.recall.enabled` and
+`wolfbook.oberon.recall.usageTelemetry` to `false`.
+
+Full detail: [Oberon — data and privacy](docs/oberon-agent.md#data-and-privacy).
 
 ---
 
@@ -193,4 +236,6 @@ If Wolfbook supports your research, a brief mention in the acknowledgements help
 ## Acknowledgements 
 
 Wolfbook was heavily inspired by and initially based on the official `vscode-wolfram` extension by Wolfram Research Inc. (Apache 2.0). The LSP client layer and kernel-finding logic originate from that project. The notebook frontend and the entire kernel backend have since been rewritten from scratch.
+
+Special thanks to **Ruben Myers** for his help compiling the Unix build of the native binaries — the WSTP bridge and the `btl` math renderer are native addons that must be built per platform, and that work is what makes Wolfbook usable outside macOS and Windows.
 

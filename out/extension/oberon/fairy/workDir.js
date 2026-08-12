@@ -324,6 +324,20 @@ class WorkDir {
      * @param {string} stepId
      * @param {object} patch   fields to merge (e.g. { code, editedInPolish: true })
      */
+    /**
+     * Stage-2 verification ladder: promote every VALID step to at least `rung`
+     * (5 = survived the fresh-kernel clean.wb replay). Single read+write.
+     */
+    async promoteVerifiedRung(rung) {
+        const all = await this.loadAllSteps();
+        let changed = false;
+        for (const s of all) {
+            if (s && s.status === 'valid' && (s.verifiedRung || 0) < rung) { s.verifiedRung = rung; changed = true; }
+        }
+        if (changed) await fsp.writeFile(this.stepsFile, JSON.stringify(all, null, 2), 'utf8');
+        return changed;
+    }
+
     async updateStep(stepId, patch) {
         const all = await this.loadAllSteps();
         const idx = all.findIndex(s => s && s.id === stepId);
@@ -693,9 +707,17 @@ class WorkDir {
      * Record an agent citation of a recalled skill. Upserts by skillRef.
      * @param {{ skillRef:string, how:string }} cite
      */
-    async addCitedSkill({ skillRef, how }) {
+    async addCitedSkill({ skillRef, how, disposition, stepIds }) {
         const all = await this.loadCitedSkills();
-        const entry = { skillRef: String(skillRef), how: String(how || ''), citedAt: new Date().toISOString() };
+        const entry = {
+            skillRef: String(skillRef), how: String(how || ''),
+            // Stage-2 evidence linking + A3: 'used' | 'pass_over' | 'contradicted'.
+            // A used-citation carries the recorded stepIds that embody the skill;
+            // pass_over and contradicted carry none and are never credited.
+            disposition: ['pass_over', 'contradicted'].includes(disposition) ? disposition : 'used',
+            stepIds: Array.isArray(stepIds) ? stepIds.map(String) : [],
+            citedAt: new Date().toISOString(),
+        };
         const idx = all.findIndex(c => c.skillRef === entry.skillRef);
         if (idx >= 0) all[idx] = entry; else all.push(entry);
         await fsp.writeFile(this.citedSkillsFile, JSON.stringify(all, null, 2), 'utf8');

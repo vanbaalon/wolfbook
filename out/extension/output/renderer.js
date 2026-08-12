@@ -28,6 +28,23 @@ const vscode = require('vscode');
 const fs = require('fs');
 const path = require('path');
 const { DEV_MODE } = require('../utils/dev-logger');
+const logPaths = require('../utils/log-paths');
+
+/**
+ * Path to btl.log for the active notebook, or null when diagnostic logs are off.
+ * Lives under globalStorage — never beside the notebook, which used to litter
+ * every Dropbox-synced project with an img/<nb>/btl.log.
+ * @returns {string|null}
+ */
+function _btlLogPath() {
+    try {
+        const ed = vscode.window.activeNotebookEditor;
+        if (!ed || ed.notebook.uri.scheme !== 'file') return null;
+        return logPaths.notebookLogFile(ed.notebook.uri.fsPath, 'btl.log');
+    } catch (_) {
+        return null;
+    }
+}
 const _encoding = require('../utils/encoding');
 const { wlUTFtoNames, wlNameToUTF } = require('../namedchars');
 
@@ -270,24 +287,17 @@ function _extractInfoDataHtml(boxStr) {
 // div, decode the boxes, run through the C++ boxToLatex addon, then either
 // KaTeX-prerender in extension host (WLLatex / Mode A only).
 function processWLLatexBoxes(self, html, logPath, pageWidthEm = 0, source = '', lineBreakOpts = null) {
-    // If no logPath was given, try to derive one from the active notebook
-    if (!logPath) {
-        try {
-            const ed = vscode.window.activeNotebookEditor;
-            if (ed && ed.notebook.uri.scheme === 'file') {
-                const nbFsPath = ed.notebook.uri.fsPath;
-                const nbBase = path.basename(nbFsPath, path.extname(nbFsPath));
-                logPath = path.join(path.dirname(nbFsPath), 'img', nbBase, 'btl.log');
-            }
-        } catch (_) {}
-    }
+    // If no logPath was given, derive one from the active notebook.
+    // null when diagnostic logs are off — every write site below is null-guarded.
+    if (!logPath) logPath = _btlLogPath();
     const hasPrerendered = html.includes('vscode-wolfram-wllatex-boxes"');
     if (!hasPrerendered) return html;
     if (!_loadBtlAddon()) {
         return html
             .replace(/<div class="vscode-wolfram-wllatex-boxes"[^>]*><\/div>/g,
                 '<pre class="vscode-wolfram-text-output">WLLatex: addon not available.\n' +
-                'Build VSCodeWolfbookLaTeX first:\n  cd ~/Dropbox/MY/Programming/VSCodeWolfbookLaTeX && ./build.sh</pre>');
+                'The bundled LaTeX/KaTeX math renderer (btl) could not be loaded for this platform.\n' +
+                'See the Building from Source guide to compile it: https://github.com/vanbaalon/wolfbook</pre>');
     }
     const lbOpts = (lineBreakOpts && typeof lineBreakOpts === 'object')
         ? { ...lineBreakOpts }
@@ -747,16 +757,7 @@ function renderPageForPager(self, pagerId, page) {
     }
     _loadBtlAddon();
     if (!_btlAddon) return null;
-    // Derive logPath for btl.log exactly as processWLLatexBoxes does
-    let logPath = null;
-    try {
-        const ed = vscode.window.activeNotebookEditor;
-        if (ed && ed.notebook.uri.scheme === 'file') {
-            const nbFsPath = ed.notebook.uri.fsPath;
-            const nbBase = path.basename(nbFsPath, path.extname(nbFsPath));
-            logPath = path.join(path.dirname(nbFsPath), 'img', nbBase, 'btl.log');
-        }
-    } catch (_) {}
+    const logPath = _btlLogPath();
     let pageLatex = '';
     let btlError = null;
     try {

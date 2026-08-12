@@ -80,6 +80,16 @@ function buildCharm(quest) {
         taskLines.push('Address each of the following success criteria:');
         successCriteria.forEach((c, i) => taskLines.push(`${i + 1}. ${c}`));
     }
+    // P8 (2026-08-02): the Planner (a stronger, thinking model) may hand the
+    // executor a concrete micro-plan — one Pro judgment call replacing several
+    // Flash exploration rounds. Advisory: the fairy may deviate on evidence.
+    const suggested = Array.isArray(quest.suggestedSteps)
+        ? quest.suggestedSteps.map(String).filter(Boolean).slice(0, 6) : [];
+    if (suggested.length) {
+        taskLines.push('');
+        taskLines.push('SUGGESTED APPROACH (advisory — from the planning model; deviate if the evidence disagrees):');
+        suggested.forEach((s, i) => taskLines.push(`${i + 1}. ${s.slice(0, 300)}`));
+    }
     const task = taskLines.join('\n').trim().slice(0, 8000) || 'Solve the parent Quest.';
 
     return {

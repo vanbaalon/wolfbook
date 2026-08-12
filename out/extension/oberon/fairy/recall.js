@@ -13,7 +13,8 @@
  *   - Everything else is model judgement (the skill block lands in the prompt)
  */
 
-const { SkilXivClient } = require('./skilxivClient');
+const { SkilXivClient, hashSkillBody } = require('./skilxivClient');
+const { fetchRef } = require('./skilxivRef');
 
 // ── Section parser ────────────────────────────────────────────────────────────
 
@@ -63,9 +64,24 @@ function parseSkillSections(body) {
 function passesVersionFilter(candidate, kernelVersion) {
     const wv = candidate.wolfram_versions
         || (candidate.metadata && candidate.metadata.wolfram_versions);
-    if (!wv || !Array.isArray(wv) || wv.length === 0) return true;
+    if (!wv || (Array.isArray(wv) && wv.length === 0)) return true;
     if (!kernelVersion) return true;
-    return wv.some(v => kernelVersion.startsWith(String(v)));
+    const current = String(kernelVersion).split('.').map(x => Number(x) || 0);
+    const cmp = value => {
+        const target = String(value).split('.').map(x => Number(x) || 0);
+        const n = Math.max(current.length, target.length);
+        for (let i = 0; i < n; i++) { const d = (current[i] || 0) - (target[i] || 0); if (d) return d < 0 ? -1 : 1; }
+        return 0;
+    };
+    const satisfies = constraint => String(constraint).trim().split(/\s+/).every(part => {
+        const m = part.match(/^(>=|<=|>|<|=|\^|~)?(\d+(?:\.\d+)*)$/); if (!m) return false;
+        const c = cmp(m[2]), op = m[1] || '=';
+        if (op === '>=') return c >= 0; if (op === '<=') return c <= 0; if (op === '>') return c > 0; if (op === '<') return c < 0;
+        if (op === '^') return c >= 0 && current[0] === Number(m[2].split('.')[0]);
+        if (op === '~') { const t = m[2].split('.').map(Number); return c >= 0 && current[0] === t[0] && (t.length < 2 || current[1] === t[1]); }
+        const wanted = m[2].split('.').map(Number); return wanted.every((x, i) => current[i] === x);
+    });
+    return (Array.isArray(wv) ? wv : [wv]).some(satisfies);
 }
 
 // ── Main entry point ──────────────────────────────────────────────────────────
@@ -160,6 +176,27 @@ function _buildTriagePrompt(task, candidates) {
     ].join('\n');
 }
 
+function _buildCapabilityPrompt(task) {
+    return [
+        `TASK: ${task}`,
+        '',
+        'Decompose this task into 1–4 independently searchable method capabilities.',
+        'Use precise technical phrases, not broad subject labels. Do not solve the task.',
+        'Reply ONLY as JSON: {"capabilities":["...","..."]}',
+    ].join('\n');
+}
+
+function _parseCapabilities(text) {
+    try {
+        const match = String(text || '').match(/\{[\s\S]*\}/);
+        if (!match) return [];
+        const parsed = JSON.parse(match[0]);
+        return Array.isArray(parsed.capabilities)
+            ? parsed.capabilities.map(x => String(x).trim().slice(0, 160)).filter(Boolean).slice(0, 4)
+            : [];
+    } catch (_) { return []; }
+}
+
 function _parseTriage(text, n) {
     const s = String(text || '').trim();
     // Legacy replies ("2" / "none") still parse — kept for prompt-drift resilience.
@@ -207,9 +244,34 @@ async function _runRecallInner(task, { client, kernelVersion, signal, llm } = {}
             return { mode: 'none', recallLog };
         }
 
-        // Search — top 5, no tier filter (include all tiers in Stage 1)
-        const searchData = await client.search(query, { limit: 5, minTier: 0 });
-        const results    = searchData.results || [];
+        // Capability-first retrieval. The full-task search remains as a stable
+        // baseline; precise capability searches expand its candidate set so a
+        // strong hit for one subproblem cannot mask missing methods for another.
+        let searchCapabilities = [];
+        if (llm) {
+            try { searchCapabilities = _parseCapabilities(await llm(_buildCapabilityPrompt(query))); }
+            catch (_) { searchCapabilities = []; }
+        }
+        const searchQueries = [query, ...searchCapabilities.filter(x => x.toLowerCase() !== query.toLowerCase())];
+        const searchResponses = await Promise.allSettled(searchQueries.map(q => client.search(q, { limit: 5, minTier: 0, signal })));
+        const byRef = new Map();
+        searchResponses.forEach((entry, queryIndex) => {
+            if (entry.status !== 'fulfilled') return;
+            for (const item of entry.value.results || []) {
+                const key = `${item.namespace}/${item.name}@${item.version || 'latest'}`;
+                const previous = byRef.get(key);
+                const score = typeof item.score === 'number' ? item.score : (typeof item.similarity === 'number' ? item.similarity : -Infinity);
+                const previousScore = previous && (typeof previous.score === 'number' ? previous.score : (typeof previous.similarity === 'number' ? previous.similarity : -Infinity));
+                const merged = previous && previousScore >= score ? previous : item;
+                const matchedQueries = new Set([...(previous && previous._matchedQueries || []), searchQueries[queryIndex]]);
+                byRef.set(key, { ...merged, _matchedQueries: [...matchedQueries] });
+            }
+        });
+        const results = [...byRef.values()].sort((a, b) =>
+            (Number(b.score ?? b.similarity ?? 0) - Number(a.score ?? a.similarity ?? 0)));
+        recallLog.searchCapabilities = searchCapabilities;
+        recallLog.searchQueries = searchQueries.length;
+        recallLog.searchFailures = searchResponses.filter(x => x.status === 'rejected').length;
         recallLog.searchCount = results.length;
 
         if (results.length === 0) {
@@ -231,6 +293,7 @@ async function _runRecallInner(task, { client, kernelVersion, signal, llm } = {}
             score: (typeof c.score === 'number') ? +c.score.toFixed(4)
                  : (typeof c.similarity === 'number') ? +c.similarity.toFixed(4) : null,
             tier:  c.tier ?? 0,
+            matchedQueries: c._matchedQueries || [],
         }));
 
         // I11/S1: capability triage across all candidates (falls back to top-1 on
@@ -260,8 +323,18 @@ async function _runRecallInner(task, { client, kernelVersion, signal, llm } = {}
                         return { mode: 'none', gaps, capabilities, recallLog };
                     }
                     picks = verdict.picks.map(pk => ({ ...pk, candidate: candidates[pk.index] }));
+                } else {
+                    recallLog.error = 'triage returned invalid structured output; no skill injected';
+                    recallLog.triageDegraded = true;
+                    recallLog.durationMs = Date.now() - startMs;
+                    return { mode: 'none', gaps: [], capabilities: [], recallLog };
                 }
-            } catch (_) { /* triage is best-effort — fall through to top-1 */ }
+            } catch (e) {
+                recallLog.error = `triage failed; no skill injected: ${(e && e.message) || String(e)}`;
+                recallLog.triageDegraded = true;
+                recallLog.durationMs = Date.now() - startMs;
+                return { mode: 'none', gaps: [], capabilities: [], recallLog };
+            }
         }
 
         if (!picks) {
@@ -290,19 +363,30 @@ async function _runRecallInner(task, { client, kernelVersion, signal, llm } = {}
             const ref = `@${c.namespace}/${c.name}@${c.version}`;
             let body = '', meta = {};
             try {
-                meta = await client.getSkill(c.namespace, c.name, c.version);
+                const resolved = await fetchRef(client, `@${c.namespace}/${c.name}@${c.version}`, { signal });
+                meta = resolved.skill;
                 body = meta.body || meta.body_text || '';
             } catch (_) { /* a fetch failure drops this pick */ }
             if (!body) continue;
+            const computedHash = hashSkillBody(body);
+            const expectedHash = c.content_hash || meta.content_hash || null;
+            if (expectedHash && expectedHash !== computedHash) {
+                recallLog.integrityErrors = recallLog.integrityErrors || [];
+                recallLog.integrityErrors.push({ ref, expected: expectedHash, computed: computedHash });
+                continue;
+            }
+            const MAX_SKILL_CHARS = 64000;
+            const boundedBody = body.slice(0, MAX_SKILL_CHARS);
             skills.push({
                 skillRef:    ref,
-                contentHash: c.content_hash || null,
+                contentHash: computedHash,
                 namespace:   c.namespace, name: c.name, version: c.version,
                 summary:     c.summary || meta.summary || '',
                 license:     c.license || meta.license || '',
                 tier:        c.tier ?? meta.tier ?? 0,
-                fullBody:    body,
-                sections:    parseSkillSections(body),
+                fullBody:    boundedBody,
+                truncated:   body.length > boundedBody.length,
+                sections:    parseSkillSections(boundedBody),
                 fit:         pk.fit,
                 covers:      pk.covers || '',
                 lacks:       pk.lacks || null,
@@ -350,4 +434,4 @@ async function _runRecallInner(task, { client, kernelVersion, signal, llm } = {}
     }
 }
 
-module.exports = { runRecall, parseSkillSections, passesVersionFilter, _internals: { _buildTriagePrompt, _parseTriage } };
+module.exports = { runRecall, parseSkillSections, passesVersionFilter, _internals: { _buildTriagePrompt, _parseTriage, _buildCapabilityPrompt, _parseCapabilities } };

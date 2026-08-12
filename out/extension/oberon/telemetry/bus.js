@@ -3,7 +3,9 @@
  * Oberon — telemetry bus.
  *
  * Single source of truth for run events. Writes JSONL to
- *   <workspace>/.oberon/telemetry/runs/<runId>.jsonl
+ *   <globalStorage>/logs/telemetry/<workspace>/runs/<runId>.jsonl
+ *   (was <workspace>/.oberon/telemetry/runs/ — moved out of the workspace because it
+ *    is routinely Dropbox-synced; see the watchdog note below and utils/log-paths.js)
  * and emits the same event on an in-process EventEmitter so the UI surfaces
  * (Control Room sidebar + Run Inspector) can react live.
  *

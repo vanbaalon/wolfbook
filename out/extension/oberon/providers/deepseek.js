@@ -40,6 +40,7 @@ const RETRYABLE_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
 
 function isRetryable(e) {
     if (!e) return false;
+    if (e.retryableOverride) return true;   // e.g. reasoning_effort stripped after a 400
     if (e.status && RETRYABLE_STATUSES.has(e.status)) return true;
     // Network-layer failures land as providerError with no status. Mid-stream
     // drops ("stream read error: …", SSE stall, socket resets) are transient the
@@ -108,7 +109,7 @@ class DeepSeekAdapter extends ProviderAdapter {
 
         const body = {
             model:    req.model,
-            messages: normaliseMessages(req.messages),
+            messages: normaliseMessages(req.messages, !!req.thinking),
             temperature: req.temperature ?? 0.2,
             stream:   false,
         };
@@ -118,6 +119,7 @@ class DeepSeekAdapter extends ProviderAdapter {
             body.tools = req.tools;
             if (req.toolChoice) body.tool_choice = req.toolChoice;
         }
+        applyThinking(body, req);
 
         // Abort plumbing — combine caller signal with our own timeout.
         const localAbort = new AbortController();
@@ -161,6 +163,10 @@ class DeepSeekAdapter extends ProviderAdapter {
             let detail = text;
             try { detail = JSON.parse(text); } catch (_) {}
             const status = res.status;
+            if (body.reasoning_effort === 'none' && isReasoningEffortRejection(status, detail)) {
+                _reasoningEffortUnsupported = true;
+                return this._chatCompleteOnce(req, ctx);   // one clean retry without the param
+            }
             const retryAfter = Number(res.headers.get('retry-after')) || null;
             throw providerError('deepseek', {
                 status,
@@ -227,7 +233,7 @@ class DeepSeekAdapter extends ProviderAdapter {
 
     const body = {
         model:    req.model,
-        messages: normaliseMessages(req.messages),
+        messages: normaliseMessages(req.messages, !!req.thinking),
         temperature: req.temperature ?? 0.2,
         stream:   true,
         stream_options: { include_usage: true },
@@ -238,6 +244,7 @@ class DeepSeekAdapter extends ProviderAdapter {
         body.tools = req.tools;
         if (req.toolChoice) body.tool_choice = req.toolChoice;
     }
+    applyThinking(body, req);
 
     const localAbort = new AbortController();
     const onAbort    = () => localAbort.abort();
@@ -278,6 +285,17 @@ class DeepSeekAdapter extends ProviderAdapter {
         try { detail = await res.text(); try { detail = JSON.parse(detail); } catch (_) {} }
         catch (_) { detail = 'error reading body'; }
         const status = res.status;
+        if (body.reasoning_effort === 'none' && isReasoningEffortRejection(status, detail)) {
+            // Strip the speculative param session-wide and let the adapter's
+            // retry loop re-issue the request cleanly.
+            _reasoningEffortUnsupported = true;
+            const err = providerError('deepseek', {
+                status, message: 'reasoning_effort rejected — stripped for this session, retrying', cause: detail,
+            });
+            err.retryableOverride = true;
+            err.retryAfterMs = 200;
+            throw err;
+        }
         const retryAfter = Number(res.headers.get('retry-after')) || null;
         throw providerError('deepseek', {
             status,
@@ -417,7 +435,14 @@ class DeepSeekAdapter extends ProviderAdapter {
  * mostly identity — we just filter to known keys to avoid sending stale
  * properties (e.g. `name` on user messages) that some gateways reject.
  */
-function normaliseMessages(messages) {
+/**
+ * @param {Array} messages
+ * @param {boolean} [includeReasoning] — true for THINKING-mode requests: V4
+ *   demands prior assistant reasoning_content back in thinking mode (live 400
+ *   "must be passed back", 2026-08-01) but reasoning in NON-thinking inputs is
+ *   at best dead weight — strip it there.
+ */
+function normaliseMessages(messages, includeReasoning = false) {
     if (!Array.isArray(messages)) return [];
     return messages.map(m => {
         if (!m || typeof m !== 'object') return m;
@@ -429,7 +454,7 @@ function normaliseMessages(messages) {
             };
         }
         if (m.role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.length) {
-            return {
+            const out = {
                 role:       'assistant',
                 content:    m.content || '',
                 tool_calls: m.tool_calls.map(tc => ({
@@ -443,9 +468,49 @@ function normaliseMessages(messages) {
                     },
                 })),
             };
+            if (includeReasoning && m.reasoning_content) out.reasoning_content = String(m.reasoning_content);
+            return out;
         }
-        return { role: m.role, content: m.content };
+        const out = { role: m.role, content: m.content };
+        if (includeReasoning && m.role === 'assistant' && m.reasoning_content) out.reasoning_content = String(m.reasoning_content);
+        return out;
     });
+}
+
+/**
+ * DeepSeek V4 reasoning control.
+ *
+ * Thinking ON (per-role opt-in): `reasoning_effort` selects depth; sampling
+ * params are silently ignored (omit them); forced/named `tool_choice` is
+ * REJECTED with a 400 — only 'auto'/'none' may pass through.
+ *
+ * Thinking OFF: V4 AUTO-THINKS on hard prompts unless explicitly disabled —
+ * run TS03 (2026-08-01) burned 23 calls × 12k tokens of hidden reasoning that
+ * hit max_tokens before any content. Empirically verified against the live
+ * API (2026-08-01): `reasoning_effort: "none"` fully disables it ('low' does
+ * NOT; `thinking:{type:"disabled"}` also works). If the API ever rejects the
+ * param, the 400-retry below strips it for the rest of the session.
+ */
+let _reasoningEffortUnsupported = false;
+
+function applyThinking(body, req) {
+    if (req && req.thinking) {
+        body.reasoning_effort = req.reasoningEffort || 'high';
+        delete body.temperature;
+        if (body.tool_choice && body.tool_choice !== 'auto' && body.tool_choice !== 'none') {
+            delete body.tool_choice;
+        }
+        return;
+    }
+    if (!_reasoningEffortUnsupported) body.reasoning_effort = 'none';
+}
+
+/** True when an HTTP-400 body complains about reasoning_effort — the one
+ *  param we inject speculatively; strip it session-wide and retry. */
+function isReasoningEffortRejection(status, detail) {
+    if (status !== 400) return false;
+    const msg = typeof detail === 'string' ? detail : JSON.stringify(detail || '');
+    return /reasoning_effort/i.test(msg);
 }
 
 function parseToolArgs(s) {

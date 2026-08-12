@@ -57,6 +57,8 @@ function evaluateEligibility(ctx) {
  * @returns {string}
  */
 function renderSkillMd(a) {
+    const inputs = Array.isArray(a.inputs) ? a.inputs : [];
+    const outputs = Array.isArray(a.outputs) ? a.outputs : [];
     const lines = [
         '---',
         'schema_version: "1.0"',
@@ -66,6 +68,10 @@ function renderSkillMd(a) {
         'license: CC-BY-4.0',
         `summary: ${JSON.stringify((a.task || a.title).slice(0, 480))}`,
         'runtime: wolfram',
+        inputs.length ? 'inputs:' : '',
+        ...inputs.slice(0, 12).map((x, i) => `  - name: ${slug((x && x.name) || `input-${i + 1}`)}\n    type: ${JSON.stringify(String((x && x.type) || 'expression'))}\n    description: ${JSON.stringify(String((x && x.description) || 'Input inferred from the verified run.').slice(0, 300))}`),
+        outputs.length ? 'outputs:' : '',
+        ...outputs.slice(0, 12).map((x, i) => `  - name: ${slug((x && x.name) || `output-${i + 1}`)}\n    type: ${JSON.stringify(String((x && x.type) || 'expression'))}\n    description: ${JSON.stringify(String((x && x.description) || 'Output produced by the verified run.').slice(0, 300))}`),
         'visibility: private',
         a.derivedFrom ? `derived_from: ["${a.derivedFrom}"]` : 'derived_from: []',
         a.generatedWith ? `generated_with: "${a.generatedWith}"` : '',
@@ -122,6 +128,7 @@ async function writeCandidate(a) {
         title: a.title, task: a.task,
         definitionsLedger: a.definitionsLedger, factsLedger: a.factsLedger,
         derivedFrom: a.derivedFrom, generatedWith: a.generatedWith,
+        inputs: a.inputs, outputs: a.outputs,
     });
     await fsp.writeFile(path.join(dir, 'SKILL.md'), skillMd, 'utf8');
 
@@ -139,6 +146,11 @@ async function writeCandidate(a) {
         eligible:      true,
         // Evidence (Stage 2 surfaces these; verification pipeline is Stage 3).
         evidence:      { executed_fresh: a.status === 'delivered', skill_self_tests_passed: null },
+        redaction: {
+            uploadedAutomatically: false,
+            included: ['the editable SKILL.md shown in the review panel'],
+            omitted: ['raw notebook cells', 'undisplayed task/query text', 'local file paths', 'kernel logs', 'secrets and environment variables'],
+        },
         // Filled in by the submit handler after the user approves.
         draftId:       null,
         draftUrl:      null,

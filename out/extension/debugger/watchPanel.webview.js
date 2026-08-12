@@ -24,10 +24,41 @@
             pnl.classList.toggle('active', pnl.id === 'tab-' + name);
         });
         if (name === 'agents') vscode.postMessage({ command: 'requestFairyHistory' });
+        if (name === 'skilxiv') vscode.postMessage({ command: 'requestSkilxivState' });
     }
     tabButtons.forEach(function(b) {
         b.addEventListener('click', function() { activateTab(b.dataset.tab); });
     });
+
+    // ── SkilXiv tab ───────────────────────────────────────────────────────
+    function sxClick(id, command) { var el = document.getElementById(id); if (el) el.addEventListener('click', function() { vscode.postMessage({ command: command }); }); }
+    sxClick('sx-token-set', 'skilxivSetToken'); sxClick('sx-token-clear', 'skilxivClearToken');
+    sxClick('sx-account', 'skilxivOpenAccount'); sxClick('sx-refresh', 'requestSkilxivState');
+    sxClick('sx-review', 'skilxivOpenReview'); sxClick('sx-review-gaps', 'skilxivReviewGaps'); sxClick('sx-explorer', 'skilxivOpenExplorer');
+
+    function renderSxList(id, rows, label) {
+        var root = document.getElementById(id); if (!root) return;
+        root.innerHTML = '';
+        if (!rows.length) { root.textContent = 'None yet.'; root.className = 'sx-muted'; return; }
+        var ul = document.createElement('ul'); ul.className = 'sx-list';
+        rows.forEach(function(row) { var li = document.createElement('li'); var b = document.createElement('b'); b.textContent = label(row); li.appendChild(b); var meta = document.createElement('div'); meta.className = 'sx-muted'; meta.textContent = row.status || row.why || ''; li.appendChild(meta); ul.appendChild(li); });
+        root.appendChild(ul);
+    }
+    function renderSkilxiv(state) {
+        state = state || {}; var dot = document.getElementById('sx-dot'), conn = document.getElementById('sx-connection'), detail = document.getElementById('sx-connection-detail');
+        dot.className = 'sx-dot ' + (state.connected ? 'ok' : state.hasToken ? 'bad' : '');
+        conn.textContent = state.connected ? 'Connected' : state.hasToken ? 'Connection error' : 'Not connected';
+        detail.textContent = state.error || (state.connected ? 'Authenticated securely. Token contents are never displayed.' : 'Set an API token to load your author dashboard.');
+        document.getElementById('sx-token-set').textContent = state.hasToken ? 'Replace token' : 'Set token';
+        document.getElementById('sx-token-clear').style.display = state.hasToken ? '' : 'none';
+        var counts = state.overview && state.overview.counts, stats = document.getElementById('sx-stats'); stats.innerHTML = '';
+        [['skills','Skills'],['independent_reproducers','Reproducers'],['unresolved_feedback','Needs attention'],['pending_drafts','Drafts']].forEach(function(x) { var d=document.createElement('div');d.className='sx-stat';var b=document.createElement('b');b.textContent=counts ? (counts[x[0]] || 0) : '—';var s=document.createElement('span');s.textContent=x[1];d.appendChild(b);d.appendChild(s);stats.appendChild(d); });
+        var candidates = state.candidates || [], gaps = state.gaps || [];
+        document.getElementById('sx-candidate-count').textContent = candidates.length ? candidates.length + ' recent' : '';
+        document.getElementById('sx-gap-count').textContent = gaps.length ? gaps.length + ' recent' : '';
+        renderSxList('sx-candidates', candidates, function(x){ return x.title || x.id; });
+        renderSxList('sx-gaps', gaps, function(x){ return x.topic || 'Untitled request'; });
+    }
 
     // ── Agents tab: Fairy quick compute ────────────────────────────────────
     // Bigger prompt field → the Oberon fairy agent (no input box). By default this
@@ -35,6 +66,7 @@
     // full experimental pipeline. ⚙ opens its settings. Runs are logged to History.
     var fairyPrompt = document.getElementById('fairy-prompt');
     var fairyRunBtn = document.getElementById('fairy-run-btn');
+    var fairyAbortBtn = document.getElementById('fairy-abort-btn');
     function submitFairy() {
         if (!fairyPrompt) return;
         var text = fairyPrompt.value.trim();
@@ -44,6 +76,10 @@
         fairyPrompt.value = '';
     }
     if (fairyRunBtn) fairyRunBtn.addEventListener('click', submitFairy);
+    if (fairyAbortBtn) fairyAbortBtn.addEventListener('click', function() {
+        fairyAbortBtn.disabled = true;
+        vscode.postMessage({ command: 'fairyAbort' });
+    });
     if (fairyPrompt) fairyPrompt.addEventListener('keydown', function(e) {
         // Cmd/Ctrl+Enter submits (plain Enter inserts a newline in the textarea).
         if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); submitFairy(); }
@@ -212,6 +248,9 @@
             emptyMsg.textContent   = 'Add variables below to monitor them.';
             renderTable(msg.variables || []);
 
+        } else if (msg.command === 'skilxivState') {
+            renderSkilxiv(msg.state);
+
         } else if (msg.command === 'initWatchList') {
             // Show watch list names with placeholder values immediately (before kernel eval)
             var names = msg.names || [];
@@ -335,6 +374,12 @@
         }
         else if (msg.command === 'fairyHistory') {
             renderFairyHistory(msg.entries, msg.devMode);
+        }
+        else if (msg.command === 'fairyRunState') {
+            var active = !!msg.active;
+            if (fairyRunBtn) fairyRunBtn.disabled = active;
+            if (fairyAbortBtn) fairyAbortBtn.disabled = !active;
+            if (fairyPrompt) fairyPrompt.disabled = active;
         }
         else if (msg.command === 'remoteStatus') {
             var rd = document.getElementById('remote-dot');

@@ -2,6 +2,9 @@
 
 → [Back to README](../README.md)
 
+> **Also new:** for an AI that runs a whole verified calculation on its own rather than assisting you turn by turn, see the experimental [Oberon research agent](oberon-agent.md).
+
+
 Wolfbook is the first Wolfram Language notebook with deep GitHub Copilot agent integration. In Agent mode, Copilot gains live access to your running kernel: it can read your entire notebook, evaluate expressions, look up documentation, insert and edit cells, and drive the debugger — all without leaving VS Code.
 
 ---

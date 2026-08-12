@@ -72,6 +72,7 @@ const {
     WolfslideSetThemeTool, WolfslideImageAssetTool,
     WolfslideBulkInsertTool, WolfslideCopySlides, WolfslideInsertEvalBlockTool,
     WolfslideRunEvalBlockTool, WolfslideBlockTool, WolfslidePatchBlockTool, WolfslideAdvancedTool,
+    WolfslideArrangeTool,
     GetCellOutputTool, ValidateSyntaxTool, LatexTool,
 } = require('./wolfslide-tools');
 
@@ -2823,36 +2824,37 @@ class KernelCrashLogTool {
     }
 
     _readDebugLog(homeDir, lines, filter) {
-        // Log lives in img/<nbBase>/wolfram-kernel-debug.log next to btl.log
+        // The log lives under globalStorage (see utils/log-paths.js), not beside the
+        // notebook, and only exists when wolfbook.advanced.diagnosticLogs is enabled.
+        const logPaths = require('../utils/log-paths');
+        if (!logPaths.diagnosticsEnabled()) {
+            return `## Kernel Debug Log\nDisabled.\nEnable \`wolfbook.advanced.diagnosticLogs\` in settings, restart the kernel, and reproduce the issue to capture a log.`;
+        }
+
         let logPath = null;
         const ed = vscode.window.activeNotebookEditor;
         if (ed && ed.notebook && ed.notebook.uri.scheme === 'file') {
-            const nbFsPath = ed.notebook.uri.fsPath;
-            const nbBase   = path.basename(nbFsPath, path.extname(nbFsPath));
-            const candidate = path.join(path.dirname(nbFsPath), 'img', nbBase, 'wolfram-kernel-debug.log');
-            if (fs.existsSync(candidate)) logPath = candidate;
+            const candidate = logPaths.notebookLogFile(ed.notebook.uri.fsPath, 'wolfram-kernel-debug.log');
+            if (candidate && fs.existsSync(candidate)) logPath = candidate;
         }
-        // Fallback: scan workspace folders for any img/*/wolfram-kernel-debug.log (most recent)
+        // Fallback: most recently written kernel log across all notebooks
+        // (e.g. the kernel crashed with no notebook focused).
         if (!logPath) {
-            const wsFolders = vscode.workspace.workspaceFolders || [];
+            const nbRoot = path.join(logPaths.logRoot(), 'notebooks');
             let best = null;
-            for (const wsf of wsFolders) {
-                const imgRoot = path.join(wsf.uri.fsPath, 'img');
-                if (!fs.existsSync(imgRoot)) continue;
-                try {
-                    for (const sub of fs.readdirSync(imgRoot)) {
-                        const candidate = path.join(imgRoot, sub, 'wolfram-kernel-debug.log');
-                        if (fs.existsSync(candidate)) {
-                            const mtime = fs.statSync(candidate).mtimeMs;
-                            if (!best || mtime > best.mtime) best = { path: candidate, mtime };
-                        }
+            try {
+                for (const sub of fs.readdirSync(nbRoot)) {
+                    const candidate = path.join(nbRoot, sub, 'wolfram-kernel-debug.log');
+                    if (fs.existsSync(candidate)) {
+                        const mtime = fs.statSync(candidate).mtimeMs;
+                        if (!best || mtime > best.mtime) best = { path: candidate, mtime };
                     }
-                } catch (_) {}
-            }
+                }
+            } catch (_) {}
             if (best) logPath = best.path;
         }
         if (!logPath) {
-            return `## Kernel Debug Log\nNot found.\nExpected at: img/<notebookName>/wolfram-kernel-debug.log\n(The log is created fresh each time the kernel starts.)`;
+            return `## Kernel Debug Log\nNot found.\nExpected under: ${path.join(logPaths.logRoot(), 'notebooks', '<notebook>')}/wolfram-kernel-debug.log\n(The log is created fresh each time the kernel starts.)`;
         }
         try {
             const stat    = fs.statSync(logPath);
@@ -3558,6 +3560,123 @@ class PaperSearchTool {
 }
 
 // ---------------------------------------------------------------------------
+// wolfbook_skilxiv — compact action-dispatch gateway to the SkilXiv lifecycle.
+// One shallow schema avoids adding dozens of tool definitions to model context.
+// ---------------------------------------------------------------------------
+
+const SKILXIV_ACTION_RISK = Object.freeze({
+    report_outcome: 'uploads-user-text', create_draft: 'private-write', update_draft: 'private-write',
+    publish_draft: 'public-write', delete_draft: 'destructive', create_revision: 'private-write',
+    create_pack: 'private-write', remix: 'private-write', create_collection: 'private-write',
+    add_collection_item: 'private-write', share_collection: 'public-write',
+    unshare_collection: 'public-write', request_skill: 'public-write', claim_request: 'public-write',
+    fulfil_request: 'public-write',
+});
+
+class SkilXivTool {
+    constructor(context) { this._context = context; }
+
+    async prepareInvocation(options, _token) {
+        const action = String(options.input?.action || 'help');
+        const result = { invocationMessage: `SkilXiv: ${action}` };
+        const risk = SKILXIV_ACTION_RISK[action];
+        if (risk) {
+            result.confirmationMessages = {
+                title: `Allow SkilXiv action “${action}”?`,
+                message: `Risk: ${risk}. This action changes server state or may upload information. Review the supplied parameters and destination registry before continuing.`,
+            };
+        }
+        return result;
+    }
+
+    async invoke(options, _token) {
+        const action = String(options.input?.action || 'help');
+        const p = options.input?.params || {};
+        try {
+            if (action === 'help') return this._result(this._help());
+            const client = await this._client();
+            const result = await this._dispatch(client, action, p);
+            return this._result(typeof result === 'string' ? result : JSON.stringify(result, null, 2));
+        } catch (e) {
+            return this._result(JSON.stringify({ ok: false, action, error: e.message }, null, 2));
+        }
+    }
+
+    async _client() {
+        const cfg = vscode.workspace.getConfiguration('wolfbook.oberon.recall.skilxiv');
+        return require('../oberon/fairy/skilxivCredentials').createClient({ baseUrl: cfg.get('baseUrl', 'https://skilxiv.org') });
+    }
+
+    _need(p, ...keys) {
+        for (const key of keys) if (p[key] === undefined || p[key] === null || p[key] === '') {
+            throw new Error(`params.${key} is required`);
+        }
+    }
+
+    async _dispatch(c, action, p) {
+        const e = encodeURIComponent;
+        switch (action) {
+            case 'search':
+                return c.search(p.query || '', { tags: p.tags, limit: p.limit || 5, minTier: p.min_tier || 0 });
+            case 'get_skill':
+                this._need(p, 'namespace', 'name'); return c.getSkill(e(p.namespace), e(p.name), p.version && e(p.version));
+            case 'get_versions':
+                this._need(p, 'namespace', 'name'); return c.request(`/skills/${e(p.namespace)}/${e(p.name)}/versions`);
+            case 'diff_versions':
+                this._need(p, 'namespace', 'name', 'from', 'to'); return c.request(`/skills/${e(p.namespace)}/${e(p.name)}/diff`, { query: { from: p.from, to: p.to } });
+            case 'citation':
+                this._need(p, 'namespace', 'name'); return c.request(`/skills/${e(p.namespace)}/${e(p.name)}/citation`, { query: { version: p.version, format: p.format || 'bibtex' }, accept: '*/*' });
+            case 'report_outcome':
+                this._need(p, 'skill', 'outcome', 'event_id'); return c.reportUsage({ skill: p.skill, outcome: p.outcome, eventId: p.event_id, environmentClass: p.environment_class, agentReport: p.agent_report, sharePublicly: p.share_publicly, reasonCode: p.reason_code, feedbackNote: p.feedback_note });
+            case 'list_drafts': return c.request('/drafts');
+            case 'get_draft': this._need(p, 'id'); return c.request(`/drafts/${e(p.id)}`);
+            case 'create_draft': this._need(p, 'skill_md'); return c.createDraft({ skillMd: p.skill_md, transcript: p.transcript, transcriptPublic: p.transcript_public, agentModel: p.agent_model, idempotencyKey: p.idempotency_key });
+            case 'update_draft': this._need(p, 'id', 'skill_md'); return c.updateDraft(p.id, { skillMd: p.skill_md });
+            case 'publish_draft': this._need(p, 'id'); return c.request(`/drafts/${e(p.id)}/publish`, { method: 'POST', body: {} });
+            case 'delete_draft': this._need(p, 'id'); return c.request(`/drafts/${e(p.id)}`, { method: 'DELETE' });
+            case 'author_overview': return c.request('/author/overview');
+            case 'author_skills': return c.request('/author/skills', { query: { q: p.query, filter: p.filter } });
+            case 'skill_feedback': this._need(p, 'namespace', 'name'); return c.request(`/author/skills/${e(p.namespace)}/${e(p.name)}`);
+            case 'create_revision': this._need(p, 'namespace', 'name'); return c.request(`/author/skills/${e(p.namespace)}/${e(p.name)}/revision-drafts`, { method: 'POST', body: { bump: p.bump || 'patch', reason_code: p.reason_code, environment_class: p.environment_class } });
+            case 'resolve_pack': this._need(p, 'skills'); return c.request('/packs/resolve', { method: 'POST', body: { skills: p.skills } });
+            case 'list_packs': return c.request('/packs');
+            case 'create_pack': this._need(p, 'name', 'items'); return c.request('/packs', { method: 'POST', body: p });
+            case 'templates': return c.request('/templates');
+            case 'remix': this._need(p, 'namespace', 'name', 'new_name'); return c.request('/remix', { method: 'POST', body: p });
+            case 'list_collections': return c.request('/collections');
+            case 'create_collection': this._need(p, 'name'); return c.request('/collections', { method: 'POST', body: { name: p.name } });
+            case 'add_collection_item': this._need(p, 'collection_id', 'skill_ref'); return c.request(`/collections/${e(p.collection_id)}/items`, { method: 'POST', body: { skill_ref: p.skill_ref, note: p.note } });
+            case 'share_collection': this._need(p, 'collection_id'); return c.request(`/collections/${e(p.collection_id)}/share`, { method: 'POST', body: {} });
+            case 'unshare_collection': this._need(p, 'collection_id'); return c.request(`/collections/${e(p.collection_id)}/share`, { method: 'DELETE' });
+            case 'list_requests': return c.request('/skill-requests');
+            case 'request_skill': this._need(p, 'topic', 'consent_to_publish'); if (p.consent_to_publish !== true) throw new Error('params.consent_to_publish must be true after the user reviews the request'); return c.requestSkill({ ...p, consentToPublish: p.consent_to_publish });
+            case 'claim_request': this._need(p, 'id'); return c.request(`/skill-requests/${e(p.id)}/claim`, { method: 'POST', body: {} });
+            case 'fulfil_request': this._need(p, 'id', 'skill_ref'); return c.request(`/skill-requests/${e(p.id)}/fulfil`, { method: 'POST', body: { skill_ref: p.skill_ref } });
+            default: throw new Error(`Unknown action “${action}”. Use action “help” for the action catalogue.`);
+        }
+    }
+
+    _help() {
+        return JSON.stringify({
+            tool: 'wolfbook_skilxiv',
+            usage: { action: 'search', params: { query: 'natural-language problem', limit: 5 } },
+            actions: {
+                discovery: ['search', 'get_skill', 'get_versions', 'diff_versions', 'citation'],
+                usage: ['report_outcome'],
+                drafts: ['list_drafts', 'get_draft', 'create_draft', 'update_draft', 'publish_draft', 'delete_draft'],
+                maintenance: ['author_overview', 'author_skills', 'skill_feedback', 'create_revision'],
+                composition: ['resolve_pack', 'list_packs', 'create_pack', 'templates', 'remix', 'list_collections', 'create_collection', 'add_collection_item', 'share_collection', 'unshare_collection'],
+                requests: ['list_requests', 'request_skill', 'claim_request', 'fulfil_request'],
+            },
+            actionRisk: SKILXIV_ACTION_RISK,
+            safety: 'All private writes, public writes, destructive actions, and optional text uploads require user confirmation. Skill requests also require params.consent_to_publish=true after review.',
+        }, null, 2);
+    }
+
+    _result(text) { return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(text)]); }
+}
+
+// ---------------------------------------------------------------------------
 // wolfbook_fairy_dispatch / wolfbook_fairy_status — the Oberon Fairy as a
 // background computation sub-agent for outside agents (Claude, Codex, …).
 //
@@ -3598,6 +3717,46 @@ class FairyStatusTool {
     async invoke(options, _token) {
         let res;
         try { res = await vscode.commands.executeCommand('wolfbook.oberon.fairyStatus', { runId: options.input?.runId }); }
+        catch (e) { res = { ok: false, error: `Oberon is not available: ${e.message}` }; }
+        return new vscode.LanguageModelToolResult([
+            new vscode.LanguageModelTextPart(JSON.stringify(res, null, 2))]);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// wolfbook_gold_run / wolfbook_gold_status — the kernel-verified gold task
+// suite (Stage 0 of the agent-upgrade plan). Thin wrappers over headless
+// wolfbook.oberon.goldRun / goldStatus commands; grading is machine-only
+// (fresh-kernel replay + per-task WL verifier), never an LLM judge.
+// ---------------------------------------------------------------------------
+
+class GoldRunTool {
+    async prepareInvocation(options, _token) {
+        const t = options.input?.tasks;
+        return { invocationMessage: `Gold suite: ${Array.isArray(t) && t.length ? t.join(', ') : 'all tasks'}` };
+    }
+
+    async invoke(options, _token) {
+        const args = {
+            tasks: Array.isArray(options.input?.tasks) ? options.input.tasks : undefined,
+            label: options.input?.label ? String(options.input.label) : undefined,
+        };
+        let res;
+        try { res = await vscode.commands.executeCommand('wolfbook.oberon.goldRun', args); }
+        catch (e) { res = { ok: false, error: `Oberon is not available: ${e.message}` }; }
+        return new vscode.LanguageModelToolResult([
+            new vscode.LanguageModelTextPart(JSON.stringify(res, null, 2))]);
+    }
+}
+
+class GoldStatusTool {
+    async prepareInvocation(_options, _token) {
+        return { invocationMessage: 'Gold suite status' };
+    }
+
+    async invoke(_options, _token) {
+        let res;
+        try { res = await vscode.commands.executeCommand('wolfbook.oberon.goldStatus'); }
         catch (e) { res = { ok: false, error: `Oberon is not available: ${e.message}` }; }
         return new vscode.LanguageModelToolResult([
             new vscode.LanguageModelTextPart(JSON.stringify(res, null, 2))]);
@@ -3785,8 +3944,11 @@ function registerTools(context, getController, debugCtrl, getAskPanel) {
         { name: 'wolfbook_showImage',          impl: new ShowImageTool() },
         { name: 'wolfbook_runTerminal',        impl: new RunTerminalTool() },
         { name: 'wolfbook_paperSearch',        impl: new PaperSearchTool() },
+        { name: 'wolfbook_skilxiv',            impl: new SkilXivTool(context) },
         { name: 'wolfbook_fairy_dispatch',     impl: new FairyDispatchTool() },
         { name: 'wolfbook_fairy_status',       impl: new FairyStatusTool() },
+        { name: 'wolfbook_gold_run',           impl: new GoldRunTool() },
+        { name: 'wolfbook_gold_status',        impl: new GoldStatusTool() },
         // Wolfteam tools
         { name: 'wolfteam_proposePlan',        impl: new ProposePlanTool() },
         { name: 'wolfteam_askDecision',        impl: new AskDecisionTool() },
@@ -3811,6 +3973,7 @@ function registerTools(context, getController, debugCtrl, getAskPanel) {
         { name: 'wolfslide_block',           impl: new WolfslideBlockTool() },
         { name: 'wolfslide_patchBlock',      impl: new WolfslidePatchBlockTool() },
         { name: 'wolfslide_advanced',        impl: new WolfslideAdvancedTool() },
+        { name: 'wolfslide_arrange',         impl: new WolfslideArrangeTool() },
         { name: 'wolfslide_undo',            impl: new WolfslideUndoTool() },
         { name: 'wolfslide_reload',          impl: new WolfslideReloadTool() },
         { name: 'wolfslide_saveFile',        impl: new WolfslideSaveFileTool() },

@@ -848,6 +848,33 @@ code { font-family: var(--vscode-editor-font-family, monospace); }
 .steer-ack { align-self: center; color: var(--acc-green); }
 
 /* ── Plan & Charms board (Fairy pane) ── */
+.fairy-progress-summary { margin: 10px 0 14px; }
+.fairy-progress-now {
+    display: grid; grid-template-columns: auto auto minmax(0,1fr) auto;
+    gap: 8px; align-items: center; padding: 8px 10px; margin-bottom: 8px;
+    border: 1px solid var(--hairline); border-radius: 5px; font-size: 11px;
+    background: var(--wash-green);
+}
+.fairy-progress-now[data-level="quiet"] { background: var(--wash-yellow); }
+.fairy-progress-now[data-level="stalled"] { background: var(--wash-red); border-color: var(--acc-red); }
+.fairy-progress-now > span:nth-of-type(2) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fairy-progress-now small { opacity: .65; white-space: nowrap; }
+.fairy-progress-pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--acc-green); box-shadow: 0 0 0 3px color-mix(in srgb,var(--acc-green) 20%,transparent); }
+.fairy-progress-now[data-level="quiet"] .fairy-progress-pulse { background: var(--acc-yellow); }
+.fairy-progress-now[data-level="stalled"] .fairy-progress-pulse { background: var(--acc-red); }
+.fairy-progress-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; }
+.fairy-progress-card { border: 1px solid var(--hairline); border-left: 3px solid var(--acc-blue); border-radius: 5px; padding: 8px 10px; min-height: 58px; }
+.fairy-progress-card.facts { border-left-color: var(--acc-purple); }
+.fairy-progress-card.worked { border-left-color: var(--acc-green); }
+.fairy-progress-card.failed { border-left-color: var(--acc-red); }
+.fairy-progress-card.saved { border-left-color: var(--acc-yellow); }
+.fairy-progress-title { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; margin-bottom: 5px; }
+.fairy-progress-title span { opacity: .55; margin-left: 3px; }
+.fairy-progress-item { display: grid; grid-template-columns: minmax(55px,auto) 1fr auto; gap: 7px; font-size: 11px; line-height: 1.35; margin-top: 3px; }
+.fairy-progress-item code { overflow: hidden; text-overflow: ellipsis; }
+.fairy-progress-item span { overflow-wrap: anywhere; }
+.fairy-progress-item small { opacity: .6; }
+@media (max-width: 700px) { .fairy-progress-grid { grid-template-columns: 1fr; } }
 .fairy-pi-quest-block { margin-bottom: 10px; }
 .fairy-pi-quest-head {
     font-size: 12px; font-weight: 600; margin-bottom: 4px;

@@ -24,9 +24,12 @@ const VALID_PHASES = new Set([
 const TERMINAL_PHASES = new Set(['delivered', 'failed', 'escalate', 'partial_delivered']);
 
 const DEFAULTS = {
-    probe_budget:                40,
+    // probe_budget/max_turns raised 40→60 / 80→120 (2026-08-02): a verified
+    // research-grade run (TS03, run 21-32-31) legitimately needed 56 probes and
+    // forced two continuation dialogs; trivial tasks don't consume the slack.
+    probe_budget:                60,
     diagnose_probe_reserve:      3,
-    max_turns:                   80,
+    max_turns:                   120,
     max_backtracks:              3,
     max_diagnose_turns:          6,
     numeric_tol:                 1e-10,
@@ -100,14 +103,14 @@ class FairyFSM {
 
     get probesUsed()     { return this._probes_used; }
     get probesRemaining() {
-        return this._probe_budget - this._probes_used;
+        return Math.max(0, this._probe_budget - this._probes_used);
     }
     get exploreProbesRemaining() {
         // In Explore, the reserve is withheld
-        return this._probe_budget - this._diagnose_probe_reserve - this._probes_used;
+        return Math.max(0, this._probe_budget - this._diagnose_probe_reserve - this._probes_used);
     }
     get diagnoseProbesRemaining() {
-        return this._probe_budget - this._probes_used;
+        return Math.max(0, this._probe_budget - this._probes_used);
     }
 
     /**
@@ -135,7 +138,7 @@ class FairyFSM {
     // ── Turn counter ──────────────────────────────────────────────────────
 
     get turnsUsed()      { return this._turns_used; }
-    get turnsRemaining() { return this._max_turns - this._turns_used; }
+    get turnsRemaining() { return Math.max(0, this._max_turns - this._turns_used); }
 
     canTurn() { return !this.isTerminal && this.turnsRemaining > 0; }
 
@@ -164,7 +167,7 @@ class FairyFSM {
     // ── Backtrack counter ─────────────────────────────────────────────────
 
     get backtracksUsed()      { return this._backtracks_used; }
-    get backtracksRemaining() { return this._max_backtracks - this._backtracks_used; }
+    get backtracksRemaining() { return Math.max(0, this._max_backtracks - this._backtracks_used); }
 
     canBacktrack() { return this.backtracksRemaining > 0; }
 
@@ -178,7 +181,7 @@ class FairyFSM {
     // ── Diagnose-turn limit ────────────────────────────────────────────────
 
     get diagnose_turns_used()     { return this._diagnose_turns_used; }
-    get diagnose_turns_remaining() { return this._max_diagnose_turns - this._diagnose_turns_used; }
+    get diagnose_turns_remaining() { return Math.max(0, this._max_diagnose_turns - this._diagnose_turns_used); }
 
     canDiagnoseTurn() {
         return this._phase === 'diagnose' && this.diagnose_turns_remaining > 0;
@@ -187,7 +190,7 @@ class FairyFSM {
     // ── Verify auto-correct ───────────────────────────────────────────────
 
     get verifyCorrectionsUsed()      { return this._verify_corrections_used; }
-    get verifyCorrectionsRemaining() { return this._verify_auto_correct - this._verify_corrections_used; }
+    get verifyCorrectionsRemaining() { return Math.max(0, this._verify_auto_correct - this._verify_corrections_used); }
 
     canAutoCorrect() { return this.verifyCorrectionsRemaining > 0; }
 
@@ -201,9 +204,9 @@ class FairyFSM {
     // ── Polish phase ──────────────────────────────────────────────────────────
 
     get polishRunCleansUsed()      { return this._polish_run_cleans_used; }
-    get polishRunCleansRemaining() { return this._polish_run_clean_max - this._polish_run_cleans_used; }
+    get polishRunCleansRemaining() { return Math.max(0, this._polish_run_clean_max - this._polish_run_cleans_used); }
     get polishTurnsUsed()          { return this._polish_turns_used; }
-    get polishTurnsRemaining()     { return this._polish_turns_max - this._polish_turns_used; }
+    get polishTurnsRemaining()     { return Math.max(0, this._polish_turns_max - this._polish_turns_used); }
 
     canPolishRunClean()   { return this.polishRunCleansRemaining > 0; }
     canPolishTurn()       { return this.polishTurnsRemaining > 0; }
@@ -223,7 +226,7 @@ class FairyFSM {
     // ── Partial-report phase ──────────────────────────────────────────────────
 
     get partialReportTurnsUsed()      { return this._partial_report_turns_used; }
-    get partialReportTurnsRemaining() { return this._partial_report_turns_max - this._partial_report_turns_used; }
+    get partialReportTurnsRemaining() { return Math.max(0, this._partial_report_turns_max - this._partial_report_turns_used); }
 
     canPartialReportTurn() { return this.partialReportTurnsRemaining > 0; }
 

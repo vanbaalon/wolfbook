@@ -6,14 +6,12 @@
  *   Computes the dependency closure of targetStepId, runs static checks,
  *   writes clean.wb, and returns a compile result.
  *
- * verify(workDir, targetStepId, opts):
- *   Delegates to kernelVerifier.js to run fresh-kernel verification.
- *   Returns a classification and details for routing.
+ * (The old verify()/kernelVerifier subprocess path was removed 2026-08-01 —
+ *  run_clean via the NotebookController is the live fresh-kernel replay.)
  *
  * No LLM calls. No vscode dependency.
  */
 
-const { verifyCleanNotebook } = require('./kernelVerifier');
 const { analyzeCode } = require('./depAnalyzer');
 
 // ── Topological ordering (H1, run Q_3VRPXL) ────────────────────────────────
@@ -489,66 +487,4 @@ async function compile(workDir, targetStepId, opts = {}) {
     };
 }
 
-// ── Verify ────────────────────────────────────────────────────────────────
-
-/**
- * Verify phase: call kernelVerifier to replay clean.wb in a fresh kernel.
- *
- * @param {import('./workDir').WorkDir} workDir
- * @param {string} targetStepId
- * @param {string} recordedValue  - the InputForm string from results/<probeId>.json
- * @param {{ wolframscriptBin: string, numeric_tol?: number, timeoutPerCell?: number }} opts
- * @returns {Promise<{
- *   classification: 'delivered' | 'missing_step' | 'cell_errored' | 'output_differs',
- *   firstFailureCell: string | null,
- *   freshOutput: string | null,
- *   recordedOutput: string | null,
- *   messages: string[] | null,
- *   details: string,
- * }>}
- */
-async function verify(workDir, targetStepId, recordedValue, opts = {}) {
-    return verifyCleanNotebook(workDir.cleanNb, targetStepId, recordedValue, opts);
-}
-
-// ── Auto-correct (missing_step) ───────────────────────────────────────────
-
-/**
- * Attempt to auto-correct a `missing_step` verify result by finding which
- * valid step defines the missing symbol and re-compiling with it included.
- *
- * Returns the extended includeSteps list if auto-correct is possible, or null.
- *
- * @param {{ classification: string, firstFailureCell: string | null, freshOutput: string | null }} verifyResult
- * @param {object[]} allValidSteps
- * @param {string[]} currentIncludeSteps
- * @returns {string[] | null}  updated includeSteps, or null if cannot auto-correct
- */
-function autoCorrectMissingStep(verifyResult, allValidSteps, currentIncludeSteps) {
-    if (verifyResult.classification !== 'missing_step') return null;
-
-    // Extract the undefined symbol from the fresh output / error message
-    // Wolfram typically says: "Symbol 'foo' in context 'Global`' is not defined."
-    // or "foo::shdw" / "foo is not defined"
-    const raw = verifyResult.freshOutput || '';
-    // Handles both:
-    //   "Symbol "foo" is not defined"
-    //   "Symbol "foo" in context "Global`" is not defined"
-    const symbolMatch = raw.match(/Symbol\s+"?([A-Za-z$][A-Za-z0-9$`]*)"?[^\n]*\bis\s+not\s+defined/)
-        || raw.match(/"([A-Za-z$][A-Za-z0-9$`]*)"\s+is\s+undefined/)
-        || raw.match(/^([A-Za-z$][A-Za-z0-9$`]*)::shdw/m);
-
-    if (!symbolMatch) return null;
-
-    const sym = symbolMatch[1].replace(/`[^`]*$/, '');  // strip context prefix
-
-    // Find a valid step that defines this symbol and is not yet in the closure
-    for (const s of allValidSteps) {
-        if ((s.definesSymbols || []).includes(sym) && !currentIncludeSteps.includes(s.id)) {
-            return [...currentIncludeSteps, s.id];
-        }
-    }
-    return null;
-}
-
-module.exports = { compile, verify, computeClosure, staticCheck, autoCorrectMissingStep, topoSortSteps, recoverMissingDefiners };
+module.exports = { compile, computeClosure, staticCheck, topoSortSteps, recoverMissingDefiners };

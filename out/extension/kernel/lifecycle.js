@@ -26,6 +26,56 @@ const fs     = require('fs');
 const { truncateLogs, dynLog, scrollLog, devLog, wstpLog, DEV_MODE, LOG_CHANNELS } = require('../utils/dev-logger');
 const _encoding = require('../utils/encoding');
 const { clearEvalLog } = require('../tools/index');
+const _diagnose = require('./diagnose');
+
+// ---------------------------------------------------------------------------
+// Launch-failure diagnostics: figure out WHY the kernel didn't come up
+// (not installed? license? WSTP layer?) and show an actionable message.
+// The heavy lifting (direct-spawn probe, output classification) lives in
+// kernel/diagnose.js; this helper only renders the result.
+
+let _diagChannel = null;   // lazily-created "Wolfbook Kernel Diagnostics" output channel
+
+async function _reportKernelFailure(self, kernelCommand, wstpError, { addonLoaded = true } = {}) {
+    let diag;
+    try {
+        const configCompat = require('../config-compat');
+        const customPath = configCompat.getSetting('systemKernel', 'Automatic') !== 'Automatic';
+        let discovered = [];
+        try { discovered = self.findKernel.discoverKernels(); } catch (_) {}
+        diag = await _diagnose.diagnoseKernelLaunch(kernelCommand, {
+            wstpError, customPath, discovered, addonLoaded,
+        });
+    } catch (e) {
+        // Diagnostics must never mask the original failure.
+        diag = { cause: 'unknown',
+                 summary: `Failed to launch Wolfram kernel: ${wstpError || e.message}`,
+                 detailLines: [String(e.stack || e)] };
+    }
+    scrollLog('[kernel-diag]', diag.cause, diag.sub || '', '—', diag.summary);
+
+    if (!_diagChannel) _diagChannel = vscode.window.createOutputChannel('Wolfbook Kernel Diagnostics');
+    _diagChannel.appendLine('');
+    _diagChannel.appendLine(`═══ Kernel launch failure — cause: ${diag.cause}${diag.sub ? ' / ' + diag.sub : ''} ═══`);
+    for (const l of diag.detailLines) _diagChannel.appendLine(l);
+    _diagChannel.appendLine(`summary         : ${diag.summary}`);
+
+    const buttons = ['Show Details'];
+    const pathIssue = diag.cause === 'not-installed' || diag.cause === 'custom-path-missing';
+    if (pathIssue) buttons.push('Open Settings');
+    if (diag.cause !== 'not-installed') buttons.push('Retry');
+
+    // Fire-and-forget: launchKernel must not stay pending on user interaction.
+    vscode.window.showErrorMessage(`Wolfram kernel: ${diag.summary}`, ...buttons).then(choice => {
+        if (choice === 'Show Details') _diagChannel.show(true);
+        else if (choice === 'Open Settings') {
+            vscode.commands.executeCommand('workbench.action.openSettings', 'wolfbook.systemKernel');
+        } else if (choice === 'Retry') {
+            vscode.commands.executeCommand('wolfbook.launchKernel');
+        }
+    });
+    return diag;
+}
 
 // ---------------------------------------------------------------------------
 // Orphan-kernel protection: track PIDs in a temp file
@@ -319,7 +369,18 @@ async function launchKernel(self, WstpSession) {
     devLog(LOG_CHANNELS.KERNEL, `[launchKernel] kernel path: ${kernelCommand}`);
 
     if (!WstpSession) {
-        vscode.window.showErrorMessage("wstp.node addon not available — cannot launch kernel.");
+        self.kernelStatusString = 'unresolved';
+        applyKernelOfflineUI(self);
+        await _reportKernelFailure(self, kernelCommand, 'wstp.node addon not available', { addonLoaded: false });
+        return;
+    }
+
+    // Fail fast with a clear message when no kernel binary exists — don't let
+    // the WSTP addon try to launch the literal string "kernel-not-found".
+    if (!kernelCommand || kernelCommand === 'kernel-not-found' || !fs.existsSync(kernelCommand)) {
+        self.kernelStatusString = 'unresolved';
+        applyKernelOfflineUI(self);
+        await _reportKernelFailure(self, kernelCommand, null);
         return;
     }
 
@@ -378,9 +439,20 @@ async function launchKernel(self, WstpSession) {
         const _resDir = path.join(self.extensionPath, 'resources');
         const _resDirEsc = _resDir.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
         const _initEsc = kernelInitPath.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-        const initExpr = await self.session.evaluate(
-            `Block[{\$wolframResourceDir="${_resDirEsc}"},Get["${_initEsc}"]]`, { interactive: false }
-        );
+        // Guard the first WSTP round-trip with a timeout: if the kernel came up
+        // half-dead (stalled license-server lookup, waiting on activation, …)
+        // this await would otherwise hang forever with the UI stuck on
+        // "launching" and no error shown.  On timeout the throw lands in the
+        // catch below, which runs the launch-failure diagnostics.
+        const _INIT_TIMEOUT_MS = 120000;
+        const initExpr = await Promise.race([
+            self.session.evaluate(
+                `Block[{\$wolframResourceDir="${_resDirEsc}"},Get["${_initEsc}"]]`, { interactive: false }
+            ),
+            new Promise((_, rej) => setTimeout(() =>
+                rej(new Error(`kernel connected but did not respond within ${_INIT_TIMEOUT_MS / 1000} s (init.wl load timed out)`)),
+                _INIT_TIMEOUT_MS)),
+        ]);
         devLog(LOG_CHANNELS.KERNEL, `[launchKernel] init.wl loaded, result=${JSON.stringify(initExpr)}`);
 
         // Push initial config
@@ -573,9 +645,13 @@ async function launchKernel(self, WstpSession) {
         scrollLog('[launchKernel] keepalive started (interval:', _KEEPALIVE_INTERVAL_MS / 1000, 's)');
     } catch (err) {
         console.error(`[launchKernel] error: ${err.message}`);
-        vscode.window.showErrorMessage(`Failed to launch Wolfram kernel: ${err.message}`);
         self.kernelStatusString = "unresolved";
         applyKernelOfflineUI(self);
+        // Close the half-open session (if any) BEFORE the diagnostic probe:
+        // the probe launches a second kernel process, and on single-seat
+        // licenses the dead-but-open link could otherwise hold the seat.
+        try { if (self.session) { self.session.close(); self.session = undefined; } } catch (_) {}
+        await _reportKernelFailure(self, kernelCommand, err.message);
     }
 }
 

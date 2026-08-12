@@ -34,6 +34,8 @@ let _postRestartSeeder = null;
 function setPostRestartSeeder(fn) { _postRestartSeeder = (typeof fn === 'function') ? fn : null; }
 
 const OUTPUT_HARD_CAP = 4000;     // chars
+const BYTECOUNT_GUARD = 5000000;  // bytes — above this the kernel returns a shape
+                                  // summary + Short preview instead of InputForm
 const PRINT_CAP       = 2000;     // chars (combined)
 const MSG_CAP         = 1000;     // chars (combined)
 const DEFAULT_TIMEOUT = 15;       // seconds
@@ -60,6 +62,9 @@ const NON_CRITICAL_MESSAGE_TAGS = new Set([
     'NIntegrate::ncvb', 'NIntegrate::slwcon',
     'NSum::ncvb', 'NProduct::ncvb',
     'General::precw', 'General::munfl', 'General::stop',
+    // Sparse→dense auto-conversion notices — informational, the result is fine
+    // (run dow8o8 burned an amend on Eigenvalues::arh).
+    'Eigenvalues::arh', 'Eigensystem::arh', 'Eigenvectors::arh',
 ]);
 
 /**
@@ -260,10 +265,23 @@ async function _attemptEval(args) {
     t0 = Date.now();
 
     const wlSec   = Math.max(1, timeoutSeconds - 1);
+    // Output pre-guard (Stage 1, 2026-08): decide IN THE KERNEL, by ByteCount,
+    // whether to stringify at all. Previously a 10^7-leaf expression was fully
+    // rendered to InputForm in the kernel before the JS-side 4000-char slice —
+    // all cost, no benefit. Above the guard we return head/dims/leaves/bytes +
+    // a bounded Short preview; the full value stays in the kernel (and in the
+    // probe's results/<id>.json path via inspect).
     const wrapped =
-        `Block[{$wbR$}, $wbR$ = TimeConstrained[(${expression}), ${wlSec}, "$WBTIMEOUT$"]; ` +
+        `Block[{$wbR$, $wbB$}, $wbR$ = TimeConstrained[(${expression}), ${wlSec}, "$WBTIMEOUT$"]; ` +
         `If[$wbR$ === "$WBTIMEOUT$", "$WBTIMEOUT$", ` +
-        `If[StringQ[$wbR$], $wbR$, ToString[$wbR$, InputForm]]]]`;
+        `If[StringQ[$wbR$], $wbR$, ` +
+        `$wbB$ = ByteCount[$wbR$]; ` +
+        `If[$wbB$ > ${BYTECOUNT_GUARD}, ` +
+        `"$WBBIG$ " <> ToString[Head[$wbR$]] <> ` +
+        `If[ArrayQ[$wbR$], " dims=" <> ToString[Dimensions[$wbR$]], ""] <> ` +
+        `" leaves=" <> ToString[LeafCount[$wbR$]] <> " bytes=" <> ToString[$wbB$] <> ` +
+        `" preview: " <> StringTake[ToString[Short[$wbR$, 6], OutputForm], UpTo[1500]], ` +
+        `ToString[$wbR$, InputForm]]]]]`;
 
     const prints = [];
     let abortOnSignal = null;
@@ -332,7 +350,19 @@ async function _attemptEval(args) {
         });
     }
     if (r.type === 'string' && typeof r.value === 'string') {
-        const raw = r.value.replace(/\\:([0-9A-Fa-f]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
+        let raw = r.value.replace(/\\:([0-9A-Fa-f]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
+        // ByteCount pre-guard fired: the kernel returned a shape summary +
+        // Short preview instead of stringifying the full expression.
+        if (raw.startsWith('$WBBIG$')) {
+            raw = '[LARGE RESULT — kept in kernel, NOT fully stringified; extract what you need via Part/inspect] '
+                + raw.slice('$WBBIG$'.length).trim();
+            return mkResult({
+                ok: true, kind: 'ok',
+                value: raw.slice(0, OUTPUT_HARD_CAP),
+                truncated: true, originalLength: raw.length,
+                durationMs, timeoutSeconds, prints: printStr, messages: msgs,
+            });
+        }
         const truncated = raw.length > OUTPUT_HARD_CAP;
         return mkResult({
             ok: true, kind: 'ok',
@@ -637,6 +667,12 @@ async function runNotebook(nbPath, opts) {
         }
     }
 
+    // Persist the replayed outputs to disk. Run QG_TS03_dfjqcb delivered with the
+    // DISK clean.wb still showing error outputs from a pre-edit replay: the final
+    // passing run_clean wrote its outputs only to the open document, which was
+    // never saved again. The deliverable file must show the VERIFIED state.
+    try { if (nbDoc.isDirty && typeof nbDoc.save === 'function') await nbDoc.save(); } catch (_) {}
+
     const failures = allResults.filter(r => !r.clean);
     return { allClean, cellCount: allResults.length, failures, allResults, usedFallback: false };
 }
@@ -812,15 +848,19 @@ async function associateNotebook(nbDoc) {
 // installed once behind a guard, then the view is returned as a JSON string.
 const AGENT_VIEW_SEED =
     'If[!TrueQ[WolfbookAgent`seeded],' +
+    // Shape is a SUMMARY — hard-capped kernel-side. The unbounded Keys[]
+    // stringification blew one Association shape up to 156k chars (probe p023,
+    // run 22-39-08: keys were giant symbolic energies) and every later call
+    // re-paid it in history: never render keys/dims without bounds.
     'WolfbookAgent`shape[expr_]:=Module[{h=Head[expr],dims=Dimensions[expr],lc=LeafCount[expr],found,keys},' +
     'found=DeleteCases[Map[Function[s,{SymbolName[s],Count[expr,Blank[s],Infinity]}],{CircleTimes,TensorProduct,Inactive,HoldForm,Defer}],{_,0}];' +
-    'keys=If[AssociationQ[expr]," {"<>StringRiffle[ToString/@Keys[expr],","]<>"}",""];' +
-    'StringJoin[SymbolName[h],' +
+    'keys=If[AssociationQ[expr]," keys("<>ToString[Length[expr]]<>"){"<>StringRiffle[StringTake[ToString[#],UpTo[40]]&/@Take[Keys[expr],UpTo[6]],","]<>If[Length[expr]>6,",\\[Ellipsis]",""]<>"}",""];' +
+    'StringTake[StringJoin[SymbolName[h],' +
     'If[ArrayQ[expr]&&dims=!={}," "<>StringRiffle[ToString/@dims,"x"],""],' +
     'keys,' +
-    'If[ArrayQ[expr],If[ArrayQ[expr,_,NumericQ]," numeric"," NON-numeric(symbolic)"],""],' +
+    'If[ArrayQ[expr],If[ArrayQ[expr,_,NumericQ]," numeric",If[ArrayQ[expr,_,(NumericQ[#]||BooleanQ[#]||StringQ[#]||MemberQ[{Null,None},#])&],""," NON-numeric(symbolic)"]],""],' +
     '" leaves="<>ToString[lc],' +
-    'If[found=!={}," unevaluated{"<>StringRiffle[(#[[1]]<>"x"<>ToString[#[[2]]])&/@found,","]<>"}",""]]];' +
+    'If[found=!={}," unevaluated{"<>StringRiffle[(#[[1]]<>"x"<>ToString[#[[2]]])&/@found,","]<>"}",""]],UpTo[600]]];' +
     'WolfbookAgent`view[n_,cap_]:=Module[{r=Out[n],iv},iv=ToString[r,InputForm];' +
     'ExportString[<|"iv"->StringTake[iv,UpTo[cap]],"len"->StringLength[iv],"shape"->WolfbookAgent`shape[r]|>,"JSON"]];' +
     'WolfbookAgent`seeded=True];';
@@ -1049,4 +1089,35 @@ async function removeLastCells(nbDoc, count) {
     await vscode.workspace.applyEdit(edit).catch(() => {});
 }
 
-module.exports = { setControllerProvider, setPostRestartSeeder, kernelStatus, evalOnce, associateNotebook, evalInNotebook, computeAgentView, decodeUtf8ByteString, removeLastCells, restartKernel, replayNotebook, runNotebook, editNotebookCell, classifyMessages, buildSuppressionCode, NON_CRITICAL_MESSAGE_TAGS, OUTPUT_HARD_CAP, MAX_TIMEOUT, DEFAULT_TIMEOUT, AGENT_VIEW_SEED };
+/**
+ * Delete a failed probe attempt's cells by CONTENT match: the last code cell whose
+ * text equals `code`, plus the `cellsAdded - 1` markup cells inserted with it
+ * (note / prevAnalysis blocks precede the code cell contiguously).
+ *
+ * Used by the amend-replaces-failed-cell flow (2026-08-02): removal now happens a
+ * turn or more AFTER the failure, so status-banner cells may have been appended in
+ * between — a blind trailing-count delete (removeLastCells) would eat those instead.
+ */
+async function removeFailedProbeCells(nbDoc, { code, cellsAdded }) {
+    if (!nbDoc || !code || !(cellsAdded > 0)) return false;
+    const vscode = (() => { try { return require('vscode'); } catch (_) { return null; } })();
+    if (!vscode) return false;
+    let codeIdx = -1;
+    for (let i = nbDoc.cellCount - 1; i >= 0; i--) {
+        try {
+            const cell = nbDoc.cellAt(i);
+            if (cell.kind === vscode.NotebookCellKind.Code && cell.document.getText() === code) {
+                codeIdx = i;
+                break;
+            }
+        } catch (_) {}
+    }
+    if (codeIdx < 0) return false;
+    const startIdx = Math.max(0, codeIdx - (cellsAdded - 1));
+    const edit = new vscode.WorkspaceEdit();
+    edit.set(nbDoc.uri, [vscode.NotebookEdit.deleteCells(new vscode.NotebookRange(startIdx, codeIdx + 1))]);
+    await vscode.workspace.applyEdit(edit).catch(() => {});
+    return true;
+}
+
+module.exports = { setControllerProvider, setPostRestartSeeder, kernelStatus, evalOnce, associateNotebook, evalInNotebook, computeAgentView, decodeUtf8ByteString, removeLastCells, removeFailedProbeCells, restartKernel, replayNotebook, runNotebook, editNotebookCell, classifyMessages, buildSuppressionCode, NON_CRITICAL_MESSAGE_TAGS, OUTPUT_HARD_CAP, MAX_TIMEOUT, DEFAULT_TIMEOUT, AGENT_VIEW_SEED };

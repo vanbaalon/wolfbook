@@ -433,6 +433,51 @@ button.tb.danger:hover { background: #fff5f6; }
 #ai-toast { position:fixed; top:56px; left:50%; transform:translateX(-50%); background:var(--cyan); color:#fff; padding:5px 14px; border-radius:16px; font-size:11px; font-weight:600; z-index:800; pointer-events:none; opacity:0; transition:opacity .3s; }
 #ai-toast.show { opacity:1; }
 
+/* ── AI design assistant (Stage 3b/3c): ✦ affordance · instruct bar · preview ── */
+#ai-affordance { position:fixed; z-index:780; width:26px; height:26px; border-radius:50%; border:none; background:linear-gradient(135deg,#6366f1,#06b6d4); color:#fff; font-size:14px; line-height:1; cursor:pointer; box-shadow:0 3px 10px rgba(79,70,229,.4); display:none; align-items:center; justify-content:center; padding:0; }
+#ai-affordance:hover { filter:brightness(1.12); }
+#ai-bar { position:fixed; z-index:820; display:none; background:#fff; border:1px solid var(--border); border-radius:10px; box-shadow:0 12px 34px rgba(16,24,40,.22); padding:8px; width:448px; max-width:92vw; }
+#ai-bar.show { display:block; }
+#ai-bar .ai-bar-row { display:flex; gap:6px; align-items:center; }
+#ai-bar-icon { color:var(--cyan); font-size:15px; }
+#ai-bar-input { flex:1; min-width:0; border:1px solid var(--border); border-radius:6px; padding:7px 9px; font-size:13px; color:var(--text); background:#fff; }
+#ai-bar-input:focus { outline:none; border-color:var(--cyan); }
+#ai-bar-go { position:relative; border:none; border-radius:6px; padding:7px 14px; background:var(--cyan); color:#fff; font-weight:600; font-size:12px; cursor:pointer; }
+#ai-bar-go:disabled { opacity:.6; cursor:default; }
+#ai-bar-hint { font-size:10px; color:var(--muted); margin:5px 2px 1px; }
+#ai-bar.busy #ai-bar-go { color:transparent; }
+#ai-bar.busy #ai-bar-go::after { content:''; position:absolute; top:50%; left:50%; width:12px; height:12px; margin:-6px 0 0 -6px; border:2px solid rgba(255,255,255,.55); border-top-color:#fff; border-radius:50%; animation:ai-spin .7s linear infinite; }
+@keyframes ai-spin { to { transform:rotate(360deg); } }
+.ai-changed { outline:2px dashed #6366f1 !important; outline-offset:2px; }
+#ai-preview-card { position:fixed; z-index:820; right:18px; bottom:18px; display:none; width:308px; max-width:90vw; background:#fff; border:1px solid var(--border); border-radius:10px; box-shadow:0 12px 34px rgba(16,24,40,.22); overflow:hidden; }
+#ai-preview-card.show { display:block; }
+#ai-preview-head { padding:9px 12px; background:linear-gradient(135deg,rgba(99,102,241,.13),rgba(6,182,212,.13)); font-weight:700; font-size:12px; color:var(--text); }
+#ai-preview-log { padding:8px 12px; font-size:12px; color:var(--text); max-height:170px; overflow:auto; }
+#ai-preview-log div { margin:2px 0; }
+#ai-preview-log .ai-warn { color:var(--muted); font-size:10px; margin-top:5px; }
+#ai-preview-actions { display:flex; gap:6px; padding:9px 12px; border-top:1px solid var(--border); }
+#ai-preview-actions button { flex:1; border:none; border-radius:6px; padding:7px; font-weight:600; font-size:12px; cursor:pointer; }
+#ai-accept { background:#16a34a; color:#fff; }
+#ai-reject { background:var(--panel-2); color:var(--text); border:1px solid var(--border) !important; }
+/* AI tab panel (right dock) */
+#ai-panel { display:flex; flex-direction:column; gap:9px; }
+.ai-panel-head { display:flex; align-items:center; gap:7px; font-size:14px; color:var(--text); }
+.ai-panel-head b { font-weight:700; }
+.ai-panel-sel { font-size:11px; color:var(--muted); }
+.ai-panel-label { font-size:11px; font-weight:700; color:var(--text); }
+.ai-panel-chips { display:flex; flex-wrap:wrap; gap:6px; }
+.ai-chip { border:1px solid var(--border); background:#fff; color:var(--text); border-radius:14px; padding:4px 11px; font-size:11px; font-weight:600; cursor:pointer; box-shadow:var(--shadow); }
+.ai-chip:hover { border-color:var(--cyan); color:var(--cyan); }
+#ai-panel-input { width:100%; box-sizing:border-box; border:1px solid var(--border); border-radius:8px; padding:8px 10px; font-size:12px; color:var(--text); background:#fff; resize:vertical; font-family:inherit; line-height:1.45; }
+#ai-panel-input:focus { outline:none; border-color:var(--cyan); }
+.ai-panel-go { position:relative; border:none; border-radius:8px; padding:9px; background:linear-gradient(135deg,#6366f1,#06b6d4); color:#fff; font-weight:700; font-size:12px; cursor:pointer; }
+.ai-panel-go:disabled { opacity:.55; cursor:default; }
+#ai-panel.busy .ai-panel-go { color:transparent; }
+#ai-panel.busy .ai-panel-go::after { content:''; position:absolute; top:50%; left:50%; width:13px; height:13px; margin:-7px 0 0 -7px; border:2px solid rgba(255,255,255,.5); border-top-color:#fff; border-radius:50%; animation:ai-spin .7s linear infinite; }
+.ai-panel-status { font-size:11px; color:var(--muted); min-height:14px; }
+.ai-panel-status.err { color:var(--accent); }
+.ai-panel-note { font-size:10px; color:var(--muted); line-height:1.55; border-top:1px solid var(--border); padding-top:8px; margin-top:2px; }
+
 /* ── Zoom indicator ──────────────────────────────────────────────────── */
 #zoom-controls { display:inline-flex; align-items:center; gap:3px; margin-left:4px; }
 #zoom-controls button { background:transparent; border:1px solid var(--border); color:var(--text); cursor:pointer; padding:1px 6px; border-radius:3px; font-size:12px; line-height:1.4; }
@@ -514,6 +559,24 @@ button.tb.danger:hover { background: #fff5f6; }
   </div>
 </div>
 <div id="ai-toast"></div>
+<!-- AI design assistant (Stage 3b/3c) -->
+<button id="ai-affordance" title="Ask the design assistant (⌘K)">✦</button>
+<div id="ai-bar">
+  <div class="ai-bar-row">
+    <span id="ai-bar-icon">✦</span>
+    <input id="ai-bar-input" type="text" autocomplete="off" spellcheck="false" placeholder="Tell the assistant what to do with the selection…">
+    <button id="ai-bar-go">Ask</button>
+  </div>
+  <div id="ai-bar-hint"></div>
+</div>
+<div id="ai-preview-card">
+  <div id="ai-preview-head">✦ Proposed changes</div>
+  <div id="ai-preview-log"></div>
+  <div id="ai-preview-actions">
+    <button id="ai-reject">Reject (Esc)</button>
+    <button id="ai-accept">Accept (⏎)</button>
+  </div>
+</div>
 
 <!-- ── Main layout ─────────────────────────────────────────────────────── -->
 <div id="main">
@@ -731,11 +794,25 @@ button.tb.danger:hover { background: #fff5f6; }
       </div>
       <!-- AI (Stage 3 — placeholder) -->
       <div class="rpane" id="rpane-ai">
-        <div style="color:var(--muted);font-size:12px;line-height:1.55;">
-          <div style="font-size:22px;margin-bottom:8px;">✦</div>
-          <b style="color:var(--text);">AI co-designer</b><br>
-          Select block(s) on the canvas, then ask the assistant to <em>tidy</em>, align, fix overflow, or restyle — it edits via the tool layer and shows a preview you accept or reject.
-          <div style="margin-top:12px;padding:8px 10px;background:var(--panel-2);border:1px solid var(--border);border-radius:8px;font-size:11px;">Coming in Stage 3. See <code>WSLIDE_AI_ASSISTANT_DESIGN.md</code>.</div>
+        <div id="ai-panel">
+          <div class="ai-panel-head"><span style="font-size:17px;">✦</span> <b>AI co-designer</b></div>
+          <div id="ai-panel-sel" class="ai-panel-sel">No blocks selected</div>
+
+          <div class="ai-panel-label">Quick actions <span style="font-weight:400;color:var(--muted);">· instant, no AI</span></div>
+          <div class="ai-panel-chips">
+            <button class="ai-chip" data-aiverb="tidy"   title="Snap to grid, align &amp; evenly stack">Tidy</button>
+            <button class="ai-chip" data-aiverb="snap"   title="Snap to a 20px grid">Snap</button>
+            <button class="ai-chip" data-aiverb="stack"  title="Stack vertically with even gaps (2+)">Stack</button>
+            <button class="ai-chip" data-aiverb="matchw" title="Make same width as the primary (2+)">Match W</button>
+            <button class="ai-chip" data-aiverb="center" title="Centre the selection on the slide">Centre</button>
+          </div>
+
+          <div class="ai-panel-label" style="margin-top:4px;">Ask the assistant</div>
+          <textarea id="ai-panel-input" rows="3" placeholder="e.g. “make these equal width and tidy them”, “tighten this to one sentence”, “turn into 3 bullets”"></textarea>
+          <button id="ai-panel-go" class="ai-panel-go">✦ Ask assistant</button>
+          <div id="ai-panel-status" class="ai-panel-status"></div>
+
+          <div class="ai-panel-note">Scope is your selection. Math, code &amp; eval blocks are never reworded — only moved/resized. Every change previews first: <b>accept (⏎)</b> or <b>reject (Esc)</b>. Also on-canvas via <b>⌘K</b> or the <b>✦</b> badge. Needs an Oberon provider key for the “Ask” box; Quick actions work without one.</div>
         </div>
       </div>
     </div>
@@ -891,6 +968,15 @@ window.addEventListener('message', e => {
           }
         }
         renderAll();
+        return;
+    }
+
+    if (msg.cmd === 'aiPlan') {
+        if (msg.id === _aiPendingReq) { _aiPendingReq = null; _onAiPlan(msg.plan, msg.warnings); }
+        return;
+    }
+    if (msg.cmd === 'aiError') {
+        if (msg.id === _aiPendingReq) { _aiPendingReq = null; _onAiError(msg.message); }
         return;
     }
 
@@ -1748,6 +1834,9 @@ function renderSlide() {
       try { renderMathInElement(contentDiv, { delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}], throwOnError:false }); } catch(e) {}
     }
     renderAllFragBadges();
+    _positionAiAffordance();          // Stage 3c: ✦ affordance follows the selection
+    _updateAiPanel();                 // reflect selection into the AI tab panel
+    if (_aiPreview) _markAiChangedBadges();  // keep AI preview outlines across re-renders
   });
   renderAnimPanel();
   updatePropsPanel();
@@ -2775,6 +2864,63 @@ const WSLIDE_VERBS = (function () {
   return { align, distribute, matchSize, snapToGrid, centerOnCanvas, stack, tidy, dedupeStyles, bbox };
 })();
 // <<< WSLIDE_VERBS_END
+
+// >>> WSLIDE_PLAN_START — Stage 3c: apply a validated AI design plan to a slide. Pure,
+// unit-tested by test/wslide/plan-unit.js. A plan is { verbs:[{op,params,ids?}],
+// textEdits:[{id,content}], changelog }. Geometry verbs run on ABSOLUTE blocks (x/y/w/h in
+// the JSON); text edits touch only prose blocks (never math/eval/code/image/shape). Mutates
+// the slide in place; returns { changelog:[…], changedIds:[…] } for the preview badges/card.
+function applyPlan(slide, plan, verbs) {
+  const byId = {};
+  (function walk(arr) { (arr || []).forEach(b => { if (b && b.id) byId[b.id] = b; if (b.children) walk(b.children); if (b.items) walk(b.items); }); })(slide && slide.children);
+  const changed = new Set();
+  const verbLog = [];
+  const PROTECTED = { math: 1, eval: 1, code: 1, image: 1, shape: 1, arrow: 1 };
+
+  for (const v of ((plan && plan.verbs) || [])) {
+    if (!v || !verbs[v.op]) continue;
+    const ids = (Array.isArray(v.ids) && v.ids.length ? v.ids : Object.keys(byId)).filter(id => byId[id]);
+    const items = ids.map(id => byId[id])
+      .filter(b => b.position === 'absolute' && typeof b.w === 'number' && typeof b.h === 'number')
+      .map(b => ({ id: b.id, x: b.x || 0, y: b.y || 0, w: b.w, h: b.h }));
+    if (!items.length) continue;
+    const res = verbs[v.op](items, v.params || {});
+    items.forEach(it => {
+      const b = byId[it.id]; if (!b) return;
+      const nx = Math.round(it.x), ny = Math.round(it.y), nw = Math.round(it.w), nh = Math.round(it.h);
+      if ((b.x || 0) !== nx) { b.x = nx; changed.add(b.id); }
+      if ((b.y || 0) !== ny) { b.y = ny; changed.add(b.id); }
+      if (typeof b.w === 'number' && b.w !== nw) { b.w = nw; changed.add(b.id); }
+      if (typeof b.h === 'number' && b.h !== nh) { b.h = nh; changed.add(b.id); }
+    });
+    (res.changelog || []).forEach(c => verbLog.push(c));
+  }
+
+  for (const t of ((plan && plan.textEdits) || [])) {
+    const b = t && byId[t.id];
+    if (!b || typeof t.content !== 'string') continue;
+    if (PROTECTED[b.type]) continue;                 // never reword protected content
+    if (typeof b.content !== 'string') continue;     // only blocks that already hold rich text
+    if (b.content !== t.content) { b.content = t.content; changed.add(b.id); verbLog.push('Reworded text'); }
+  }
+
+  // styleEdits — merge CSS into block.style (allowed on ANY block; restyling ≠ rewriting).
+  for (const s of ((plan && plan.styleEdits) || [])) {
+    const b = s && byId[s.id];
+    if (!b || !s.style || typeof s.style !== 'object') continue;
+    let touched = false;
+    if (!b.style) b.style = {};
+    for (const [k, v] of Object.entries(s.style)) {
+      if (v == null) continue;
+      if (b.style[k] !== v) { b.style[k] = v; touched = true; }
+    }
+    if (touched) { changed.add(b.id); verbLog.push('Restyled (' + Object.keys(s.style).join(', ') + ')'); }
+  }
+
+  const changelog = (plan && plan.changelog) ? [String(plan.changelog)] : verbLog;
+  return { changelog, changedIds: [...changed] };
+}
+// <<< WSLIDE_PLAN_END
 
 let _snapGuides = [];
 function _clearSnapGuides() { _snapGuides.forEach(g => g.remove()); _snapGuides = []; }
@@ -3964,6 +4110,202 @@ function runDedupeStyles() {
   renderSlide(); markDirty();
   setStatus(res.changelog.join(' · ') + ' ✓');
 }
+
+// ── AI design assistant (Stage 3b/3c): select-and-instruct + preview/accept ──────────
+// The webview posts the selection + instruction to the host (which owns the API keys and
+// calls the slidewright model), gets back a design-verb PLAN, applies it to a STAGED deck
+// (in place on `deck`, original saved), and shows a badged preview the user accepts (one
+// undo step) or rejects. The model never writes the file directly.
+let _aiReqId = 0, _aiPendingReq = null;
+let _aiPreview = null;   // { orig:<deck JSON>, changedIds:[] } while a proposal is staged
+
+// Selected blocks enriched with measured geometry (so absolute verbs have real w/h).
+function _aiSelectedBlocks() {
+  const founds = _selectedFounds(); if (!founds.length) return [];
+  const geo = {}; _measuredRects(founds).forEach(r => { geo[r.f.block.id] = r; });
+  return founds.map(f => {
+    const b = f.block, g = geo[b.id];
+    return {
+      id: b.id, type: b.type, position: b.position || 'flow',
+      x: b.position === 'absolute' ? (b.x || 0) : (g ? Math.round(g.left) : undefined),
+      y: b.position === 'absolute' ? (b.y || 0) : (g ? Math.round(g.top) : undefined),
+      w: typeof b.w === 'number' ? b.w : (g ? Math.round(g.w) : undefined),
+      h: typeof b.h === 'number' ? b.h : (g ? Math.round(g.h) : undefined),
+      style: b.style, stylePreset: b.stylePreset,
+      content: typeof b.content === 'string' ? b.content : undefined,
+    };
+  });
+}
+
+function openAiBar() {
+  if (_aiPreview) { setStatus('Accept or reject the current proposal first'); return; }
+  const founds = _selectedFounds();
+  if (!founds.length) { setStatus('Select block(s) first, then ⌘K'); return; }
+  const bar = document.getElementById('ai-bar'), input = document.getElementById('ai-bar-input');
+  const cr = canvasEl.getBoundingClientRect();
+  const rects = _measuredRects(founds);
+  if (rects.length) {
+    const sc = cr.width ? (cr.width / 1920) : 1;
+    const L = Math.min(...rects.map(r => r.left)), T = Math.min(...rects.map(r => r.top));
+    let x = cr.left + L * sc, y = cr.top + T * sc - 54;
+    bar.style.left = Math.max(8, Math.min(x, window.innerWidth - 460)) + 'px';
+    bar.style.top = Math.max(56, y) + 'px';
+  } else {
+    bar.style.left = Math.max(8, cr.left + cr.width / 2 - 224) + 'px'; bar.style.top = '80px';
+  }
+  document.getElementById('ai-bar-hint').textContent =
+    founds.length + ' block' + (founds.length > 1 ? 's' : '') + ' selected · e.g. “tidy this”, “make these equal width”, “turn into 3 bullets”';
+  bar.classList.add('show'); bar.classList.remove('busy');
+  document.getElementById('ai-bar-go').disabled = false;
+  input.value = ''; input.focus();
+}
+function closeAiBar() { const bar = document.getElementById('ai-bar'); bar.classList.remove('show', 'busy'); }
+
+// Shared core for both triggers (floating ⌘K bar + the AI-tab panel).
+function _sendAiInstruct(instruction) {
+  instruction = String(instruction || '').trim();
+  if (!instruction) return false;
+  if (_aiPreview) { setStatus('Accept or reject the current proposal first'); return false; }
+  const blocks = _aiSelectedBlocks();
+  if (!blocks.length) { setStatus('Select block(s) first'); return false; }
+  const id = ++_aiReqId; _aiPendingReq = id;
+  _aiSetBusy(true);
+  vscodeApi.postMessage({ cmd: 'aiInstruct', id, instruction, blocks, canvas: { w: 1920, h: 1080 } });
+  return true;
+}
+function _aiSetBusy(on) {
+  const bar = document.getElementById('ai-bar');
+  if (bar) { bar.classList.toggle('busy', on); const g = document.getElementById('ai-bar-go'); if (g) g.disabled = on; }
+  const panel = document.getElementById('ai-panel');
+  if (panel) { panel.classList.toggle('busy', on); const g = document.getElementById('ai-panel-go'); if (g) g.disabled = on; }
+  if (on) { const st = document.getElementById('ai-panel-status'); if (st) { st.classList.remove('err'); st.textContent = 'Thinking…'; } }
+}
+function submitAiInstruct() { _sendAiInstruct(document.getElementById('ai-bar-input').value); }
+function submitAiPanel()   { _sendAiInstruct(document.getElementById('ai-panel-input').value); }
+
+function _setAiPanelStatus(text, isErr) {
+  const st = document.getElementById('ai-panel-status'); if (!st) return;
+  st.classList.toggle('err', !!isErr); st.textContent = text || '';
+}
+function _onAiPlan(plan, warnings) {
+  _aiSetBusy(false);
+  closeAiBar();
+  if (!deck || !deck.slides[slideIdx]) return;
+  const orig = JSON.stringify(deck);
+  const res = applyPlan(deck.slides[slideIdx], plan, WSLIDE_VERBS);
+  if (!res.changedIds.length) { deck = JSON.parse(orig); setStatus('No applicable change for the selection'); _setAiPanelStatus('No applicable change for the selection'); return; }
+  _aiPreview = { orig, changedIds: res.changedIds };
+  renderSlide();               // rAF re-marks badges + hides the ✦ affordance
+  _markAiChangedBadges();
+  const log = document.getElementById('ai-preview-log'); log.innerHTML = '';
+  (res.changelog.length ? res.changelog : ['Applied changes']).forEach(line => {
+    const d = document.createElement('div'); d.textContent = '• ' + line; log.appendChild(d);
+  });
+  if (warnings && warnings.length) { const w = document.createElement('div'); w.className = 'ai-warn'; w.textContent = warnings.join(' · '); log.appendChild(w); }
+  document.getElementById('ai-preview-card').classList.add('show');
+  _setAiPanelStatus('Preview ready — accept (⏎) or reject (Esc).');
+}
+function _onAiError(message) {
+  _aiSetBusy(false);
+  setStatus('Assistant: ' + message, true);
+  _setAiPanelStatus(message, true);
+}
+function _markAiChangedBadges() {
+  if (!_aiPreview) return;
+  _aiPreview.changedIds.forEach(id => { const el = canvasEl.querySelector(`[data-block-id="${id}"]`); if (el) el.classList.add('ai-changed'); });
+}
+function acceptAiPreview() {
+  if (!_aiPreview) return;
+  _aiPreview = null;
+  markDirty();                 // commit staged deck as ONE undo step (baseline = pre-preview)
+  document.getElementById('ai-preview-card').classList.remove('show');
+  renderSlide();
+  setStatus('Applied ✓');
+}
+function rejectAiPreview() {
+  if (!_aiPreview) return;
+  deck = JSON.parse(_aiPreview.orig);
+  _aiPreview = null;
+  document.getElementById('ai-preview-card').classList.remove('show');
+  renderSlide();
+  _scheduleDirtySave(2000);
+  setStatus('Discarded');
+}
+// Show the ✦ affordance at the top-right of the selection (hidden during a preview / no selection).
+function _positionAiAffordance() {
+  const btn = document.getElementById('ai-affordance');
+  if (!btn) return;
+  if (_aiPreview) { btn.style.display = 'none'; return; }
+  const founds = _selectedFounds();
+  if (!founds.length) { btn.style.display = 'none'; return; }
+  const rects = _measuredRects(founds);
+  if (!rects.length) { btn.style.display = 'none'; return; }
+  const cr = canvasEl.getBoundingClientRect(), sc = cr.width ? (cr.width / 1920) : 1;
+  const R = Math.max(...rects.map(r => r.left + r.w)), T = Math.min(...rects.map(r => r.top));
+  const x = Math.min(cr.left + R * sc + 6, window.innerWidth - 32), y = Math.max(52, cr.top + T * sc - 6);
+  btn.style.left = x + 'px'; btn.style.top = y + 'px'; btn.style.display = 'flex';
+}
+// Reflect the live selection into the AI-tab panel (count + Ask button enablement).
+function _updateAiPanel() {
+  const sel = document.getElementById('ai-panel-sel'); if (!sel) return;
+  const n = _selectedFounds().length;
+  sel.textContent = n ? (n + ' block' + (n > 1 ? 's' : '') + ' selected') : 'No blocks selected — select on the canvas first';
+  const go = document.getElementById('ai-panel-go'); if (go) go.disabled = (n === 0) || !!_aiPreview;
+}
+
+document.getElementById('ai-bar-go').addEventListener('click', submitAiInstruct);
+document.getElementById('ai-bar-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); submitAiInstruct(); }
+  else if (e.key === 'Escape') { e.preventDefault(); closeAiBar(); }
+});
+document.getElementById('ai-affordance').addEventListener('click', openAiBar);
+document.getElementById('ai-accept').addEventListener('click', acceptAiPreview);
+document.getElementById('ai-reject').addEventListener('click', rejectAiPreview);
+// AI-tab panel: instant deterministic quick-actions (no model) + the LLM "Ask" box.
+document.getElementById('ai-panel-go').addEventListener('click', submitAiPanel);
+document.getElementById('ai-panel-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submitAiPanel(); }
+});
+document.querySelectorAll('#ai-panel .ai-chip').forEach(c => c.addEventListener('click', () => {
+  if (_aiPreview) { setStatus('Accept or reject the current proposal first'); return; }
+  if (!_selectedFounds().length) { setStatus('Select block(s) first'); _setAiPanelStatus('Select block(s) on the canvas first'); return; }
+  switch (c.dataset.aiverb) {
+    case 'tidy':   runDesignVerb('tidy', {}, 1); break;
+    case 'snap':   runDesignVerb('snapToGrid', { grid: 20 }, 1); break;
+    case 'stack':  runDesignVerb('stack', { axis: 'v', gap: 24 }, 2); break;
+    case 'matchw': matchSize('w'); break;
+    case 'center': runDesignVerb('centerOnCanvas', { axis: 'both' }, 1); break;
+  }
+}));
+document.addEventListener('keydown', e => {
+  const mod = e.metaKey || e.ctrlKey;
+  const t = e.target, typing = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
+  if (mod && (e.key === 'k' || e.key === 'K') && !typing) { e.preventDefault(); openAiBar(); return; }
+  if (_aiPreview && !typing) {
+    if (e.key === 'Enter') { e.preventDefault(); acceptAiPreview(); }
+    else if (e.key === 'Escape') { e.preventDefault(); rejectAiPreview(); }
+  }
+  // Escape dismisses the ⌘K bar from ANYWHERE, not only from inside its input
+  // (the input-scoped handler missed the case where focus had moved away).
+  if (e.key === 'Escape' && !_aiPreview) {
+    const b = document.getElementById('ai-bar');
+    if (b && b.classList.contains('show')) { e.preventDefault(); closeAiBar(); }
+  }
+});
+// Click-outside dismissal for the ⌘K assistant bar. Without this the bar stays
+// pinned over the canvas after the user moves on, obscuring the slide (it is
+// positioned above the selection, so it covers the very block being edited).
+// pointerdown (not click) so it closes on press, before any canvas drag starts.
+document.addEventListener('pointerdown', e => {
+  const bar = document.getElementById('ai-bar');
+  if (!bar || !bar.classList.contains('show')) return;
+  // Ignore presses inside the bar itself, on the ✦ affordance that opens it,
+  // and while a proposal is pending (the preview card owns the interaction).
+  if (e.target.closest && (e.target.closest('#ai-bar') || e.target.closest('#ai-affordance')
+      || e.target.closest('#ai-preview-card'))) return;
+  if (_aiPreview) return;
+  closeAiBar();
+}, true);
 // ── Arrange pane: Inkscape-style icon buttons ──────────────────────────
 const _ARR_BAR = 'fill="#cfd6e4" stroke="#7c8598" stroke-width="0.7"';
 const _ARR_ANC = 'fill="#c7d0f5" stroke="#4f46e5" stroke-width="0.8"';

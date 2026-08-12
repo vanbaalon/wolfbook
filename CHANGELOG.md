@@ -4,6 +4,98 @@ All notable changes to **Wolfbook** are documented here.
 
 ---
 
+## [2.8.0] - 2026-08-12
+
+The headline of this release is that Wolfbook now does more than *let* an AI use
+your kernel — it can run a whole verified calculation on its own. Alongside that,
+the slide editor has been reworked, and a long tail of `.wb` and tooling bugs is
+fixed.
+
+### Added — Oberon, an EXPERIMENTAL research agent (off by default)
+
+> ⚠️ **Experimental preview.** Oberon is off unless you configure your own LLM
+> API key. It spends real money per run, writes files into your workspace, and
+> its commands, settings and file layout **will change between releases**. No
+> other Wolfbook feature depends on it. If you do not configure a key, nothing
+> in this section runs and nothing leaves your machine.
+
+- **Autonomous research agent (experimental, opt-in).** Give Oberon a brief and it
+  plans the calculation, probes the live kernel, records the steps that survive,
+  compiles them into a clean notebook, then **restarts the kernel and re-runs that
+  notebook from scratch** to verify it. A clean replay *is* the verification —
+  nothing is graded by a language model judging its own work.
+- **Two modes:** *Quick compute* for one self-contained calculation, and
+  *Director* for multi-stage programmes that plan, run dependent stages, bank
+  verified key results, and write a LaTeX report.
+- **Machine-checked expectations.** Probes and recorded steps can carry WL
+  booleans that the kernel adjudicates on the spot, so a plausible-but-wrong
+  result fails immediately instead of propagating.
+- **Live transparency.** A `working.wb` notebook fills in as the agent computes —
+  failed probes stay visible with their errors rather than being quietly deleted —
+  plus a Control Room sidebar, a Run Inspector, and a self-postmortem the agent
+  writes about its own run.
+- **Bounded by design.** Per-run cost and call ceilings, per-phase probe/turn
+  budgets, and a Director budget cap. Off entirely until you configure an API key.
+- Providers: DeepSeek (default, cheapest), Anthropic, OpenAI; per-role model
+  binding so judgment and execution can use different models.
+- See [docs/oberon-agent.md](docs/oberon-agent.md) for setup, budgets and a full
+  statement of what data goes where.
+
+### Added — SkilXiv.org integration (experimental; part of the Oberon agent)
+
+- **Skill recall.** Before starting, the agent searches
+  [SkilXiv.org](https://skilxiv.org) — a public registry of versioned, citeable,
+  executable know-how — and injects a matching *skill* into its context. On hard
+  problems this is the difference between rediscovering a method by trial and
+  error and applying it directly.
+- Skills are treated as **untrusted reference material**: anything taken from one
+  must still be reproduced in the kernel before it is recorded, and a skill whose
+  claim the kernel disproves gets a correction filed against it.
+- **Contribution flow.** A run that establishes something novel can draft a
+  candidate skill from the verified notebook. Nothing publishes automatically:
+  drafts go to a local review panel, must execute cleanly in a fresh kernel, and
+  are submitted as **private** drafts that only you can publish.
+- All SkilXiv traffic can be disabled with `wolfbook.oberon.recall.enabled`.
+
+### Changed — `.wslide` presentations: reworked interface and AI editing
+
+- **Redesigned editor:** cleaner canvas, proper multi-block selection, alignment
+  and arrange tooling, and a rebuilt side panel.
+- **AI editing in the editor itself:** select blocks and press **⌘K** to say what
+  you want ("tidy this", "make these equal width", "turn into 3 bullets"). The
+  assistant proposes concrete changes you accept or reject before anything is
+  written to the file.
+- **Deterministic quick actions** for common tidy-ups — instant, no model call.
+- Expanded slide tooling for agents, including bulk insert, block patching,
+  arrangement and HTML export.
+
+### Fixed
+
+- `.wb` notebooks: output round-tripping and serialization fixes; markup cells no
+  longer persist stale outputs; execution summaries are no longer written into
+  the file (they caused spurious diffs and sync conflicts).
+- Notebook deliverables produced by the agent are now saved in their **verified**
+  state — previously a passing verification could be written only to the open
+  editor, leaving a stale copy on disk.
+- Kernel launch failures now produce a readable diagnosis (not-installed, licence,
+  crash, hang, WSTP link, missing addon) instead of a raw error.
+- Slide editor: the ⌘K assistant bar now dismisses on click-outside and on Escape
+  from anywhere, instead of staying pinned over the canvas.
+- Numerous robustness fixes across the agent tool surface: dependency analysis of
+  Wolfram code (destructuring assignments, `Function` parameters, iterator and
+  Association-key false positives), provider retry with backoff on transient
+  network errors, and output-size guards that prevent a huge result from flooding
+  the session.
+
+### Acknowledgements
+
+Special thanks to **Ruben Myers** for his help compiling the Unix build of the
+native binaries. The WSTP bridge and the `btl` math renderer are native addons
+that must be built per platform, and that work is what makes Wolfbook usable
+beyond macOS and Windows.
+
+---
+
 ## [2.7.0] - 2026-05-02
 
 ### Added — WBPrint: live updating output for Print/WBPrint in loops

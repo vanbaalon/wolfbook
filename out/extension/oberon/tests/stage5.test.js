@@ -183,21 +183,346 @@ async function run5R1() {
     });
 }
 
+// ── 5R11 failed-cell retention (2026-08-02) ─────────────────────────────────────
+// A failed probe's cells STAY in working.wb; the next amend of the same slot
+// replaces them (remove-then-insert); a fresh probe abandons them in place.
+
+function makeNbShim(results) {
+    const nbDoc = { cellCount: 0 };
+    const removals = [];
+    let i = 0;
+    const shim = {
+        DEFAULT_TIMEOUT: 30,
+        async evalInNotebook(doc, code) {
+            doc.cellCount += 1;                      // simulate one inserted code cell
+            const r = results[Math.min(i++, results.length - 1)];
+            return { durationMs: 1, ...r };
+        },
+        async evalOnce() { throw new Error('notebook path expected'); },
+        async removeFailedProbeCells(doc, attempt) {
+            removals.push(attempt);
+            doc.cellCount -= attempt.cellsAdded;
+            return true;
+        },
+    };
+    return { nbDoc, shim, removals };
+}
+
+async function run5R11() {
+    console.log('\n── 5R11: failed cells retained until amended ──');
+
+    await ok('5R11: failure keeps the cell and arms failedAttempt', async () => {
+        const { nbDoc, shim, removals } = makeNbShim([{ ok: false, kind: 'error', error: 'boom' }]);
+        const ctx = await makeCtx('keep');
+        ctx.shim = shim;
+        ctx.getWorkingNbDoc = () => nbDoc;
+        const r = await handleProbe({ code: '1/0' }, ctx);
+        assert.strictEqual(r.ok, false);
+        assert.strictEqual(nbDoc.cellCount, 1, 'failed cell must remain in the notebook');
+        assert.strictEqual(removals.length, 0, 'no removal at failure time');
+        assert.deepStrictEqual(ctx._probeState.failedAttempt, { code: '1/0', cellsAdded: 1 });
+        assert.ok(/REMAINS in the notebook/.test(String(r.modelPayload || '')),
+            'errorNotice must tell the agent the cell stays until fixed');
+    });
+    await ok('5R11: amend replaces the failed cells then clears the marker', async () => {
+        const { nbDoc, shim, removals } = makeNbShim([
+            { ok: false, kind: 'error', error: 'boom' },
+            { ok: true, value: '4', messages: [] },
+        ]);
+        const ctx = await makeCtx('amend');
+        ctx.shim = shim;
+        ctx.getWorkingNbDoc = () => nbDoc;
+        const r1 = await handleProbe({ code: '1/0' }, ctx);
+        assert.strictEqual(r1.ok, false);
+        ctx.lastProbeId = r1.probeId;
+        const r2 = await handleAmendProbe({ code: '2+2' }, ctx);
+        assert.ok(r2.ok !== false, r2.error);
+        assert.strictEqual(removals.length, 1, 'amend must remove the failed attempt first');
+        assert.deepStrictEqual(removals[0], { code: '1/0', cellsAdded: 1 });
+        assert.strictEqual(nbDoc.cellCount, 1, 'net effect: one (corrected) cell');
+        assert.ok(!ctx._probeState.failedAttempt, 'marker cleared after replacement');
+    });
+    await ok('5R12: multi-cell probe runs all cells, one probeId each', async () => {
+        const { nbDoc, shim } = makeNbShim([
+            { ok: true, value: '1', messages: [] },
+            { ok: true, value: '2', messages: [] },
+            { ok: true, value: '3', messages: [] },
+        ]);
+        const ctx = await makeCtx('mc');
+        ctx.shim = shim;
+        ctx.getWorkingNbDoc = () => nbDoc;
+        const r = await handleProbe({ cells: ['a=1', 'b=a+1', 'c=b+1'], note: 'chained steps' }, ctx);
+        assert.strictEqual(r.ok, true, r.error);
+        const p = JSON.parse(r.modelPayload);
+        assert.strictEqual(p.multiCell, true);
+        assert.strictEqual(p.cellsRun, 3);
+        assert.strictEqual(nbDoc.cellCount, 3);
+        const ids = p.cells.map(c => c.probeId);
+        assert.strictEqual(new Set(ids).size, 3, 'each cell gets its own probeId');
+        assert.strictEqual(r.probeId, ids[2], 'top-level probeId = last cell');
+    });
+    await ok('5R12: multi-cell stops at the failing cell; later cells not run', async () => {
+        const { nbDoc, shim } = makeNbShim([
+            { ok: true, value: '1', messages: [] },
+            { ok: false, kind: 'error', error: 'boom' },
+            { ok: true, value: '3', messages: [] },
+        ]);
+        const ctx = await makeCtx('mcf');
+        ctx.shim = shim;
+        ctx.getWorkingNbDoc = () => nbDoc;
+        const r = await handleProbe({ cells: ['a=1', 'b=1/0', 'c=2'], note: 'n' }, ctx);
+        assert.strictEqual(r.ok, false);
+        const p = JSON.parse(r.modelPayload);
+        assert.strictEqual(p.cellsRun, 2, 'third cell must not run');
+        assert.strictEqual(p.stoppedAtCell, 2);
+        assert.strictEqual(nbDoc.cellCount, 2, 'cell 1 result + failed cell 2 stay');
+        assert.ok(ctx._probeState.failedAttempt, 'failed cell armed for amend replacement');
+        assert.strictEqual(ctx._probeState.failedAttempt.code, 'b=1/0');
+        assert.strictEqual(r.lastCellCode, 'b=1/0');
+    });
+    await ok('5R12: >4 cells rejected without spending a probe', async () => {
+        const ctx = await makeCtx('mcx');
+        const r = await handleProbe({ cells: ['1', '2', '3', '4', '5'], note: 'n' }, ctx);
+        assert.strictEqual(r.ok, false);
+        assert.ok(/capped at 4/.test(r.error || JSON.stringify(r)), 'cap message expected');
+    });
+    await ok('5R18 (Stage A3): contradicted skills file a correction, never credit', async () => {
+        const { handleCiteSkill } = require('../fairy/tools');
+        const ctx = await makeCtx('contra');
+        ctx.recalledSkillRefs = ['@n/s@1'];
+        const filed = [];
+        ctx.recordSkillCorrection = async (c) => { filed.push(c); return { recorded: true }; };
+        const r = await handleCiteSkill({
+            skillRef: '@n/s@1', disposition: 'contradicted',
+            how: 'Claims FiniteGroupData has no S_n character table; the kernel returned one.',
+        }, ctx);
+        assert.ok(r.ok !== false, r.error);
+        assert.strictEqual(filed.length, 1, 'a contradiction must reach the correction ledger');
+        assert.ok(/FiniteGroupData/.test(filed[0].claim));
+        const cited = await ctx.workDir.loadCitedSkills();
+        assert.strictEqual(cited[0].disposition, 'contradicted');
+        assert.deepStrictEqual(cited[0].stepIds, [], 'a refuted skill is never evidence-linked');
+    });
+    await ok('5R18 (Stage A3): correction queue dedups and ranks by skill', async () => {
+        const sc = require('../memory/skillCorrections');
+        const q = await sc.correctionQueue();          // real ledger may be empty — shape check
+        assert.ok(Array.isArray(q));
+        const rendered = sc.renderCorrectionQueue([
+            { skillRef: '@a/b@1', count: 2, lastSeen: '2026-08-04T00:00:00Z', claims: ['wrong formula', 'bad claim'] },
+        ]);
+        assert.ok(rendered.includes('@a/b@1') && rendered.includes('2 contradiction(s)'));
+        assert.ok(sc.renderCorrectionQueue([]).includes('No skill contradictions'));
+    });
+    await ok('5R17 (Stage A2): skill verification gate catches non-executing claims', async () => {
+        const V = require('../memory/skillVerify');
+        const md = '```wolfram\nFiniteGroupData[{"Symmetric",6},"CharacterTable"]\n```\n\n```wolfram\n1+1\n```';
+        assert.strictEqual(V.extractWolframBlocks(md).length, 2);
+        // Reproduces the v0.1.0 defect: block "succeeds" but emits ::notent.
+        const evalOnce = async ({ expression }) => expression.includes('FiniteGroupData')
+            ? { ok: true, messages: ['FiniteGroupData::notent: {Symmetric, 6} is not a known entity.'] }
+            : { ok: true, value: '2' };
+        const res = await V.verifySkillBlocks(md, { evalOnce });
+        assert.strictEqual(res.ok, false, 'a structural kernel message must fail the gate');
+        assert.strictEqual(res.failures.length, 1);
+        assert.ok(V.renderVerification(res).includes('do not publish'));
+        // Clean skill passes.
+        const good = await V.verifySkillBlocks('```wolfram\n1+1\n```', { evalOnce: async () => ({ ok: true, value: '2' }) });
+        assert.strictEqual(good.ok, true);
+    });
+    await ok('5R17 (Stage A1): skill gaps cluster into a ranked authoring queue', async () => {
+        const sg = require('../memory/skillGaps');
+        const ranked = [
+            { topic: 'Exact diagonalization of two-magnon subspace', count: 2, runs: 2, lastSeen: '2026-08-01T00:00:00Z', examples: [], tasks: ['t'] },
+        ];
+        const md = sg.renderGapQueue(ranked);
+        assert.ok(md.includes('Skill-gap queue') && md.includes('2 run(s)'));
+        assert.strictEqual(sg.renderGapQueue([]), 'No skill gaps recorded yet.');
+        assert.strictEqual(typeof sg.rankSkillGaps, 'function');
+    });
+    await ok('5R17 (Stage A4): tricks promotion skips already-covered signatures', async () => {
+        const tricks = require('../fairy/tricks');
+        const dir = tmpDir();
+        const p = path.join(dir, 'unmatched.jsonl');
+        // Thread::tdlen IS covered by a seed trick; Foo::barbaz is not.
+        fs.writeFileSync(p, [
+            JSON.stringify({ names: ['Thread::tdlen'], sample: 'unequal length' }),
+            JSON.stringify({ names: ['Thread::tdlen'], sample: 'unequal length' }),
+            JSON.stringify({ names: ['Foo::barbaz'], sample: 'novel failure' }),
+            JSON.stringify({ names: ['Foo::barbaz'], sample: 'novel failure' }),
+        ].join('\n'), 'utf8');
+        const props = tricks.proposeTricksFromUnmatched(p, tricks.loadTricks(null), { minCount: 2 });
+        assert.strictEqual(props.length, 1, 'covered signatures must not be proposed again');
+        assert.strictEqual(props[0].name, 'Foo::barbaz');
+        assert.strictEqual(props[0].stub.disabled, true, 'stubs must require human review');
+        assert.ok(props[0].stub.id.startsWith('wolfram/'));
+    });
+    await ok('5R17 (Stage B3): director progress digest separates evidence from opinion', async () => {
+        const rep = require('../director/report');
+        const md = rep.renderProgressDigest({
+            id: 'P01', title: 'Test programme', goal: 'g',
+            plan: [
+                { id: 'S01', title: 'verified stage', status: 'delivered', passes: true, assessment: { verdict: 'delivered' } },
+                { id: 'S02', title: 'opinion only',   status: 'delivered', passes: false, assessment: { verdict: 'delivered' } },
+                { id: 'S03', title: 'not run',        status: 'pending' },
+            ],
+            keyResults: [{ id: 'K01', stageId: 'S01', statement: 'result', confidence: 0.9 }],
+        });
+        assert.ok(md.includes('✅ checks passed'), 'harness-verified stage must be marked');
+        assert.ok(md.includes('⚠️ unverified'), 'an LLM-delivered but unverified stage must NOT read as verified');
+        assert.ok(md.includes('do not edit by hand'));
+    });
+    await ok('5R16 (Stage 3): read_skill_section lists and serves sections', async () => {
+        const { handleReadSkillSection } = require('../fairy/tools');
+        const ctx = await makeCtx('sksec');
+        ctx.skillSections = new Map([['@n/s@1', {
+            what_it_does: 'Does the thing.',
+            verification: 'Check orthogonality; anchors: S5 → {1,4,5}.',
+        }]]);
+        const list = await handleReadSkillSection({}, ctx);
+        assert.ok(list.ok !== false, list.error);
+        assert.deepStrictEqual(JSON.parse(list.modelPayload).availableSections, ['what_it_does', 'verification']);
+        // Tolerant name matching: "Verification" → verification
+        const sec = await handleReadSkillSection({ section: 'Verification' }, ctx);
+        assert.ok(JSON.parse(sec.modelPayload).content.includes('orthogonality'));
+        const bad = await handleReadSkillSection({ section: 'nonexistent-xyz' }, ctx);
+        assert.strictEqual(bad.ok, false);
+        assert.strictEqual(bad.kind, 'no_such_section');
+        const none = await handleReadSkillSection({}, await makeCtx('sksec2'));
+        assert.strictEqual(none.kind, 'no_skills');
+    });
+    await ok('5R16 (Stage 3): lessons channel filters, dedups and injects', async () => {
+        const L = require('../memory/lessons');
+        const dir = tmpDir();
+        const g = path.join(dir, 'canonical_state.md');
+        fs.writeFileSync(g, '# Grimoire\n\n## Verified results\n\n- prior content\n', 'utf8');
+        const r1 = await L.recordLessons(g, [
+            'Numericize matrices with N[] before Eigenvalues — exact input returns unusable Root[] objects.',
+            'p004 failed because eigs was symbolic',          // probe id → rejected
+            'this run needed a crosscheck',                    // task-specific → rejected
+            'tiny',                                            // too short → rejected
+        ], 'QG_A');
+        assert.strictEqual(r1.added, 1, 'only the transferable lesson is kept');
+        const r2 = await L.recordLessons(g, ['Numericize matrices with N[] before eigenvalues!'], 'QG_B');
+        assert.strictEqual(r2.added, 0, 'near-identical lesson must dedup');
+        const excerpt = await L.lessonsExcerpt(g);
+        assert.ok(excerpt.includes('LESSONS FROM PREVIOUS RUNS') && excerpt.includes('Numericize'));
+        assert.ok(fs.readFileSync(g, 'utf8').includes('## Verified results'), 'grimoire content preserved');
+    });
+    await ok('5R15: depAnalyzer false-positive classes (gold sweep 2026-08-04)', async () => {
+        const { analyzeCode } = require('../fairy/depAnalyzer');
+        const multi = analyzeCode('{evals, evecs} = Eigensystem[N[H]];');
+        assert.ok(multi.definesSymbols.includes('evals') && multi.definesSymbols.includes('evecs'),
+            'destructuring assignment must define BOTH names');
+        const fn = analyzeCode('f = Function[x, x^2 + a];');
+        assert.ok(!fn.usesSymbols.includes('x'), 'unbraced Function param must bind');
+        const slot = analyzeCode('res = Select[sols, #class === "regular" &];');
+        assert.ok(!slot.usesSymbols.includes('class'), 'Association #key is not a symbol use');
+        const free = analyzeCode('(* free: u *) poly = Solve[u^2 == 4, u];');
+        assert.ok(!free.usesSymbols.includes('u'), '(* free: *) pragma must exclude the symbol');
+    });
+    await ok('5R15: record({stepId, free}) patches an existing step at zero cost', async () => {
+        const ctx = await makeCtx('free-patch');
+        await ctx.workDir.addStep({ id: 'step_ode', probeId: 'p001', code: 'sol = DSolve[y\'\'[x] == 0, y, x]',
+            note: '', usesSymbols: ['x', 'y'], definesSymbols: ['sol'] });
+        const r = await handleRecord({ stepId: 'step_ode', free: ['x', 'y'] }, ctx);
+        assert.ok(r.ok !== false, r.error);
+        const steps = await ctx.workDir.loadValidSteps();
+        const st = steps.find(s => s.id === 'step_ode');
+        assert.deepStrictEqual(st.freeSymbols, ['x', 'y']);
+        assert.deepStrictEqual(st.usesSymbols, [], 'declared free symbols leave usesSymbols');
+    });
+    await ok('5R15: record free-patch rejects an unknown step', async () => {
+        const ctx = await makeCtx('free-bad');
+        const r = await handleRecord({ stepId: 'step_ghost', free: ['x'] }, ctx);
+        assert.strictEqual(r.ok, false);
+        assert.strictEqual(r.kind, 'unknown_step');
+    });
+    await ok('5R14: probe `expect` fails a semantically wrong result', async () => {
+        const ctx = await makeCtx('exp-fail');
+        ctx.shim = { DEFAULT_TIMEOUT: 30, async evalOnce({ expression }) {
+            return expression.includes('Max[') ? { ok: true, value: 'False' } : { ok: true, value: '{1050, 462, 896}' };
+        } };
+        const r = await handleProbe({ code: 'dims = glWeylDims[6]', expect: 'Max[dims] <= 16' }, ctx);
+        assert.strictEqual(r.ok, false);
+        assert.strictEqual(r.kind, 'expect_failed');
+        assert.ok(/expectation FAILED/.test(r.error), r.error);
+    });
+    await ok('5R14: probe `expect` passes when the claim holds', async () => {
+        const ctx = await makeCtx('exp-ok');
+        ctx.shim = { DEFAULT_TIMEOUT: 30, async evalOnce({ expression }) {
+            return expression.includes('Max[') ? { ok: true, value: 'True' } : { ok: true, value: '{1, 5, 9, 5}' };
+        } };
+        const r = await handleProbe({ code: 'dims = hookDims[6]', expect: 'Max[dims] <= 16' }, ctx);
+        assert.ok(r.ok !== false, r.error);
+    });
+    await ok('5R13: plan steps sent as objects are normalized to strings', async () => {
+        const { handlePlan } = require('../fairy/tools');
+        const ctx = await makeCtx('plan');
+        const r = await handlePlan({ steps: [
+            { step: 'Build H and diagonalise', complexity: 'standard', note: 'ED first' },
+            'Solve the BAE',
+            { title: 'Compare spectra' },
+        ], note: 'roadmap' }, ctx);
+        assert.ok(r.ok !== false, r.error);
+        const p = JSON.parse(r.modelPayload);
+        assert.deepStrictEqual(p.steps, [
+            'Build H and diagonalise — ED first',
+            'Solve the BAE',
+            'Compare spectra',
+        ]);
+        assert.ok(!JSON.stringify(p.steps).includes('[object Object]'));
+    });
+    await ok('5R11: a fresh probe abandons the failed cell in place', async () => {
+        const { nbDoc, shim, removals } = makeNbShim([
+            { ok: false, kind: 'error', error: 'boom' },
+            { ok: true, value: '4', messages: [] },
+        ]);
+        const ctx = await makeCtx('abandon');
+        ctx.shim = shim;
+        ctx.getWorkingNbDoc = () => nbDoc;
+        await handleProbe({ code: '1/0' }, ctx);
+        const r2 = await handleProbe({ code: '2+2', prevAnalysis: 'OUTPUT RECEIVED: error. ASSESSMENT: ERROR. NEXT ACTION: different approach.' }, ctx);
+        assert.ok(r2.ok !== false, r2.error);
+        assert.strictEqual(removals.length, 0, 'non-amend probe must NOT delete the failed cell');
+        assert.strictEqual(nbDoc.cellCount, 2, 'failed cell stays as an honest trace');
+        assert.ok(!ctx._probeState.failedAttempt, 'marker cleared so a later amend cannot mis-delete');
+    });
+}
+
 // ── 5R5 cite_skill (replaces removed token heuristic) ───────────────────────────
 
 async function run5R5() {
     console.log('\n── 5R5: cite_skill (skill attribution) ──');
     const { handleCiteSkill } = require('../fairy/tools');
 
-    await ok('5R5: cite_skill persists the citation', async () => {
+    await ok('5R5: used-citation requires stepIds and persists evidence', async () => {
         const ctx = await makeCtx('cite-ok');
         ctx.recalledSkillRefs = ['@n/s@1'];
-        const r = await handleCiteSkill({ skillRef: '@n/s@1', how: 'used its Legendre relation' }, ctx);
+        const noSteps = await handleCiteSkill({ skillRef: '@n/s@1', how: 'used its Legendre relation' }, ctx);
+        assert.strictEqual(noSteps.ok, false, 'used-citation without stepIds must be rejected');
+        await ctx.workDir.addStep({ id: 'step_legendre', probeId: 'p001', code: 'x = 1', note: '', usesSymbols: [], definesSymbols: ['x'] });
+        const r = await handleCiteSkill({ skillRef: '@n/s@1', how: 'used its Legendre relation', stepIds: ['step_legendre'] }, ctx);
         assert.ok(r.ok !== false, r.error);
         const cited = await ctx.workDir.loadCitedSkills();
         assert.strictEqual(cited.length, 1);
-        assert.strictEqual(cited[0].skillRef, '@n/s@1');
-        assert.ok(cited[0].how.includes('Legendre'));
+        assert.strictEqual(cited[0].disposition, 'used');
+        assert.deepStrictEqual(cited[0].stepIds, ['step_legendre']);
+    });
+    await ok('5R5: citation with only unknown stepIds is rejected', async () => {
+        const ctx = await makeCtx('cite-orphan');
+        ctx.recalledSkillRefs = ['@n/s@1'];
+        const r = await handleCiteSkill({ skillRef: '@n/s@1', how: 'x', stepIds: ['step_ghost'] }, ctx);
+        assert.strictEqual(r.ok, false);
+        assert.strictEqual(r.kind, 'no_surviving_steps');
+    });
+    await ok('5R5: pass_over is first-class and needs no stepIds', async () => {
+        const ctx = await makeCtx('cite-pass');
+        ctx.recalledSkillRefs = ['@n/s@1'];
+        const r = await handleCiteSkill({ skillRef: '@n/s@1', how: 'method did not apply to this task', disposition: 'pass_over' }, ctx);
+        assert.ok(r.ok !== false, r.error);
+        const cited = await ctx.workDir.loadCitedSkills();
+        assert.strictEqual(cited[0].disposition, 'pass_over');
+        assert.deepStrictEqual(cited[0].stepIds, []);
     });
     await ok('5R5: cite_skill rejects a non-recalled skill', async () => {
         const ctx = await makeCtx('cite-bad');
@@ -464,7 +789,7 @@ async function runS2Submit() {
 // ── main ─────────────────────────────────────────────────────────────────────
 
 async function main() {
-    for (const s of [run5R2, run5R3, run5R1, run5R5, run5R6, run5R8, run5R9, runS2Inbox, runS2Submit, runSpec]) await s();
+    for (const s of [run5R2, run5R3, run5R1, run5R11, run5R5, run5R6, run5R8, run5R9, runS2Inbox, runS2Submit, runSpec]) await s();
     console.log(`\n── Stage 5 Results: ${passCount} passed, ${failCount} failed ──`);
     if (failures.length) {
         for (const { label, err } of failures) {

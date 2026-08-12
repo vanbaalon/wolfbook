@@ -8,8 +8,6 @@
  *   harness.compile — closure computation, static checks, auto-extend
  *   harness.staticCheck — conflict detection, missing dep detection
  *   harness.computeClosure — BFS, missing-step detection
- *   harness.autoCorrectMissingStep — symbol extraction
- *   kernelVerifier  — buildVerifyScript, parseVerifyOutput (no real kernel)
  *   prompts         — buildExploreUserMessage, buildDiagnoseUserMessage
  *
  * No real Wolfram kernel required. The verify/subprocess path is NOT tested here
@@ -53,8 +51,7 @@ Module._resolveFilename = function (req, parent, ...rest) {
 
 // ── Load modules under test ──────────────────────────────────────────────────
 const { FairyFSM, DEFAULTS }              = require('../fairy/fsm');
-const { computeClosure, staticCheck, autoCorrectMissingStep, compile } = require('../fairy/harness');
-const { buildVerifyScript, parseVerifyOutput } = require('../fairy/kernelVerifier');
+const { computeClosure, staticCheck, compile } = require('../fairy/harness');
 const { buildExploreUserMessage, buildDiagnoseUserMessage, buildBudgetReminderMessage, FAIRY_SYSTEM_PROMPT } = require('../fairy/prompts');
 const { createWorkDir }                   = require('../fairy/workDir');
 
@@ -449,141 +446,6 @@ await t('compile: single step (no deps)', async () => {
     ok(r.ok);
     eq(r.closureSteps.length, 1);
     eq(r.phase, 'verify');
-});
-
-// ════════════════════════════════════════════════════════════════════════════
-// harness.autoCorrectMissingStep
-// ════════════════════════════════════════════════════════════════════════════
-
-console.log('\n── harness.autoCorrectMissingStep ──');
-
-await t('extracts symbol from Wolfram error message', () => {
-    const verifyResult = {
-        classification: 'missing_step',
-        firstFailureCell: 'step_b_cell',
-        freshOutput: 'Symbol "myFunc" in context "Global`" is not defined',
-    };
-    const allValid = [
-        makeStep('step_helper', [], [], ['myFunc']),
-        makeStep('step_b', [], ['myFunc'], ['result']),
-    ];
-    const result = autoCorrectMissingStep(verifyResult, allValid, []);
-    ok(result, 'returns updated includeSteps');
-    ok(result.includes('step_helper'), 'step_helper added to includeSteps');
-});
-
-await t('returns null for non-missing-step classification', () => {
-    const result = autoCorrectMissingStep(
-        { classification: 'output_differs', freshOutput: '' },
-        [],
-        []
-    );
-    eq(result, null);
-});
-
-await t('returns null when no step defines the missing symbol', () => {
-    const verifyResult = {
-        classification: 'missing_step',
-        freshOutput: 'Symbol "unknownSym" in context "Global`" is not defined',
-    };
-    const result = autoCorrectMissingStep(verifyResult, [], []);
-    eq(result, null, 'null when no step defines the symbol');
-});
-
-await t('does not re-add step already in includeSteps', () => {
-    const verifyResult = {
-        classification: 'missing_step',
-        freshOutput: 'Symbol "myFunc" in context "Global`" is not defined',
-    };
-    const allValid = [makeStep('step_helper', [], [], ['myFunc'])];
-    const result = autoCorrectMissingStep(verifyResult, allValid, ['step_helper']);
-    eq(result, null, 'no new step found to add (already included)');
-});
-
-// ════════════════════════════════════════════════════════════════════════════
-// kernelVerifier helpers (no subprocess)
-// ════════════════════════════════════════════════════════════════════════════
-
-console.log('\n── kernelVerifier helpers ──');
-
-await t('buildVerifyScript: generates sentinels for each cell', () => {
-    const cells = [
-        { id: 'cell_a', kind: 2, language: 'wolfram', value: 'a = 1', outputs: [], metadata: {} },
-        { id: 'cell_b', kind: 2, language: 'wolfram', value: 'b = a + 1', outputs: [], metadata: {} },
-    ];
-    const script = buildVerifyScript(cells, 30);
-    ok(script.includes('__WB_CELL_START__ cell_a'), 'start sentinel for cell_a');
-    ok(script.includes('__WB_CELL_START__ cell_b'), 'start sentinel for cell_b');
-    ok(script.includes('__WB_CELL_END__ cell_a'),   'end sentinel for cell_a');
-    ok(script.includes('__WB_CELL_END__ cell_b'),   'end sentinel for cell_b');
-    ok(script.includes('a = 1'),     'code for cell_a');
-    ok(script.includes('b = a + 1'), 'code for cell_b');
-    ok(script.includes('Exit[];'),   'Exit at end');
-    ok(script.includes('ToString[$wbResult$, InputForm]'), 'InputForm wrapping');
-    ok(script.includes('TimeConstrained'), 'timeout wrapping');
-});
-
-await t('buildVerifyScript: skips markup cells (kind=1)', () => {
-    const cells = [
-        { id: 'markup', kind: 1, language: 'markdown', value: '# Header', outputs: [], metadata: {} },
-        { id: 'code',   kind: 2, language: 'wolfram',  value: 'x = 5',   outputs: [], metadata: {} },
-    ];
-    const script = buildVerifyScript(cells, 30);
-    notOk(script.includes('__WB_CELL_START__ markup'), 'markup cell skipped');
-    ok(script.includes('__WB_CELL_START__ code'), 'code cell included');
-});
-
-await t('parseVerifyOutput: extracts cell results', () => {
-    const stdout = [
-        '__WB_CELL_START__ cell_a',
-        '1',
-        '__WB_CELL_END__ cell_a',
-        '__WB_CELL_START__ cell_b',
-        '2',
-        '__WB_CELL_END__ cell_b',
-    ].join('\n');
-    const cells = [
-        { id: 'cell_a', kind: 2 },
-        { id: 'cell_b', kind: 2 },
-    ];
-    const results = parseVerifyOutput(stdout, cells);
-    ok(results.has('cell_a'), 'cell_a parsed');
-    ok(results.has('cell_b'), 'cell_b parsed');
-    eq(results.get('cell_a').output, '1');
-    eq(results.get('cell_b').output, '2');
-    notOk(results.get('cell_a').error);
-    notOk(results.get('cell_a').timeout);
-});
-
-await t('parseVerifyOutput: detects timeout sentinel', () => {
-    const stdout = [
-        '__WB_CELL_START__ cell_a',
-        '__WB_CELL_TIMEOUT__ cell_a',
-        '__WB_CELL_END__ cell_a',
-    ].join('\n');
-    const results = parseVerifyOutput(stdout, [{ id: 'cell_a', kind: 2 }]);
-    ok(results.get('cell_a').timeout, 'timeout detected');
-});
-
-await t('parseVerifyOutput: handles multi-line output', () => {
-    const stdout = [
-        '__WB_CELL_START__ cell_a',
-        'line1',
-        'line2',
-        'line3',
-        '__WB_CELL_END__ cell_a',
-    ].join('\n');
-    const results = parseVerifyOutput(stdout, [{ id: 'cell_a', kind: 2 }]);
-    const out = results.get('cell_a').output;
-    ok(out.includes('line1'), 'line1 in output');
-    ok(out.includes('line3'), 'line3 in output');
-});
-
-await t('parseVerifyOutput: no output for missing cells', () => {
-    const stdout = '__WB_CELL_START__ cell_a\n1\n__WB_CELL_END__ cell_a\n';
-    const results = parseVerifyOutput(stdout, [{ id: 'cell_a', kind: 2 }, { id: 'cell_b', kind: 2 }]);
-    ok(results.has('cell_a'), 'cell_a present');
-    notOk(results.has('cell_b'), 'cell_b not present (not in stdout)');
 });
 
 // ════════════════════════════════════════════════════════════════════════════

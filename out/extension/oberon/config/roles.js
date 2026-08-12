@@ -45,6 +45,7 @@ function resolveRole(role) {
                 role, provider: oberon.provider, model: oberon.model,
                 pricing: oberon.pricing, maxTokens: oberon.maxTokens,
                 contextWindow: oberon.contextWindow, configured: oberon.configured,
+                thinking: oberon.thinking, reasoningEffort: oberon.reasoningEffort,
             };
         }
     }
@@ -66,6 +67,24 @@ function resolveRole(role) {
         }
     }
 
+    // slidewright: the on-canvas Wolfslide design assistant (Stage 3 AI co-designer).
+    // Maps a natural-language instruction on the SELECTED blocks into a small plan of
+    // design verbs (+ occasional prose edits). Reuses the model transport but NOT the
+    // Oberon quest/charm lifecycle — it's a sub-second, preview-first, single-shot call.
+    // Falls back to the fairy binding; override via wolfbook.oberon.roles.slidewright.
+    // Small output cap — plans are compact JSON.
+    if (role === 'slidewright') {
+        const override = settings.roleBinding('slidewright');
+        if (!(override && Object.keys(override).length)) {
+            const fairy = resolveRole('fairy');
+            return {
+                role, provider: fairy.provider, model: fairy.model,
+                pricing: fairy.pricing, maxTokens: 1200,
+                contextWindow: fairy.contextWindow, configured: fairy.configured,
+            };
+        }
+    }
+
     const binding = settings.roleBinding(role) || {};
     const provider     = String(binding.provider     || '');
     const model        = String(binding.model        || '');
@@ -79,7 +98,12 @@ function resolveRole(role) {
     const maxTokens    = Number(binding.maxTokens    || 0) || null;   // null = use call-site default
     const contextWindow= Number(binding.contextWindow|| 0) || null;   // null = unknown
     const configured = providerConfigured(provider) && !!model;
-    return { role, provider, model, pricing, maxTokens, contextWindow, configured };
+    // Thinking-mode opt-in per role (DeepSeek V4 dual-mode; default OFF).
+    // Set e.g. wolfbook.oberon.roles.oberon: { ..., "thinking": true,
+    // "reasoningEffort": "high" } — the adapter handles the wire contract.
+    const thinking        = binding.thinking === true;
+    const reasoningEffort = (typeof binding.reasoningEffort === 'string' && binding.reasoningEffort) || null;
+    return { role, provider, model, pricing, maxTokens, contextWindow, configured, thinking, reasoningEffort };
 }
 
 function providerConfigured(provider) {

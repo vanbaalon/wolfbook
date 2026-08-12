@@ -186,6 +186,21 @@ function wardOut(summary, results) {
         assert(text.includes('kind="unverified"'));
     });
 
+    await t('Scribe: partial_success never promotes findings as verified', async () => {
+        await wipe();
+        const bus = new FakeBus();
+        const r = await runScribe({
+            quest: quest(), charm: charm(), scroll: scroll(),
+            reviewOut: reviewOut('partial_success'), wardOut: null,
+            runId: 'R-PARTIAL', bus,
+        });
+        assert.strictEqual(r.kind, 'unverified');
+        assert.strictEqual(r.findingsWritten, 0);
+        assert.strictEqual(r.findingsExcluded, 1);
+        const text = await fsp.readFile(grimoire.grimoireFilePath(), 'utf8');
+        assert(text.includes('kind="unverified"'));
+    });
+
     // (7. Scribe ward-failure downgrade removed — the Wards/Skeptic layer was
     //  deleted; the Fairy's clean.wb run is now the only verification.)
 

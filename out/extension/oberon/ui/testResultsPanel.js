@@ -1,14 +1,22 @@
 'use strict';
 /**
- * Oberon — Test Results Panel (WebviewPanel backend).
+ * Oberon — Gold Suite Panel (WebviewPanel backend).
  *
- * Singleton panel.  Opened by 'wolfbook.oberon.runTestSuite'.  Starts the
- * TestSuiteRunner when shown and streams progress to the webview.
+ * Singleton panel.  Opened by 'wolfbook.oberon.runTestSuite'.  Since the
+ * Stage-0 rebuild the suite is the 25-task kernel-verified gold benchmark:
+ * every task is a REAL fairy run (5–30 min, real LLM cost), so the panel
+ * never auto-starts — it opens a picker (starter subset / pick tasks /
+ * full suite) and streams progress to the webview.
  */
 
 const vscode = require('vscode');
 const path   = require('path');
 const fs     = require('fs');
+const gold        = require('../tests/goldRunner');
+const wolframShim = require('../core/wolframShim');
+
+/** Cheap end-to-end starter — the recommended first baseline (see GOLD_SUITE.md). */
+const STARTER_TASKS = ['GT14', 'GT15', 'GT01', 'GT05', 'TS04'];
 
 const VIEW_TYPE = 'wolfbook.oberon.testResults';
 
@@ -50,6 +58,8 @@ class TestResultsPanel {
         this._lastAnalytics = null;
         this._inProgress   = [];   // live results so far
         this._currentIndex = -1;
+        this._lastRunOpts  = null; // { taskIds, label } of the last started run
+        this._total        = 0;
 
         // Wire runner events
         runner.on('started', () => {
@@ -58,7 +68,7 @@ class TestResultsPanel {
             this._currentIndex = -1;
             this._lastResults  = null;
             this._lastAnalytics = null;
-            this._post({ command: TO.SUITE_STARTED, total: 10 });
+            this._post({ command: TO.SUITE_STARTED, total: this._total || 0 });
         });
         runner.on('testStarted', ({ index, test }) => {
             this._currentIndex = index;
@@ -78,24 +88,110 @@ class TestResultsPanel {
         });
     }
 
-    /** Open or reveal the panel.  Starts the suite if not already running. */
+    /** Open or reveal the panel, then offer the task picker (never auto-runs). */
     async show() {
         if (this._panel) {
             this._panel.reveal(vscode.ViewColumn.Active, false);
         } else {
             this._createPanel();
         }
-
         if (!this._runner.isRunning) {
-            // If there's an active research run, warn and bail
-            if (this._runManager.isActive) {
+            // Small delay so the webview script has time to load before any state post
+            setTimeout(() => this._pickAndRun().catch(() => {}), 300);
+        }
+    }
+
+    /**
+     * Interactive flow: mode (starter / pick / full) → optional multi-pick →
+     * report label → run. Cancelling anywhere leaves the panel idle showing
+     * the previous results (if any).
+     */
+    async _pickAndRun() {
+        if (this._runner.isRunning) return;
+        if (this._runManager.isActive) {
+            vscode.window.showWarningMessage(
+                'Oberon: a run is already active — abort it before starting the gold suite.');
+            this._replayIdle();
+            return;
+        }
+        try {
+            const k = wolframShim.kernelStatus();
+            if (!k.available) {
                 vscode.window.showWarningMessage(
-                    'Oberon: a run is already active — abort it before starting the test suite.',
-                );
+                    `Oberon Gold Suite: Wolfram kernel is not available (${k.reason || 'unknown'}). ` +
+                    'Open any .wb notebook to start a kernel, then run the suite again.');
+                this._replayIdle();
                 return;
             }
-            // Small delay so the webview script has time to load
-            setTimeout(() => this._runner.run().catch(() => {}), 300);
+        } catch (_) {}
+
+        const mode = await vscode.window.showQuickPick([
+            {
+                id: 'starter', label: '$(beaker) Starter subset  (recommended first)',
+                description: STARTER_TASKS.join(', '),
+                detail: '5 cheap tasks — smokes the whole loop: fairy run → fresh-kernel verify → report.',
+            },
+            {
+                id: 'pick', label: '$(checklist) Pick tasks…',
+                description: 'choose from all 25',
+                detail: 'Each task is one real fairy run (5–30 min). Day-to-day: re-run the subset you are working on.',
+            },
+            {
+                id: 'full', label: '$(flame) Full suite',
+                description: 'all 25 tasks',
+                detail: 'HOURS of wall-clock and real LLM cost — for recording a full baseline, prefer off-peak.',
+            },
+        ], {
+            title: 'Oberon Gold Suite — kernel-verified benchmark',
+            placeHolder: 'What should run? (Esc to just view previous results)',
+        });
+        if (!mode) { this._replayIdle(); return; }
+
+        let taskIds = null;
+        if (mode.id === 'starter') {
+            taskIds = STARTER_TASKS.slice();
+        } else if (mode.id === 'pick') {
+            const prev = new Set((this._lastRunOpts && this._lastRunOpts.taskIds) || STARTER_TASKS);
+            const items = gold.allTasks().map(t => ({
+                label: t.id,
+                description: t.title,
+                detail: `${t.verify} · ${t.category}`,
+                picked: prev.has(t.id),
+            }));
+            const sel = await vscode.window.showQuickPick(items, {
+                canPickMany: true,
+                title: 'Gold tasks to run',
+                placeHolder: 'Each selected task = one real fairy run (5–30 min, ~$0.05–0.2)',
+            });
+            if (!sel || !sel.length) { this._replayIdle(); return; }
+            taskIds = sel.map(s => s.label);
+        } else {
+            const go = await vscode.window.showWarningMessage(
+                'Run the FULL gold suite? 25 sequential fairy runs — several hours of wall-clock ' +
+                'and real LLM cost. The kernel is restarted repeatedly throughout.',
+                { modal: true }, 'Run full suite');
+            if (go !== 'Run full suite') { this._replayIdle(); return; }
+        }
+
+        const label = await vscode.window.showInputBox({
+            title: 'Report label',
+            value: (this._lastRunOpts && this._lastRunOpts.label) || 'baseline',
+            prompt: 'Stamped into the report filename (.oberon/gold/gold-<time>-<label>.json)',
+        });
+        if (label === undefined) { this._replayIdle(); return; }
+
+        this._lastRunOpts = { taskIds, label: label || 'gold' };
+        try { this._total = gold.resolveTasks(taskIds).length; } catch (_) { this._total = 0; }
+        this._runner.run(this._lastRunOpts).catch(() => {});
+    }
+
+    /** Repaint the webview's idle state after a cancelled/blocked picker. */
+    _replayIdle() {
+        if (this._runner.isRunning) return;
+        if (this._lastResults) {
+            this._post({ command: TO.SUITE_COMPLETE, results: this._lastResults, analytics: this._lastAnalytics });
+        } else {
+            this._post({ command: TO.SUITE_ERROR, message: 'No run started — reopen the command (Oberon: Run Test Suite) or press Run Again to pick tasks.' });
         }
     }
 
@@ -167,14 +263,9 @@ class TestResultsPanel {
             return;
         }
         if (msg.command === FROM.RUN_AGAIN) {
-            if (this._runner.isRunning) return;
-            if (this._runManager.isActive) {
-                vscode.window.showWarningMessage(
-                    'Oberon: abort the current run before running the test suite again.',
-                );
-                return;
-            }
-            this._runner.run().catch(() => {});
+            // Re-opens the picker (pre-filled with the last selection) rather
+            // than blindly re-running — every task costs real money.
+            this._pickAndRun().catch(() => {});
         }
     }
 
@@ -204,11 +295,11 @@ class TestResultsPanel {
 </head>
 <body>
   <header class="topbar">
-    <div class="topbar__title"><span title="Oberon: the supervisor/planner/reviewer agent that orchestrates research">Oberon</span> · Test Suite</div>
+    <div class="topbar__title"><span title="Oberon: the supervisor/planner/reviewer agent that orchestrates research">Oberon</span> · Gold Suite</div>
     <div id="statusPill" class="topbar__pill" data-state="idle">idle</div>
     <div class="topbar__spacer"></div>
     <button id="abortBtn"   class="btn btn--danger"   style="display:none">Abort</button>
-    <button id="runAgainBtn" class="btn btn--secondary" style="display:none">Run Again</button>
+    <button id="runAgainBtn" class="btn btn--secondary" style="display:none">Run…</button>
   </header>
 
   <div id="progressBar" class="progress-bar" style="display:none">
@@ -223,7 +314,7 @@ class TestResultsPanel {
           <th>#</th>
           <th>Problem</th>
           <th title="Whether the pipeline run completed, errored, or was aborted — independent of correctness">Run Status</th>
-          <th title="Analytic verdict assigned by the LLM after reviewing the Fairy's Scroll output. A DONE run may still be PARTIAL or FAILED.">Analysis Verdict</th>
+          <th title="Kernel-verified verdict: a fresh kernel replays the delivered clean.wb and runs the task's machine verifier — no LLM judging. A DONE run may still be PARTIAL or FAILED (FAILED with a delivered run = false_delivered: the kernel refuted the claim).">Verdict</th>
           <th title="Total LLM API calls during this run (Planner + Fairy loop)">LLM calls</th>
           <th title="Tool invocations made by the Fairy agent while working on its Charm">Tool calls</th>
           <th>Cost</th>
@@ -237,9 +328,8 @@ class TestResultsPanel {
 
     <div id="analyticsSection" class="analytics-section" style="display:none">
       <div class="analytics-section__title">
-        Assessment by
-        <span title="The Fairy role LLM is used for the analytics call. This call is not counted in run costs.">Fairy</span>
-        (not counted in costs)
+        <span title="Verdicts come from fresh-kernel replay + per-task machine verifiers (goldRunner.js) — deterministic, no LLM judge, no extra cost.">Kernel-verified assessment</span>
+        (deterministic)
       </div>
       <div id="analyticsDistribution" class="analytics-distribution"></div>
       <div id="analyticsTotals"       class="analytics-totals"></div>
@@ -251,7 +341,7 @@ class TestResultsPanel {
     </div>
 
     <div id="emptyState" class="empty-state">
-      Starting test suite…
+      Choose tasks in the picker to start a run…
     </div>
   </div>
 

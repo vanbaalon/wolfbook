@@ -106,6 +106,38 @@ class ContributionReviewPanel {
             case 'approve': {
                 if (!m.rightsConfirmed) { this._post({ type: 'error', message: 'Tick the rights declaration before approving.' }); return; }
                 if (m.skillMd) await submit.saveSkillMd(m.id, m.skillMd);
+
+                // Stage A2 (2026-08-04): kernel verification gate. A published
+                // skill is trusted by every future run — v0.1.0 of the S_n skill
+                // shipped a confident FALSE claim ("no built-in exists") that came
+                // from a run's misdiagnosis. Every wolfram block must execute in a
+                // fresh kernel before the draft can leave this machine.
+                if (!m.skipVerification) {
+                    try {
+                        const shim = require('../core/wolframShim');
+                        const cur  = await submit.loadCandidate(m.id);
+                        const md   = m.skillMd || (cur && cur.skillMd) || '';
+                        const V    = require('../memory/skillVerify');
+                        if (V.extractWolframBlocks(md).length) {
+                            this._post({ type: 'verifying', id: m.id });
+                            await shim.restartKernel().catch(() => {});
+                            const res = await V.verifySkillBlocks(md, {
+                                evalOnce: (a) => shim.evalOnce(a), timeoutSeconds: 60,
+                            });
+                            if (!res.ok) {
+                                this._post({ type: 'verificationFailed', id: m.id,
+                                    report: V.renderVerification(res), failures: res.failures });
+                                return;
+                            }
+                            this._post({ type: 'verified', id: m.id, report: V.renderVerification(res) });
+                        }
+                    } catch (e) {
+                        // Verification infrastructure failure must not block a
+                        // human who has read the draft — surface and continue.
+                        this._post({ type: 'verificationSkipped', id: m.id, message: (e && e.message) || String(e) });
+                    }
+                }
+
                 const token = await submit.getToken(this._context.secrets);
                 if (!token) { this._post({ type: 'needSignIn' }); return; }
 
@@ -244,10 +276,15 @@ function renderDetail(id, manifest, skillMd){
       <button class="secondary" id="openNb">Open clean.wb</button>
       <button class="secondary" id="save">Save edits</button>
     </div>
+    <h2>Evidence preview</h2>
+    <div class="candidate"><b>Fresh execution:</b> ${ev.executed_fresh?'confirmed':'not confirmed'}<br><b>Source notebook:</b> ${manifest.cleanNbPath?'available locally; not uploaded':'not attached'}</div>
+    <h2>Redaction report</h2>
+    <div class="candidate"><b>Included:</b> ${esc(((manifest.redaction||{}).included||[]).join('; ')||'editable SKILL.md only')}<br><b>Omitted:</b> ${esc(((manifest.redaction||{}).omitted||[]).join('; '))}</div>
     <h2>SKILL.md (editable)</h2>
     <textarea id="md">\${esc(skillMd)}</textarea>
     <div id="dup"></div>
     <label class="rights"><input type="checkbox" id="rights"> I have the right to publish this content.</label>
+    <label class="rights"><input type="checkbox" id="redaction"> I reviewed the draft and redaction report; only the displayed SKILL.md may be uploaded.</label>
     <div class="row">
       <button id="approve" disabled>Approve &amp; submit (private draft)</button>
       <button class="secondary" id="decline">Decline (keep local)</button>
@@ -255,13 +292,14 @@ function renderDetail(id, manifest, skillMd){
     </div>
     <p class="muted" id="status"></p>\`;
   document.getElementById('back').onclick = ()=>{ d.classList.add('hidden'); CURRENT=null; };
-  document.getElementById('rights').onchange = (e)=>{ document.getElementById('approve').disabled = !e.target.checked; };
+  const gate=()=>{ document.getElementById('approve').disabled=!(document.getElementById('rights').checked&&document.getElementById('redaction').checked); };
+  document.getElementById('rights').onchange = gate; document.getElementById('redaction').onchange = gate;
   document.getElementById('openNb').onclick = ()=>vscode.postMessage({command:'openNotebook', id});
   document.getElementById('save').onclick = ()=>vscode.postMessage({command:'saveEdits', id, skillMd: document.getElementById('md').value});
   document.getElementById('decline').onclick = ()=>vscode.postMessage({command:'decline', id});
   document.getElementById('discard').onclick = ()=>{ if(confirm('Delete this candidate?')) vscode.postMessage({command:'discard', id}); };
   document.getElementById('approve').onclick = ()=>vscode.postMessage({
-    command:'approve', id, rightsConfirmed: document.getElementById('rights').checked, skillMd: document.getElementById('md').value
+    command:'approve', id, rightsConfirmed: document.getElementById('rights').checked&&document.getElementById('redaction').checked, skillMd: document.getElementById('md').value
   });
 }
 
@@ -278,6 +316,15 @@ window.addEventListener('message', e=>{
     if(dup) dup.innerHTML = '<div class="dup">A similar skill already exists: <b>'+esc(m.match.ref)+'</b><br><span class="muted">'+esc(m.match.summary)+'</span><div class="row" style="margin-top:6px"><button id="ackUse" class="secondary">Acknowledge usage instead</button><button id="forceNew">Submit as new anyway</button></div></div>';
     const ack=document.getElementById('ackUse'); if(ack) ack.onclick=()=>vscode.postMessage({command:'acknowledgeUsage', id:m.id});
     const fn=document.getElementById('forceNew'); if(fn) fn.onclick=()=>vscode.postMessage({command:'approve', id:m.id, rightsConfirmed:true, forceNew:true, skillMd:document.getElementById('md').value});
+  }
+  else if (m.type==='verifying'){ const s=document.getElementById('status'); if(s) s.textContent='Verifying the skill\\'s code in a fresh kernel…'; }
+  else if (m.type==='verified'){ const s=document.getElementById('status'); if(s) s.textContent=m.report; }
+  else if (m.type==='verificationSkipped'){ const s=document.getElementById('status'); if(s) s.textContent='⚠️ Kernel verification unavailable ('+esc(m.message)+') — submitting unverified.'; }
+  else if (m.type==='verificationFailed'){
+    const dup=document.getElementById('dup');
+    if(dup) dup.innerHTML = '<div class="dup"><b>Kernel verification FAILED — not submitted.</b><pre style="white-space:pre-wrap;font-size:11px">'+esc(m.report)+'</pre><div class="row" style="margin-top:6px"><button id="fixMd" class="secondary">Fix the draft above</button><button id="skipVer">Submit anyway (I checked it myself)</button></div></div>';
+    const fx=document.getElementById('fixMd'); if(fx) fx.onclick=()=>{ dup.innerHTML=''; document.getElementById('md').focus(); };
+    const sv=document.getElementById('skipVer'); if(sv) sv.onclick=()=>vscode.postMessage({command:'approve', id:m.id, rightsConfirmed:true, skipVerification:true, skillMd:document.getElementById('md').value});
   }
   else if (m.type==='error'){ const s=document.getElementById('status'); if(s) s.textContent=m.message; }
 });

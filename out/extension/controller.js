@@ -27,6 +27,7 @@ const configCompat = require("./config-compat");
 
 // ---- Dev diagnostics: DEV_MODE, SCROLL_DEBUG, scrollLog, dynLog, _hexDump ----
 const { DEV_MODE, SCROLL_DEBUG, scrollLog, dynLog, _hexDump, truncateLogs } = require('./utils/dev-logger');
+const logPaths  = require('./utils/log-paths');
 
 // ---- String encoding helpers: escapeHtml, decodeWolframOctal, escapeWL ----
 const _encoding = require('./utils/encoding');
@@ -82,6 +83,10 @@ try {
     }
 } catch (e) {
     console.error("[Controller] Failed to load wstp.node:", e.message);
+    // Record why, so the launch-failure diagnostics (kernel/diagnose.js) can
+    // tell the user e.g. "addon built for the wrong architecture" instead of
+    // a bare "addon not available".
+    try { require('./kernel/diagnose').recordAddonLoadError(e); } catch (_) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -627,11 +632,9 @@ class WolframNotebookKernel {
             if (message.type === 'render-width-debug') {
                 try {
                     const _nbUri = _eventNbUri || vscode.window.activeNotebookEditor?.notebook?.uri;
-                    if (_nbUri && _nbUri.scheme === 'file') {
-                        const nbFsPath = _nbUri.fsPath;
-                        const nbBase = path.basename(nbFsPath, path.extname(nbFsPath));
-                        const logPath = path.join(path.dirname(nbFsPath), 'img', nbBase, 'btl.log');
-                        fs.mkdirSync(path.dirname(logPath), { recursive: true });
+                    const logPath = (_nbUri && _nbUri.scheme === 'file')
+                        ? logPaths.notebookLogFile(_nbUri.fsPath, 'btl.log') : null;
+                    if (logPath) {
                         const divsStr = (message.divs || []).map(d =>
                             `{pw:${d.pw} lb:${d.lb} rendW:${d.rendW ? d.rendW.toFixed(1) : 0}}`
                         ).join(' ');
@@ -661,11 +664,9 @@ class WolframNotebookKernel {
                 try {
                     const _nbUri = _eventNbUri ||
                         vscode.window.activeNotebookEditor?.notebook?.uri;
-                    if (_nbUri && _nbUri.scheme === 'file') {
-                        const nbFsPath = _nbUri.fsPath;
-                        const nbBase = path.basename(nbFsPath, path.extname(nbFsPath));
-                        const logPath = path.join(path.dirname(nbFsPath), 'img', nbBase, 'btl.log');
-                        fs.mkdirSync(path.dirname(logPath), { recursive: true });
+                    const logPath = (_nbUri && _nbUri.scheme === 'file')
+                        ? logPaths.notebookLogFile(_nbUri.fsPath, 'btl.log') : null;
+                    if (logPath) {
                         const entry =
                             `========================================================================\n` +
                             `${new Date().toISOString()}  [katex-feedback]\n` +
@@ -1278,15 +1279,20 @@ class WolframNotebookKernel {
         }
     }
 
-    /** Compute kernel debug log path: img/<nbBase>/wolfram-kernel-debug.log */
+    /**
+     * Kernel debug log path, under globalStorage (see utils/log-paths.js).
+     * Returns null when wolfbook.advanced.diagnosticLogs is off — checked on every
+     * call so turning the setting off stops writes without a reload, and never
+     * returns a cached path from when it was on.
+     * @returns {string|null}
+     */
     _resolveDebugLogPath() {
+        if (!logPaths.diagnosticsEnabled()) return null;
         // Try active notebook editor first
         const ed = vscode.window.activeNotebookEditor;
         if (ed && ed.notebook && ed.notebook.uri.scheme === 'file') {
-            const nbFsPath = ed.notebook.uri.fsPath;
-            const nbBase   = path.basename(nbFsPath, path.extname(nbFsPath));
-            const imgDir   = path.join(path.dirname(nbFsPath), 'img', nbBase);
-            this._lastDebugLogPath = path.join(imgDir, 'wolfram-kernel-debug.log');
+            this._lastDebugLogPath =
+                logPaths.notebookLogFile(ed.notebook.uri.fsPath, 'wolfram-kernel-debug.log');
         }
         // Fall back to cached path (e.g. during abort when no editor is focused)
         return this._lastDebugLogPath || null;

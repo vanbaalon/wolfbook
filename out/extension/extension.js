@@ -41,6 +41,10 @@ let wolframTmpDir;
 let kernel_initialized = false;
 let implicitTokensDecorationType = vscode.window.createTextEditorDecorationType({});
 async function activate(context) {
+    // Resolve the diagnostic-log root before anything can write. Logs go to
+    // globalStorage, never the workspace — see utils/log-paths.js.
+    require('./utils/log-paths').init(context);
+
     // Show a loading indicator while the extension activates
     const _loadingStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 1000);
     _loadingStatus.text = '$(loading~spin) Wolfbook loading…';
@@ -193,7 +197,7 @@ async function activate(context) {
         if (bp.location.uri.scheme !== 'vscode-notebook-cell') continue;
         _bpMgr.addBreakpointAt(bp.location.uri.toString(), bp.location.range.start.line);
     }
-    const _watchPanel  = new WatchPanelProvider();
+    const _watchPanel  = new WatchPanelProvider(context);
     const _askPanel    = new AskSpecialistPanel();
     const _debugCtrl   = new DebugController(() => controller, _bpMgr, _watchPanel);
 
@@ -508,6 +512,9 @@ async function activate(context) {
     try {
         const oberon = require('./oberon');
         _oberon = oberon.activate(context);
+        if (_oberon && _oberon.runManager) {
+            _watchPanel.setFairyRunActive(!!_oberon.runManager.isActive);
+        }
         devLog(LOG_CHANNELS.EXTENSION, '[Extension] Oberon foundation activated');
         // Feed Fairy telemetry (steps/cost/status) into the watch panel's Agents-tab
         // history so a launched run's metrics land on its prompt entry.

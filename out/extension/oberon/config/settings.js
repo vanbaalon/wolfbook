@@ -167,7 +167,6 @@ function recall() {
         enabled:         !!get('recall.enabled', true),
         usageTelemetry:  !!get('recall.usageTelemetry', true),
         skilxivBaseUrl:  String(get('recall.skilxiv.baseUrl',  'https://skilxiv.org') || 'https://skilxiv.org'),
-        skilxivApiToken: String(get('recall.skilxiv.apiToken', '')                     || ''),
     };
 }
 
@@ -193,13 +192,81 @@ function contribution() {
 function fairy() {
     return {
         askSpecialistEnabled: !!get('fairy.askSpecialistEnabled', true),
+        askSpecialistTimeoutSeconds: Math.max(15, Math.min(600, Number(get('fairy.askSpecialistTimeoutSeconds', 90)) || 90)),
+        askSpecialistMaxPerCharm: Math.max(0, Math.min(5, Number(get('fairy.askSpecialistMaxPerCharm', 1)) || 1)),
         rejectRedefinition:   !!get('fairy.rejectRedefinition', true),
+        // Dev feedback loop: one cache-warm LLM call right before compile asking the
+        // agent for a structured self-postmortem (what worked / what didn't / what to
+        // change). Saved to the charm dir + shown in working.wb + telemetry.
+        selfPostmortem:       !!get('fairy.selfPostmortem', true),
+        reasoning: fairyReasoning(),
+    };
+}
+
+/**
+ * Selective thinking for the fairy loop (2026-08-01). Full auto-think is
+ * suppressed at the adapter (reasoning_effort:'none' — it ran away unboundedly);
+ * instead thinking is turned ON for specific turns where judgment matters:
+ * phase entries (incl. the plan turn and every polish/run_clean decision),
+ * every `cadence` turns, and after `onFailureStreak` consecutive probe
+ * failures. `cadence: 0` disables ALL selective thinking.
+ *
+ * Empirics (live API, 2026-08-01): effort 'medium' ≈ 4–10k reasoning tokens
+ * and a clean tool call; 'high' ≈ 2×; **'low' is pathological** (41k tokens,
+ * truncation) — it is remapped to 'medium'. Mixed thinking/non-thinking turns
+ * interleave fine WITHOUT round-tripping reasoning_content (verified).
+ */
+function fairyReasoning() {
+    const stored = get('fairy.reasoning', null) || {};
+    const cadence = Number.isFinite(Number(stored.cadence)) ? Math.max(0, Math.min(50, Math.round(Number(stored.cadence)))) : 5;
+    let effort = typeof stored.effort === 'string' ? stored.effort : 'medium';
+    if (!['medium', 'high', 'max'].includes(effort)) effort = 'medium';   // 'low' runs away — never use it
+    return {
+        cadence,
+        effort,
+        onFailureStreak: Number.isFinite(Number(stored.onFailureStreak)) ? Math.max(0, Math.min(10, Math.round(Number(stored.onFailureStreak)))) : 2,
+        onPhaseEntry: stored.onPhaseEntry !== false,
+        planner: stored.planner !== false,
+        // Hard per-run cap on explore-side thinking turns (run baselineff/TS03:
+        // 18 uncapped thinks = 224k tokens = 78% of output — thinking must not
+        // scale linearly with failure count). Polish delivered-decision thinks
+        // are exempt (few and load-bearing).
+        maxPerRun: Number.isFinite(Number(stored.maxPerRun)) ? Math.max(0, Math.min(40, Math.round(Number(stored.maxPerRun)))) : 8,
     };
 }
 
 function toolLoopMultiplier() {
     const v = Number(get('toolLoopMultiplier', 2));
     return Number.isFinite(v) && v >= 1 ? v : 2;
+}
+
+/**
+ * The LIVE per-charm fairy budget — passed verbatim into `new FairyFSM(cfg)`
+ * (Stage 1 of the 2026-08 upgrade; before this the FSM always ran on its
+ * hard-coded defaults and `budgets.fairyDefault`/`toolLoopMultiplier` were
+ * display-only). Keys mirror fairy/fsm.js DEFAULTS exactly; any key absent
+ * from the stored object falls back to the FSM default, so bumped defaults
+ * auto-apply unless explicitly overridden.
+ */
+function fairyFsmBudget() {
+    const stored = cfg().get('budgets.fairyFsm');
+    if (!stored || typeof stored !== 'object') return {};
+    const out = {};
+    const int = (k, lo, hi) => {
+        const v = Number(stored[k]);
+        if (Number.isFinite(v)) out[k] = Math.max(lo, Math.min(hi, Math.round(v)));
+    };
+    int('probe_budget',             4, 400);
+    int('diagnose_probe_reserve',   0, 20);
+    int('max_turns',                8, 800);
+    int('max_backtracks',           0, 30);
+    int('max_diagnose_turns',       1, 60);
+    int('polish_run_clean_max',     1, 30);
+    int('polish_turns_max',         2, 80);
+    int('partial_report_turns_max', 2, 40);
+    const tol = Number(stored.numeric_tol);
+    if (Number.isFinite(tol) && tol > 0 && tol < 1) out.numeric_tol = tol;
+    return out;
 }
 
 /**
@@ -231,12 +298,12 @@ module.exports = {
     isEnabled,
     deepseekApiKey, deepseekBaseUrl, deepseekTimeoutMs,
     anthropicApiKey, openaiApiKey,
-    roleBinding, fairyDefaultBudget, runBudget,
+    roleBinding, fairyDefaultBudget, runBudget, fairyFsmBudget,
     priceTablePath,
     telemetry, mathematica, postmortem, git,
     notebookFirstExecution,
     executive, memory, director, replayPerCellTimeoutSeconds,
-    fairy, recall, contribution,
+    fairy, fairyReasoning, recall, contribution,
     toolLoopMultiplier,
     openSettingsUI, openProviderSettingsUI,
     onDidChange,

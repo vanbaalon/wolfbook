@@ -20,6 +20,7 @@ const project  = require('./project');
 const settings = require('../config/settings');
 const roles    = require('../config/roles');
 const { getAdapter } = require('../providers');
+const { assessTelemetry, toMarkdown } = require('../tests/researchEval');
 
 const POSTMORTEM_SYSTEM_PROMPT =
     'You are a concise science communicator writing a postmortem for an automated ' +
@@ -45,6 +46,7 @@ const POSTMORTEM_SYSTEM_PROMPT =
  *   charmNotebookPath?:   string|null,
  *   scrollFileRef?:      { path: string }|null,
  *   runSummary?:         object|null,    // RunManager summary snapshot
+ *   runEvents?:          object[],       // captured before endRun clears the bus
  * }} opts
  * @returns {Promise<{ path: string } | null>}
  */
@@ -58,6 +60,32 @@ async function writePostmortem(opts) {
     const fp    = path.join(dir, `${safe}.md`);
     const md    = _renderMarkdown(opts);
     await fsp.writeFile(fp, md, 'utf8');
+
+    // Stage 1 research evaluation: deterministic capability sidecars. These
+    // intentionally leave semantic dimensions unassessed until a qualified
+    // grader supplies evidence; a clean replay alone is never scientific proof.
+    let capabilityReport = null;
+    try {
+        capabilityReport = assessTelemetry((opts && opts.runEvents) || [], {
+            runId, source: 'production_postmortem',
+        });
+        const jsonPath = path.join(dir, `${safe}.research-eval.json`);
+        const mdPath   = path.join(dir, `${safe}.research-eval.md`);
+        await Promise.all([
+            fsp.writeFile(jsonPath, JSON.stringify(capabilityReport, null, 2) + '\n', 'utf8'),
+            fsp.writeFile(mdPath, toMarkdown(capabilityReport) + '\n', 'utf8'),
+        ]);
+        await fsp.appendFile(fp, [
+            '', '## Research capability evaluation', '',
+            `- Assessed score: ${capabilityReport.summary.score == null ? 'n/a' : capabilityReport.summary.score.toFixed(3)}`,
+            `- Assessment coverage: ${(capabilityReport.summary.assessmentCoverage * 100).toFixed(1)}%`,
+            `- Machine report: \`${jsonPath}\``,
+            `- Human-readable report: \`${mdPath}\``,
+            '', '_Unassessed capabilities are excluded from the score; always read score and coverage together._', '',
+        ].join('\n'), 'utf8');
+    } catch (_) {
+        // Evaluation is diagnostic and must never prevent a postmortem.
+    }
 
     // ── Optional LLM narrative ────────────────────────────────────────────
     // Gated by `wolfbook.oberon.postmortem.narrativeEnabled` (default true).
@@ -75,7 +103,7 @@ async function writePostmortem(opts) {
         }
     }
 
-    return { path: fp };
+    return { path: fp, capabilityReport };
 }
 
 /**

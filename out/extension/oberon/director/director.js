@@ -46,6 +46,11 @@ const prompts  = require('./prompts');
 const analyst  = require('./analyst');
 const reportMod = require('./report');
 
+// Stage B3 escalation threshold: a stage that has failed this many attempts is
+// retried once on the stronger judgment binding rather than re-attempted on the
+// cheap execution model. Escalation economics (Pro ~3.1x Flash) say: rarely.
+const ESCALATE_AFTER = 2;
+
 // ── Director LLM plumbing ─────────────────────────────────────────────────────
 
 /**
@@ -366,6 +371,38 @@ async function runDirector({ brief, resumeDir, root, bus, signal = null, deps = 
             await state.saveProgramme(programme);
         }
 
+        // ── Stage B3: SESSION CANARY (plan §Stage 4 "session ritual") ───────
+        // One trivial kernel computation before spending a multi-stage budget.
+        // A Director programme is the most expensive thing this system runs; if
+        // the kernel is wedged, unlicensed, or answering nonsense, failing here
+        // costs seconds instead of dollars and a confusing failed programme.
+        if (typeof d.canaryEval === 'function') {
+            try {
+                const c = await d.canaryEval({ expression: 'Total[Range[10]] + Length[IntegerPartitions[4]]', timeoutSeconds: 30 });
+                const val = String((c && c.value) || '').trim();
+                const okCanary = c && c.ok !== false && /\b60\b/.test(val);   // 55 + 5
+                await bus.appendEvent('director.canary', {
+                    programmeId: programme.id, ok: !!okCanary, value: val.slice(0, 80),
+                }).catch(() => {});
+                if (!okCanary) {
+                    await bus.appendEvent('omen', {
+                        kind: 'director_canary_failed',
+                        message: `Kernel canary failed (expected 60, got "${val.slice(0, 60)}") — aborting before the stage loop.`,
+                    }).catch(() => {});
+                    programme.status = 'failed';
+                    programme.stopReason = 'kernel canary failed before stage 1 — the environment is not usable';
+                    await state.saveProgramme(programme);
+                    return { programme, aborted: true, reason: programme.stopReason };
+                }
+            } catch (e) {
+                // A canary that cannot RUN is inconclusive, not a failure: log and
+                // continue rather than blocking a programme on harness plumbing.
+                await bus.appendEvent('omen', {
+                    kind: 'director_canary_skipped', message: (e && e.message) || String(e),
+                }).catch(() => {});
+            }
+        }
+
         // ── B/C/D. STAGE LOOP ───────────────────────────────────────────────
         let handoff = null;   // fairy utils+facts carried between consecutive stages
         let stopAction = null;
@@ -433,11 +470,29 @@ async function runDirector({ brief, resumeDir, root, bus, signal = null, deps = 
             stage.scrollStatus = art.scroll && art.scroll.fairyArtifact && art.scroll.fairyArtifact.status || (art.errorNote ? 'error' : null);
             stage.confidence   = art.scroll && typeof art.scroll.confidence === 'number' ? art.scroll.confidence : null;
             stage.status       = statusFromArtifacts(art);
+            // ── Stage B3: HARNESS-GATED `passes` (plan §Stage 4 ledger protocol) ──
+            // `passes` records OBSERVED verification, never opinion: the stage
+            // authored validationChecks at plan time, the fairy executed them in a
+            // fresh-kernel replay, the replay was clean, and they were NOT
+            // downgraded to warnings. No LLM verdict may set this — the assess step
+            // below can only downgrade `status`, and never touches `passes`.
+            {
+                const fa = (art.scroll && art.scroll.fairyArtifact) || {};
+                const hadChecks   = Array.isArray(stage.validationChecks) && stage.validationChecks.length > 0;
+                const downgraded  = !!fa.validationDowngraded;
+                stage.passes = !!(hadChecks && stage.scrollStatus === 'delivered' && !downgraded);
+                stage.passesEvidence = hadChecks
+                    ? (stage.passes
+                        ? `${stage.validationChecks.length} plan-time check(s) passed in the fresh-kernel replay`
+                        : `checks ${downgraded ? 'DOWNGRADED to warnings' : `not confirmed (scroll: ${stage.scrollStatus || 'none'})`}`)
+                    : 'no plan-time validationChecks were authored for this stage';
+            }
             await state.saveProgramme(programme);
             await bus.appendEvent('director.stage_finished', {
                 programmeId: programme.id, stageId: stage.id,
                 status: stage.status, scrollStatus: stage.scrollStatus,
                 questId: stage.questId, cleanNbPath: stage.cleanNbPath,
+                passes: stage.passes, passesEvidence: stage.passesEvidence,
             }).catch(() => {});
             checkAbort();
 
@@ -462,6 +517,10 @@ async function runDirector({ brief, resumeDir, root, bus, signal = null, deps = 
             else if (assessment.verdict === 'partial' && stage.status === 'delivered') stage.status = 'partial';
             stage.endedAt = new Date().toISOString();
             await state.saveProgramme(programme);
+            // Stage B3: regenerate the progress digest after every stage — it is
+            // GENERATED from programme.json (never hand-kept), so a human checking
+            // in mid-run reads ledger truth, not a stale narrative.
+            try { await require('./report').writeProgressDigest(programme); } catch (_) {}
             await bus.appendEvent('director.stage_assessed', {
                 programmeId: programme.id, stageId: stage.id,
                 verdict: assessment.verdict, surprise: assessment.surprise,
@@ -485,6 +544,21 @@ async function runDirector({ brief, resumeDir, root, bus, signal = null, deps = 
                     const revived = state.makeStage({ ...assessment.revisedStage, id: stage.id });
                     revived.attempt = stage.attempt;           // attempts carry across revisions
                     revived.rationale = assessment.reason || revived.rationale;
+                    // ── Stage B3: ESCALATION (plan §Stage 4, "the only new routing")
+                    // A stage that has already failed ESCALATE_AFTER times is not
+                    // failing for want of another identical attempt — the cheap
+                    // execution model is out of its depth. Retry it once on the
+                    // stronger judgment binding. Hard cap: ONE escalation per
+                    // stage, and only when that role is actually configured.
+                    if (stage.attempt >= ESCALATE_AFTER && !stage.escalated) {
+                        const strongRole = cfg.escalateRole || 'oberon';
+                        revived.escalated    = true;
+                        revived.bindingRole  = strongRole;
+                        await bus.appendEvent('director.escalated', {
+                            programmeId: programme.id, stageId: revived.id,
+                            attempt: stage.attempt, role: strongRole, reason: assessment.reason || '',
+                        }).catch(() => {});
+                    }
                     // Keep the failed attempt's record under a shadow id for the
                     // report/history; superseded records never affect the outcome.
                     stage.id = `${stage.id}r${stage.attempt}`;

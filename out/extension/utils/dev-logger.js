@@ -13,10 +13,15 @@
  */
 
 // Detect developer machine by OS username.  Constant — evaluated once at load.
+// The usernames are matched by SHA-256 prefix rather than as plaintext literals:
+// this repo is public, and the behaviour is identical either way. Set
+// WOLFBOOK_DEV=1 to force dev mode on any machine.
 const DEV_MODE = (() => {
+    if (process.env.WOLFBOOK_DEV === '1') return true;
     try {
         const _u = require('os').userInfo().username;
-        return _u === 'k0959535' || _u === 'nikolay' || _u === 'nikolayold';
+        const _h = require('crypto').createHash('sha256').update(_u).digest('hex').slice(0, 16);
+        return ['df8bf20ffe645ce3', '4f96b2cb54873e10', '9b6ce9bfec2e421b'].includes(_h);
     } catch (_) { return false; }
 })();
 
@@ -91,26 +96,24 @@ function isChannelEnabled(ch) { return DEV_MODE && !!((_enabledMask) & ch); }
 // Code that calls scrollLog() already checks this implicitly via scrollLog().
 const SCROLL_DEBUG = DEV_MODE;  // kept for import compat — real check is in scrollLog()
 
-// Log file paths — resolved lazily on first write so the workspace folder list
-// is available (it isn't populated at require() time).
-let _scrollLogPath = null;
-let _dynLogPath    = null;
-let _wstpLogPath   = null;
-
-function _resolveScrollLogPath() {
-    if (_scrollLogPath) return _scrollLogPath;
+// Log file paths. These used to live in <workspace>/Temporary Docs/, which meant every
+// keystroke of diagnostics was written into a Dropbox-synced folder. They now go to
+// globalStorage via utils/log-paths.js, and only when the user opts in via
+// wolfbook.advanced.diagnosticLogs.
+//
+// Resolved on each call rather than cached: the setting can be toggled at runtime, and
+// workspaceLogFile() returns null while diagnostics are off.
+function _logFile(name) {
     try {
-        const vscode  = require('vscode');
-        const folders = vscode.workspace && vscode.workspace.workspaceFolders;
-        if (!folders || folders.length === 0) return null;
-        const extFolder = folders.find(f => f.name === 'VSCodeWolframExtension');
-        const base = extFolder ? extFolder.uri.fsPath : folders[0].uri.fsPath;
-        _scrollLogPath = require('path').join(base, 'Temporary Docs', 'wolfbook-extension-debug.log');
-        _dynLogPath    = require('path').join(base, 'Temporary Docs', 'wolfbook-dynamic-debug.log');
-        _wstpLogPath   = require('path').join(base, 'Temporary Docs', 'wstp.log');
-    } catch (_) {}
-    return _scrollLogPath;
+        return require('./log-paths').workspaceLogFile(name);
+    } catch (_) {
+        return null;
+    }
 }
+
+function _scrollLogPath() { return _logFile('wolfbook-extension-debug.log'); }
+function _dynLogPath()    { return _logFile('wolfbook-dynamic-debug.log'); }
+function _wstpLogPath()   { return _logFile('wstp.log'); }
 
 /**
  * scrollLog — writes to DevTools console + wolfbook-extension-debug.log.
@@ -120,7 +123,7 @@ function scrollLog(...args) {
     if (!isChannelEnabled(LOG_CHANNELS.SCROLL)) return;
     const msg = '[scroll] ' + args.join(' ');
     console.log(msg);
-    const p = _resolveScrollLogPath();
+    const p = _scrollLogPath();
     if (p) {
         try {
             require('fs').appendFileSync(p, '[' + new Date().toISOString() + '] ' + msg + '\n');
@@ -136,10 +139,10 @@ function dynLog(...args) {
     if (!isChannelEnabled(LOG_CHANNELS.DYNAMICS)) return;
     const msg = args.join(' ');
     console.log('[dyn-dbg] ' + msg);
-    _resolveScrollLogPath();  // ensure _dynLogPath is set
-    if (_dynLogPath) {
+    const p = _dynLogPath();
+    if (p) {
         try {
-            require('fs').appendFileSync(_dynLogPath, '[' + new Date().toISOString() + '] ' + msg + '\n');
+            require('fs').appendFileSync(p, '[' + new Date().toISOString() + '] ' + msg + '\n');
         } catch (_) {}
     }
 }
@@ -153,7 +156,7 @@ function devLog(channel, prefix, ...args) {
     if (!isChannelEnabled(channel)) return;
     const msg = prefix + ' ' + args.join(' ');
     console.log(msg);
-    const p = _resolveScrollLogPath();
+    const p = _scrollLogPath();
     if (p) {
         try {
             require('fs').appendFileSync(p, '[' + new Date().toISOString() + '] ' + msg + '\n');
@@ -171,8 +174,9 @@ function _hexDump(str, n) {
 
 /**
  * wstpLog — append a WSTP traffic entry to wstp.log (dev machines only).
- * If notebookFsPath is an absolute path, writes to img/<notebook>/wstp.log.
- * Otherwise writes to global Temporary Docs/wstp.log.
+ * If notebookFsPath is an absolute path, writes to that notebook's log dir under
+ * globalStorage; otherwise to the shared workspace wstp.log. Both are no-ops unless
+ * wolfbook.advanced.diagnosticLogs is on.
  * Trims to last 400 lines if the file grows too large.
  */
 function wstpLog(notebookFsPath, ...args) {
@@ -181,16 +185,15 @@ function wstpLog(notebookFsPath, ...args) {
     const msg = args.join(' ');
     let logPath;
     if (typeof notebookFsPath === 'string' && _path.isAbsolute(notebookFsPath)) {
-        const nbBase = _path.basename(notebookFsPath, _path.extname(notebookFsPath));
-        logPath = _path.join(_path.dirname(notebookFsPath), 'img', nbBase, 'wstp.log');
+        try {
+            logPath = require('./log-paths').notebookLogFile(notebookFsPath, 'wstp.log');
+        } catch (_) { logPath = null; }
     } else {
-        _resolveScrollLogPath();
-        logPath = _wstpLogPath;
+        logPath = _wstpLogPath();
     }
     if (!logPath) return;
     try {
         const fs = require('fs');
-        fs.mkdirSync(_path.dirname(logPath), { recursive: true });
         fs.appendFileSync(logPath, '[' + new Date().toISOString() + '] ' + msg + '\n');
         const _lines = fs.readFileSync(logPath, 'utf8').split('\n');
         if (_lines.length > 400) fs.writeFileSync(logPath, _lines.slice(-400).join('\n'));
@@ -198,14 +201,13 @@ function wstpLog(notebookFsPath, ...args) {
 }
 
 /**
- * truncateLogs — wipe all debug log files at kernel start so only fresh data
- * is visible.  No-op if paths haven't been resolved yet or on non-dev machines.
+ * truncateLogs — wipe the workspace debug logs at kernel start so only fresh data
+ * is visible. No-op when diagnostics are off (the paths resolve to null).
  */
 function truncateLogs() {
-    _resolveScrollLogPath();
-    if (_dynLogPath)    try { require('fs').writeFileSync(_dynLogPath,    ''); } catch(_){}
-    if (_scrollLogPath) try { require('fs').writeFileSync(_scrollLogPath, ''); } catch(_){}
-    if (_wstpLogPath)   try { require('fs').writeFileSync(_wstpLogPath,   ''); } catch(_){}
+    for (const p of [_dynLogPath(), _scrollLogPath(), _wstpLogPath()]) {
+        if (p) try { require('fs').writeFileSync(p, ''); } catch (_) {}
+    }
 }
 
 module.exports = {

@@ -2,6 +2,9 @@
 
 → [Back to README](../README.md) · [Using Cline (any model — DeepSeek, Claude, GPT-4o…)](using_cline.md)
 
+> **Also new:** Wolfbook now ships an experimental in-extension research agent — see [Oberon](oberon-agent.md).
+
+
 Wolfbook exposes its kernel and notebook tools as an **MCP (Model Context Protocol) server**. This means any MCP-compatible AI agent can read your notebook, evaluate expressions, and manipulate cells — not just GitHub Copilot.
 
 ---

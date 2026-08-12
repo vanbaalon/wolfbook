@@ -183,7 +183,9 @@ await t('analyzeCode: WL builtins not in usesSymbols', () => {
     const r = analyzeCode('Integrate[f[x], {x, 0, 1}]');
     ok(!r.usesSymbols.includes('Integrate'), 'Integrate is a builtin');
     ok(r.usesSymbols.includes('f'),          'f is a user symbol');
-    ok(r.usesSymbols.includes('x'),          'x is a user symbol (Module would exclude it)');
+    // 2026-08-01: iterator-spec variables ({x, 0, 1}) are BOUND, not deps —
+    // they were the dominant missing_deps_gate false-positive class.
+    ok(!r.usesSymbols.includes('x'),         'x is bound by the iterator spec');
 });
 
 await t('analyzeCode: multi-step with interdependency', () => {
@@ -457,6 +459,20 @@ await t('handleRecord: happy path with dep inference', async () => {
 
     const valid = await ctx.workDir.loadValidSteps();
     eq(valid.length, 2, 'two valid steps now');
+    ok(valid[1].evidenceSnapshot, 'immutable evidence snapshot stored');
+    eq(valid[1].evidenceSnapshot.code, 'myF[5]');
+    eq(valid[1].evidenceSnapshot.output, '25');
+    ok(/^[a-f0-9]{64}$/.test(valid[1].evidenceSnapshot.sha256), 'snapshot is sha256-stamped');
+});
+
+await t('handleRecord: one probe cannot back two different steps', async () => {
+    const ctx = await makeCtx('record_probe_reuse');
+    await ctx.workDir.saveProbe('p001', { code: 'x=1', ok: true, value: '1', messages: null, durationMs: 1 });
+    const a = await handleRecord({ stepId: 'step_a', probeId: 'p001' }, ctx);
+    ok(a.ok, 'first binding accepted');
+    const b = await handleRecord({ stepId: 'step_b', probeId: 'p001' }, ctx);
+    ok(!b.ok, 'second binding rejected');
+    eq(b.kind, 'probe_already_recorded');
 });
 
 await t('handleRecord: duplicate stepId → error', async () => {
@@ -591,6 +607,36 @@ await t('dispatchFairyTool: routes to probe', async () => {
     shimStub._next = { ok: true, kind: 'ok', value: '7', messages: null, prints: null, durationMs: 1 };
     const r = await dispatchFairyTool({ name: 'probe', args: { code: '3+4' } }, ctx);
     ok(r.ok, `dispatched probe ok: ${r.error}`);
+});
+
+await t('ask_specialist: duplicate question is suppressed and answer reused', async () => {
+    const ctx = await makeCtx('ask_dedup');
+    let dialogs = 0;
+    ctx.askUser = async () => { dialogs++; return 'the planner check is invalid'; };
+    ctx.askState = { count: 0, cache: new Map(), max: 2 };
+    const a = await dispatchFairyTool({ name: 'ask_specialist', args: {
+        question: 'Is the negative ground-state validation condition incorrect?', context: 'E0 is positive',
+    } }, ctx);
+    const b = await dispatchFairyTool({ name: 'ask_specialist', args: {
+        question: 'Could the negative ground state validation check be incorrect?', context: 'same evidence',
+    } }, ctx);
+    ok(a.ok && b.ok);
+    eq(dialogs, 1, 'only one user dialog');
+    const payload = JSON.parse(b.modelPayload);
+    ok(payload.duplicate, 'second question marked duplicate');
+    eq(payload.answer, 'the planner check is invalid');
+});
+
+await t('ask_specialist: per-charm cap prevents additional dialogs', async () => {
+    const ctx = await makeCtx('ask_cap');
+    let dialogs = 0;
+    ctx.askUser = async () => { dialogs++; return ''; };
+    ctx.askState = { count: 1, cache: new Map(), max: 1 };
+    const r = await dispatchFairyTool({ name: 'ask_specialist', args: {
+        question: 'A completely different question requiring user input?',
+    } }, ctx);
+    eq(dialogs, 0);
+    ok(JSON.parse(r.modelPayload).capped);
 });
 
 // ════════════════════════════════════════════════════════════════════════════

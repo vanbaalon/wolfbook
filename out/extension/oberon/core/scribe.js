@@ -130,10 +130,15 @@ async function runScribe(opts) {
                 unverifiedFindings = findings.filter((_, i) =>  failedFindingIndices.has(i));
             }
         }
-    } else if (verdict === 'partial_success' && !wardsFailed) {
-        kind = 'verified';
-        verifiedFindings   = findings.slice();
-        unverifiedFindings = [];
+    } else if (verdict === 'partial_success') {
+        // A partial delivery did not complete fresh-kernel verification for its
+        // claimed chain. Individual results may be useful, but they remain open
+        // questions until inherited from an earlier verified claim or verified
+        // by a later delivered charm. Q41/C02 incorrectly promoted four repeated,
+        // cleanRan=false steps into the verified Grimoire through this branch.
+        kind = 'unverified';
+        verifiedFindings   = [];
+        unverifiedFindings = findings.slice();
     } else {
         // needs_review, failed, or no verdict at all: nothing here is a
         // verified fact.  We still record the cohort so the user can find

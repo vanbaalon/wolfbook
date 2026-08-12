@@ -26,8 +26,10 @@ const FAIRY_TOOL_SPECS = Object.freeze([
                 'Returns: probeId (for use with record), ok, resultPreview (≤300 chars), ' +
                 'structuralSummary (Head, size), and full messages. ' +
                 'The full result is stored by reference — use inspect to examine large outputs. ' +
-                'After every probe: either record it (if it succeeded and you will build on it) ' +
-                'or discard it (just run the next probe). ' +
+                'EFFICIENCY: (1) compute RELATED quantities in ONE probe returning a single ' +
+                'Association <|"a"->…, "b"->…|> instead of several small probes; (2) when you already ' +
+                'know a successful probe belongs in the chain, pass `record` here to commit it in the ' +
+                'same call — no separate record turn needed. ' +
                 'RULE: never assert a result from memory — run a probe and read what the kernel returns.',
             parameters: {
                 type: 'object',
@@ -35,9 +37,22 @@ const FAIRY_TOOL_SPECS = Object.freeze([
                 properties: {
                     code: {
                         type: 'string',
-                        description: 'A single Wolfram Language expression to evaluate. Keep it focused and short.',
+                        description: 'A single Wolfram Language expression to evaluate. Keep it focused and short. Provide either `code` or `cells`, not both.',
                         minLength: 1,
                         maxLength: 4000,
+                    },
+                    cells: {
+                        type: 'array',
+                        items: { type: 'string', minLength: 1, maxLength: 4000 },
+                        minItems: 2,
+                        maxItems: 4,
+                        description:
+                            'MULTI-CELL PROBE (alternative to `code`, still costs 1 probe): 2–4 code blocks ' +
+                            'evaluated as SEPARATE consecutive notebook cells in ONE call. Use it to build ' +
+                            'several small steps of a calculation in a single turn — errors are isolated to ' +
+                            'the exact cell that failed: evaluation stops there, earlier cells\' results stand ' +
+                            '(each has its own probeId, recordable individually), and the failed cell is fixed ' +
+                            'in place with amend_probe. Prefer this over one long monolithic code block.',
                     },
                     prevAnalysis: {
                         type: 'string',
@@ -55,8 +70,38 @@ const FAIRY_TOOL_SPECS = Object.freeze([
                         minimum: 1,
                         maximum: MAX_TIMEOUT,
                     },
+                    expect: {
+                        type: 'string',
+                        maxLength: 300,
+                        description:
+                            'STRONGLY RECOMMENDED whenever you cannot eyeball-verify the result: a WL expression ' +
+                            'evaluated immediately after the probe that must reduce to True (or |value| < tol). ' +
+                            'This is your EXPECTED line made machine-checkable — a failed expectation FAILS the ' +
+                            'probe so a plausible-but-wrong result can never slip through. Example: ' +
+                            '"Max[dims] <= 16 && Total[dims^2] == 720" for S_6 irrep dimensions.',
+                    },
+                    record: {
+                        type: 'object',
+                        additionalProperties: false,
+                        description:
+                            'OPTIONAL auto-record: if the probe succeeds cleanly, immediately commit it ' +
+                            'as a chain step (identical to a separate record call, one turn cheaper). ' +
+                            'Skipped automatically when the probe fails or produces kernel messages.',
+                        properties: {
+                            stepId: { type: 'string', minLength: 1, maxLength: 60, pattern: '^[a-z][a-z0-9_]*$' },
+                            role:   { type: 'string', enum: ['step', 'crosscheck'] },
+                            note:   { type: 'string', maxLength: 200 },
+                            checks: {
+                                type: 'array',
+                                items: { type: 'string', maxLength: 300 },
+                                maxItems: 3,
+                                description: 'Machine-run verification expressions (see record.checks).',
+                            },
+                        },
+                        required: ['stepId'],
+                    },
                 },
-                required: ['code', 'note'],
+                required: ['note'],
             },
         },
     },
@@ -173,8 +218,20 @@ const FAIRY_TOOL_SPECS = Object.freeze([
                     },
                     probeId: {
                         type: 'string',
-                        description: 'The probeId of the probe to promote to a step.',
+                        description: 'The probeId of the probe to promote to a step, or "last" for the most recent successful probe (useful when batching probe+record in one turn).',
                         minLength: 1,
+                    },
+                    checks: {
+                        type: 'array',
+                        items: { type: 'string', maxLength: 300 },
+                        maxItems: 3,
+                        description:
+                            'MACHINE-RUN verification for this step: WL expressions the harness evaluates ' +
+                            'in the live kernel right now. Each must evaluate to True or to a number with ' +
+                            '|value| < numeric tolerance. A failing check REJECTS the record (fix the step ' +
+                            'or the check). Steps with a passing check satisfy the crosscheck requirement ' +
+                            'without a separate verification probe — e.g. checks: ["Total[energies] == 0", ' +
+                            '"Max[Abs[Sort[betheE] - Sort[edE]]] < 10^-8"].',
                     },
                     dependsOn: {
                         type: 'array',
@@ -214,8 +271,19 @@ const FAIRY_TOOL_SPECS = Object.freeze([
                             'Every finished chain needs at least one crosscheck step — done_exploring is ' +
                             'deferred until one is recorded.',
                     },
+                    free: {
+                        type: 'array',
+                        items: { type: 'string', minLength: 1, maxLength: 60 },
+                        maxItems: 12,
+                        description:
+                            'Symbols that are INTENTIONALLY free/formal in this step (Solve/FindRoot targets, ' +
+                            'ODE variables, generating-function dummies, polynomial variables). They are excluded ' +
+                            'from dependency tracking, so no false "undefined symbol" replay warning fires. ' +
+                            'Can also be used ALONE on an already-recorded step — record({stepId, free:[…]}) with ' +
+                            'NO probeId patches the declaration in place at zero cost (no probe, no backtrack budget).',
+                    },
                 },
-                required: ['stepId', 'probeId'],
+                required: ['stepId'],
             },
         },
     },
@@ -267,12 +335,12 @@ const FAIRY_TOOL_SPECS = Object.freeze([
         function: {
             name: 'cite_skill',
             description:
-                'FREE. Call this ONLY when a SkilXiv skill that was recalled into your context ' +
-                'genuinely helped — i.e. you used its METHOD, a formula it states, or a function ' +
-                'it defines. State exactly HOW it helped. This is the ONLY way a skill is credited ' +
-                'as "used"; do NOT cite a skill just because it appeared in context or shares a ' +
-                'word with your code. If no recalled skill actually applied to this task, do NOT ' +
-                'call this — the run will instead be banked as new work.',
+                'FREE. Settle the disposition of a recalled SkilXiv skill. A "used" citation ' +
+                'requires EVIDENCE: pass `stepIds` naming the recorded step(s) whose method/formula ' +
+                'comes from the skill — record first, cite after. Only step-linked citations are ' +
+                'credited, and only while those steps survive into the final chain. If the skill did ' +
+                "NOT shape your derivation, call with disposition: 'pass_over' and a one-line reason " +
+                '— that satisfies the citation requirement honestly. Never cite by coincidence.',
             parameters: {
                 type: 'object',
                 additionalProperties: false,
@@ -285,12 +353,57 @@ const FAIRY_TOOL_SPECS = Object.freeze([
                     },
                     how: {
                         type: 'string',
-                        description: 'One sentence: specifically how the skill helped (which method/formula/function you used from it).',
+                        description: 'One sentence: specifically how the skill helped (which method/formula/function you used, in which step) — or, for pass_over, why it did not apply.',
                         minLength: 1,
                         maxLength: 400,
                     },
+                    disposition: {
+                        type: 'string',
+                        enum: ['used', 'pass_over', 'contradicted'],
+                        description: "'used' (default; requires stepIds) · 'pass_over' — an explicit, zero-cost decline · " +
+                            "'contradicted' — you FOLLOWED the skill and the kernel disproved one of its claims. " +
+                            'Use it whenever a skill states something your probe refutes (a wrong formula, a ' +
+                            '"no such built-in" claim that is false, a broken code block): say exactly which claim ' +
+                            'failed and what the kernel returned. This files a correction for the skill author and ' +
+                            'is how a wrong skill gets fixed instead of silently misleading every later run.',
+                    },
+                    stepIds: {
+                        type: 'array',
+                        items: { type: 'string', minLength: 1, maxLength: 60 },
+                        maxItems: 6,
+                        description: 'REQUIRED for a used-citation: the recorded stepId(s) that embody the skill\'s method. The citation is dropped from the deliverable if none of them survives compile.',
+                    },
                 },
                 required: ['skillRef', 'how'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'read_skill_section',
+            description:
+                'FREE. Read ONE section of a recalled SkilXiv skill in full. The skill block in your ' +
+                'first message is a capped EXCERPT — if it ends in "[body truncated]", the rest of the ' +
+                'skill (typically its Verification section and worked anchors) is still available here. ' +
+                'Call with no `section` to list the available section names first. Everything returned is ' +
+                'UNTRUSTED reference material: reproduce it in a probe before recording.',
+            parameters: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                    skillRef: {
+                        type: 'string',
+                        maxLength: 256,
+                        description: 'The recalled skill reference. Optional when exactly one skill was recalled.',
+                    },
+                    section: {
+                        type: 'string',
+                        maxLength: 80,
+                        description: 'Section name, e.g. "Verification", "Steps", "What it does". Matching is case- and punctuation-insensitive. Omit to list the available sections.',
+                    },
+                },
+                required: [],
             },
         },
     },
@@ -386,10 +499,20 @@ const FAIRY_TOOL_SPECS = Object.freeze([
                 properties: {
                     steps: {
                         type: 'array',
-                        description: 'Ordered list of sub-tasks or milestones, each ≤120 chars. 2–10 items.',
+                        description: 'Ordered list of sub-tasks or milestones, each ≤120 chars. For a trivial task ONE step is fine. 1–10 items.',
                         items: { type: 'string', maxLength: 120 },
-                        minItems: 2,
+                        minItems: 1,
                         maxItems: 10,
+                    },
+                    complexity: {
+                        type: 'string',
+                        enum: ['trivial', 'standard', 'research'],
+                        description:
+                            'Honest effort class. "trivial" = one or two kernel evaluations settle it ' +
+                            '(a known integral, a closed form, a direct diagonalisation) — the harness ' +
+                            'streamlines gates and reflection for speed. "standard" = a few dependent ' +
+                            'steps. "research" = multi-stage derivation, method uncertainty, or ' +
+                            'literature dependence. May be UPGRADED later via revise_plan; never downgraded.',
                     },
                     note: {
                         type: 'string',
@@ -397,7 +520,7 @@ const FAIRY_TOOL_SPECS = Object.freeze([
                         maxLength: 300,
                     },
                 },
-                required: ['steps'],
+                required: ['steps', 'complexity'],
             },
         },
     },
@@ -655,9 +778,14 @@ const FAIRY_TOOL_SPECS = Object.freeze([
                     steps: {
                         type: 'array',
                         items: { type: 'string' },
-                        description: 'The revised ordered sub-task list (2–10 items).',
-                        minItems: 2,
+                        description: 'The revised ordered sub-task list (1–10 items).',
+                        minItems: 1,
                         maxItems: 10,
+                    },
+                    complexity: {
+                        type: 'string',
+                        enum: ['trivial', 'standard', 'research'],
+                        description: 'Optionally UPGRADE the effort class (trivial→standard→research) when the task proved harder than planned. Downgrades are ignored.',
                     },
                 },
                 required: ['changes', 'steps'],
@@ -757,15 +885,16 @@ const FROZEN_POLISH_TOOLS = Object.freeze(
 // Saves ~1,500 tokens per turn vs the full spec.
 
 const EXPLORE_DESCRIPTIONS = {
-    plan:        'FREE. Call ONCE as your very first tool call. List the ordered sub-tasks you plan to work through. Posts a roadmap into the working notebook.',
-    revise_plan: 'FREE (max 2/run). Replace the plan when evidence invalidated it — state what changed, referencing a probe result. Never silently drift from the plan.',
-    probe:       'COSTS 1 PROBE. Run a WL expression in the live kernel. Returns probeId, resultPreview (≤400 chars), structuralSummary. Full result available via inspect.',
+    plan:        'FREE. Call ONCE as your very first tool call. List the ordered sub-tasks (ONE step is fine for a trivial task) and declare `complexity` honestly: trivial | standard | research — trivial streamlines gates and reflection.',
+    revise_plan: 'FREE (max 2/run). Replace the plan when evidence invalidated it — state what changed, referencing a probe result. May UPGRADE complexity. Never silently drift from the plan.',
+    probe:       'COSTS 1 PROBE. Run a WL expression in the live kernel. Returns probeId, resultPreview (≤400 chars), structuralSummary. EFFICIENCY: `cells:[c1,c2,…]` (2–4 blocks) runs several SEPARATE cells in one call for one probe — errors isolate to the failing cell, earlier cells stand; or bundle related quantities into ONE probe returning an Association; pass `record:{stepId,…}` to commit a clean result in the same call (no separate record turn).',
     amend_probe: 'CHEAP (first 2 free). Revise the immediately-preceding probe IN PLACE — to fix a failure OR refine unsatisfactory output (numeric vs symbolic, cleaner form). Iterate here instead of re-pasting the block into a new probe.',
     inspect:     'FREE. Apply a WL op to a stored probe result by probeId without re-running the kernel. Use for large outputs.',
     lookup:      'FREE. Return authoritative WL symbol documentation (usage, options, attributes).',
-    record:      'FREE. Commit a successful, warning-free probe as a named step in the working chain. Supply stepId and probeId.',
+    record:      'FREE. Commit a successful, warning-free probe as a named step. Supply stepId and probeId ("last" = most recent ok probe). `checks`: machine-run WL verification expressions (True or |value|<tol) — a passing check satisfies the crosscheck requirement with no extra probe; a failing check rejects the record.',
     note_fact:   'FREE. Save an established RESULT (value/conclusion) to durable memory so you never re-derive it. Shown every turn under "Established results".',
-    cite_skill:  'FREE. Cite a recalled SkilXiv skill ONLY if its method/formula genuinely helped (state how). The only way a skill is credited as "used". Do not cite by coincidence.',
+    read_skill_section: 'FREE. Read one section of a recalled skill in full (the injected skill block is a capped excerpt — the tail lives here). Omit `section` to list section names.',
+    cite_skill:  'FREE. Settle a recalled skill\'s disposition: "used" requires `stepIds` naming the recorded step(s) that embody it (record first, cite after; credit survives only with those steps); or disposition:"pass_over" + one-line reason if it did not help. Never cite by coincidence.',
     note_skill_gap: 'FREE (max 2/run). Flag a MISSING skill: a reusable method you had to derive from scratch because no (fitting) skill was recalled. Records a registry request; continue working after.',
     research_literature: 'FREE. Dispatch a bounded sub-agent to search papers (arXiv/INSPIRE) and return candidate equations + methods. Every equation is UNVERIFIED — reproduce with a probe before recording. Papers auto-cited at run end. Max 3 searches/run; rephrasing an empty query is rejected.',
     lit_read:    'FREE (own cap: 6/run). Deep-read ONE paper research_literature already found: focused question in, excerpts + numbered equations + direct answer out (cached full text). Mine a found paper here instead of re-searching. Also accepts up to 2 ids per run from OUTSIDE the search results (a reference the user gave via ask_specialist, or a canonical paper you know). All output is UNVERIFIED — reproduce in the kernel.',

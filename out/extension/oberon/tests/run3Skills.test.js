@@ -89,13 +89,12 @@ async function runI11() {
         assert.ok(/triage/.test(res.recallLog.error));
         assert.strictEqual(res.recallLog.triage.picks.length, 0);
     });
-    await ok('unparseable triage falls back to top-1', async () => {
+    await ok('unparseable triage injects no skill', async () => {
         const res = await runRecall('spectrum task', {
             client: mkClient(), llm: async () => 'I think maybe the second??? unclear', timeoutMs: 5000,
         });
-        // "2" appears in no digit form → _parseTriage returns null → top-1 kept.
-        assert.strictEqual(res.mode, 'consult');
-        assert.strictEqual(res.skillRef, '@a/su2-xxx-bethe@1');
+        assert.strictEqual(res.mode, 'none');
+        assert.strictEqual(res.recallLog.triageDegraded, true);
     });
     await ok('recallLog carries all candidates + scores', async () => {
         const res = await runRecall('task', { client: mkClient(), timeoutMs: 5000 });
@@ -124,16 +123,24 @@ async function runI13() {
         let remoteCalls = 0;
         const client = { requestSkill: async () => { remoteCalls++; return { ok: true }; } };
 
-        await ok('records locally + posts remotely', async () => {
+        await ok('records locally and waits for consent', async () => {
             const r = await skillGaps.recordSkillGap({
                 topic: 'nested Bethe ansatz solver for su(3) chains',
                 why: 'had to derive from scratch', source: 'agent', client,
             });
             assert.strictEqual(r.recorded, true);
-            assert.strictEqual(r.remote, true);
+            assert.strictEqual(r.remote, false);
+            assert.strictEqual(r.pendingConsent, true);
+            assert.strictEqual(remoteCalls, 0);
             const all = await skillGaps.loadSkillGaps();
             assert.strictEqual(all.length, 1);
             assert.strictEqual(all[0].source, 'agent');
+        });
+        await ok('explicit approval posts the reviewed gap remotely', async () => {
+            const all = await skillGaps.loadSkillGaps();
+            const r = await skillGaps.submitSkillGap(all[0], client);
+            assert.strictEqual(r.submitted, true);
+            assert.strictEqual(remoteCalls, 1);
         });
         await ok('near-identical topic deduped', async () => {
             const r = await skillGaps.recordSkillGap({

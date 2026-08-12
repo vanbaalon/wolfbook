@@ -3531,6 +3531,97 @@ class WolfslideCopySlides {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Consolidated tool: wolfslide_arrange — align and/or distribute blocks on a slide
+// ---------------------------------------------------------------------------
+
+class WolfslideArrangeTool {
+    prepareInvocation(options) {
+        const i = options.input || {};
+        const parts = [];
+        if (i.align) parts.push(`align:${i.align}`);
+        if (i.distribute) parts.push(`distribute:${i.distribute}`);
+        return { invocationMessage: `Arrange blocks${parts.length ? ' (' + parts.join(' + ') + ')' : ''}` };
+    }
+    async invoke(options, _token) {
+        const arrange = require('../slideArrange');
+        const input = options.input || {};
+        const align = input.align, distribute = input.distribute;
+        if (!align && !distribute) {
+            return _slideResult('Nothing to do. Pass "align" (left|hcenter|right|top|vcenter|bottom) and/or "distribute" (horizontal|vertical).');
+        }
+        if (align && arrange.ALIGN_EDGES.indexOf(align) < 0) {
+            return _slideResult(`Invalid align "${align}". Use one of: ${arrange.ALIGN_EDGES.join(', ')}.`);
+        }
+
+        const p = _getSlideProvider();
+        if (!p) return _slideResult('No .wslide editor is open.');
+        const docUri = input.docUri;
+        const deck = p.getDeck(docUri);
+        if (!deck || !Array.isArray(deck.slides)) return _slideResult('No deck found.');
+
+        // Resolve the slide (slideId > slideIndex; else the block search / first slide).
+        let sIdx = -1;
+        if (input.slideId) sIdx = deck.slides.findIndex(s => s.id === input.slideId);
+        else if (input.slideIndex != null) sIdx = input.slideIndex - 1;
+        else if (Array.isArray(input.blockIds) && input.blockIds.length) {
+            sIdx = deck.slides.findIndex(s => input.blockIds.some(id => _findBlockRecursive(id, s)));
+        }
+        if (sIdx < 0 && !input.slideId && input.slideIndex == null && !(input.blockIds || []).length) sIdx = 0;
+        const slide = deck.slides[sIdx];
+        if (!slide) return _slideResult('Slide not found. Pass slideIndex (1-based), slideId, or blockIds.');
+
+        // Gather target blocks: the given ids, else all absolute-positioned blocks on the slide.
+        const all = _collectAllBlocks(slide);
+        let targets, missing = [];
+        if (Array.isArray(input.blockIds) && input.blockIds.length) {
+            const byId = {}; all.forEach(b => { if (b && b.id) byId[b.id] = b; });
+            targets = input.blockIds.map(id => byId[id]).filter(Boolean);
+            missing = input.blockIds.filter(id => !byId[id]);
+        } else {
+            targets = all.filter(b => b && b.position === 'absolute');
+        }
+
+        // Only absolute-positioned blocks carrying real geometry can be arranged.
+        const skipped = targets.filter(b => !(b.position === 'absolute' && typeof b.w === 'number' && typeof b.h === 'number')).map(b => b.id);
+        const items = targets
+            .filter(b => b.position === 'absolute' && typeof b.w === 'number' && typeof b.h === 'number')
+            .map(b => ({ id: b.id, x: b.x || 0, y: b.y || 0, w: b.w, h: b.h, _b: b }));
+        const need = distribute ? 3 : 1;
+        if (items.length < need) {
+            return _slideResult(
+                `Need ${need}+ absolute-positioned block(s) with x/y/w/h on slide ${sIdx + 1}; found ${items.length}. ` +
+                `Flow/column blocks can't be geometry-arranged — give them position:"absolute" with x/y/w/h first (wolfslide_patchBlock).` +
+                (skipped.length ? `\nSkipped (not absolute or no size): ${skipped.join(', ')}` : '') +
+                (missing.length ? `\nNot found on this slide: ${missing.join(', ')}` : '')
+            );
+        }
+
+        const logs = [];
+        if (align) {
+            const relativeTo = input.relativeTo || (items.length < 2 ? 'slide' : 'selection');
+            const r = arrange.align(items, { edge: align, relativeTo });
+            if (r.error) return _slideResult(r.error);
+            logs.push(...r.changelog);
+        }
+        if (distribute) {
+            const r = arrange.distribute(items, { axis: distribute });
+            if (r.error) return _slideResult(r.error);
+            logs.push(...r.changelog);
+        }
+
+        // Write the new coordinates back onto the real blocks and persist.
+        items.forEach(it => { it._b.x = Math.round(it.x); it._b.y = Math.round(it.y); });
+        await p.applyDeck(deck, docUri);
+
+        const lines = [`Arranged ${items.length} block(s) on slide ${sIdx + 1} "${slide.label || slide.id || ''}":`];
+        lines.push(...logs.map(l => '  • ' + l));
+        if (skipped.length) lines.push(`  (skipped ${skipped.length} non-absolute/size-less block(s): ${skipped.join(', ')})`);
+        if (missing.length) lines.push(`  (blockIds not found on this slide: ${missing.join(', ')})`);
+        return _slideResult(lines.join('\n'));
+    }
+}
+
 module.exports = {
     WolfslideGetContextTool,
     WolfslideListSlidesTool,
@@ -3565,6 +3656,7 @@ module.exports = {
     WolfslideBlockTool,
     WolfslidePatchBlockTool,
     WolfslideAdvancedTool,
+    WolfslideArrangeTool,
     // Non-wolfslide tools that ended up in this file
     GetCellOutputTool,
     ValidateSyntaxTool,

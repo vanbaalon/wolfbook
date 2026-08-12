@@ -942,6 +942,27 @@ class SlideEditorProvider {
                     }
                     break;
                 }
+
+                case 'aiInstruct': {
+                    // Stage 3c — the on-canvas design assistant. Map the user's NL instruction
+                    // on the selected blocks into a validated design-verb plan (reusing the
+                    // Oberon model transport), then hand it back for a preview the user accepts.
+                    const reqId = msg.id;
+                    try {
+                        const slideAI = require('./slideAI');
+                        const res = await slideAI.planFromInstruction({
+                            instruction: msg.instruction, blocks: msg.blocks, canvas: msg.canvas,
+                        });
+                        if (res.ok) {
+                            webviewPanel.webview.postMessage({ cmd: 'aiPlan', id: reqId, plan: res.plan, warnings: res.warnings });
+                        } else {
+                            webviewPanel.webview.postMessage({ cmd: 'aiError', id: reqId, message: res.error });
+                        }
+                    } catch (err) {
+                        webviewPanel.webview.postMessage({ cmd: 'aiError', id: reqId, message: err && err.message || String(err) });
+                    }
+                    break;
+                }
             }
         }, undefined, this._context.subscriptions);
 

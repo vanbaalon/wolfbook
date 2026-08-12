@@ -19,10 +19,11 @@
  *         scrolls/
  */
 
-const vscode = require('vscode');
-const path   = require('path');
-const fs     = require('fs');
-const fsp    = require('fs/promises');
+const vscode   = require('vscode');
+const path     = require('path');
+const fs       = require('fs');
+const fsp      = require('fs/promises');
+const logPaths = require('../../utils/log-paths');
 
 const OBERON_DIR_NAME    = '.oberon';
 const TELEMETRY_DIR_NAME = 'telemetry';
@@ -53,16 +54,32 @@ function oberonDir() {
     return root ? path.join(root, OBERON_DIR_NAME) : null;
 }
 
-/** @returns {string|null} */
+/**
+ * Telemetry run logs. These live under globalStorage, NOT under .oberon/ — a run
+ * writes tens of MB of JSONL, and the workspace is routinely Dropbox-synced, where a
+ * sync lock can stall an fs write indefinitely (the watchdog in telemetry/bus.js
+ * exists because of exactly that). Keyed by workspace so runs stay per-project.
+ * Pruned to wolfbook.advanced.telemetryRetainRuns by pruneTelemetry().
+ * @returns {string|null}
+ */
 function telemetryRunsDir() {
-    const o = oberonDir();
-    return o ? path.join(o, TELEMETRY_DIR_NAME, RUNS_DIR_NAME) : null;
+    const t = logPaths.telemetryDir(getWorkspaceRoot());
+    return t ? path.join(t, RUNS_DIR_NAME) : null;
 }
 
 /** @returns {string|null} */
 function telemetryBlobsDir() {
-    const o = oberonDir();
-    return o ? path.join(o, TELEMETRY_DIR_NAME, BLOBS_DIR_NAME) : null;
+    const t = logPaths.telemetryDir(getWorkspaceRoot());
+    return t ? path.join(t, BLOBS_DIR_NAME) : null;
+}
+
+/**
+ * Delete all but the newest N telemetry runs. Call once at activation.
+ * Best-effort — never throws.
+ * @returns {Promise<number>} number of run logs deleted
+ */
+async function pruneTelemetry() {
+    return logPaths.pruneTelemetryRuns(telemetryRunsDir());
 }
 
 /** @returns {string|null} */
@@ -220,6 +237,7 @@ module.exports = {
     oberonDir,
     telemetryRunsDir,
     telemetryBlobsDir,
+    pruneTelemetry,
     postmortemsDir,
     contributionsInboxDir,
     stateFilePath,

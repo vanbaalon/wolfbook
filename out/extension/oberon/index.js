@@ -53,6 +53,15 @@ const toolRegistry                                       = require('./core/toolR
  * }}
  */
 function activate(context, opts = {}) {
+    require('./fairy/skilxivCredentials').configure(context);
+
+    // Drop stale run logs before anything writes a new one. Telemetry had no retention
+    // policy and had grown to 284 MB across 122 runs. Fire-and-forget: a failed prune
+    // must never block activation.
+    project.pruneTelemetry()
+        .then(n => { if (n > 0) console.log(`[oberon] pruned ${n} stale telemetry run log(s)`); })
+        .catch(() => {});
+
     const bus             = new TelemetryBus();
     // Telemetry drops were previously invisible: a Dropbox sync lock could hang
     // the JSONL append chain and silently lose a whole run's events. Surface the
@@ -74,10 +83,25 @@ function activate(context, opts = {}) {
     const inspector       = new RunInspectorManager({ context, runManager, bus, onCommand: dispatch });
     const charmDebugger   = new CharmDebuggerManager({ context, bus, onCommand: dispatch });
     const sidebar         = new ControlRoomProvider({ runManager, bus, onCommand: dispatch });
-    const testRunner      = new TestSuiteRunner({ bus, runManager });
+    const testRunner      = new TestSuiteRunner({
+        bus, runManager,
+        // Same live quick-compute path as wolfbook_fairy_dispatch; `dispatch`
+        // is resolved at call time (suite runs long after activation).
+        dispatchBrief: (payload) => dispatch('startFairy', payload),
+        // Run reports land in workspace state; a blessed report is copied to
+        // <repo>/oberon/tests/baselines/ by hand when promoting a baseline.
+        outDir: (() => { try { const o = project.oberonDir(); return o ? require('path').join(o, 'gold') : null; } catch (_) { return null; } })(),
+    });
     const testResultsPanel = new TestResultsPanel({ context, runner: testRunner, runManager });
     const { ContributionReviewPanel } = require('./ui/contributionReview');
     const contributionReviewPanel = new ContributionReviewPanel(context);
+    const { SkilXivExplorerPanel } = require('./ui/skilxivExplorer');
+    const skilxivExplorer = new SkilXivExplorerPanel(context);
+    context.subscriptions.push(vscode.window.registerUriHandler({
+        handleUri(uri) {
+            if (uri.path === '/skilxiv/open') skilxivExplorer.open(new URLSearchParams(uri.query).get('ref') || '');
+        },
+    }));
 
     // Wire the Wolfram kernel shim. The controller is created LATER in
     // extension.js, so callers may also use `setKernelController()` on the
@@ -158,6 +182,58 @@ function activate(context, opts = {}) {
         }],
         ['wolfbook.oberon.bumpAndDeploy', () => dispatch('bumpAndDeploy')],
         ['wolfbook.oberon.reviewContributions', () => contributionReviewPanel.open()],
+        ['wolfbook.skilxiv.openExplorer', (arg) => skilxivExplorer.open(typeof arg === 'string' ? arg : '')],
+        // Stage A3: claims the kernel disproved in skills we recalled — the
+        // author's revision queue. A wrong claim in a trusted skill misleads
+        // every later run, so this must be visible, not buried in telemetry.
+        ['wolfbook.skilxiv.reviewSkillCorrections', async () => {
+            const sc = require('./memory/skillCorrections');
+            const queue = await sc.correctionQueue();
+            if (!queue.length) {
+                vscode.window.showInformationMessage('No skill contradictions recorded — every cited skill has held up in the kernel.');
+                return;
+            }
+            const doc = await vscode.workspace.openTextDocument({
+                content: sc.renderCorrectionQueue(queue), language: 'markdown' });
+            await vscode.window.showTextDocument(doc, { preview: false });
+        }],
+        ['wolfbook.skilxiv.reviewSkillGaps', async () => {
+            // Stage A1 (2026-08-04): the raw ledger had grown to 78 entries and was
+            // unusable as a list — near-duplicate topics recur across months. Show
+            // the RANKED authoring queue (clustered, by distinct-run demand) and
+            // offer the full queue as a document.
+            const sg = require('./memory/skillGaps');
+            const ranked = await sg.rankSkillGaps({ limit: 25 });
+            if (!ranked.length) { vscode.window.showInformationMessage('No local SkilXiv skill gaps recorded.'); return; }
+            const OPEN_QUEUE = '$(list-ordered) Open the full authoring queue…';
+            const choice = await vscode.window.showQuickPick(
+                [{ label: OPEN_QUEUE, description: `${ranked.length} clustered capabilities` },
+                 ...ranked.map(c => ({
+                     label: c.topic,
+                     description: `${c.runs} run(s) wanted this`,
+                     detail: c.tasks[0] ? `e.g. ${String(c.tasks[0]).slice(0, 100)}` : undefined,
+                     cluster: c,
+                 }))],
+                { placeHolder: 'Skill-gap queue — most-demanded capability first' });
+            if (!choice) return;
+            if (choice.label === OPEN_QUEUE) {
+                const doc = await vscode.workspace.openTextDocument({
+                    content: sg.renderGapQueue(ranked), language: 'markdown' });
+                await vscode.window.showTextDocument(doc, { preview: false });
+                return;
+            }
+            // Submitting a public request needs one concrete ledger entry.
+            const all = await sg.loadSkillGaps();
+            const gap = all.slice().reverse().find(g => g.topic === choice.cluster.topic) || all[all.length - 1];
+            const picked = { gap };
+            if (!picked) return;
+            const yes = await vscode.window.showWarningMessage(`Submit this public skill request to SkilXiv?\n\n${picked.gap.topic}\n\nOnly the displayed topic and short reason will be sent.`, { modal: true }, 'Submit request');
+            if (yes !== 'Submit request') return;
+            const cfg = require('./config/settings').recall();
+            const client = await require('./fairy/skilxivCredentials').createClient({ baseUrl: cfg.skilxivBaseUrl });
+            await require('./memory/skillGaps').submitSkillGap(picked.gap, client);
+            vscode.window.showInformationMessage('Skill request submitted with your consent.');
+        }],
 
         // ── Headless agent API (MCP: wolfbook_fairy_dispatch / wolfbook_fairy_status) ──
         // No dialogs, structured returns — an outside agent (Claude/Codex/…) uses the
@@ -261,6 +337,56 @@ function activate(context, opts = {}) {
                         ? 'Delivered: clean.wb is the verified notebook; facts carry the headline results.'
                         : 'Run ended — inspect artifacts and metrics; a partial run still leaves clean_partial.wb / checkpoints.')
                     : 'Still running — poll again in ~60s.',
+            };
+        }],
+
+        // ── Headless gold-suite API (MCP: wolfbook_gold_run / wolfbook_gold_status) ──
+        // Kernel-verified benchmark of the live pipeline (Stage 0 of the agent
+        // upgrade plan). Fire-and-forget; poll goldStatus. Grading is machine-
+        // only: fresh kernel → replay clean.wb → task verifier.
+        ['wolfbook.oberon.goldRun', async (args) => {
+            if (!roles.minimallyConfigured()) {
+                return { ok: false, error: 'Oberon LLM roles are not configured.' };
+            }
+            if (testRunner.isRunning) return { ok: false, error: 'Gold suite already running — poll wolfbook.oberon.goldStatus.' };
+            if (runManager.isActive) {
+                return { ok: false, error: `A run is already active (${(runManager.summary && runManager.summary.runId) || 'unknown'}).` };
+            }
+            let tasks;
+            try { tasks = require('./tests/goldRunner').resolveTasks(args && args.tasks); }
+            catch (e) { return { ok: false, error: e.message }; }
+            const label = String((args && args.label) || 'gold');
+            // Fire-and-forget: a full suite takes hours; subsets are the day-to-day tool.
+            testRunner.run({ taskIds: tasks.map(t => t.id), label }).catch(() => {});
+            return {
+                ok: true, started: true, label,
+                tasks: tasks.map(t => ({ id: t.id, title: t.title, verify: t.verify })),
+                note: `Dispatching ${tasks.length} task(s) sequentially through the live fairy pipeline ` +
+                      '(each 5–30 min + fresh-kernel verification). Poll wolfbook.oberon.goldStatus; ' +
+                      'reports are written under .oberon/gold/.',
+            };
+        }],
+        ['wolfbook.oberon.goldStatus', async () => {
+            const rep = testRunner.lastReport;
+            return {
+                ok: true,
+                running: testRunner.isRunning,
+                lastReport: rep ? {
+                    reportPath: rep.reportPath || null,
+                    label: rep.label, build: rep.build,
+                    generatedAt: rep.generatedAt, durationMs: rep.durationMs,
+                    summary: rep.summary,
+                    tasks: (rep.tasks || []).map(t => ({
+                        id: t.id, verdict: t.verdict, status: t.status,
+                        detail: t.verifier ? String(t.verifier.detail).slice(0, 200) : (t.verifyError || null),
+                        costUSD: t.economics && t.economics.costUSD,
+                        llmCalls: t.economics && t.economics.llmCalls,
+                    })),
+                } : null,
+                note: testRunner.isRunning
+                    ? 'Suite in progress — tasks land in the report as they finish; poll again in ~2 min.'
+                    : (rep ? 'Suite idle; lastReport is the most recent completed (or aborted) run.'
+                           : 'Suite idle; no report yet this session. Start one with wolfbook.oberon.goldRun.'),
             };
         }],
 
@@ -496,6 +622,8 @@ function activate(context, opts = {}) {
                             _insertCheckpointBanner(_probeNbDoc, ev.payload).catch(() => {});
                         } else if (ev.type === 'skills.used' && _probeNbDoc) {
                             _insertSkillsUsed(_probeNbDoc, ev.payload).catch(() => {});
+                        } else if (ev.type === 'fairy.self_postmortem' && _probeNbDoc) {
+                            _insertSelfPostmortem(_probeNbDoc, ev.payload).catch(() => {});
                         } else if (ev.type === 'util.registered' && _probeNbDoc) {
                             _insertUtilBanner(_probeNbDoc, ev.payload).catch(() => {});
                         } else if (ev.type === 'literature.brief' && _probeNbDoc) {
@@ -642,6 +770,10 @@ function activate(context, opts = {}) {
                             quest, charm, bus,
                             signal: signal || ctrl.signal,
                             handoff: handoff || null,
+                            // Stage B3 escalation: a stage the Director escalated
+                            // runs on the stronger judgment binding (set by the
+                            // assess loop after ESCALATE_AFTER failed attempts).
+                            bindingRole: stage.bindingRole || undefined,
                             getWorkingNbDoc: () => live.getDoc(),
                             writeNotebook: async (_cells, destPath) => destPath,
                             onSteerQueueReady: (q) => { sidebar.setSteerQueue(q); inspector.setSteerQueue(q); },
@@ -718,6 +850,10 @@ function activate(context, opts = {}) {
                         signal: ctrl.signal,
                         deps: {
                             runStage,
+                            // Stage B3 session canary: one trivial kernel computation
+                            // before the programme spends its budget (a wedged or
+                            // unlicensed kernel should cost seconds, not dollars).
+                            canaryEval: (a) => require('./core/wolframShim').evalOnce(a),
                             literature:    _makeDirectorLiterature({ bus, signal: ctrl.signal }),
                             skilxivSearch: _directorSkillSearch,
                             askUser: async ({ question }) => vscode.window.showInputBox({
@@ -808,6 +944,11 @@ function activate(context, opts = {}) {
                 if (!brief.trim()) return;
                 // Track depth of auto-dispatched executive follow-ups so we
                 // can bound the recursion (settings.executive().maxAutoFollowups).
+                // Stage B3 (classic path): the Executive's 'escalate' action asks
+                // for a STRONGER model, not merely another attempt. The follow-up
+                // dispatch carries the role here and it is bound in runFairy below.
+                const escalateRole = (payload && typeof payload.__escalateRole === 'string')
+                    ? payload.__escalateRole : null;
                 const autoFollowupDepth = (payload && Number.isFinite(payload.__autoFollowupDepth))
                     ? Math.max(0, Math.floor(payload.__autoFollowupDepth))
                     : 0;
@@ -904,12 +1045,17 @@ function activate(context, opts = {}) {
                         const capInfo = settings.runBudget() || {};
                         const callCap = Number(capInfo.runLlmCalls) || 0;
                         const usedSoFar = (runManager.summary && runManager.summary.llmCallCount) || 0;
+                        // Reserve planner/review/postmortem overhead before judging whether
+                        // every dispatched charm can receive a viable Fairy allowance.
+                        const RUN_OVERHEAD_CALLS = 8;
                         const MIN_CALLS_PER_CHARM = 30;
                         if (callCap > 0 && totalCharms > 0) {
-                            const perCharm = Math.floor((callCap - usedSoFar) / totalCharms);
+                            const available = Math.max(0, callCap - usedSoFar - RUN_OVERHEAD_CALLS);
+                            const perCharm = Math.floor(available / totalCharms);
                             await bus.appendEvent('budget.plan', {
                                 questId: quest.id, charms: totalCharms,
-                                callCap, usedSoFar, perCharmAllowance: perCharm,
+                                callCap, usedSoFar, overheadReserve: RUN_OVERHEAD_CALLS,
+                                availableForCharms: available, perCharmAllowance: perCharm,
                                 tight: perCharm < MIN_CALLS_PER_CHARM,
                             }, { questId: quest.id });
                             if (perCharm < MIN_CALLS_PER_CHARM) {
@@ -1005,6 +1151,8 @@ function activate(context, opts = {}) {
                                 _insertCheckpointBanner(_probeNbDoc, ev.payload).catch(() => {});
                             } else if (ev.type === 'skills.used' && _probeNbDoc) {
                                 _insertSkillsUsed(_probeNbDoc, ev.payload).catch(() => {});
+                            } else if (ev.type === 'fairy.self_postmortem' && _probeNbDoc) {
+                                _insertSelfPostmortem(_probeNbDoc, ev.payload).catch(() => {});
                             } else if (ev.type === 'util.registered' && _probeNbDoc) {
                                 _insertUtilBanner(_probeNbDoc, ev.payload).catch(() => {});
                             } else if (ev.type === 'literature.brief' && _probeNbDoc) {
@@ -1026,6 +1174,7 @@ function activate(context, opts = {}) {
                             quest, charm, bus,
                             signal: ctrl.signal,
                             handoff: charmHandoff,   // O6: prior charm's utils+facts
+                            bindingRole: escalateRole || undefined,   // Executive 'escalate'
                             getWorkingNbDoc: () => _probeNbDoc,
                             writeNotebook: async (_cells, destPath) => {
                                 // Harness already wrote the JSON to disk. Do not open/show
@@ -1299,6 +1448,8 @@ function activate(context, opts = {}) {
                     const _capturedRunId      = bus && bus.runId;
                     const _capturedRunSummary = runManager && runManager.summary
                         ? { ...runManager.summary } : null;
+                    const _capturedRunEvents = bus && typeof bus.recent === 'function'
+                        ? bus.recent(50000).slice() : [];
                     await runManager.endRun({ state: 'IDLE' });
 
                     // ── Step 3: Postmortem (deterministic, opt-in) ───────────────────────
@@ -1314,6 +1465,7 @@ function activate(context, opts = {}) {
                                 charmNotebookPath,
                                 scrollFileRef,
                                 runSummary: _capturedRunSummary,
+                                runEvents: _capturedRunEvents,
                                 charmOutcomes,
                                 budgetInfo: {
                                     exhausted: !!runManager.isBudgetExhausted,
@@ -1353,6 +1505,7 @@ function activate(context, opts = {}) {
                             retry_subset:        '[Auto-retry-subset]',
                             extract_and_continue:'[Auto-continue]',
                             reformulate_brief:   '[Auto-reformulated]',
+                            escalate:            '[Auto-escalated to the stronger model]',
                         })[executiveOut.action] || '[Auto-followup]';
                         const factsPreview = executiveOut.factsWritten
                             ? `\n(${executiveOut.factsWritten} fact(s) banked to project memory.)`
@@ -1406,6 +1559,10 @@ function activate(context, opts = {}) {
                         setImmediate(() => dispatch('startResearch', {
                             brief: executiveAutoBrief + extraNote,
                             __autoFollowupDepth: nextDepth,
+                            // 'escalate' means the cheap model is out of its depth:
+                            // rebind the retry to the stronger judgment role. One
+                            // level only — the depth cap still bounds the recursion.
+                            __escalateRole: executiveOut.action === 'escalate' ? 'oberon' : undefined,
                         }));
                         return; // skip the manual toast — auto-dispatch supersedes it
                     }
@@ -1668,7 +1825,13 @@ async function _insertPlanRoadmap(nbDoc, payload) {
     const lines = ['## 📋 Plan'];
     if (note) lines.push('', `*${note}*`);
     lines.push('');
-    steps.forEach((s, i) => lines.push(`${i + 1}. ${s}`));
+    // Defense in depth: steps should be normalized strings (handlePlan), but an
+    // object slipping through must never render as "[object Object]".
+    const stepText = (s) => typeof s === 'string' ? s
+        : (s && typeof s === 'object' && (s.step || s.title || s.text || s.description))
+            ? String(s.step || s.title || s.text || s.description)
+            : JSON.stringify(s);
+    steps.forEach((s, i) => lines.push(`${i + 1}. ${stepText(s)}`));
 
     const md   = lines.join('\n');
     const cell = new vscode.NotebookCellData(vscode.NotebookCellKind.Markup, md, 'markdown');
@@ -1730,6 +1893,35 @@ async function _insertSkillsUsed(nbDoc, payload) {
     for (let i = 0; i < nbDoc.cellCount; i++) {
         const c = nbDoc.cellAt(i);
         if (c.metadata && c.metadata.oberon === 'skills-used') { existingIdx = i; break; }
+    }
+    const edit = new vscode.WorkspaceEdit();
+    if (existingIdx >= 0) {
+        edit.set(nbDoc.uri, [
+            vscode.NotebookEdit.deleteCells(new vscode.NotebookRange(existingIdx, existingIdx + 1)),
+            vscode.NotebookEdit.insertCells(_endInsertIndex(nbDoc), [cell]),
+        ]);
+    } else {
+        edit.set(nbDoc.uri, [vscode.NotebookEdit.insertCells(_endInsertIndex(nbDoc), [cell])]);
+    }
+    await vscode.workspace.applyEdit(edit);
+}
+
+/**
+ * Dev self-postmortem cell: the agent's own structured account of the session
+ * (fired right before compile / at explore exhaustion). Replaces any previous
+ * self-postmortem cell so continuation runs show only the latest.
+ */
+async function _insertSelfPostmortem(nbDoc, payload) {
+    const vscode = require('vscode');
+    const md = payload && payload.markdown;
+    if (!md) return;
+    const cell = new vscode.NotebookCellData(vscode.NotebookCellKind.Markup, String(md), 'markdown');
+    cell.metadata = { oberon: 'self-postmortem' };
+
+    let existingIdx = -1;
+    for (let i = 0; i < nbDoc.cellCount; i++) {
+        const c = nbDoc.cellAt(i);
+        if (c.metadata && c.metadata.oberon === 'self-postmortem') { existingIdx = i; break; }
     }
     const edit = new vscode.WorkspaceEdit();
     if (existingIdx >= 0) {
@@ -1955,6 +2147,8 @@ function _makeFairyLiveView(bus) {
             _insertCheckpointBanner(_doc, ev.payload).catch(() => {});
         } else if (ev.type === 'skills.used' && _doc) {
             _insertSkillsUsed(_doc, ev.payload).catch(() => {});
+        } else if (ev.type === 'fairy.self_postmortem' && _doc) {
+            _insertSelfPostmortem(_doc, ev.payload).catch(() => {});
         } else if (ev.type === 'util.registered' && _doc) {
             _insertUtilBanner(_doc, ev.payload).catch(() => {});
         } else if (ev.type === 'literature.brief' && _doc) {
@@ -2041,8 +2235,7 @@ async function _directorSkillSearch(query) {
         const settings = require('./config/settings');
         const cfg = settings.recall();
         if (!cfg.enabled) return '';
-        const { SkilXivClient } = require('./fairy/skilxivClient');
-        const client = new SkilXivClient({ baseUrl: cfg.skilxivBaseUrl, apiToken: cfg.skilxivApiToken });
+        const client = await require('./fairy/skilxivCredentials').createClient({ baseUrl: cfg.skilxivBaseUrl });
         const res = await client.search(String(query || ''), { limit: 5, minTier: 0 });
         const results = (res && res.results) || [];
         if (!results.length) return '';

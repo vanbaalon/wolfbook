@@ -52,6 +52,11 @@ async function clarifyQuestGate({ quest, questFileRef, brief, bus, signal, askCl
 
     let replanFailed = false;
     if (answer && String(answer).trim()) {
+        const originalRequirements = {
+            successCriteria: Array.isArray(quest.successCriteria) ? quest.successCriteria.slice() : [],
+            validationChecks: Array.isArray(quest.validationChecks) ? quest.validationChecks.slice() : [],
+            risks: Array.isArray(quest.risks) ? quest.risks.slice() : [],
+        };
         // The user took the time to answer — a single provider hiccup must not
         // discard that answer (run Q25: DeepSeek stream timeout → the answer was
         // dropped and every default silently ASSUMED). Retry the re-plan once;
@@ -62,6 +67,16 @@ async function clarifyQuestGate({ quest, questFileRef, brief, bus, signal, askCl
                 const replanned = await runPlanner({ brief: replanBrief, bus, signal, contextNote });
                 quest = replanned.quest;
                 questFileRef = replanned.fileRef;
+                quest.successCriteria = originalRequirements.successCriteria;
+                quest.validationChecks = originalRequirements.validationChecks;
+                quest.risks = [...new Set([...originalRequirements.risks, ...(quest.risks || [])])].slice(0, 12);
+                try { questFileRef = await require('../memory/quests').writeQuest(quest); } catch (_) {}
+                await bus.appendEvent('quest.requirements_preserved', {
+                    questId: quest.id,
+                    successCriteria: quest.successCriteria.length,
+                    validationChecks: quest.validationChecks.length,
+                    message: 'Clarification replan preserved the original scientific requirements.',
+                }, { questId: quest.id }).catch(() => {});
                 replanFailed = false;
                 break;
             } catch (e) {

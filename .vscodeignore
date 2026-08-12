@@ -11,6 +11,10 @@ node_modules/**/webpack.config.js
 .vscode-test/**
 EditorVariation/README.md
 EditorVariation/unicode_mappings.json
+# Long-form documentation is intentionally NOT packaged: it is ~5 MB of
+# screenshots, and the Marketplace rewrites relative README links to the
+# repository, so docs/*.md resolve on GitHub instead. (Matches docs/ too —
+# vsce path matching is case-insensitive on macOS.)
 Docs/**
 
 # Build scripts (not needed at runtime)
@@ -20,8 +24,9 @@ gen-katex-css.js
 reorder_notebook.py
 
 # Dev docs
+# NOTE: CHANGELOG.md is deliberately NOT ignored — VS Code renders it as the
+# extension's "Changelog" tab in the Marketplace and the extensions pane.
 AUTOCOMPLETE_IMPLEMENTATION.md
-CHANGELOG.md
 DEVELOPMENT_GUIDE.md
 HowToBuild.md
 QUICK_REFERENCE.md
@@ -46,3 +51,43 @@ wstp/node_modules/**
 # Misc
 *.vsix
 config_defaults.json
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Release hygiene (2026-08-11 pre-publish audit). Everything below is developer
+# material that must never reach a public VSIX: it carries absolute paths from
+# the maintainer's machine, internal planning notes, and benchmark artefacts
+# with research task titles. None of it is used at runtime.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Oberon agent test suites + gold benchmark baselines.
+# The baselines embed /Users/<maintainer>/… paths, quest ids and task titles.
+out/extension/oberon/tests/**
+
+# Slide/unit test fixtures (golden HTML contains absolute build paths).
+test/**
+
+# Developer scratch + build helpers.
+dev/**
+release.sh
+ship.sh
+build-and-package.ps1
+build-windows.bat
+watch-and-rebuild.ps1
+gen_confusables.js
+wslide-lint.js
+add_tools.py
+
+# Internal planning / working notes — not user documentation.
+wolfteam-chat-participant-plan.md
+JulAgentUpdate.md
+EVAL_BLOCK_PLAN.md
+RENDERING_PIPELINE.md
+WSLIDE_CHANGES.md
+editor-selection.md
+editor-collapsing-code.md
+windows-test-report.txt
+
+# Stray backups / VCS metadata.
+*.bak
+**/*.bak
+.gitignore

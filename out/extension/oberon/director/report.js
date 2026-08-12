@@ -140,4 +140,66 @@ async function tryCompilePdf(texPath, { timeoutMs = 90000 } = {}) {
     } catch (_) { return null; }
 }
 
-module.exports = { texEscape, buildCitations, composeReportTex, writeReport, tryCompilePdf };
+/**
+ * Stage B3 (plan §Stage 4): GENERATED progress digest.
+ *
+ * The plan is explicit that `progress.md` must be generated from programme.json,
+ * never hand-kept — a hand-maintained progress file drifts from the ledger and
+ * then quietly lies. This renders the current programme state for a human
+ * checking in mid-run (and is safe to regenerate after every stage).
+ *
+ * Note what it shows and what it refuses to show: `passes` is printed as
+ * harness-observed verification, kept visually distinct from the LLM's `verdict`,
+ * so a reader can never mistake an opinion for evidence.
+ */
+function renderProgressDigest(programme) {
+    if (!programme) return '';
+    const L = [];
+    const done = (programme.plan || []).filter(s => s.status && s.status !== 'pending').length;
+    L.push(`# ${programme.title || programme.id} — progress`);
+    L.push('');
+    L.push(`**Goal:** ${programme.goal || '(none stated)'}`);
+    L.push('');
+    L.push(`Stages: ${done}/${(programme.plan || []).length} run · key results: ${(programme.keyResults || []).length} · status: **${programme.status || 'active'}**`);
+    L.push('');
+    L.push('## Stages');
+    L.push('');
+    L.push('| # | stage | status | verified? | LLM verdict |');
+    L.push('|---|-------|--------|-----------|-------------|');
+    for (const s of (programme.plan || [])) {
+        const verdict = (s.assessment && s.assessment.verdict) || '—';
+        const verified = s.passes ? '✅ checks passed' : (s.status === 'pending' ? '—' : '⚠️ unverified');
+        L.push(`| ${s.id} | ${String(s.title || '').slice(0, 60)} | ${s.status || 'pending'} | ${verified} | ${verdict} |`);
+    }
+    L.push('');
+    if ((programme.keyResults || []).length) {
+        L.push('## Key results (kernel-established)');
+        L.push('');
+        for (const k of programme.keyResults) {
+            L.push(`- **${k.id}** _(${k.stageId || '?'}, conf ${Number(k.confidence).toFixed(2)})_ — ${k.statement}`);
+        }
+        L.push('');
+    }
+    const openStages = (programme.plan || []).filter(s => s.status === 'pending');
+    if (openStages.length) {
+        L.push('## Remaining');
+        L.push('');
+        for (const s of openStages) L.push(`- ${s.id}: ${s.title}`);
+        L.push('');
+    }
+    L.push(`_Generated from programme.json at ${new Date().toISOString()} — do not edit by hand._`);
+    return L.join('\n');
+}
+
+/** Write the digest next to programme.json (regenerated, never merged). */
+async function writeProgressDigest(programme) {
+    if (!programme || !programme.dir) return null;
+    const p = path.join(programme.dir, 'progress.md');
+    try {
+        await fsp.writeFile(p, renderProgressDigest(programme), 'utf8');
+        return p;
+    } catch (_) { return null; }
+}
+
+module.exports = { texEscape, buildCitations, composeReportTex, writeReport, tryCompilePdf,
+                   renderProgressDigest, writeProgressDigest };

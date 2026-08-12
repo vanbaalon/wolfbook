@@ -55,6 +55,7 @@ const shimStub = {
     kernelStatus: () => ({ available: true }),
     restartKernel: async function() { return this._nextRestart; },
     evalOnce: async function() { return this._nextEval; },
+    setPostRestartSeeder() {},
 };
 require.cache[shimStubId] = { id: shimStubId, filename: shimStubId, loaded: true, exports: shimStub };
 
@@ -310,7 +311,7 @@ test('findRecordedValue: returns null when probe file missing', () => withTempDi
 // ─────────────────────────────────────────────────────────────────────────────
 // 4. buildAndPersistScroll
 // ─────────────────────────────────────────────────────────────────────────────
-test('buildAndPersistScroll: delivered — confidence 0.95', () => withTempDir(async (dir) => {
+test('buildAndPersistScroll: delivered — confidence 0.9 and readable conclusion', () => withTempDir(async (dir) => {
     const wd  = await createWorkDir(dir);
     const fsm = new FairyFSM();
     fsm.transitionTo('explore');
@@ -324,11 +325,15 @@ test('buildAndPersistScroll: delivered — confidence 0.95', () => withTempDir(a
         workDir: wd, quest: fakeQuest(), charm: fakeCharm(), bus, fsm, spanId: 'sp1',
     });
 
-    assert.strictEqual(scroll.confidence, 0.95);
+    assert.strictEqual(scroll.confidence, 0.9);
     assert.strictEqual(scroll.fairyArtifact.status, 'delivered');
     assert.strictEqual(scroll.fairyArtifact.cleanNbPath, '/tmp/clean.wb');
     assert.strictEqual(scroll.id, 'S01');
     assert.ok(scroll.createdAt);
+    assert.ok(scroll.fairyArtifact.conclusionPath);
+    const conclusion = await fsp.readFile(scroll.fairyArtifact.conclusionPath, 'utf8');
+    assert.match(conclusion, /^# Test Quest/m);
+    assert.match(conclusion, /## Punchline/);
 
     const submittedEv = bus.events.find(e => e.type === 'scroll.submitted');
     assert.ok(submittedEv);

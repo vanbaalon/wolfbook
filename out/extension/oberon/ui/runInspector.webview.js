@@ -549,6 +549,71 @@
         return { started, currentPhase, phaseHistory, phaseTimestamps, status, steps, cleanNbPath, budget };
     }
 
+    /** Summarise observable progress since the latest fairy.started event. */
+    function buildProgressVM(events) {
+        let start = -1;
+        for (let i = events.length - 1; i >= 0; i--) {
+            if (events[i] && events[i].type === 'fairy.started') { start = i; break; }
+        }
+        if (start < 0) return null;
+        const xs = events.slice(start);
+        const facts = [], successes = [], failures = [], checkpoints = [];
+        let activity = null, lastTs = (xs[0] && xs[0].ts) || null;
+        const failureTypes = new Set([
+            'fairy.consecutive_failures', 'fairy.near_duplicate', 'fairy.repeat_abandon',
+            'fairy.error', 'budget.exhausted', 'provider.error',
+        ]);
+        for (const ev of xs) {
+            if (!ev) continue;
+            const p = ev.payload || {};
+            if (ev.ts) lastTs = ev.ts;
+            if (ev.type === 'fact.recorded') {
+                facts.push({ key: p.key || 'fact', value: p.value || '', confidence: p.confidence || '' });
+            } else if (ev.type === 'tool.call' && p.name === 'note_fact') {
+                const a = p.args || {};
+                facts.push({ key: a.key || 'fact', value: a.value || '', confidence: a.confidence || '' });
+            } else if (ev.type === 'facts.extracted') {
+                const list = Array.isArray(p.facts) ? p.facts : [];
+                if (list.length) list.forEach(f => facts.push({ key: f.key || 'fact', value: f.value || f.statement || '', confidence: f.confidence || '' }));
+                else if (p.count) facts.push({ key: 'banked facts', value: `${p.count} fact(s) extracted`, confidence: '' });
+            }
+            if (ev.type === 'probe.appended') {
+                successes.push({ id: p.probeId || 'probe', text: p.note || clip(p.code || '', 150) || 'successful probe' });
+            }
+            if (ev.type === 'checkpoint.recorded') {
+                checkpoints.push({ id: p.sectionTitle || 'checkpoint', text: `${(p.stepsIncluded || []).length} step(s) preserved` });
+            }
+            if (ev.type === 'correlated.tool' && p.ok === false) {
+                failures.push({ id: p.name || 'tool', text: p.error || p.kind || p.summary || 'failed' });
+            } else if (failureTypes.has(ev.type)) {
+                failures.push({ id: ev.type.replace(/^fairy\./, ''), text: p.message || p.reason || p.error || oneLineSummary(ev) });
+            }
+            if (ev.type === 'literature.progress' || ev.type === 'tool.call'
+                || ev.type === 'fairy.status' || ev.type === 'llm.call') activity = ev;
+        }
+        // Amendments can emit probe.appended for the same probe; keep the latest card.
+        const uniq = (arr) => [...new Map(arr.map(x => [x.id, x])).values()];
+        return {
+            facts: uniq(facts), successes: uniq(successes), failures: failures.slice(-8),
+            checkpoints: uniq(checkpoints), activity, lastTs,
+        };
+    }
+
+    function _ageInfo(ts) {
+        const ms = ts ? Math.max(0, Date.now() - new Date(ts).getTime()) : Infinity;
+        const sec = Math.floor(ms / 1000);
+        const text = sec < 60 ? `${sec}s ago` : sec < 3600 ? `${Math.floor(sec / 60)}m ${sec % 60}s ago` : `${Math.floor(sec / 3600)}h ago`;
+        const level = ms >= 10 * 60e3 ? 'stalled' : ms >= 3 * 60e3 ? 'quiet' : 'moving';
+        return { text, level };
+    }
+
+    function _progressList(title, cls, items, empty) {
+        const body = items.length
+            ? items.slice(-6).reverse().map(x => `<div class="fairy-progress-item"><code>${escapeHtml(x.id)}</code><span>${escapeHtml(x.text || x.value || '')}</span>${x.confidence ? `<small>${escapeHtml(x.confidence)}</small>` : ''}</div>`).join('')
+            : `<div class="muted small">${escapeHtml(empty)}</div>`;
+        return `<div class="fairy-progress-card ${cls}"><div class="fairy-progress-title">${title} <span>${items.length}</span></div>${body}</div>`;
+    }
+
     function renderFairy() {
         const pane = document.getElementById('fairyPaneContent');
         if (!pane) return;
@@ -673,11 +738,31 @@
         </div>`;
 
         const planHtml = renderCharmPlan(questsVM, started.charmId);
+        const progress = buildProgressVM(state.events);
+        let progressHtml = '';
+        if (progress) {
+            const age = _ageInfo(progress.lastTs);
+            const act = progress.activity ? oneLineSummary(progress.activity) : 'waiting for first operation';
+            progressHtml = `<div class="fairy-progress-summary">
+                <div class="fairy-progress-now" data-level="${age.level}">
+                    <span class="fairy-progress-pulse"></span>
+                    <strong>${age.level === 'stalled' ? 'Possibly stalled' : age.level === 'quiet' ? 'No recent telemetry' : 'Advancing'}</strong>
+                    <span>${escapeHtml(act)}</span><small>last event ${age.text}</small>
+                </div>
+                <div class="fairy-progress-grid">
+                    ${_progressList('Established facts', 'facts', progress.facts, 'No facts established yet.')}
+                    ${_progressList('Worked', 'worked', progress.successes, 'No successful probes yet.')}
+                    ${_progressList('Failed / blocked', 'failed', progress.failures, 'No failures recorded.')}
+                    ${_progressList('Saved progress', 'saved', progress.checkpoints, 'No checkpoints yet.')}
+                </div>
+            </div>`;
+        }
 
         pane.innerHTML = `
             <div class="fairy-pi-wrap">
                 ${charmsBoardHtml}
                 ${metaHtml}
+                ${progressHtml}
                 ${stepperHtml}
                 ${diagnoseHtml}
                 ${planHtml}
@@ -686,6 +771,11 @@
                 ${verifyHtml}
             </div>`;
     }
+
+    // Keep stall age readable even when no new telemetry arrives.
+    setInterval(() => {
+        if (!isHistorical && state.run && isActiveState(state.run.state)) renderFairy();
+    }, 5000);
 
     function _budgetRow(label, used, total) {
         const frac = total > 0 ? used / total : 0;

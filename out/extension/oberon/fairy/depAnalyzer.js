@@ -179,6 +179,22 @@ const WL_BUILTINS = new Set([
     'Export', 'Import', 'ExportString', 'ImportString',
     'MatrixForm', 'TableForm', 'Grid', 'Row', 'Column', 'Style', 'Text', 'Framed',
     'BinCounts', 'HistogramList',
+    // Common OPTION names (2026-08-01 gold baseline: WorkingPrecision /
+    // PrecisionGoal / AccuracyGoal were flagged as missing deps on 2 of 5 runs)
+    'WorkingPrecision', 'PrecisionGoal', 'AccuracyGoal', 'MaxIterations', 'MaxRecursion',
+    'Method', 'Assumptions', 'GenerateConditions', 'Direction', 'InterpolationOrder',
+    'PlotPoints', 'MaxSteps', 'StartingStepSize', 'InitialSeeding', 'VerifySolutions',
+    'Modulus', 'Extension', 'Trig', 'ComplexityFunction', 'TimeConstraint', 'Tolerance',
+    // Combinatorics / number theory / groups (Subfactorial was flagged on GT15)
+    'Subfactorial', 'Fibonacci', 'LucasL', 'CatalanNumber', 'BellB',
+    'StirlingS1', 'StirlingS2', 'Hyperfactorial', 'BarnesG', 'RamanujanTau',
+    'Cycles', 'Permute', 'PermutationReplace', 'PermutationList', 'PermutationCycles',
+    'GroupElements', 'GroupOrder', 'SymmetricGroup', 'AlternatingGroup',
+    'PermutationGroup', 'CyclicGroup', 'DihedralGroup', 'GroupCentralizer',
+    // FEM / numerics staples
+    'NDEigenvalues', 'NDEigensystem', 'DirichletCondition', 'NeumannValue',
+    'DSolveValue', 'NDSolveValue', 'ParametricNDSolve', 'FourierCoefficient',
+    'FourierSeries', 'AsymptoticIntegrate', 'Asymptotic',
 ]);
 
 // ── Internal helpers ────────────────────────────────────────────────────────
@@ -202,7 +218,8 @@ function stripStringsAndComments(code) {
  */
 function extractLocals(stripped) {
     const locals = new Set();
-    const containerRe = /\b(?:Module|Block|With)\s*\[\s*\{([^}]*)\}/g;
+    // Function[{u, v}, body] arg lists bind exactly like Module locals.
+    const containerRe = /\b(?:Module|Block|With|Function)\s*\[\s*\{([^}]*)\}/g;
     let m;
     while ((m = containerRe.exec(stripped)) !== null) {
         const varList = m[1];
@@ -213,7 +230,39 @@ function extractLocals(stripped) {
             locals.add(v[1]);
         }
     }
+    // Function[x, body] — the UNBRACED single-parameter form also binds x
+    // (gold sweep 2026-08-04, TS10: Function[x, …] params were reported as
+    // undefined global dependencies).
+    const fnSingleRe = /\bFunction\s*\[\s*([A-Za-z$][A-Za-z0-9$]*)\s*,/g;
+    while ((m = fnSingleRe.exec(stripped)) !== null) locals.add(m[1]);
     return locals;
+}
+
+/**
+ * Extract iterator/binding variables from iteration-spec brace groups:
+ * Table[expr, {k, 0, n}], Sum[…, {i, 1, m}, {j, i, m}], Integrate[…, {x, 0, 1}],
+ * Plot[…, {x, -2, 2}], FindRoot[…, {x, 0.5}], Limit[…, x -> 0] etc.
+ *
+ * Deliberately SHAPE-based, not head-based (nested brackets defeat head-scoped
+ * regexes): a brace group in ARGUMENT position (preceded by `,` or `[`) whose
+ * first element is a bare identifier followed by `,` and further elements is
+ * treated as an iteration spec. Risk assessment (2026-08-01): plain symbol
+ * lists `{a, b}` in argument position also match — that costs a possible
+ * false-NEGATIVE dependency edge for single-letter-style locals, but those
+ * same symbols were the dominant false-POSITIVE source of the
+ * missing_deps_gate (k/i/j/n/x flagged on 8 of 9 baseline gate firings), and
+ * the compile-time auto-recovery (H2) + run_clean replay still catch any real
+ * gap. Bound-variable exclusion applies ONLY to usesSymbols, never defines.
+ */
+function extractIterators(stripped) {
+    const vars = new Set();
+    const re = /[\[,]\s*\{\s*([A-Za-z$][A-Za-z0-9$]*)\s*,[^{}]*\}/g;
+    let m;
+    while ((m = re.exec(stripped)) !== null) vars.add(m[1]);
+    // Limit[expr, x -> x0] / Limit[expr, x -> x0, Direction -> …]
+    const limRe = /\bLimit\s*\[[^\[\]]*?,\s*([A-Za-z$][A-Za-z0-9$]*)\s*->/g;
+    while ((m = limRe.exec(stripped)) !== null) vars.add(m[1]);
+    return vars;
 }
 
 /**
@@ -263,6 +312,17 @@ function extractDefines(stripped) {
         if (!WL_BUILTINS.has(sym)) defines.add(sym);
     }
 
+    // Destructuring assignment: {evals, evecs} = Eigensystem[…] defines BOTH
+    // (gold sweep 2026-08-04, TS02: only the first name was tracked, so the
+    // second looked undefined in every later step).
+    const multiRe = /\{\s*([A-Za-z$][A-Za-z0-9$,\s]*)\}\s*(?::=|(?<![=!<>])=(?!=))/g;
+    while ((m = multiRe.exec(stripped)) !== null) {
+        for (const raw of m[1].split(',')) {
+            const sym = raw.trim();
+            if (/^[A-Za-z$][A-Za-z0-9$]*$/.test(sym) && !WL_BUILTINS.has(sym)) defines.add(sym);
+        }
+    }
+
     return [...defines];
 }
 
@@ -275,15 +335,21 @@ function extractDefines(stripped) {
 function extractUses(stripped, defines) {
     const locals     = extractLocals(stripped);
     const patVars    = extractPatternVars(stripped);
+    const iterators  = extractIterators(stripped);
     const defined    = new Set(defines);
-    const exclude    = new Set([...WL_BUILTINS, ...locals, ...patVars, ...defined]);
+    const exclude    = new Set([...WL_BUILTINS, ...locals, ...patVars, ...iterators, ...defined]);
 
     const uses = new Set();
     const re = /[A-Za-z$][A-Za-z0-9$]*/g;
     let m;
     while ((m = re.exec(stripped)) !== null) {
         const sym = m[0];
-        if (!exclude.has(sym)) uses.add(sym);
+        if (exclude.has(sym)) continue;
+        // Association slot access `#key` / `#key &` names a KEY, not a symbol
+        // (gold sweep 2026-08-04, TS03: #class and #roots were reported as
+        // undefined dependencies of every step that queried an Association).
+        if (m.index > 0 && stripped[m.index - 1] === '#') continue;
+        uses.add(sym);
     }
     return [...uses];
 }
@@ -300,9 +366,18 @@ function analyzeCode(code) {
     if (!code || typeof code !== 'string') {
         return { definesSymbols: [], usesSymbols: [] };
     }
+    // `(* free: a, b *)` pragma (postmortems dolzsr/dpef7r: solver targets like
+    // c1 and RecurrenceTable function names are idiomatic FREE symbols, not
+    // dependencies — they triggered replay warnings with no way to silence).
+    // Listed names are excluded from usesSymbols; the agent declares intent
+    // explicitly in the code, which also documents it in the notebook.
+    const freeDecl = new Set();
+    for (const m of code.matchAll(/\(\*\s*free:\s*([^*]+?)\s*\*\)/gi)) {
+        for (const s of m[1].split(/[,\s]+/)) if (s) freeDecl.add(s.trim());
+    }
     const stripped      = stripStringsAndComments(code);
     const definesSymbols = extractDefines(stripped);
-    const usesSymbols    = extractUses(stripped, definesSymbols);
+    const usesSymbols    = extractUses(stripped, definesSymbols).filter(s => !freeDecl.has(s));
     return { definesSymbols, usesSymbols };
 }
 

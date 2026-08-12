@@ -1,0 +1,617 @@
+[
+ {
+  "id": "wolfram/findroot-singular-jacobian",
+  "title": "FindRoot::jsing — symmetric seeds kill the Jacobian",
+  "body": "A singular Jacobian in FindRoot almost always means degenerate/symmetric starting points (equal, opposite-pair, or zero seeds make rows dependent). Break the symmetry: give each variable a DIFFERENT, slightly irrational seed (0.37, -0.61, 1.13…), add small random perturbations, and for known-symmetric root pairs solve for the asymmetric combination (sum/difference) instead.",
+  "example": "FindRoot[eqs, {{u1, 0.37}, {u2, -0.61}}]  (* not {{u1, 0.5}, {u2, -0.5}} *)",
+  "signatures": [
+   {
+    "kind": "message",
+    "value": "FindRoot::jsing"
+   }
+  ],
+  "priority": 95,
+  "tierA": true,
+  "tags": [
+   "findroot",
+   "numerics"
+  ]
+ },
+ {
+  "id": "wolfram/rational-eq-pole-clearing",
+  "title": "1/0 and 0*ComplexInfinity in rational equations — clear denominators first",
+  "body": "Bethe-type/rational equations blow up (Power::infy, Infinity::indet) when the solver steps onto a pole (e.g. u_i == u_j in a denominator). Multiply the equations through by their denominators BEFORE solving: polys = Numerator[Together[lhs - rhs]]; then FindRoot/NSolve the polynomial system. Also never evaluate the raw equations at coinciding roots.",
+  "example": "polys = Numerator[Together[#]] & /@ (lhs - rhs); FindRoot[Thread[polys == 0], seeds]",
+  "signatures": [
+   {
+    "kind": "message",
+    "value": "Power::infy"
+   },
+   {
+    "kind": "message",
+    "value": "Divide::infy"
+   },
+   {
+    "kind": "message",
+    "value": "Infinity::indet"
+   },
+   {
+    "kind": "message",
+    "value": "FindRoot::nlnum"
+   }
+  ],
+  "priority": 95,
+  "tierA": true,
+  "tags": [
+   "numerics",
+   "bethe"
+  ]
+ },
+ {
+  "id": "wolfram/thread-length-mismatch",
+  "title": "Thread::tdlen — unequal lengths; check counts before elementwise ops",
+  "body": "Thread/listable ops need equal-length lists. Check Length[a] == Length[b] BEFORE subtracting/comparing spectra — a mismatch usually means you MISSED states (or double-counted), which is a physics finding, not a formatting problem. Sort both sides and compare Tally counts first.",
+  "example": "If[Length[eB] == Length[eD], Max[Abs[Sort[eB] - Sort[eD]]], {\"count mismatch\", Length[eB], Length[eD]}]",
+  "signatures": [
+   {
+    "kind": "message",
+    "value": "Thread::tdlen"
+   }
+  ],
+  "priority": 90,
+  "tierA": true,
+  "tags": [
+   "lists"
+  ]
+ },
+ {
+  "id": "wolfram/findroot-vars-vs-equations",
+  "title": "FindRoot::nveq — one seed per variable, equations as an explicit list",
+  "body": "FindRoot needs the equation COUNT to match the variable count, with explicit seeds per variable. If your equations come from a function returning a vector, evaluate them into an explicit list first (Thread[f[u1,u2] == 0] // Evaluate) — a held function of the wrong arity looks like 1 equation in N variables.",
+  "example": "FindRoot[Evaluate[Thread[bae[{u1, u2}] == 0]], {{u1, .3}, {u2, -.7}}]",
+  "signatures": [
+   {
+    "kind": "message",
+    "value": "FindRoot::nveq"
+   }
+  ],
+  "priority": 85,
+  "tierA": false,
+  "tags": [
+   "findroot"
+  ]
+ },
+ {
+  "id": "wolfram/solver-variable-has-value",
+  "title": "NSolve/Solve 'not a valid variable' — the symbol already has a value",
+  "body": "`0.114 is not a valid variable` means a symbol you are solving for was ASSIGNED earlier in the session. Never assign to symbols you later solve for; if it happened, Clear[u1, u2] right before the solve, or solve in fresh symbols (v1, v2) and substitute after.",
+  "example": "Clear[u1, u2]; NSolve[eqs, {u1, u2}]",
+  "signatures": [
+   {
+    "kind": "message",
+    "value": "NSolve::ivar"
+   },
+   {
+    "kind": "message",
+    "value": "Solve::ivar"
+   },
+   {
+    "kind": "message",
+    "value": "FindRoot::nlnum1"
+   }
+  ],
+  "priority": 85,
+  "tierA": true,
+  "tags": [
+   "solve",
+   "state"
+  ]
+ },
+ {
+  "id": "wolfram/solver-output-shape",
+  "title": "ReplaceAll::reps — inspect solver output shape before substituting",
+  "body": "Solver output is a LIST OF RULE-LISTS: vals = vars /. sols[[1]]. If you see `{False, False} is neither a list of replacements`, you substituted into booleans (you applied /. to equations, or the solve returned {} / a ConditionalExpression). Check Head and Length of the result first; {} means the solver FAILED — change method, don't substitute.",
+  "example": "sols = NSolve[eqs, vars]; If[sols =!= {}, vars /. First[sols], \"no solutions\"]",
+  "signatures": [
+   {
+    "kind": "message",
+    "value": "ReplaceAll::reps"
+   }
+  ],
+  "priority": 80,
+  "tierA": false,
+  "tags": [
+   "solve"
+  ]
+ },
+ {
+  "id": "wolfram/abs-single-argument",
+  "title": "Abs takes ONE argument",
+  "body": "Abs[a, b] is an arity error. For tolerance tests write Abs[a - b] < 10^-8, or Chop[a - b, 10^-8] == 0 for structured values. The same applies to Norm for vectors: Norm[a - b] < tol.",
+  "example": "Max[Abs[Sort[got] - Sort[want]]] < 10^-8",
+  "signatures": [
+   {
+    "kind": "message",
+    "value": "Abs::argx"
+   }
+  ],
+  "priority": 70,
+  "tierA": false,
+  "tags": [
+   "syntax"
+  ]
+ },
+ {
+  "id": "wolfram/complex-numbers-not-ordered",
+  "title": "Complex numbers have no <, and Sort on them is structural",
+  "body": "Less::nord / wrong orderings: complex values cannot be compared with < and default Sort orders them structurally. Sort with an explicit numeric key: SortBy[list, {Re[#], Im[#]} &] (or N[...] first). Compare complex spectra only after such sorting on BOTH sides.",
+  "example": "SortBy[N[zeros], {Re[#], Im[#]} &]",
+  "signatures": [
+   {
+    "kind": "message",
+    "value": "Less::nord"
+   },
+   {
+    "kind": "message",
+    "value": "Greater::nord"
+   }
+  ],
+  "priority": 75,
+  "tierA": true,
+  "tags": [
+   "complex",
+   "lists"
+  ]
+ },
+ {
+  "id": "wolfram/general-stop-find-first-message",
+  "title": "General::stop is not the error — scroll to the FIRST message",
+  "body": "`Further output ... will be suppressed` only says an earlier message repeated 3+. The actionable error is the FIRST distinct message in the output — fix that one; the rest usually vanish with it.",
+  "signatures": [
+   {
+    "kind": "message",
+    "value": "General::stop"
+   }
+  ],
+  "priority": 60,
+  "tierA": false,
+  "tags": [
+   "messages"
+  ]
+ },
+ {
+  "id": "wolfram/build-forward-no-redefinition",
+  "title": "Recorded symbols are immutable — build FORWARD, never redefine",
+  "body": "The harness rejects probes that redefine a symbol an earlier recorded step already defines. Use the existing symbol BY NAME and derive new quantities into NEW symbols. If a recorded step is genuinely wrong, `invalidate` it first — silent redefinition breaks the fresh-kernel replay.",
+  "signatures": [
+   {
+    "kind": "harness",
+    "value": "redefinition"
+   },
+   {
+    "kind": "harness",
+    "value": "rejected"
+   }
+  ],
+  "priority": 80,
+  "tierA": true,
+  "tags": [
+   "harness",
+   "chain"
+  ]
+ },
+ {
+  "id": "wolfram/near-duplicate-change-approach",
+  "title": "Near-duplicate probe rejected — change the APPROACH, not a constant",
+  "body": "A probe ≥90% similar to a recent one is rejected to stop thrash. Use `amend_probe` to fix the previous probe in place. If the same approach failed twice, the third similar attempt will too: switch method (different parametrization, higher WorkingPrecision, polynomial form, smaller subproblem) instead of nudging numbers.",
+  "signatures": [
+   {
+    "kind": "harness",
+    "value": "near_duplicate"
+   }
+  ],
+  "priority": 80,
+  "tierA": false,
+  "tags": [
+   "harness",
+   "strategy"
+  ]
+ },
+ {
+  "id": "wolfram/dot-shape-mismatch",
+  "title": "Dot::dotsh — check Dimensions on both operands",
+  "body": "Dot needs compatible tensor shapes: check Dimensions[a] and Dimensions[b] before a.b. Common causes: a list-of-eigenvectors is ROWS (use v.m or m.Transpose[v] accordingly); elementwise product wants * not . ; a flattened vector where a matrix is expected.",
+  "example": "Dimensions /@ {m, v}  (* verify before m.v *)",
+  "signatures": [
+   {
+    "kind": "message",
+    "value": "Dot::dotsh"
+   }
+  ],
+  "priority": 65,
+  "tierA": false,
+  "tags": [
+   "linalg"
+  ]
+ },
+ {
+  "id": "wolfram/guard-empty-lists",
+  "title": "Guard list ops against {} — empty solver output upstream",
+  "body": "Take/First/Part on {} (Take::take, First::first) usually means an upstream solve/select returned NOTHING. Test Length[...] > 0 before extracting, and treat 'empty' as a finding: the method failed and needs changing — don't paper over it with defaults.",
+  "example": "If[sols === {}, \"solver returned nothing — change method\", First[sols]]",
+  "signatures": [
+   {
+    "kind": "message",
+    "value": "Take::take"
+   },
+   {
+    "kind": "message",
+    "value": "First::first"
+   },
+   {
+    "kind": "message",
+    "value": "Part::partw"
+   }
+  ],
+  "priority": 70,
+  "tierA": false,
+  "tags": [
+   "lists"
+  ]
+ },
+ {
+  "id": "wolfram/return-escapes-inline-module",
+  "title": "Return[] escapes nested inline Modules — use Catch/Throw",
+  "body": "Return[expr] inside an inline Module/Block propagates OUT through enclosing Modules; statements after it silently never run. For early exit use Catch[Module[..., If[bad, Throw[val]]; ...]] — Throw stops exactly at its Catch.",
+  "example": "Catch[Module[{d}, If[d =!= want, Throw[\"mismatch\"]]; True]]",
+  "signatures": [
+   {
+    "kind": "code",
+    "value": "Return["
+   }
+  ],
+  "priority": 75,
+  "tierA": true,
+  "tags": [
+   "control-flow"
+  ]
+ },
+ {
+  "id": "wolfram/module-shadows-global-symbol",
+  "title": "Module[{u}, …] shadows the global u your stored expressions reference",
+  "body": "Module renames its locals — a stored polynomial in global `u` will NOT match a Module-local `u` (replacements silently do nothing). To temporarily clear a global's value while keeping symbol identity, use Block[{u}, ...]; or use distinct local names.",
+  "example": "Block[{u}, Expand[T*Q - (Q /. u -> u - I)]]",
+  "signatures": [
+   {
+    "kind": "regex",
+    "value": "Module\\[\\{[^}]*\\bu\\b"
+   }
+  ],
+  "priority": 70,
+  "tierA": true,
+  "tags": [
+   "scoping"
+  ]
+ },
+ {
+  "id": "wolfram/one-result-per-cell",
+  "title": "One Out[] per probe — end intermediate lines with ;",
+  "body": "A cell with several unterminated statements prints several Out[] lines, but only the LAST expression is the cell's verifiable value. Terminate intermediate lines with `;` and make the headline result the final expression — or better, return one Association bundling the related values.",
+  "example": "a = ...; b = ...; <|\"a\" -> a, \"b\" -> b|>",
+  "signatures": [
+   {
+    "kind": "harness",
+    "value": "multi_output"
+   }
+  ],
+  "priority": 65,
+  "tierA": true,
+  "tags": [
+   "notebook"
+  ]
+ },
+ {
+  "id": "wolfram/workingprecision-ladder",
+  "title": "Near-singular numerics: raise WorkingPrecision WITH high-precision inputs",
+  "body": "Machine precision fails near singular/stiff configurations. Use FindRoot/NSolve[..., WorkingPrecision -> 30] — but the inputs must ALSO be exact or high-precision (SetPrecision[x, 30] or rationals); one machine-precision constant poisons the whole computation back to MachinePrecision.",
+  "example": "FindRoot[eqs, {{u, SetPrecision[3/10, 30]}}, WorkingPrecision -> 30]",
+  "signatures": [
+   {
+    "kind": "message",
+    "value": "FindRoot::lstol"
+   },
+   {
+    "kind": "message",
+    "value": "Precision::mnprec"
+   },
+   {
+    "kind": "message",
+    "value": "N::meprec"
+   }
+  ],
+  "priority": 80,
+  "tierA": true,
+  "tags": [
+   "numerics",
+   "precision"
+  ]
+ },
+ {
+  "id": "wolfram/timeout-decompose",
+  "title": "Probe near the 60s timeout — split it, and avoid Simplify on large expressions",
+  "body": "Long-running probes should be decomposed: compute and store intermediates in separate probes (symbols persist in the kernel). Simplify/FullSimplify on large expressions is the usual sink — prefer Expand/Together/Factor, numeric checks via N, and Chop; simplify only the final small result.",
+  "signatures": [
+   {
+    "kind": "harness",
+    "value": "timeout"
+   },
+   {
+    "kind": "message",
+    "value": "TimeConstrained"
+   }
+  ],
+  "priority": 75,
+  "tierA": true,
+  "tags": [
+   "performance"
+  ]
+ },
+ {
+  "id": "wolfram/equal-vs-sameq-vs-set",
+  "title": "= assigns, == is (possibly unevaluated) equality, === is definite",
+  "body": "`=` ASSIGNS (a common accidental overwrite of a solver variable). `==` stays unevaluated for symbolic operands — as a check it may return neither True nor False; use === for structural identity or Simplify[lhs == rhs] / Abs[lhs - rhs] < tol for mathematical equality of expressions.",
+  "example": "Simplify[expr1 - expr2] === 0   (* not expr1 == expr2 as a truth test *)",
+  "signatures": [
+   {
+    "kind": "message",
+    "value": "Set::write"
+   },
+   {
+    "kind": "message",
+    "value": "Set::setraw"
+   }
+  ],
+  "priority": 70,
+  "tierA": true,
+  "tags": [
+   "syntax"
+  ]
+ },
+ {
+  "id": "wolfram/eigensystem-numeric-vs-exact",
+  "title": "Eigenvalues: N[] the matrix, not the result — exact eigenvalues explode",
+  "body": "Eigenvalues of an exact symbolic/rational matrix beyond ~10×10 produces giant Root[] expressions (slow, unusable). Diagonalise numerically: Eigenvalues[N[H]] (or N[H, 30] for precision), and only keep exact eigenvalues for small matrices where you need closed forms. Round/Chop for tallying degeneracies.",
+  "example": "Sort[Eigenvalues[N[H]]]; Tally[Round[evs, 10^-8]]",
+  "signatures": [
+   {
+    "kind": "code",
+    "value": "Eigenvalues["
+   },
+   {
+    "kind": "message",
+    "value": "Eigenvalues::eival"
+   }
+  ],
+  "priority": 65,
+  "tierA": true,
+  "tags": [
+   "linalg",
+   "performance"
+  ]
+ },
+ {
+  "id": "wolfram/verify-conventions-on-minimal-case",
+  "title": "Verify conventions on a minimal known case BEFORE scaling up",
+  "body": "Before building the full-size object (Hamiltonian, operator, generating function), verify your normalization/sign/shift conventions on a case with a KNOWN closed-form answer: the smallest size, a single excitation, or a textbook limit (e.g. a one-particle dispersion, a 2x2 matrix, n=1 term of a series). A wrong convention detected at full scale invalidates every downstream step and typically costs the whole backtrack budget; the minimal check costs one probe. Record the convention as a note_fact so later steps and the crosscheck use the same one.",
+  "example": "H per bond (S.S - 1/4) vs S.S differ by a constant shift L/4: check the 1-magnon energy against E(k) = cos k - 1 before diagonalising the full sector.",
+  "signatures": [],
+  "priority": 88,
+  "tierA": true,
+  "tags": [
+   "methodology",
+   "verification"
+  ]
+ },
+ {
+  "id": "wolfram/periodic-bond-tensor-embedding",
+  "title": "Periodic wrap bond (L,1): embed via single-site operator PRODUCTS",
+  "body": "For a periodic chain, never build the wrap term (L,1) by reordering KroneckerProduct factors or hand-permuting bit orders — both are the classic source of a non-translation-invariant spectrum. Express the two-site operator as a sum of PRODUCTS of single-site embeddings: h_{ij} = Sum_ab c_ab op[Ea,i].op[Eb,j] with op[m,i] = KroneckerProduct @@ ReplacePart[ConstantArray[id,L], i->m]. This works for ANY pair (i,j) including the wrap, with no special casing. Sanity check immediately: the one-particle spectrum must be symmetric under k -> -k, and the vacuum/known-limit energy must come out exactly.",
+  "example": "pg[i_,j_] := op[Ebb,i].op[Ebb,j] + op[Ebf,i].op[Efb,j] + op[Efb,i].op[Ebf,j] - op[Eff,i].op[Eff,j]",
+  "signatures": [
+   {
+    "kind": "code",
+    "value": "KroneckerProduct"
+   },
+   {
+    "kind": "regex",
+    "value": "Mod\\[\\s*i\\s*,\\s*L\\s*\\]|RotateLeft|ArrayReshape"
+   }
+  ],
+  "priority": 78,
+  "tierA": true,
+  "tags": [
+   "linear-algebra",
+   "spin-chains"
+  ]
+ },
+ {
+  "id": "wolfram/sort-symbolic-is-structural",
+  "title": "Sort on symbolic expressions is STRUCTURAL — use SortBy[list, N]",
+  "body": "Sort[] and Min/Max ordering on exact symbolic values (2(1-Sqrt[3]/2) vs 2, radicals, Root objects) compares expression STRUCTURE, not numeric value — the result silently comes out in the wrong order and downstream selections (lowest state, extremal root) pick the wrong element. Order numerically: SortBy[list, N], MinimalBy[list, N], or Sort[N[list]] when exactness of the sort keys does not matter. Same trap in Select with < or > on symbolic entries.",
+  "example": "SortBy[{2 (1 - Sqrt[3]/2), 2}, N]  (* correct numeric order; plain Sort gets it wrong *)",
+  "signatures": [
+   {
+    "kind": "code",
+    "value": "Sort["
+   }
+  ],
+  "priority": 72,
+  "tierA": true,
+  "tags": [
+   "ordering",
+   "symbolic"
+  ]
+ },
+ {
+  "id": "wolfram/replacepart-multi-position-spec",
+  "title": "ReplacePart multi-position needs {{p1},{p2}} — {p1,p2}->v is ONE nested position",
+  "body": "ReplacePart[list, {1,2,3} -> v] does NOT replace elements 1,2,3 — it addresses the single NESTED position [[1,2,3]] and, when that position does not exist, silently returns the list UNCHANGED (no message). The silent no-op then propagates (e.g. every basis state stays the vacuum). For multiple positions write ReplacePart[list, {{1},{2},{3}} -> v], or avoid ReplacePart: Module[{l = list}, l[[{1,2,3}]] = v; l].",
+  "example": "ReplacePart[ConstantArray[0, 8], {{2},{5},{7}} -> 1]  (* three 1s; {2,5,7}->1 changes nothing *)",
+  "signatures": [
+   {
+    "kind": "code",
+    "value": "ReplacePart"
+   }
+  ],
+  "priority": 80,
+  "tierA": true,
+  "tags": [
+   "lists"
+  ]
+ },
+ {
+  "id": "wolfram/part-zero-returns-head",
+  "title": "list[[0]] returns the HEAD (List), not an element",
+  "body": "Part index 0 is the expression HEAD: list[[0]] silently returns List (or the function head) instead of erroring, so 0-based enumeration bugs corrupt sums with a literal List symbol appearing in results. WL is 1-based; when enumerating modes n=0..L-1 stored in a list, index with [[n+1]] and assert the offset once in a comment.",
+  "example": "eps[[n + 1]] (* mode n, 0-based physics label, 1-based WL storage *)",
+  "signatures": [
+   {
+    "kind": "regex",
+    "value": "\\[\\[\\s*0\\s*\\]\\]"
+   },
+   {
+    "kind": "regex",
+    "value": "unequal length|List\\b.*cannot be combined"
+   }
+  ],
+  "priority": 70,
+  "tierA": false,
+  "tags": [
+   "lists",
+   "indexing"
+  ]
+ },
+ {
+  "id": "wolfram/slot-outside-function",
+  "title": "Slot (#, #name) only works inside Function/& — elsewhere it is Protected",
+  "body": "Slot syntax (#, #2, #key) is ONLY meaningful inside a Function (ending in &). Used inside Table/Do/Module bodies without &, it stays the raw Slot object and assignments to it throw 'Tag Slot is Protected' (Table::write). Use the iterator variable or a named function argument instead; for Association field access outside a Function, write assoc['key'], not #key.",
+  "example": "Table[r[\"roots\"], {r, sols}]   (* not Table[#roots, {r, sols}] *)",
+  "signatures": [
+   {
+    "kind": "message",
+    "value": "Tag Slot"
+   },
+   {
+    "kind": "regex",
+    "value": "Slot[^a-zA-Z]*is Protected"
+   }
+  ],
+  "priority": 74,
+  "tierA": false,
+  "tags": [
+   "syntax"
+  ]
+ },
+ {
+  "id": "wolfram/underscore-in-name-is-pattern",
+  "title": "Underscore in a name makes a PATTERN — lam_i is lam blank i, not a variable",
+  "body": "WL identifiers cannot contain underscores: lam_i parses as the pattern lam_i (lam : Blank[i]), silently matching instead of storing. Same family: x[Range[6]] applies x to the whole list (one call), not elementwise — use Map or x /@ Range[6]; and iterator names reused in nested Do/Table shadow each other. Name variables camelCase (lamI), and if an expression unexpectedly contains Blank[] or Pattern[], an underscore slipped into a name.",
+  "example": "lamI = {3, 2, 1}   (* lam_i would be a pattern, not an assignment *)",
+  "signatures": [
+   {
+    "kind": "regex",
+    "value": "[a-zA-Z]_[a-zA-Z0-9]+\\s*="
+   },
+   {
+    "kind": "message",
+    "value": "Pattern::patvar"
+   }
+  ],
+  "priority": 68,
+  "tierA": true,
+  "tags": [
+   "syntax"
+  ]
+ },
+ {
+  "id": "wolfram/finitegroupdata-entity-names",
+  "title": "FiniteGroupData needs {\"SymmetricGroup\", n} — not {\"Symmetric\", n}",
+  "body": "FiniteGroupData::notent means the ENTITY NAME is wrong, not that the data is missing. Group entities are spelled in full: {\"SymmetricGroup\", n}, {\"AlternatingGroup\", n}, {\"DihedralGroup\", n}, {\"CyclicGroup\", n}. FiniteGroupData[{\"SymmetricGroup\", n}, \"CharacterTable\"] DOES work (checked to n=10). Align its columns with FiniteGroupData[..., \"ConjugacyClassNames\"] (cycle-type partitions); \"ConjugacyClasses\" returns element indices, not cycle types. Never load Combinatorica for this — its CharacterTable clashes with modern Graph symbols.",
+  "example": "FiniteGroupData[{\"SymmetricGroup\", 6}, \"CharacterTable\"]",
+  "signatures": [
+   {
+    "kind": "message",
+    "value": "FiniteGroupData::notent"
+   },
+   {
+    "kind": "code",
+    "value": "FiniteGroupData"
+   }
+  ],
+  "priority": 66,
+  "tierA": false,
+  "tags": [
+   "group-theory",
+   "built-ins"
+  ]
+ },
+ {
+  "id": "wolfram/sort-normal-nonatomic",
+  "title": "Sort::normal — you passed an Association/SparseArray where a List was expected",
+  "body": "Sort::normal (\"Nonatomic expression expected\") means the argument is an Association, SparseArray, or other non-List head. Convert explicitly first: Values[assoc] or Normal[assoc] for Associations, Normal[sa] for SparseArray. The same family of errors (First::nofirst, Part::partw, Take::take) usually means the object is EMPTY or not the shape you assumed — check Head[expr] and Length[expr] before indexing.",
+  "example": "Sort[Values[assoc]]  (* not Sort[assoc] *)",
+  "signatures": [
+   {
+    "kind": "message",
+    "value": "Sort::normal"
+   },
+   {
+    "kind": "message",
+    "value": "First::nofirst"
+   }
+  ],
+  "priority": 62,
+  "tierA": false,
+  "tags": [
+   "lists"
+  ]
+ },
+ {
+  "id": "wolfram/maxextraprecision-symbolic-compare",
+  "title": "Max::meprec / $MaxExtraPrecision — stop comparing unevaluated symbolic reals",
+  "body": "Max::meprec means WL is trying to decide an inequality between symbolic exact expressions and ran out of extra precision. Raising $MaxExtraPrecision only delays it. The fix is to numericise BEFORE ordering or comparing: N[expr, 30], SortBy[list, N], or Chop[N[…]] for near-zero tests. If the comparison must stay exact, use FullSimplify on the DIFFERENCE and test against 0 rather than comparing the two sides directly.",
+  "example": "SortBy[vals, N]   (* or N[vals, 30] before Max/Min/Sort *)",
+  "signatures": [
+   {
+    "kind": "message",
+    "value": "Max::meprec"
+   },
+   {
+    "kind": "message",
+    "value": "MaxExtraPrecision"
+   }
+  ],
+  "priority": 64,
+  "tierA": false,
+  "tags": [
+   "precision"
+  ]
+ },
+ {
+  "id": "wolfram/sparsearray-rule-shape",
+  "title": "SparseArray rules need {i, j} -> v positions, not nested rules",
+  "body": "SparseArray::posd (\"left-hand side of (1 -> 1) -> 1 is not a valid position\") means a rule was built with the wrong shape — usually Thread or Map produced (i -> j) -> v instead of {i, j} -> v. Build positions as LISTS: SparseArray[{{i, j} -> v, …}, {n, n}]. For a single index use {i} -> v. Check one element of your rule list before passing the whole thing.",
+  "example": "SparseArray[Table[{r[[1]], r[[2]]} -> 1, {r, pairs}], {n, n}]",
+  "signatures": [
+   {
+    "kind": "message",
+    "value": "SparseArray::posd"
+   }
+  ],
+  "priority": 60,
+  "tierA": false,
+  "tags": [
+   "linear-algebra"
+  ]
+ }
+]

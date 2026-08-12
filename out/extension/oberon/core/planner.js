@@ -127,6 +127,11 @@ async function runPlanner(args) {
 
 async function callOnce({ bus, adapter, binding, messages, signal, spanId, prefixSha256 }) {
     const tel = settings.telemetry();
+    // Planning is the highest-leverage judgment call of a run — think at effort
+    // high by default (fairy.reasoning.planner: false disables). Verified live
+    // (2026-08-01): DeepSeek V4 thinking coexists with response_format
+    // json_object (reasoning happens, content is still strict JSON).
+    const plannerThinks = settings.fairyReasoning().planner && binding.provider === 'deepseek';
     const req = {
         messages,
         model:          binding.model,
@@ -134,6 +139,10 @@ async function callOnce({ bus, adapter, binding, messages, signal, spanId, prefi
         maxTokens:      binding.maxTokens || 8000,
         responseFormat: 'json_object',
         signal,
+        thinking:        binding.thinking === true || plannerThinks,
+        reasoningEffort: binding.thinking === true
+            ? (binding.reasoningEffort || undefined)
+            : (plannerThinks ? 'high' : undefined),
     };
     let result;
     try {

@@ -289,11 +289,109 @@ function computeStructuralSummary(valueStr) {
  * Run a trial expression. Appends a scratch cell to working.wb and stores
  * the full result in results/<probeId>.json.
  */
+// Multi-cell probes: max cells per call. Small on purpose — the point is
+// isolating steps, not smuggling a whole derivation past the probe budget.
+const MULTI_PROBE_MAX_CELLS = 4;
+
+/**
+ * Multi-cell probe (2026-08-02, user request): `cells: [code, ...]` evaluates
+ * up to MULTI_PROBE_MAX_CELLS code blocks as SEPARATE consecutive notebook
+ * cells in ONE tool call (one probe budget unit, one LLM turn). Evaluation
+ * stops at the first failing cell — that cell owns the amend cycle
+ * (fix-in-place) while the earlier cells' results stand, each recordable by
+ * its own probeId. Errors are isolated to the exact cell that caused them.
+ */
+async function handleMultiCellProbe(args, ctx) {
+    const t0   = Date.now();
+    const name = 'probe';
+    const cells = (args.cells || []).map(c => String(c || '').trim()).filter(Boolean);
+    if (!cells.length) return mkErr(name, 0, 'bad_args', 'cells must contain non-empty code strings');
+    if (cells.length === 1) return handleProbe({ ...args, cells: undefined, code: cells[0] }, ctx);
+    if (cells.length > MULTI_PROBE_MAX_CELLS) {
+        return mkErr(name, 0, 'bad_args',
+            `cells is capped at ${MULTI_PROBE_MAX_CELLS} blocks per probe call (got ${cells.length}). ` +
+            'Split the calculation across probe calls, or merge trivially-related lines into one cell.');
+    }
+
+    // Create the shared probe-state object on the REAL ctx before any sub-call —
+    // lazy init inside handleProbe would land on the shallow copy and be lost.
+    if (!ctx._probeState) ctx._probeState = {};
+
+    const subResults = [];
+    let stopped = null;
+    for (let i = 0; i < cells.length; i++) {
+        const subArgs = {
+            code:           cells[i],
+            note:           i === 0 ? args.note : undefined,
+            prevAnalysis:   i === 0 ? args.prevAnalysis : undefined,
+            timeoutSeconds: args.timeoutSeconds,
+            // auto-record and the machine-checked expectation apply to the LAST
+            // cell only, and only when every earlier cell succeeded.
+            record:         i === cells.length - 1 ? args.record : undefined,
+            expect:         i === cells.length - 1 ? args.expect : undefined,
+        };
+        const subCtx = Object.assign({}, ctx, { _multiCellContinuation: i > 0 });
+        const r = await handleProbe(subArgs, subCtx);
+        subResults.push(r);
+        if (r.ok === false) { stopped = { index: i, result: r }; break; }
+    }
+
+    const lastR  = subResults[subResults.length - 1];
+    // A cell rejected pre-eval (near-dup/syntax) has no probeId — amend must then
+    // target the last cell that actually RAN, not a stale pre-batch slot.
+    const lastWithId = [...subResults].reverse().find(r => r.probeId);
+    const okAll  = !stopped;
+    const perCell = subResults.map((r, i) => {
+        let p = {};
+        try { p = JSON.parse(r.modelPayload || '{}'); } catch (_) {}
+        return { cell: i + 1, probeId: r.probeId || null, ...p };
+    });
+    const durationMs = Date.now() - t0;
+    const ids = subResults.map(r => r.probeId).filter(Boolean);
+
+    return {
+        name,
+        ok:         okAll,
+        kind:       okAll ? 'ok' : stopped.result.kind,
+        durationMs,
+        probeId:    lastR.probeId || (lastWithId && lastWithId.probeId),   // failed (or last-run) cell — amend targets it
+        lastCellCode: cells[subResults.length - 1],
+        summary: okAll
+            ? `multi-probe ${ids.join('+')} ok in ${durationMs}ms`
+            : `multi-probe stopped at cell ${stopped.index + 1}/${cells.length} (${stopped.result.kind})`,
+        modelPayload: JSON.stringify({
+            multiCell:  true,
+            cellsRun:   subResults.length,
+            cellsTotal: cells.length,
+            cells:      perCell,
+            ...(stopped ? {
+                stoppedAtCell: stopped.index + 1,
+                notice: `Cell ${stopped.index + 1} FAILED — cells ${stopped.index + 2}..${cells.length} were NOT run. ` +
+                    `The failing cell remains in the notebook; fix it IN PLACE with amend_probe ` +
+                    `(it targets ${lastR.probeId || 'the failed cell'}), then re-submit the remaining cells.`,
+            } : {}),
+        }),
+        raw:          lastR.raw,            // failing cell's raw → tricks signature matching
+        error:        okAll ? null : lastR.error,
+        autoRecorded: lastR.autoRecorded,
+    };
+}
+
 async function handleProbe(args, ctx) {
     const t0   = Date.now();
     const name = 'probe';
+    if (!ctx.amendProbeId && Array.isArray(args.cells) && args.cells.length) {
+        return handleMultiCellProbe(args, ctx);
+    }
+    // Rejection tracking: any return BEFORE the kernel call is a harness
+    // rejection (nothing ran), so the NEXT probe must not be asked to analyse a
+    // non-existent output. Capture the previous attempt's outcome, then assume
+    // rejection until the kernel call actually clears the flag.
+    const _psTop = ctx._probeState || (ctx._probeState = {});
+    const _prevAttemptRejected = !!_psTop.lastRejected;
+    _psTop.lastRejected = true;
     const code = String(args.code || '').trim();
-    if (!code) return mkErr(name, 0, 'bad_args', 'code must be a non-empty string');
+    if (!code) return mkErr(name, 0, 'bad_args', 'code must be a non-empty string (or use `cells` for a multi-cell probe)');
 
     // ── Forbidden probe patterns ────────────────────────────────────────────
     // Reject filesystem introspection — task inputs are pre-loaded, never on disk.
@@ -370,7 +468,10 @@ async function handleProbe(args, ctx) {
                 modelPayload: JSON.stringify({
                     rejected:        true,
                     reason:          `${redefHit.join(', ')} ${redefHit.length === 1 ? 'is' : 'are'} already defined in the live kernel — re-pasting the definition is forbidden. Call it by name instead.`,
-                    suggestedAction: `Write only the next NEW line of the calculation, using ${redefHit.join(', ')} by name. To deliberately change a definition, first invalidate the step that created it, then re-probe with a leading "(* redefine: ${redefHit[0]} *)" comment.`,
+                    suggestedAction: `Write only the next NEW line of the calculation, using ${redefHit.join(', ')} by name. ` +
+                        `If these are SCRATCH variables (loop indices, temporaries), wrap them in Module[{...}, ...] so they ` +
+                        `never become global — that removes the conflict entirely. To deliberately change a definition, first ` +
+                        `invalidate the step that created it, then re-probe with a leading "(* redefine: ${redefHit[0]} *)" comment.`,
                 }),
                 error: 'redefinition', raw: null,
             };
@@ -381,33 +482,72 @@ async function handleProbe(args, ctx) {
     // tiny tweak (numeric vs symbolic, Round→Chop) into fresh probes instead of
     // recording the shared setup or amending the last probe. Skipped for amends
     // (an amend is *meant* to resemble the probe it revises).
+    let dupEscapeNote = null;
     if (!ctx.amendProbeId) {
         const recent = await ctx.workDir.loadRecentProbes(5).catch(() => []);
+        // Invalidation-aware (runs dszcbu/dsivno: after invalidating a step, the
+        // legitimate REBUILD of the same computation was near-dup-rejected against
+        // the stale step's probe, forcing amend/probe dances): probes bound to a
+        // stale step are not duplicates — rebuilding them is the whole point.
+        let staleProbeIds = new Set();
+        try {
+            const allSteps = await ctx.workDir.loadAllSteps();
+            staleProbeIds = new Set(allSteps.filter(s => s.status !== 'valid').map(s => s.probeId));
+        } catch (_) {}
         let dupId = null, dupSim = 0;
         for (const rp of recent) {
             if (!rp || !rp.code) continue;
+            if (staleProbeIds.has(rp.probeId)) continue;
             const sim = utilSimilarity(rp.code, code);
             if (sim >= 0.8 && sim > dupSim) { dupSim = sim; dupId = rp.probeId; }
         }
         if (dupId) {
-            return {
-                name, ok: false, kind: 'near_duplicate', durationMs: 0,
-                summary: `probe rejected: ${Math.round(dupSim * 100)}% identical to ${dupId}`,
-                modelPayload: JSON.stringify({
-                    rejected: true,
-                    reason: `This probe is ${Math.round(dupSim * 100)}% identical to ${dupId} (no probe spent). ` +
-                        `Re-running nearly the same block with a small tweak wastes budget and is the ` +
-                        `"rebuild instead of extend" anti-pattern.`,
-                    suggestedAction:
-                        `Pick ONE: (a) if you are refining ${dupId} (e.g. numeric vs symbolic, a cleaner form), ` +
-                        `use \`amend_probe\` to revise it IN PLACE — do not open a new probe; ` +
-                        `(b) if the setup is correct and reusable, \`record\` it as a step (it is then loaded ` +
-                        `automatically — never re-paste it) and probe ONLY the next new line; ` +
-                        `(c) isolate the single thing you are changing into a SMALL, focused probe rather than ` +
-                        `re-pasting the whole construction.`,
-                }),
-                error: 'near_duplicate', raw: null,
-            };
+            // If the duplicate target is already a RECORDED step, say so — the
+            // model repeatedly re-verified already-passed checks (postmortem
+            // QG_TS03_dfjqcb p022/p024/p025) because the rejection didn't tell
+            // it the result was already committed.
+            let dupStepNote = '';
+            try {
+                const steps = await ctx.workDir.loadValidSteps();
+                const st = steps.find(s => s.probeId === dupId);
+                if (st) {
+                    dupStepNote = ` That probe is already RECORDED as step '${st.id}'` +
+                        (st.role === 'crosscheck' ? ' (a passed crosscheck)' : '') +
+                        ' — its result is committed and will replay in clean.wb. Do NOT re-verify it; ' +
+                        'reference it and compute the next NEW quantity.';
+                }
+            } catch (_) {}
+            // Escape valve (run 15-11-39: 18 rejections — the guard + the
+            // essay force-act nudge formed a reject→essay→same-probe loop with
+            // no exit): after 2 consecutive rejections, let the 3rd attempt
+            // RUN, flagged — if the model insists, the tweak may matter, and a
+            // spent probe beats an infinite oscillation.
+            ctx._nearDupStreak = (ctx._nearDupStreak || 0) + 1;
+            if (ctx._nearDupStreak <= 2) {
+                return {
+                    name, ok: false, kind: 'near_duplicate', durationMs: 0,
+                    summary: `probe rejected: ${Math.round(dupSim * 100)}% identical to ${dupId}`,
+                    modelPayload: JSON.stringify({
+                        rejected: true,
+                        reason: `This probe is ${Math.round(dupSim * 100)}% identical to ${dupId} (no probe spent). ` +
+                            `Re-running nearly the same block with a small tweak wastes budget and is the ` +
+                            `"rebuild instead of extend" anti-pattern.` + dupStepNote,
+                        suggestedAction:
+                            `Pick ONE: (a) if you are refining ${dupId} (e.g. numeric vs symbolic, a cleaner form), ` +
+                            `use \`amend_probe\` to revise it IN PLACE — do not open a new probe; ` +
+                            `(b) if the setup is correct and reusable, \`record\` it as a step (it is then loaded ` +
+                            `automatically — never re-paste it) and probe ONLY the next new line; ` +
+                            `(c) isolate the single thing you are changing into a SMALL, focused probe rather than ` +
+                            `re-pasting the whole construction.`,
+                    }),
+                    error: 'near_duplicate', raw: null,
+                };
+            }
+            ctx._nearDupStreak = 0;
+            dupEscapeNote = `⚠️ Accepted despite ${Math.round(dupSim * 100)}% similarity to ${dupId} (third consecutive attempt). ` +
+                'If this approach fails again, you MUST change method structurally — do not iterate this block further.';
+        } else {
+            ctx._nearDupStreak = 0;
         }
     }
 
@@ -420,8 +560,23 @@ async function handleProbe(args, ctx) {
     const probeId = ctx.amendProbeId || `p${String(counter).padStart(3, '0')}`;
 
     // Require prevAnalysis for every probe after the first — forces visible reflection.
-    // An amend never requires prevAnalysis (it is a fix of the immediately prior probe).
-    if (!ctx.amendProbeId && counter >= 2 && !args.prevAnalysis) {
+    // An amend never requires prevAnalysis (it is a fix of the immediately prior probe);
+    // neither do the 2nd+ cells of a multi-cell probe (the analysis came with cell 1),
+    // nor a probe whose PREDECESSOR was already committed as a step — the record's
+    // note IS the analysis (run dn41ll: the gate cost a pure round-trip there).
+    let _prevRecorded = false;
+    if (!ctx.amendProbeId && !ctx._multiCellContinuation && counter >= 2 && !args.prevAnalysis) {
+        try {
+            const _steps = await ctx.workDir.loadValidSteps();
+            _prevRecorded = !!(ctx.lastProbeId && _steps.some(s => s.probeId === ctx.lastProbeId));
+        } catch (_) {}
+    }
+    // A REJECTED previous attempt never executed — there is no output to analyse,
+    // so demanding prevAnalysis just burns a turn (gold sweep 2026-08-04: the
+    // single most-repeated friction, 6 postmortems).
+    const _prevRejected = _prevAttemptRejected;
+    if (!ctx.amendProbeId && !ctx._multiCellContinuation && counter >= 2 && !args.prevAnalysis
+        && !_prevRecorded && !_prevRejected) {
         return {
             name, ok: false, kind: 'missing_analysis', durationMs: 0,
             summary: `probe ${probeId} rejected: prevAnalysis required`,
@@ -445,11 +600,25 @@ async function handleProbe(args, ctx) {
     // the probe cell gets full rich rendering in the tab. Falls back to evalOnce
     // (text-only) when no notebook document is available (e.g. background runs).
     let r;
-    let _nbDoc    = null;   // used for cleanup on message failure
+    let _nbDoc    = null;   // used for failed-attempt cell replacement
     let _cellsBefore = 0;
+    // Shared by reference with the real fairyCtx even on the amend path's shallow
+    // ctx copy — mutations here survive across tool calls.
+    const _ps = ctx._probeState || (ctx._probeState = {});
+    _ps.lastRejected = false;   // this attempt reaches the kernel
     try {
         _nbDoc = ctx.getWorkingNbDoc && ctx.getWorkingNbDoc();
         if (_nbDoc && ctx.shim.evalInNotebook) {
+            // Failed-cell policy (user-reported 2026-08-02: failing cells were
+            // silently DELETED and the run continued "as if all good"): a failed
+            // attempt's cells now STAY visible in working.wb until the same slot
+            // is retried. An amend of that slot replaces them (remove-then-insert
+            // = visual fix-in-place); a NEW probe abandons them in place as an
+            // honest ❌ trace.
+            if (ctx.amendProbeId && _ps.failedAttempt && ctx.shim.removeFailedProbeCells) {
+                await ctx.shim.removeFailedProbeCells(_nbDoc, _ps.failedAttempt).catch(() => {});
+            }
+            _ps.failedAttempt = null;
             _cellsBefore = _nbDoc.cellCount;
             r = await ctx.shim.evalInNotebook(_nbDoc, code, {
                 timeoutSeconds, signal: ctx.signal,
@@ -481,14 +650,57 @@ async function handleProbe(args, ctx) {
         }
     }
 
-    // Remove cells inserted by evalInNotebook whenever the probe failed (any reason:
-    // messages, error, timeout). evalInNotebook may return ok:false directly (hasError
-    // detected in text/plain), so this must be outside the messages check above.
-    if (!r.ok && _nbDoc && ctx.shim.removeLastCells) {
-        const cellsAdded = _nbDoc.cellCount - _cellsBefore;
-        if (cellsAdded > 0) {
-            await ctx.shim.removeLastCells(_nbDoc, cellsAdded).catch(() => {});
+    // Machine-checked expectation (user-reported, run ejiy7g p027: a probe computed
+    // S_6 irrep "dimensions" of 1050/462/896 — formally clean, semantically nonsense
+    // — and the run sailed on). `expect` turns the analysis block's EXPECTED line
+    // into a kernel-adjudicated claim evaluated IMMEDIATELY after the probe: it must
+    // reduce to True (or a tiny residual). A failed expectation fails the probe like
+    // a kernel error — the cell stays and the fix gate arms.
+    if (r.ok && args.expect && typeof args.expect === 'string' && ctx.shim.evalOnce) {
+        const expectExpr = args.expect.trim().slice(0, 300);
+        let er = null;
+        try { er = await ctx.shim.evalOnce({ expression: expectExpr, timeoutSeconds: 20, signal: ctx.signal }); }
+        catch (e) { er = { ok: false, error: (e && e.message) || String(e) }; }
+        const evStr = er && er.ok ? String(er.value || '').trim() : '';
+        const num = Number(evStr.replace(/\*\^/g, 'e').replace(/`+[0-9.]*/g, ''));
+        const tol = typeof ctx.numericTol === 'number' ? ctx.numericTol : 1e-8;
+        const passed = evStr === 'True' || (Number.isFinite(num) && Math.abs(num) < tol);
+        if (!passed) {
+            // Per-clause diff (gold sweep 2026-08-04, 3 postmortems: "show WHICH
+            // sub-clause failed"): a conjunction is split and each side evaluated
+            // separately, so a compound expectation pinpoints the false clause
+            // instead of reporting one opaque False.
+            let clauseDetail = '';
+            const clauses = expectExpr.split(/&&/).map(c => c.trim()).filter(Boolean);
+            if (clauses.length > 1 && clauses.length <= 6) {
+                const verdicts = [];
+                for (const c of clauses) {
+                    let cv = '?';
+                    try {
+                        const cr = await ctx.shim.evalOnce({ expression: c, timeoutSeconds: 10, signal: ctx.signal });
+                        cv = cr && cr.ok ? String(cr.value || '').trim().slice(0, 80) : 'eval error';
+                    } catch (_) {}
+                    verdicts.push(`  ${cv === 'True' ? '✓' : '✗'} ${c} → ${cv}`);
+                }
+                clauseDetail = `\nPer-clause verdicts:\n${verdicts.join('\n')}`;
+            }
+            r = {
+                ...r, ok: false, kind: 'expect_failed',
+                error: `expectation FAILED: \`${expectExpr}\` evaluated to ${evStr ? evStr.slice(0, 200) : (er && er.error ? String(er.error).slice(0, 200) : 'nothing')} — ` +
+                    'the result contradicts your own stated expectation. Either the computation is wrong (fix it with amend_probe) ' +
+                    'or the expectation is wrong (amend with a corrected `expect` and justify the change in the note).' +
+                    clauseDetail,
+            };
         }
+    }
+
+    // Failed attempt: KEEP the cells (error output visible) and remember how
+    // many were added — the next amend of this slot replaces them in place.
+    // (The old behaviour deleted them immediately, which read as "nothing
+    // happened" and let the run continue as if all was fine.)
+    if (!r.ok && _nbDoc) {
+        const cellsAdded = _nbDoc.cellCount - _cellsBefore;
+        if (cellsAdded > 0) _ps.failedAttempt = { code, cellsAdded };
     }
 
     const durationMs = Date.now() - t0;
@@ -499,7 +711,14 @@ async function handleProbe(args, ctx) {
     // executable, and surface evaluation state. The human cell keeps its LaTeX render;
     // valueStr (the human/LaTeX text) is still stored on disk for inspect/replay.
     const agentValue = (r.ok && typeof r.agentValue === 'string' && r.agentValue.length) ? r.agentValue : null;
-    const agentShape = (r.ok && typeof r.agentShape === 'string' && r.agentShape.length) ? r.agentShape : null;
+    // Defense in depth (run 22-39-08: an uncapped kernel-side shape reached
+    // 156k chars via Association keys and entered EVERY later prompt): the
+    // shape is a summary — never let it exceed a few hundred chars here even
+    // if the kernel cap regresses.
+    const agentShapeRaw = (r.ok && typeof r.agentShape === 'string' && r.agentShape.length) ? r.agentShape : null;
+    const agentShape = agentShapeRaw && agentShapeRaw.length > 600
+        ? agentShapeRaw.slice(0, 600) + '…[shape truncated]'
+        : agentShapeRaw;
 
     const structural = !r.ok
         ? { head: 'Error', summary: r.error || r.kind }
@@ -566,7 +785,10 @@ async function handleProbe(args, ctx) {
         // Prefer the kernel-computed shape (precise) over regex-sniffing the rendered value.
         const shapeStr = agentShape || '';
         const unevalFromShape = /unevaluated\{|NON-numeric/.test(shapeStr);
-        const unevalFromValue = !agentShape && valueStr && valueStr.length > 1500 && /⊗|\\otimes|CircleTimes|Root\[|\\mathrm\{Root\}/.test(valueStr);
+        // Root[…] removed from the pattern (runs doken8/donu80: RootReduce'd EXACT
+        // results are legitimate closed forms, not evaluation failures) and the
+        // threshold raised — only genuinely bloated formal-product output hints.
+        const unevalFromValue = !agentShape && valueStr && valueStr.length > 3000 && /⊗|\\otimes|CircleTimes/.test(valueStr);
         if (unevalFromShape || unevalFromValue) {
             hints.push(`The result did not fully evaluate (${agentShape ? `shape: ${shapeStr}` : 'large symbolic output'}). ` +
                 `A NON-numeric/unevaluated result usually means a formal head (e.g. CircleTimes vs KroneckerProduct) ` +
@@ -588,16 +810,67 @@ async function handleProbe(args, ctx) {
             warning:          largeStepWarning,
             hint:             symbolicHint,
             solverWarning:    r.softWarning || undefined,
-            notice: outputIsEmpty
+            // Symbol-leak awareness (runs dtapzb/dszcbu: probes silently defined
+            // scratch globals like i1/st/op that later caused redefinition
+            // conflicts): show what this probe just defined in the kernel.
+            definesSymbols:   (() => { try { const d = analyzeCode(code).definesSymbols; return d.length ? d.slice(0, 12) : undefined; } catch (_) { return undefined; } })(),
+            // Unrecorded-dependency alert (runs dv41kf/dutzas: a probe built on H
+            // from an UNRECORDED earlier probe; the gap surfaced only at chain
+            // time): name the unrecorded probes this one depends on, right away.
+            unrecordedDeps: await (async () => {
+                try {
+                    const uses = analyzeCode(code).usesSymbols || [];
+                    if (!uses.length) return undefined;
+                    const [probes, steps] = await Promise.all([
+                        ctx.workDir.loadRecentProbes(10).catch(() => []),
+                        ctx.workDir.loadValidSteps().catch(() => []),
+                    ]);
+                    const recordedProbeIds = new Set(steps.map(s => s.probeId));
+                    const stepDefs = new Set();
+                    for (const s of steps) (s.definesSymbols || []).forEach(d => stepDefs.add(d));
+                    const from = new Map();
+                    for (const rp of probes) {
+                        if (!rp || !rp.code || rp.ok === false || rp.probeId === probeId || recordedProbeIds.has(rp.probeId)) continue;
+                        for (const d of (analyzeCode(rp.code).definesSymbols || [])) if (!from.has(d)) from.set(d, rp.probeId);
+                    }
+                    const hits = uses.filter(u => from.has(u) && !stepDefs.has(u));
+                    return hits.length
+                        ? `⚠️ depends on symbols from UNRECORDED probes: ${hits.slice(0, 6).map(u => `${u}←${from.get(u)}`).join(', ')} — record those probes or the fresh-kernel replay will fail.`
+                        : undefined;
+                } catch (_) { return undefined; }
+            })(),
+            notice: [dupEscapeNote, outputIsEmpty
                 ? '🚨 EMPTY OUTPUT — this probe returned no value (Null or blank). You MUST write your analysis block and explicitly explain why empty output is acceptable here. If this probe was supposed to compute a value, do NOT record it — fix the code so it returns the value explicitly.'
                 : (r.softWarning
                     ? `⚠️ Non-critical solver warning (${r.softWarning}) — the result was kept. This is usually fine, but VERIFY the residual/accuracy is acceptably small before relying on it; if so you may record this step with acknowledgeMessages: true.`
                     : (r.messages
                         ? '⚠️ Kernel messages present — check before recording this step.'
-                        : undefined)),
+                        : undefined))].filter(Boolean).join(' ') || undefined,
         };
+        // P2 (2026-08-02): optional AUTO-RECORD — probe + record in one turn.
+        // Only when the probe is clean (no messages/warnings): a messaged probe
+        // still needs the model's explicit acknowledgeMessages decision.
+        if (args.record && args.record.stepId && !r.messages && !r.softWarning && !outputIsEmpty) {
+            const rec = await handleRecord({
+                stepId:  args.record.stepId,
+                probeId,
+                role:    args.record.role,
+                note:    args.record.note || args.note,
+                checks:  args.record.checks,
+            }, ctx);
+            const recPayload = (() => { try { return JSON.parse(rec.modelPayload); } catch (_) { return {}; } })();
+            modelData.autoRecord = rec.ok !== false
+                ? { recorded: true, stepId: args.record.stepId, role: recPayload.role, checks: recPayload.checks }
+                : { recorded: false, reason: recPayload.reason || rec.error || rec.kind, checks: recPayload.checks };
+        } else if (args.record && args.record.stepId) {
+            modelData.autoRecord = {
+                recorded: false,
+                reason: outputIsEmpty ? 'probe output empty' : 'probe has kernel messages/warnings — record explicitly with acknowledgeMessages if benign',
+            };
+        }
         const result = mkOk(name, durationMs, modelData, summary, r);
         result.probeId = probeId;  // expose at top level for probe.appended event
+        if (modelData.autoRecord && modelData.autoRecord.recorded) result.autoRecorded = args.record.stepId;
         return result;
     } else {
         const rawError = r.error || r.kind || '';
@@ -608,7 +881,9 @@ async function handleProbe(args, ctx) {
             error:   capMessages(rawError),
             messages: capMessages(r.messages) || undefined,
             durationMs,
-            errorNotice: `⚠️ Probe ${probeId} FAILED (${r.kind}). Do not record this probe. Fix the code and probe again.`,
+            errorNotice: `⚠️ Probe ${probeId} FAILED (${r.kind}). The failing cell REMAINS in the notebook with its error — ` +
+                'fix it IN PLACE with `amend_probe` until it runs clean. Do not abandon a broken calculation: ' +
+                'a new probe leaves the ❌ cell behind as an unfixed defect in your work.',
         };
         return {
             name, ok: false, kind: r.kind, durationMs,
@@ -643,6 +918,21 @@ async function handleAmendProbe(args, ctx) {
     // succeeded with unsatisfactory output (a refinement: numeric vs symbolic, a
     // cleaner form). Reusing the slot is how you ITERATE on one probe instead of
     // re-pasting the whole block into a fresh probe.
+    //
+    // Immutability guard (run dsivno: amending a probe already bound to a recorded
+    // step mutated the slot while the step kept the OLD code — recorded-code vs
+    // kernel divergence that confused every later comparison): a recorded probe
+    // is frozen; iterate in a fresh probe or invalidate the step first.
+    try {
+        const _steps = await ctx.workDir.loadValidSteps();
+        const _bound = _steps.find(s => s.probeId === ctx.lastProbeId);
+        if (_bound) {
+            return mkErr(name, 0, 'probe_recorded',
+                `Probe ${ctx.lastProbeId} is already recorded as step '${_bound.id}' and is immutable. ` +
+                'Either continue in a NEW probe (building on the recorded symbols by name), or — if the ' +
+                `recorded result is actually wrong — invalidate('${_bound.id}') first, then re-probe.`);
+        }
+    } catch (_) {}
 
     // Delegate to handleProbe with the forced probeId; mark the result as an amend.
     const probeCtx = Object.assign({}, ctx, { amendProbeId: ctx.lastProbeId });
@@ -772,15 +1062,52 @@ async function handleLookup(args, ctx) {
 async function handleRecord(args, ctx) {
     const t0      = Date.now();
     const name    = 'record';
-    const stepId  = String(args.stepId  || '').trim();
+    let   stepId  = String(args.stepId  || '').trim();
     const probeId = String(args.probeId || '').trim();
 
     if (!stepId)  return mkErr(name, 0, 'bad_args', 'stepId is required');
-    if (!probeId) return mkErr(name, 0, 'bad_args', 'probeId is required');
 
-    // Validate stepId format
+    // Metadata patch (gold sweep 2026-08-04 — the #1 postmortem ask, 11 runs):
+    // declaring free/formal symbols on an ALREADY-recorded step required
+    // invalidate + re-probe + re-record, burning backtrack budget on a purely
+    // cosmetic fix. `record {stepId, free:[…]}` with no probeId now patches the
+    // declaration in place: free, no budget, no cascade.
+    if (!probeId && Array.isArray(args.free) && args.free.length) {
+        const freeSyms = args.free.map(s => String(s).trim()).filter(Boolean).slice(0, 12);
+        const existing = (await ctx.workDir.loadValidSteps().catch(() => [])).find(s => s.id === stepId);
+        if (!existing) {
+            return mkErr(name, 0, 'unknown_step',
+                `No valid recorded step '${stepId}' to declare free symbols on. To record a NEW step, pass probeId.`);
+        }
+        const merged = [...new Set([...(existing.freeSymbols || []), ...freeSyms])];
+        await ctx.workDir.updateStep(stepId, {
+            freeSymbols: merged,
+            usesSymbols: (existing.usesSymbols || []).filter(u => !merged.includes(u)),
+        });
+        return mkOk(name, Date.now() - t0, {
+            ok: true, stepId, freeSymbols: merged, patched: true,
+            message: `Declared ${merged.join(', ')} as intentional free/formal symbol(s) of step '${stepId}'. ` +
+                'Replay warnings for them are now silenced; no probe or backtrack budget was used.',
+        }, `record: '${stepId}' free ← ${merged.join(',')}`);
+    }
+
+    if (!probeId) return mkErr(name, 0, 'bad_args', 'probeId is required (or pass `free` to declare free symbols on an existing step)');
+
+    // Normalise stepId to snake_case instead of rejecting (run dq21ha wasted
+    // two record calls on 'step_goldResult'-style names): lowercase, camelCase
+    // → snake, dashes/spaces → underscores. Reject only what can't be salvaged.
     if (!/^[a-z][a-z0-9_]*$/.test(stepId)) {
-        return mkErr(name, 0, 'bad_args', `stepId must be snake_case lowercase: '${stepId}'`);
+        const norm = stepId
+            .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+            .replace(/[-\s]+/g, '_')
+            .toLowerCase()
+            .replace(/[^a-z0-9_]/g, '')
+            .replace(/^_+|_+$/g, '')
+            .replace(/^([^a-z])/, 's$1');
+        if (!/^[a-z][a-z0-9_]*$/.test(norm)) {
+            return mkErr(name, 0, 'bad_args', `stepId must be snake_case lowercase: '${stepId}'`);
+        }
+        stepId = norm;
     }
 
     // Ensure stepId is unique among valid steps
@@ -788,6 +1115,12 @@ async function handleRecord(args, ctx) {
     if (existingSteps.some(s => s.id === stepId)) {
         return mkErr(name, Date.now() - t0, 'duplicate_step',
             `A valid step with id '${stepId}' already exists. Choose a different stepId.`);
+    }
+    const probeOwner = existingSteps.find(s => s.probeId === probeId);
+    if (probeOwner) {
+        return mkErr(name, Date.now() - t0, 'probe_already_recorded',
+            `Probe '${probeId}' is already immutably bound to step '${probeOwner.id}'. ` +
+            'One probe execution may support only one recorded step. Run a new probe for new evidence.');
     }
 
     // Load the probe
@@ -818,7 +1151,12 @@ async function handleRecord(args, ctx) {
     }
 
     // Static dependency analysis
-    const { definesSymbols, usesSymbols } = analyzeCode(probe.code);
+    const { definesSymbols } = analyzeCode(probe.code);
+    // First-class free/formal-symbol declaration (Solve targets, ODE variables,
+    // generating-function dummies): excluded from dependency tracking, so no
+    // replay warning fires and no comment-convention re-record is needed.
+    const freeSymbols = (Array.isArray(args.free) ? args.free : []).map(s => String(s).trim()).filter(Boolean).slice(0, 12);
+    const usesSymbols = analyzeCode(probe.code).usesSymbols.filter(u => !freeSymbols.includes(u));
 
     // Infer dependsOn: steps that define symbols this step uses
     const inferredDependsOn = [];
@@ -877,13 +1215,25 @@ async function handleRecord(args, ctx) {
     const selfDefined  = new Set(definesSymbols);
     const knownDefined = new Set();
     for (const s of existingSteps) for (const sym of (s.definesSymbols || [])) knownDefined.add(sym);
-    try { for (const u of await ctx.workDir.loadUtils()) if (u && u.name) knownDefined.add(u.name); } catch (_) {}
+    // Util BODIES define symbols too (run eizvqx: sectorE defined inside a
+    // registered util's code was flagged, forcing a pointless util split).
+    try {
+        for (const u of await ctx.workDir.loadUtils()) {
+            if (!u) continue;
+            if (u.name) knownDefined.add(u.name);
+            for (const sym of extractDefinedSymbols(u.code || '')) knownDefined.add(sym);
+        }
+    } catch (_) {}
     try {
         for (const inp of await ctx.workDir.loadInputs()) {
             for (const sym of extractDefinedSymbols((inp && inp.code) || '')) knownDefined.add(sym);
         }
     } catch (_) {}
-    const missingSyms = usesSymbols.filter(sym => !selfDefined.has(sym) && !knownDefined.has(sym)).slice(0, 3);
+    // Built-in heuristic (run eixolw: IntegerLength flagged as a replay risk):
+    // uppercase/$-initial names nothing defines are WL built-ins beyond
+    // depAnalyzer's finite list — advisory silence, compile stays the authority.
+    const missingSyms = usesSymbols.filter(sym =>
+        !selfDefined.has(sym) && !knownDefined.has(sym) && !/^[A-Z$]/.test(sym)).slice(0, 3);
     if (missingSyms.length) {
         let recentProbes = [];
         try { recentProbes = await ctx.workDir.loadRecentProbes(15); } catch (_) {}
@@ -932,6 +1282,65 @@ async function handleRecord(args, ctx) {
         }
     }
 
+    // Stage-2 rung 3 (2026-08-02): MACHINE-RUN checks at record time. Each check
+    // is evaluated in the live kernel NOW; pass = True or |numeric| < tol. A
+    // failing check rejects the record — the kernel, not the model, adjudicates.
+    // A step with ≥1 passing check satisfies the crosscheck gate with no extra
+    // verification probe.
+    const checkExprs = Array.isArray(args.checks)
+        ? args.checks.map(String).map(s => s.trim()).filter(Boolean).slice(0, 3) : [];
+    const checkResults = [];
+    if (checkExprs.length && ctx.shim && typeof ctx.shim.evalOnce === 'function') {
+        const tol = (typeof ctx.numericTol === 'number' && ctx.numericTol > 0) ? ctx.numericTol : 1e-10;
+        for (const expr of checkExprs) {
+            const cr = await ctx.shim.evalOnce({ expression: expr, timeoutSeconds: 20 });
+            let passed = false, valStr = null;
+            if (cr && cr.ok) {
+                valStr = String(cr.value || '').trim();
+                const num = Number(valStr.replace(/\*\^/g, 'e').replace(/`+[0-9.]*/g, ''));
+                passed = valStr === 'True' || (Number.isFinite(num) && Math.abs(num) < tol);
+            }
+            checkResults.push({ expr, passed, value: valStr ? valStr.slice(0, 200) : (cr && (cr.error || cr.kind)) });
+        }
+        const failed = checkResults.filter(c => !c.passed);
+        if (failed.length) {
+            return {
+                name, ok: false, kind: 'check_failed', durationMs: Date.now() - t0,
+                summary: `record rejected: ${failed.length}/${checkResults.length} machine check(s) failed`,
+                modelPayload: JSON.stringify({
+                    rejected: true,
+                    reason: 'Machine-run check(s) failed — the kernel disputes this step. A check must ' +
+                        'evaluate to the literal True or to a small number (|value| < tol). If the check ' +
+                        'stayed unevaluated, common causes: All[...] is not a boolean reducer (use And @@ ' +
+                        'Table[...]), the check references Association KEYS as if they were symbols ' +
+                        '(extract with assoc["key"] instead), or a symbolic == needs Simplify/FullSimplify ' +
+                        'to reduce to True.',
+                    checks: checkResults,
+                    suggestedAction: 'Fix the step (amend_probe / new probe) if the result is wrong, or fix the check if IT is wrong (wrong tolerance, wrong reference, non-boolean form). Then record again.',
+                }),
+                error: 'check_failed', raw: { checks: checkResults },
+            };
+        }
+    }
+
+    // Immutable evidence snapshot: results/<probeId>.json remains the mutable
+    // scratch slot used by amend_probe. Once recorded, exact code/output pairing
+    // lives on the step and can no longer be changed by a later amend or slot reuse.
+    const canonicalOutput = (typeof probe.agentValue === 'string' && probe.agentValue.length)
+        ? probe.agentValue : String(probe.value || '');
+    const evidenceSnapshot = {
+        schemaVersion: 1,
+        probeId,
+        probeTs: probe.ts || null,
+        code: String(probe.code || ''),
+        output: canonicalOutput.slice(0, 20000),
+        ok: probe.ok === true,
+        messages: probe.messages || null,
+        durationMs: Number(probe.durationMs) || 0,
+    };
+    evidenceSnapshot.sha256 = require('crypto').createHash('sha256')
+        .update(JSON.stringify(evidenceSnapshot)).digest('hex');
+
     // Append to steps.json
     await ctx.workDir.addStep({
         id:             stepId,
@@ -946,6 +1355,13 @@ async function handleRecord(args, ctx) {
         confidence:     ['high', 'medium', 'low'].includes(args.confidence) ? args.confidence : undefined,
         verifiedBy:     args.verifiedBy ? String(args.verifiedBy).slice(0, 200) : undefined,
         role:           stepRole,
+        checks:         checkResults.length ? checkResults : undefined,
+        evidenceSnapshot,
+        freeSymbols:    freeSymbols.length ? freeSymbols : undefined,
+        // Stage-2 verification ladder rung (plan §Stage 2 item 5): 2 = clean
+        // kernel eval, 3 = record-time machine checks passed. run_clean's
+        // fresh-kernel replay later promotes surviving steps to 5.
+        verifiedRung:   checkResults.length ? 3 : 2,
     });
 
     const durationMs = Date.now() - t0;
@@ -955,6 +1371,7 @@ async function handleRecord(args, ctx) {
         probeId,
         recorded:           true,
         role:               stepRole,
+        checks:             checkResults.length ? checkResults : undefined,
         autoTaggedCrosscheck: autoTagged || undefined,
         inferredDependsOn,
         mergedDependsOn,
@@ -1029,17 +1446,62 @@ async function handleChain(_args, ctx) {
     const t0   = Date.now();
     const name = 'chain';
     try {
-        const [summary, utils] = await Promise.all([
+        const [summary, utils, validSteps] = await Promise.all([
             ctx.workDir.buildChainSummary({ maxChars: 3000 }),
             ctx.workDir.loadUtils().catch(() => []),
+            ctx.workDir.loadValidSteps().catch(() => []),
         ]);
+        // Replay audit (postmortem QG_TS03_dfjqcb: a step whose dependency was
+        // never recorded risks fresh-kernel replay failure, and discovering it
+        // at run_clean costs the backtrack budget): flag symbols a step uses
+        // that NO valid step or util defines.
+        const definedAll = new Set(utils.map(u => u.name));
+        for (const u of utils) { try { for (const d of analyzeCode(u.code || '').definesSymbols) definedAll.add(d); } catch (_) {} }
+        for (const s of validSteps) (s.definesSymbols || []).forEach(d => definedAll.add(d));
+        const replayWarnings = [];
+        for (const s of validSteps) {
+            const declaredFree = new Set(s.freeSymbols || []);
+            const missing = (s.usesSymbols || []).filter(u => {
+                if (!u || definedAll.has(u) || declaredFree.has(u)) return false;
+                // Built-in heuristic (run dn41ll false positives: Integer, $Failed,
+                // DeleteDuplicatesBy): uppercase/$-initial names no step defines are
+                // WL built-ins that depAnalyzer's finite list missed. This is an
+                // ADVISORY warning — err towards silence, the compile-time closure
+                // check remains the authority.
+                if (/^[A-Z$]/.test(u)) return false;
+                // Slot/string-only occurrences (#eSkill, "eSkill") are not symbol uses.
+                const code = String(s.code || '');
+                if (!code) return true;
+                const esc = u.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                // Table/Do/Sum iterator false positives (run duis3t: "uses `s`"):
+                // an iterator opener "{sym," marks a locally-bound name, not a dep.
+                if (new RegExp('\\{\\s*' + esc + '\\s*,').test(code)) return false;
+                return new RegExp('(^|[^#\\w"`])' + esc + '\\b').test(code);
+            });
+            if (missing.length) {
+                replayWarnings.push(`step '${s.id}' uses \`${missing.join(', ')}\` which no valid step or utility defines — ` +
+                    'the fresh-kernel replay of clean.wb will fail on it. Record a defining step, or invalidate and re-record. ' +
+                    `If a name is an INTENTIONAL free symbol (a Solve/FindRoot target, an ODE variable, a generating-function ` +
+                    `dummy), declare it at ZERO cost: record({stepId: "${s.id}", free: ["${missing[0]}"]}) — no probeId, no ` +
+                    'backtrack budget, no re-probe. (A `(* free: name *)` comment in new probe code works too.)');
+            }
+        }
+        // Topological replay preview (run dszcbu: the agent couldn't see the
+        // clean.wb execution order before done_exploring and had to "trust the
+        // topological sort"): show the exact order compile will use.
+        let replayOrder;
+        try {
+            replayOrder = require('./harness').topoSortSteps(validSteps).map(s => s.id);
+        } catch (_) {}
         const durationMs = Date.now() - t0;
         return mkOk(name, durationMs, {
             ok: true,
             ...summary,
             utilities: utils.map(u => ({ name: u.name, note: u.note })),
+            ...(replayOrder && replayOrder.length ? { replayOrder } : {}),
+            ...(replayWarnings.length ? { replayWarnings } : {}),
             durationMs,
-        }, `chain ok (${(summary.steps || []).length} valid steps, ${utils.length} utilities) in ${durationMs}ms`);
+        }, `chain ok (${(summary.steps || []).length} valid steps, ${utils.length} utilities${replayWarnings.length ? `, ${replayWarnings.length} replay warning(s)` : ''}) in ${durationMs}ms`);
     } catch (e) {
         return mkErr(name, Date.now() - t0, 'error', e && e.message || String(e));
     }
@@ -1205,6 +1667,9 @@ async function handleRunClean(_args, ctx) {
     if (failedValidations.length) {
         const ps = ctx.polishState || (ctx.polishState = {});
         ps.validationFailStreak = (ps.validationFailStreak || 0) + 1;
+        // Documented invariant (CLAUDE.md + run2Fixes I4/I5): failing checks
+        // block allClean TWICE, then downgrade (and the downgrade caps the
+        // terminal status at partial_delivered).
         if (ps.validationFailStreak <= 2) {
             allClean = false;
             validationNotice =
@@ -1212,11 +1677,18 @@ async function handleRunClean(_args, ctx) {
                 'result does not satisfy the task\'s first-principles checks). Fix the chain — if a recorded ' +
                 'step is wrong, emit reopen_chain. Do NOT delete or weaken the checks.';
         } else {
+            // Verifier-gated status (Stage 2, 2026-08-01): downgraded checks no
+            // longer block polish, but the run can then terminate at most
+            // partial_delivered — an adjudicable check the kernel refutes must
+            // never yield 'delivered' (that is exactly the false_delivered
+            // vector the gold suite measures).
+            ps.validationDowngraded = true;
             validationNotice =
                 `⚠️ ${failedValidations.length} validation check(s) still failing after ` +
                 `${ps.validationFailStreak} attempts — downgraded to warnings (the check itself may be ` +
-                'ill-posed). They will be reported with the delivery; state in your final summary why ' +
-                'each failing check does not invalidate the result.';
+                'ill-posed). Do NOT ask the user again or reopen a reproducible chain solely to satisfy ' +
+                'a contradicted Planner check. Finish normally and state why each check is invalid — the ' +
+                'run will be delivered as PARTIAL (verified replay, disputed checks).';
         }
     } else if (validationResults.length && ctx.polishState) {
         ctx.polishState.validationFailStreak = 0;
@@ -1247,6 +1719,12 @@ async function handleRunClean(_args, ctx) {
         } catch (_) { /* sync is best-effort — never blocks delivery */ }
     }
 
+    // Stage-2 verification ladder: a fully-clean fresh-kernel replay promotes
+    // every surviving valid step to rung 5 (the top of the ladder).
+    if (allClean && typeof workDir.promoteVerifiedRung === 'function') {
+        await workDir.promoteVerifiedRung(5).catch(() => {});
+    }
+
     return mkOk(name, Date.now() - t0, {
         allClean,
         cellCount,
@@ -1268,6 +1746,19 @@ async function handleRunClean(_args, ctx) {
         })),
         validationResults: validationResults.length ? validationResults : undefined,
         validationNotice,
+        // Deliverable polish (run eiosfk: Eigenvalues::arh boxes shipped in
+        // clean.wb — soft, non-blocking, but red in the reader's face): name
+        // the cells with benign messages and nudge an in-place fix.
+        softWarningNotice: (() => {
+            const soft = allResults.filter(x => x.softWarnings);
+            if (!soft.length) return undefined;
+            return `🧹 Deliverable polish: cell(s) ${soft.map(x => `#${x.cellIndex} (${x.softWarnings})`).join(', ')} emit ` +
+                'benign kernel messages that will show as red boxes in the final notebook. A publication-quality ' +
+                'clean.wb runs message-free — fix the cause with edit_cell (e.g. Normal[] a sparse matrix before ' +
+                'full Eigenvalues, tighten options) and run_clean again. Do NOT suppress with Off[].';
+        })(),
+        disputedPlannerChecks: failedValidations.length && allClean
+            ? failedValidations.map(v => ({ check: v.check, observed: v.value })) : undefined,
         syncedSteps: syncedSteps.length ? syncedSteps : undefined,
         allResults: allClean ? [] : allResults.map(f => ({
             cellIndex: f.cellIndex, cellId: f.cellId,
@@ -1453,10 +1944,25 @@ async function handleWritePartialReport(args, ctx) {
  * Persists to plan.json; the bus event is emitted by fairy.js so the
  * UI can insert a roadmap cell into working.wb.
  */
+/**
+ * Coerce a plan step to a display string. The spec declares steps as strings,
+ * but the model sometimes sends objects ({step, complexity, note}) — a bare
+ * String() then renders "[object Object]" in the roadmap cell (run 23-01-18).
+ */
+function normalizePlanStep(s) {
+    if (typeof s === 'string') return s.trim();
+    if (s && typeof s === 'object') {
+        const t = s.step || s.title || s.text || s.description || s.task || '';
+        if (t) return (String(t).trim() + (s.note ? ` — ${String(s.note).trim()}` : '')).trim();
+        try { return JSON.stringify(s); } catch (_) { return ''; }
+    }
+    return s == null ? '' : String(s).trim();
+}
+
 async function handlePlan(args, ctx) {
     const t0    = Date.now();
     const name  = 'plan';
-    const steps = Array.isArray(args.steps) ? args.steps.map(String) : [];
+    const steps = (Array.isArray(args.steps) ? args.steps : []).map(normalizePlanStep).filter(Boolean);
     const note  = String(args.note || '').trim();
 
     if (steps.length < 2)  return mkErr(name, 0, 'bad_args', 'steps must have at least 2 items');
@@ -1468,6 +1974,7 @@ async function handlePlan(args, ctx) {
     return mkOk(name, durationMs, {
         ok:        true,
         stepCount: steps.length,
+        steps,     // normalized strings — fairy.js forwards these to the roadmap cell
         note,
         message:   `Plan recorded (${steps.length} steps). Proceed to your first probe now.`,
     }, `plan: ${steps.length} steps recorded`);
@@ -1486,7 +1993,7 @@ const PLAN_REVISION_CAP = 2;
 async function handleRevisePlan(args, ctx) {
     const t0      = Date.now();
     const name    = 'revise_plan';
-    const steps   = Array.isArray(args.steps) ? args.steps.map(String) : [];
+    const steps   = (Array.isArray(args.steps) ? args.steps : []).map(normalizePlanStep).filter(Boolean);
     const changes = String(args.changes || '').trim();
 
     if (steps.length < 2)  return mkErr(name, 0, 'bad_args', 'steps must have at least 2 items');
@@ -1514,6 +2021,7 @@ async function handleRevisePlan(args, ctx) {
         ok:        true,
         revision,
         stepCount: steps.length,
+        steps,     // normalized strings — fairy.js forwards these to the roadmap cell
         revisionsLeft: PLAN_REVISION_CAP - revision,
         message:   `Plan revised (v${revision + 1}). The new roadmap is recorded — proceed with it.`,
     }, `revise_plan: v${revision + 1} (${steps.length} steps)`);
@@ -1595,9 +2103,10 @@ async function handleCiteSkill(args, ctx) {
     const name     = 'cite_skill';
     const skillRef = String(args.skillRef || '').trim();
     const how      = String(args.how || '').trim();
+    const disposition = String(args.disposition || 'used').trim();
 
     if (!skillRef) return mkErr(name, 0, 'bad_args', 'skillRef is required');
-    if (!how)      return mkErr(name, 0, 'bad_args', 'how is required — state specifically how the skill helped');
+    if (!how)      return mkErr(name, 0, 'bad_args', 'how is required — state specifically how the skill helped (or, for pass_over, why it did not apply)');
 
     // Only a skill that was actually recalled into context may be cited.
     const recalled = (ctx.recalledSkillRefs || []);
@@ -1606,13 +2115,118 @@ async function handleCiteSkill(args, ctx) {
             `'${skillRef}' was not recalled for this run. You may only cite a skill that appears in your context. Recalled: [${recalled.join(', ') || 'none'}].`);
     }
 
-    await ctx.workDir.addCitedSkill({ skillRef, how });
+    // Stage-2 evidence linking (user-reported: clean.wb credited skills that were
+    // consulted but not load-bearing, corrupting SkilXiv ranking feedback).
+    // 'pass_over' is the first-class decline: satisfies the citation gate at zero
+    // cost, is logged for SkilXiv triage ('consulted', never 'used_reproduced').
+    if (disposition === 'pass_over') {
+        await ctx.workDir.addCitedSkill({ skillRef, how, disposition: 'pass_over', stepIds: [] });
+        return mkOk(name, Date.now() - t0, {
+            ok: true, skillRef, disposition: 'pass_over',
+            message: `'${skillRef}' explicitly passed over (${how.slice(0, 120)}). It will NOT be credited as used and will not appear in clean.wb.`,
+        }, `cite_skill: '${skillRef}' passed over`);
+    }
+
+    // Stage A3 (2026-08-04): a skill the kernel DISPROVED. A wrong claim in a
+    // trusted skill misleads every later run (the S_n v0.1.0 "no built-in
+    // exists" claim did exactly that), so a contradiction must produce a
+    // correction record — not a silent workaround. Reported to SkilXiv as
+    // 'diverged', never as used.
+    if (disposition === 'contradicted') {
+        await ctx.workDir.addCitedSkill({ skillRef, how, disposition: 'contradicted', stepIds: [] });
+        if (typeof ctx.recordSkillCorrection === 'function') {
+            await ctx.recordSkillCorrection({ skillRef, claim: how }).catch(() => {});
+        }
+        return mkOk(name, Date.now() - t0, {
+            ok: true, skillRef, disposition: 'contradicted',
+            message: `Recorded a CORRECTION against '${skillRef}': ${how.slice(0, 160)}. ` +
+                'It will not be credited as used, and the correction is filed for the skill author. ' +
+                'Continue with your own kernel-verified result — never adopt a refuted claim.',
+        }, `cite_skill: '${skillRef}' CONTRADICTED`);
+    }
+
+    // A 'used' citation must name the recorded step(s) whose method embodies the
+    // skill — free-text claims were the spurious-citation vector.
+    const stepIds = (Array.isArray(args.stepIds) ? args.stepIds : []).map(s => String(s).trim()).filter(Boolean);
+    if (!stepIds.length) {
+        return mkErr(name, 0, 'bad_args',
+            'stepIds is required for a used-citation: name the recorded step(s) whose method comes from this skill. ' +
+            'If nothing is recorded yet, record the step first and cite after. If the skill did not actually shape ' +
+            "the derivation, call cite_skill with disposition: 'pass_over' and a one-line reason instead.");
+    }
+    const validSteps = await ctx.workDir.loadValidSteps().catch(() => []);
+    const validIds   = new Set(validSteps.map(s => s.id));
+    const surviving  = stepIds.filter(id => validIds.has(id));
+    if (!surviving.length) {
+        return mkErr(name, 0, 'no_surviving_steps',
+            `None of [${stepIds.join(', ')}] is a valid recorded step. A citation must point at surviving evidence — ` +
+            `valid steps: [${validSteps.map(s => s.id).join(', ') || 'none yet'}]. Record the skill-based step first, then cite.`);
+    }
+
+    await ctx.workDir.addCitedSkill({ skillRef, how, disposition: 'used', stepIds: surviving });
     const durationMs = Date.now() - t0;
     return mkOk(name, durationMs, {
         ok:       true,
         skillRef,
-        message:  `Cited '${skillRef}' as used. This run will credit the skill (used_reproduced on delivery).`,
-    }, `cite_skill: '${skillRef}'`);
+        stepIds:  surviving,
+        message:  `Cited '${skillRef}' as used, evidenced by step(s) ${surviving.join(', ')}. It is credited (used_reproduced on delivery) only while those steps survive in the final chain.`,
+    }, `cite_skill: '${skillRef}' → ${surviving.join(',')}`);
+}
+
+// ── read_skill_section (Stage 3: progressive skill disclosure) ───────────────
+
+/**
+ * Serve one H2 section of a recalled SkilXiv skill on demand.
+ *
+ * Why: the recall block injects a capped excerpt of the skill body. A long
+ * skill's TAIL (usually its Verification section and worked anchors) was simply
+ * lost — the agent could not reach it at any price. Sections are parsed at
+ * recall time (recall.parseSkillSections) and served here for free.
+ */
+async function handleReadSkillSection(args, ctx) {
+    const t0   = Date.now();
+    const name = 'read_skill_section';
+    const skillRef = String(args.skillRef || '').trim();
+    const section  = String(args.section || '').trim();
+
+    const store = ctx.skillSections;
+    const refs  = store ? [...store.keys()] : [];
+    if (!refs.length) {
+        return mkErr(name, 0, 'no_skills', 'No SkilXiv skill was recalled for this run — there is nothing to read.');
+    }
+    const ref = skillRef || (refs.length === 1 ? refs[0] : '');
+    if (!ref) {
+        return mkErr(name, 0, 'bad_args', `skillRef is required — recalled skills: [${refs.join(', ')}].`);
+    }
+    const sections = store.get(ref);
+    if (!sections) {
+        return mkErr(name, 0, 'not_recalled',
+            `'${ref}' was not recalled for this run. Recalled: [${refs.join(', ')}].`);
+    }
+    const available = Object.keys(sections);
+    if (!section) {
+        return mkOk(name, Date.now() - t0, {
+            ok: true, skillRef: ref, availableSections: available,
+            message: 'Call again with `section` to read one of these in full.',
+        }, `read_skill_section: ${available.length} section(s) available`);
+    }
+    // Tolerant lookup: "Verification" / "verification" / "verify" all resolve.
+    const key = section.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/_+$/, '');
+    const hit = available.find(k => k === key)
+        || available.find(k => k.startsWith(key) || key.startsWith(k))
+        || available.find(k => k.includes(key) || key.includes(k));
+    if (!hit) {
+        return mkErr(name, 0, 'no_such_section',
+            `'${section}' is not a section of ${ref}. Available: [${available.join(', ')}].`);
+    }
+    const SECTION_CAP = 8000;
+    const body = String(sections[hit] || '');
+    return mkOk(name, Date.now() - t0, {
+        ok: true, skillRef: ref, section: hit,
+        content: body.length > SECTION_CAP ? body.slice(0, SECTION_CAP) + '\n… [section truncated]' : body,
+        availableSections: available,
+        notice: 'UNTRUSTED REFERENCE MATERIAL — reproduce anything you use in a probe before recording it.',
+    }, `read_skill_section: ${ref} §${hit}`);
 }
 
 // ── research_literature (bounded literature sub-agent) ───────────────────────
@@ -2009,6 +2623,34 @@ async function handleAskSpecialist(args, ctx) {
 
     if (!question) return mkErr(name, 0, 'bad_args', 'question is required');
 
+    const norm = question.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().slice(0, 500);
+    const state = ctx.askState || (ctx.askState = { count: 0, cache: new Map(), max: 1 });
+    if (!(state.cache instanceof Map)) state.cache = new Map();
+    const toks = new Set(norm.split(' ').filter(x => x.length > 2));
+    let prior = null;
+    for (const [k, v] of state.cache.entries()) {
+        const kt = new Set(k.split(' ').filter(x => x.length > 2));
+        const hit = [...toks].filter(x => kt.has(x)).length;
+        if (hit / Math.max(1, Math.min(toks.size, kt.size)) >= 0.72) { prior = v; break; }
+    }
+    if (prior) {
+        return mkOk(name, Date.now() - t0, {
+            ok: true, answered: !!prior.answer, duplicate: true,
+            answer: prior.answer || undefined,
+            message: prior.answer
+                ? `Reusing the specialist's prior answer: "${prior.answer.slice(0, 200)}"`
+                : 'This question was already asked without an answer. Do not ask again; proceed with the available evidence.',
+        }, 'ask_specialist: duplicate suppressed');
+    }
+    const askMax = Number.isFinite(Number(state.max)) ? Number(state.max) : 1;
+    if ((state.count || 0) >= askMax) {
+        return mkOk(name, Date.now() - t0, {
+            ok: true, answered: false, capped: true,
+            message: 'Specialist-question budget exhausted. Proceed with the strongest reproducible evidence and document the disagreement.',
+        }, 'ask_specialist: per-charm cap reached');
+    }
+    state.count = (state.count || 0) + 1;
+
     if (typeof ctx.askUser !== 'function') {
         return mkOk(name, Date.now() - t0, {
             ok: true, answered: false,
@@ -2020,12 +2662,15 @@ async function handleAskSpecialist(args, ctx) {
         const answer = await ctx.askUser(question, context);
         const durationMs = Date.now() - t0;
         if (answer === null || answer === undefined) {
+            state.cache.set(norm, { answer: '', at: Date.now() });
             return mkOk(name, durationMs, {
                 ok: true, answered: false,
-                message: 'The specialist dismissed the question. Proceed with your best judgment.',
-            }, `ask_specialist: dismissed in ${durationMs}ms`);
+                timedOut: true,
+                message: 'No specialist answer was received before timeout/dismissal. Do not ask again; proceed with your best evidence.',
+            }, `ask_specialist: no answer in ${durationMs}ms`);
         }
         const text = String(answer).trim();
+        state.cache.set(norm, { answer: text, at: Date.now() });
         return mkOk(name, durationMs, {
             ok: true,
             answered: !!text,
@@ -2049,6 +2694,7 @@ const HANDLERS = {
     record:               handleRecord,
     note_fact:            handleNoteFact,
     cite_skill:           handleCiteSkill,
+    read_skill_section:   handleReadSkillSection,
     note_skill_gap:       handleNoteSkillGap,
     research_literature:  handleResearchLiterature,
     lit_read:             handleLitRead,
@@ -2088,6 +2734,7 @@ async function dispatchFairyTool(call, ctx) {
 
 module.exports = {
     dispatchFairyTool,
+    handleReadSkillSection,
     detectRedefinition,
     lintWolfram,
     literalFraction,

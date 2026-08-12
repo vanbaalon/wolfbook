@@ -46,7 +46,8 @@ function _fairySeedEntries() {
 }
 
 class WatchPanelProvider {
-    constructor() {
+    constructor(context) {
+        this._context        = context;
         this._view           = null;   // vscode.WebviewView | null
         this._watchList      = [];     // string[]  — user-added variable names
         this._onAddWatch     = null;   // callback(name)
@@ -68,6 +69,7 @@ class WatchPanelProvider {
         this._fairyHistory   = null;  // lazily-loaded [{id,ts,prompt,steps,probes,costUSD,status,seed}]
         this._pendingFairyId = null;  // id of the history entry for the run currently in flight
         this._fairySaveTimer = null;  // debounce timer for history persistence
+        this._fairyRunActive = false; // controls Run/Stop buttons in the Agents tab
     }
 
     // Called by extension.js when registering:
@@ -143,6 +145,21 @@ class WatchPanelProvider {
                 // setImmediate() in resolveWebviewView fires before the <script src="..."> loads,
                 // so any postMessage sent there is dropped. This is the reliable resend point.
                 this._sendCurrentState();
+            } else if (msg.command === 'requestSkilxivState') {
+                this._sendSkilxivState();
+            } else if (msg.command === 'skilxivSetToken') {
+                this._setSkilxivToken();
+            } else if (msg.command === 'skilxivClearToken') {
+                this._clearSkilxivToken();
+            } else if (msg.command === 'skilxivOpenAccount') {
+                const base = vscode.workspace.getConfiguration('wolfbook.oberon.recall.skilxiv').get('baseUrl', 'https://skilxiv.org');
+                vscode.env.openExternal(vscode.Uri.parse(String(base).replace(/\/$/, '') + '/#/account'));
+            } else if (msg.command === 'skilxivOpenReview') {
+                vscode.commands.executeCommand('wolfbook.oberon.reviewContributions');
+            } else if (msg.command === 'skilxivOpenExplorer') {
+                vscode.commands.executeCommand('wolfbook.skilxiv.openExplorer');
+            } else if (msg.command === 'skilxivReviewGaps') {
+                vscode.commands.executeCommand('wolfbook.skilxiv.reviewSkillGaps');
             } else if (msg.command === 'hoverDocReceived') {
                 console.log('[wolfbook-watch] ✓ webview confirmed hoverDoc received for:', msg.symbol);
                 this._pendingHoverDoc = null;
@@ -218,6 +235,11 @@ class WatchPanelProvider {
                 });
             } else if (msg.command === 'fairyRun' && typeof msg.prompt === 'string') {
                 this._dispatchFairy(msg.prompt);
+            } else if (msg.command === 'fairyAbort') {
+                vscode.commands.executeCommand('wolfbook.oberon.abortRun').then(
+                    () => this.setFairyRunActive(false),
+                    e => vscode.window.showErrorMessage(`Could not abort Fairy run: ${e?.message || e}`),
+                );
             } else if (msg.command === 'fairyHistoryDelete' && msg.id) {
                 this._deleteFairyHistory(msg.id);
             } else if (msg.command === 'fairyHistoryClear') {
@@ -374,12 +396,14 @@ class WatchPanelProvider {
         };
         this._fairyHistory.unshift(entry);
         this._pendingFairyId = entry.id;
+        this.setFairyRunActive(true);
         this._saveFairyHistory();
         this._sendFairyHistory();
         vscode.commands.executeCommand('wolfbook.oberon.startFairy', { brief }).then(
             () => this._finalizeStuckFairy(entry.id, 'done'),
             (e) => {
                 this._finalizeStuckFairy(entry.id, 'error');
+                this.setFairyRunActive(false);
                 vscode.window.showErrorMessage(`Fairy run failed to start: ${e?.message || e}`);
             }
         );
@@ -419,7 +443,17 @@ class WatchPanelProvider {
      * single pending entry.
      */
     onFairyEvent(ev) {
-        if (!ev || !ev.type || !this._pendingFairyId) return;
+        if (!ev || !ev.type) return;
+        if (ev.type === 'fairy.started' || ev.type === 'quest.accepted'
+            || (ev.type === 'circle.transition' && !['IDLE', 'ERROR', 'ABORTED'].includes((ev.payload || {}).to))) {
+            this.setFairyRunActive(true);
+        }
+        if (ev.type === 'fairy.run_metrics' || ev.type === 'director.done'
+            || ev.type === 'director.failed' || ev.type === 'director.aborted'
+            || (ev.type === 'circle.transition' && ['IDLE', 'ERROR', 'ABORTED'].includes((ev.payload || {}).to))) {
+            this.setFairyRunActive(false);
+        }
+        if (!this._pendingFairyId) return;
         this._loadFairyHistory();
         const entry = this._fairyHistory.find(x => x.id === this._pendingFairyId);
         if (!entry) return;
@@ -456,8 +490,10 @@ class WatchPanelProvider {
         this._view.webview.postMessage({ command: 'collabState', enabled: collabEnabled });
         const oberonExp = vscode.workspace.getConfiguration('wolfbook').get('oberon.experimentalPipeline', false);
         this._view.webview.postMessage({ command: 'oberonState', enabled: oberonExp });
+        this._view.webview.postMessage({ command: 'fairyRunState', active: this._fairyRunActive });
         this._view.webview.postMessage({ command: 'remoteStatus', connected: this._remoteConnected });
         this._sendFairyHistory();
+        this._sendSkilxivState();
         // Show watch list placeholder names immediately (before kernel values arrive)
         if (this._watchList.length > 0) {
             this._view.webview.postMessage({ command: 'initWatchList', names: this._watchList });
@@ -486,6 +522,56 @@ class WatchPanelProvider {
             }
             if (es.type === 'spinner') this._view.webview.postMessage({ command: 'evalSelSpinner',  expr: es.expr });
             if (es.type === 'error')   this._view.webview.postMessage({ command: 'evalSelError',    msg: es.msg, expr: es.expr });
+        }
+    }
+
+    async _setSkilxivToken() {
+        if (!this._context) return;
+        const token = await vscode.window.showInputBox({ title: 'Connect SkilXiv', prompt: 'Paste an API token from your SkilXiv account. It is stored securely and never displayed.', password: true, ignoreFocusOut: true });
+        if (!token?.trim()) return;
+        const baseUrl = vscode.workspace.getConfiguration('wolfbook.oberon.recall.skilxiv').get('baseUrl', 'https://skilxiv.org');
+        await require('../oberon/fairy/skilxivCredentials').setToken(baseUrl, token.trim());
+        vscode.window.showInformationMessage('SkilXiv token saved securely.');
+        this._sendSkilxivState();
+    }
+
+    async _clearSkilxivToken() {
+        if (!this._context) return;
+        const yes = await vscode.window.showWarningMessage('Disconnect SkilXiv and remove the stored token?', { modal: true }, 'Disconnect');
+        if (yes !== 'Disconnect') return;
+        const baseUrl = vscode.workspace.getConfiguration('wolfbook.oberon.recall.skilxiv').get('baseUrl', 'https://skilxiv.org');
+        await require('../oberon/fairy/skilxivCredentials').clearToken(baseUrl);
+        this._sendSkilxivState();
+    }
+
+    async _sendSkilxivState() {
+        if (!this._view || !this._context) return;
+        const { SkilXivClient } = require('../oberon/fairy/skilxivClient');
+        const { listCandidates } = require('../oberon/memory/contributionInbox');
+        const { loadSkillGaps } = require('../oberon/memory/skillGaps');
+        const cfg = vscode.workspace.getConfiguration('wolfbook.oberon.recall.skilxiv');
+        const baseUrl = cfg.get('baseUrl', 'https://skilxiv.org');
+        const credentials = require('../oberon/fairy/skilxivCredentials');
+        const token = await credentials.getToken(baseUrl);
+        const [candidates, gaps] = await Promise.all([listCandidates(), loadSkillGaps()]);
+        const state = { connected: false, hasToken: !!token, baseUrl, overview: null, error: null,
+            candidates: candidates.slice(0, 8).map(x => ({ id: x.id, title: x.title || x.task || x.id, status: x.status || 'pending', createdAt: x.createdAt })),
+            gaps: gaps.slice(-8).reverse().map(x => ({ topic: x.topic, why: x.why, at: x.at })),
+        };
+        if (token) {
+            try {
+                state.overview = await (await credentials.createClient({ baseUrl })).request('/author/overview');
+                state.connected = true;
+            } catch (e) { state.error = e.message; }
+        }
+        if (this._view) this._view.webview.postMessage({ command: 'skilxivState', state });
+    }
+
+    /** Synchronise the Agents-tab Run/Stop controls with Oberon's RunManager. */
+    setFairyRunActive(active) {
+        this._fairyRunActive = !!active;
+        if (this._view) {
+            this._view.webview.postMessage({ command: 'fairyRunState', active: this._fairyRunActive });
         }
     }
 
@@ -986,6 +1072,13 @@ class WatchPanelProvider {
   }
   #fairy-run-btn:hover { background: var(--vscode-button-hoverBackground, #0e7afe); }
   #fairy-run-btn:disabled { opacity: 0.5; cursor: default; }
+  #fairy-abort-btn {
+    border: 1px solid var(--vscode-inputValidation-errorBorder, #be1100);
+    background: transparent; color: var(--vscode-errorForeground, #f14c4c);
+    border-radius: 2px; padding: 4px 9px; cursor: pointer;
+  }
+  #fairy-abort-btn:hover:not(:disabled) { background: var(--vscode-inputValidation-errorBackground, rgba(190,17,0,.15)); }
+  #fairy-abort-btn:disabled { opacity: 0.4; cursor: default; }
   #fairy-config-btn {
     padding: 6px 9px; cursor: pointer; border-radius: 4px; font-size: 12px;
     background: var(--vscode-button-secondaryBackground, rgba(128,128,128,0.18));
@@ -1037,6 +1130,23 @@ class WatchPanelProvider {
     margin-left: auto; opacity: 0.5; padding: 0 3px; cursor: pointer;
   }
   .fairy-hist-meta .del:hover { opacity: 1; color: var(--vscode-errorForeground); }
+  .sx-card { border:1px solid var(--vscode-panel-border,rgba(128,128,128,.3)); border-radius:5px; padding:9px; margin:7px 0; }
+  .sx-head { display:flex; align-items:center; gap:7px; margin-bottom:5px; }
+  .sx-head strong { font-size:12px; }
+  .sx-status { margin-left:auto; font-size:10px; color:var(--vscode-descriptionForeground); }
+  .sx-dot { width:8px; height:8px; border-radius:50%; background:var(--vscode-descriptionForeground); }
+  .sx-dot.ok { background:var(--vscode-testing-iconPassed,#2ea043); }
+  .sx-dot.bad { background:var(--vscode-testing-iconFailed,#f14c4c); }
+  .sx-actions { display:flex; gap:5px; flex-wrap:wrap; margin-top:7px; }
+  .sx-btn { border:1px solid var(--vscode-button-border,transparent); border-radius:3px; padding:4px 7px; cursor:pointer; font-size:11px; color:var(--vscode-button-foreground); background:var(--vscode-button-background); }
+  .sx-btn.secondary { color:var(--vscode-button-secondaryForeground); background:var(--vscode-button-secondaryBackground); }
+  .sx-stats { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:5px; }
+  .sx-stat { background:var(--vscode-editorWidget-background,rgba(128,128,128,.08)); padding:7px; border-radius:3px; }
+  .sx-stat b { display:block; font-size:17px; } .sx-stat span { font-size:10px; color:var(--vscode-descriptionForeground); }
+  .sx-list { margin:0; padding:0; list-style:none; }
+  .sx-list li { padding:6px 0; border-top:1px solid var(--vscode-panel-border,rgba(128,128,128,.2)); font-size:11px; }
+  .sx-list li:first-child { border-top:0; }
+  .sx-muted { font-size:10.5px; color:var(--vscode-descriptionForeground); }
 </style>
 </head>
 <body>
@@ -1076,6 +1186,7 @@ class WatchPanelProvider {
 <div id="wb-tabs">
   <button class="wb-tab active" id="tab-btn-watch"  data-tab="watch">Watch</button>
   <button class="wb-tab"        id="tab-btn-agents" data-tab="agents">🧚 Agents</button>
+  <button class="wb-tab"        id="tab-btn-skilxiv" data-tab="skilxiv">SkilXiv</button>
 </div>
 
 <div id="tab-watch" class="tab-panel active">
@@ -1135,6 +1246,7 @@ class WatchPanelProvider {
   <textarea id="fairy-prompt" placeholder="e.g. Compute all energy eigenvalues of the L=4 SU(2) Heisenberg spin chain (periodic) and compare with the Bethe Ansatz."></textarea>
   <div id="fairy-run-row">
     <button id="fairy-run-btn" title="Dispatch this prompt to the Fairy agent">🧚 Run Fairy</button>
+    <button id="fairy-abort-btn" title="Abort the active Fairy / Oberon run" disabled>■ Stop</button>
     <button id="fairy-config-btn" title="Configure Fairy / Oberon (provider &amp; model)">⚙</button>
   </div>
   <div id="agents-oberon-row">
@@ -1151,6 +1263,18 @@ class WatchPanelProvider {
   <div id="fairy-history-empty">No Fairy runs yet. Your prompts, steps &amp; cost will appear here.</div>
   <div id="fairy-history-list"></div>
 </div><!-- /#tab-agents -->
+
+<div id="tab-skilxiv" class="tab-panel">
+  <div class="sx-card">
+    <div class="sx-head"><span id="sx-dot" class="sx-dot"></span><strong>SkilXiv account</strong><span id="sx-connection" class="sx-status">Checking…</span></div>
+    <div id="sx-connection-detail" class="sx-muted">Loading connection status.</div>
+    <div class="sx-actions"><button id="sx-token-set" class="sx-btn">Set token</button><button id="sx-token-clear" class="sx-btn secondary" style="display:none">Disconnect</button><button id="sx-account" class="sx-btn secondary">Open account</button><button id="sx-refresh" class="sx-btn secondary">Refresh</button></div>
+  </div>
+  <div class="sx-card"><div class="sx-head"><strong>Your skills</strong></div><div id="sx-stats" class="sx-stats"><div class="sx-muted">Connect to load author statistics.</div></div></div>
+  <div class="sx-card"><div class="sx-head"><strong>Contribution candidates</strong><span id="sx-candidate-count" class="sx-status"></span></div><div id="sx-candidates" class="sx-muted">No local candidates.</div><div class="sx-actions"><button id="sx-review" class="sx-btn">Review candidates</button></div></div>
+  <div class="sx-card"><div class="sx-head"><strong>Missing-skill requests</strong><span id="sx-gap-count" class="sx-status"></span></div><div id="sx-gaps" class="sx-muted">No recorded gaps.</div><div class="sx-actions"><button id="sx-review-gaps" class="sx-btn">Review and publish</button></div></div>
+  <div class="sx-actions"><button id="sx-explorer" class="sx-btn secondary">Search SkilXiv</button></div>
+</div><!-- /#tab-skilxiv -->
 
 <script>
   // ── Hover tooltip for .wb-hint elements ───────────────────────────────────

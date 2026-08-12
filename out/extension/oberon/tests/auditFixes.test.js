@@ -102,6 +102,20 @@ async function runEvidence() {
         const ev = await buildEvidenceFromSteps([step('s1', 'p1')], gp);
         assert.strictEqual(ev.length, 0);
     });
+
+    await ok('immutable step snapshot wins after mutable probe slot changes', async () => {
+        const stepWithSnapshot = {
+            id: 'snap', probeId: 'p1', code: 'x=1',
+            evidenceSnapshot: { ok: true, code: 'x=1', output: '1', sha256: 'abc' },
+        };
+        const ev = await buildEvidenceFromSteps([stepWithSnapshot], async () => ({
+            ok: true, code: 'x=999', value: '999', agentValue: '999',
+        }));
+        assert.strictEqual(ev.length, 1);
+        assert.strictEqual(ev[0].expression, 'x=1');
+        assert.strictEqual(ev[0].output, '1');
+        assert.strictEqual(ev[0].evidenceSha256, 'abc');
+    });
 }
 
 // ── F1: validationChecks in the explore message ──────────────────────────────
