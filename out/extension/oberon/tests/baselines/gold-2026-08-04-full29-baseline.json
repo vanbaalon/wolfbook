@@ -1,0 +1,3551 @@
+{
+  "schemaVersion": "wolfbook-gold-suite/1.0.0",
+  "generatedAt": "2026-08-04T23:49:26.419Z",
+  "label": "massive",
+  "build": {
+    "version": "2.7.22",
+    "codeMtime": "2026-08-04T13:44:14.810Z"
+  },
+  "durationMs": 24654091,
+  "tasks": [
+    {
+      "id": "TS01",
+      "title": "SU(4) spin chain spectrum L=4",
+      "category": "spectra",
+      "verify": "full",
+      "questId": "QG_TS01_ewjrwo",
+      "runId": "run_2026-08-04T16-58-32-330Z",
+      "charmDir": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_TS01_ewjrwo_gold_ts01/charms/C01",
+      "verifiedNb": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_TS01_ewjrwo_gold_ts01/charms/C01/clean.wb",
+      "status": "delivered",
+      "verdict": "verified",
+      "scrollConfidence": 0.9,
+      "needsReview": false,
+      "verifier": {
+        "pass": true,
+        "detail": "residual 7.105427357601002*^-15 (tol 0.000001)",
+        "residual": 7.105427357601002e-15,
+        "missingSymbols": [],
+        "replay": {
+          "cellCount": 4,
+          "allClean": false,
+          "failures": 1
+        }
+      },
+      "verifyError": null,
+      "economics": {
+        "llmCalls": 23,
+        "toolCalls": 20,
+        "probes": 7,
+        "costUSD": 0.021456,
+        "tokens": {
+          "input": 481017,
+          "output": 22899,
+          "cacheRead": 381184,
+          "cacheMiss": 99833
+        },
+        "durationMs": 318825,
+        "cacheHitRatio": 0.792
+      },
+      "metrics": {
+        "questId": "QG_TS01_ewjrwo",
+        "charmId": "C01",
+        "verifiedRungs": {
+          "5": 4
+        },
+        "probesOk": 7,
+        "probesFailed": 1,
+        "probeSuccessRate": 0.875,
+        "records": 5,
+        "recordRate": 0.714,
+        "unrecordedSuccesses": 2,
+        "noteFacts": 1,
+        "amends": 0,
+        "amendRatio": 0,
+        "probeFailRate": 0.125,
+        "checkpoints": 2,
+        "utilForkRejections": 0,
+        "nearDuplicateRejections": 0,
+        "recordGates": 1,
+        "crosscheckGates": 0,
+        "missingDepGates": 0,
+        "chainReopens": 0,
+        "continuations": 0,
+        "literatureQueries": 0,
+        "litReads": 0,
+        "reDerivations": 0,
+        "inspects": 0,
+        "inspectsPerProbe": 0,
+        "recallSkill": "@vanbaalon/sun-xxx-bethe-qq-system@0.1.0",
+        "recallUsed": false,
+        "recallInjected": true,
+        "recallMs": 6349,
+        "recallTopScore": 0.4683,
+        "recallTriage": {
+          "capabilities": [
+            "Exact diagonalization of a finite SU(4) spin chain Hamiltonian",
+            "Construction of the SU(4) permutation Hamiltonian and its spectrum"
+          ],
+          "picks": [
+            {
+              "ref": "@vanbaalon/sun-xxx-bethe-qq-system@0.1.0",
+              "capability": "Exact diagonalization of a finite SU(4) spin chain Hamiltonian",
+              "fit": "exact"
+            },
+            {
+              "ref": "@vanbaalon/sn-permutation-rep-decomposition@0.1.1",
+              "capability": "Construction of the SU(4) permutation Hamiltonian and its spectrum",
+              "fit": "partial"
+            }
+          ],
+          "gaps": []
+        },
+        "citationGates": 1,
+        "skillGapNotes": 0,
+        "skillGapsAuto": 0,
+        "skillDraftAuthored": true,
+        "llmCalls": 17,
+        "runCapHits": 0,
+        "thinkingTurns": 2,
+        "autoRecords": 2,
+        "lengthStops": 0,
+        "lengthStopRecoveries": 1,
+        "reasoningOverruns": 1,
+        "fixGateRejections": 0,
+        "unrecordedNudges": 1,
+        "essayTruncations": 0,
+        "tricksShown": 2,
+        "tricksResolved": 1,
+        "unmatchedTrickSigs": 0,
+        "handoffUtils": 0,
+        "build": {
+          "version": "2.7.22",
+          "codeMtime": "2026-08-04T13:44:14.810Z"
+        },
+        "cacheHitRate": 0.882,
+        "candidateRaised": true,
+        "status": "delivered"
+      },
+      "rubric": {
+        "score": 0.662,
+        "coverage": 0.309
+      },
+      "error": null
+    },
+    {
+      "id": "TS02",
+      "title": "SU(3) spin chain translation sectors L=5",
+      "category": "spectra",
+      "verify": "full",
+      "questId": "QG_TS02_ewqlwy",
+      "runId": "run_2026-08-04T17-03-51-154Z",
+      "charmDir": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_TS02_ewqlwy_gold_ts02/charms/C01",
+      "verifiedNb": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_TS02_ewqlwy_gold_ts02/charms/C01/clean.wb",
+      "status": "delivered",
+      "verdict": "verified",
+      "scrollConfidence": 0.9,
+      "needsReview": false,
+      "verifier": {
+        "pass": true,
+        "detail": "residual 1.3322676295501878*^-14 (tol 0.000001)",
+        "residual": 1.3322676295501878e-14,
+        "missingSymbols": [],
+        "replay": {
+          "cellCount": 6,
+          "allClean": false,
+          "failures": 2
+        }
+      },
+      "verifyError": null,
+      "economics": {
+        "llmCalls": 52,
+        "toolCalls": 47,
+        "probes": 17,
+        "costUSD": 0.061313,
+        "tokens": {
+          "input": 2162105,
+          "output": 52943,
+          "cacheRead": 1867392,
+          "cacheMiss": 294713
+        },
+        "durationMs": 729309,
+        "cacheHitRatio": 0.864
+      },
+      "metrics": {
+        "questId": "QG_TS02_ewqlwy",
+        "charmId": "C01",
+        "verifiedRungs": {
+          "5": 6
+        },
+        "probesOk": 9,
+        "probesFailed": 8,
+        "probeSuccessRate": 0.529,
+        "records": 7,
+        "recordRate": 0.778,
+        "unrecordedSuccesses": 2,
+        "noteFacts": 2,
+        "amends": 10,
+        "amendRatio": 1.25,
+        "probeFailRate": 0.471,
+        "checkpoints": 2,
+        "utilForkRejections": 0,
+        "nearDuplicateRejections": 0,
+        "recordGates": 0,
+        "crosscheckGates": 0,
+        "missingDepGates": 0,
+        "chainReopens": 0,
+        "continuations": 0,
+        "literatureQueries": 0,
+        "litReads": 0,
+        "reDerivations": 0,
+        "inspects": 2,
+        "inspectsPerProbe": 0.22,
+        "recallSkill": "@vanbaalon/sun-xxx-bethe-qq-system@0.1.0",
+        "recallUsed": false,
+        "recallInjected": true,
+        "recallMs": 5797,
+        "recallTopScore": 0.4658,
+        "recallTriage": {
+          "capabilities": [
+            "SU(3) fundamental representation spin chain Hamiltonian construction",
+            "Momentum sector block-diagonalization via translation symmetry",
+            "Exact diagonalization of 243-dimensional Hamiltonian"
+          ],
+          "picks": [
+            {
+              "ref": "@vanbaalon/sun-xxx-bethe-qq-system@0.1.0",
+              "capability": "SU(3) fundamental representation spin chain Hamiltonian construction",
+              "fit": "exact"
+            },
+            {
+              "ref": "@vanbaalon/sn-permutation-rep-decomposition@0.1.1",
+              "capability": "Momentum sector block-diagonalization via translation symmetry",
+              "fit": "partial"
+            }
+          ],
+          "gaps": [
+            "Exact diagonalization of 243-dimensional Hamiltonian"
+          ]
+        },
+        "citationGates": 1,
+        "skillGapNotes": 0,
+        "skillGapsAuto": 1,
+        "skillDraftAuthored": true,
+        "llmCalls": 46,
+        "runCapHits": 0,
+        "thinkingTurns": 5,
+        "autoRecords": 0,
+        "lengthStops": 0,
+        "lengthStopRecoveries": 1,
+        "reasoningOverruns": 1,
+        "fixGateRejections": 2,
+        "unrecordedNudges": 2,
+        "essayTruncations": 0,
+        "tricksShown": 9,
+        "tricksResolved": 3,
+        "unmatchedTrickSigs": 1,
+        "handoffUtils": 0,
+        "build": {
+          "version": "2.7.22",
+          "codeMtime": "2026-08-04T13:44:14.810Z"
+        },
+        "cacheHitRate": 0.919,
+        "candidateRaised": true,
+        "status": "delivered"
+      },
+      "rubric": {
+        "score": 0.662,
+        "coverage": 0.309
+      },
+      "error": null
+    },
+    {
+      "id": "TS03",
+      "title": "XXX Heisenberg vs exact diagonalisation L=8 two-magnon",
+      "category": "bethe",
+      "verify": "full",
+      "questId": "QG_TS03_ex68nk",
+      "runId": "run_2026-08-04T17-16-00-464Z",
+      "charmDir": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_TS03_ex68nk_gold_ts03/charms/C01",
+      "verifiedNb": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_TS03_ex68nk_gold_ts03/charms/C01/clean.wb",
+      "status": "delivered",
+      "verdict": "verified",
+      "scrollConfidence": 0.9,
+      "needsReview": false,
+      "verifier": {
+        "pass": true,
+        "detail": "residual 0. (tol 0.000001)",
+        "residual": 0,
+        "missingSymbols": [],
+        "replay": {
+          "cellCount": 4,
+          "allClean": true,
+          "failures": 0
+        }
+      },
+      "verifyError": null,
+      "economics": {
+        "llmCalls": 20,
+        "toolCalls": 15,
+        "probes": 4,
+        "costUSD": 0.015761,
+        "tokens": {
+          "input": 412618,
+          "output": 22459,
+          "cacheRead": 352000,
+          "cacheMiss": 60618
+        },
+        "durationMs": 2302024,
+        "cacheHitRatio": 0.853
+      },
+      "metrics": {
+        "questId": "QG_TS03_ex68nk",
+        "charmId": "C01",
+        "verifiedRungs": {
+          "5": 4
+        },
+        "probesOk": 4,
+        "probesFailed": 1,
+        "probeSuccessRate": 0.8,
+        "records": 2,
+        "recordRate": 0.5,
+        "unrecordedSuccesses": 2,
+        "noteFacts": 1,
+        "amends": 0,
+        "amendRatio": 0,
+        "probeFailRate": 0.2,
+        "checkpoints": 0,
+        "utilForkRejections": 0,
+        "nearDuplicateRejections": 0,
+        "recordGates": 0,
+        "crosscheckGates": 0,
+        "missingDepGates": 0,
+        "chainReopens": 0,
+        "continuations": 0,
+        "literatureQueries": 0,
+        "litReads": 0,
+        "reDerivations": 0,
+        "inspects": 0,
+        "inspectsPerProbe": 0,
+        "recallSkill": "@vanbaalon/su2-xxx-bethe-roots-tq@0.2.0",
+        "recallUsed": true,
+        "recallInjected": true,
+        "recallMs": 6179,
+        "recallTopScore": 0.4733,
+        "recallTriage": {
+          "capabilities": [
+            "Bethe ansatz solution for SU(2) XXX spin-1/2 chain",
+            "Exact diagonalization of two-magnon subspace"
+          ],
+          "picks": [
+            {
+              "ref": "@vanbaalon/su2-xxx-bethe-roots-tq@0.2.0",
+              "capability": "Bethe ansatz solution for SU(2) XXX spin-1/2 chain",
+              "fit": "exact"
+            },
+            {
+              "ref": "@skilxiv/bethe-ansatz-spin-chain@1.0.0",
+              "capability": "Bethe ansatz solution for SU(2) XXX spin-1/2 chain",
+              "fit": "exact"
+            }
+          ],
+          "gaps": [
+            "Exact diagonalization of the two-magnon subspace"
+          ]
+        },
+        "citationGates": 0,
+        "skillGapNotes": 0,
+        "skillGapsAuto": 0,
+        "skillDraftAuthored": false,
+        "llmCalls": 15,
+        "runCapHits": 0,
+        "thinkingTurns": 2,
+        "autoRecords": 2,
+        "lengthStops": 0,
+        "lengthStopRecoveries": 1,
+        "reasoningOverruns": 1,
+        "fixGateRejections": 0,
+        "unrecordedNudges": 0,
+        "essayTruncations": 0,
+        "tricksShown": 2,
+        "tricksResolved": 1,
+        "unmatchedTrickSigs": 0,
+        "handoffUtils": 0,
+        "build": {
+          "version": "2.7.22",
+          "codeMtime": "2026-08-04T13:44:14.810Z"
+        },
+        "cacheHitRate": 0.921,
+        "candidateRaised": true,
+        "status": "delivered"
+      },
+      "rubric": {
+        "score": 0.662,
+        "coverage": 0.309
+      },
+      "error": null
+    },
+    {
+      "id": "TS04",
+      "title": "Cauchy-like matrix determinant pattern",
+      "category": "linalg",
+      "verify": "full",
+      "questId": "QG_TS04_eyjkwo",
+      "runId": "run_2026-08-04T17-54-22-488Z",
+      "charmDir": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_TS04_eyjkwo_gold_ts04/charms/C01",
+      "verifiedNb": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_TS04_eyjkwo_gold_ts04/charms/C01/clean.wb",
+      "status": "delivered",
+      "verdict": "verified",
+      "scrollConfidence": 0.9,
+      "needsReview": false,
+      "verifier": {
+        "pass": true,
+        "detail": "True",
+        "residual": null,
+        "missingSymbols": [],
+        "replay": {
+          "cellCount": 2,
+          "allClean": true,
+          "failures": 0
+        }
+      },
+      "verifyError": null,
+      "economics": {
+        "llmCalls": 14,
+        "toolCalls": 8,
+        "probes": 2,
+        "costUSD": 0.011647,
+        "tokens": {
+          "input": 279883,
+          "output": 10036,
+          "cacheRead": 221184,
+          "cacheMiss": 58699
+        },
+        "durationMs": 130234,
+        "cacheHitRatio": 0.79
+      },
+      "metrics": {
+        "questId": "QG_TS04_eyjkwo",
+        "charmId": "C01",
+        "verifiedRungs": {
+          "5": 2
+        },
+        "probesOk": 2,
+        "probesFailed": 0,
+        "probeSuccessRate": 1,
+        "records": 2,
+        "recordRate": 1,
+        "unrecordedSuccesses": 0,
+        "noteFacts": 0,
+        "amends": 0,
+        "amendRatio": null,
+        "probeFailRate": 0,
+        "checkpoints": 0,
+        "utilForkRejections": 0,
+        "nearDuplicateRejections": 0,
+        "recordGates": 0,
+        "crosscheckGates": 0,
+        "missingDepGates": 0,
+        "chainReopens": 0,
+        "continuations": 0,
+        "literatureQueries": 0,
+        "litReads": 0,
+        "reDerivations": 0,
+        "inspects": 0,
+        "inspectsPerProbe": 0,
+        "recallSkill": "@vanbaalon/gauss-hypergeometric-2f1@0.1.0",
+        "recallUsed": false,
+        "recallInjected": true,
+        "recallMs": 5234,
+        "recallTopScore": 0.3911,
+        "recallTriage": {
+          "capabilities": [
+            "exact rational determinant computation of a Cauchy-like matrix",
+            "closed-form identification and verification for large n"
+          ],
+          "picks": [
+            {
+              "ref": "@vanbaalon/gauss-hypergeometric-2f1@0.1.0",
+              "capability": "exact rational determinant computation of a Cauchy-like matrix",
+              "fit": "partial"
+            },
+            {
+              "ref": "@vanbaalon/gauss-hypergeometric-packages@0.1.0",
+              "capability": "closed-form identification and verification for large n",
+              "fit": "partial"
+            }
+          ],
+          "gaps": [
+            "exact rational determinant computation for n=2..12",
+            "closed-form verification for n=15 and n=20"
+          ]
+        },
+        "citationGates": 1,
+        "skillGapNotes": 0,
+        "skillGapsAuto": 2,
+        "skillDraftAuthored": false,
+        "llmCalls": 10,
+        "runCapHits": 0,
+        "thinkingTurns": 1,
+        "autoRecords": 0,
+        "lengthStops": 0,
+        "lengthStopRecoveries": 0,
+        "reasoningOverruns": 0,
+        "fixGateRejections": 0,
+        "unrecordedNudges": 0,
+        "essayTruncations": 0,
+        "tricksShown": 0,
+        "tricksResolved": 0,
+        "unmatchedTrickSigs": 0,
+        "handoffUtils": 0,
+        "build": {
+          "version": "2.7.22",
+          "codeMtime": "2026-08-04T13:44:14.810Z"
+        },
+        "cacheHitRate": 0.91,
+        "candidateRaised": false,
+        "status": "delivered"
+      },
+      "rubric": {
+        "score": 0.662,
+        "coverage": 0.309
+      },
+      "error": null
+    },
+    {
+      "id": "TS05",
+      "title": "Zeros of truncated exponential sum",
+      "category": "zeros",
+      "verify": "full",
+      "questId": "QG_TS05_eymdea",
+      "runId": "run_2026-08-04T17-56-32-722Z",
+      "charmDir": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_TS05_eymdea_gold_ts05/charms/C01",
+      "verifiedNb": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_TS05_eymdea_gold_ts05/charms/C01/clean.wb",
+      "status": "delivered",
+      "verdict": "verified",
+      "scrollConfidence": 0.9,
+      "needsReview": false,
+      "verifier": {
+        "pass": true,
+        "detail": "True",
+        "residual": null,
+        "missingSymbols": [],
+        "replay": {
+          "cellCount": 6,
+          "allClean": true,
+          "failures": 0
+        }
+      },
+      "verifyError": null,
+      "economics": {
+        "llmCalls": 22,
+        "toolCalls": 23,
+        "probes": 4,
+        "costUSD": 0.018922,
+        "tokens": {
+          "input": 422546,
+          "output": 25336,
+          "cacheRead": 344960,
+          "cacheMiss": 77586
+        },
+        "durationMs": 11013684,
+        "cacheHitRatio": 0.816
+      },
+      "metrics": {
+        "questId": "QG_TS05_eymdea",
+        "charmId": "C01",
+        "verifiedRungs": {
+          "5": 4
+        },
+        "probesOk": 1,
+        "probesFailed": 4,
+        "probeSuccessRate": 0.2,
+        "records": 4,
+        "recordRate": 1,
+        "unrecordedSuccesses": 0,
+        "noteFacts": 4,
+        "amends": 3,
+        "amendRatio": 0.75,
+        "probeFailRate": 0.8,
+        "checkpoints": 1,
+        "utilForkRejections": 0,
+        "nearDuplicateRejections": 0,
+        "recordGates": 0,
+        "crosscheckGates": 0,
+        "missingDepGates": 0,
+        "chainReopens": 0,
+        "continuations": 0,
+        "literatureQueries": 0,
+        "litReads": 0,
+        "reDerivations": 0,
+        "inspects": 1,
+        "inspectsPerProbe": 1,
+        "recallSkill": null,
+        "recallUsed": false,
+        "recallInjected": false,
+        "recallMs": 3848,
+        "recallTopScore": null,
+        "recallTriage": {
+          "capabilities": [
+            "Compute zeros of truncated exponential polynomial P_N(z) for N=20,40,80",
+            "Describe zero distribution and Szego curve limiting shape"
+          ],
+          "picks": [],
+          "gaps": [
+            "Compute zeros of truncated exponential polynomial P_N(z) for N=20,40,80",
+            "Describe zero distribution and Szego curve limiting shape"
+          ]
+        },
+        "citationGates": 0,
+        "skillGapNotes": 0,
+        "skillGapsAuto": 2,
+        "skillDraftAuthored": true,
+        "llmCalls": 17,
+        "runCapHits": 0,
+        "thinkingTurns": 2,
+        "autoRecords": 0,
+        "lengthStops": 1,
+        "lengthStopRecoveries": 0,
+        "reasoningOverruns": 0,
+        "fixGateRejections": 0,
+        "unrecordedNudges": 0,
+        "essayTruncations": 0,
+        "tricksShown": 1,
+        "tricksResolved": 0,
+        "unmatchedTrickSigs": 0,
+        "handoffUtils": 0,
+        "build": {
+          "version": "2.7.22",
+          "codeMtime": "2026-08-04T13:44:14.810Z"
+        },
+        "cacheHitRate": 0.864,
+        "candidateRaised": true,
+        "status": "delivered"
+      },
+      "rubric": {
+        "score": 0.662,
+        "coverage": 0.309
+      },
+      "error": null
+    },
+    {
+      "id": "TS06",
+      "title": "Baxter TQ polynomial solutions L=4",
+      "category": "bethe",
+      "verify": "partial",
+      "questId": "QG_TS06_f56flz",
+      "runId": "run_2026-08-04T21-00-06-407Z",
+      "charmDir": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_TS06_f56flz_gold_ts06/charms/C01",
+      "verifiedNb": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_TS06_f56flz_gold_ts06/charms/C01/clean.wb",
+      "status": "delivered",
+      "verdict": "verified",
+      "scrollConfidence": 0.9,
+      "needsReview": false,
+      "verifier": {
+        "pass": true,
+        "detail": "True",
+        "residual": null,
+        "missingSymbols": [],
+        "replay": {
+          "cellCount": 7,
+          "allClean": true,
+          "failures": 0
+        }
+      },
+      "verifyError": null,
+      "economics": {
+        "llmCalls": 39,
+        "toolCalls": 39,
+        "probes": 14,
+        "costUSD": 0.049497,
+        "tokens": {
+          "input": 1350872,
+          "output": 55219,
+          "cacheRead": 1130368,
+          "cacheMiss": 220504
+        },
+        "durationMs": 4538029,
+        "cacheHitRatio": 0.837
+      },
+      "metrics": {
+        "questId": "QG_TS06_f56flz",
+        "charmId": "C01",
+        "verifiedRungs": {
+          "5": 7
+        },
+        "probesOk": 12,
+        "probesFailed": 6,
+        "probeSuccessRate": 0.667,
+        "records": 7,
+        "recordRate": 0.583,
+        "unrecordedSuccesses": 5,
+        "noteFacts": 1,
+        "amends": 3,
+        "amendRatio": 0.5,
+        "probeFailRate": 0.333,
+        "checkpoints": 2,
+        "utilForkRejections": 0,
+        "nearDuplicateRejections": 0,
+        "recordGates": 2,
+        "crosscheckGates": 0,
+        "missingDepGates": 0,
+        "chainReopens": 0,
+        "continuations": 0,
+        "literatureQueries": 0,
+        "litReads": 0,
+        "reDerivations": 0,
+        "inspects": 1,
+        "inspectsPerProbe": 0.08,
+        "recallSkill": "@vanbaalon/su2-xxx-bethe-roots-tq@0.2.0",
+        "recallUsed": true,
+        "recallInjected": true,
+        "recallMs": 7332,
+        "recallTopScore": 0.4738,
+        "recallTriage": {
+          "capabilities": [
+            "solve Baxter TQ relation as polynomial divisibility for SU(2) XXX chain",
+            "classify solution branches by Bethe-root count and highest-weight sectors"
+          ],
+          "picks": [
+            {
+              "ref": "@vanbaalon/su2-xxx-bethe-roots-tq@0.2.0",
+              "capability": "solve Baxter TQ relation as polynomial divisibility for SU(2) XXX chain",
+              "fit": "exact"
+            },
+            {
+              "ref": "@skilxiv/bethe-ansatz-spin-chain@1.0.0",
+              "capability": "classify solution branches by Bethe-root count and highest-weight sectors",
+              "fit": "partial"
+            }
+          ],
+          "gaps": [
+            "systematic classification of distinct (T,Q) solution branches for a given length and sector"
+          ]
+        },
+        "citationGates": 0,
+        "skillGapNotes": 0,
+        "skillGapsAuto": 0,
+        "skillDraftAuthored": false,
+        "llmCalls": 34,
+        "runCapHits": 0,
+        "thinkingTurns": 5,
+        "autoRecords": 3,
+        "lengthStops": 0,
+        "lengthStopRecoveries": 1,
+        "reasoningOverruns": 1,
+        "fixGateRejections": 0,
+        "unrecordedNudges": 3,
+        "essayTruncations": 0,
+        "tricksShown": 3,
+        "tricksResolved": 3,
+        "unmatchedTrickSigs": 0,
+        "handoffUtils": 0,
+        "build": {
+          "version": "2.7.22",
+          "codeMtime": "2026-08-04T13:44:14.810Z"
+        },
+        "cacheHitRate": 0.863,
+        "candidateRaised": true,
+        "status": "delivered"
+      },
+      "rubric": {
+        "score": 0.662,
+        "coverage": 0.309
+      },
+      "error": null
+    },
+    {
+      "id": "TS07",
+      "title": "GUE random matrix nearest-neighbour statistics",
+      "category": "stats",
+      "verify": "manual",
+      "questId": "QG_TS07_f7vp6d",
+      "runId": "run_2026-08-04T22-15-44-437Z",
+      "charmDir": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_TS07_f7vp6d_gold_ts07/charms/C01",
+      "verifiedNb": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_TS07_f7vp6d_gold_ts07/charms/C01/clean.wb",
+      "status": "delivered",
+      "verdict": "sanity_passed",
+      "scrollConfidence": 0.9,
+      "needsReview": true,
+      "verifier": {
+        "pass": true,
+        "detail": "True",
+        "residual": null,
+        "missingSymbols": [],
+        "replay": {
+          "cellCount": 4,
+          "allClean": true,
+          "failures": 0
+        }
+      },
+      "verifyError": null,
+      "economics": {
+        "llmCalls": 27,
+        "toolCalls": 21,
+        "probes": 8,
+        "costUSD": 0.023877,
+        "tokens": {
+          "input": 562582,
+          "output": 32097,
+          "cacheRead": 465536,
+          "cacheMiss": 97046
+        },
+        "durationMs": 459443,
+        "cacheHitRatio": 0.827
+      },
+      "metrics": {
+        "questId": "QG_TS07_f7vp6d",
+        "charmId": "C01",
+        "verifiedRungs": {
+          "5": 4
+        },
+        "probesOk": 6,
+        "probesFailed": 3,
+        "probeSuccessRate": 0.667,
+        "records": 2,
+        "recordRate": 0.333,
+        "unrecordedSuccesses": 4,
+        "noteFacts": 1,
+        "amends": 2,
+        "amendRatio": 0.67,
+        "probeFailRate": 0.333,
+        "checkpoints": 0,
+        "utilForkRejections": 0,
+        "nearDuplicateRejections": 0,
+        "recordGates": 0,
+        "crosscheckGates": 0,
+        "missingDepGates": 0,
+        "chainReopens": 0,
+        "continuations": 0,
+        "literatureQueries": 0,
+        "litReads": 0,
+        "reDerivations": 0,
+        "inspects": 0,
+        "inspectsPerProbe": 0,
+        "recallSkill": "@skilxiv/hypothesis-property-testing@1.0.0",
+        "recallUsed": false,
+        "recallInjected": true,
+        "recallMs": 4334,
+        "recallTopScore": 0.3745,
+        "recallTriage": {
+          "capabilities": [
+            "GUE random matrix generation and spectrum unfolding",
+            "Nearest-neighbour spacing distribution and statistical comparison with Wigner surmise"
+          ],
+          "picks": [
+            {
+              "ref": "@skilxiv/hypothesis-property-testing@1.0.0",
+              "capability": "Nearest-neighbour spacing distribution and statistical comparison with Wigner surmise",
+              "fit": "partial"
+            }
+          ],
+          "gaps": [
+            "GUE random matrix generation and spectrum unfolding"
+          ]
+        },
+        "citationGates": 1,
+        "skillGapNotes": 0,
+        "skillGapsAuto": 0,
+        "skillDraftAuthored": true,
+        "llmCalls": 21,
+        "runCapHits": 0,
+        "thinkingTurns": 2,
+        "autoRecords": 2,
+        "lengthStops": 0,
+        "lengthStopRecoveries": 1,
+        "reasoningOverruns": 1,
+        "fixGateRejections": 0,
+        "unrecordedNudges": 4,
+        "essayTruncations": 0,
+        "tricksShown": 4,
+        "tricksResolved": 2,
+        "unmatchedTrickSigs": 0,
+        "handoffUtils": 0,
+        "build": {
+          "version": "2.7.22",
+          "codeMtime": "2026-08-04T13:44:14.810Z"
+        },
+        "cacheHitRate": 0.91,
+        "candidateRaised": true,
+        "status": "delivered"
+      },
+      "rubric": {
+        "score": 0.662,
+        "coverage": 0.309
+      },
+      "error": null
+    },
+    {
+      "id": "TS08",
+      "title": "Anharmonic oscillator eigenvalues",
+      "category": "ode",
+      "verify": "full",
+      "questId": "QG_TS08_f85joo",
+      "runId": "run_2026-08-04T22-23-23-881Z",
+      "charmDir": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_TS08_f85joo_gold_ts08/charms/C01",
+      "verifiedNb": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_TS08_f85joo_gold_ts08/charms/C01/clean.wb",
+      "status": "delivered",
+      "verdict": "verified",
+      "scrollConfidence": 0.9,
+      "needsReview": false,
+      "verifier": {
+        "pass": true,
+        "detail": "residual 2.1277613839743026*^-6 (tol 0.02)",
+        "residual": 0.0000021277613839743026,
+        "missingSymbols": [],
+        "replay": {
+          "cellCount": 5,
+          "allClean": false,
+          "failures": 2
+        }
+      },
+      "verifyError": null,
+      "economics": {
+        "llmCalls": 19,
+        "toolCalls": 14,
+        "probes": 5,
+        "costUSD": 0.01405,
+        "tokens": {
+          "input": 301904,
+          "output": 20277,
+          "cacheRead": 247040,
+          "cacheMiss": 54864
+        },
+        "durationMs": 272411,
+        "cacheHitRatio": 0.818
+      },
+      "metrics": {
+        "questId": "QG_TS08_f85joo",
+        "charmId": "C01",
+        "verifiedRungs": {
+          "5": 5
+        },
+        "probesOk": 5,
+        "probesFailed": 1,
+        "probeSuccessRate": 0.833,
+        "records": 3,
+        "recordRate": 0.6,
+        "unrecordedSuccesses": 2,
+        "noteFacts": 1,
+        "amends": 0,
+        "amendRatio": 0,
+        "probeFailRate": 0.167,
+        "checkpoints": 1,
+        "utilForkRejections": 0,
+        "nearDuplicateRejections": 0,
+        "recordGates": 0,
+        "crosscheckGates": 0,
+        "missingDepGates": 0,
+        "chainReopens": 0,
+        "continuations": 0,
+        "literatureQueries": 0,
+        "litReads": 0,
+        "reDerivations": 0,
+        "inspects": 0,
+        "inspectsPerProbe": 0,
+        "recallSkill": "@skilxiv/runge-kutta-4@1.0.0",
+        "recallUsed": false,
+        "recallInjected": true,
+        "recallMs": 4495,
+        "recallTopScore": 0.4029,
+        "recallTriage": {
+          "capabilities": [
+            "finite-difference discretization of a 1D Schrödinger eigenvalue problem",
+            "Richardson extrapolation of eigenvalues across grid spacings"
+          ],
+          "picks": [
+            {
+              "ref": "@skilxiv/runge-kutta-4@1.0.0",
+              "capability": "finite-difference discretization of a 1D Schrödinger eigenvalue problem",
+              "fit": "partial"
+            }
+          ],
+          "gaps": [
+            "finite-difference discretization of a 1D Schrödinger eigenvalue problem",
+            "Richardson extrapolation of eigenvalues across grid spacings"
+          ]
+        },
+        "citationGates": 1,
+        "skillGapNotes": 0,
+        "skillGapsAuto": 2,
+        "skillDraftAuthored": true,
+        "llmCalls": 13,
+        "runCapHits": 0,
+        "thinkingTurns": 2,
+        "autoRecords": 1,
+        "lengthStops": 0,
+        "lengthStopRecoveries": 1,
+        "reasoningOverruns": 1,
+        "fixGateRejections": 0,
+        "unrecordedNudges": 1,
+        "essayTruncations": 0,
+        "tricksShown": 0,
+        "tricksResolved": 0,
+        "unmatchedTrickSigs": 0,
+        "handoffUtils": 0,
+        "build": {
+          "version": "2.7.22",
+          "codeMtime": "2026-08-04T13:44:14.810Z"
+        },
+        "cacheHitRate": 0.91,
+        "candidateRaised": true,
+        "status": "delivered"
+      },
+      "rubric": {
+        "score": 0.662,
+        "coverage": 0.309
+      },
+      "error": null
+    },
+    {
+      "id": "TS09",
+      "title": "S_6 permutation representation on 3-subsets",
+      "category": "rep-theory",
+      "verify": "full",
+      "questId": "QG_TS09_f8bdvo",
+      "runId": "run_2026-08-04T22-27-56-292Z",
+      "charmDir": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_TS09_f8bdvo_gold_ts09/charms/C01",
+      "verifiedNb": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_TS09_f8bdvo_gold_ts09/charms/C01/clean.wb",
+      "status": "delivered",
+      "verdict": "verified",
+      "scrollConfidence": 0.9,
+      "needsReview": false,
+      "verifier": {
+        "pass": true,
+        "detail": "True",
+        "residual": null,
+        "missingSymbols": [],
+        "replay": {
+          "cellCount": 9,
+          "allClean": true,
+          "failures": 0
+        }
+      },
+      "verifyError": null,
+      "economics": {
+        "llmCalls": 14,
+        "toolCalls": 15,
+        "probes": 2,
+        "costUSD": 0.011397,
+        "tokens": {
+          "input": 222320,
+          "output": 19922,
+          "cacheRead": 184448,
+          "cacheMiss": 37872
+        },
+        "durationMs": 283561,
+        "cacheHitRatio": 0.83
+      },
+      "metrics": {
+        "questId": "QG_TS09_f8bdvo",
+        "charmId": "C01",
+        "verifiedRungs": {
+          "5": 2
+        },
+        "probesOk": 2,
+        "probesFailed": 0,
+        "probeSuccessRate": 1,
+        "records": 0,
+        "recordRate": 0,
+        "unrecordedSuccesses": 2,
+        "noteFacts": 2,
+        "amends": 0,
+        "amendRatio": null,
+        "probeFailRate": 0,
+        "checkpoints": 0,
+        "utilForkRejections": 0,
+        "nearDuplicateRejections": 0,
+        "recordGates": 0,
+        "crosscheckGates": 0,
+        "missingDepGates": 0,
+        "chainReopens": 0,
+        "continuations": 0,
+        "literatureQueries": 0,
+        "litReads": 0,
+        "reDerivations": 0,
+        "inspects": 0,
+        "inspectsPerProbe": 0,
+        "recallSkill": "@vanbaalon/sn-permutation-rep-decomposition@0.1.1",
+        "recallUsed": true,
+        "recallInjected": true,
+        "recallMs": 4193,
+        "recallTopScore": 0.7455,
+        "recallTriage": {
+          "capabilities": [
+            "construct permutation representation of S_n on k-subsets",
+            "decompose representation into irreducibles via character theory"
+          ],
+          "picks": [
+            {
+              "ref": "@vanbaalon/sn-permutation-rep-decomposition@0.1.1",
+              "capability": "decompose representation into irreducibles via character theory",
+              "fit": "exact"
+            }
+          ],
+          "gaps": [
+            "construct permutation representation of S_n on k-subsets"
+          ]
+        },
+        "citationGates": 0,
+        "skillGapNotes": 0,
+        "skillGapsAuto": 0,
+        "skillDraftAuthored": false,
+        "llmCalls": 9,
+        "runCapHits": 0,
+        "thinkingTurns": 1,
+        "autoRecords": 2,
+        "lengthStops": 0,
+        "lengthStopRecoveries": 1,
+        "reasoningOverruns": 1,
+        "fixGateRejections": 0,
+        "unrecordedNudges": 0,
+        "essayTruncations": 0,
+        "tricksShown": 0,
+        "tricksResolved": 0,
+        "unmatchedTrickSigs": 0,
+        "handoffUtils": 0,
+        "build": {
+          "version": "2.7.22",
+          "codeMtime": "2026-08-04T13:44:14.810Z"
+        },
+        "cacheHitRate": 0.953,
+        "candidateRaised": true,
+        "status": "delivered"
+      },
+      "rubric": {
+        "score": 0.662,
+        "coverage": 0.309
+      },
+      "error": null
+    },
+    {
+      "id": "TS10",
+      "title": "QQ-system (Wronskian) bootstrap for XXX L=4",
+      "category": "bethe",
+      "verify": "partial",
+      "questId": "QG_TS10_f8hgod",
+      "runId": "run_2026-08-04T22-32-39-853Z",
+      "charmDir": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_TS10_f8hgod_gold_ts10/charms/C01",
+      "verifiedNb": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_TS10_f8hgod_gold_ts10/charms/C01/clean.wb",
+      "status": "delivered",
+      "verdict": "verified",
+      "scrollConfidence": 0.9,
+      "needsReview": false,
+      "verifier": {
+        "pass": true,
+        "detail": "True",
+        "residual": null,
+        "missingSymbols": [],
+        "replay": {
+          "cellCount": 7,
+          "allClean": true,
+          "failures": 0
+        }
+      },
+      "verifyError": null,
+      "economics": {
+        "llmCalls": 75,
+        "toolCalls": 80,
+        "probes": 27,
+        "costUSD": 0.082897,
+        "tokens": {
+          "input": 4085491,
+          "output": 67931,
+          "cacheRead": 3703296,
+          "cacheMiss": 382195
+        },
+        "durationMs": 820436,
+        "cacheHitRatio": 0.906
+      },
+      "metrics": {
+        "questId": "QG_TS10_f8hgod",
+        "charmId": "C01",
+        "verifiedRungs": {
+          "5": 8
+        },
+        "probesOk": 23,
+        "probesFailed": 5,
+        "probeSuccessRate": 0.821,
+        "records": 18,
+        "recordRate": 0.783,
+        "unrecordedSuccesses": 5,
+        "noteFacts": 2,
+        "amends": 6,
+        "amendRatio": 1.2,
+        "probeFailRate": 0.179,
+        "checkpoints": 5,
+        "utilForkRejections": 0,
+        "nearDuplicateRejections": 5,
+        "recordGates": 1,
+        "crosscheckGates": 0,
+        "missingDepGates": 1,
+        "chainReopens": 0,
+        "continuations": 0,
+        "literatureQueries": 0,
+        "litReads": 0,
+        "reDerivations": 0,
+        "inspects": 3,
+        "inspectsPerProbe": 0.13,
+        "recallSkill": "@vanbaalon/su2-xxx-bethe-roots-tq@0.2.0",
+        "recallUsed": true,
+        "recallInjected": true,
+        "recallMs": 7569,
+        "recallTopScore": 0.7661,
+        "recallTriage": {
+          "capabilities": [
+            "solve QQ-relation (Wronskian) polynomial equations for SU(2) XXX chain",
+            "classify solution branches including singular/exceptional cases"
+          ],
+          "picks": [
+            {
+              "ref": "@vanbaalon/su2-xxx-bethe-roots-tq@0.2.0",
+              "capability": "solve QQ-relation (Wronskian) polynomial equations for SU(2) XXX chain",
+              "fit": "exact"
+            },
+            {
+              "ref": "@vanbaalon/sun-xxx-bethe-qq-system@0.1.0",
+              "capability": "classify solution branches including singular/exceptional cases",
+              "fit": "partial"
+            }
+          ],
+          "gaps": [
+            "no candidate explicitly classifies all solution branches (including singular/exceptional M=2) of the QQ-relation"
+          ]
+        },
+        "citationGates": 0,
+        "skillGapNotes": 0,
+        "skillGapsAuto": 1,
+        "skillDraftAuthored": false,
+        "llmCalls": 69,
+        "runCapHits": 0,
+        "thinkingTurns": 2,
+        "autoRecords": 0,
+        "lengthStops": 0,
+        "lengthStopRecoveries": 2,
+        "reasoningOverruns": 2,
+        "fixGateRejections": 0,
+        "unrecordedNudges": 1,
+        "essayTruncations": 0,
+        "tricksShown": 4,
+        "tricksResolved": 2,
+        "unmatchedTrickSigs": 0,
+        "handoffUtils": 0,
+        "build": {
+          "version": "2.7.22",
+          "codeMtime": "2026-08-04T13:44:14.810Z"
+        },
+        "cacheHitRate": 0.949,
+        "candidateRaised": true,
+        "status": "delivered"
+      },
+      "rubric": {
+        "score": 0.662,
+        "coverage": 0.309
+      },
+      "error": null
+    },
+    {
+      "id": "TS11",
+      "title": "SU(1|1) chain L=8 three-particle sector: BAE vs exact diagonalisation",
+      "category": "bethe",
+      "verify": "full",
+      "questId": "QG_TS11_f8z1q9",
+      "runId": "run_2026-08-04T22-46-20-290Z",
+      "charmDir": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_TS11_f8z1q9_gold_ts11/charms/C01",
+      "verifiedNb": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_TS11_f8z1q9_gold_ts11/charms/C01/clean.wb",
+      "status": "delivered",
+      "verdict": "verified",
+      "scrollConfidence": 0.9,
+      "needsReview": false,
+      "verifier": {
+        "pass": true,
+        "detail": "residual 0. (tol 0.000001)",
+        "residual": 0,
+        "missingSymbols": [],
+        "replay": {
+          "cellCount": 11,
+          "allClean": true,
+          "failures": 0
+        }
+      },
+      "verifyError": null,
+      "economics": {
+        "llmCalls": 46,
+        "toolCalls": 46,
+        "probes": 14,
+        "costUSD": 0.067185,
+        "tokens": {
+          "input": 1882597,
+          "output": 58063,
+          "cacheRead": 1549824,
+          "cacheMiss": 332773
+        },
+        "durationMs": 704919,
+        "cacheHitRatio": 0.823
+      },
+      "metrics": {
+        "questId": "QG_TS11_f8z1q9",
+        "charmId": "C01",
+        "verifiedRungs": {
+          "5": 11
+        },
+        "probesOk": 11,
+        "probesFailed": 5,
+        "probeSuccessRate": 0.688,
+        "records": 10,
+        "recordRate": 0.909,
+        "unrecordedSuccesses": 1,
+        "noteFacts": 2,
+        "amends": 4,
+        "amendRatio": 0.8,
+        "probeFailRate": 0.313,
+        "checkpoints": 2,
+        "utilForkRejections": 0,
+        "nearDuplicateRejections": 0,
+        "recordGates": 2,
+        "crosscheckGates": 0,
+        "missingDepGates": 1,
+        "chainReopens": 0,
+        "continuations": 0,
+        "literatureQueries": 0,
+        "litReads": 0,
+        "reDerivations": 0,
+        "inspects": 0,
+        "inspectsPerProbe": 0,
+        "recallSkill": "@vanbaalon/sun-fusion-hirota-tsystem@1.0.1",
+        "recallUsed": false,
+        "recallInjected": true,
+        "recallMs": 5929,
+        "recallTopScore": 0.471,
+        "recallTriage": {
+          "capabilities": [
+            "Graded permutation matrix construction and Hamiltonian assembly",
+            "Fermion number conservation and symmetry analysis",
+            "Exact diagonalization or Bethe ansatz for su(1|1) spin chain spectrum"
+          ],
+          "picks": [
+            {
+              "ref": "@vanbaalon/sun-fusion-hirota-tsystem@1.0.1",
+              "capability": "Exact diagonalization or Bethe ansatz for su(1|1) spin chain spectrum",
+              "fit": "partial"
+            },
+            {
+              "ref": "@vanbaalon/sun-xxx-bethe-qq-system@0.1.0",
+              "capability": "Exact diagonalization or Bethe ansatz for su(1|1) spin chain spectrum",
+              "fit": "partial"
+            }
+          ],
+          "gaps": [
+            "Graded permutation matrix construction and Hamiltonian assembly",
+            "Fermion number conservation and symmetry analysis"
+          ]
+        },
+        "citationGates": 1,
+        "skillGapNotes": 0,
+        "skillGapsAuto": 2,
+        "skillDraftAuthored": true,
+        "llmCalls": 37,
+        "runCapHits": 0,
+        "thinkingTurns": 3,
+        "autoRecords": 1,
+        "lengthStops": 0,
+        "lengthStopRecoveries": 1,
+        "reasoningOverruns": 1,
+        "fixGateRejections": 0,
+        "unrecordedNudges": 3,
+        "essayTruncations": 0,
+        "tricksShown": 3,
+        "tricksResolved": 0,
+        "unmatchedTrickSigs": 1,
+        "handoffUtils": 0,
+        "build": {
+          "version": "2.7.22",
+          "codeMtime": "2026-08-04T13:44:14.810Z"
+        },
+        "cacheHitRate": 0.892,
+        "candidateRaised": true,
+        "status": "delivered"
+      },
+      "rubric": {
+        "score": 0.662,
+        "coverage": 0.309
+      },
+      "error": null
+    },
+    {
+      "id": "TS12",
+      "title": "SU(1|1) chain L=6 full spectrum: graded Bethe ansatz across all sectors",
+      "category": "bethe",
+      "verify": "full",
+      "questId": "QG_TS12_f9e5nc",
+      "runId": "run_2026-08-04T22-58-05-209Z",
+      "charmDir": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_TS12_f9e5nc_gold_ts12/charms/C01",
+      "verifiedNb": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_TS12_f9e5nc_gold_ts12/charms/C01/clean.wb",
+      "status": "delivered",
+      "verdict": "verified",
+      "scrollConfidence": 0.9,
+      "needsReview": false,
+      "verifier": {
+        "pass": true,
+        "detail": "True",
+        "residual": null,
+        "missingSymbols": [],
+        "replay": {
+          "cellCount": 8,
+          "allClean": true,
+          "failures": 0
+        }
+      },
+      "verifyError": null,
+      "economics": {
+        "llmCalls": 39,
+        "toolCalls": 36,
+        "probes": 12,
+        "costUSD": 0.048478,
+        "tokens": {
+          "input": 1297552,
+          "output": 51209,
+          "cacheRead": 1075200,
+          "cacheMiss": 222352
+        },
+        "durationMs": 581928,
+        "cacheHitRatio": 0.829
+      },
+      "metrics": {
+        "questId": "QG_TS12_f9e5nc",
+        "charmId": "C01",
+        "verifiedRungs": {
+          "5": 8
+        },
+        "probesOk": 10,
+        "probesFailed": 5,
+        "probeSuccessRate": 0.667,
+        "records": 8,
+        "recordRate": 0.8,
+        "unrecordedSuccesses": 2,
+        "noteFacts": 2,
+        "amends": 3,
+        "amendRatio": 0.6,
+        "probeFailRate": 0.333,
+        "checkpoints": 2,
+        "utilForkRejections": 0,
+        "nearDuplicateRejections": 0,
+        "recordGates": 0,
+        "crosscheckGates": 0,
+        "missingDepGates": 0,
+        "chainReopens": 0,
+        "continuations": 0,
+        "literatureQueries": 0,
+        "litReads": 0,
+        "reDerivations": 0,
+        "inspects": 0,
+        "inspectsPerProbe": 0,
+        "recallSkill": "@vanbaalon/sun-xxx-bethe-qq-system@0.1.0",
+        "recallUsed": true,
+        "recallInjected": true,
+        "recallMs": 7179,
+        "recallTopScore": 0.4733,
+        "recallTriage": {
+          "capabilities": [
+            "su(1|1) graded Bethe ansatz equations and spectrum",
+            "exact diagonalisation of the su(1|1) chain and comparison"
+          ],
+          "picks": [
+            {
+              "ref": "@vanbaalon/sun-xxx-bethe-qq-system@0.1.0",
+              "capability": "su(1|1) graded Bethe ansatz equations and spectrum",
+              "fit": "partial"
+            },
+            {
+              "ref": "@skilxiv/bethe-ansatz-spin-chain@1.0.0",
+              "capability": "exact diagonalisation of the su(1|1) chain and comparison",
+              "fit": "exact"
+            }
+          ],
+          "gaps": [
+            "No candidate skill explicitly handles the graded permutation R-matrix and the su(1|1) superalgebra structure; the Bethe equations for su(1|1) must be derived fr"
+          ]
+        },
+        "citationGates": 1,
+        "skillGapNotes": 1,
+        "skillGapsAuto": 0,
+        "skillDraftAuthored": true,
+        "llmCalls": 32,
+        "runCapHits": 0,
+        "thinkingTurns": 3,
+        "autoRecords": 0,
+        "lengthStops": 0,
+        "lengthStopRecoveries": 2,
+        "reasoningOverruns": 2,
+        "fixGateRejections": 1,
+        "unrecordedNudges": 2,
+        "essayTruncations": 0,
+        "tricksShown": 3,
+        "tricksResolved": 1,
+        "unmatchedTrickSigs": 0,
+        "handoffUtils": 0,
+        "build": {
+          "version": "2.7.22",
+          "codeMtime": "2026-08-04T13:44:14.810Z"
+        },
+        "cacheHitRate": 0.907,
+        "candidateRaised": true,
+        "status": "delivered"
+      },
+      "rubric": {
+        "score": 0.662,
+        "coverage": 0.309
+      },
+      "error": null
+    },
+    {
+      "id": "GT01",
+      "title": "Bose integral x^3/(e^x - 1)",
+      "category": "integral",
+      "verify": "full",
+      "questId": "QG_GT01_f9qmo0",
+      "runId": "run_2026-08-04T23-07-47-137Z",
+      "charmDir": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_GT01_f9qmo0_gold_gt01/charms/C01",
+      "verifiedNb": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_GT01_f9qmo0_gold_gt01/charms/C01/clean.wb",
+      "status": "delivered",
+      "verdict": "verified",
+      "scrollConfidence": 0.9,
+      "needsReview": false,
+      "verifier": {
+        "pass": true,
+        "detail": "True",
+        "residual": null,
+        "missingSymbols": [],
+        "replay": {
+          "cellCount": 1,
+          "allClean": true,
+          "failures": 0
+        }
+      },
+      "verifyError": null,
+      "economics": {
+        "llmCalls": 14,
+        "toolCalls": 8,
+        "probes": 2,
+        "costUSD": 0.006874,
+        "tokens": {
+          "input": 201994,
+          "output": 4965,
+          "cacheRead": 166144,
+          "cacheMiss": 35850
+        },
+        "durationMs": 76227,
+        "cacheHitRatio": 0.823
+      },
+      "metrics": {
+        "questId": "QG_GT01_f9qmo0",
+        "charmId": "C01",
+        "verifiedRungs": {
+          "5": 1
+        },
+        "probesOk": 2,
+        "probesFailed": 1,
+        "probeSuccessRate": 0.667,
+        "records": 0,
+        "recordRate": 0,
+        "unrecordedSuccesses": 2,
+        "noteFacts": 1,
+        "amends": 0,
+        "amendRatio": 0,
+        "probeFailRate": 0.333,
+        "checkpoints": 0,
+        "utilForkRejections": 0,
+        "nearDuplicateRejections": 0,
+        "recordGates": 0,
+        "crosscheckGates": 0,
+        "missingDepGates": 0,
+        "chainReopens": 0,
+        "continuations": 0,
+        "literatureQueries": 0,
+        "litReads": 0,
+        "reDerivations": 0,
+        "inspects": 0,
+        "inspectsPerProbe": 0,
+        "recallSkill": "@vanbaalon/gauss-hypergeometric-2f1@0.1.0",
+        "recallUsed": false,
+        "recallInjected": true,
+        "recallMs": 4547,
+        "recallTopScore": 0.4026,
+        "recallTriage": {
+          "capabilities": [
+            "Evaluate definite integral in closed form",
+            "Verify result numerically to high precision"
+          ],
+          "picks": [
+            {
+              "ref": "@vanbaalon/gauss-hypergeometric-2f1@0.1.0",
+              "capability": "Evaluate definite integral in closed form",
+              "fit": "partial"
+            }
+          ],
+          "gaps": [
+            "Verify result numerically to high precision"
+          ]
+        },
+        "citationGates": 1,
+        "skillGapNotes": 0,
+        "skillGapsAuto": 1,
+        "skillDraftAuthored": true,
+        "llmCalls": 9,
+        "runCapHits": 0,
+        "thinkingTurns": 1,
+        "autoRecords": 1,
+        "lengthStops": 0,
+        "lengthStopRecoveries": 0,
+        "reasoningOverruns": 0,
+        "fixGateRejections": 0,
+        "unrecordedNudges": 0,
+        "essayTruncations": 0,
+        "tricksShown": 0,
+        "tricksResolved": 0,
+        "unmatchedTrickSigs": 0,
+        "handoffUtils": 0,
+        "build": {
+          "version": "2.7.22",
+          "codeMtime": "2026-08-04T13:44:14.810Z"
+        },
+        "cacheHitRate": 0.885,
+        "candidateRaised": true,
+        "status": "delivered"
+      },
+      "rubric": {
+        "score": 0.662,
+        "coverage": 0.309
+      },
+      "error": null
+    },
+    {
+      "id": "GT02",
+      "title": "Integral of Log[x] Log[1-x]",
+      "category": "integral",
+      "verify": "full",
+      "questId": "QG_GT02_f9s9hf",
+      "runId": "run_2026-08-04T23-09-03-363Z",
+      "charmDir": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_GT02_f9s9hf_gold_gt02/charms/C01",
+      "verifiedNb": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_GT02_f9s9hf_gold_gt02/charms/C01/clean.wb",
+      "status": "delivered",
+      "verdict": "verified",
+      "scrollConfidence": 0.9,
+      "needsReview": false,
+      "verifier": {
+        "pass": true,
+        "detail": "True",
+        "residual": null,
+        "missingSymbols": [],
+        "replay": {
+          "cellCount": 2,
+          "allClean": true,
+          "failures": 0
+        }
+      },
+      "verifyError": null,
+      "economics": {
+        "llmCalls": 16,
+        "toolCalls": 11,
+        "probes": 3,
+        "costUSD": 0.012631,
+        "tokens": {
+          "input": 330004,
+          "output": 10440,
+          "cacheRead": 265984,
+          "cacheMiss": 64020
+        },
+        "durationMs": 124014,
+        "cacheHitRatio": 0.806
+      },
+      "metrics": {
+        "questId": "QG_GT02_f9s9hf",
+        "charmId": "C01",
+        "verifiedRungs": {
+          "5": 2
+        },
+        "probesOk": 3,
+        "probesFailed": 1,
+        "probeSuccessRate": 0.75,
+        "records": 0,
+        "recordRate": 0,
+        "unrecordedSuccesses": 3,
+        "noteFacts": 0,
+        "amends": 1,
+        "amendRatio": 1,
+        "probeFailRate": 0.25,
+        "checkpoints": 0,
+        "utilForkRejections": 0,
+        "nearDuplicateRejections": 0,
+        "recordGates": 0,
+        "crosscheckGates": 0,
+        "missingDepGates": 0,
+        "chainReopens": 0,
+        "continuations": 0,
+        "literatureQueries": 0,
+        "litReads": 0,
+        "reDerivations": 0,
+        "inspects": 0,
+        "inspectsPerProbe": 0,
+        "recallSkill": "@vanbaalon/gauss-hypergeometric-2f1@0.1.0",
+        "recallUsed": false,
+        "recallInjected": true,
+        "recallMs": 4369,
+        "recallTopScore": 0.4016,
+        "recallTriage": {
+          "capabilities": [
+            "closed-form evaluation of a definite integral involving logarithms",
+            "numerical verification of the closed-form result"
+          ],
+          "picks": [
+            {
+              "ref": "@vanbaalon/gauss-hypergeometric-2f1@0.1.0",
+              "capability": "closed-form evaluation of a definite integral involving logarithms",
+              "fit": "exact"
+            },
+            {
+              "ref": "@vanbaalon/elliptic-integral-identities@1.0.0",
+              "capability": "numerical verification of the closed-form result",
+              "fit": "partial"
+            }
+          ],
+          "gaps": []
+        },
+        "citationGates": 1,
+        "skillGapNotes": 0,
+        "skillGapsAuto": 0,
+        "skillDraftAuthored": false,
+        "llmCalls": 12,
+        "runCapHits": 0,
+        "thinkingTurns": 1,
+        "autoRecords": 3,
+        "lengthStops": 0,
+        "lengthStopRecoveries": 0,
+        "reasoningOverruns": 0,
+        "fixGateRejections": 0,
+        "unrecordedNudges": 0,
+        "essayTruncations": 0,
+        "tricksShown": 0,
+        "tricksResolved": 0,
+        "unmatchedTrickSigs": 0,
+        "handoffUtils": 0,
+        "build": {
+          "version": "2.7.22",
+          "codeMtime": "2026-08-04T13:44:14.810Z"
+        },
+        "cacheHitRate": 0.871,
+        "candidateRaised": false,
+        "status": "delivered"
+      },
+      "rubric": {
+        "score": 0.662,
+        "coverage": 0.309
+      },
+      "error": null
+    },
+    {
+      "id": "GT03",
+      "title": "Log-sine integral",
+      "category": "integral",
+      "verify": "full",
+      "questId": "QG_GT03_f9ux69",
+      "runId": "run_2026-08-04T23-11-07-377Z",
+      "charmDir": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_GT03_f9ux69_gold_gt03/charms/C01",
+      "verifiedNb": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_GT03_f9ux69_gold_gt03/charms/C01/clean.wb",
+      "status": "delivered",
+      "verdict": "verified",
+      "scrollConfidence": 0.9,
+      "needsReview": false,
+      "verifier": {
+        "pass": true,
+        "detail": "True",
+        "residual": null,
+        "missingSymbols": [],
+        "replay": {
+          "cellCount": 2,
+          "allClean": true,
+          "failures": 0
+        }
+      },
+      "verifyError": null,
+      "economics": {
+        "llmCalls": 11,
+        "toolCalls": 7,
+        "probes": 2,
+        "costUSD": 0.007234,
+        "tokens": {
+          "input": 197831,
+          "output": 2562,
+          "cacheRead": 154368,
+          "cacheMiss": 43463
+        },
+        "durationMs": 52629,
+        "cacheHitRatio": 0.78
+      },
+      "metrics": {
+        "questId": "QG_GT03_f9ux69",
+        "charmId": "C01",
+        "verifiedRungs": {
+          "5": 2
+        },
+        "probesOk": 2,
+        "probesFailed": 0,
+        "probeSuccessRate": 1,
+        "records": 0,
+        "recordRate": 0,
+        "unrecordedSuccesses": 2,
+        "noteFacts": 0,
+        "amends": 0,
+        "amendRatio": null,
+        "probeFailRate": 0,
+        "checkpoints": 0,
+        "utilForkRejections": 0,
+        "nearDuplicateRejections": 0,
+        "recordGates": 0,
+        "crosscheckGates": 0,
+        "missingDepGates": 0,
+        "chainReopens": 0,
+        "continuations": 0,
+        "literatureQueries": 0,
+        "litReads": 0,
+        "reDerivations": 0,
+        "inspects": 0,
+        "inspectsPerProbe": 0,
+        "recallSkill": "@vanbaalon/gauss-hypergeometric-2f1@0.1.0",
+        "recallUsed": false,
+        "recallInjected": true,
+        "recallMs": 4086,
+        "recallTopScore": 0.4065,
+        "recallTriage": {
+          "capabilities": [
+            "closed-form evaluation of a definite integral involving special functions",
+            "numerical verification of the closed-form result"
+          ],
+          "picks": [
+            {
+              "ref": "@vanbaalon/gauss-hypergeometric-2f1@0.1.0",
+              "capability": "closed-form evaluation of a definite integral involving special functions",
+              "fit": "exact"
+            },
+            {
+              "ref": "@vanbaalon/elliptic-integral-identities@1.0.0",
+              "capability": "numerical verification of the closed-form result",
+              "fit": "partial"
+            }
+          ],
+          "gaps": []
+        },
+        "citationGates": 0,
+        "skillGapNotes": 0,
+        "skillGapsAuto": 0,
+        "skillDraftAuthored": false,
+        "llmCalls": 7,
+        "runCapHits": 0,
+        "thinkingTurns": 1,
+        "autoRecords": 1,
+        "lengthStops": 0,
+        "lengthStopRecoveries": 0,
+        "reasoningOverruns": 0,
+        "fixGateRejections": 0,
+        "unrecordedNudges": 0,
+        "essayTruncations": 0,
+        "tricksShown": 0,
+        "tricksResolved": 0,
+        "unmatchedTrickSigs": 0,
+        "handoffUtils": 0,
+        "build": {
+          "version": "2.7.22",
+          "codeMtime": "2026-08-04T13:44:14.810Z"
+        },
+        "cacheHitRate": 0.863,
+        "candidateRaised": false,
+        "status": "delivered"
+      },
+      "rubric": {
+        "score": 0.662,
+        "coverage": 0.309
+      },
+      "error": null
+    },
+    {
+      "id": "GT04",
+      "title": "Gaussian cosine integral with parameter",
+      "category": "integral",
+      "verify": "full",
+      "questId": "QG_GT04_f9w1s6",
+      "runId": "run_2026-08-04T23-12-00-006Z",
+      "charmDir": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_GT04_f9w1s6_gold_gt04/charms/C01",
+      "verifiedNb": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_GT04_f9w1s6_gold_gt04/charms/C01/clean.wb",
+      "status": "delivered",
+      "verdict": "verified",
+      "scrollConfidence": 0.9,
+      "needsReview": false,
+      "verifier": {
+        "pass": true,
+        "detail": "residual 0``29.799680006086625 (tol 1e-20)",
+        "residual": 0,
+        "missingSymbols": [],
+        "replay": {
+          "cellCount": 2,
+          "allClean": true,
+          "failures": 0
+        }
+      },
+      "verifyError": null,
+      "economics": {
+        "llmCalls": 14,
+        "toolCalls": 9,
+        "probes": 2,
+        "costUSD": 0.008444,
+        "tokens": {
+          "input": 236861,
+          "output": 6872,
+          "cacheRead": 194176,
+          "cacheMiss": 42685
+        },
+        "durationMs": 128786,
+        "cacheHitRatio": 0.82
+      },
+      "metrics": {
+        "questId": "QG_GT04_f9w1s6",
+        "charmId": "C01",
+        "verifiedRungs": {
+          "5": 2
+        },
+        "probesOk": 1,
+        "probesFailed": 1,
+        "probeSuccessRate": 0.5,
+        "records": 2,
+        "recordRate": 1,
+        "unrecordedSuccesses": 0,
+        "noteFacts": 0,
+        "amends": 1,
+        "amendRatio": 1,
+        "probeFailRate": 0.5,
+        "checkpoints": 0,
+        "utilForkRejections": 0,
+        "nearDuplicateRejections": 0,
+        "recordGates": 0,
+        "crosscheckGates": 0,
+        "missingDepGates": 0,
+        "chainReopens": 0,
+        "continuations": 0,
+        "literatureQueries": 0,
+        "litReads": 0,
+        "reDerivations": 0,
+        "inspects": 0,
+        "inspectsPerProbe": 0,
+        "recallSkill": "@vanbaalon/gauss-hypergeometric-2f1@0.1.0",
+        "recallUsed": false,
+        "recallInjected": true,
+        "recallMs": 4567,
+        "recallTopScore": 0.4003,
+        "recallTriage": {
+          "capabilities": [
+            "closed-form evaluation of a Gaussian integral with a cosine factor",
+            "numerical verification of the closed form for multiple parameter values"
+          ],
+          "picks": [
+            {
+              "ref": "@vanbaalon/gauss-hypergeometric-2f1@0.1.0",
+              "capability": "closed-form evaluation of a Gaussian integral with a cosine factor",
+              "fit": "partial"
+            }
+          ],
+          "gaps": [
+            "numerical verification of the closed form for multiple parameter values"
+          ]
+        },
+        "citationGates": 1,
+        "skillGapNotes": 0,
+        "skillGapsAuto": 1,
+        "skillDraftAuthored": false,
+        "llmCalls": 10,
+        "runCapHits": 0,
+        "thinkingTurns": 1,
+        "autoRecords": 0,
+        "lengthStops": 0,
+        "lengthStopRecoveries": 0,
+        "reasoningOverruns": 0,
+        "fixGateRejections": 0,
+        "unrecordedNudges": 0,
+        "essayTruncations": 0,
+        "tricksShown": 0,
+        "tricksResolved": 0,
+        "unmatchedTrickSigs": 1,
+        "handoffUtils": 0,
+        "build": {
+          "version": "2.7.22",
+          "codeMtime": "2026-08-04T13:44:14.810Z"
+        },
+        "cacheHitRate": 0.885,
+        "candidateRaised": false,
+        "status": "delivered"
+      },
+      "rubric": {
+        "score": 0.662,
+        "coverage": 0.309
+      },
+      "error": null
+    },
+    {
+      "id": "GT05",
+      "title": "Taylor coefficient of Tan",
+      "category": "series",
+      "verify": "full",
+      "questId": "QG_GT05_f9yt5k",
+      "runId": "run_2026-08-04T23-14-08-792Z",
+      "charmDir": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_GT05_f9yt5k_gold_gt05/charms/C01",
+      "verifiedNb": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_GT05_f9yt5k_gold_gt05/charms/C01/clean.wb",
+      "status": "delivered",
+      "verdict": "verified",
+      "scrollConfidence": 0.9,
+      "needsReview": false,
+      "verifier": {
+        "pass": true,
+        "detail": "True",
+        "residual": null,
+        "missingSymbols": [],
+        "replay": {
+          "cellCount": 3,
+          "allClean": true,
+          "failures": 0
+        }
+      },
+      "verifyError": null,
+      "economics": {
+        "llmCalls": 10,
+        "toolCalls": 8,
+        "probes": 1,
+        "costUSD": 0.006779,
+        "tokens": {
+          "input": 109160,
+          "output": 14350,
+          "cacheRead": 91264,
+          "cacheMiss": 17896
+        },
+        "durationMs": 150683,
+        "cacheHitRatio": 0.836
+      },
+      "metrics": {
+        "questId": "QG_GT05_f9yt5k",
+        "charmId": "C01",
+        "verifiedRungs": {
+          "5": 3
+        },
+        "probesOk": 1,
+        "probesFailed": 0,
+        "probeSuccessRate": 1,
+        "records": 3,
+        "recordRate": 1,
+        "unrecordedSuccesses": 0,
+        "noteFacts": 1,
+        "amends": 0,
+        "amendRatio": null,
+        "probeFailRate": 0,
+        "checkpoints": 1,
+        "utilForkRejections": 0,
+        "nearDuplicateRejections": 0,
+        "recordGates": 0,
+        "crosscheckGates": 0,
+        "missingDepGates": 0,
+        "chainReopens": 0,
+        "continuations": 0,
+        "literatureQueries": 0,
+        "litReads": 0,
+        "reDerivations": 0,
+        "inspects": 0,
+        "inspectsPerProbe": 0,
+        "recallSkill": null,
+        "recallUsed": false,
+        "recallInjected": false,
+        "recallMs": 3453,
+        "recallTopScore": null,
+        "recallTriage": {
+          "capabilities": [
+            "Taylor expansion of Tan[x] about x=0",
+            "relation to Bernoulli numbers"
+          ],
+          "picks": [],
+          "gaps": [
+            "Taylor expansion of Tan[x] about x=0",
+            "relation to Bernoulli numbers"
+          ]
+        },
+        "citationGates": 0,
+        "skillGapNotes": 0,
+        "skillGapsAuto": 2,
+        "skillDraftAuthored": true,
+        "llmCalls": 5,
+        "runCapHits": 0,
+        "thinkingTurns": 1,
+        "autoRecords": 0,
+        "lengthStops": 0,
+        "lengthStopRecoveries": 0,
+        "reasoningOverruns": 0,
+        "fixGateRejections": 0,
+        "unrecordedNudges": 0,
+        "essayTruncations": 0,
+        "tricksShown": 0,
+        "tricksResolved": 0,
+        "unmatchedTrickSigs": 0,
+        "handoffUtils": 0,
+        "build": {
+          "version": "2.7.22",
+          "codeMtime": "2026-08-04T13:44:14.810Z"
+        },
+        "cacheHitRate": 0.924,
+        "candidateRaised": true,
+        "status": "delivered"
+      },
+      "rubric": {
+        "score": 0.662,
+        "coverage": 0.309
+      },
+      "error": null
+    },
+    {
+      "id": "GT06",
+      "title": "Sum n^2/2^n",
+      "category": "series",
+      "verify": "full",
+      "questId": "QG_GT06_fa21f8",
+      "runId": "run_2026-08-04T23-16-39-476Z",
+      "charmDir": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_GT06_fa21f8_gold_gt06/charms/C01",
+      "verifiedNb": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_GT06_fa21f8_gold_gt06/charms/C01/clean.wb",
+      "status": "delivered",
+      "verdict": "verified",
+      "scrollConfidence": 0.9,
+      "needsReview": false,
+      "verifier": {
+        "pass": true,
+        "detail": "True",
+        "residual": null,
+        "missingSymbols": [],
+        "replay": {
+          "cellCount": 3,
+          "allClean": true,
+          "failures": 0
+        }
+      },
+      "verifyError": null,
+      "economics": {
+        "llmCalls": 16,
+        "toolCalls": 15,
+        "probes": 2,
+        "costUSD": 0.013496,
+        "tokens": {
+          "input": 285742,
+          "output": 13081,
+          "cacheRead": 219904,
+          "cacheMiss": 65838
+        },
+        "durationMs": 167443,
+        "cacheHitRatio": 0.77
+      },
+      "metrics": {
+        "questId": "QG_GT06_fa21f8",
+        "charmId": "C01",
+        "verifiedRungs": {
+          "5": 3
+        },
+        "probesOk": 1,
+        "probesFailed": 3,
+        "probeSuccessRate": 0.25,
+        "records": 3,
+        "recordRate": 1,
+        "unrecordedSuccesses": 0,
+        "noteFacts": 1,
+        "amends": 1,
+        "amendRatio": 0.33,
+        "probeFailRate": 0.75,
+        "checkpoints": 1,
+        "utilForkRejections": 0,
+        "nearDuplicateRejections": 0,
+        "recordGates": 0,
+        "crosscheckGates": 0,
+        "missingDepGates": 0,
+        "chainReopens": 0,
+        "continuations": 0,
+        "literatureQueries": 0,
+        "litReads": 0,
+        "reDerivations": 0,
+        "inspects": 0,
+        "inspectsPerProbe": 0,
+        "recallSkill": "@vanbaalon/gauss-hypergeometric-2f1@0.1.0",
+        "recallUsed": false,
+        "recallInjected": true,
+        "recallMs": 4693,
+        "recallTopScore": 0.3892,
+        "recallTriage": {
+          "capabilities": [
+            "exact evaluation of an infinite series",
+            "derivation of a closed-form value"
+          ],
+          "picks": [
+            {
+              "ref": "@vanbaalon/gauss-hypergeometric-2f1@0.1.0",
+              "capability": "exact evaluation of an infinite series",
+              "fit": "partial"
+            }
+          ],
+          "gaps": [
+            "derivation of a closed-form value"
+          ]
+        },
+        "citationGates": 0,
+        "skillGapNotes": 0,
+        "skillGapsAuto": 1,
+        "skillDraftAuthored": true,
+        "llmCalls": 11,
+        "runCapHits": 0,
+        "thinkingTurns": 1,
+        "autoRecords": 1,
+        "lengthStops": 0,
+        "lengthStopRecoveries": 0,
+        "reasoningOverruns": 0,
+        "fixGateRejections": 0,
+        "unrecordedNudges": 0,
+        "essayTruncations": 0,
+        "tricksShown": 1,
+        "tricksResolved": 1,
+        "unmatchedTrickSigs": 0,
+        "handoffUtils": 0,
+        "build": {
+          "version": "2.7.22",
+          "codeMtime": "2026-08-04T13:44:14.810Z"
+        },
+        "cacheHitRate": 0.837,
+        "candidateRaised": true,
+        "status": "delivered"
+      },
+      "rubric": {
+        "score": 0.662,
+        "coverage": 0.309
+      },
+      "error": null
+    },
+    {
+      "id": "GT07",
+      "title": "Sum 1/(n^2 (n+1)^2)",
+      "category": "series",
+      "verify": "full",
+      "questId": "QG_GT07_fa5mmg",
+      "runId": "run_2026-08-04T23-19-26-920Z",
+      "charmDir": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_GT07_fa5mmg_gold_gt07/charms/C01",
+      "verifiedNb": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_GT07_fa5mmg_gold_gt07/charms/C01/clean.wb",
+      "status": "delivered",
+      "verdict": "verified",
+      "scrollConfidence": 0.9,
+      "needsReview": false,
+      "verifier": {
+        "pass": true,
+        "detail": "True",
+        "residual": null,
+        "missingSymbols": [],
+        "replay": {
+          "cellCount": 1,
+          "allClean": true,
+          "failures": 0
+        }
+      },
+      "verifyError": null,
+      "economics": {
+        "llmCalls": 8,
+        "toolCalls": 5,
+        "probes": 2,
+        "costUSD": 0.002131,
+        "tokens": {
+          "input": 108384,
+          "output": 1963,
+          "cacheRead": 99072,
+          "cacheMiss": 9312
+        },
+        "durationMs": 41042,
+        "cacheHitRatio": 0.914
+      },
+      "metrics": {
+        "questId": "QG_GT07_fa5mmg",
+        "charmId": "C01",
+        "verifiedRungs": {
+          "5": 1
+        },
+        "probesOk": 2,
+        "probesFailed": 0,
+        "probeSuccessRate": 1,
+        "records": 0,
+        "recordRate": 0,
+        "unrecordedSuccesses": 2,
+        "noteFacts": 0,
+        "amends": 0,
+        "amendRatio": null,
+        "probeFailRate": 0,
+        "checkpoints": 0,
+        "utilForkRejections": 0,
+        "nearDuplicateRejections": 0,
+        "recordGates": 0,
+        "crosscheckGates": 0,
+        "missingDepGates": 0,
+        "chainReopens": 0,
+        "continuations": 0,
+        "literatureQueries": 0,
+        "litReads": 0,
+        "reDerivations": 0,
+        "inspects": 0,
+        "inspectsPerProbe": 0,
+        "recallSkill": null,
+        "recallUsed": false,
+        "recallInjected": false,
+        "recallMs": null,
+        "recallTopScore": 0.3684,
+        "recallTriage": null,
+        "citationGates": 0,
+        "skillGapNotes": 0,
+        "skillGapsAuto": 0,
+        "skillDraftAuthored": false,
+        "llmCalls": 6,
+        "runCapHits": 0,
+        "thinkingTurns": 1,
+        "autoRecords": 1,
+        "lengthStops": 0,
+        "lengthStopRecoveries": 0,
+        "reasoningOverruns": 0,
+        "fixGateRejections": 0,
+        "unrecordedNudges": 0,
+        "essayTruncations": 0,
+        "tricksShown": 0,
+        "tricksResolved": 0,
+        "unmatchedTrickSigs": 0,
+        "handoffUtils": 0,
+        "build": {
+          "version": "2.7.22",
+          "codeMtime": "2026-08-04T13:44:14.810Z"
+        },
+        "cacheHitRate": 0.96,
+        "candidateRaised": false,
+        "status": "delivered"
+      },
+      "rubric": {
+        "score": 0.662,
+        "coverage": 0.309
+      },
+      "error": null
+    },
+    {
+      "id": "GT08",
+      "title": "Resonantly forced oscillator ODE",
+      "category": "ode",
+      "verify": "full",
+      "questId": "QG_GT08_fa6iaj",
+      "runId": "run_2026-08-04T23-20-07-963Z",
+      "charmDir": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_GT08_fa6iaj_gold_gt08/charms/C01",
+      "verifiedNb": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_GT08_fa6iaj_gold_gt08/charms/C01/clean.wb",
+      "status": "delivered",
+      "verdict": "verified",
+      "scrollConfidence": 0.9,
+      "needsReview": false,
+      "verifier": {
+        "pass": true,
+        "detail": "residual 0``24.747262277932478 (tol 1e-10)",
+        "residual": 0,
+        "missingSymbols": [],
+        "replay": {
+          "cellCount": 2,
+          "allClean": true,
+          "failures": 0
+        }
+      },
+      "verifyError": null,
+      "economics": {
+        "llmCalls": 14,
+        "toolCalls": 8,
+        "probes": 2,
+        "costUSD": 0.007433,
+        "tokens": {
+          "input": 212148,
+          "output": 4456,
+          "cacheRead": 171392,
+          "cacheMiss": 40756
+        },
+        "durationMs": 72714,
+        "cacheHitRatio": 0.808
+      },
+      "metrics": {
+        "questId": "QG_GT08_fa6iaj",
+        "charmId": "C01",
+        "verifiedRungs": {
+          "5": 2
+        },
+        "probesOk": 2,
+        "probesFailed": 1,
+        "probeSuccessRate": 0.667,
+        "records": 0,
+        "recordRate": 0,
+        "unrecordedSuccesses": 2,
+        "noteFacts": 1,
+        "amends": 0,
+        "amendRatio": 0,
+        "probeFailRate": 0.333,
+        "checkpoints": 0,
+        "utilForkRejections": 0,
+        "nearDuplicateRejections": 0,
+        "recordGates": 0,
+        "crosscheckGates": 0,
+        "missingDepGates": 0,
+        "chainReopens": 0,
+        "continuations": 0,
+        "literatureQueries": 0,
+        "litReads": 0,
+        "reDerivations": 0,
+        "inspects": 0,
+        "inspectsPerProbe": 0,
+        "recallSkill": "@skilxiv/runge-kutta-4@1.0.0",
+        "recallUsed": false,
+        "recallInjected": true,
+        "recallMs": 5220,
+        "recallTopScore": 0.4222,
+        "recallTriage": {
+          "capabilities": [
+            "solve linear ODE with constant coefficients and resonance",
+            "verify solution by substitution"
+          ],
+          "picks": [
+            {
+              "ref": "@skilxiv/runge-kutta-4@1.0.0",
+              "capability": "solve linear ODE with constant coefficients and resonance",
+              "fit": "partial"
+            },
+            {
+              "ref": "@skilxiv/wolfram-ndsolve-workflow@1.0.0",
+              "capability": "solve linear ODE with constant coefficients and resonance",
+              "fit": "partial"
+            }
+          ],
+          "gaps": [
+            "closed-form symbolic solution of linear ODE with constant coefficients and resonance",
+            "verification by substitution"
+          ]
+        },
+        "citationGates": 1,
+        "skillGapNotes": 0,
+        "skillGapsAuto": 2,
+        "skillDraftAuthored": true,
+        "llmCalls": 9,
+        "runCapHits": 0,
+        "thinkingTurns": 1,
+        "autoRecords": 2,
+        "lengthStops": 0,
+        "lengthStopRecoveries": 0,
+        "reasoningOverruns": 0,
+        "fixGateRejections": 0,
+        "unrecordedNudges": 0,
+        "essayTruncations": 0,
+        "tricksShown": 1,
+        "tricksResolved": 1,
+        "unmatchedTrickSigs": 0,
+        "handoffUtils": 0,
+        "build": {
+          "version": "2.7.22",
+          "codeMtime": "2026-08-04T13:44:14.810Z"
+        },
+        "cacheHitRate": 0.874,
+        "candidateRaised": true,
+        "status": "delivered"
+      },
+      "rubric": {
+        "score": 0.662,
+        "coverage": 0.309
+      },
+      "error": null
+    },
+    {
+      "id": "GT09",
+      "title": "Bessel boundary value problem",
+      "category": "ode",
+      "verify": "full",
+      "questId": "QG_GT09_fa82ed",
+      "runId": "run_2026-08-04T23-21-20-677Z",
+      "charmDir": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_GT09_fa82ed_gold_gt09/charms/C01",
+      "verifiedNb": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_GT09_fa82ed_gold_gt09/charms/C01/clean.wb",
+      "status": "delivered",
+      "verdict": "verified",
+      "scrollConfidence": 0.9,
+      "needsReview": false,
+      "verifier": {
+        "pass": true,
+        "detail": "residual 0``24.580721204211972 (tol 1e-10)",
+        "residual": 0,
+        "missingSymbols": [],
+        "replay": {
+          "cellCount": 3,
+          "allClean": true,
+          "failures": 0
+        }
+      },
+      "verifyError": null,
+      "economics": {
+        "llmCalls": 12,
+        "toolCalls": 11,
+        "probes": 3,
+        "costUSD": 0.010577,
+        "tokens": {
+          "input": 222288,
+          "output": 13248,
+          "cacheRead": 176768,
+          "cacheMiss": 45520
+        },
+        "durationMs": 161010,
+        "cacheHitRatio": 0.795
+      },
+      "metrics": {
+        "questId": "QG_GT09_fa82ed",
+        "charmId": "C01",
+        "verifiedRungs": {
+          "5": 3
+        },
+        "probesOk": 1,
+        "probesFailed": 3,
+        "probeSuccessRate": 0.25,
+        "records": 2,
+        "recordRate": 1,
+        "unrecordedSuccesses": 0,
+        "noteFacts": 0,
+        "amends": 2,
+        "amendRatio": 0.67,
+        "probeFailRate": 0.75,
+        "checkpoints": 1,
+        "utilForkRejections": 0,
+        "nearDuplicateRejections": 0,
+        "recordGates": 0,
+        "crosscheckGates": 0,
+        "missingDepGates": 0,
+        "chainReopens": 0,
+        "continuations": 0,
+        "literatureQueries": 0,
+        "litReads": 0,
+        "reDerivations": 0,
+        "inspects": 0,
+        "inspectsPerProbe": 0,
+        "recallSkill": null,
+        "recallUsed": false,
+        "recallInjected": false,
+        "recallMs": null,
+        "recallTopScore": 0.3987,
+        "recallTriage": null,
+        "citationGates": 0,
+        "skillGapNotes": 0,
+        "skillGapsAuto": 0,
+        "skillDraftAuthored": false,
+        "llmCalls": 10,
+        "runCapHits": 0,
+        "thinkingTurns": 1,
+        "autoRecords": 1,
+        "lengthStops": 0,
+        "lengthStopRecoveries": 0,
+        "reasoningOverruns": 0,
+        "fixGateRejections": 0,
+        "unrecordedNudges": 0,
+        "essayTruncations": 0,
+        "tricksShown": 2,
+        "tricksResolved": 1,
+        "unmatchedTrickSigs": 0,
+        "handoffUtils": 0,
+        "build": {
+          "version": "2.7.22",
+          "codeMtime": "2026-08-04T13:44:14.810Z"
+        },
+        "cacheHitRate": 0.87,
+        "candidateRaised": false,
+        "status": "delivered"
+      },
+      "rubric": {
+        "score": 0.662,
+        "coverage": 0.309
+      },
+      "error": null
+    },
+    {
+      "id": "GT10",
+      "title": "XXX L=6 ground-state energy",
+      "category": "spectra",
+      "verify": "full",
+      "questId": "QG_GT10_fabimw",
+      "runId": "run_2026-08-04T23-24-01-688Z",
+      "charmDir": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_GT10_fabimw_gold_gt10/charms/C01",
+      "verifiedNb": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_GT10_fabimw_gold_gt10/charms/C01/clean.wb",
+      "status": "delivered",
+      "verdict": "verified",
+      "scrollConfidence": 0.9,
+      "needsReview": false,
+      "verifier": {
+        "pass": true,
+        "detail": "residual 8.881784197001252*^-16 (tol 1e-8)",
+        "residual": 8.881784197001252e-16,
+        "missingSymbols": [],
+        "replay": {
+          "cellCount": 3,
+          "allClean": true,
+          "failures": 0
+        }
+      },
+      "verifyError": null,
+      "economics": {
+        "llmCalls": 20,
+        "toolCalls": 15,
+        "probes": 4,
+        "costUSD": 0.021823,
+        "tokens": {
+          "input": 444874,
+          "output": 22526,
+          "cacheRead": 340864,
+          "cacheMiss": 104010
+        },
+        "durationMs": 281653,
+        "cacheHitRatio": 0.766
+      },
+      "metrics": {
+        "questId": "QG_GT10_fabimw",
+        "charmId": "C01",
+        "verifiedRungs": {
+          "5": 3
+        },
+        "probesOk": 3,
+        "probesFailed": 2,
+        "probeSuccessRate": 0.6,
+        "records": 3,
+        "recordRate": 1,
+        "unrecordedSuccesses": 0,
+        "noteFacts": 1,
+        "amends": 1,
+        "amendRatio": 0.5,
+        "probeFailRate": 0.4,
+        "checkpoints": 1,
+        "utilForkRejections": 0,
+        "nearDuplicateRejections": 0,
+        "recordGates": 0,
+        "crosscheckGates": 0,
+        "missingDepGates": 0,
+        "chainReopens": 0,
+        "continuations": 0,
+        "literatureQueries": 0,
+        "litReads": 0,
+        "reDerivations": 0,
+        "inspects": 0,
+        "inspectsPerProbe": 0,
+        "recallSkill": "@vanbaalon/su2-xxx-bethe-roots-tq@0.2.0",
+        "recallUsed": true,
+        "recallInjected": true,
+        "recallMs": 4586,
+        "recallTopScore": 0.4628,
+        "recallTriage": {
+          "capabilities": [
+            "exact diagonalization of small spin chains",
+            "Bethe ansatz for SU(2) XXX spin-1/2 chain",
+            "energy spectrum computation for periodic Heisenberg chains"
+          ],
+          "picks": [
+            {
+              "ref": "@vanbaalon/su2-xxx-bethe-roots-tq@0.2.0",
+              "capability": "Bethe ansatz for SU(2) XXX spin-1/2 chain",
+              "fit": "exact"
+            },
+            {
+              "ref": "@skilxiv/bethe-ansatz-spin-chain@1.0.0",
+              "capability": "Bethe ansatz for SU(2) XXX spin-1/2 chain",
+              "fit": "exact"
+            }
+          ],
+          "gaps": [
+            "exact diagonalization of small spin chains",
+            "energy spectrum computation for periodic Heisenberg chains"
+          ]
+        },
+        "citationGates": 1,
+        "skillGapNotes": 0,
+        "skillGapsAuto": 2,
+        "skillDraftAuthored": false,
+        "llmCalls": 15,
+        "runCapHits": 0,
+        "thinkingTurns": 2,
+        "autoRecords": 0,
+        "lengthStops": 0,
+        "lengthStopRecoveries": 1,
+        "reasoningOverruns": 1,
+        "fixGateRejections": 0,
+        "unrecordedNudges": 2,
+        "essayTruncations": 0,
+        "tricksShown": 3,
+        "tricksResolved": 1,
+        "unmatchedTrickSigs": 0,
+        "handoffUtils": 0,
+        "build": {
+          "version": "2.7.22",
+          "codeMtime": "2026-08-04T13:44:14.810Z"
+        },
+        "cacheHitRate": 0.863,
+        "candidateRaised": true,
+        "status": "delivered"
+      },
+      "rubric": {
+        "score": 0.662,
+        "coverage": 0.309
+      },
+      "error": null
+    },
+    {
+      "id": "GT11",
+      "title": "Tridiagonal Toeplitz eigenvalues",
+      "category": "linalg",
+      "verify": "full",
+      "questId": "QG_GT11_fahjyl",
+      "runId": "run_2026-08-04T23-28-43-342Z",
+      "charmDir": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_GT11_fahjyl_gold_gt11/charms/C01",
+      "verifiedNb": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_GT11_fahjyl_gold_gt11/charms/C01/clean.wb",
+      "status": "delivered",
+      "verdict": "verified",
+      "scrollConfidence": 0.9,
+      "needsReview": false,
+      "verifier": {
+        "pass": true,
+        "detail": "True",
+        "residual": null,
+        "missingSymbols": [],
+        "replay": {
+          "cellCount": 6,
+          "allClean": true,
+          "failures": 0
+        }
+      },
+      "verifyError": null,
+      "economics": {
+        "llmCalls": 26,
+        "toolCalls": 22,
+        "probes": 5,
+        "costUSD": 0.014566,
+        "tokens": {
+          "input": 467968,
+          "output": 16231,
+          "cacheRead": 404480,
+          "cacheMiss": 63488
+        },
+        "durationMs": 228111,
+        "cacheHitRatio": 0.864
+      },
+      "metrics": {
+        "questId": "QG_GT11_fahjyl",
+        "charmId": "C01",
+        "verifiedRungs": {
+          "5": 4
+        },
+        "probesOk": 4,
+        "probesFailed": 3,
+        "probeSuccessRate": 0.571,
+        "records": 2,
+        "recordRate": 0.5,
+        "unrecordedSuccesses": 2,
+        "noteFacts": 2,
+        "amends": 1,
+        "amendRatio": 0.33,
+        "probeFailRate": 0.429,
+        "checkpoints": 1,
+        "utilForkRejections": 0,
+        "nearDuplicateRejections": 0,
+        "recordGates": 0,
+        "crosscheckGates": 0,
+        "missingDepGates": 0,
+        "chainReopens": 0,
+        "continuations": 0,
+        "literatureQueries": 0,
+        "litReads": 0,
+        "reDerivations": 0,
+        "inspects": 1,
+        "inspectsPerProbe": 0.25,
+        "recallSkill": null,
+        "recallUsed": false,
+        "recallInjected": false,
+        "recallMs": 3004,
+        "recallTopScore": null,
+        "recallTriage": {
+          "capabilities": [
+            "exact closed-form eigenvalues of a tridiagonal Toeplitz matrix",
+            "general-n formula for tridiagonal Toeplitz eigenvalues"
+          ],
+          "picks": [],
+          "gaps": [
+            "exact closed-form eigenvalues of a tridiagonal Toeplitz matrix",
+            "general-n formula for tridiagonal Toeplitz eigenvalues"
+          ]
+        },
+        "citationGates": 0,
+        "skillGapNotes": 0,
+        "skillGapsAuto": 2,
+        "skillDraftAuthored": true,
+        "llmCalls": 21,
+        "runCapHits": 0,
+        "thinkingTurns": 1,
+        "autoRecords": 3,
+        "lengthStops": 0,
+        "lengthStopRecoveries": 0,
+        "reasoningOverruns": 0,
+        "fixGateRejections": 0,
+        "unrecordedNudges": 0,
+        "essayTruncations": 0,
+        "tricksShown": 3,
+        "tricksResolved": 2,
+        "unmatchedTrickSigs": 0,
+        "handoffUtils": 0,
+        "build": {
+          "version": "2.7.22",
+          "codeMtime": "2026-08-04T13:44:14.810Z"
+        },
+        "cacheHitRate": 0.927,
+        "candidateRaised": true,
+        "status": "delivered"
+      },
+      "rubric": {
+        "score": 0.662,
+        "coverage": 0.309
+      },
+      "error": null
+    },
+    {
+      "id": "GT12",
+      "title": "Denesting a nested radical",
+      "category": "identity",
+      "verify": "full",
+      "questId": "QG_GT12_famfz0",
+      "runId": "run_2026-08-04T23-32-31-452Z",
+      "charmDir": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_GT12_famfz0_gold_gt12/charms/C01",
+      "verifiedNb": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_GT12_famfz0_gold_gt12/charms/C01/clean.wb",
+      "status": "delivered",
+      "verdict": "verified",
+      "scrollConfidence": 0.9,
+      "needsReview": false,
+      "verifier": {
+        "pass": true,
+        "detail": "True",
+        "residual": null,
+        "missingSymbols": [],
+        "replay": {
+          "cellCount": 3,
+          "allClean": true,
+          "failures": 0
+        }
+      },
+      "verifyError": null,
+      "economics": {
+        "llmCalls": 18,
+        "toolCalls": 16,
+        "probes": 2,
+        "costUSD": 0.014923,
+        "tokens": {
+          "input": 398395,
+          "output": 10963,
+          "cacheRead": 320128,
+          "cacheMiss": 78267
+        },
+        "durationMs": 149291,
+        "cacheHitRatio": 0.804
+      },
+      "metrics": {
+        "questId": "QG_GT12_famfz0",
+        "charmId": "C01",
+        "verifiedRungs": {
+          "5": 3
+        },
+        "probesOk": 2,
+        "probesFailed": 1,
+        "probeSuccessRate": 0.667,
+        "records": 6,
+        "recordRate": 1,
+        "unrecordedSuccesses": 0,
+        "noteFacts": 1,
+        "amends": 1,
+        "amendRatio": 1,
+        "probeFailRate": 0.333,
+        "checkpoints": 2,
+        "utilForkRejections": 0,
+        "nearDuplicateRejections": 0,
+        "recordGates": 0,
+        "crosscheckGates": 0,
+        "missingDepGates": 0,
+        "chainReopens": 0,
+        "continuations": 0,
+        "literatureQueries": 0,
+        "litReads": 0,
+        "reDerivations": 0,
+        "inspects": 0,
+        "inspectsPerProbe": 0,
+        "recallSkill": "@vanbaalon/elliptic-integral-identities@1.0.0",
+        "recallUsed": false,
+        "recallInjected": true,
+        "recallMs": 4323,
+        "recallTopScore": 0.6774,
+        "recallTriage": {
+          "capabilities": [
+            "denesting nested radicals of quadratic surds",
+            "proving radical identities",
+            "numerical verification of algebraic identities"
+          ],
+          "picks": [
+            {
+              "ref": "@vanbaalon/elliptic-integral-identities@1.0.0",
+              "capability": "denesting nested radicals of quadratic surds",
+              "fit": "partial"
+            },
+            {
+              "ref": "@vanbaalon/gauss-hypergeometric-2f1@0.1.0",
+              "capability": "proving radical identities",
+              "fit": "partial"
+            }
+          ],
+          "gaps": [
+            "denesting nested radicals of quadratic surds",
+            "proving radical identities",
+            "numerical verification of algebraic identities"
+          ]
+        },
+        "citationGates": 1,
+        "skillGapNotes": 0,
+        "skillGapsAuto": 2,
+        "skillDraftAuthored": true,
+        "llmCalls": 13,
+        "runCapHits": 0,
+        "thinkingTurns": 1,
+        "autoRecords": 0,
+        "lengthStops": 0,
+        "lengthStopRecoveries": 0,
+        "reasoningOverruns": 0,
+        "fixGateRejections": 0,
+        "unrecordedNudges": 0,
+        "essayTruncations": 0,
+        "tricksShown": 0,
+        "tricksResolved": 0,
+        "unmatchedTrickSigs": 0,
+        "handoffUtils": 0,
+        "build": {
+          "version": "2.7.22",
+          "codeMtime": "2026-08-04T13:44:14.810Z"
+        },
+        "cacheHitRate": 0.877,
+        "candidateRaised": true,
+        "status": "delivered"
+      },
+      "rubric": {
+        "score": 0.662,
+        "coverage": 0.309
+      },
+      "error": null
+    },
+    {
+      "id": "GT13",
+      "title": "Limit of n((1+1/n)^n - e)",
+      "category": "identity",
+      "verify": "full",
+      "questId": "QG_GT13_fapn5z",
+      "runId": "run_2026-08-04T23-35-00-743Z",
+      "charmDir": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_GT13_fapn5z_gold_gt13/charms/C01",
+      "verifiedNb": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_GT13_fapn5z_gold_gt13/charms/C01/clean.wb",
+      "status": "delivered",
+      "verdict": "verified",
+      "scrollConfidence": 0.9,
+      "needsReview": false,
+      "verifier": {
+        "pass": true,
+        "detail": "True",
+        "residual": null,
+        "missingSymbols": [],
+        "replay": {
+          "cellCount": 3,
+          "allClean": true,
+          "failures": 0
+        }
+      },
+      "verifyError": null,
+      "economics": {
+        "llmCalls": 12,
+        "toolCalls": 10,
+        "probes": 3,
+        "costUSD": 0.008644,
+        "tokens": {
+          "input": 188827,
+          "output": 14921,
+          "cacheRead": 160128,
+          "cacheMiss": 28699
+        },
+        "durationMs": 169197,
+        "cacheHitRatio": 0.848
+      },
+      "metrics": {
+        "questId": "QG_GT13_fapn5z",
+        "charmId": "C01",
+        "verifiedRungs": {
+          "5": 3
+        },
+        "probesOk": 2,
+        "probesFailed": 2,
+        "probeSuccessRate": 0.5,
+        "records": 2,
+        "recordRate": 1,
+        "unrecordedSuccesses": 0,
+        "noteFacts": 0,
+        "amends": 1,
+        "amendRatio": 0.5,
+        "probeFailRate": 0.5,
+        "checkpoints": 1,
+        "utilForkRejections": 0,
+        "nearDuplicateRejections": 0,
+        "recordGates": 0,
+        "crosscheckGates": 0,
+        "missingDepGates": 0,
+        "chainReopens": 0,
+        "continuations": 0,
+        "literatureQueries": 0,
+        "litReads": 0,
+        "reDerivations": 0,
+        "inspects": 0,
+        "inspectsPerProbe": 0,
+        "recallSkill": null,
+        "recallUsed": false,
+        "recallInjected": false,
+        "recallMs": null,
+        "recallTopScore": 0.3672,
+        "recallTriage": null,
+        "citationGates": 0,
+        "skillGapNotes": 0,
+        "skillGapsAuto": 0,
+        "skillDraftAuthored": false,
+        "llmCalls": 10,
+        "runCapHits": 0,
+        "thinkingTurns": 1,
+        "autoRecords": 1,
+        "lengthStops": 0,
+        "lengthStopRecoveries": 0,
+        "reasoningOverruns": 0,
+        "fixGateRejections": 0,
+        "unrecordedNudges": 0,
+        "essayTruncations": 0,
+        "tricksShown": 0,
+        "tricksResolved": 0,
+        "unmatchedTrickSigs": 0,
+        "handoffUtils": 0,
+        "build": {
+          "version": "2.7.22",
+          "codeMtime": "2026-08-04T13:44:14.810Z"
+        },
+        "cacheHitRate": 0.905,
+        "candidateRaised": false,
+        "status": "delivered"
+      },
+      "rubric": {
+        "score": 0.662,
+        "coverage": 0.309
+      },
+      "error": null
+    },
+    {
+      "id": "GT14",
+      "title": "Fibonacci F(100) via matrix power",
+      "category": "combinatorics",
+      "verify": "full",
+      "questId": "QG_GT14_fat9pw",
+      "runId": "run_2026-08-04T23-37-49-940Z",
+      "charmDir": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_GT14_fat9pw_gold_gt14/charms/C01",
+      "verifiedNb": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_GT14_fat9pw_gold_gt14/charms/C01/clean.wb",
+      "status": "delivered",
+      "verdict": "verified",
+      "scrollConfidence": 0.9,
+      "needsReview": false,
+      "verifier": {
+        "pass": true,
+        "detail": "True",
+        "residual": null,
+        "missingSymbols": [],
+        "replay": {
+          "cellCount": 3,
+          "allClean": true,
+          "failures": 0
+        }
+      },
+      "verifyError": null,
+      "economics": {
+        "llmCalls": 9,
+        "toolCalls": 9,
+        "probes": 1,
+        "costUSD": 0.009566,
+        "tokens": {
+          "input": 167337,
+          "output": 7634,
+          "cacheRead": 116608,
+          "cacheMiss": 50729
+        },
+        "durationMs": 108170,
+        "cacheHitRatio": 0.697
+      },
+      "metrics": {
+        "questId": "QG_GT14_fat9pw",
+        "charmId": "C01",
+        "verifiedRungs": {
+          "5": 3
+        },
+        "probesOk": 1,
+        "probesFailed": 0,
+        "probeSuccessRate": 1,
+        "records": 3,
+        "recordRate": 1,
+        "unrecordedSuccesses": 0,
+        "noteFacts": 0,
+        "amends": 0,
+        "amendRatio": null,
+        "probeFailRate": 0,
+        "checkpoints": 1,
+        "utilForkRejections": 0,
+        "nearDuplicateRejections": 0,
+        "recordGates": 0,
+        "crosscheckGates": 0,
+        "missingDepGates": 0,
+        "chainReopens": 0,
+        "continuations": 0,
+        "literatureQueries": 0,
+        "litReads": 0,
+        "reDerivations": 0,
+        "inspects": 0,
+        "inspectsPerProbe": 0,
+        "recallSkill": "@vanbaalon/sun-fusion-hirota-tsystem@1.0.1",
+        "recallUsed": false,
+        "recallInjected": true,
+        "recallMs": 4139,
+        "recallTopScore": 0.442,
+        "recallTriage": {
+          "capabilities": [
+            "exact integer computation of Fibonacci numbers via matrix exponentiation",
+            "cross-check with Binet's formula"
+          ],
+          "picks": [
+            {
+              "ref": "@vanbaalon/sun-fusion-hirota-tsystem@1.0.1",
+              "capability": "exact integer computation of Fibonacci numbers via matrix exponentiation",
+              "fit": "partial"
+            },
+            {
+              "ref": "@vanbaalon/gauss-hypergeometric-2f1@0.1.0",
+              "capability": "cross-check with Binet's formula",
+              "fit": "partial"
+            }
+          ],
+          "gaps": [
+            "exact integer computation of Fibonacci numbers via matrix exponentiation",
+            "cross-check with Binet's formula"
+          ]
+        },
+        "citationGates": 0,
+        "skillGapNotes": 0,
+        "skillGapsAuto": 2,
+        "skillDraftAuthored": false,
+        "llmCalls": 5,
+        "runCapHits": 0,
+        "thinkingTurns": 1,
+        "autoRecords": 0,
+        "lengthStops": 0,
+        "lengthStopRecoveries": 0,
+        "reasoningOverruns": 0,
+        "fixGateRejections": 0,
+        "unrecordedNudges": 0,
+        "essayTruncations": 0,
+        "tricksShown": 0,
+        "tricksResolved": 0,
+        "unmatchedTrickSigs": 0,
+        "handoffUtils": 0,
+        "build": {
+          "version": "2.7.22",
+          "codeMtime": "2026-08-04T13:44:14.810Z"
+        },
+        "cacheHitRate": 0.779,
+        "candidateRaised": false,
+        "status": "delivered"
+      },
+      "rubric": {
+        "score": 0.662,
+        "coverage": 0.309
+      },
+      "error": null
+    },
+    {
+      "id": "GT15",
+      "title": "Derangements D(12)",
+      "category": "combinatorics",
+      "verify": "full",
+      "questId": "QG_GT15_favl6m",
+      "runId": "run_2026-08-04T23-39-38-110Z",
+      "charmDir": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_GT15_favl6m_gold_gt15/charms/C01",
+      "verifiedNb": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_GT15_favl6m_gold_gt15/charms/C01/clean.wb",
+      "status": "delivered",
+      "verdict": "verified",
+      "scrollConfidence": 0.9,
+      "needsReview": false,
+      "verifier": {
+        "pass": true,
+        "detail": "True",
+        "residual": null,
+        "missingSymbols": [],
+        "replay": {
+          "cellCount": 1,
+          "allClean": true,
+          "failures": 0
+        }
+      },
+      "verifyError": null,
+      "economics": {
+        "llmCalls": 10,
+        "toolCalls": 5,
+        "probes": 1,
+        "costUSD": 0.00228,
+        "tokens": {
+          "input": 95391,
+          "output": 2468,
+          "cacheRead": 85760,
+          "cacheMiss": 9631
+        },
+        "durationMs": 46793,
+        "cacheHitRatio": 0.899
+      },
+      "metrics": {
+        "questId": "QG_GT15_favl6m",
+        "charmId": "C01",
+        "verifiedRungs": {
+          "5": 1
+        },
+        "probesOk": 1,
+        "probesFailed": 0,
+        "probeSuccessRate": 1,
+        "records": 0,
+        "recordRate": 0,
+        "unrecordedSuccesses": 1,
+        "noteFacts": 1,
+        "amends": 0,
+        "amendRatio": null,
+        "probeFailRate": 0,
+        "checkpoints": 0,
+        "utilForkRejections": 0,
+        "nearDuplicateRejections": 0,
+        "recordGates": 0,
+        "crosscheckGates": 0,
+        "missingDepGates": 0,
+        "chainReopens": 0,
+        "continuations": 0,
+        "literatureQueries": 0,
+        "litReads": 0,
+        "reDerivations": 0,
+        "inspects": 0,
+        "inspectsPerProbe": 0,
+        "recallSkill": null,
+        "recallUsed": false,
+        "recallInjected": false,
+        "recallMs": 3863,
+        "recallTopScore": null,
+        "recallTriage": {
+          "capabilities": [
+            "exact integer computation of derangements via inclusion-exclusion and recurrence",
+            "verification that two independent computations agree"
+          ],
+          "picks": [],
+          "gaps": [
+            "exact integer computation of derangements via inclusion-exclusion and recurrence",
+            "verification that two independent computations agree"
+          ]
+        },
+        "citationGates": 0,
+        "skillGapNotes": 0,
+        "skillGapsAuto": 1,
+        "skillDraftAuthored": true,
+        "llmCalls": 5,
+        "runCapHits": 0,
+        "thinkingTurns": 1,
+        "autoRecords": 1,
+        "lengthStops": 0,
+        "lengthStopRecoveries": 0,
+        "reasoningOverruns": 0,
+        "fixGateRejections": 0,
+        "unrecordedNudges": 0,
+        "essayTruncations": 0,
+        "tricksShown": 0,
+        "tricksResolved": 0,
+        "unmatchedTrickSigs": 0,
+        "handoffUtils": 0,
+        "build": {
+          "version": "2.7.22",
+          "codeMtime": "2026-08-04T13:44:14.810Z"
+        },
+        "cacheHitRate": 0.952,
+        "candidateRaised": true,
+        "status": "delivered"
+      },
+      "rubric": {
+        "score": 0.662,
+        "coverage": 0.309
+      },
+      "error": null
+    },
+    {
+      "id": "GT16",
+      "title": "SU(1|1) chain L=6 one-particle spectrum",
+      "category": "bethe",
+      "verify": "full",
+      "questId": "QG_GT16_fawlaf",
+      "runId": "run_2026-08-04T23-40-24-904Z",
+      "charmDir": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_GT16_fawlaf_gold_gt16/charms/C01",
+      "verifiedNb": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_GT16_fawlaf_gold_gt16/charms/C01/clean.wb",
+      "status": "delivered",
+      "verdict": "verified",
+      "scrollConfidence": 0.9,
+      "needsReview": false,
+      "verifier": {
+        "pass": true,
+        "detail": "residual 0. (tol 1e-8)",
+        "residual": 0,
+        "missingSymbols": [],
+        "replay": {
+          "cellCount": 3,
+          "allClean": true,
+          "failures": 0
+        }
+      },
+      "verifyError": null,
+      "economics": {
+        "llmCalls": 17,
+        "toolCalls": 14,
+        "probes": 3,
+        "costUSD": 0.021716,
+        "tokens": {
+          "input": 407159,
+          "output": 23251,
+          "cacheRead": 304640,
+          "cacheMiss": 102519
+        },
+        "durationMs": 287395,
+        "cacheHitRatio": 0.748
+      },
+      "metrics": {
+        "questId": "QG_GT16_fawlaf",
+        "charmId": "C01",
+        "verifiedRungs": {
+          "5": 3
+        },
+        "probesOk": 1,
+        "probesFailed": 3,
+        "probeSuccessRate": 0.25,
+        "records": 3,
+        "recordRate": 1,
+        "unrecordedSuccesses": 0,
+        "noteFacts": 1,
+        "amends": 2,
+        "amendRatio": 0.67,
+        "probeFailRate": 0.75,
+        "checkpoints": 1,
+        "utilForkRejections": 0,
+        "nearDuplicateRejections": 0,
+        "recordGates": 0,
+        "crosscheckGates": 0,
+        "missingDepGates": 0,
+        "chainReopens": 0,
+        "continuations": 0,
+        "literatureQueries": 0,
+        "litReads": 0,
+        "reDerivations": 0,
+        "inspects": 0,
+        "inspectsPerProbe": 0,
+        "recallSkill": "@vanbaalon/sun-xxx-bethe-qq-system@0.1.0",
+        "recallUsed": false,
+        "recallInjected": true,
+        "recallMs": 4870,
+        "recallTopScore": 0.4522,
+        "recallTriage": {
+          "capabilities": [
+            "Exact diagonalization of a small spin-chain Hamiltonian in a fixed particle-number sector",
+            "Graded permutation / superalgebra (su(1|1)) Hamiltonian construction"
+          ],
+          "picks": [
+            {
+              "ref": "@vanbaalon/sun-xxx-bethe-qq-system@0.1.0",
+              "capability": "Exact diagonalization of a small spin-chain Hamiltonian in a fixed particle-number sector",
+              "fit": "partial"
+            }
+          ],
+          "gaps": [
+            "Graded permutation / superalgebra (su(1|1)) Hamiltonian construction"
+          ]
+        },
+        "citationGates": 1,
+        "skillGapNotes": 0,
+        "skillGapsAuto": 1,
+        "skillDraftAuthored": true,
+        "llmCalls": 12,
+        "runCapHits": 0,
+        "thinkingTurns": 1,
+        "autoRecords": 0,
+        "lengthStops": 0,
+        "lengthStopRecoveries": 0,
+        "reasoningOverruns": 0,
+        "fixGateRejections": 0,
+        "unrecordedNudges": 1,
+        "essayTruncations": 0,
+        "tricksShown": 4,
+        "tricksResolved": 1,
+        "unmatchedTrickSigs": 0,
+        "handoffUtils": 0,
+        "build": {
+          "version": "2.7.22",
+          "codeMtime": "2026-08-04T13:44:14.810Z"
+        },
+        "cacheHitRate": 0.821,
+        "candidateRaised": true,
+        "status": "delivered"
+      },
+      "rubric": {
+        "score": 0.662,
+        "coverage": 0.309
+      },
+      "error": null
+    },
+    {
+      "id": "GT17",
+      "title": "SU(1|1) chain L=4 full spectrum via sector-dependent free fermions",
+      "category": "bethe",
+      "verify": "full",
+      "questId": "QG_GT17_fb2r1m",
+      "runId": "run_2026-08-04T23-45-12-299Z",
+      "charmDir": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_GT17_fb2r1m_gold_gt17/charms/C01",
+      "verifiedNb": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_GT17_fb2r1m_gold_gt17/charms/C01/clean.wb",
+      "status": "delivered",
+      "verdict": "verified",
+      "scrollConfidence": 0.9,
+      "needsReview": false,
+      "verifier": {
+        "pass": true,
+        "detail": "residual 0. (tol 1e-8)",
+        "residual": 0,
+        "missingSymbols": [],
+        "replay": {
+          "cellCount": 3,
+          "allClean": true,
+          "failures": 0
+        }
+      },
+      "verifyError": null,
+      "economics": {
+        "llmCalls": 20,
+        "toolCalls": 14,
+        "probes": 3,
+        "costUSD": 0.025909,
+        "tokens": {
+          "input": 521982,
+          "output": 23087,
+          "cacheRead": 390912,
+          "cacheMiss": 131070
+        },
+        "durationMs": 254121,
+        "cacheHitRatio": 0.749
+      },
+      "metrics": {
+        "questId": "QG_GT17_fb2r1m",
+        "charmId": "C01",
+        "verifiedRungs": {
+          "5": 3
+        },
+        "probesOk": 2,
+        "probesFailed": 2,
+        "probeSuccessRate": 0.5,
+        "records": 3,
+        "recordRate": 1,
+        "unrecordedSuccesses": 0,
+        "noteFacts": 0,
+        "amends": 1,
+        "amendRatio": 0.5,
+        "probeFailRate": 0.5,
+        "checkpoints": 1,
+        "utilForkRejections": 0,
+        "nearDuplicateRejections": 0,
+        "recordGates": 0,
+        "crosscheckGates": 0,
+        "missingDepGates": 0,
+        "chainReopens": 0,
+        "continuations": 0,
+        "literatureQueries": 0,
+        "litReads": 0,
+        "reDerivations": 0,
+        "inspects": 1,
+        "inspectsPerProbe": 0.5,
+        "recallSkill": "@vanbaalon/sun-xxx-bethe-qq-system@0.1.0",
+        "recallUsed": false,
+        "recallInjected": true,
+        "recallMs": 5599,
+        "recallTopScore": 0.4638,
+        "recallTriage": {
+          "capabilities": [
+            "exact diagonalization of a small finite-dimensional Hamiltonian",
+            "free-fermion spectrum construction for a graded permutation chain"
+          ],
+          "picks": [
+            {
+              "ref": "@vanbaalon/sun-xxx-bethe-qq-system@0.1.0",
+              "capability": "exact diagonalization of a small finite-dimensional Hamiltonian",
+              "fit": "partial"
+            },
+            {
+              "ref": "@skilxiv/bethe-ansatz-spin-chain@1.0.0",
+              "capability": "free-fermion spectrum construction for a graded permutation chain",
+              "fit": "partial"
+            }
+          ],
+          "gaps": [
+            "exact diagonalization of a small finite-dimensional Hamiltonian",
+            "free-fermion spectrum construction for a graded permutation chain"
+          ]
+        },
+        "citationGates": 1,
+        "skillGapNotes": 0,
+        "skillGapsAuto": 2,
+        "skillDraftAuthored": false,
+        "llmCalls": 15,
+        "runCapHits": 0,
+        "thinkingTurns": 2,
+        "autoRecords": 0,
+        "lengthStops": 0,
+        "lengthStopRecoveries": 1,
+        "reasoningOverruns": 1,
+        "fixGateRejections": 0,
+        "unrecordedNudges": 1,
+        "essayTruncations": 0,
+        "tricksShown": 4,
+        "tricksResolved": 1,
+        "unmatchedTrickSigs": 0,
+        "handoffUtils": 0,
+        "build": {
+          "version": "2.7.22",
+          "codeMtime": "2026-08-04T13:44:14.810Z"
+        },
+        "cacheHitRate": 0.841,
+        "candidateRaised": false,
+        "status": "delivered"
+      },
+      "rubric": {
+        "score": 0.662,
+        "coverage": 0.309
+      },
+      "error": null
+    }
+  ],
+  "summary": {
+    "total": 29,
+    "byVerdict": {
+      "verified": 28,
+      "sanity_passed": 1
+    },
+    "passRate": 1,
+    "verified": 28,
+    "falseDelivered": 0,
+    "falseDeliveredRate": 0,
+    "totalCostUSD": 0.621506,
+    "meanCacheHitRatio": 0.818
+  }
+}

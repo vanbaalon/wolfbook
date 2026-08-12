@@ -1,0 +1,533 @@
+{
+  "schemaVersion": "wolfbook-gold-suite/1.0.0",
+  "generatedAt": "2026-08-01T13:27:06.649Z",
+  "label": "baseline-reverified",
+  "build": {
+    "version": "2.7.22",
+    "codeMtime": "2026-07-12T00:49:46.000Z"
+  },
+  "durationMs": 304416,
+  "tasks": [
+    {
+      "id": "GT14",
+      "title": "Fibonacci F(100) via matrix power",
+      "category": "combinatorics",
+      "verify": "full",
+      "questId": "QG_GT14_adoj2p",
+      "runId": "run_2026-08-01T12-59-16-756Z",
+      "charmDir": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_GT14_adoj2p_gold_gt14/charms/C01",
+      "verifiedNb": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_GT14_adoj2p_gold_gt14/charms/C01/clean.wb",
+      "status": "delivered",
+      "verdict": "verified",
+      "scrollConfidence": 0.9,
+      "needsReview": false,
+      "verifier": {
+        "pass": true,
+        "detail": "True",
+        "residual": null,
+        "missingSymbols": [],
+        "replay": {
+          "offline": true,
+          "cellCount": 3
+        }
+      },
+      "verifyError": null,
+      "economics": {
+        "llmCalls": 11,
+        "toolCalls": 9,
+        "probes": 3,
+        "costUSD": 0.004507,
+        "tokens": {
+          "input": 109306,
+          "output": 4280,
+          "cacheRead": 87424,
+          "cacheMiss": 21882
+        },
+        "durationMs": 63635,
+        "cacheHitRatio": 0.8
+      },
+      "metrics": {
+        "questId": "QG_GT14_adoj2p",
+        "charmId": "C01",
+        "probesOk": 3,
+        "probesFailed": 0,
+        "probeSuccessRate": 1,
+        "records": 3,
+        "recordRate": 1,
+        "unrecordedSuccesses": 0,
+        "noteFacts": 0,
+        "amends": 0,
+        "amendRatio": null,
+        "probeFailRate": 0,
+        "checkpoints": 1,
+        "utilForkRejections": 0,
+        "nearDuplicateRejections": 0,
+        "recordGates": 0,
+        "crosscheckGates": 0,
+        "missingDepGates": 0,
+        "chainReopens": 0,
+        "continuations": 0,
+        "literatureQueries": 0,
+        "litReads": 0,
+        "reDerivations": 0,
+        "inspects": 0,
+        "inspectsPerProbe": 0,
+        "recallSkill": null,
+        "recallUsed": false,
+        "recallInjected": false,
+        "recallMs": 21564,
+        "recallTopScore": null,
+        "recallTriage": {
+          "capabilities": [
+            "Exact 2x2 matrix-power exponentiation of a linear recurrence",
+            "Arbitrary-precision integer arithmetic",
+            "Closed-form Binet cross-check with exact-integer verification"
+          ],
+          "picks": [],
+          "gaps": [
+            "Exact 2x2 matrix-power exponentiation of a linear recurrence",
+            "Arbitrary-precision integer arithmetic",
+            "Closed-form Binet cross-check with exact-integer verification"
+          ]
+        },
+        "citationGates": 0,
+        "skillGapNotes": 0,
+        "skillGapsAuto": 2,
+        "skillDraftAuthored": false,
+        "llmCalls": 7,
+        "runCapHits": 0,
+        "handoffUtils": 0,
+        "build": {
+          "version": "2.7.22",
+          "codeMtime": "2026-07-12T00:49:46.000Z"
+        },
+        "cacheHitRate": 0.896,
+        "candidateRaised": false,
+        "status": "delivered"
+      },
+      "rubric": {
+        "score": 0.662,
+        "coverage": 0.309
+      },
+      "error": null,
+      "reverified": true
+    },
+    {
+      "id": "GT15",
+      "title": "Derangements D(12)",
+      "category": "combinatorics",
+      "verify": "full",
+      "questId": "QG_GT15_adpw6d",
+      "runId": "run_2026-08-01T13-00-20-390Z",
+      "charmDir": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_GT15_adpw6d_gold_gt15/charms/C01",
+      "verifiedNb": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_GT15_adpw6d_gold_gt15/charms/C01/clean.wb",
+      "status": "delivered",
+      "verdict": "verified",
+      "scrollConfidence": 0.9,
+      "needsReview": false,
+      "verifier": {
+        "pass": true,
+        "detail": "True",
+        "residual": null,
+        "missingSymbols": [],
+        "replay": {
+          "offline": true,
+          "cellCount": 4
+        }
+      },
+      "verifyError": null,
+      "economics": {
+        "llmCalls": 34,
+        "toolCalls": 31,
+        "probes": 11,
+        "costUSD": 0.015674,
+        "tokens": {
+          "input": 641905,
+          "output": 19649,
+          "cacheRead": 580864,
+          "cacheMiss": 61041
+        },
+        "durationMs": 264265,
+        "cacheHitRatio": 0.905
+      },
+      "metrics": {
+        "questId": "QG_GT15_adpw6d",
+        "charmId": "C01",
+        "probesOk": 9,
+        "probesFailed": 1,
+        "probeSuccessRate": 0.9,
+        "records": 8,
+        "recordRate": 0.889,
+        "unrecordedSuccesses": 1,
+        "noteFacts": 1,
+        "amends": 2,
+        "amendRatio": 2,
+        "probeFailRate": 0.1,
+        "checkpoints": 2,
+        "utilForkRejections": 0,
+        "nearDuplicateRejections": 2,
+        "recordGates": 0,
+        "crosscheckGates": 0,
+        "missingDepGates": 1,
+        "chainReopens": 0,
+        "continuations": 0,
+        "literatureQueries": 0,
+        "litReads": 0,
+        "reDerivations": 0,
+        "inspects": 0,
+        "inspectsPerProbe": 0,
+        "recallSkill": null,
+        "recallUsed": false,
+        "recallInjected": false,
+        "recallMs": 9943,
+        "recallTopScore": null,
+        "recallTriage": {
+          "capabilities": [
+            "Exact integer computation of derangements via inclusion-exclusion",
+            "Exact integer computation via recurrence D(n) = (n-1)(D(n-1)+D(n-2))",
+            "Verification that the two methods agree"
+          ],
+          "picks": [],
+          "gaps": [
+            "Exact integer computation of derangements via inclusion-exclusion",
+            "Exact integer computation via recurrence D(n) = (n-1)(D(n-1)+D(n-2))",
+            "Verification that the two methods agree"
+          ]
+        },
+        "citationGates": 0,
+        "skillGapNotes": 0,
+        "skillGapsAuto": 2,
+        "skillDraftAuthored": true,
+        "llmCalls": 29,
+        "runCapHits": 0,
+        "handoffUtils": 0,
+        "build": {
+          "version": "2.7.22",
+          "codeMtime": "2026-07-12T00:49:46.000Z"
+        },
+        "cacheHitRate": 0.929,
+        "candidateRaised": true,
+        "status": "delivered"
+      },
+      "rubric": {
+        "score": 0.662,
+        "coverage": 0.309
+      },
+      "error": null,
+      "reverified": true
+    },
+    {
+      "id": "GT01",
+      "title": "Bose integral x^3/(e^x - 1)",
+      "category": "integral",
+      "verify": "full",
+      "questId": "QG_GT01_advk33",
+      "runId": "run_2026-08-01T13-04-44-655Z",
+      "charmDir": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_GT01_advk33_gold_gt01/charms/C01",
+      "verifiedNb": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_GT01_advk33_gold_gt01/charms/C01/clean.wb",
+      "status": "delivered",
+      "verdict": "verified",
+      "scrollConfidence": 0.9,
+      "needsReview": false,
+      "verifier": {
+        "pass": true,
+        "detail": "True",
+        "residual": null,
+        "missingSymbols": [],
+        "replay": {
+          "offline": true,
+          "cellCount": 4
+        }
+      },
+      "verifyError": null,
+      "economics": {
+        "llmCalls": 22,
+        "toolCalls": 19,
+        "probes": 5,
+        "costUSD": 0.007961,
+        "tokens": {
+          "input": 305793,
+          "output": 12640,
+          "cacheRead": 279808,
+          "cacheMiss": 25985
+        },
+        "durationMs": 167007,
+        "cacheHitRatio": 0.915
+      },
+      "metrics": {
+        "questId": "QG_GT01_advk33",
+        "charmId": "C01",
+        "probesOk": 5,
+        "probesFailed": 0,
+        "probeSuccessRate": 1,
+        "records": 6,
+        "recordRate": 1,
+        "unrecordedSuccesses": 0,
+        "noteFacts": 1,
+        "amends": 0,
+        "amendRatio": null,
+        "probeFailRate": 0,
+        "checkpoints": 2,
+        "utilForkRejections": 0,
+        "nearDuplicateRejections": 0,
+        "recordGates": 0,
+        "crosscheckGates": 0,
+        "missingDepGates": 1,
+        "chainReopens": 0,
+        "continuations": 0,
+        "literatureQueries": 0,
+        "litReads": 0,
+        "reDerivations": 0,
+        "inspects": 0,
+        "inspectsPerProbe": 0,
+        "recallSkill": null,
+        "recallUsed": false,
+        "recallInjected": false,
+        "recallMs": 24075,
+        "recallTopScore": null,
+        "recallTriage": null,
+        "citationGates": 0,
+        "skillGapNotes": 0,
+        "skillGapsAuto": 0,
+        "skillDraftAuthored": true,
+        "llmCalls": 17,
+        "runCapHits": 0,
+        "handoffUtils": 0,
+        "build": {
+          "version": "2.7.22",
+          "codeMtime": "2026-07-12T00:49:46.000Z"
+        },
+        "cacheHitRate": 0.949,
+        "candidateRaised": true,
+        "status": "delivered"
+      },
+      "rubric": {
+        "score": 0.662,
+        "coverage": 0.309
+      },
+      "error": null,
+      "reverified": true
+    },
+    {
+      "id": "GT05",
+      "title": "Taylor coefficient of Tan",
+      "category": "series",
+      "verify": "full",
+      "questId": "QG_GT05_adz4y7",
+      "runId": "run_2026-08-01T13-07-31-664Z",
+      "charmDir": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_GT05_adz4y7_gold_gt05/charms/C01",
+      "verifiedNb": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_GT05_adz4y7_gold_gt05/charms/C01/clean.wb",
+      "status": "delivered",
+      "verdict": "verified",
+      "scrollConfidence": 0.9,
+      "needsReview": false,
+      "verifier": {
+        "pass": true,
+        "detail": "True",
+        "residual": null,
+        "missingSymbols": [],
+        "replay": {
+          "offline": true,
+          "cellCount": 6
+        }
+      },
+      "verifyError": null,
+      "economics": {
+        "llmCalls": 38,
+        "toolCalls": 33,
+        "probes": 10,
+        "costUSD": 0.028423,
+        "tokens": {
+          "input": 988373,
+          "output": 46990,
+          "cacheRead": 897280,
+          "cacheMiss": 91093
+        },
+        "durationMs": 542518,
+        "cacheHitRatio": 0.908
+      },
+      "metrics": {
+        "questId": "QG_GT05_adz4y7",
+        "charmId": "C01",
+        "probesOk": 10,
+        "probesFailed": 2,
+        "probeSuccessRate": 0.833,
+        "records": 10,
+        "recordRate": 1,
+        "unrecordedSuccesses": 0,
+        "noteFacts": 1,
+        "amends": 1,
+        "amendRatio": 0.5,
+        "probeFailRate": 0.167,
+        "checkpoints": 3,
+        "utilForkRejections": 0,
+        "nearDuplicateRejections": 0,
+        "recordGates": 0,
+        "crosscheckGates": 0,
+        "missingDepGates": 1,
+        "chainReopens": 0,
+        "continuations": 0,
+        "literatureQueries": 0,
+        "litReads": 0,
+        "reDerivations": 0,
+        "inspects": 0,
+        "inspectsPerProbe": 0,
+        "recallSkill": null,
+        "recallUsed": false,
+        "recallInjected": false,
+        "recallMs": 8282,
+        "recallTopScore": null,
+        "recallTriage": {
+          "capabilities": [
+            "Symbolic Taylor series expansion of Tan[x] about x=0 to order 9",
+            "Exact rational arithmetic for the extracted coefficient",
+            "Relating the coefficient to Bernoulli numbers via the standard generating-function identity"
+          ],
+          "picks": [],
+          "gaps": [
+            "Symbolic Taylor series expansion of Tan[x] about x=0 to order 9",
+            "Exact rational arithmetic for the extracted coefficient",
+            "Relating the coefficient to Bernoulli numbers via the standard generating-function identity"
+          ]
+        },
+        "citationGates": 0,
+        "skillGapNotes": 0,
+        "skillGapsAuto": 2,
+        "skillDraftAuthored": true,
+        "llmCalls": 33,
+        "runCapHits": 0,
+        "handoffUtils": 0,
+        "build": {
+          "version": "2.7.22",
+          "codeMtime": "2026-07-12T00:49:46.000Z"
+        },
+        "cacheHitRate": 0.923,
+        "candidateRaised": true,
+        "status": "delivered"
+      },
+      "rubric": {
+        "score": 0.662,
+        "coverage": 0.309
+      },
+      "error": null,
+      "reverified": true
+    },
+    {
+      "id": "TS04",
+      "title": "Cauchy-like matrix determinant pattern",
+      "category": "linalg",
+      "verify": "full",
+      "questId": "QG_TS04_aeark6",
+      "runId": "run_2026-08-01T13-16-34-182Z",
+      "charmDir": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_TS04_aeark6_gold_ts04/charms/C01",
+      "verifiedNb": "/Users/k0959535/Dropbox/MY/Programming/VSCodeWolframExtension/quests/QG_TS04_aeark6_gold_ts04/charms/C01/clean.wb",
+      "status": "delivered",
+      "verdict": "verified",
+      "scrollConfidence": 0.9,
+      "needsReview": false,
+      "verifier": {
+        "pass": true,
+        "detail": "True",
+        "residual": null,
+        "missingSymbols": [],
+        "replay": {
+          "offline": true,
+          "cellCount": 7
+        }
+      },
+      "verifyError": null,
+      "economics": {
+        "llmCalls": 34,
+        "toolCalls": 30,
+        "probes": 9,
+        "costUSD": 0.019406,
+        "tokens": {
+          "input": 833233,
+          "output": 29011,
+          "cacheRead": 768000,
+          "cacheMiss": 65233
+        },
+        "durationMs": 328050,
+        "cacheHitRatio": 0.922
+      },
+      "metrics": {
+        "questId": "QG_TS04_aeark6",
+        "charmId": "C01",
+        "probesOk": 7,
+        "probesFailed": 1,
+        "probeSuccessRate": 0.875,
+        "records": 9,
+        "recordRate": 1,
+        "unrecordedSuccesses": 0,
+        "noteFacts": 2,
+        "amends": 2,
+        "amendRatio": 2,
+        "probeFailRate": 0.125,
+        "checkpoints": 3,
+        "utilForkRejections": 0,
+        "nearDuplicateRejections": 0,
+        "recordGates": 0,
+        "crosscheckGates": 0,
+        "missingDepGates": 1,
+        "chainReopens": 0,
+        "continuations": 0,
+        "literatureQueries": 0,
+        "litReads": 0,
+        "reDerivations": 0,
+        "inspects": 1,
+        "inspectsPerProbe": 0.14,
+        "recallSkill": null,
+        "recallUsed": false,
+        "recallInjected": false,
+        "recallMs": 16872,
+        "recallTopScore": null,
+        "recallTriage": {
+          "capabilities": [
+            "Exact rational determinant of the n x n Hilbert-type matrix A_ij = 1/(1+i+j)",
+            "Closed-form determinant identification via Cauchy/product formulas as a function of n",
+            "Arbitrary-precision rational verification for larger n (n=15,20)"
+          ],
+          "picks": [],
+          "gaps": [
+            "Exact rational determinant of the n x n Hilbert-type matrix A_ij = 1/(1+i+j)",
+            "Closed-form determinant identification via Cauchy/product formulas as a function of n",
+            "Arbitrary-precision rational verification for larger n (n=15,20)"
+          ]
+        },
+        "citationGates": 0,
+        "skillGapNotes": 0,
+        "skillGapsAuto": 2,
+        "skillDraftAuthored": false,
+        "llmCalls": 29,
+        "runCapHits": 0,
+        "handoffUtils": 0,
+        "build": {
+          "version": "2.7.22",
+          "codeMtime": "2026-07-12T00:49:46.000Z"
+        },
+        "cacheHitRate": 0.944,
+        "candidateRaised": true,
+        "status": "delivered"
+      },
+      "rubric": {
+        "score": 0.662,
+        "coverage": 0.309
+      },
+      "error": null,
+      "reverified": true
+    }
+  ],
+  "summary": {
+    "total": 5,
+    "byVerdict": {
+      "verified": 5
+    },
+    "passRate": 1,
+    "verified": 5,
+    "falseDelivered": 0,
+    "falseDeliveredRate": 0,
+    "totalCostUSD": 0.075971,
+    "meanCacheHitRatio": 0.89
+  },
+  "reverifiedFrom": null
+}
