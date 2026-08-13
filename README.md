@@ -18,7 +18,9 @@
   <a href="https://github.com/vanbaalon/wolfbook/blob/main/README.md#citing-wolfbook">Citing</a>
 </p>
 
-Wolfbook is a Mathematica notebook frontend for VS Code. It lets you create, edit and run Wolfram Language notebooks using a local Wolfram Engine or Mathematica kernel — with rich LaTeX and graphics output, a live kernel that AI agents can call, and plain-text notebooks that work with Git.
+Wolfbook is a Mathematica-style notebook frontend for VS Code. Create, edit and run **Wolfram Language** notebooks against a local **Wolfram Engine** or **Mathematica** kernel — with typeset LaTeX and inline graphics, a live kernel that AI agents can drive, and plain-text notebooks that diff cleanly in Git.
+
+> **Requires a Wolfram kernel.** Wolfbook is the notebook interface; the mathematics runs in [Wolfram Engine](https://wolfram.com/engine) (free for personal and developer use) or Mathematica, which you install separately. Setup takes a few minutes — see [Getting Started](https://github.com/vanbaalon/wolfbook/blob/main/docs/getting-started.md).
 
 <p align="center">
   <img src="docs/screenshot-debugger.png" alt="Mathematica-style Wolfram Language notebook in VS Code with live kernel evaluation, LaTeX typesetting, graphics output and debugger breakpoint" width="80%" />

@@ -1,6 +1,6 @@
 {
   "name": "wolfbook",
-  "displayName": "Mathematica & Wolfram Language Notebooks for VS Code — Wolfbook",
+  "displayName": "Wolfbook — Mathematica & Wolfram Language Notebooks",
   "description": "Mathematica-style Wolfram Language notebooks in VS Code. Run a live Wolfram kernel, render LaTeX/graphics, debug code, and let Copilot, Claude Code or MCP agents evaluate cells.",
   "publisher": "wolfbook",
   "version": "2.8.1",
@@ -27,36 +27,37 @@
     "wolfram-kernel",
     "wolframscript",
     "notebook",
-    "notebooks",
-    "vscode-notebook",
     "mathematica-notebook",
     "wolfram-notebook",
-    "frontend",
     "mathematica-frontend",
     "symbolic-computation",
     "computer-algebra",
     "cas",
     "latex",
-    "katex",
     "tikz",
     "math",
     "physics",
-    "ai",
     "copilot",
     "claude",
     "claude-code",
-    "codex",
     "mcp",
-    "agent",
     "wstp",
-    "jupyter"
+    "computational-notebook",
+    "scientific-computing",
+    "symbolic-math",
+    "wolfram-mathematica",
+    "plotting",
+    "slides",
+    "presentation",
+    "debugger"
   ],
   "categories": [
     "Notebooks",
     "Programming Languages",
     "Data Science",
     "Visualization",
-    "Education"
+    "Education",
+    "Debuggers"
   ],
   "galleryBanner": {
     "color": "#CC3333",
@@ -94,6 +95,7 @@
         "id": "wolfram",
         "aliases": [
           "Wolfram",
+          "Mathematica",
           "wolfram",
           "Wolfram Language"
         ],
@@ -4808,5 +4810,6 @@
     "installedTimestamp": 1753889027366,
     "targetPlatform": "undefined",
     "size": 22428951
-  }
+  },
+  "qna": "https://github.com/vanbaalon/wolfbook/issues"
 }
