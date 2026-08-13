@@ -31,6 +31,7 @@ Wolfbook is a Mathematica-style notebook frontend for VS Code. Create, edit and 
 ## Why Wolfbook?
 
 - A real Mathematica notebook inside VS Code, not just syntax highlighting
+- **Opens your existing Mathematica `.nb` files** (read-only) — no kernel, no export step
 - Works with **Wolfram Engine** (free) or **Mathematica**
 - Plain-text `.wb` / `.vsnb` notebooks — **diffable in Git**, readable by AI tools
 - Rich math output: **LaTeX / KaTeX**, **SVG / PNG graphics**,  **TikZ**
@@ -46,6 +47,7 @@ Wolfbook is a Mathematica-style notebook frontend for VS Code. Create, edit and 
 |---|---|---|---|
 | Wolfram Language syntax highlighting | ✓ | ✓ | ✓ |
 | Mathematica-style notebook UI | ✓ | basic | ✓ |
+| Opens existing Mathematica `.nb` files | ✓ | — | — |
 | Live Wolfram kernel via WSTP | ✓ | — | wolframscript |
 | Rich LaTeX / KaTeX rendering | ✓ | — | partial |
 | Inline SVG / PNG / TikZ graphics | ✓ | static | basic |
@@ -88,6 +90,23 @@ Wolfbook is a Mathematica-style notebook frontend for VS Code. Create, edit and 
 - Abort the kernel without losing your kernel context, or restart with a clean kernel with one click — exactly like in Mathematica, but unique among VS Code notebook extensions
 - Escape-mode Greek entry: type `\[Alpha]`, `\[Beta]`, `\[Gamma]` and they get converted into symbols, or use [escape]a[escape] etc.
 - Watch any expression continuously; evaluate any selection mid-computation
+
+### Open your existing Mathematica `.nb` notebooks
+
+Double-click any Mathematica `.nb` file and it opens directly in the Wolfbook
+notebook editor — cells, Markdown text, typeset output and graphics. Conversion
+happens in-process in about 20 ms: **no kernel required**, nothing to run, no
+export step in Mathematica first.
+
+Opened `.nb` files are **read-only by design**: Wolfbook never writes `.wb` JSON
+back over your original notebook. Press **⌘S / Ctrl-S** and it saves a sibling
+`.wb` copy — keeping any edits you made — and opens that, so the Mathematica file
+on disk is left exactly as it was.
+
+- Output is re-typeset through the same LaTeX/KaTeX renderer as native notebooks
+- Graphics are rasterised to PNGs alongside the notebook and cached by content
+- `WBInclude["file.nb"]` uses the same importer, so you can pull an existing
+  notebook into a Wolfbook session directly
 
 ### VS Code IDE features — free
 

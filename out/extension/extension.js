@@ -1476,7 +1476,11 @@ async function activate(context) {
         // include it in conflict detection when the file changes on disk (Dropbox sync).
         { transientCellMetadata: { executionSummary: true, lastRunDuration: true, runStartTime: true } }
     ), controller);
-    
+
+    // Mathematica .nb support: the serializer converts them on open; these are
+    // the commands and the first-open notice.
+    require('./nb-import/index').registerNbImport(context);
+
     // Setup Unicode replacer for \[Name] -> Unicode conversion
     const extensionPath = context.extensionPath;
     (0, unicode_replacer_1.registerUnicodeReplacer)(context, extensionPath);

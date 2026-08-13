@@ -1,9 +1,9 @@
 {
   "name": "wolfbook",
   "displayName": "Wolfbook — Mathematica & Wolfram Language Notebooks",
-  "description": "Mathematica-style Wolfram Language notebooks in VS Code. Run a live Wolfram kernel, render LaTeX/graphics, debug code, and let Copilot, Claude Code or MCP agents evaluate cells.",
+  "description": "Mathematica-style Wolfram Language notebooks in VS Code. Open existing .nb files, run a live Wolfram kernel, render LaTeX/graphics, debug code, and let Copilot, Claude Code or MCP agents evaluate cells.",
   "publisher": "wolfbook",
-  "version": "2.8.1",
+  "version": "2.8.4",
   "engines": {
     "vscode": "^1.95.0"
   },
@@ -104,7 +104,8 @@
           ".m",
           ".wls",
           ".wlt",
-          ".mt"
+          ".mt",
+          ".nb"
         ],
         "configuration": "./wolfram.language-configuration.json"
       },
@@ -964,6 +965,15 @@
         "title": "Open in System Editor"
       },
       {
+        "command": "wolfbook.saveNbCopyAsWb",
+        "title": "Wolfbook: Save .nb copy as .wb",
+        "icon": "$(save-as)"
+      },
+      {
+        "command": "wolfbook.refineNbImportWithKernel",
+        "title": "Wolfbook: Refine .nb import with kernel"
+      },
+      {
         "command": "wolfbook.configureClaude",
         "title": "Wolfbook: Configure Claude Desktop MCP"
       },
@@ -1308,6 +1318,11 @@
           "when": "resourceExtname == .nb || resourceExtname == .m || resourceExtname == .wl || resourceExtname == .wls || resourceExtname == .cdf",
           "command": "wolfbook.OpenNotebook",
           "group": "navigation"
+        },
+        {
+          "when": "resourceExtname == .nb",
+          "command": "wolfbook.saveNbCopyAsWb",
+          "group": "navigation"
         }
       ],
       "editor/context": [
@@ -1353,6 +1368,14 @@
           "when": "false"
         },
         {
+          "command": "wolfbook.saveNbCopyAsWb",
+          "when": "resourceExtname == .nb"
+        },
+        {
+          "command": "wolfbook.refineNbImportWithKernel",
+          "when": "resourceExtname == .nb"
+        },
+        {
           "command": "wolfbook.debug.openWatchInEditor",
           "when": "false"
         },
@@ -1377,6 +1400,11 @@
         }
       ],
       "notebook/toolbar": [
+        {
+          "command": "wolfbook.saveNbCopyAsWb",
+          "when": "notebookType == extended-wolfram-notebook && resourceExtname == .nb",
+          "group": "navigation@0"
+        },
         {
           "command": "wolfbook.evalMode.auto",
           "when": "notebookType == extended-wolfram-notebook && wolframEvalMode == 'auto'",
@@ -1506,6 +1534,21 @@
       ]
     },
     "keybindings": [
+      {
+        "command": "wolfbook.saveNbCopyAsWb",
+        "key": "ctrl+s",
+        "mac": "cmd+s",
+        "when": "notebookType == 'extended-wolfram-notebook' && resourceExtname == .nb"
+      },
+      {
+        "command": "wolfbook.saveNbCopyAsWb",
+        "key": "ctrl+shift+s",
+        "mac": "cmd+shift+s",
+        "args": {
+          "forceDialog": true
+        },
+        "when": "notebookType == 'extended-wolfram-notebook' && resourceExtname == .nb"
+      },
       {
         "command": "editor.action.blockComment",
         "key": "ctrl+/",
@@ -1787,6 +1830,9 @@
           },
           {
             "filenamePattern": "*.wb"
+          },
+          {
+            "filenamePattern": "*.nb"
           }
         ],
         "priority": "default"
@@ -4105,7 +4151,8 @@
       "workbench.editorAssociations": {
         "*.wb": "extended-wolfram-notebook",
         "*.evsnb": "extended-wolfram-notebook",
-        "*.vsnb": "extended-wolfram-notebook"
+        "*.vsnb": "extended-wolfram-notebook",
+        "*.nb": "extended-wolfram-notebook"
       },
       "workbench.colorCustomizations": {
         "editor.wordHighlightBackground": "#3399ff18",

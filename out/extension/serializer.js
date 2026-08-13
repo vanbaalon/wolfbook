@@ -16,6 +16,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.VSNBContentSerializer = void 0;
 const util = require("util");
 const _outputRenderer = require('./output/renderer');
+const _nbImport = require('./nb-import/index');
 class VSNBContentSerializer {
     constructor() {
         // TODO: better label
@@ -25,8 +26,17 @@ class VSNBContentSerializer {
         const decoder = new util.TextDecoder();
         const encoder = new util.TextEncoder();
         let notebook;
+        const text = decoder.decode(data);
+
+        // A Mathematica .nb is not JSON — convert it to the wolfbook cell model
+        // on the fly. deserializeNotebook receives no URI, so this has to be a
+        // content sniff rather than an extension check.
+        if (_nbImport.isNbSource(text)) {
+            return _nbImport.deserializeNbNotebook(text);
+        }
+
         try {
-            notebook = JSON.parse(decoder.decode(data));
+            notebook = JSON.parse(text);
             
             // Preserve notebook metadata including settings
             const metadata = notebook.metadata || {};
@@ -67,6 +77,25 @@ class VSNBContentSerializer {
         return notebook;
     }
     async serializeNotebook(data, token) {
+        // MUST stay outside the try below: that catch replaces the notebook with
+        // an empty one, so an error escaping into it would overwrite the source
+        // .nb with {"cells":[]}.
+        //
+        // An imported .nb is a view of a Mathematica file. Writing .wb JSON over
+        // it would destroy it, so instead the original bytes go back unchanged —
+        // the save is a no-op that keeps the file byte-identical. Cmd-S is bound
+        // to wolfbook.saveNbCopyAsWb, which is what actually persists edits.
+        if (data && data.metadata && data.metadata.wolfbookNbImport) {
+            const original = _nbImport.originalSourceOf(data);
+            if (typeof original === 'string') {
+                return new util.TextEncoder().encode(original);
+            }
+            throw new Error(
+                'This notebook is a read-only view of a Mathematica .nb file and cannot be saved in place. ' +
+                'Run "Wolfbook: Save .nb copy as .wb" to create an editable copy.'
+            );
+        }
+
         const decoder = new util.TextDecoder();
         const encoder = new util.TextEncoder();
         let notebook = data;

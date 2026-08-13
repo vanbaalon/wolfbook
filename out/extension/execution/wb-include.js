@@ -1,81 +1,47 @@
 'use strict';
 // execution/wb-include.js — handles WBInclude["file.nb"] interception.
-// Converts the target .nb file using the bundled converter toolchain,
-// then returns an array of NotebookCellData objects ready for insertion.
+// Converts the target .nb file with the in-process importer, then returns an
+// array of NotebookCellData objects ready for insertion.
 
 const vscode  = require('vscode');
 const path    = require('path');
 const fs      = require('fs');
-const os      = require('os');
-const crypto  = require('crypto');
-const { spawn } = require('child_process');
 
 /**
- * Run the bundled nb→evsnb converter on `nbAbsPath`.
- * Resolves with the array of VS Code NotebookCellData to insert.
+ * Convert `nbAbsPath` to notebook cells.
  *
- * @param {string} extensionPath  — self.extensionPath
+ * Uses the same pure-JS importer that backs opening a .nb directly
+ * (nb-import/), so this needs no wolframscript and keeps Output cells.
+ *
+ * @param {string} extensionPath  — self.extensionPath (unused; kept for callers)
  * @param {string} nbAbsPath      — absolute path to the .nb file
+ * @param {string} [hostNbFsPath] — the notebook the cells are inserted into; its
+ *                                  img/ folder receives any rendered graphics,
+ *                                  since that is what the relative src resolves against
  * @returns {Promise<vscode.NotebookCellData[]>}
  */
-async function convertNbToCells(extensionPath, nbAbsPath) {
-    const converterDir = path.join(extensionPath, 'resources');
-    const wlsScript    = path.join(converterDir, 'convert_nb_to_vsnb.wls');
-
-    if (!fs.existsSync(wlsScript)) {
-        throw new Error(`Converter script not found: ${wlsScript}`);
-    }
+async function convertNbToCells(extensionPath, nbAbsPath, hostNbFsPath) {
     if (!fs.existsSync(nbAbsPath)) {
         throw new Error(`File not found: ${nbAbsPath}`);
     }
 
-    // Use a temp file so we never write into the user's source directory
-    const evsnbPath = path.join(os.tmpdir(), `wb-include-${crypto.randomBytes(6).toString('hex')}.evsnb`);
-
-    // Run wolframscript.  Paths are passed via env vars (WB_INPUT / WB_OUTPUT) so
-    // that spaces in directory names don't cause argument-splitting inside wolframscript.
-    // CWD = converterDir so that nb2m (which writes its .m output to CWD) is found.
-    let stdout = '', stderr = '';
-    await new Promise((resolve, reject) => {
-        const proc = spawn('wolframscript', ['-script', wlsScript], {
-            cwd: converterDir,
-            env: { ...process.env, WB_INPUT: nbAbsPath, WB_OUTPUT: evsnbPath }
-        });
-        proc.stdout.on('data', d => { stdout += d.toString(); });
-        proc.stderr.on('data', d => { stderr += d.toString(); });
-        proc.on('error', err => reject(new Error(`Failed to launch wolframscript: ${err.message}`)));
-        proc.on('close', code => {
-            if (code !== 0) {
-                reject(new Error(`Converter exited with code ${code}.\nstdout: ${stdout.trim()}\nstderr: ${stderr.trim()}`));
-            } else {
-                resolve();
-            }
-        });
+    const nbImport = require('../nb-import/index');
+    const source   = fs.readFileSync(nbAbsPath, 'utf8');
+    const imported = await nbImport.importForHost(source, {
+        sourceName: path.basename(nbAbsPath),
+        hostNbFsPath,
     });
 
-    if (!fs.existsSync(evsnbPath)) {
-        throw new Error(
-            `Converter finished but output file not found.\nstdout: ${stdout.trim()}\nstderr: ${stderr.trim()}`
-        );
-    }
-
-    let jsonText;
-    try {
-        jsonText = fs.readFileSync(evsnbPath, 'utf8');
-    } finally {
-        try { fs.unlinkSync(evsnbPath); } catch (_) {}  // always clean up temp
-    }
-
-    const parsed = JSON.parse(jsonText);
-    const rawCells = parsed.cells || [];
-
-    // Map JSON cell descriptors → NotebookCellData
-    return rawCells.map(c => {
-        const kind = c.kind === 1
-            ? vscode.NotebookCellKind.Markup
-            : vscode.NotebookCellKind.Code;
+    return (imported.cells || []).map(c => {
+        const kind = c.kind === 1 ? vscode.NotebookCellKind.Markup : vscode.NotebookCellKind.Code;
         const lang = kind === vscode.NotebookCellKind.Markup ? 'markdown' : (c.languageId || 'wolfram');
-        return new vscode.NotebookCellData(kind, c.value || '', lang);
+        const cell = new vscode.NotebookCellData(kind, c.value || '', lang);
+        if (kind === vscode.NotebookCellKind.Code && c.outputs && c.outputs.length) {
+            cell.outputs = c.outputs.map(o => new vscode.NotebookCellOutput(
+                o.items.map(it => new vscode.NotebookCellOutputItem(it.data, it.mime))
+            ));
+        }
+        return cell;
     });
 }
 
@@ -117,7 +83,8 @@ async function handleWBInclude(self, nbPath, notebookDir, currentExecution, inse
 
     let cells;
     try {
-        cells = await convertNbToCells(self.extensionPath, nbAbsPath);
+        const hostNbFsPath = currentExecution.execution.cell.notebook.uri.fsPath;
+        cells = await convertNbToCells(self.extensionPath, nbAbsPath, hostNbFsPath);
     } catch (err) {
         await showMsg(
             `<div style="color:#c00;font-size:12px;padding:4px 0;">❌ WBInclude failed: ${err.message.replace(/</g, '&lt;')}</div>`,

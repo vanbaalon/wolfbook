@@ -4,6 +4,33 @@ All notable changes to **Wolfbook** are documented here.
 
 ---
 
+## [2.8.4] - 2026-08-13
+
+### Added — open existing Mathematica `.nb` notebooks
+
+- **Double-click any Mathematica `.nb` file and it opens in the Wolfbook notebook
+  editor** — cells, Markdown text, typeset output and graphics. Conversion is
+  pure JavaScript and in-process (~20 ms for a typical file): **no Wolfram kernel
+  is required**, and nothing has to be exported from Mathematica first.
+- **Read-only by design.** The original `.nb` is never overwritten with `.wb`
+  JSON — any VS Code-initiated save (auto-save, hot-exit, the close prompt) is a
+  byte-identical no-op. **⌘S / Ctrl-S** instead writes a sibling `.wb` copy,
+  keeping your edits, and opens it.
+- Outputs are re-typeset through the same LaTeX/KaTeX renderer as native
+  notebooks; graphics are rasterised to PNGs beside the notebook and cached by
+  content hash, so reopening needs no kernel at all.
+- `WBInclude["file.nb"]` now uses the same importer — no `wolframscript`
+  round-trip, and outputs are preserved.
+- A parse failure yields a banner plus the raw source in one cell — never a blank
+  notebook.
+
+### Changed
+
+- `.nb` is registered as a Wolfram Language file type, so VS Code recognises the
+  format and can offer Wolfbook when one is opened.
+
+---
+
 ## [2.8.1] - 2026-08-13
 
 ### Fixed
