@@ -5,17 +5,17 @@
 </p>
 
 <p align="center">
-  <a href="docs/getting-started.md">Get Started</a> ·
-  <a href="docs/features.md">Features</a> ·
-  <a href="docs/ai-integration.md">AI Integration</a> ·
-  <a href="docs/mcp-and-agent-tools.md">MCP & Agent Tools</a> ·
-  <a href="docs/using_cline.md">Using Cline</a> ·
-  <a href="docs/deepseek-copilot.md">DeepSeek + Copilot</a> ·
-  <a href="docs/presentations.md">Presentations (.wslide)</a> ·
-  <a href="docs/oberon-agent.md">Oberon Agent 🧪</a> ·
-  <a href="docs/best-practices.md">Best Practices</a> ·
-  <a href="docs/wb-functions.md">WB Functions</a> ·
-  <a href="#citing-wolfbook">Citing</a>
+  <a href="https://github.com/vanbaalon/wolfbook/blob/main/docs/getting-started.md">Get Started</a> ·
+  <a href="https://github.com/vanbaalon/wolfbook/blob/main/docs/features.md">Features</a> ·
+  <a href="https://github.com/vanbaalon/wolfbook/blob/main/docs/ai-integration.md">AI Integration</a> ·
+  <a href="https://github.com/vanbaalon/wolfbook/blob/main/docs/mcp-and-agent-tools.md">MCP & Agent Tools</a> ·
+  <a href="https://github.com/vanbaalon/wolfbook/blob/main/docs/using_cline.md">Using Cline</a> ·
+  <a href="https://github.com/vanbaalon/wolfbook/blob/main/docs/deepseek-copilot.md">DeepSeek + Copilot</a> ·
+  <a href="https://github.com/vanbaalon/wolfbook/blob/main/docs/presentations.md">Presentations (.wslide)</a> ·
+  <a href="https://github.com/vanbaalon/wolfbook/blob/main/docs/oberon-agent.md">Oberon Agent 🧪</a> ·
+  <a href="https://github.com/vanbaalon/wolfbook/blob/main/docs/best-practices.md">Best Practices</a> ·
+  <a href="https://github.com/vanbaalon/wolfbook/blob/main/docs/wb-functions.md">WB Functions</a> ·
+  <a href="https://github.com/vanbaalon/wolfbook/blob/main/README.md#citing-wolfbook">Citing</a>
 </p>
 
 Wolfbook is a Mathematica notebook frontend for VS Code. It lets you create, edit and run Wolfram Language notebooks using a local Wolfram Engine or Mathematica kernel — with rich LaTeX and graphics output, a live kernel that AI agents can call, and plain-text notebooks that work with Git.

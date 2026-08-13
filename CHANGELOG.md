@@ -4,6 +4,17 @@ All notable changes to **Wolfbook** are documented here.
 
 ---
 
+## [2.8.1] - 2026-08-13
+
+### Fixed
+
+- **Marketplace landing page: broken documentation links.** The README's top
+  navigation is raw HTML, and `vsce` only rewrites *Markdown*-syntax links to
+  absolute repository URLs — raw `<a href="docs/…">` was left relative, so every
+  nav link 404'd on the Marketplace page. All HTML links are now absolute.
+
+---
+
 ## [2.8.0] - 2026-08-12
 
 The headline of this release is that Wolfbook now does more than *let* an AI use
