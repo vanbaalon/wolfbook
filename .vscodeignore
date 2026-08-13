@@ -59,6 +59,9 @@ config_defaults.json
 # with research task titles. None of it is used at runtime.
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Unit tests that live beside runtime code (not needed at runtime).
+out/extension/nb-import/tests/**
+
 # Oberon agent test suites + gold benchmark baselines.
 # The baselines embed /Users/<maintainer>/… paths, quest ids and task titles.
 out/extension/oberon/tests/**
