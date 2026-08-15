@@ -141,6 +141,16 @@ function _appendPid(pid) {
 // underlying native-addon object has non-configurable / non-writable properties.
 // The active notebook path is looked up dynamically on each call so it is always
 // current even if no notebook was open when the session was created.
+// Reap a kernel WE spawned (listen-mode addon only). The addon kills only the
+// kernels it launched itself, so without this a restart would leave the old
+// kernel alive, holding a licence seat and a stale SharedMemory link.
+function _reapExternalKernel(self) {
+    const proc = self && self._externalKernelProc;
+    if (!proc) return;
+    self._externalKernelProc = null;
+    try { if (proc.exitCode === null && proc.signalCode === null) proc.kill('SIGTERM'); } catch (_) {}
+}
+
 function _wstpWrap(sess, label) {
     if (!DEV_MODE) return sess;
     const _METHODS = ['evaluate', 'sub', 'subAuto', 'subWhenIdle'];
@@ -336,6 +346,7 @@ function _stopKeepalive(self) {
 async function _lifecycle_relaunch(self, WstpSession) {
     // Close the stale session object so its resources are freed
     try { if (self.session) self.session.close(); } catch (_) {}
+    _reapExternalKernel(self);
     self.session = undefined;
     self.kernelStatusString = 'unresolved';
     vscode.commands.executeCommand('setContext', 'wolframKernelActive', false);
@@ -428,7 +439,48 @@ async function launchKernel(self, WstpSession) {
         truncateLogs();
         if (typeof self.clearDebugLog === 'function') self.clearDebugLog();
         dynLog('=== KERNEL START ===', new Date().toISOString());
-        self.session = _wstpWrap(new WstpSession(kernelCommand, { interactive: true }), 'main');
+        // ── Kernel link-up: two addon flavours, detected not assumed ────────
+        // The macOS/Windows addon opens the WSTP link with `-linkmode launch`,
+        // i.e. it forks the kernel itself, and the constructor is all that is
+        // needed. The Linux addon cannot do that: forking inside Electron trips
+        // FD-ownership enforcement (SIGTRAP), so it opens a *listen* link and
+        // something else must spawn a kernel that connects back to it.
+        //
+        // Regression this fixes (2.8.4, Linux): the listen-mode session was
+        // constructed and then nothing ever spawned a kernel, so every
+        // evaluation failed instantly with "Session is closed" while the link
+        // sat Idle/Alive with kernelPid=0.
+        //
+        // Capability detection rather than `process.platform === 'linux'`: the
+        // deciding factor is which addon was bundled, and a listen-mode build
+        // is the only one that exposes a link name. A launch-mode Linux build
+        // (or a future unified addon) therefore keeps working untouched.
+        const _rawSession = new WstpSession(kernelCommand, { interactive: true });
+        let _listenLink = null;
+        try {
+            const _n = _rawSession.linkName;
+            if (typeof _n === 'string' && _n.length > 0) _listenLink = _n;
+        } catch (_) { /* launch-mode addon: no linkName — nothing to do */ }
+
+        if (_listenLink) {
+            devLog(LOG_CHANNELS.KERNEL, `[launchKernel] listen-mode addon; WSTP link: ${_listenLink}`);
+            const _cpMod = require('child_process');
+            const _kernelProc = _cpMod.spawn(kernelCommand, [
+                '-wstp',
+                '-linkname',     _listenLink,
+                '-linkmode',     'connect',
+                '-linkprotocol', 'SharedMemory',
+            ], { detached: false, stdio: 'ignore' });
+            _kernelProc.on('error', (e) => {
+                try { scrollLog(`[launchKernel] kernel spawn error: ${e.message}`); } catch (_) {}
+            });
+            // Remember it so stopKernel/relaunch can reap the process we own.
+            // The addon only kills kernels it launched itself.
+            self._externalKernelProc = _kernelProc;
+            devLog(LOG_CHANNELS.KERNEL, `[launchKernel] kernel spawned pid=${_kernelProc.pid}; connecting…`);
+            _rawSession.connect();
+        }
+        self.session = _wstpWrap(_rawSession, 'main');
 
         // Load init.wl via sub() so it runs as a priority batch call and
         // does NOT count as a user evaluation (does not increment $Line).
@@ -651,6 +703,7 @@ async function launchKernel(self, WstpSession) {
         // the probe launches a second kernel process, and on single-seat
         // licenses the dead-but-open link could otherwise hold the seat.
         try { if (self.session) { self.session.close(); self.session = undefined; } } catch (_) {}
+        _reapExternalKernel(self);
         await _reportKernelFailure(self, kernelCommand, err.message);
     }
 }
@@ -678,6 +731,7 @@ function quitKernel(self) {
     }
     if (self.session) {
         try { self.session.close(); } catch (_) {}
+        _reapExternalKernel(self);
         self.session = undefined;
     }
     self._lastMainImgDir = null;

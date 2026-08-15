@@ -4,6 +4,33 @@ All notable changes to **Wolfbook** are documented here.
 
 ---
 
+## [2.8.5] - 2026-08-15
+
+### Fixed — Linux: the kernel never launched
+
+- **`Session is closed` on every evaluation (Linux only).** The Linux WSTP addon
+  cannot fork the kernel itself — doing so inside Electron trips FD-ownership
+  enforcement (SIGTRAP) — so it opens a *listen* link and relies on the
+  extension to spawn a kernel that connects back to it. 2.8.4 constructed the
+  listen-mode session and then never spawned anything, leaving the link Idle
+  with no peer: cells hung on "Kernel is starting…" forever.
+  The launch path now detects which addon flavour is bundled (a listen-mode
+  build is the only one that exposes a link name) and performs
+  listen → spawn → connect when required. macOS and Windows, whose addon uses
+  `-linkmode launch`, are unchanged.
+- **Externally spawned kernels are now reaped** on stop, restart and relaunch.
+  The addon only kills kernels it launched itself, so a listen-mode restart
+  would otherwise leave the old kernel alive holding a licence seat.
+- **Linux kernel discovery enumerates installed versions again** instead of
+  matching a hardcoded list, so releases newer than the list (14.3+) and
+  `/opt` install prefixes are found. Version ordering is numeric, so 14.10
+  correctly outranks 14.9.
+
+With thanks to the Linux testers for a diagnosis that identified the exact
+regression, ruled out the addon binary, and shipped with a working patch.
+
+---
+
 ## [2.8.4] - 2026-08-13
 
 ### Added — open existing Mathematica `.nb` notebooks
