@@ -123,6 +123,18 @@
           "light": "./icons/wslide-light.svg",
           "dark": "./icons/wslide-dark.svg"
         }
+      },
+      {
+        "id": "wolfbook-notebook",
+        "aliases": [
+          "Wolfbook Notebook",
+          "Wolfram Notebook"
+        ],
+        "extensions": [
+          ".wb",
+          ".evsnb",
+          ".vsnb"
+        ]
       }
     ],
     "grammars": [
