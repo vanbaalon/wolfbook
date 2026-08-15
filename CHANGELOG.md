@@ -4,6 +4,29 @@ All notable changes to **Wolfbook** are documented here.
 
 ---
 
+## [2.8.7] - 2026-08-15
+
+### Fixed — LaTeX `\\( … \\)` and `\\[ … \\]` now render as math
+
+Markdown written with LaTeX's own delimiters was not treated as math: markdown
+ate the backslashes and formulas appeared as literal text — `(F(w,\\bar w)\\to
+f(w))` instead of typeset output. Only `$ … $` and `$$ … $$` were recognised.
+
+That form arrives constantly — pasted from papers and `.tex` sources, and
+emitted by AI assistants, which overwhelmingly prefer `\\(` / `\\[`.
+
+- **Notebook markdown cells**: a renderer extending the built-in markdown-it
+  pipeline translates the delimiters before math parsing.
+- **Slides** (editor, preview and HTML export): the KaTeX auto-render
+  configuration now lists the LaTeX delimiters, which it supports natively.
+
+Wolfram named characters are unaffected: `\\[Alpha]`, `\\[Rule]` and friends
+close with a plain `]`, whereas display math closes with an escaped `\\]`, so the
+two are distinguished. Code — fenced blocks and inline spans — is never
+rewritten.
+
+---
+
 ## [2.8.6] - 2026-08-15
 
 ### Fixed — MCP server showing "Failed" after an extension update

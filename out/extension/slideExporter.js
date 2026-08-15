@@ -263,7 +263,7 @@ function katexHeadAssets(forPdf) {
             `<script>document.addEventListener('DOMContentLoaded',function(){`,
             `  if(typeof renderMathInElement!=='undefined')`,
             `    renderMathInElement(document.body,{throwOnError:false,output:'html',`,
-            `      delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]});`,
+            `      delimiters:[{left:'$$',right:'$$',display:true},{left:'\\[',right:'\\]',display:true},{left:'$',right:'$',display:false},{left:'\\(',right:'\\)',display:false}]});`,
             `});</script>`,
         ].join('\n') : '';
         return `<style>\n${css}\n</style>\n${autoRenderTag}`;
@@ -274,7 +274,7 @@ function katexHeadAssets(forPdf) {
         '<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16/dist/katex.min.js"></script>',
         `<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16/dist/contrib/auto-render.min.js"`,
         ` onload="renderMathInElement(document.body,{throwOnError:false,output:'html',delimiters:`,
-        `[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]})">`,
+        `[{left:'$$',right:'$$',display:true},{left:'\\[',right:'\\]',display:true},{left:'$',right:'$',display:false},{left:'\\(',right:'\\)',display:false}]})">`,
         `</script>`,
     ].join('\n');
 }
@@ -1004,7 +1004,7 @@ function exportSlideStepHtml(slide, step, deck, deckDir) {
     const _shotAutoRender = _katexInlineJS
         ? `<script>${_katexInlineJS}</script>\n<script>document.addEventListener('DOMContentLoaded',function(){` +
           `if(typeof renderMathInElement!=='undefined')renderMathInElement(document.body,{throwOnError:false,output:'html',` +
-          `delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]});});</script>`
+          `delimiters:[{left:'$$',right:'$$',display:true},{left:'\\[',right:'\\]',display:true},{left:'$',right:'$',display:false},{left:'\\(',right:'\\)',display:false}]});});</script>`
         : '';
     const katexCSS = _katexLocalFontCSS
         ? `<style>\n${_katexLocalFontCSS}\n</style>\n${_shotAutoRender}`

@@ -1831,7 +1831,7 @@ function renderSlide() {
   // don't leave badges at pre-KaTeX (wrong) positions for flow-positioned blocks.
   requestAnimationFrame(() => {
     if (window.renderMathInElement) {
-      try { renderMathInElement(contentDiv, { delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}], throwOnError:false }); } catch(e) {}
+      try { renderMathInElement(contentDiv, { delimiters:[{left:'$$',right:'$$',display:true},{left:'\\[',right:'\\]',display:true},{left:'$',right:'$',display:false},{left:'\\(',right:'\\)',display:false}], throwOnError:false }); } catch(e) {}
     }
     renderAllFragBadges();
     _positionAiAffordance();          // Stage 3c: ✦ affordance follows the selection
@@ -2331,7 +2331,7 @@ function renderShape(block) {
     inner.innerHTML = block.content;
     t.appendChild(inner);
     d.appendChild(t);
-    if (window.renderMathInElement) { try { renderMathInElement(inner, { delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}], throwOnError:false }); } catch (e) {} }
+    if (window.renderMathInElement) { try { renderMathInElement(inner, { delimiters:[{left:'$$',right:'$$',display:true},{left:'\\[',right:'\\]',display:true},{left:'$',right:'$',display:false},{left:'\\(',right:'\\)',display:false}], throwOnError:false }); } catch (e) {} }
   }
   return d;
 }
@@ -2491,7 +2491,7 @@ function buildRawSrcdoc(html, bg, css) {
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16/dist/katex.min.css">
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16/dist/katex.min.js"><\/script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16/dist/contrib/auto-render.min.js"
-  onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}],throwOnError:false})"><\/script>
+  onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'\\[',right:'\\]',display:true},{left:'$',right:'$',display:false},{left:'\\(',right:'\\)',display:false}],throwOnError:false})"><\/script>
 <style>:root{--navy:#0a244a;--blue:#0064b4;--cyan:#009ac8;--accent:#be1e2d;}html,body{margin:0;padding:0;overflow:hidden;background:${bg};}${css}</style>
 </head><body>${html}</body></html>`;
 }
@@ -3257,7 +3257,7 @@ function startInlineEdit(dom, block) {
     block.content = html;
     dom.innerHTML = html;
     if (window.renderMathInElement) {
-      try { renderMathInElement(dom, { delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}], throwOnError:false }); } catch(e) {}
+      try { renderMathInElement(dom, { delimiters:[{left:'$$',right:'$$',display:true},{left:'\\[',right:'\\]',display:true},{left:'$',right:'$',display:false},{left:'\\(',right:'\\)',display:false}], throwOnError:false }); } catch(e) {}
     }
     positionPanel();
   }
@@ -5511,7 +5511,7 @@ function populatePanel(panel, sIdx) {
 
   requestAnimationFrame(() => {
     if (window.renderMathInElement) {
-      try { renderMathInElement(contentDiv, { delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}], throwOnError:false }); } catch(e) {}
+      try { renderMathInElement(contentDiv, { delimiters:[{left:'$$',right:'$$',display:true},{left:'\\[',right:'\\]',display:true},{left:'$',right:'$',display:false},{left:'\\(',right:'\\)',display:false}], throwOnError:false }); } catch(e) {}
     }
   });
 }
@@ -5902,7 +5902,7 @@ async function serializeDeckForExport(id) {
       host.innerHTML = '';
       host.appendChild(content);
       if (window.renderMathInElement) {
-        try { renderMathInElement(content, { delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}], throwOnError:false }); } catch (_) {}
+        try { renderMathInElement(content, { delimiters:[{left:'$$',right:'$$',display:true},{left:'\\[',right:'\\]',display:true},{left:'$',right:'$',display:false},{left:'\\(',right:'\\)',display:false}], throwOnError:false }); } catch (_) {}
       }
       if (window.Prism && Prism.highlightAllUnder) { try { Prism.highlightAllUnder(content); } catch (_) {} }
       await _inlineExportImages(content);
@@ -7088,7 +7088,7 @@ function _liveUpdateFromHtml(html) {
   _inlineEditBlock.content = html;
   _inlineEditDom.innerHTML = html;
   if (window.renderMathInElement) {
-    try { renderMathInElement(_inlineEditDom, { delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}], throwOnError:false }); } catch(e) {}
+    try { renderMathInElement(_inlineEditDom, { delimiters:[{left:'$$',right:'$$',display:true},{left:'\\[',right:'\\]',display:true},{left:'$',right:'$',display:false},{left:'\\(',right:'\\)',display:false}], throwOnError:false }); } catch(e) {}
   }
 }
 function _afterRichEdit() {
