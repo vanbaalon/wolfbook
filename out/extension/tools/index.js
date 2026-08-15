@@ -49,7 +49,8 @@ const paperSearch = require('./paperSearch');
 })();
 const {
     clearEvalLog, appendEvalLog, appendEventLog,
-    normalizeToolContent, splitWLIntoStatements,
+    normalizeToolContent,
+    normalizeMarkdownMath, splitWLIntoStatements,
     checkMarkdownKaTeX, _katexWarnings, _katexWarningsForCells,
     _isCollabMode, _ensureCollabEditor, flashCell,
     _snapshotViewport, _restoreViewport,
@@ -182,9 +183,13 @@ class NewNotebookTool {
     _cellToJson(cell) {
         const kindName = String(cell?.kind || 'code').toLowerCase();
         const isMarkdown = kindName === 'markdown' || kindName === 'markup';
+        let _v = normalizeToolContent(cell?.content ?? cell?.value ?? '');
+        // Markdown only: \( \) / \[ \] are LaTeX math, but in a CODE cell the same
+        // sequences are Wolfram box syntax and named characters.
+        if (isMarkdown) _v = normalizeMarkdownMath(_v).text;
         return {
             kind: isMarkdown ? vscode.NotebookCellKind.Markup : vscode.NotebookCellKind.Code,
-            value: normalizeToolContent(cell?.content ?? cell?.value ?? ''),
+            value: _v,
             languageId: isMarkdown ? 'markdown' : 'wolfram',
             outputs: [],
             metadata: {},
@@ -885,11 +890,20 @@ class InsertCellsTool {
         }
         const insertIdx = idxRes.insertIdx;
 
+        let _mathConverted = false;
         const cellDatas = cells.map(c => {
             const kindVal = c.kind || c.type || 'code';
             const ck     = (kindVal === 'markdown') ? vscode.NotebookCellKind.Markup : vscode.NotebookCellKind.Code;
             const langId = (kindVal === 'markdown') ? 'markdown' : 'wolfram';
-            return new vscode.NotebookCellData(ck, normalizeToolContent(c.content || ''), langId);
+            let _val = normalizeToolContent(c.content || '');
+            // Markdown only — in code, \( \) is Wolfram box syntax and \[Name] a
+            // named character, so those must survive untouched.
+            if (kindVal === 'markdown') {
+                const _n = normalizeMarkdownMath(_val);
+                _val = _n.text;
+                if (_n.converted) _mathConverted = true;
+            }
+            return new vscode.NotebookCellData(ck, _val, langId);
         });
 
         const edit = new vscode.WorkspaceEdit();
@@ -928,6 +942,12 @@ class InsertCellsTool {
             `Inserted ${cells.length} cell(s) as Cell${ cells.length > 1 ? 's' : ''} ${
                 firstNew}${ cells.length > 1 ? '\u2013' + lastNew : ''} of ${totalAfter} in ${nbName}.\n`
         ];
+        // Teach the convention once, at the moment it is relevant: the content
+        // was silently corrected, so say so briefly rather than let the author
+        // keep producing a form that only renders after conversion.
+        if (_mathConverted) {
+            lines.push('Note: converted LaTeX math delimiters to `$…$` / `$$…$$` — use those in .wb markdown (they render everywhere, including GitHub).\n');
+        }
         cells.forEach((c, i) => {
             const preview = (c.content || '').trim().slice(0, 80).replace(/\n/g, '\u21B5');
             const cellAt = notebook.cellAt(insertIdx + i);

@@ -20,6 +20,11 @@ emitted by AI assistants, which overwhelmingly prefer `\\(` / `\\[`.
 - **Slides** (editor, preview and HTML export): the KaTeX auto-render
   configuration now lists the LaTeX delimiters, which it supports natively.
 
+Markdown inserted through the agent/MCP tools is also normalised to `$` form at
+insert time, so the stored `.wb` renders in other viewers too (GitHub, exported
+HTML) rather than only in Wolfbook — with a one-line note back to the author
+stating the convention. Code cells are never touched.
+
 Wolfram named characters are unaffected: `\\[Alpha]`, `\\[Rule]` and friends
 close with a plain `]`, whereas display math closes with an escaped `\\]`, so the
 two are distinguished. Code — fenced blocks and inline spans — is never

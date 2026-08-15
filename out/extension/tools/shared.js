@@ -96,6 +96,37 @@ function appendEventLog(action, detail) {
 // Rule 2 — quotes: if EVERY " is escaped as \" (no bare ") → the model
 //   over-encoded quotes → unescape \" and \\ together (one pass, left-to-right,
 //   so \\\" (\\ then \") correctly becomes \" in WL).
+/**
+ * Markdown-only: rewrite LaTeX's native math delimiters to the $ forms.
+ *
+ * Wolfbook renders \( … \) and \[ … \] in its own viewer, but the text stored in
+ * the .wb does not render anywhere else — GitHub, exported HTML, other markdown
+ * tools. Agents and paste-from-paper overwhelmingly produce the LaTeX form, so
+ * normalising at insert time keeps the notebook portable.
+ *
+ * MUST NOT be applied to code cells: \( … \) is Wolfram box syntax and \[Alpha]
+ * is a named character. Even here, display math is distinguished from a named
+ * character by the ESCAPED closer (\] vs a plain ]), and fenced/inline code is
+ * masked out.
+ *
+ * @returns {{ text: string, converted: boolean }}
+ */
+function normalizeMarkdownMath(src) {
+    const input = String(src);
+    if (input.indexOf('\\') === -1) return { text: input, converted: false };
+    const parts = input.split(/(```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`)/g);
+    let converted = false;
+    for (let i = 0; i < parts.length; i++) {
+        if (i % 2 === 1) continue;               // code region — never rewrite
+        const before = parts[i];
+        parts[i] = before
+            .replace(/\\\[([\s\S]+?)\\\]/g, (_m, b) => '$$' + b + '$$')
+            .replace(/\\\(([\s\S]+?)\\\)/g, (_m, b) => '$' + b + '$');
+        if (parts[i] !== before) converted = true;
+    }
+    return { text: parts.join(''), converted };
+}
+
 function normalizeToolContent(s) {
     let c = String(s);
     // Rule 1: double-encoded newlines
@@ -901,6 +932,7 @@ module.exports = {
     appendEvalLog,
     appendEventLog,
     normalizeToolContent,
+    normalizeMarkdownMath,
     splitWLIntoStatements,
     checkMarkdownKaTeX,
     _katexWarnings,
