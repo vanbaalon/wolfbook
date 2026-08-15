@@ -4,6 +4,31 @@ All notable changes to **Wolfbook** are documented here.
 
 ---
 
+## [2.8.6] - 2026-08-15
+
+### Fixed — MCP server showing "Failed" after an extension update
+
+- The registered bridge path contains the extension **version**
+  (`~/.vscode/extensions/wolfbook.wolfbook-<version>/…`), and VS Code deletes the
+  old directory on update. The config was only refreshed for workspaces that
+  happened to be **open** at activation, so every other project kept a dead path
+  and its MCP server failed with no usable message — Node exits with
+  `MODULE_NOT_FOUND` before the bridge can report anything.
+- Activation now repairs **all** projects in `~/.claude.json`, not just open
+  ones. Entries whose bridge still resolves are left untouched (a deliberate
+  custom bridge is preserved), nothing is written unless something changed, and
+  the file is written atomically — it holds the user's entire CLI state.
+
+### Changed — every handled file type is now registered
+
+- `.wb`, `.evsnb` and `.vsnb` were claimed only by the notebook selector, so
+  VS Code did not recognise them as file types Wolfbook owns. They are now a
+  registered language (`wolfbook-notebook`); opening still routes to the
+  notebook editor.
+- Icon theme: `.nb`, `.wslide`, `.wl`, `.wls`, `.wlt`, `.mt` had no icon.
+
+---
+
 ## [2.8.5] - 2026-08-15
 
 ### Fixed — Linux: the kernel never launched

@@ -782,10 +782,10 @@ async function activate(context) {
     if (_mcpDisabled) {
         devLog(LOG_CHANNELS.EXTENSION, '[Wolfbook MCP] MCP server disabled via wolfbook.mcpEnabled setting');
     }
-    let WolframMCPServer, loadMCPSchemas, configureClaudeDesktop, writeClaudeConfig, needsConfigUpdate, resolveNodeBinary, validateNodeBinary, writeAntigravityConfig, needsAntigravityConfigUpdate, installAntigravitySkill, needsSkillInstall, writeClineConfig, needsClineConfigUpdate, writeRooCodeConfig, needsRooCodeConfigUpdate, getMcpInfoPayload, WorkerServer, assignClientId;
+    let WolframMCPServer, loadMCPSchemas, configureClaudeDesktop, writeClaudeConfig, repairStaleClaudeConfigs, needsConfigUpdate, resolveNodeBinary, validateNodeBinary, writeAntigravityConfig, needsAntigravityConfigUpdate, installAntigravitySkill, needsSkillInstall, writeClineConfig, needsClineConfigUpdate, writeRooCodeConfig, needsRooCodeConfigUpdate, getMcpInfoPayload, WorkerServer, assignClientId;
     let _mcpUnavailable = false;
     try {
-        ({ WolframMCPServer, loadMCPSchemas, configureClaudeDesktop, writeClaudeConfig, needsConfigUpdate, resolveNodeBinary, validateNodeBinary, writeAntigravityConfig, needsAntigravityConfigUpdate, installAntigravitySkill, needsSkillInstall, writeClineConfig, needsClineConfigUpdate, writeRooCodeConfig, needsRooCodeConfigUpdate, getMcpInfoPayload } = require('./claude-mcp/server'));
+        ({ WolframMCPServer, loadMCPSchemas, configureClaudeDesktop, writeClaudeConfig, repairStaleClaudeConfigs, needsConfigUpdate, resolveNodeBinary, validateNodeBinary, writeAntigravityConfig, needsAntigravityConfigUpdate, installAntigravitySkill, needsSkillInstall, writeClineConfig, needsClineConfigUpdate, writeRooCodeConfig, needsRooCodeConfigUpdate, getMcpInfoPayload } = require('./claude-mcp/server'));
         ({ WorkerServer } = require('./claude-mcp/worker'));
         ({ assignClientId } = require('./claude-mcp/registry'));
     } catch (err) {
@@ -893,6 +893,21 @@ async function activate(context) {
             } catch (e) {
                 console.warn('[Wolfbook MCP] Eager config write failed:', e.message);
             }
+        }
+        // The write above only refreshes workspaces open RIGHT NOW. Every other
+        // project keeps the path of whichever extension version was current when
+        // it was last opened — and VS Code deletes that directory on update, so
+        // those projects silently break ("Failed", MODULE_NOT_FOUND before our
+        // bridge can report anything). Repair them all here; entries that still
+        // resolve are left untouched.
+        try {
+            const _rep = repairStaleClaudeConfigs(_bridgePath, _nodeBin);
+            if (_rep.repaired.length) {
+                devLog(LOG_CHANNELS.EXTENSION,
+                    `[Wolfbook MCP] Repaired ${_rep.repaired.length} stale project config(s): ${_rep.repaired.join(', ')}`);
+            }
+        } catch (e) {
+            console.warn('[Wolfbook MCP] Stale-config repair failed:', e.message);
         }
         if (needsAntigravityConfigUpdate(_bridgePath, _nodeBin)) {
             try {

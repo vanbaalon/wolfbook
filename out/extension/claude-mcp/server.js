@@ -900,6 +900,67 @@ function writeClaudeConfig(bridgePath, nodeBin, home, port, workspacePaths) {
     return { updated: true, configPaths: results, port, bridgePath, nodeBin };
 }
 
+/**
+ * Repair wolfbook MCP entries that point at a bridge which no longer exists.
+ *
+ * WHY: the registered path contains the extension VERSION
+ * (~/.vscode/extensions/wolfbook.wolfbook-<version>/...), and VS Code deletes
+ * the old directory on every update. writeClaudeConfig only refreshes the
+ * workspaces that are OPEN at activation, so every other project keeps a dead
+ * path and its MCP server shows up as "Failed" with no usable explanation
+ * (node exits with MODULE_NOT_FOUND before our bridge can say anything).
+ *
+ * This sweeps ALL projects in ~/.claude.json and repoints any wolfbook entry
+ * whose bridge file is missing. Entries that already resolve are left alone, and
+ * nothing is written unless something actually changed.
+ *
+ * @returns {{repaired: string[], checked: number}}
+ */
+function repairStaleClaudeConfigs(bridgePath, nodeBin, home) {
+    home = home || process.env.HOME || process.env.USERPROFILE || '~';
+    const claudeJsonPath = path.join(home, '.claude.json');
+    const out = { repaired: [], checked: 0 };
+    let root;
+    try {
+        if (!fs.existsSync(claudeJsonPath)) return out;
+        root = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf8'));
+    } catch (e) {
+        console.warn('[Wolfbook MCP] Could not read ~/.claude.json for repair:', e.message);
+        return out;
+    }
+    if (!root || !root.projects || typeof root.projects !== 'object') return out;
+
+    let changed = false;
+    for (const [wsPath, proj] of Object.entries(root.projects)) {
+        const entry = proj && proj.mcpServers && proj.mcpServers.wolfbook;
+        if (!entry) continue;
+        out.checked++;
+        const current = Array.isArray(entry.args) ? entry.args[0] : null;
+        // Only touch entries that are actually broken: a missing bridge file, or
+        // a node binary that no longer exists. A user who deliberately points at
+        // a custom bridge that DOES exist keeps their setting.
+        const bridgeOk = current && fs.existsSync(current);
+        const nodeOk   = !entry.command || entry.command === 'node' || fs.existsSync(entry.command);
+        if (bridgeOk && nodeOk) continue;
+        proj.mcpServers.wolfbook = { type: 'stdio', command: nodeBin, args: [bridgePath], env: entry.env || {} };
+        out.repaired.push(wsPath);
+        changed = true;
+    }
+    if (!changed) return out;
+
+    try {
+        // Atomic write: ~/.claude.json holds the user's entire CLI state, so a
+        // truncated file from a mid-write crash would be very costly.
+        const tmp = claudeJsonPath + '.wolfbook.tmp';
+        fs.writeFileSync(tmp, JSON.stringify(root, null, 2), 'utf8');
+        fs.renameSync(tmp, claudeJsonPath);
+    } catch (e) {
+        console.warn('[Wolfbook MCP] Could not repair ~/.claude.json:', e.message);
+        return { repaired: [], checked: out.checked };
+    }
+    return out;
+}
+
 /** Check if all configs already have the correct wolfbook entry.
  *  Returns true when a write is needed.
  */
@@ -1192,4 +1253,5 @@ function getMcpInfoPayload(bridgePath, nodeBin, port, isSecondary, isDisabled) {
     return { port: port || 0, bridgePath, nodeBin, isSecondary: !!isSecondary, isDisabled: !!isDisabled, configPaths, configured };
 }
 
-module.exports = { WolframMCPServer, loadMCPSchemas, configureClaudeDesktop, writeClaudeConfig, needsConfigUpdate, resolveNodeBinary, validateNodeBinary, probeExistingServer, writeAntigravityConfig, needsAntigravityConfigUpdate, installAntigravitySkill, needsSkillInstall, writeClineConfig, needsClineConfigUpdate, writeRooCodeConfig, needsRooCodeConfigUpdate, getMcpInfoPayload };
+module.exports = { WolframMCPServer, loadMCPSchemas, configureClaudeDesktop, writeClaudeConfig,
+    repairStaleClaudeConfigs, needsConfigUpdate, resolveNodeBinary, validateNodeBinary, probeExistingServer, writeAntigravityConfig, needsAntigravityConfigUpdate, installAntigravitySkill, needsSkillInstall, writeClineConfig, needsClineConfigUpdate, writeRooCodeConfig, needsRooCodeConfigUpdate, getMcpInfoPayload };
