@@ -22,10 +22,6 @@ Wolfbook is a Mathematica-style notebook frontend for VS Code. Create, edit and 
 
 > **Requires a Wolfram kernel.** Wolfbook is the notebook interface; the mathematics runs in [Wolfram Engine](https://wolfram.com/engine) (free for personal and developer use) or Mathematica, which you install separately. Setup takes a few minutes — see [Getting Started](https://github.com/vanbaalon/wolfbook/blob/main/docs/getting-started.md).
 
-<p align="center">
-  <img src="docs/screenshot-debugger.png" alt="Mathematica-style Wolfram Language notebook in VS Code with live kernel evaluation, LaTeX typesetting, graphics output and debugger breakpoint" width="80%" />
-</p>
-
 ---
 
 ## Why Wolfbook?
@@ -35,6 +31,7 @@ Wolfbook is a Mathematica-style notebook frontend for VS Code. Create, edit and 
 - Works with **Wolfram Engine** (free) or **Mathematica**
 - Plain-text `.wb` / `.vsnb` notebooks — **diffable in Git**, readable by AI tools
 - Rich math output: **LaTeX / KaTeX**, **SVG / PNG graphics**,  **TikZ**
+- Interactive **3D graphics** and coordinate tooltips for 2D plots
 - **Live kernel access for AI agents** — Copilot, Claude Code, Codex, MCP-compatible tools
 - **Mid-evaluation abort**, **Dynamic[]** widgets, debugger and watch panel
 - Open source, Apache 2.0
@@ -59,22 +56,19 @@ Wolfbook is a Mathematica-style notebook frontend for VS Code. Create, edit and 
 
 ---
 
-## Screenshots
+## Recent features
 
-![Live variable watch panel and mid-evaluation selection in a Wolfram Language notebook](docs/screenshot-watchpanel.png)
-*Live watch of variables and mid-evaluation evaluate-selection feature — inspect expressions without Print statements, all while the kernel is running.*
+![Rotate a Wolfram Language Graphics3D output interactively inside a Wolfbook notebook](images/demos/3d-rotation.gif)
+*Interactive 3D output: drag a rendered `Graphics3D` result to rotate it directly in the notebook.*
 
-![Rich symbolic output rendered as LaTeX via KaTeX, with adaptive line-breaking and matrix pagination](docs/screenshot-latex.png)
-*Symbolic Mathematica output typeset with LaTeX via KaTeX. Adaptive line-breaking and matrix paging make even huge expressions readable.*
+![Open and convert an existing Mathematica NB notebook in Wolfbook](images/demos/nb-conversion.gif)
+*Open existing Mathematica `.nb` files as safe, read-only notebook views, then save an editable `.wb` copy.*
 
-![An AI agent calling Wolfbook's kernel tools: $Aport, Wolfram Language documentation lookup, and cell evaluation](docs/screenshot-aport.png)
-*An AI agent using Wolfbook's MCP tools — calling `$Aport`, looking up documentation, evaluating cells in the live Wolfram kernel.*
+![Format Wolfram Language code in a Wolfbook notebook cell](images/demos/formatting.gif)
+*Format Wolfram Language cells in place, including named-character conversion and indentation.*
 
-![Claude Code agent evaluating a Mathematica cell through the Wolfbook MCP server](docs/screenshot-ai.png)
-*An AI agent (Claude Code / Copilot / MCP-compatible) evaluating cells and inspecting results in a live Wolfram kernel.*
-
-![Inline graphics rendering: plots and SVG output from a Wolfram kernel inside a VS Code notebook](docs/screenshot-graphics.png)
-*AI agents can read your notebook content in an AI-friendly format, assist you in writing code, or solve mathematical problems from start to end with full numerical and analytic verification — producing a clean notebook for your inspection, debugging errors, and summarizing main findings. You can then export results to your LaTeX documents with ease, either using AI agents or manually.*
+![Inspect plot coordinates with an interactive tooltip in Wolfbook](images/demos/plot-tooltip.gif)
+*Hover over a 2D plot to inspect curve coordinates without leaving the notebook.*
 
 ---
 
@@ -90,6 +84,12 @@ Wolfbook is a Mathematica-style notebook frontend for VS Code. Create, edit and 
 - Abort the kernel without losing your kernel context, or restart with a clean kernel with one click — exactly like in Mathematica, but unique among VS Code notebook extensions
 - Escape-mode Greek entry: type `\[Alpha]`, `\[Beta]`, `\[Gamma]` and they get converted into symbols, or use [escape]a[escape] etc.
 - Watch any expression continuously; evaluate any selection mid-computation
+
+Select Wolfram Language code and press **Cmd+Shift+E** on macOS or
+**Ctrl+Shift+E** on Windows/Linux to evaluate it immediately. The result is
+rendered in the Watch panel using the selected LaTeX, source or SVG output
+format. Evaluate Selection works while another cell is running and preserves
+the editor selection, so the same expression can be evaluated repeatedly.
 
 ### Open your existing Mathematica `.nb` notebooks
 
@@ -259,4 +259,3 @@ If Wolfbook supports your research, a brief mention in the acknowledgements help
 Wolfbook was heavily inspired by and initially based on the official `vscode-wolfram` extension by Wolfram Research Inc. (Apache 2.0). The LSP client layer and kernel-finding logic originate from that project. The notebook frontend and the entire kernel backend have since been rewritten from scratch.
 
 Special thanks to **Ruben Myers** for his help compiling the Unix build of the native binaries — the WSTP bridge and the `btl` math renderer are native addons that must be built per platform, and that work is what makes Wolfbook usable outside macOS and Windows.
-

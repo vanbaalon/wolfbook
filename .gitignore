@@ -21,3 +21,8 @@ Docs/
 
 # Internal AI agent reference (lives in parent folder, not tracked here)
 AGENTS.md
+
+# Agent guidance lives at the workspace root and is Dropbox-synced only.
+# Guard against a stray copy ever being committed to the public repo.
+CLAUDE.md
+AGENTS.md

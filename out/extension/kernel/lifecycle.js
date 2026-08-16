@@ -510,7 +510,11 @@ async function launchKernel(self, WstpSession) {
         // Push initial config
         const cfg = self.config.getKernelRelatedConfigs();
         for (const [k, v] of Object.entries(cfg)) {
-            const vStr = typeof v === "string" ? `"${v}"` : String(v);
+            // String(true) is "true" — an ordinary symbol in WL, NOT True, which
+            // silently turns every boolean setting false on the kernel side.
+            const vStr = typeof v === "string"  ? `"${v}"`
+                       : typeof v === "boolean" ? (v ? "True" : "False")
+                       : String(v);
             await self.session.evaluate(`$setKernelConfig["${k}", ${vStr}]`, { interactive: false }).catch(() => {});
         }
 
@@ -690,6 +694,14 @@ async function launchKernel(self, WstpSession) {
         // so this never races with queued user cells.
         self.session.subWhenIdle('Quiet[ExportString[Graphics[{}],"SVG"]]').catch(() => {});
         scrollLog('[launchKernel] graphics warmup scheduled via subWhenIdle');
+
+        // Pre-warm the graphics OPTION machinery too.  The first AbsoluteOptions
+        // call of a session costs ~0.75 s to initialise and ~7 ms thereafter, and
+        // the interactive-3D mesh export needs it for PlotRange/Ticks/Lighting.
+        // Without this the first 3D output in a session pays the whole 0.75 s.
+        self.session.subWhenIdle('Quiet[Wolfbook`Private`wb3dWarmup[]]').catch(() => {});
+        self.session.subWhenIdle('Quiet[Wolfbook`Private`wb2dWarmup[]]').catch(() => {});
+        scrollLog('[launchKernel] 3D/2D option warmup scheduled via subWhenIdle');
 
         // Start keepalive heartbeat: pings kernel every 3 minutes via subWhenIdle.
         // Prevents macOS App Nap suspension; auto-relaunches if the kernel dies.

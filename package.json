@@ -3,7 +3,7 @@
   "displayName": "Wolfbook — Mathematica & Wolfram Language Notebooks",
   "description": "Mathematica-style Wolfram Language notebooks in VS Code. Open existing .nb files, run a live Wolfram kernel, render LaTeX/graphics, debug code, and let Copilot, Claude Code or MCP agents evaluate cells.",
   "publisher": "wolfbook",
-  "version": "2.8.7",
+  "version": "2.8.8",
   "engines": {
     "vscode": "^1.95.0"
   },
@@ -331,6 +331,16 @@
           "default": 0.8,
           "description": "Controls image output size",
           "order": 4
+        },
+        "wolfbook.notebook.rendering.interactive3D": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Attach interactive 3D data to `Graphics3D` outputs. The picture still renders as a static image \u2014 dragging it turns it into a rotatable WebGL view, and the **3D** output button opens it directly. Turn off to skip the extra work (roughly 70\u2013200 ms per 3D output) if you never rotate plots."
+        },
+        "wolfbook.notebook.rendering.plotTooltips": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Show a coordinate callout when hovering the curves of a 2D plot, the way Mathematica's `PlotHighlighting` does. The picture itself is unchanged; this only writes a small curve-data file next to it. Turn off to skip that work."
         },
         "wolfbook.notebook.rendering.outputFormat": {
           "type": "string",
@@ -1168,6 +1178,11 @@
         "icon": "$(zap)"
       },
       {
+        "command": "wolfbook.evaluateEditorExpression",
+        "title": "Wolfbook: Evaluate Wolfram Expression",
+        "icon": "$(play)"
+      },
+      {
         "command": "wolfbook.evaluateSelectionFormat",
         "title": "Wolfbook: Pick Eval-Selection Format"
       },
@@ -1364,7 +1379,7 @@
           "group": "1_modification@52"
         },
         {
-          "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook'",
+          "when": "editorTextFocus && (notebookType == 'extended-wolfram-notebook' || resourceExtname == .m || resourceExtname == .wl || resourceExtname == .wls || resourceExtname == .cdf)",
           "command": "wolfbook.evaluateSelection",
           "group": "wolframNotebook@1"
         },
@@ -1653,9 +1668,9 @@
         "when": "notebookEditorFocused && !notebookEditorTabFocused && notebookType == 'extended-wolfram-notebook'"
       },
       {
-        "command": "workbench.action.terminal.runSelectedText",
-        "key": "Shift+Enter",
-        "when": "resourceExtname == .nb || resourceExtname == .m || resourceExtname == .wl || resourceExtname == .wls || resourceExtname == .cdf"
+        "command": "wolfbook.evaluateEditorExpression",
+        "key": "shift+enter",
+        "when": "editorTextFocus && (resourceExtname == .m || resourceExtname == .wl || resourceExtname == .wls || resourceExtname == .cdf) && !suggestWidgetVisible"
       },
       {
         "command": "wolfbook.escapeKey",
@@ -1774,7 +1789,13 @@
         "command": "wolfbook.evaluateSelection",
         "key": "ctrl+shift+e",
         "mac": "cmd+shift+e",
-        "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook'"
+        "when": "editorTextFocus && (notebookType == 'extended-wolfram-notebook' || resourceExtname == .m || resourceExtname == .wl || resourceExtname == .wls || resourceExtname == .cdf)"
+      },
+      {
+        "command": "wolfbook.evaluateSelection",
+        "key": "ctrl+shift+e",
+        "mac": "ctrl+shift+e",
+        "when": "editorTextFocus && (notebookType == 'extended-wolfram-notebook' || resourceExtname == .m || resourceExtname == .wl || resourceExtname == .wls || resourceExtname == .cdf)"
       },
       {
         "command": "wolfbook.addSelectionToWatch",
@@ -4855,7 +4876,6 @@
     "eslint": "^7.32.0",
     "fork-ts-checker-webpack-plugin": "^6.5.3",
     "lodash": "^4.17.21",
-    "marked": "^4.3.0",
     "mocha": "^10.8.2",
     "string-argv": "^0.3.2",
     "style-loader": "^3.3.4",
@@ -4868,6 +4888,7 @@
   },
   "dependencies": {
     "domutils": "^2.8.0",
+    "marked": "^4.3.0",
     "katex": "^0.16.0",
     "open": "8.4.0",
     "path": "^0.12.7",

@@ -4,6 +4,52 @@ All notable changes to **Wolfbook** are documented here.
 
 ---
 
+## [2.8.8] - 2026-08-16
+
+### Added
+
+- **Interactive 3D graphics.** Drag `Graphics3D` and 3D plot outputs to switch
+  from the static preview to an in-place rotatable WebGL view. The **3D** output
+  control opens the interactive view directly.
+- **Coordinate tooltips for 2D plots.** Hover plotted curves to inspect their
+  coordinates without leaving the notebook.
+- Settings `wolfbook.notebook.rendering.interactive3D` and
+  `wolfbook.notebook.rendering.plotTooltips` independently disable the extra
+  interactive data when static output is preferred.
+
+### Changed
+
+- Updated the README demonstrations for 3D rotation, Mathematica `.nb`
+  conversion, notebook formatting and plot tooltips. Demo media now ships under
+  `images/demos/`, so links work in GitHub, the Marketplace and VS Code's local
+  extension details view.
+- Notebook formatting preserves the active selection and cursor position.
+
+### Fixed
+
+- **Evaluate Selection is reliable alongside Live Watch.**
+  **Cmd+Shift+E** (macOS) / **Ctrl+Shift+E** (Windows and Linux) evaluates the
+  selected Wolfram Language expression in the Watch panel, including while a
+  notebook cell is running. Selection evaluation and live-watch updates now
+  serialize access to the shared WSTP channel, preventing the spurious
+  “Evaluation returned no result” failure. The active selection and notebook
+  image context are preserved when focus moves to the Watch panel.
+- `Shift+Enter` in a read-only imported Mathematica `.nb` input cell now uses
+  Wolfbook's WSTP notebook controller instead of sending the expression to the
+  integrated terminal.
+- `Shift+Enter` in standalone `.wl`, `.m`, `.wls` and `.cdf` editors now
+  evaluates the selection—or the complete top-level expression under the cursor
+  when nothing is selected—through the Wolfbook WSTP kernel instead of the
+  integrated terminal. Recognised subexpressions run sequentially and their
+  InputForm results appear as transient gray editor decorations. The existing
+  **Cmd/Ctrl+Shift+E** selection evaluator remains available in these files and
+  renders the selected expression in the Watch panel, as it does in `.wb` cells.
+- Imported `.nb` graphics now replace their temporary filename placeholders
+  after rasterisation, including when notebook opening races extension
+  activation. Cached PNGs are reused on subsequent opens.
+
+---
+
 ## [2.8.7] - 2026-08-15
 
 ### Fixed — LaTeX `\\( … \\)` and `\\[ … \\]` now render as math

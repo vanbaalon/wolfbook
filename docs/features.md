@@ -42,6 +42,19 @@ Each code cell output has format buttons in its header. Two button sets are avai
 
 Double-click any format button to set it as the notebook default for that output type.
 
+### Interactive graphics
+
+- **3D rotation** — `Graphics3D` and 3D plot outputs initially display as a
+  lightweight static image. Drag the image, or use its **3D** output button, to
+  open the interactive WebGL view and rotate it in place.
+- **2D plot tooltips** — hover a curve to inspect its coordinates. The visual
+  output remains a normal image; Wolfbook stores a small curve-data sidecar for
+  hit testing.
+
+Both features are enabled by default. Disable them independently with
+`wolfbook.notebook.rendering.interactive3D` and
+`wolfbook.notebook.rendering.plotTooltips` if you prefer static-only graphics.
+
 ### LaTeX rendering pipeline
 
 Wolfbook has two paths for typesetting symbolic output:
@@ -189,6 +202,9 @@ Powered by Wolfram's `LSPServer` package: hover for usage messages, completions,
 
 Press `Opt+Shift+F` (Mac) / `Alt+Shift+F` (Windows) to format the current cell. Also converts named symbols (`\[Alpha]`) to Unicode.
 
+Formatting works directly inside notebook cell editors and preserves the active
+selection and cursor position.
+
 ### Multi-cursor
 
 Click a symbol, then press `Cmd+D` / `Ctrl+D` repeatedly to select all occurrences. Type a new name — all instances rename simultaneously.
@@ -267,4 +283,3 @@ This means the collab mode setting only controls whether the second editor is op
 | `wolfbook.notebook.rendering.imageScalingFactor` | `0.8` | Controls output image size. |
 | `wolfbook.notebook.rendering.invertBrightnessInDarkThemes` | `true` | Invert image brightness in dark themes. |
 | `wolfbook.editor.globalSymbolColor` | `""` | Colour for `Global`` context symbols. Leave empty for auto (theme-aware). Set `off` to disable. |
-

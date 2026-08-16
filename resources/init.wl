@@ -14,7 +14,15 @@ $CharacterEncoding = "UTF-8";
 WBPrint; WBVersion; WBInclude; WBExport; WBPrompt;
 VsCodeRender; VsCodeRenderFull; VsCodeRenderShallow;
 VsCodeRenderNth; VsCodeRenderLast; VsCodeEvalWrapper;
+(* VsCodeRenderExpr is called by BARE NAME from editor/evaluateSelection.js over
+   subAuto (eval-selection + hover doc lookup), so it must live in Global` like the
+   other user-facing entry points.  Without this line render-expr.wl defines it as
+   Wolfbook`Private`VsCodeRenderExpr, the extension's call interns an empty
+   Global`VsCodeRenderExpr shell, the expression comes back unevaluated instead of a
+   string, and the Watch panel reports "Evaluation returned no result." *)
+VsCodeRenderExpr;
 VsCodeSyntaxCheck; VsCodeSplitCode; VsCodeOpenAsText; VsCodeDynExportValue;
+VsCodeManipUpdate;
 VsCodeSetImgDir; VsCodeCleanupImgDir; VsCodeSymbolMarkdown;
 $setKernelConfig;   (* called from lifecycle.js + controller.js after init.wl loads *)
 ClearGlobals;
@@ -105,6 +113,21 @@ $setKernelConfig[name_String, value_] := ($config[name] = value; Null);
 $getKernelConfig[name_String]           := If[AssociationQ[$config], Lookup[$config, name, Missing["NotFound", name]], Missing["NotFound", name]];
 $getKernelConfig[name_String, default_] := If[AssociationQ[$config], Lookup[$config, name, default], default];
 
+
+(* ===== Manipulate -> HTML sliders ===== *)
+Check[Get[FileNameJoin[{$wolframResourceDir, "wbmanip.wl"}]],
+      $wbLogError["Failed to load wbmanip.wl from: " <> ToString[$wolframResourceDir]]];
+
+(* ===== Graphics3D -> mesh JSON (interactive WebGL viewer) ===== *)
+(* Must load before render-expr.wl, whose WL3D branch calls wb3dMeshJSON. *)
+Check[Get[FileNameJoin[{$wolframResourceDir, "wb3d.wl"}]],
+      $wbLogError["Failed to load wb3d.wl from: " <> ToString[$wolframResourceDir]]];
+
+(* ===== 2D plot -> curve JSON (hover coordinate callout) ===== *)
+(* Must load after wb3d.wl (reuses wb3dToRGB/wb3dAbsOpt) and before
+   render-expr.wl, whose SVG and PNG branches call wb2dPlotAttrs. *)
+Check[Get[FileNameJoin[{$wolframResourceDir, "wb2d.wl"}]],
+      $wbLogError["Failed to load wb2d.wl from: " <> ToString[$wolframResourceDir]]];
 
 (* ===== Render engine: helpers + VsCodeRenderExpr ===== *)
 (* $wolframResourceDir is injected by lifecycle.js via Block before Get[init.wl] *)
@@ -406,6 +429,7 @@ Protect[
     $setKernelConfig,
     VsCodeSetImgDir, VsCodeCleanupImgDir,
     VsCodeSymbolMarkdown,
+    VsCodeRenderExpr,   (* Protected => ClearGlobals[] cannot strip its definitions *)
     WBPrint, WBInclude, WBExport, WBPrompt,
     ClearGlobals
 ];

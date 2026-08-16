@@ -67,6 +67,12 @@ pre.vscode-wolfram-text-output, pre.vscode-wolfram-tex-source {
 button.wl-nb-default-fmt { animation:wl-fmt-flash 1.5s ease-out forwards; }
 button[data-fmt-key]:hover { opacity:0.9 !important; }
 img.vscode-wolfram-svg-output, img.vscode-wolfram-png-output { background: transparent; }
+/* Manipulate: kernel-driven sliders. Kept visually quiet so the control strip
+   never competes with the output it drives. */
+.wl-manip-slider { accent-color: var(--vscode-button-background, #0e639c); height: 14px; cursor: pointer; }
+.wl-manip-slider:focus { outline: 1px solid var(--vscode-focusBorder, #007fd4); outline-offset: 2px; }
+.wl-manip-controls { user-select: none; }
+.wl-manip-result { min-height: 1em; }
 .vscode-wolfram-svg-output > svg > rect:first-child { fill: none !important; }
 div.mathml-output { overflow-x:auto; }
 div.vscode-wolfram-tex-output { overflow-x:auto; padding: 0; }

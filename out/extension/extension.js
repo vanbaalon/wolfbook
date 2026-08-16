@@ -1441,7 +1441,13 @@ async function activate(context) {
         
         // Clear the output
         const edit = new vscode.WorkspaceEdit();
-        const nbEdit = vscode.NotebookEdit.updateCellOutputs(cell.index, []);
+        const cellData = new vscode.NotebookCellData(
+            cell.kind, cell.document.getText(), cell.document.languageId);
+        cellData.metadata = cell.metadata;
+        cellData.executionSummary = cell.executionSummary;
+        cellData.outputs = [];
+        const nbEdit = vscode.NotebookEdit.replaceCells(
+            new vscode.NotebookRange(cell.index, cell.index + 1), [cellData]);
         edit.set(cell.notebook.uri, [nbEdit]);
         await vscode.workspace.applyEdit(edit);
         devLog(LOG_CHANNELS.EXTENSION, '[Extension] Cell output cleared');

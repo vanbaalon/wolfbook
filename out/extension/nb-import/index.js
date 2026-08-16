@@ -302,19 +302,17 @@ async function runGraphicsPass(vscode, doc, opts) {
         const cell = plain[idx];
         const live = doc.cellAt(idx);
         if (!live) continue;
-        if (cell.kind === 1) {
-            // Replace the cell rather than edit its text: a markdown cell that is
-            // showing its rendered preview does not re-render on a programmatic
-            // text edit, so the reader would keep seeing the placeholder until
-            // they clicked into the cell.
-            const data = new vscode.NotebookCellData(vscode.NotebookCellKind.Markup, cell.value, 'markdown');
-            data.metadata = cell.metadata;
-            nbEdits.push(vscode.NotebookEdit.replaceCells(new vscode.NotebookRange(idx, idx + 1), [data]));
-        } else {
-            nbEdits.push(vscode.NotebookEdit.updateCellOutputs(
-                idx, cell.outputs.map(o => plainOutputToVscode(vscode, o))));
-            nbEdits.push(vscode.NotebookEdit.updateCellMetadata(idx, cell.metadata));
-        }
+        // VS Code exposes output-only replacement through NotebookCellExecution,
+        // but there is no output edit in the public WorkspaceEdit API. Replace
+        // the imported cell while preserving all of its content and metadata.
+        // This also forces rendered markdown previews to refresh.
+        const kind = cell.kind === 1 ? vscode.NotebookCellKind.Markup : vscode.NotebookCellKind.Code;
+        const data = new vscode.NotebookCellData(kind, cell.value,
+            cell.kind === 1 ? 'markdown' : cell.languageId);
+        data.metadata = cell.metadata;
+        data.outputs = cell.outputs.map(o => plainOutputToVscode(vscode, o));
+        nbEdits.push(vscode.NotebookEdit.replaceCells(
+            new vscode.NotebookRange(idx, idx + 1), [data]));
     }
     if (nbEdits.length) edit.set(doc.uri, nbEdits);
     await vscode.workspace.applyEdit(edit);
@@ -534,13 +532,45 @@ function registerNbImport(context) {
         vscode.commands.registerCommand('wolfbook.refineNbImportWithKernel', () => refineOpenNotebook(vscode)),
     );
 
+    // Opening a notebook activates this extension through its serializer.  VS Code
+    // can finish creating the NotebookDocument before activation reaches this
+    // registration point, so onDidOpenNotebookDocument alone is racy.  Cover the
+    // open event, active-editor changes, and documents already visible when the
+    // listener is installed.  The guard only suppresses concurrent passes; a later
+    // trigger may retry graphics that genuinely failed.
+    const graphicsInFlight = new WeakSet();
+    const scheduleGraphicsPass = (doc) => {
+        if (doc.notebookType !== NOTEBOOK_TYPE || !isNbUri(doc.uri)) return;
+        if (graphicsInFlight.has(doc)) return;
+        graphicsInFlight.add(doc);
+        setTimeout(() => {
+            runGraphicsPass(vscode, doc, {}).catch((e) => {
+                vscode.window.showWarningMessage(
+                    'Wolfbook: could not apply imported graphics — ' + String(e && e.message || e));
+            }).finally(() => graphicsInFlight.delete(doc));
+        }, 0);
+    };
+
+    context.subscriptions.push(
+        vscode.workspace.onDidOpenNotebookDocument(scheduleGraphicsPass),
+        vscode.window.onDidChangeActiveNotebookEditor((editor) => {
+            if (editor) scheduleGraphicsPass(editor.notebook);
+        })
+    );
+
+    // Recover documents whose open event raced extension activation.  The delayed
+    // scan also covers the serializer completing just after registerNbImport().
+    const scanOpenDocuments = () => {
+        for (const doc of vscode.workspace.notebookDocuments) scheduleGraphicsPass(doc);
+        const active = vscode.window.activeNotebookEditor;
+        if (active) scheduleGraphicsPass(active.notebook);
+    };
+    scanOpenDocuments();
+    const recoveryTimer = setTimeout(scanOpenDocuments, 500);
+    context.subscriptions.push(new vscode.Disposable(() => clearTimeout(recoveryTimer)));
+
     context.subscriptions.push(vscode.workspace.onDidOpenNotebookDocument((doc) => {
         if (doc.notebookType !== NOTEBOOK_TYPE || !isNbUri(doc.uri)) return;
-
-        // Rasterise plots and pasted images into img/<name>/ and patch them in.
-        // Anything already on disk was resolved during deserialisation, so this
-        // only runs when a graphic is genuinely being rendered for the first time.
-        runGraphicsPass(vscode, doc, {}).catch(() => {});
 
         // One-time explanation the first time a .nb is opened.
         if (context.globalState.get('wolfbook.nbImportNoticeSeen')) return;

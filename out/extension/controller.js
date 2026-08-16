@@ -960,6 +960,71 @@ class WolframNotebookKernel {
                 }
                 if (!found) scrollLog('scroll-to-output — outputId not found in any visible cell');
 
+            } else if (message.type === 'manipulate-set' && message.manipId) {
+                // A Manipulate slider moved. Re-evaluate the body out-of-band via
+                // subAuto so it still responds while another cell is running, then
+                // hand the new HTML back to the renderer, which patches ONLY the
+                // result region — replacing the whole output would destroy the
+                // slider the user is still dragging.
+                const { manipId, sets, outputId } = message;
+                if (!/^m[a-z0-9]+$/i.test(manipId)) return;
+                const pairs = Object.entries(sets || {})
+                    .filter(([k, v]) => /^[A-Za-z$][A-Za-z0-9$]*$/.test(k) && Number.isFinite(Number(v)))
+                    .map(([k, v]) => `"${k}"->${Number(v)}`);
+                if (!pairs.length) return;
+
+                // Latest-wins: a fast scrub must not queue one kernel call per pixel.
+                this._manipPending = this._manipPending || new Map();
+                this._manipInFlight = this._manipInFlight || new Set();
+                this._manipPending.set(manipId, { pairs, outputId });
+                if (this._manipInFlight.has(manipId)) return;
+                this._manipInFlight.add(manipId);
+
+                const _scale = Number(this.config.get('imageScale') || 0.8);
+                try {
+                    while (this._manipPending.has(manipId)) {
+                        const job = this._manipPending.get(manipId);
+                        this._manipPending.delete(manipId);
+                        const _expr = `VsCodeManipUpdate["${manipId}", <|${job.pairs.join(',')}|>, ${_scale}]`;
+                        let raw;
+                        try {
+                            raw = await Promise.race([
+                                this.session.subAuto(_expr),
+                                new Promise((_, rej) => setTimeout(
+                                    () => rej(new Error('manipulate timeout (30s)')), 30000)),
+                            ]);
+                        } catch (e) {
+                            if (DEV_MODE) this.outputPanel.print(`[Manipulate] ${e.message}`);
+                            break;
+                        }
+                        if (!raw || raw.type !== 'string' || !raw.value) break;
+                        // Same post-processing the normal output path applies, so
+                        // images get dimensions and LaTeX boxes become KaTeX.
+                        let _html = this._fixImageUris(raw.value);
+                        try {
+                            const _info = job.outputId ? this._outputRegistry.get(job.outputId) : null;
+                            _html = this._processWLLatexBoxes(_html, undefined, undefined, undefined,
+                                undefined, _info?.cell?.notebook?.uri);
+                        } catch (_) {}
+                        this._rendererMessaging.postMessage(
+                            { type: 'manipulate-result', manipId, html: _html }, event.editor);
+                    }
+                } finally {
+                    this._manipInFlight.delete(manipId);
+                }
+
+            } else if (message.type === 'resize-output' && message.outputId) {
+                // Reader dragged a plot's corner. Persist the new display size by
+                // patching the stored output HTML — no kernel round trip, and the
+                // image file itself is untouched.
+                const info = this._outputRegistry.get(message.outputId);
+                if (!info) return;
+                try {
+                    await this._resizeOutputImage(info.cell, message.outputId,
+                        message.imgIndex, Number(message.width) || 0, Number(message.height) || 0);
+                } catch (rsErr) {
+                    if (DEV_MODE) this.outputPanel.print(`[ResizeOutput] ${rsErr.message}`);
+                }
             } else if (message.type === 'reformat-output' && message.outputId) {
                 // Format-switch button clicked in renderer: re-render Out[N] in the
                 // requested format and replace the existing cell output in place.
@@ -1181,7 +1246,11 @@ class WolframNotebookKernel {
             if (this.session) {
                 const cfg = config.getKernelRelatedConfigs();
                 for (const [k, v] of Object.entries(cfg)) {
-                    const vStr = typeof v === "string" ? `"${v}"` : String(v);
+                    // String(true) is "true" — an ordinary symbol in WL, NOT True, which
+            // silently turns every boolean setting false on the kernel side.
+            const vStr = typeof v === "string"  ? `"${v}"`
+                       : typeof v === "boolean" ? (v ? "True" : "False")
+                       : String(v);
                     this.session.evaluate(`$setKernelConfig["${k}", ${vStr}]`, { interactive: false }).catch(() => {});
                 }
             }
@@ -1415,6 +1484,7 @@ class WolframNotebookKernel {
     makeTruncationBanner(outputId, headerText, shortLines = null) { return _output.makeTruncationBanner(this, outputId, headerText, shortLines); }
     async _replaceOutputByUuid(cell, uuid, fullHtml, outN) { return _output.replaceOutputByUuid(this, cell, uuid, fullHtml, outN); }
     async _replaceOutputById(cell, outputId, contentHtml, outN, outName, newFormat, bannerHtml = '') { return _output.replaceOutputById(this, cell, outputId, contentHtml, outN, outName, newFormat, bannerHtml); }
+    async _resizeOutputImage(cell, outputId, imgIndex, width, height) { return _output.resizeOutputImage(this, cell, outputId, imgIndex, width, height); }
 
     // -----------------------------------------------------------------------
     async execute(cells, _notebook, _controller) {

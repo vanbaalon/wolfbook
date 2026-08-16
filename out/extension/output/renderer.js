@@ -77,7 +77,9 @@ function _loadBtlAddon() {
 // Output type sets — never return an expr-only format for graphics or vice-versa
 
 const EXPR_ONLY_FMTS = new Set(['WLLatex','SVGT','MathML','TeX','TeXSrc']);
-const GFX_ONLY_FMTS  = new Set(['SVGSrc']);
+// WL3D emits a PNG poster + a sibling mesh JSON for the interactive 3D viewer;
+// it is meaningless for a symbolic output, so it falls back to 'Auto' there.
+const GFX_ONLY_FMTS  = new Set(['SVGSrc','WL3D']);
 
 // ---------------------------------------------------------------------------
 // Format resolution
@@ -684,6 +686,58 @@ async function replaceOutputById(self, cell, outputId, contentHtml, outN, outNam
     tempExec.end(true);
 }
 
+// Rewrite one plot image's width/height inside an output's stored HTML, so a
+// size the reader dragged survives save and reload.
+//
+// This edits the stored HTML rather than re-rendering: the picture on disk is
+// untouched and only the display size changes. injectImageDimensions leaves an
+// existing width= alone (its negative lookahead), so nothing puts the kernel's
+// size back afterwards. width <= 0 means "reset to the kernel's own size".
+const IMG_TAG_RE = /<img\s[^>]*class="vscode-wolfram-(?:svg|png)-output"[^>]*>/g;
+
+function setImageSizeInHtml(html, imgIndex, width, height) {
+    let n = -1;
+    return html.replace(IMG_TAG_RE, (tag) => {
+        n++;
+        if (n !== imgIndex) return tag;
+        let core = tag.replace(/\s*\/?>\s*$/, '')
+                      .replace(/\s+(?:width|height)="[^"]*"/g, '');
+        if (width > 0) {
+            core += ` width="${Math.round(width)}"`;
+            if (height > 0) core += ` height="${Math.round(height)}"`;
+        }
+        return core + '/>';
+    });
+}
+
+async function resizeOutputImage(self, cell, outputId, imgIndex, width, height) {
+    const allOutputs = [...cell.outputs];
+    let targetIndex = -1, html = null;
+    for (let i = 0; i < allOutputs.length; i++) {
+        const items = allOutputs[i].items || [];
+        if (!items.length) continue;
+        try {
+            const text = new TextDecoder().decode(items[0].data);
+            if (text.includes(`data-output-id="${outputId}"`)) {
+                targetIndex = i; html = text; break;
+            }
+        } catch (_) {}
+    }
+    if (targetIndex === -1 || html === null) {
+        if (DEV_MODE) self.outputPanel.print(`[resizeOutput] outputId ${outputId} not found`);
+        return;
+    }
+    const next = setImageSizeInHtml(html, imgIndex | 0, width, height);
+    if (next === html) return;              // nothing changed — don't dirty the file
+    allOutputs[targetIndex] = new vscode.NotebookCellOutput([
+        vscode.NotebookCellOutputItem.text(next, "x-application/wolfram-language-html")
+    ]);
+    const tempExec = self._controller.createNotebookCellExecution(cell);
+    tempExec.start();
+    tempExec.replaceOutput(allOutputs);
+    tempExec.end(true);
+}
+
 // ---------------------------------------------------------------------------
 // Extract a readable text/plain string from a rendered output HTML block.
 // Used by execution/checkout.js (live evaluation) and serializer.js (on load)
@@ -928,6 +982,8 @@ module.exports = {
     makeTruncationBanner,
     replaceOutputByUuid,
     replaceOutputById,
+    resizeOutputImage,
+    setImageSizeInHtml,
     extractPlainText,
     renderPageForPager,
     injectImageDimensions,

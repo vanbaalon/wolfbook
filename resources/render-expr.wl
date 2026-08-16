@@ -128,7 +128,19 @@ VsCodeRenderExpr[expr_, format_String, scale_?NumericQ, searchPat_String:""] :=
   Module[
     {fmt, svgStr, svgStart, pngData, pngStr, mathmlStr, html, mathStart,
      rasImg, rasData, rasStr, rasFname, rasFpath, texStr,
-     fname, fpath, hashStr},
+     fname, fpath, hashStr, meshJson, meshFname, meshFpath, meshAttrs, manipHtml,
+     tipAttrs},
+
+    (* ---- Manipulate: real sliders, before any format dispatch ----
+       Manipulate is HoldAll and headless it stays unevaluated, so MakeBoxes on
+       it yields front-end widget boxes that BTL can only render as garbage.
+       wbManipIntercept reads the specification instead and emits sliders wired
+       back to the kernel; it returns $Failed for any control we do not model,
+       in which case we fall through to the old behaviour. *)
+    If[Head[expr] === Manipulate,
+       manipHtml = Quiet[Check[wbManipIntercept[expr, scale], $Failed]];
+       If[StringQ[manipHtml], Return[manipHtml]]];
+
     fmt = If[format === "Auto",
              If[UseSvgQ[] && graphicsQ[expr], "SVG",
                 If[graphicsQ[expr], "MathML", "WLLatex"]],
@@ -387,6 +399,42 @@ VsCodeRenderExpr[expr_, format_String, scale_?NumericQ, searchPat_String:""] :=
         ]
     ];
 
+    (* ---- WL3D path: interactive WebGL mesh for Graphics3D ---- *)
+    (* Opt-in only (the "3D" output button); never chosen by "Auto".  Emits the
+       normal PNG poster PLUS a sibling wl3d_<hash>.json describing the scene,
+       and hangs data-wl-mesh / data-wl-mesh-src on the <img>.  The renderer
+       swaps in a three.js canvas when it sees those; without the renderer (a
+       saved notebook, a plain reload) the PNG is what shows, so the output is
+       never worse than it is today.
+
+       wb3dMeshJSON is pure in-kernel (resources/wb3d.wl) — it must never reach
+       the front-end IPC path that makes ExportString[g3d,"SVG"] hang. *)
+    If[fmt === "WL3D",
+        If[!FreeQ[expr, _Graphics3D],
+            If[$wolframImgDir === "" || StringLength[$wolframImgDir] == 0,
+                Return["<pre class=\"vscode-wolfram-text-output\">Image dir not configured — cannot render graphics.</pre>"]];
+            (* PNG poster first: it is the fallback and the saved artefact *)
+            hashStr = IntegerString[Hash[expr], 36];
+            fname = "wl_" <> hashStr <> ".png";
+            fpath = FileNameJoin[{$wolframImgDir, fname}];
+            If[!FileExistsQ[fpath],
+                Quiet[CheckAbort[TimeConstrained[Export[fpath, expr, "PNG",
+                    Background -> None, ImageSize -> Automatic, ImageResolution -> 144], 45, $Failed], $Failed]]];
+            meshAttrs = wb3dMeshAttrs[expr];
+            (* data-wl-3d-open tells the renderer to open the viewer straight
+               away, because the user explicitly asked for the 3D format. *)
+            If[meshAttrs =!= "", meshAttrs = meshAttrs <> " data-wl-3d-open=\"1\""];
+            If[FileExistsQ[fpath],
+                Return["<img class=\"vscode-wolfram-png-output\" data-wl-img=\"" <>
+                       fpath <> "\" src=\"" <>
+                       $wolframImgRelPrefix <> "/" <> fname <> "\"" <> meshAttrs <> "/>"]];
+            Return["<pre class=\"vscode-wolfram-text-output\">Could not render this 3D graphic.</pre>"]
+        ,
+            (* not 3D content — fall through to the ordinary image path *)
+            fmt = "SVG"
+        ]
+    ];
+
     (* ---- SVG path: Graphics → SVG/PNG vector; non-graphics → Rasterize → PNG ---- *)
     If[fmt === "SVG",
         If[graphicsQ[expr],
@@ -416,9 +464,17 @@ VsCodeRenderExpr[expr_, format_String, scale_?NumericQ, searchPat_String:""] :=
                     fname = "wl_" <> hashStr <> ".svg";
                     fpath = FileNameJoin[{$wolframImgDir, fname}];
                     If[!FileExistsQ[fpath], Quiet[Export[fpath, svgStr, "String"]]];
+                    (* Hover coordinate callout: ship the sampled curves next to
+                       the picture so the webview can redraw Mathematica's own
+                       XYLabel/InterpolatedBall highlight.  Opt OUT only on an
+                       explicit False (a missing setting arrives as the symbol
+                       `undefined`, which TrueQ would read as "off"). *)
+                    tipAttrs = If[$getKernelConfig["plotTooltips", True] =!= False,
+                                  Quiet[Check[wb2dPlotAttrs[expr], ""]], ""];
+                    If[!StringQ[tipAttrs], tipAttrs = ""];
                     Return["<img class=\"vscode-wolfram-svg-output\" data-wl-img=\"" <>
                            fpath <> "\" src=\"" <>
-                           $wolframImgRelPrefix <> "/" <> fname <> "\"/>"]
+                           $wolframImgRelPrefix <> "/" <> fname <> "\"" <> tipAttrs <> "/>"]
                 ]
             ];
             (* SVG timed out (>10s) OR 3D graphics (SVG skipped) — PNG fallback.
@@ -431,10 +487,29 @@ VsCodeRenderExpr[expr_, format_String, scale_?NumericQ, searchPat_String:""] :=
                 If[!FileExistsQ[fpath],
                     Quiet[CheckAbort[TimeConstrained[Export[fpath, expr, "PNG",
                         Background -> None, ImageSize -> Automatic, ImageResolution -> 144], 45, $Failed], $Failed]]];
+                (* Attach the interactive mesh to ordinary 3D output too: someone
+                   who mistakes the picture for Mathematica's and drags it should
+                   get rotation, not a dead image. No data-wl-3d-open, so it stays
+                   a still image until that drag happens. *)
+                (* Opt OUT only on an explicit False. TrueQ[] here was fragile:
+                   any non-True value (a missing setting arriving as the symbol
+                   `undefined`, Null, Missing) silently disabled the feature. *)
+                meshAttrs = If[!FreeQ[expr, _Graphics3D] &&
+                               $getKernelConfig["interactive3D", True] =!= False,
+                               wb3dMeshAttrs[expr], ""];
+                (* A 2D plot lands here only when ExportString["SVG"] timed out.
+                   The mapping is fraction-based, so the 144-dpi raster needs no
+                   special handling.  The FreeQ guard keeps mesh and plot attrs
+                   mutually exclusive: one <img> is never both. *)
+                tipAttrs = If[FreeQ[expr, _Graphics3D] &&
+                              $getKernelConfig["plotTooltips", True] =!= False,
+                              Quiet[Check[wb2dPlotAttrs[expr], ""]], ""];
+                If[!StringQ[tipAttrs], tipAttrs = ""];
                 If[FileExistsQ[fpath],
                     Return["<img class=\"vscode-wolfram-png-output\" data-wl-img=\"" <>
                            fpath <> "\" src=\"" <>
-                           $wolframImgRelPrefix <> "/" <> fname <> "\"/>"]
+                           $wolframImgRelPrefix <> "/" <> fname <> "\"" <> meshAttrs <>
+                           tipAttrs <> "/>"]
                 ]
             ];
             (* No imgDir — cannot render graphics without an image directory *)

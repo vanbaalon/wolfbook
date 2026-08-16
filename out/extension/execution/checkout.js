@@ -377,8 +377,15 @@ async function checkoutExecutionQueue(self) {
                 const _filtered = _c.outputs.filter(
                     o => !o.metadata?.wolfbook_wbp
                 );
-                if (_filtered.length < _c.outputs.length)
-                    _wbpEdits.push(vscode.NotebookEdit.updateCellOutputs(_c.index, _filtered));
+                if (_filtered.length < _c.outputs.length) {
+                    const _cellData = new vscode.NotebookCellData(
+                        _c.kind, _c.document.getText(), _c.document.languageId);
+                    _cellData.metadata = _c.metadata;
+                    _cellData.executionSummary = _c.executionSummary;
+                    _cellData.outputs = _filtered;
+                    _wbpEdits.push(vscode.NotebookEdit.replaceCells(
+                        new vscode.NotebookRange(_c.index, _c.index + 1), [_cellData]));
+                }
             });
             if (_wbpEdits.length > 0) {
                 _wbpWsEdit.set(_nbk.uri, _wbpEdits);
@@ -1628,6 +1635,15 @@ function cleanupImgDir(self, notebook, imgDir) {
                         for (const m of html.matchAll(/data-wl-img="([^"]+)"/g)) {
                             live.add(m[1]);
                         }
+                        // Interactive-3D mesh JSON sits beside the PNG it belongs to
+                        // and is referenced only by this attribute.
+                        for (const m of html.matchAll(/data-wl-mesh="([^"]+)"/g)) {
+                            live.add(m[1]);
+                        }
+                        // Same arrangement for the 2D hover-callout curve data.
+                        for (const m of html.matchAll(/data-wl-plot="([^"]+)"/g)) {
+                            live.add(m[1]);
+                        }
                     } catch (_) {}
                 }
             }
@@ -1662,7 +1678,11 @@ function cleanupImgDir(self, notebook, imgDir) {
         const files = fs.readdirSync(imgDir);
         let deleted = 0, spared = 0;
         for (const fname of files) {
-            if (!/\.(svg|png)$/i.test(fname)) continue;
+            // Only files this extension generates are ever collected. wl3d_*.json
+            // are the interactive-3D meshes, wl2d_*.json the 2D hover-callout
+            // curves; a stray .json the user dropped here must not be touched.
+            if (!/\.(svg|png)$/i.test(fname) && !/^wl3d_[^/]*\.json$/i.test(fname)
+                && !/^wl2d_[^/]*\.json$/i.test(fname)) continue;
             const fpath = path.join(imgDir, fname);
             if (live.has(fpath)) continue;
             // Check mtime — skip recently-written files (still being attached to a cell)

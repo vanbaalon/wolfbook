@@ -44,11 +44,20 @@ class NotebookConfig {
         const configNames = [
             "notebook.rendering.invertBrightnessInDarkThemes",
             "notebook.rendering.imageScalingFactor",
-            "notebook.rendering.outputFormat"
+            "notebook.rendering.outputFormat",
+            // gates the interactive-3D mesh emitted alongside Graphics3D images
+            "notebook.rendering.interactive3D",
+            // gates the curve data emitted alongside 2D plot images (hover callout)
+            "notebook.rendering.plotTooltips"
         ];
         let config = {};
         configNames.forEach(name => {
-            config[name.split('.').pop()] = configCompat.getSetting(name);
+            const v = configCompat.getSetting(name);
+            // A setting VS Code has not registered yet reads back as undefined.
+            // Sending it would push the literal symbol `undefined` into the kernel
+            // and poison the option (TrueQ[undefined] is False), so omit the key
+            // entirely and let the kernel-side default apply.
+            if (v !== undefined && v !== null) config[name.split('.').pop()] = v;
         });
         console.log('[NotebookConfig] Kernel configs:', config);
         return config;

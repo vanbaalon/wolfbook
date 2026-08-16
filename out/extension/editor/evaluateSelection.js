@@ -17,6 +17,7 @@ const vscode = require('vscode');
 const path   = require('path');
 const fs     = require('fs');
 const { scrollLog } = require('../utils/dev-logger');
+const { splitIntoSubexpressions } = require('../utils/wl-parse');
 
 // Format options presented to the user
 const FORMAT_OPTIONS = [
@@ -30,6 +31,82 @@ let _currentFormat = 'WLLatex';
 let _statusBarItem = null;
 let _watchPanel    = null;   // WatchPanelProvider instance (set by register())
 let _inFlight      = false;
+let _editorResultDecoration = null;
+const _editorResults = new Map();
+
+function _wlResultText(result) {
+    if (result?.result?.type === 'abort') return '(aborted)';
+    if (result?.result?.type !== 'string') return '(no output)';
+    return String(result.result.value || 'Null')
+        .replace(/\\:([0-9A-Fa-f]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
+        .replace(/[\r\n]+/g, ' ')
+        .slice(0, 500);
+}
+
+async function evaluateEditorExpression(getController) {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) return;
+    const doc = editor.document;
+    const sel = editor.selection;
+    let parts;
+    let baseLine = 0;
+
+    if (!sel.isEmpty) {
+        // Selection is the hard evaluation boundary: never include surrounding code.
+        baseLine = sel.start.line;
+        parts = splitIntoSubexpressions(doc.getText(sel));
+    } else {
+        // With no selection, evaluate the complete top-level expression under
+        // the cursor (which may span several physical lines).
+        const all = splitIntoSubexpressions(doc.getText());
+        const line = sel.active.line;
+        const current = all.find(p => line >= p.startLine && line <= p.endLine);
+        parts = current ? [current] : [];
+    }
+    if (!parts.length || !parts.some(p => p.text.trim())) return;
+
+    const ctrl = getController();
+    if (!ctrl) return;
+    if (!ctrl.session || ctrl.kernelStatusString !== 'resolved') {
+        try { await ctrl.launchKernel(); }
+        catch (e) {
+            vscode.window.showErrorMessage('Could not start the Wolfram kernel: ' + String(e && e.message || e));
+            return;
+        }
+    }
+    if (!ctrl.session || ctrl.kernelStatusString !== 'resolved') {
+        vscode.window.showWarningMessage('The Wolfram kernel is not ready.');
+        return;
+    }
+
+    const decorations = [];
+    for (const part of parts) {
+        const source = part.text.trim();
+        if (!source) continue;
+        const wrapped = 'Block[{$wbEditorResult$},$wbEditorResult$=(' + source + ');' +
+            'If[StringQ[$wbEditorResult$],$wbEditorResult$,ToString[$wbEditorResult$,InputForm]]]';
+        try {
+            const result = await ctrl.session.evaluate(wrapped, { interactive: false });
+            const endLine = Math.min(doc.lineCount - 1, baseLine + part.endLine);
+            const end = doc.lineAt(endLine).range.end;
+            decorations.push({
+                range: new vscode.Range(end, end),
+                renderOptions: { after: { contentText: '    ⟹ ' + _wlResultText(result) } },
+                hoverMessage: new vscode.MarkdownString('```wolfram\n' + _wlResultText(result) + '\n```'),
+            });
+        } catch (e) {
+            const endLine = Math.min(doc.lineCount - 1, baseLine + part.endLine);
+            const end = doc.lineAt(endLine).range.end;
+            decorations.push({
+                range: new vscode.Range(end, end),
+                renderOptions: { after: { contentText: '    ⟹ error: ' + String(e && e.message || e).slice(0, 300) } },
+            });
+            break;
+        }
+    }
+    _editorResults.set(doc.uri.toString(), decorations);
+    editor.setDecorations(_editorResultDecoration, decorations);
+}
 
 // ── Status bar ──────────────────────────────────────────────────────────
 
@@ -57,7 +134,9 @@ function _updateStatusBar() {
 
 function _updateStatusBarVisibility() {
     const nbEditor = vscode.window.activeNotebookEditor;
-    if (nbEditor && nbEditor.notebook.notebookType === 'extended-wolfram-notebook') {
+    const textEditor = vscode.window.activeTextEditor;
+    const isWolframFile = textEditor && textEditor.document.languageId === 'wolfram';
+    if ((nbEditor && nbEditor.notebook.notebookType === 'extended-wolfram-notebook') || isWolframFile) {
         _statusBarItem.show();
     } else {
         _statusBarItem.hide();
@@ -80,17 +159,34 @@ async function _pickFormat() {
 
 // ── Core evaluation logic ───────────────────────────────────────────────
 
-async function evaluateSelection(getController) {
+async function evaluateSelection(getController, options) {
+    options = options || {};
     // Get selected text
     const editor = vscode.window.activeTextEditor;
     if (!editor) { vscode.window.showInformationMessage('No active editor.'); return; }
     const sel = editor.selection;
-    if (sel.isEmpty) { vscode.window.showInformationMessage('Select code to evaluate.'); return; }
-    const expr = editor.document.getText(sel).trim();
+    const expr = (sel.isEmpty && options.useCurrentLine
+        ? editor.document.lineAt(sel.active.line).text
+        : editor.document.getText(sel)).trim();
+    if (sel.isEmpty && !options.useCurrentLine) {
+        vscode.window.showInformationMessage('Select code to evaluate.');
+        return;
+    }
     if (!expr) { vscode.window.showInformationMessage('Selection is empty.'); return; }
 
     const ctrl = getController();
+    if (options.startKernel && ctrl && (!ctrl.session || ctrl.kernelStatusString !== 'resolved')) {
+        try { await ctrl.launchKernel(); }
+        catch (e) {
+            vscode.window.showErrorMessage('Could not start the Wolfram kernel: ' + String(e && e.message || e));
+            return;
+        }
+    }
     if (!ctrl?.session) { vscode.window.showWarningMessage('No kernel. Launch the kernel first.'); return; }
+    if (ctrl.kernelStatusString !== 'resolved') {
+        vscode.window.showInformationMessage('The Wolfram kernel is still starting.');
+        return;
+    }
 
     // ── Syntax check before sending to kernel ──
     try {
@@ -125,9 +221,12 @@ async function evaluateSelection(getController) {
     const _savedTextEditor = vscode.window.activeTextEditor;
     const _savedSelection  = _savedTextEditor?.selection;
     const _savedViewColumn = _savedTextEditor?.viewColumn;
+    // Capture this before focusing the Watch view. Once focus moves into the
+    // sidebar activeNotebookEditor can temporarily be undefined.
+    const _savedNotebookEditor = vscode.window.activeNotebookEditor;
 
-    // Reveal the watch panel so user sees the result
-    vscode.commands.executeCommand('wolfbook.watchPanel.focus');
+    // Update the panel state now, but do not focus it until the shared subAuto
+    // channel has been claimed below. Focusing can wake live-watch polling.
     _watchPanel.evalSelSpinner(expr);
     scrollLog('[eval-sel] start | expr:', expr.slice(0, 100), '| format:', _currentFormat);
 
@@ -136,7 +235,7 @@ async function evaluateSelection(getController) {
         const scale  = Number(ctrl.config?.get('imageScale') || 0.8);
 
         // Compute imgDir for raster images (SVG/PNG outputs from VsCodeRenderExpr)
-        const nbEditor = vscode.window.activeNotebookEditor;
+        const nbEditor = _savedNotebookEditor;
         let imgDir, imgRel, notebookDir;
         if (nbEditor) {
             const nbPath = nbEditor.notebook.uri.fsPath;
@@ -178,8 +277,21 @@ async function evaluateSelection(getController) {
             ']]';
 
         scrollLog('[eval-sel] subAuto | format:', format, '| expr:', expr.slice(0, 100));
+        // subAuto shares one WSTP packet stream with live watch and Dynamic.
+        // Overlapping calls can consume one another's RETURNPKT and produce a
+        // spurious Symbol[Null] (reported previously as "no result"). Wait for
+        // the current owner, then publish our promise before focusing the panel.
+        if (ctrl._subAutoLock) {
+            try { await ctrl._subAutoLock; } catch (_) {}
+        }
+        const _cppPromise = ctrl.session.subAuto(wlExpr);
+        ctrl._subAutoLock = _cppPromise;
+        _cppPromise.finally(() => {
+            if (ctrl._subAutoLock === _cppPromise) ctrl._subAutoLock = null;
+        }).catch(() => {});
+        vscode.commands.executeCommand('wolfbook.watchPanel.focus');
         const raw = await Promise.race([
-            ctrl.session.subAuto(wlExpr),
+            _cppPromise,
             new Promise((_, rej) => setTimeout(() => rej(new Error('subAuto timeout (30s)')), 30000)),
         ]);
         scrollLog('[eval-sel] subAuto result:', raw?.type, String(raw?.value ?? raw?.error ?? '').slice(0, 100));
@@ -339,8 +451,12 @@ function addSelectionToWatch() {
  * eval-sel section.  Falls back to rawMarkdown when the kernel is unavailable.
  */
 async function docLookup(ctrl, symbolName, watchPanel, fallbackMd) {
-    if (!ctrl?.session) {
+    // No kernel, kernel still starting, or paused inside a debug Dialog[]: the
+    // subAuto round-trip cannot succeed, so show the LSP markdown instead of
+    // failing with a bare "No result from kernel.".
+    if (!ctrl?.session || ctrl.kernelStatusString !== 'resolved' || ctrl._active) {
         if (fallbackMd) watchPanel.showHoverDoc(fallbackMd, symbolName);
+        else watchPanel.evalSelError('Kernel not ready.', 'Information[' + symbolName + ']');
         return;
     }
 
@@ -367,7 +483,23 @@ async function docLookup(ctrl, symbolName, watchPanel, fallbackMd) {
         ']]';
 
     try {
-        const raw = await ctrl.session.subAuto(wlExpr);
+        // subAuto shares one WSTP packet stream with live watch and Dynamic.
+        // Overlapping calls consume one another's RETURNPKT and produce a
+        // spurious Symbol[Null] — which surfaced here as "No result from
+        // kernel.".  Serialise on the same lock evaluateSelection() uses, and
+        // bound the wait so a lost packet cannot hang the panel forever.
+        if (ctrl._subAutoLock) {
+            try { await ctrl._subAutoLock; } catch (_) {}
+        }
+        const _cppPromise = ctrl.session.subAuto(wlExpr);
+        ctrl._subAutoLock = _cppPromise;
+        _cppPromise.finally(() => {
+            if (ctrl._subAutoLock === _cppPromise) ctrl._subAutoLock = null;
+        }).catch(() => {});
+        const raw = await Promise.race([
+            _cppPromise,
+            new Promise((_, rej) => setTimeout(() => rej(new Error('subAuto timeout (30s)')), 30000)),
+        ]);
         if (!raw || raw.type !== 'string' || !raw.value) {
             watchPanel.evalSelError('No result from kernel.', expr);
             return;
@@ -401,9 +533,22 @@ async function docLookup(ctrl, symbolName, watchPanel, fallbackMd) {
 function register(context, getController, watchPanel) {
     _watchPanel = watchPanel;
     _createStatusBar(context);
+    _editorResultDecoration = vscode.window.createTextEditorDecorationType({
+        after: {
+            color: new vscode.ThemeColor('editorCodeLens.foreground'),
+            fontStyle: 'italic',
+            margin: '0 0 0 1.5em',
+        },
+    });
+    context.subscriptions.push(_editorResultDecoration);
 
     context.subscriptions.push(
-        vscode.commands.registerCommand('wolfbook.evaluateSelection', () => evaluateSelection(getController))
+        vscode.commands.registerCommand('wolfbook.evaluateSelection', () =>
+            evaluateSelection(getController, { startKernel: true }))
+    );
+    context.subscriptions.push(
+        vscode.commands.registerCommand('wolfbook.evaluateEditorExpression', () =>
+            evaluateEditorExpression(getController))
     );
     context.subscriptions.push(
         vscode.commands.registerCommand('wolfbook.evaluateSelectionFormat', () => _pickFormat())
@@ -411,6 +556,20 @@ function register(context, getController, watchPanel) {
     context.subscriptions.push(
         vscode.commands.registerCommand('wolfbook.addSelectionToWatch', () => addSelectionToWatch())
     );
+    context.subscriptions.push(vscode.workspace.onDidChangeTextDocument((event) => {
+        const key = event.document.uri.toString();
+        if (!_editorResults.has(key)) return;
+        _editorResults.delete(key);
+        for (const editor of vscode.window.visibleTextEditors) {
+            if (editor.document.uri.toString() === key) editor.setDecorations(_editorResultDecoration, []);
+        }
+    }));
+    context.subscriptions.push(vscode.window.onDidChangeVisibleTextEditors((editors) => {
+        for (const editor of editors) {
+            editor.setDecorations(_editorResultDecoration,
+                _editorResults.get(editor.document.uri.toString()) || []);
+        }
+    }));
 
     scrollLog('[eval-sel] registered');
 }
