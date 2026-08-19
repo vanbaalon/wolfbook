@@ -7,8 +7,14 @@ const util   = require("util");
 const https  = require("https");
 const fs     = require("fs");
 const path   = require("path");
+const crypto = require("crypto");
 const { decodeWstpText, cleanPrintLine, setBoxToLatexProvider } = require('../utils/encoding');
 const paperSearch = require('./paperSearch');
+const { readCommittedOutputs, runCellViaPipeline } = require('./cell-pipeline');
+const { CELL_STATE, stateLabel, stateRemedy, isConfirmed } = require('./cell-state');
+const { SelfTestTool } = require('./self-test');
+const { projectNotebook, ContentAddressedRenderCache } = require('../claude-mcp/output-projection');
+const { resolveJsonPath, describeJson } = require('../kernel/json-path');
 
 // Wire up the BTL (box-to-LaTeX) C++ addon so cleanPrintLine can convert BoxData → LaTeX.
 // Uses the same platform-aware loading strategy as output/renderer.js.
@@ -50,7 +56,7 @@ const paperSearch = require('./paperSearch');
 const {
     clearEvalLog, appendEvalLog, appendEventLog,
     normalizeToolContent,
-    normalizeMarkdownMath, splitWLIntoStatements,
+    normalizeMarkdownMath, prepareCellContent, _canonCellId, splitWLIntoStatements,
     checkMarkdownKaTeX, _katexWarnings, _katexWarningsForCells,
     _isCollabMode, _ensureCollabEditor, flashCell,
     _snapshotViewport, _restoreViewport,
@@ -58,8 +64,26 @@ const {
     formatCellRef, resolveCellIndex, resolveInsertIndex,
     isKernelConnectionError, cleanWrapperFromMsg, KERNEL_CRASH_MSG,
     NB_EXTS, setNotebookResolvedCallback, _allNotebookUris,
-    resolveNotebookEditor, noEditorMsg,
+    resolveNotebookEditor, resolveNotebookDocument, noEditorMsg,
+    acquireKernelForAgent, releaseKernelForAgent, trackedKernelEvaluate,
 } = require('./shared');
+const trackedEvaluate = trackedKernelEvaluate;
+const kernelScopedInput = options => ({ ...(options?.input || {}), _kernelOnly: true });
+// Operation-first controller resolution: an operation id already identifies its
+// kernel (each controller has its own OperationRegistry), so look the id up
+// across ALL kernels in this window before demanding kernel_id.  Falls back to
+// kernel-scoped resolution; a resolve() throw is returned as {error} (the
+// manager's message names every live kernel — actionable, never a bare demand).
+const resolveControllerForOperation = (getController, options, operationId) => {
+    const manager = getController?.manager;
+    const byOp = operationId ? manager?.findControllerByOperation?.(operationId) : null;
+    if (byOp) return { controller: byOp };
+    try {
+        return { controller: getController?.(kernelScopedInput(options)) };
+    } catch (err) {
+        return { controller: null, error: err };
+    }
+};
 const {
     WolfslideGetContextTool, WolfslideListSlidesTool, WolfslideGetSlideTool,
     WolfslideInsertSlideTool, WolfslideReplaceSlideTool, WolfslideEditSlideTool, WolfslideDeleteSlideTool, WolfslideDeleteSlidesTool,
@@ -76,6 +100,26 @@ const {
     WolfslideArrangeTool,
     GetCellOutputTool, ValidateSyntaxTool, LatexTool,
 } = require('./wolfslide-tools');
+
+function mutationConflict(cell, input = {}) {
+    const source = cell.document.getText();
+    const id = getCellToolId(cell);
+    const kind = cell.kind === vscode.NotebookCellKind.Markup ? 'markdown' : 'code';
+    const hash = crypto.createHash('sha256').update(source).digest('hex');
+    const mismatch = (input.expected_cell_id != null && _canonCellId(input.expected_cell_id) !== _canonCellId(id)) ||
+        (input.expected_kind != null && String(input.expected_kind).toLowerCase() !== kind) ||
+        (input.expected_source_prefix != null && !source.startsWith(String(input.expected_source_prefix))) ||
+        (input.expected_source_hash != null && String(input.expected_source_hash).toLowerCase() !== hash);
+    if (!mismatch) return null;
+    return { state: 'conflict', cell_id: id, kind, source_hash: hash, first_line: source.split('\n')[0].slice(0, 200) };
+}
+
+function mutationIdentityText(cell) {
+    const source = cell.document.getText();
+    const id = getCellToolId(cell);
+    const kind = cell.kind === vscode.NotebookCellKind.Markup ? 'markdown' : 'code';
+    return `CellId: ${id}; kind: ${kind}; first line: ${JSON.stringify(source.split('\n')[0].slice(0, 200))}`;
+}
 
 // ---------------------------------------------------------------------------
 // summariseEvalOutputs(outs, hasError)
@@ -159,11 +203,23 @@ function summariseEvalOutputs(outs, hasError) {
     return joined.slice(0, 400) + `… [${joined.length} chars total]`;
 }
 
+function classifyCellOutputs(cell) {
+    const outputs = Array.isArray(cell?.outputs) ? cell.outputs : [];
+    let hasErrors = false;
+    for (const output of outputs) {
+        const mimes = (output.items || []).map(item => item.mime);
+        if (mimes.includes('x-application/wolfram-language-html') &&
+            mimes.includes('application/vnd.code.notebook.error')) hasErrors = true;
+    }
+    return { has_output: outputs.length > 0, has_errors: hasErrors };
+}
+
 
 class NewNotebookTool {
+    constructor(getController) { this._manager = getController?.manager; }
     async prepareInvocation(options, _token) {
         const target = options.input?.path || options.input?.filename || 'new notebook';
-        return { invocationMessage: `Create Wolfbook notebook: ${path.basename(target)}` };
+        return { invocationMessage: `Open or create Wolfbook notebook: ${path.basename(target)}` };
     }
 
     _resolveNotebookPath(input) {
@@ -183,13 +239,14 @@ class NewNotebookTool {
     _cellToJson(cell) {
         const kindName = String(cell?.kind || 'code').toLowerCase();
         const isMarkdown = kindName === 'markdown' || kindName === 'markup';
-        let _v = normalizeToolContent(cell?.content ?? cell?.value ?? '');
-        // Markdown only: \( \) / \[ \] are LaTeX math, but in a CODE cell the same
-        // sequences are Wolfram box syntax and named characters.
-        if (isMarkdown) _v = normalizeMarkdownMath(_v).text;
+        const prepared = prepareCellContent({
+            content: cell?.content ?? cell?.value ?? '',
+            kind: isMarkdown ? 'markdown' : 'code',
+            encoding: cell?.content_encoding,
+        });
         return {
             kind: isMarkdown ? vscode.NotebookCellKind.Markup : vscode.NotebookCellKind.Code,
-            value: _v,
+            value: prepared.text,
             languageId: isMarkdown ? 'markdown' : 'wolfram',
             outputs: [],
             metadata: {},
@@ -228,7 +285,12 @@ class NewNotebookTool {
 
         const overwrite = !!input.overwrite;
         const waitMs = Math.max(1000, Math.min(Number(input.waitMs || 10000), 60000));
-        const cells = Array.isArray(input.cells) ? input.cells.map(c => this._cellToJson(c)) : [];
+        let cells;
+        try {
+            cells = Array.isArray(input.cells) ? input.cells.map(c => this._cellToJson(c)) : [];
+        } catch (err) {
+            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(err.message)]);
+        }
         const notebookJson = {
             cells,
             metadata: {
@@ -238,14 +300,15 @@ class NewNotebookTool {
             },
         };
 
+        const existed = fs.existsSync(nbPath);
         try {
-            if (fs.existsSync(nbPath) && !overwrite) {
-                return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
-                    `Notebook already exists: ${nbPath}. Pass overwrite:true to replace it.`
-                )]);
+            // Existing files are opened safely by default. overwrite:true keeps
+            // the original explicit replacement semantics for callers that
+            // intentionally supplied replacement cells/metadata.
+            if (!existed || overwrite) {
+                fs.mkdirSync(path.dirname(nbPath), { recursive: true });
+                fs.writeFileSync(nbPath, JSON.stringify(notebookJson, null, 1), 'utf8');
             }
-            fs.mkdirSync(path.dirname(nbPath), { recursive: true });
-            fs.writeFileSync(nbPath, JSON.stringify(notebookJson, null, 1), 'utf8');
         } catch (err) {
             return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(`Failed to write notebook: ${err.message}`)]);
         }
@@ -261,15 +324,71 @@ class NewNotebookTool {
                 )]);
             }
 
+            // Agent-created notebooks must be immediately routable. Persist an
+            // explicit default-slot association before exposing the notebook as
+            // the MCP target; this remains VS Code workspace state, never .wb
+            // metadata.
+            const defaultKernel = this._manager?.defaultEntry;
+            if (defaultKernel && !this._manager.explicitBindingFor(nbPath)) {
+                await this._manager.bind(nbPath, defaultKernel.id);
+            }
+
+            // Select the VS Code controller for this notebook NOW.  manager.bind()
+            // only records workspace state; without a real controller selection
+            // createNotebookCellExecution throws "not associated" and the first
+            // runs are silently dropped (the phantom-run bug).
+            const boundEntry = this._manager?.bindingFor?.(nbPath) || defaultKernel;
+            let assocLine = 'Kernel: no kernel available to associate.';
+            if (boundEntry?.controller) {
+                const { associateNotebook } = require('../kernel/association');
+                const assoc = await associateNotebook(boundEntry.controller, ed.notebook, { restoreActive: false });
+                const label = boundEntry.label || boundEntry.id || 'kernel';
+                assocLine = assoc.associated
+                    ? `Kernel: ${label} — controller selected for this notebook ✓`
+                    : `Kernel: ${label} — binding recorded, but VS Code did not confirm controller selection (${assoc.method}); the first run will retry the association.`;
+            }
+
             // Reuse the shared resolver so Copilot/in-editor targeting hooks see
             // the new active notebook too.
-            try { await resolveNotebookEditor(path.basename(nbPath), { skipConfirm: true }); } catch (_) {}
+            try { await resolveNotebookEditor(nbPath, { skipConfirm: true }); } catch (_) {}
+
+            // Optional: evaluate the initial code cells through the evidence-gated
+            // pipeline.  Default OFF — stated explicitly in the response so nobody
+            // has to guess whether initial cells ran.
+            let evalLines = '';
+            if (input.evaluate === true && boundEntry?.controller) {
+                const _ctrl = boundEntry.controller;
+                if (_ctrl.kernelStatusString !== 'resolved') {
+                    evalLines = '\nEvaluate: kernel is not running — initial cells were NOT evaluated.';
+                } else {
+                    const timeoutSec = Math.max(5, Number(input.timeoutSeconds) || 60);
+                    const deadline = Date.now() + timeoutSec * 1000;
+                    const parts = [];
+                    for (let idx = 0; idx < ed.notebook.cellCount; idx++) {
+                        if (ed.notebook.cellAt(idx).kind === vscode.NotebookCellKind.Markup) continue;
+                        if (Date.now() >= deadline) { parts.push('(global timeout reached)'); break; }
+                        const pipeline = await runCellViaPipeline(_ctrl, ed, idx, {
+                            timeoutMs: Math.max(1, deadline - Date.now()), token: _token || { isCancellationRequested: false },
+                            snapshotViewport: _snapshotViewport, getCellId: getCellToolId,
+                        });
+                        const ok = isConfirmed(pipeline.state);
+                        parts.push(`Cell ${idx + 1}: ${ok ? '✓' : `⚠ ${stateLabel(pipeline.state)}`} — ${
+                            ok ? (pipeline.plain?.slice(0, 200) || stateLabel(CELL_STATE.EVALUATED_NO_OUTPUT)) : stateRemedy(pipeline.state)}`);
+                        if (!ok) break;
+                    }
+                    evalLines = parts.length ? '\nEvaluate:\n' + parts.map(p => '  ' + p).join('\n') : '';
+                }
+            } else if (cells.some(c => c.kind === vscode.NotebookCellKind.Code)) {
+                evalLines = '\nNote: initial cells are NOT evaluated by default — pass evaluate:true, or use wolfbook_runCells.';
+            }
 
             return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
-                `Created and opened **${path.basename(nbPath)}**.\n` +
+                `${existed && !overwrite ? 'Opened existing' : 'Created and opened'} **${path.basename(nbPath)}**.\n` +
                 `Path: ${nbPath}\n` +
                 `Ready: notebook editor is visible (${ed.notebook.cellCount} cells).\n` +
-                `Target: this notebook is ready for subsequent Wolfbook MCP editing tools.`
+                assocLine + '\n' +
+                `Target: this notebook is ready for subsequent Wolfbook MCP editing and evaluation tools.` +
+                evalLines
             )]);
         } catch (err) {
             return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
@@ -281,6 +400,14 @@ class NewNotebookTool {
 
 
 class GetNotebookContextTool {
+    constructor(getController, context) { this._getController = getController; this._context = context; }
+    _kernelInfo(notebook) {
+        try {
+            const ctrl = this._getController?.({ notebook });
+            const status = ctrl?.arbiter?.status(ctrl) || {};
+            return `[${ctrl?.kernelIdentity?.label || 'unbound'} · ${ctrl?.kernelIdentity?.kernel_id || 'none'} · ${status.lifecycle || 'offline'}]`;
+        } catch (_) { return '[unbound]'; }
+    }
     async prepareInvocation(options, _token) {
         const action = options.input?.action || 'read';
         if (action === 'list') return { invocationMessage: 'List open notebooks' };
@@ -334,9 +461,9 @@ class GetNotebookContextTool {
                     for (let i = 0; i < doc.cellCount; i++) {
                         doc.cellAt(i).kind === vscode.NotebookCellKind.Code ? codeN++ : mdN++;
                     }
-                    lines.push(`- **${name}** — ${doc.cellCount} cells (${codeN} code, ${mdN} markdown)${isActive}`);
+                    lines.push(`- **${name}** ${this._kernelInfo(fsPath)} — ${doc.cellCount} cells (${codeN} code, ${mdN} markdown)${isActive}`);
                 } else {
-                    lines.push(`- **${name}** — (background tab, not yet loaded)${isActive}`);
+                    lines.push(`- **${name}** ${this._kernelInfo(fsPath)} — (background tab, not yet loaded)${isActive}`);
                 }
             }
             lines.push('\nTo switch: use action="switch" with notebook="filename.wb".');
@@ -365,24 +492,17 @@ class GetNotebookContextTool {
             }
             return new vscode.LanguageModelToolResult([
                 new vscode.LanguageModelTextPart(
-                    `Switched to **${editor.notebook.uri.fsPath.split('/').pop()}** (${editor.notebook.cellCount} cells). All tools now target this notebook.`
+                    `Switched to **${editor.notebook.uri.fsPath.split('/').pop()}** ${this._kernelInfo(editor.notebook.uri.fsPath)} (${editor.notebook.cellCount} cells). All tools now target this notebook.`
                 )
             ]);
         }
 
-        // ── action: save ─────────────────────────────────────────────────────
+        // ── action: save (deprecated — delegates to the ONE save path) ──────
+        // wolfbook_saveNotebook is canonical: both now return bytes+mtime+SHA-256
+        // so a save is verified, never merely claimed.
         if (action === 'save') {
-            const editor = await resolveNotebookEditor();
-            if (!editor) {
-                return new vscode.LanguageModelToolResult([
-                    new vscode.LanguageModelTextPart('No active notebook editor.')
-                ]);
-            }
             try {
-                await vscode.workspace.save(editor.notebook.uri);
-                return new vscode.LanguageModelToolResult([
-                    new vscode.LanguageModelTextPart(`Saved: ${editor.notebook.uri.fsPath.split('/').pop()}`)
-                ]);
+                return await new SaveNotebookTool().invoke(options, _token);
             } catch (err) {
                 return new vscode.LanguageModelToolResult([
                     new vscode.LanguageModelTextPart(`Save failed: ${err.message}`)
@@ -392,17 +512,21 @@ class GetNotebookContextTool {
 
         // ── action: read (default) ───────────────────────────────────────────
         const targetName = options.input?.notebook;
-        // Reading is non-destructive — always auto-switch without confirmation dialog.
-        const editor = await resolveNotebookEditor(targetName, { skipConfirm: true });
-        if (!editor) {
+        // Reads are ROUTING-NEUTRAL: resolve the document without showing it,
+        // changing the active editor, or setting the Copilot session target
+        // (a read that shifts execution routing was feedback bug §3.3).
+        const notebook = await resolveNotebookDocument(targetName);
+        if (!notebook) {
             const notFoundMsg = targetName
                 ? `Notebook "${targetName}" is not open. Use action="list" to see open notebooks.`
-                : 'No Wolfram notebook is currently open.';
+                : noEditorMsg(targetName);
             return new vscode.LanguageModelToolResult([
                 new vscode.LanguageModelTextPart(notFoundMsg)
             ]);
         }
-        const notebook = editor.notebook;
+        // Editor (if this notebook happens to be visible) — read-only peek at the
+        // user's selection; never shown/focused from here.
+        const editor = vscode.window.visibleNotebookEditors.find(e => e.notebook === notebook) || null;
         if (notebook.notebookType !== 'extended-wolfram-notebook') {
             return new vscode.LanguageModelToolResult([
                 new vscode.LanguageModelTextPart('The active editor is not a Wolfram notebook.')
@@ -410,16 +534,55 @@ class GetNotebookContextTool {
         }
         const startCell = options.input?.startCell;
         const endCell   = options.input?.endCell;
+        if (options.input?.output_projection === 'canonical' || options.input?._mcpProjection === true) {
+            const cache = new ContentAddressedRenderCache(
+                this._context?.globalStorageUri?.fsPath ? path.join(this._context.globalStorageUri.fsPath, 'mcp-render-cache-v1') : null,
+                options.input?._mcpCache === true
+            );
+            const projection = projectNotebook(notebook, {
+                from: Math.max(0, Number(startCell || 1) - 1),
+                to: Math.min(notebook.cellCount, Number(endCell || notebook.cellCount)),
+                previewChars: 1000, getCellId: getCellToolId, cache,
+            });
+            projection.kernel = (() => {
+                const ctrl = this._getController?.({ notebook: notebook.uri.fsPath, kernel_id: options.input?.kernel_id });
+                const status = ctrl?.arbiter?.status(ctrl) || {};
+                return { kernel_id: ctrl?.kernelIdentity?.kernel_id || null, kernel_label: ctrl?.kernelIdentity?.label || null, lifecycle: status.lifecycle || 'offline' };
+            })();
+            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(JSON.stringify(projection, null, 2))]);
+        }
 
         // Brief mode: compact table of cell numbers, kinds, and first-line previews
         if (options.input?.brief === true) {
             const decoder     = new util.TextDecoder();
-            const nbName      = notebook.uri.fsPath.split('/').pop();
+            const nbName      = path.basename(notebook.uri.fsPath);
             const from        = Math.max(1, startCell || 1);
             const to          = Math.min(notebook.cellCount, endCell || notebook.cellCount);
             // previewChars: how many chars of source to show per cell (default 100, max 500)
             const previewCap  = Math.min(500, Math.max(20, Number(options.input?.previewChars) || 100));
-            const lines   = [`**${nbName}** — ${notebook.cellCount} cells${from !== 1 || to !== notebook.cellCount ? ` (showing ${from}–${to})` : ''}`];
+            // Coerce string booleans ("true"/"false") — clients with a stale
+            // schema stringify undeclared params, which silently no-opped the
+            // strict typeof check.
+            const _boolParam = (v) => v === true || v === 'true' ? true
+                : v === false || v === 'false' ? false : undefined;
+            const _hasOutput = _boolParam(options.input?.has_output);
+            const _hasErrors = _boolParam(options.input?.has_errors);
+            const candidates = [];
+            for (let i = from - 1; i < to; i++) {
+                const cell = notebook.cellAt(i);
+                const kind = cell.kind === vscode.NotebookCellKind.Markup ? 'markdown' : 'code';
+                const outputState = classifyCellOutputs(cell);
+                if (options.input?.kind && options.input.kind !== kind) continue;
+                if (_hasOutput !== undefined && _hasOutput !== outputState.has_output) continue;
+                if (_hasErrors !== undefined && _hasErrors !== outputState.has_errors) continue;
+                candidates.push({ i, cell, kind, outputState });
+            }
+            const filtered = options.input?.kind != null || options.input?.has_output != null || options.input?.has_errors != null;
+            const rangeCount = Math.max(0, to - from + 1);
+            const filterNote = filtered ? ` (showing ${candidates.length} of ${rangeCount} in range after filters)`
+                : (from !== 1 || to !== notebook.cellCount ? ` (showing ${from}–${to})` : '');
+            const lines = [`**${nbName}** ${this._kernelInfo(notebook.uri.fsPath)} — ${notebook.cellCount} cells${filterNote}`,
+                `Path: ${notebook.uri.fsPath} · version ${notebook.version} · ${notebook.isDirty ? 'UNSAVED CHANGES' : 'saved'}`];
             // Surface the active (focused) cell so the agent knows where the user is
             if (editor && Array.isArray(editor.selections) && editor.selections.length > 0) {
                 const activeIdx = editor.selections[0].start;
@@ -428,8 +591,8 @@ class GetNotebookContextTool {
                     lines.push(`Current cell: Cell ${activeIdx + 1} (cellId: ${getCellToolId(activeCell)})`);
                 }
             }
-            for (let i = from - 1; i < to; i++) {
-                const cell   = notebook.cellAt(i);
+            for (const candidate of candidates) {
+                const { i, cell } = candidate;
                 const cellId = getCellToolId(cell);
                 const kind   = cell.kind === vscode.NotebookCellKind.Markup ? 'md' : 'code';
                 const src    = cell.document.getText().trim();
@@ -442,12 +605,10 @@ class GetNotebookContextTool {
                 if (cell.outputs.length === 0) {
                     evalState = kind === 'code' ? ' [?]' : '';
                 } else {
-                    let hasError = false;
+                    let hasError = candidate.outputState.has_errors;
                     for (const output of cell.outputs) {
                         const mimes = output.items.map(it => it.mime);
-                        if (mimes.includes('x-application/wolfram-language-html') &&
-                            mimes.includes('application/vnd.code.notebook.error')) {
-                            hasError = true;
+                        if (hasError && mimes.includes('application/vnd.code.notebook.error')) {
                             outSummary = ' ⚠ msgs';
                             break;
                         }
@@ -467,7 +628,7 @@ class GetNotebookContextTool {
             return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(lines.join('\n'))]);
         }
 
-        const transcript = buildTranscript(notebook, startCell, endCell, editor);
+        const transcript = `${this._kernelInfo(notebook.uri.fsPath)}\n${buildTranscript(notebook, startCell, endCell, editor)}`;
         return new vscode.LanguageModelToolResult([
             new vscode.LanguageModelTextPart(transcript)
         ]);
@@ -477,6 +638,80 @@ class GetNotebookContextTool {
 // ---------------------------------------------------------------------------
 // TODO-4b: wolfbook_evaluateExpression
 // ---------------------------------------------------------------------------
+
+// Shared outputForm → WL string-producing wrapper.  'json' exports via
+// ExportString with a SILENT InputForm fallback (symbolic/held expressions and
+// exotic keys fail JSON export; the fallback is labelled, never an error).
+function _buildOutputFormWrapper(outputForm, varName) {
+    if (outputForm === 'Short')      return `ToString[Short[${varName}, 5], OutputForm]`;
+    if (outputForm === 'TeXForm')     return `ToString[TeXForm[${varName}]]`;
+    if (outputForm === 'MatrixForm')  return `ToString[MatrixForm[${varName}], OutputForm]`;
+    if (outputForm === 'TableForm')   return `ToString[TableForm[${varName}], OutputForm]`;
+    if (outputForm === 'json')        return `Quiet[Check[ExportString[${varName}, "JSON", "Compact" -> True], ` +
+        `"$WBJSONFAIL$" <> If[StringQ[${varName}], ${varName}, ToString[${varName}, InputForm]]]]`;
+    return `If[StringQ[${varName}], ${varName}, ToString[${varName}, InputForm]]`;
+}
+
+// expect → kernel-side check over $wbR$ (one round trip, no second evaluation).
+// Returns null when no kernel-side check applies (freeOfMessages is JS-side).
+function _buildExpectCheck(expect) {
+    if (!expect || typeof expect !== 'object') return null;
+    const clauses = [];
+    if (typeof expect.equals === 'string' && expect.equals.trim()) {
+        const v = `(${expect.equals.trim()})`;
+        clauses.push(`(SameQ[$wbR$, ${v}] || (NumericQ[$wbR$] && NumericQ[${v}] && $wbR$ == ${v}))`);
+    }
+    if (typeof expect.matches === 'string' && expect.matches.trim()) {
+        clauses.push(`MatchQ[$wbR$, ${expect.matches.trim()}]`);
+    }
+    if (expect.numeric && typeof expect.numeric === 'object' && expect.numeric.value != null) {
+        const v = `(${String(expect.numeric.value).trim()})`;
+        const tol = String(expect.numeric.tolerance || '10^-10').trim();
+        clauses.push(`(NumericQ[N[$wbR$]] && Abs[N[($wbR$) - ${v}]] <= (${tol}))`);
+    }
+    if (expect.isTrue === true) clauses.push('TrueQ[$wbR$]');
+    return clauses.length ? clauses.join(' && ') : null;
+}
+
+// Describe the expectation for the ASSERT line.
+function _describeExpect(expect) {
+    if (!expect || typeof expect !== 'object') return '';
+    const bits = [];
+    if (expect.equals != null) bits.push(`equals ${expect.equals}`);
+    if (expect.matches != null) bits.push(`matches ${expect.matches}`);
+    if (expect.numeric?.value != null) bits.push(`≈ ${expect.numeric.value} (tol ${expect.numeric.tolerance || '10^-10'})`);
+    if (expect.isTrue === true) bits.push('is True');
+    if (expect.freeOfMessages === true) bits.push('no kernel messages');
+    return bits.join(', ');
+}
+
+// Split the "$WBA$<outcome>$WBSEP$<value>" prefix a checked evaluation returns.
+function _parseAssertPrefix(value) {
+    if (typeof value !== 'string' || !value.startsWith('$WBA$')) return { outcome: null, value };
+    const sep = value.indexOf('$WBSEP$');
+    if (sep < 0) return { outcome: null, value };
+    return { outcome: value.slice(5, sep), value: value.slice(sep + 7) };
+}
+
+// Strip the silent JSON-export fallback marker; returns { value, jsonFellBack }.
+function _stripJsonFallback(value) {
+    if (typeof value === 'string' && value.startsWith('$WBJSONFAIL$')) {
+        return { value: value.slice('$WBJSONFAIL$'.length), jsonFellBack: true };
+    }
+    return { value, jsonFellBack: false };
+}
+
+function _captureStructuredResult(controller, operationId, value, label) {
+    if (!operationId || typeof value !== 'string' || Buffer.byteLength(value, 'utf8') > 1048576) return;
+    try {
+        const parsed = JSON.parse(value);
+        const op = controller.operations?.get?.(operationId);
+        if (!op) return;
+        op.structuredJson = value;
+        op.structured = parsed;
+        if (label) op.structuredJsonLabel = label;
+    } catch (_) {}
+}
 
 class EvaluateExpressionTool {
     constructor(getController) {
@@ -504,25 +739,24 @@ class EvaluateExpressionTool {
 
         const timeoutSec = Number(options.input?.timeoutSeconds) || 30;
 
-        const controller = this._getController();
+        const controller = this._getController(options?.input || {});
         if (!controller || !controller.session || controller.kernelStatusString !== 'resolved') {
             return new vscode.LanguageModelToolResult([
                 new vscode.LanguageModelTextPart('Error: kernel is not running. Launch the kernel first.')
             ]);
         }
 
-        // If a notebook cell is actively evaluating, abort it and wait — the tool
-        // takes priority over user evaluations in collab mode.
-        if (controller._evalDispatched || controller.executionQueue.queueLength() > 0) {
-            await controller.abortAndWait(8000);
-            // Re-check: if still busy (e.g. kernel is stuck), bail out gracefully.
-            if (controller._evalDispatched) {
-                return new vscode.LanguageModelToolResult([
-                    new vscode.LanguageModelTextPart('Kernel did not become idle after abort attempt — try again.')
-                ]);
-            }
-        }
+        const claim = await acquireKernelForAgent(controller, {
+            operationId: options.input?._operationId,
+            owner: 'mcp', kind: 'scratch-evaluation',
+            caption: options.input?.caption || `Evaluate: ${expression.slice(0, 100)}`,
+            policyOverride: options.input?.busyPolicy,
+            sourcePreview: expression.slice(0, 160),
+        });
+        if (claim.result) return claim.result;
+        const lease = claim.lease;
 
+        try {
         // Note any live Dynamic widgets (they use sub() calls in parallel, which is safe,
         // but worth informing the model about).
         const dynCount = controller._dynCells?.size ?? 0;
@@ -553,15 +787,14 @@ class EvaluateExpressionTool {
             // hard backstop in case WL itself freezes.
             // outputForm: wrap the result in Short/TeXForm/MatrixForm/TableForm before ToString.
             const outputForm = (options.input?.outputForm || '').trim();
-            const _wrapForm = (varName) => {
-                if (outputForm === 'Short')      return `ToString[Short[${varName}, 5], OutputForm]`;
-                if (outputForm === 'TeXForm')     return `ToString[TeXForm[${varName}]]`;
-                if (outputForm === 'MatrixForm')  return `ToString[MatrixForm[${varName}], OutputForm]`;
-                if (outputForm === 'TableForm')   return `ToString[TableForm[${varName}], OutputForm]`;
-                return `If[StringQ[${varName}], ${varName}, ToString[${varName}, InputForm]]`;
-            };
-            const mkWrapped = (expr, wlSec) =>
-                `Block[{$wbR$}, $wbR$ = TimeConstrained[(${expr}), ${wlSec}, "$WBTIMEOUT$"]; If[$wbR$ === "$WBTIMEOUT$", "$WBTIMEOUT$", ${_wrapForm('$wbR$')}]]`;
+            const _wrapForm = (varName) => _buildOutputFormWrapper(outputForm, varName);
+            const _mlCheck = _buildExpectCheck(options.input?.expect);
+            const mkWrapped = (expr, wlSec, checkWL) =>
+                `Block[{$wbR$, $wbA$}, $wbR$ = TimeConstrained[(${expr}), ${wlSec}, "$WBTIMEOUT$"]; If[$wbR$ === "$WBTIMEOUT$", "$WBTIMEOUT$", ${
+                    checkWL
+                        ? `($wbA$ = Quiet[Check[If[TrueQ[${checkWL}], "PASS", "FAIL"], "ERROR"]]; "$WBA$" <> $wbA$ <> "$WBSEP$" <> (${_wrapForm('$wbR$')}))`
+                        : _wrapForm('$wbR$')
+                }]]`;
 
             let outIdx = 0;
             for (const ln of lines) {
@@ -577,7 +810,9 @@ class EvaluateExpressionTool {
                 // WL timeout is 1 s before the JS deadline (minimum 1 s).
                 const wlSec = Math.max(1, Math.round(remaining / 1000) - 1);
                 const linePrints = [];
-                const evalP    = controller.session.evaluate(mkWrapped(ln, wlSec), {
+                // expect applies to the LAST statement only (documented in schema).
+                const isLast = outIdx === lines.length;
+                const evalP    = trackedEvaluate(controller, mkWrapped(ln, wlSec, isLast ? _mlCheck : null), {
                     interactive: false,
                     onPrint: p => linePrints.push(cleanPrintLine(p))
                 });
@@ -596,12 +831,32 @@ class EvaluateExpressionTool {
                         parts.push(`${label}= (aborted)`);
                         break;
                     } else if (result?.result?.type === 'string' && result.result.value === '$WBTIMEOUT$') {
-                        parts.push(`${label}: timed out after ${wlSec}s — kernel is still alive. Simplify the expression or increase timeoutSeconds.`);
+                        // Report the REQUEST budget, not the per-statement remainder
+                        // (a "timed out after 7s" on a 30 s request read as a bug).
+                        parts.push(`${label}: timed out — ${(remaining / 1000).toFixed(1)}s of the ${timeoutSec}s request budget remained for this statement; kernel is still alive. Simplify the expression or increase timeoutSeconds.`);
                         break;
                     } else if (result?.result?.type === 'string' && result.result.value) {
                         let val = result.result.value.replace(
                             /\\:([0-9A-Fa-f]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16))
                         );
+                        const parsedAssert = _parseAssertPrefix(val);
+                        val = parsedAssert.value;
+                        const jsonInfo = _stripJsonFallback(val);
+                        val = jsonInfo.value;
+                        if (outputForm === 'json' && !jsonInfo.jsonFellBack) {
+                            _captureStructuredResult(controller, options.input?._operationId, val, label);
+                        }
+                        if (parsedAssert.outcome != null) {
+                            const desc = _describeExpect(options.input?.expect);
+                            parts.unshift(parsedAssert.outcome === 'PASS'
+                                ? `ASSERT PASS — ${desc}`
+                                : parsedAssert.outcome === 'FAIL'
+                                ? `ASSERT FAIL — expected ${desc}; actual ${label} below.`
+                                : `ASSERT ERROR — the check expression itself failed (${desc}).`);
+                            const op = options.input?._operationId ? controller.operations?.get?.(options.input._operationId) : null;
+                            if (op) op.assertion = { expect: options.input.expect, outcome: parsedAssert.outcome, ts: Date.now() };
+                        }
+                        if (jsonInfo.jsonFellBack) parts.push('[outputForm:json unavailable — returned InputForm]');
                         const MAX = 4096, truncated = val.length > MAX;
                         if (truncated) val = val.slice(0, MAX);
                         let out = `${label}= ${val}`;
@@ -640,18 +895,19 @@ class EvaluateExpressionTool {
         // (defaults to InputForm) to avoid double-quoting.
         const outputForm = (options.input?.outputForm || '').trim();
         const wlTimeout = Math.max(1, timeoutSec - 1);
-        const _wrapFormSingle = (varName) => {
-            if (outputForm === 'Short')      return `ToString[Short[${varName}, 5], OutputForm]`;
-            if (outputForm === 'TeXForm')     return `ToString[TeXForm[${varName}]]`;
-            if (outputForm === 'MatrixForm')  return `ToString[MatrixForm[${varName}], OutputForm]`;
-            if (outputForm === 'TableForm')   return `ToString[TableForm[${varName}], OutputForm]`;
-            return `If[StringQ[${varName}], ${varName}, ToString[${varName}, InputForm]]`;
-        };
+        const _wrapFormSingle = (varName) => _buildOutputFormWrapper(outputForm, varName);
+        // expect: evaluate and check in ONE round trip — the check runs kernel-side
+        // over $wbR$ and rides back as a "$WBA$PASS/FAIL/ERROR$WBSEP$" prefix.
+        const _expectCheck = _buildExpectCheck(options.input?.expect);
         const wrappedExpr =
-            `Block[{$wbR$}, $wbR$ = TimeConstrained[(${expression}), ${wlTimeout}, "$WBTIMEOUT$"]; If[$wbR$ === "$WBTIMEOUT$", "$WBTIMEOUT$", ${_wrapFormSingle('$wbR$')}]]`;
+            `Block[{$wbR$, $wbA$}, $wbR$ = TimeConstrained[(${expression}), ${wlTimeout}, "$WBTIMEOUT$"]; If[$wbR$ === "$WBTIMEOUT$", "$WBTIMEOUT$", ${
+                _expectCheck
+                    ? `($wbA$ = Quiet[Check[If[TrueQ[${_expectCheck}], "PASS", "FAIL"], "ERROR"]]; "$WBA$" <> $wbA$ <> "$WBSEP$" <> (${_wrapFormSingle('$wbR$')}))`
+                    : _wrapFormSingle('$wbR$')
+            }]]`;
 
         const singlePrints = [];
-        const evalPromise    = controller.session.evaluate(wrappedExpr, {
+        const evalPromise    = trackedEvaluate(controller, wrappedExpr, {
             interactive: false,
             onPrint: p => singlePrints.push(cleanPrintLine(p))
         });
@@ -684,8 +940,11 @@ class EvaluateExpressionTool {
                 output += summariseMsgs(clean).join('\n') + '\n';
             }
             if (result?.result?.type === 'string' && result.result.value === '$WBTIMEOUT$') {
-                // WL-level timeout — kernel aborted cleanly, WSTP link is intact
-                output += `Timed out after ${wlTimeout}s — kernel is still alive.\n` +
+                // WL-level timeout — kernel aborted cleanly, WSTP link is intact.
+                // Report the REQUESTED timeout; the internal WL budget is 1 s
+                // shorter to leave room for a clean abort (saying "after 2s" on a
+                // 3 s request read as a bug in the field).
+                output += `Timed out after ${timeoutSec}s (internal WL budget ${wlTimeout}s, 1s reserved for a clean abort) — kernel is still alive.\n` +
                     `Simplify the expression, wrap it in TimeConstrained manually, or increase timeoutSeconds.`;
             } else if (result?.result?.type === 'string' && result.result.value) {
                 // Decode WL unicode escapes: \:03B1 → α
@@ -693,10 +952,38 @@ class EvaluateExpressionTool {
                     /\\:([0-9A-Fa-f]{4})/g,
                     (_, h) => String.fromCharCode(parseInt(h, 16))
                 );
+                // Assertion prefix (expect) and silent JSON-export fallback marker.
+                const parsedAssert = _parseAssertPrefix(val);
+                let assertOutcome = parsedAssert.outcome;
+                val = parsedAssert.value;
+                const jsonInfo = _stripJsonFallback(val);
+                val = jsonInfo.value;
+                if (outputForm === 'json' && !jsonInfo.jsonFellBack) {
+                    _captureStructuredResult(controller, options.input?._operationId, val);
+                }
+                // freeOfMessages is a JS-side clause of the assertion.
+                if (options.input?.expect?.freeOfMessages === true) {
+                    const clean = (result?.messages?.length || 0) === 0;
+                    if (assertOutcome == null) assertOutcome = clean ? 'PASS' : 'FAIL';
+                    else if (assertOutcome === 'PASS' && !clean) assertOutcome = 'FAIL';
+                }
                 // Truncate if enormous (>4 KB)
                 const MAX = 4096;
                 const truncated = val.length > MAX;
                 if (truncated) val = val.slice(0, MAX);
+                let assertLine = '';
+                if (assertOutcome != null) {
+                    const desc = _describeExpect(options.input?.expect);
+                    assertLine = assertOutcome === 'PASS'
+                        ? `ASSERT PASS — ${desc}\n`
+                        : assertOutcome === 'FAIL'
+                        ? `ASSERT FAIL — expected ${desc}; actual below.\n`
+                        : `ASSERT ERROR — the check expression itself failed (${desc}); actual result below.\n`;
+                    const op = options.input?._operationId ? controller.operations?.get?.(options.input._operationId) : null;
+                    if (op) op.assertion = { expect: options.input.expect, outcome: assertOutcome, ts: Date.now() };
+                }
+                output = assertLine + output;
+                if (jsonInfo.jsonFellBack) output += '[outputForm:json unavailable for this expression — returned InputForm]\n';
                 output += `Out= ${val}`;
                 if (truncated) output += `\n[output truncated — ${result.result.value.length} chars total]`;
             } else if (result?.result?.type === 'abort') {
@@ -729,6 +1016,9 @@ class EvaluateExpressionTool {
             return new vscode.LanguageModelToolResult([
                 new vscode.LanguageModelTextPart(errMsg)
             ]);
+        }
+        } finally {
+            controller.arbiter?.release(lease, 'completed');
         }
     }
 }
@@ -772,6 +1062,36 @@ function fetchWolframDocPage(symbolName) {
     });
 }
 
+// De-TeX the usage strings VsCodeSymbolMarkdown emits ($...$ runs produced by
+// TeXForm over usage boxes).  Plain text is 3-4× cheaper in tokens and just as
+// useful to an agent; format:"tex" keeps the raw LaTeX (feedback §5 economy).
+function _deTexUsage(text) {
+    if (typeof text !== 'string' || !text.includes('$')) return text;
+    const unwrapFonts = (t) => {
+        // Innermost-first, iterated to a fixpoint — \text{\textit{x}} nests.
+        let prev;
+        do {
+            prev = t;
+            t = t.replace(/\\(?:text|textit|textbf|mathrm|mathbf|mathit)\s*\{([^{}]*)\}/g, '$1');
+        } while (t !== prev);
+        return t;
+    };
+    const detexRun = (tex) => unwrapFonts(tex)
+        .replace(/\\left\s*/g, '').replace(/\\right\s*/g, '')
+        .replace(/\\ldots|\\dots|\\cdots/g, '...')
+        .replace(/\\infty/g, 'Infinity')
+        .replace(/\\times/g, '*')
+        .replace(/\\,|\\;|\\!|\\ /g, ' ')
+        .replace(/_\{([^{}]*)\}/g, '$1')
+        .replace(/\^\{([^{}]*)\}/g, '^$1')
+        .replace(/\\([A-Za-z]+)/g, '$1')
+        .replace(/[{}]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+    // Replace inline $...$ runs (non-greedy, no nested $).
+    return text.replace(/\$([^$\n]+)\$/g, (_, tex) => detexRun(tex));
+}
+
 class LookupSymbolTool {
     constructor(getController) {
         this._getController = getController;
@@ -791,25 +1111,46 @@ class LookupSymbolTool {
         }
 
         const fetchWeb = options.input?.fetchWeb === true;
-        const controller = this._getController();
+        // A symbol lookup works from any kernel: fall back to the default entry
+        // instead of failing on the multi-kernel guard.
+        let controller = null;
+        try {
+            controller = this._getController(kernelScopedInput(options));
+        } catch (_) {
+            controller = this._getController?.manager?.defaultEntry?.controller || null;
+        }
 
         let localResult = null;
 
         // Try in-kernel lookup (only if kernel is available and not busy)
-        if (controller && controller.session && controller.kernelStatusString === 'resolved' && !controller._evalDispatched) {
+        if (controller && controller.session && controller.kernelStatusString === 'resolved') {
             const longForm = options.input?.longForm !== false;
             const lf = longForm ? 'True' : 'False';
             const expr = `VsCodeSymbolMarkdown["${symbol.replace(/"/g, '')}", ${lf}]`;
+            let lease;
             try {
+                const claim = await acquireKernelForAgent(controller, {
+                    owner: 'wolfbook_lookupSymbol', kind: 'symbol-lookup', caption: `Look up ${symbol}`
+                });
+                if (!claim.lease) {
+                    if (!fetchWeb) return claim.error;
+                } else lease = claim.lease;
+                if (!lease) throw new Error('kernel busy');
                 const result = await Promise.race([
-                    controller.session.evaluate(expr, { interactive: false }),
+                    trackedEvaluate(controller, expr, { interactive: false }),
                     new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 10000))
                 ]);
                 if (!token.isCancellationRequested) {
                     localResult = result?.result?.type === 'string' ? result.result.value : null;
                 }
             } catch (_) { /* kernel unavailable — fall through */ }
+            finally { releaseKernelForAgent(controller, lease); }
         }
+
+        // Default 'text': strip the TeX that VsCodeSymbolMarkdown embeds in usage
+        // strings.  'tex'/'markdown' keep it for callers that actually render.
+        const format = String(options.input?.format || 'text');
+        if (localResult && format === 'text') localResult = _deTexUsage(localResult);
 
         if (!fetchWeb) {
             const out = localResult
@@ -865,7 +1206,8 @@ class InsertCellsTool {
         }
         if (!Array.isArray(cells) || cells.length === 0) {
             if (options.input?.kind && options.input?.content !== undefined) {
-                cells = [{ kind: options.input.kind, content: options.input.content }];
+                cells = [{ kind: options.input.kind, content: options.input.content,
+                    content_encoding: options.input.content_encoding }];
             } else {
                 const received = options.input?.cells !== undefined
                     ? ` (received cells=${JSON.stringify(options.input.cells).slice(0, 120)})`
@@ -891,20 +1233,24 @@ class InsertCellsTool {
         const insertIdx = idxRes.insertIdx;
 
         let _mathConverted = false;
-        const cellDatas = cells.map(c => {
-            const kindVal = c.kind || c.type || 'code';
-            const ck     = (kindVal === 'markdown') ? vscode.NotebookCellKind.Markup : vscode.NotebookCellKind.Code;
-            const langId = (kindVal === 'markdown') ? 'markdown' : 'wolfram';
-            let _val = normalizeToolContent(c.content || '');
-            // Markdown only — in code, \( \) is Wolfram box syntax and \[Name] a
-            // named character, so those must survive untouched.
-            if (kindVal === 'markdown') {
-                const _n = normalizeMarkdownMath(_val);
-                _val = _n.text;
-                if (_n.converted) _mathConverted = true;
-            }
-            return new vscode.NotebookCellData(ck, _val, langId);
-        });
+        let cellDatas;
+        const preparedTexts = [];   // decoded content — previews must show this, not raw base64
+        try {
+            cellDatas = cells.map(c => {
+                const kindVal = c.kind || c.type || 'code';
+                const ck = kindVal === 'markdown' ? vscode.NotebookCellKind.Markup : vscode.NotebookCellKind.Code;
+                const langId = kindVal === 'markdown' ? 'markdown' : 'wolfram';
+                const prepared = prepareCellContent({
+                    content: c.content || '', kind: kindVal,
+                    encoding: c.content_encoding ?? options.input?.content_encoding,
+                });
+                if (prepared.converted) _mathConverted = true;
+                preparedTexts.push(prepared.text);
+                return new vscode.NotebookCellData(ck, prepared.text, langId);
+            });
+        } catch (err) {
+            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(err.message)]);
+        }
 
         const edit = new vscode.WorkspaceEdit();
         edit.set(notebook.uri, [vscode.NotebookEdit.insertCells(insertIdx, cellDatas)]);
@@ -933,7 +1279,7 @@ class InsertCellsTool {
         appendEventLog(
             `\u{1F4E5} BULK INSERT ${cells.length} CELL(S) at positions ${firstNew}\u2013${lastNew}`,
             cells.map((c, i) => {
-                const preview = (c.content || '').trim().slice(0, 100).replace(/\n/g, '\u21B5');
+                const preview = (preparedTexts[i] ?? c.content ?? '').trim().slice(0, 100).replace(/\n/g, '\u21B5');
                 return `${i + 1}. [${c.kind || c.type || 'code'}] ${preview}`;
             }).join('\n')
         );
@@ -949,10 +1295,11 @@ class InsertCellsTool {
             lines.push('Note: converted LaTeX math delimiters to `$…$` / `$$…$$` — use those in .wb markdown (they render everywhere, including GitHub).\n');
         }
         cells.forEach((c, i) => {
-            const preview = (c.content || '').trim().slice(0, 80).replace(/\n/g, '\u21B5');
+            const decoded = preparedTexts[i] ?? c.content ?? '';
+            const preview = decoded.trim().slice(0, 80).replace(/\n/g, '\u21B5');
             const cellAt = notebook.cellAt(insertIdx + i);
             lines.push(`- ${formatCellRef(insertIdx + i, cellAt)} [${c.kind || c.type || 'code'}]: ${preview}${
-                (c.content || '').trim().length > 80 ? '\u2026' : ''}`);
+                decoded.trim().length > 80 ? '\u2026' : ''}`);
         });
 
         // ── evaluate option: run all inserted code cells through the notebook ──
@@ -966,81 +1313,49 @@ class InsertCellsTool {
                 const decoder     = new util.TextDecoder();
                 const evalResults = [];
 
-                const _ctrl = this._getController?.();
+                const _ctrl = this._getController?.({ ...(options?.input || {}), notebook: notebook.uri.fsPath });
                 if (!_ctrl || typeof _ctrl.execute !== 'function') {
                     lines.push('\n[evaluate] No controller available — cells inserted but not evaluated.');
                 } else if (_ctrl.kernelStatusString !== 'resolved') {
                     lines.push('\n[evaluate] Kernel is not running — cells inserted but not evaluated.');
                 } else {
-                    // ── Agent execution: abort any user eval, then run via real VS Code
-                    // execution API (so outputs render correctly). The execution scroll guard
-                    // (same mechanism as refine mode) restores the viewport at Idle.
-                    await _ctrl.abortAndWait(5000);
-                    _ctrl._silentExecution = true; // skip keyboard detection in execute()
-
+                    const claim = await acquireKernelForAgent(_ctrl, {
+                        operationId: options.input?._operationId,
+                        owner: 'mcp', kind: 'insert-and-evaluate',
+                        caption: options.input?.caption || `Evaluate ${cells.length} inserted cell(s)`,
+                        notebook: notebook.uri.fsPath,
+                        policy: options.input?.busyPolicy
+                    });
+                    if (!claim.lease) {
+                        lines.push('\n[evaluate] Cells were inserted, but evaluation was not started because the kernel is busy. Use wolfbook_kernelStatus, then retry explicitly.');
+                        return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(lines.join('\n'))]);
+                    }
                     try {
                         for (let i = 0; i < cells.length; i++) {
                             if ((cells[i].kind || cells[i].type || 'code') === 'markdown') continue;
                             const idx  = insertIdx + i;
 
-                            // Arm the scroll guard (same pattern as RunCellTool).
-                            const _snap = _snapshotViewport(notebook);
-                            if (_snap) {
-                                _ctrl._scrollGuardSavedViewport   = _snap.viewport;
-                                _ctrl._scrollGuardSavedSelections = _snap.selections;
-                                _ctrl._agentGuardActive = true;
-                            }
-
-                            // Fire execution through the notebook pipeline (same as runCell).
-                            _ctrl._wolframExecPending = true;
-                            _ctrl.execute([notebook.cellAt(idx)], notebook, _ctrl._controller);
-
-                            // Poll for idle — identical timing to RunCellTool:
-                            // initial 300 ms lets checkout set _evalDispatched before first check;
-                            // 200 ms grace period after idle lets async appendOutput calls settle.
                             const cellDeadline = Math.min(deadline, Date.now() + 300000);
-                            let hasSeenCellIdle = false;
-                            await new Promise(resolve => {
-                                const poll = () => {
-                                    if (token.isCancellationRequested) { resolve(); return; }
-                                    const isIdle = !_ctrl._evalDispatched && _ctrl.executionQueue.queueLength() === 0;
-                                    if (isIdle) {
-                                        if (!hasSeenCellIdle) {
-                                            hasSeenCellIdle = true;
-                                            setTimeout(poll, 200);
-                                            return;
-                                        }
-                                    } else {
-                                        hasSeenCellIdle = false;
-                                    }
-                                    if ((isIdle && hasSeenCellIdle) || Date.now() >= cellDeadline) resolve();
-                                    else setTimeout(poll, 200);
-                                };
-                                setTimeout(poll, 300);
+                            const pipeline = await runCellViaPipeline(_ctrl, editor, idx, {
+                                timeoutMs: Math.max(1, cellDeadline - Date.now()), token,
+                                snapshotViewport: _snapshotViewport, getCellId: getCellToolId,
                             });
-
-                            // Read cell outputs for the tool response
-                            const updatedCell = notebook.cellAt(idx);
-                            const outs = [];
-                            let hasError = false;
-                            for (const output of updatedCell.outputs) {
-                                const mimes     = output.items.map(it => it.mime);
-                                const plainItem = output.items.find(it => it.mime === 'text/plain');
-                                const isErrSentinel = mimes.includes('x-application/wolfram-language-html') &&
-                                                      mimes.includes('application/vnd.code.notebook.error');
-                                if (plainItem) {
-                                    try {
-                                        const txt = decoder.decode(plainItem.data).trim();
-                                        if (txt) {
-                                            outs.push(txt);
-                                            if (isErrSentinel || /\w+::\w+:/.test(txt)) hasError = true;
-                                        }
-                                    } catch (_) {}
-                                }
-                            }
-                            const timedOut = Date.now() >= cellDeadline && _ctrl._evalDispatched;
-                            const status   = timedOut ? '⏱ timeout' : '✓';
-                            const outStr   = summariseEvalOutputs(outs, hasError);
+                            const updatedCell = pipeline.cell;
+                            const outs = [...pipeline.outputs, ...pipeline.messages];
+                            const hasError = pipeline.failed || pipeline.aborted ||
+                                ['failed', 'aborted', 'stale'].includes(pipeline.provenance?.status);
+                            const hasMessages = pipeline.messages.length > 0;
+                            const state = pipeline.state;
+                            const confirmed = isConfirmed(state);
+                            const timedOut = state === CELL_STATE.TIMEOUT;
+                            // "✓" requires evidence the cell actually ran (see cell-state.js).
+                            const status   = timedOut ? '⏱ timeout'
+                                : !confirmed ? `⚠ ${stateLabel(state)}`
+                                : hasError ? '✗'
+                                : '✓';
+                            const outStr   = (confirmed || timedOut)
+                                ? summariseEvalOutputs(outs, hasError)
+                                : stateRemedy(state);
                             const cellRef  = formatCellRef(idx, updatedCell);
                             // Detect Syntax:: messages — surface prominently so the agent knows
                             // definitions may be stale (e.g. Get[file] with a bad string escape).
@@ -1050,18 +1365,18 @@ class InsertCellsTool {
                             evalResults.push(resultLine);
                             appendEvalLog(cells[i].content || '', outStr);
 
-                            // Stop on error: do not evaluate subsequent cells when a cell fails.
-                            // This prevents cascade failures and forces the agent to fix the problem first.
-                            if (hasError || hasSyntaxMsg || timedOut) {
-                                evalResults.push(`⛔ Evaluation stopped at cell ${idx + 1} — fix the error above before continuing. Remaining cells were NOT evaluated.`);
+                            // Stop on error OR on an unconfirmed dispatch: do not evaluate
+                            // subsequent cells when this one failed or cannot be proven to
+                            // have run — later cells may depend on its definitions.
+                            if (hasError || hasSyntaxMsg || timedOut || !confirmed) {
+                                evalResults.push(`⛔ Evaluation stopped at cell ${idx + 1} — ${!confirmed && !timedOut ? stateLabel(state) : 'fix the error above before continuing'}. Remaining cells were NOT evaluated.`);
                                 break;
                             }
 
                             if (Date.now() >= deadline) { evalResults.push('(global timeout reached)'); break; }
                         }
                     } finally {
-                        _ctrl._silentExecution  = false;
-                        _ctrl._agentGuardActive = false;
+                        releaseKernelForAgent(_ctrl, claim.lease, { state: 'finished' });
                     }
 
                     if (evalResults.length) {
@@ -1129,6 +1444,10 @@ class DeleteCellTool {
 
         // Deduplicate; sort descending so each deletion doesn't shift remaining indices
         const sortedDesc = [...new Set(resolved)].sort((a, b) => b - a);
+        if (sortedDesc.length === 1) {
+            const conflict = mutationConflict(notebook.cellAt(sortedDesc[0] - 1), options.input || {});
+            if (conflict) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(JSON.stringify(conflict, null, 2))]);
+        }
         const saveToRecovery = options.input?.saveToRecovery !== false;
         const notebookPath  = notebook.uri.fsPath;
         const recoveryDir   = path.join(path.dirname(notebookPath), 'img',
@@ -1176,7 +1495,7 @@ class DeleteCellTool {
             const d = deleted[0];
             const preview = d.source.trim().slice(0, 100).replace(/\n/g, '\u21b5');
             return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
-                `Deleted ${d.kindStr} Cell ${d.cellNumber} (CellId: ${d.cellId})${recovery}. Notebook now has ${totalAfter} cell(s).\nContent: ${preview}${d.source.trim().length > 100 ? '\u2026' : ''}`
+                `Deleted ${d.kindStr} Cell ${d.cellNumber} (CellId: ${d.cellId}; kind: ${d.kindStr}; first line: ${JSON.stringify(d.source.split('\n')[0].slice(0, 200))})${recovery}. Notebook now has ${totalAfter} cell(s).\nContent: ${preview}${d.source.trim().length > 100 ? '\u2026' : ''}`
             )]);
         }
 
@@ -1184,7 +1503,7 @@ class DeleteCellTool {
         const lines = [`Deleted ${deleted.length} cells${recovery}. Notebook now has ${totalAfter} cell(s).\n`];
         for (const d of deleted) {
             const preview = d.source.trim().slice(0, 100).replace(/\n/g, '\u21b5');
-            lines.push(`- Cell ${d.cellNumber} [${d.kindStr}] (CellId: ${d.cellId}): ${preview}${d.source.trim().length > 100 ? '\u2026' : ''}`);
+            lines.push(`- Cell ${d.cellNumber} (CellId: ${d.cellId}; kind: ${d.kindStr}; first line: ${JSON.stringify(d.source.split('\n')[0].slice(0, 200))}): ${preview}${d.source.trim().length > 100 ? '\u2026' : ''}`);
         }
         return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(lines.join('\n'))]);
     }
@@ -1350,14 +1669,19 @@ class EditCellTool {
             let evalErrorCount = 0;
 
             // Prepare controller once before the loop
-            const _ctrl = doEval ? this._getController?.() : null;
+            const _ctrl = doEval ? this._getController?.({ ...(options?.input || {}), notebook: notebook.uri.fsPath }) : null;
             const useCtrl = doEval && _ctrl && typeof _ctrl.execute === 'function' && _ctrl.kernelStatusString === 'resolved';
+            let _toolLease = null;
             if (useCtrl) {
-                // Abort any ongoing eval before starting the batch
-                if (_ctrl._evalDispatched || _ctrl.executionQueue.queueLength() > 0) {
-                    await _ctrl.abortAndWait(8000);
-                }
-                _ctrl._silentExecution = true;
+                const claim = await acquireKernelForAgent(_ctrl, {
+                    operationId: options.input?._operationId,
+                    owner: 'mcp', kind: 'edit-and-evaluate',
+                    caption: options.input?.caption || `Edit and evaluate ${items.length} cell(s)`,
+                    notebook: notebook.uri.fsPath,
+                    policy: options.input?.busyPolicy
+                });
+                if (!claim.lease) return claim.error;
+                _toolLease = claim.lease;
             }
 
             const _vpSnapshot = _snapshotViewport(notebook);
@@ -1390,9 +1714,22 @@ class EditCellTool {
                 const idx        = resolved.idx;
                 const cellNumber = idx + 1;
                 const cell       = notebook.cellAt(idx);
+                const conflict = mutationConflict(cell, item);
+                if (conflict) { results.push(`⚠ ${by}: ${JSON.stringify(conflict)}`); errorCount++; continue; }
                 const cellId     = getCellToolId(cell);
                 const isCode     = cell.kind === vscode.NotebookCellKind.Code;
-                const newContent = normalizeToolContent(item.content);
+                let newContent;
+                try {
+                    newContent = prepareCellContent({
+                        content: item.content,
+                        kind: isCode ? 'code' : 'markdown',
+                        encoding: item.content_encoding ?? options.input?.content_encoding,
+                    }).text;
+                } catch (err) {
+                    results.push(`⚠ ${by}: ${err.message}`);
+                    errorCount++;
+                    continue;
+                }
                 const oldContent = cell.document.getText();
 
                 // Compact diff summary (3 lines max each side)
@@ -1424,59 +1761,35 @@ class EditCellTool {
                 // ── Evaluate via real kernel pipeline ─────────────────────────
                 const shouldEval = doEval && (item.evaluate !== false) && isCode && newContent.trim();
                 if (!shouldEval) {
-                    results.push(`✓ Cell ${cellNumber} (${cellId})${_ds}`);
+                    results.push(`✓ Cell ${cellNumber} (${mutationIdentityText(notebook.cellAt(idx))})${_ds}`);
                     continue;
                 }
 
                 if (!useCtrl) {
-                    results.push(`✓ Cell ${cellNumber} (${cellId})${_ds}\n  ⚠ Kernel not running — edit applied but not evaluated.`);
+                    results.push(`✓ Cell ${cellNumber} (${mutationIdentityText(notebook.cellAt(idx))})${_ds}\n  ⚠ Kernel not running — edit applied but not evaluated.`);
                     evalErrorCount++;
                     continue;
                 }
 
-                // Arm scroll guard per cell
-                const _snap = _snapshotViewport(notebook);
-                if (_snap) {
-                    _ctrl._scrollGuardSavedViewport   = _snap.viewport;
-                    _ctrl._scrollGuardSavedSelections = _snap.selections;
-                    _ctrl._agentGuardActive = true;
-                }
-                _ctrl._wolframExecPending = true;
-                _ctrl.execute([notebook.cellAt(idx)], notebook, _ctrl._controller);
-
-                const deadline = Date.now() + timeoutSec * 1000;
-                await new Promise(resolve => {
-                    const poll = () => {
-                        if (token.isCancellationRequested) { resolve(); return; }
-                        if ((!_ctrl._evalDispatched && _ctrl.executionQueue.queueLength() === 0) || Date.now() >= deadline) resolve();
-                        else setTimeout(poll, 150);
-                    };
-                    setTimeout(poll, 200);
+                const pipeline = await runCellViaPipeline(_ctrl, editor, idx, {
+                    timeoutMs: timeoutSec * 1000, token,
+                    snapshotViewport: _snapshotViewport, getCellId: getCellToolId,
                 });
-                _ctrl._agentGuardActive = false;
-
-                const timedOut   = _ctrl._evalDispatched || _ctrl.executionQueue.queueLength() > 0;
-                const updCell    = notebook.cellAt(idx);
-                const outs       = [];
-                const msgOuts    = [];
-                for (const output of updCell.outputs) {
-                    const mimes     = output.items.map(it => it.mime);
-                    const plainItem = output.items.find(it => it.mime === 'text/plain');
-                    const isErrSentinel = mimes.includes('x-application/wolfram-language-html') &&
-                                          mimes.includes('application/vnd.code.notebook.error');
-                    if (!plainItem) continue;
-                    try {
-                        const txt = decoder.decode(plainItem.data).trim();
-                        if (!txt) continue;
-                        if (isErrSentinel) msgOuts.push(txt);
-                        else outs.push(txt);
-                    } catch (_) {}
-                }
+                const timedOut = pipeline.state === CELL_STATE.TIMEOUT;
+                const updCell = pipeline.cell;
+                const outs = pipeline.outputs;
+                const msgOuts = pipeline.messages;
 
                 const outSummary = summariseEvalOutputs(outs, msgOuts.length > 0);
                 let evalStatus;
                 if (timedOut) {
                     evalStatus = `  ⏱ timed out after ${timeoutSec}s`;
+                    evalErrorCount++;
+                } else if (!isConfirmed(pipeline.state)) {
+                    evalStatus = `  ⚠ ${stateLabel(pipeline.state)} — ${stateRemedy(pipeline.state)}`;
+                    evalErrorCount++;
+                } else if (['failed', 'aborted', 'stale'].includes(pipeline.provenance?.status)) {
+                    evalStatus = `  ⛔ ${pipeline.provenance.status}`;
                     evalErrorCount++;
                 } else if (msgOuts.length > 0) {
                     const msgSummary = summariseEvalOutputs(msgOuts, true);
@@ -1490,10 +1803,10 @@ class EditCellTool {
                 const timingStr = (!timedOut && timing?.startTime && timing?.endTime)
                     ? ` (${((timing.endTime - timing.startTime) / 1000).toFixed(2)}s)` : '';
                 appendEvalLog(newContent, evalStatus.trim());
-                results.push(`✓ Cell ${cellNumber} (${cellId})${timingStr}${_ds}\n${evalStatus}`);
+                results.push(`✓ Cell ${cellNumber} (${mutationIdentityText(notebook.cellAt(idx))})${timingStr}${_ds}\n${evalStatus}`);
             }
             } finally {
-                if (useCtrl) { _ctrl._silentExecution = false; _ctrl._agentGuardActive = false; }
+            releaseKernelForAgent(_ctrl, _toolLease, { state: 'finished' });
             }
 
             _restoreViewport(_vpSnapshot);
@@ -1531,13 +1844,23 @@ class EditCellTool {
         const idx        = resolved.idx;
         const cellNumber = idx + 1;
         const cell       = notebook.cellAt(idx);
+        const conflict = mutationConflict(cell, options.input || {});
+        if (conflict) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(JSON.stringify(conflict, null, 2))]);
         const cellId     = getCellToolId(cell);
 
         // Normalise content: fix double-encoded escape sequences (\n, \", \\)
         // that the LLM sometimes emits instead of the real characters.
         // Accept 'newContent' as an alias for 'content' (common model mistake).
-        let rawContent = normalizeToolContent(options.input?.content ?? options.input?.newContent ?? cell.document.getText());
-        const newContent = rawContent;
+        let newContent;
+        try {
+            newContent = prepareCellContent({
+                content: options.input?.content ?? options.input?.newContent ?? cell.document.getText(),
+                kind: cell.kind === vscode.NotebookCellKind.Markup ? 'markdown' : 'code',
+                encoding: options.input?.content_encoding,
+            }).text;
+        } catch (err) {
+            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(err.message)]);
+        }
         const oldContent = cell.document.getText();
 
         // Build a compact diff summary for the agent
@@ -1579,73 +1902,51 @@ class EditCellTool {
         }
         const _vpSnapshot = _snapshotViewport(notebook);
 
-        const editedMsg = `Edited Cell ${cellNumber} (CellId: ${cellId}) of ${notebook.cellCount} in ${notebook.uri.fsPath.split('/').pop()}.${_diffSummary}`;
+        const editedMsg = `Edited Cell ${cellNumber} (${mutationIdentityText(notebook.cellAt(idx))}) of ${notebook.cellCount} in ${notebook.uri.fsPath.split('/').pop()}.${_diffSummary}`;
         appendEventLog(`\u270F\uFE0F EDIT CELL ${cellNumber}`,
             newContent.trim().length > 200 ? newContent.trim().slice(0, 200) + '\u2026' : newContent.trim() || '*(empty)*');
 
         const evaluate = !!options.input?.evaluate;
         if (evaluate && cell.kind !== vscode.NotebookCellKind.Markup && newContent.trim()) {
-            const controller = this._getController?.();
+            const controller = this._getController?.({ ...(options?.input || {}), notebook: notebook.uri.fsPath });
             if (!controller || !controller.session || controller.kernelStatusString !== 'resolved') {
                 return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
                     editedMsg + '\n[evaluate] Kernel is not running.'
                 )]);
             }
-            if (controller._evalDispatched || controller.executionQueue.queueLength() > 0) {
-                await controller.abortAndWait(8000);
-                if (controller._evalDispatched) {
-                    return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
-                        editedMsg + '\n[evaluate] Kernel did not become idle after abort — cell edited but not evaluated.'
-                    )]);
-                }
-            }
+            const claim = await acquireKernelForAgent(controller, {
+                operationId: options.input?._operationId,
+                owner: 'mcp', kind: 'edit-and-evaluate',
+                caption: options.input?.caption || `Edit and evaluate Cell ${cellNumber}`,
+                notebook: notebook.uri.fsPath, cellId, cellNumber,
+                sourcePreview: newContent.slice(0, 160), policy: options.input?.busyPolicy
+            });
+            if (!claim.lease) return claim.error;
             const timeoutSec = Number(options.input?.timeoutSeconds) || 15;
-            const wlTimeout  = Math.max(1, timeoutSec - 1);
-            const dynCount   = controller._dynCells?.size ?? 0;
-            const wrappedExpr =
-                `Block[{$wbR$}, $wbR$ = TimeConstrained[(${newContent}), ${wlTimeout}, "$WBTIMEOUT$"]; If[$wbR$ === "$WBTIMEOUT$", "$WBTIMEOUT$", If[StringQ[$wbR$], $wbR$, ToString[$wbR$, InputForm]]]]`;
             try {
-                const result = await Promise.race([
-                    controller.session.evaluate(wrappedExpr, { interactive: false }),
-                    new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), timeoutSec * 1000))
-                ]);
-                if (token.isCancellationRequested) {
-                    return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(editedMsg + '\n[evaluate] Cancelled.')]);
-                }
-                let evalOut = '';
-                if (dynCount > 0) evalOut += `[note] ${dynCount} Dynamic widget(s) active\n`;
-                if (result?.messages?.length) {
-                    const clean = result.messages.map(cleanWrapperFromMsg);
-                    evalOut += summariseMsgs(clean).join('\n') + '\n';
-                }
-                if (result?.result?.type === 'string' && result.result.value === '$WBTIMEOUT$') {
-                    evalOut += `Timed out after ${wlTimeout}s — kernel is still alive. Increase timeoutSeconds.`;
-                } else if (result?.result?.type === 'string' && result.result.value) {
-                    let val = result.result.value.replace(/\\:([0-9A-Fa-f]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
-                    const MAX = 4096, truncated = val.length > MAX;
-                    if (truncated) val = val.slice(0, MAX);
-                    evalOut += `Out= ${val}`;
-                    if (truncated) evalOut += `\n[output truncated — ${result.result.value.length} chars total]`;
-                } else if (result?.result?.type === 'abort') {
-                    evalOut += 'Evaluation aborted.';
-                } else {
-                    evalOut += '(no output)';
-                }
+                const pipeline = await runCellViaPipeline(controller, editor, idx, {
+                    timeoutMs: timeoutSec * 1000, token,
+                    snapshotViewport: _snapshotViewport, getCellId: getCellToolId,
+                });
+                const evalOut = pipeline.state === CELL_STATE.TIMEOUT
+                    ? `Timed out after ${timeoutSec}s; operation ${claim.lease.operationId} is still running.`
+                    : !isConfirmed(pipeline.state)
+                    ? `⚠ ${stateLabel(pipeline.state)}. ${stateRemedy(pipeline.state)}`
+                    : (pipeline.provenance?.status === 'stale'
+                        ? `Stale-result conflict: Cell ${cellNumber} changed during evaluation. Output was retained only in operation ${claim.lease.operationId}.`
+                        : (pipeline.plain || `(${stateLabel(CELL_STATE.EVALUATED_NO_OUTPUT)})`));
                 appendEvalLog(newContent, evalOut.trim());
                 _restoreViewport(_vpSnapshot);
                 return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
                     editedMsg + '\n\n[evaluate]\n' + evalOut.trim()
                 )]);
             } catch (err) {
-                const errMsg = err.message === 'timeout'
-                    ? `Evaluation timed out after ${timeoutSec}s.`
-                    : isKernelConnectionError(err.message) ? KERNEL_CRASH_MSG : `Error: ${err.message}`;
-                if (err.message === 'timeout' && !controller._evalDispatched) {
-                    try { controller.session.abort?.(); } catch (_) {}
-                }
+                const errMsg = isKernelConnectionError(err.message) ? KERNEL_CRASH_MSG : `Error: ${err.message}`;
                 appendEvalLog(newContent, errMsg);
                 _restoreViewport(_vpSnapshot);
                 return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(editedMsg + '\n[evaluate] ' + errMsg)]);
+            } finally {
+                releaseKernelForAgent(controller, claim.lease, { state: 'finished' });
             }
         }
 
@@ -1679,6 +1980,20 @@ class RunCellTool {
         const editor = await resolveNotebookEditor(options.input?.notebook, { skipConfirm: true });
         if (!editor) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(noEditorMsg(options.input?.notebook))]);
 
+        const _claimCtrl = this._getController?.({ ...(options?.input || {}), notebook: editor.notebook.uri.fsPath });
+        const claim = await acquireKernelForAgent(_claimCtrl, {
+            operationId: options.input?._operationId,
+            owner: 'mcp', kind: options.input?.cellId || options.input?.cellNumber ? 'cell-evaluation' : 'range-evaluation',
+            caption: options.input?.caption || 'Run notebook cell(s)',
+            policyOverride: options.input?.busyPolicy,
+            notebook: editor.notebook.uri.fsPath,
+            cellId: options.input?.cellId || null,
+            cellNumber: options.input?.cellNumber || null,
+        });
+        if (claim.result) return claim.result;
+        const _toolLease = claim.lease;
+        try {
+
         // ── detect wrong parameter names ──────────────────────────────────────
         const _CELL_USAGE = 'Correct parameters: cellId (stable string, preferred) or cellNumber (1-based integer) for a single cell; startCell/endCell for a range.';
         if (options.input?.cellIndex != null || options.input?.cell_index != null) {
@@ -1699,7 +2014,8 @@ class RunCellTool {
             const startCell   = Math.max(1, Number(options.input?.startCell) || 1);
             const endCell     = Math.min(notebook.cellCount, Number(options.input?.endCell) || notebook.cellCount);
             const timeoutSec  = Math.max(10, Number(options.input?.timeoutSeconds) || 120);
-            const stopOnError = options.input?.stopOnError !== false;
+            const stopOnFailure = options.input?.stop_on_failure !== false && options.input?.stopOnError !== false;
+            const messagePolicy = options.input?.message_policy === 'stop' ? 'stop' : 'collect';
             const errorsOnly  = options.input?.errorsOnly === true;
 
             if (startCell > endCell || startCell < 1) {
@@ -1708,18 +2024,14 @@ class RunCellTool {
                 )]);
             }
 
-            const decoder   = new util.TextDecoder();
             const deadline  = Date.now() + timeoutSec * 1000;
             const results   = [];
             let   codeCount = 0;
             let   stopped   = null;
 
-            const _ctrl = this._getController?.();
+            const _ctrl = this._getController?.({ ...(options?.input || {}), notebook: notebook.uri.fsPath });
             const useSilent = _ctrl && typeof _ctrl.execute === 'function' && _ctrl.kernelStatusString === 'resolved';
-            if (useSilent) await _ctrl.abortAndWait(5000);
-            if (useSilent) { _ctrl._silentExecution = true; }
 
-            try {
             for (let n = startCell; n <= endCell; n++) {
                 if (token.isCancellationRequested) { stopped = `cancelled at Cell ${n}`; break; }
                 const idx  = n - 1;
@@ -1729,36 +2041,12 @@ class RunCellTool {
                 const remaining = deadline - Date.now();
                 if (remaining <= 0) { stopped = `global timeout (${timeoutSec}s) reached before Cell ${n}`; break; }
 
+                let pipeline = null;
+                let fbUnconfirmed = null;   // fallback path: unconfirmed/timeout state
                 if (useSilent) {
-                    // Arm the scroll guard for each cell execution.
-                    const _snap = _snapshotViewport(notebook);
-                    if (_snap) {
-                        _ctrl._scrollGuardSavedViewport   = _snap.viewport;
-                        _ctrl._scrollGuardSavedSelections = _snap.selections;
-                        _ctrl._agentGuardActive = true;
-                    }
-                    _ctrl._wolframExecPending = true;
-                    _ctrl.execute([notebook.cellAt(idx)], notebook, _ctrl._controller);
-                    const cellDeadline = Math.min(deadline, Date.now() + 300000);
-                    // Grace period for async output operations to settle after idle is detected
-                    let hasSeenCellIdle = false;
-                    await new Promise(resolve => {
-                        const poll = () => {
-                            if (token.isCancellationRequested) { resolve(); return; }
-                            const cellIsIdle = !_ctrl._evalDispatched && _ctrl.executionQueue.queueLength() === 0;
-                            if (cellIsIdle) {
-                                if (!hasSeenCellIdle) {
-                                    hasSeenCellIdle = true;
-                                    setTimeout(poll, 200);  // wait 200ms for async appends
-                                    return;
-                                }
-                            } else {
-                                hasSeenCellIdle = false;
-                            }
-                            if ((cellIsIdle && hasSeenCellIdle) || Date.now() >= cellDeadline) resolve();
-                            else setTimeout(poll, 200);
-                        };
-                        setTimeout(poll, 300);
+                    pipeline = await runCellViaPipeline(_ctrl, editor, idx, {
+                        timeoutMs: Math.min(deadline - Date.now(), 300000), token,
+                        snapshotViewport: _snapshotViewport, getCellId: getCellToolId,
                     });
                 } else {
                     const prevEndTime = cell.executionSummary?.timing?.endTime ?? 0;
@@ -1774,49 +2062,53 @@ class RunCellTool {
                         };
                         setTimeout(poll, 500);
                     });
-                }
-
-                const updatedCell = notebook.cellAt(idx);
-                const timedOut = useSilent
-                    ? (_ctrl._evalDispatched || _ctrl.executionQueue.queueLength() > 0)
-                    : (updatedCell.outputs.length === 0);
-                codeCount++;
-
-                const outs = [];
-                let hasError = false;
-                for (const output of updatedCell.outputs) {
-                    const mimes     = output.items.map(it => it.mime);
-                    const plainItem = output.items.find(it => it.mime === 'text/plain');
-                    const isErrSentinel = mimes.includes('x-application/wolfram-language-html') &&
-                                          mimes.includes('application/vnd.code.notebook.error');
-                    if (plainItem) {
-                        try {
-                            const txt = decoder.decode(plainItem.data).trim();
-                            if (txt) {
-                                outs.push(txt);
-                                // Detect kernel messages: error sentinel output OR WL message format (Symbol::tag:)
-                                if (isErrSentinel || /\w+::\w+:/.test(txt)) hasError = true;
-                            }
-                        } catch (_) {}
+                    // Evidence for the fallback path: the VS Code execution record.
+                    // An unchanged endTime means we CANNOT claim the cell ran.
+                    const newEnd = notebook.cellAt(idx).executionSummary?.timing?.endTime ?? 0;
+                    if (!(newEnd > prevEndTime)) {
+                        fbUnconfirmed = Date.now() >= cellDeadline
+                            ? CELL_STATE.TIMEOUT : CELL_STATE.DISPATCHED_UNCONFIRMED;
                     }
                 }
 
-                const status = timedOut ? '\u23F1 timeout' : '\u2713';
-                const outStr = summariseEvalOutputs(outs, hasError);
+                const updatedCell = pipeline?.cell || notebook.cellAt(idx);
+                codeCount++;
+
+                const committed = pipeline || readCommittedOutputs(updatedCell);
+                const outs = [...committed.outputs, ...committed.messages];
+                const hasError = committed.failed || committed.aborted ||
+                    ['failed', 'aborted', 'stale'].includes(committed.provenance?.status);
+                const hasMessages = committed.messages.length > 0;
+                const state = pipeline ? pipeline.state
+                    : (fbUnconfirmed || (hasError ? CELL_STATE.FAILED
+                        : hasMessages ? CELL_STATE.EVALUATED_WITH_MESSAGES
+                        : committed.outputs.length > 0 ? CELL_STATE.EVALUATED_WITH_OUTPUT
+                        : CELL_STATE.EVALUATED_NO_OUTPUT));
+                const confirmed = isConfirmed(state);
+                const timedOut = state === CELL_STATE.TIMEOUT;
+
+                // "\u2713" requires evidence that the cell actually ran (provenance or an
+                // advanced execution record) \u2014 mere absence of activity never earns it.
+                const status = timedOut ? '\u23F1 timeout'
+                    : !confirmed ? `\u26A0 ${stateLabel(state)}`
+                    : hasError ? '\u2717'
+                    : '\u2713';
+                const outStr = (confirmed || timedOut)
+                    ? summariseEvalOutputs(outs, hasError)
+                    : stateRemedy(state);
                 // Detect Syntax:: messages — surface prominently so the agent knows
                 // definitions may be stale (e.g. Get[file] with a bad string escape).
                 const hasSyntaxMsg = outs.some(t => /Syntax::\w+:/.test(t));
                 let resultLine = `Cell ${n}: ${status} \u2014 ${outStr}`;
                 if (hasSyntaxMsg) resultLine += '\n  \u26A0\uFE0F SYNTAX MESSAGE DETECTED \u2014 definitions loaded before this error may be stale.';
                 // errorsOnly: only include cells that had messages/warnings
-                if (!errorsOnly || hasError || timedOut) {
+                if (!errorsOnly || hasError || hasMessages || timedOut || !confirmed) {
                     results.push(resultLine);
                 }
 
-                if (stopOnError && hasError) { stopped = `stopped at Cell ${n} — error detected (pass stopOnError:false to continue past errors)`; break; }
-            }
-            } finally {
-                if (useSilent) { _ctrl._silentExecution = false; _ctrl._agentGuardActive = false; }
+                if (stopOnFailure && hasError) { stopped = `stopped at Cell ${n} — evaluation failed (pass stop_on_failure:false to continue)`; break; }
+                if (!confirmed && !timedOut) { stopped = `stopped at Cell ${n} — ${stateLabel(state)}; later cells were not run`; break; }
+                if (messagePolicy === 'stop' && hasMessages) { stopped = `stopped at Cell ${n} — message_policy is stop`; break; }
             }
 
             const total  = notebook.cellCount;
@@ -1859,51 +2151,14 @@ class RunCellTool {
 
         const timeoutSec = Number(options.input?.timeoutSeconds) || 30;
 
-        // ── Agent execution: abort any user eval, then run via real VS Code execution API.
-        // The scroll guard (same as refine mode) restores the viewport at Idle.
-        const _ctrl = this._getController?.();
+        const _ctrl = this._getController?.({ ...(options?.input || {}), notebook: notebook.uri.fsPath });
+        let pipeline = null;
+        let fbUnconfirmed = null;   // fallback path: unconfirmed/timeout state
         if (_ctrl && typeof _ctrl.execute === 'function' && _ctrl.kernelStatusString === 'resolved') {
-            await _ctrl.abortAndWait(5000);
-            // Arm the scroll guard.
-            const _snap = _snapshotViewport(notebook);
-            if (_snap) {
-                _ctrl._scrollGuardSavedViewport   = _snap.viewport;
-                _ctrl._scrollGuardSavedSelections = _snap.selections;
-                _ctrl._agentGuardActive = true;
-            }
-            _ctrl._silentExecution = true;
-            try {
-                _ctrl._wolframExecPending = true;
-                _ctrl.execute([notebook.cellAt(idx)], notebook, _ctrl._controller);
-                // Wait for checkout to finish. After idle is detected, add a grace period
-                // to allow async appendOutput() operations to complete (they were started
-                // by the checkout pipeline but may still be in-flight).
-                const deadline = Date.now() + timeoutSec * 1000;
-                let hasSeenIdle = false;
-                await new Promise(resolve => {
-                    const poll = () => {
-                        const isIdle = !_ctrl._evalDispatched && _ctrl.executionQueue.queueLength() === 0;
-                        if (isIdle) {
-                            if (!hasSeenIdle) {
-                                // Just detected idle — wait 200ms for async output ops to settle
-                                hasSeenIdle = true;
-                                setTimeout(poll, 200);
-                                return;
-                            }
-                        } else {
-                            hasSeenIdle = false;  // reset if we go back to busy
-                        }
-                        if (token.isCancellationRequested || (isIdle && hasSeenIdle) || Date.now() >= deadline) resolve();
-                        else setTimeout(poll, 100);
-                    };
-                    setTimeout(poll, 50);
-                });
-            } finally {
-                _ctrl._silentExecution  = false;
-                _ctrl._agentGuardActive = false;
-            }
-            // Scroll right pane to the evaluated cell in collab mode.
-            await flashCell(editor, idx);
+            pipeline = await runCellViaPipeline(_ctrl, editor, idx, {
+                timeoutMs: timeoutSec * 1000, token, snapshotViewport: _snapshotViewport,
+                flashCell, getCellId: getCellToolId,
+            });
         } else {
             // Fallback: no controller available
             editor.selection = new vscode.NotebookRange(idx, idx + 1);
@@ -1919,59 +2174,59 @@ class RunCellTool {
                 };
                 setTimeout(poll, 400);
             });
+            // Evidence for the fallback path: the VS Code execution record.
+            const newEnd = notebook.cellAt(idx).executionSummary?.timing?.endTime ?? 0;
+            if (!(newEnd > prevEndTime)) {
+                fbUnconfirmed = Date.now() >= deadline
+                    ? CELL_STATE.TIMEOUT : CELL_STATE.DISPATCHED_UNCONFIRMED;
+            }
         }
 
         if (token.isCancellationRequested) {
             return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart('Cancelled.')]);
         }
 
-        // Detect timeout: kernel still dispatching or queue not drained.
-        const _evalStillActive = _ctrl && (_ctrl._evalDispatched || _ctrl.executionQueue.queueLength() > 0);
-        const timedOut = _evalStillActive;
-
         // Collect outputs from the (now-updated) cell.
         // The error sentinel output (wolfram-html-html + vnd.code.notebook.error) is a
         // hidden output whose text/plain item holds all kernel messages (warnings, errors).
         // Regular outputs (results, Print[], graphics) are the non-sentinel ones.
-        const decoder = new util.TextDecoder();
-        const updatedCell = notebook.cellAt(idx);
-        const outs    = [];   // normal result / print output
-        const msgOuts = [];   // kernel messages / warnings / errors
+        const updatedCell = pipeline?.cell || notebook.cellAt(idx);
+        const committed = pipeline || readCommittedOutputs(updatedCell);
+        const outs = committed.outputs;
+        const msgOuts = committed.messages;
 
-        for (const output of updatedCell.outputs) {
-            const mimes     = output.items.map(it => it.mime);
-            const plainItem = output.items.find(it => it.mime === 'text/plain');
-            const isErrSentinel = mimes.includes('x-application/wolfram-language-html') &&
-                                  mimes.includes('application/vnd.code.notebook.error');
-            if (!plainItem) continue;
-            try {
-                const txt = decoder.decode(plainItem.data).trim();
-                if (!txt) continue;
-                if (isErrSentinel) {
-                    msgOuts.push(txt);
-                } else {
-                    outs.push(txt);
-                }
-            } catch (_) {}
-        }
+        // Evidence-based state: "executed" is claimed only when provenance or the
+        // VS Code execution record confirms it (see tools/cell-state.js).
+        const state = pipeline ? pipeline.state
+            : (fbUnconfirmed || (committed.failed ? CELL_STATE.FAILED
+                : msgOuts.length > 0 ? CELL_STATE.EVALUATED_WITH_MESSAGES
+                : outs.length > 0 ? CELL_STATE.EVALUATED_WITH_OUTPUT
+                : CELL_STATE.EVALUATED_NO_OUTPUT));
+        const confirmed = isConfirmed(state);
+        const timedOut = state === CELL_STATE.TIMEOUT;
 
         const total     = notebook.cellCount;
         const timing    = updatedCell.executionSummary?.timing;
-        const timingStr = (!timedOut && timing?.startTime && timing?.endTime)
+        const timingStr = (confirmed && timing?.startTime && timing?.endTime)
             ? ` (${((timing.endTime - timing.startTime) / 1000).toFixed(2)} s)`
             : '';
 
         const resultParts = [];
-        if (timedOut) {
+        if (committed.provenance?.status === 'stale') {
+            resultParts.push(`Cell ${cellNumber} (CellId: ${cellId}) changed during evaluation; the stale result was not attached. See operation ${_toolLease.operationId}.`);
+        } else if (timedOut) {
             resultParts.push(`Cell ${cellNumber} (CellId: ${cellId}) of ${total} timed out after ${timeoutSec}s (execution may still be running).`);
+        } else if (!confirmed) {
+            resultParts.push(`Cell ${cellNumber} (CellId: ${cellId}) of ${total}: ${stateLabel(state)}.`);
+            resultParts.push(stateRemedy(state, { kernelLabel: _ctrl?.kernelIdentity?.label }));
         } else {
             resultParts.push(`Cell ${cellNumber} (CellId: ${cellId}) of ${total} executed${timingStr}.`);
         }
 
         if (outs.length > 0) {
             resultParts.push(outs.join('\n'));
-        } else {
-            resultParts.push('(no output — definition or suppressed expression)');
+        } else if (confirmed) {
+            resultParts.push(`(${stateLabel(CELL_STATE.EVALUATED_NO_OUTPUT)})`);
         }
 
         if (msgOuts.length > 0) {
@@ -1989,6 +2244,8 @@ class RunCellTool {
         const inputPreview = (cell.document.getText?.() || '').trim().slice(0, 200).replace(/\n/g, '\u21B5') || '(code cell)';
         const outputSummary = timedOut
             ? `TIMEOUT after ${timeoutSec}s`
+            : !confirmed
+            ? `\u26A0 ${stateLabel(state)}`
             : (outs.length > 0 ? outs.join(' | ').slice(0, 300) : '(no output)') +
               (msgOuts.length > 0 ? `  \u26A0 ${msgOuts.join(' | ').slice(0, 200)}` : '');
         appendEventLog(
@@ -1997,14 +2254,20 @@ class RunCellTool {
         );
 
         return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(resultParts.join('\n'))]);
+        } finally {
+            releaseKernelForAgent(_claimCtrl, _toolLease, 'completed');
+        }
     }
 }
 
 // ---------------------------------------------------------------------------
-// wolfbook_getKernelState — list user-defined symbols with values/rule counts
+// wolfbook_inspectSymbols (canonical; wolfbook_getKernelState is a deprecated
+// alias) — list user-defined symbols with values/rule counts.  NOTE: this tool
+// EVALUATES in the kernel — it is not a side-effect-free status probe; use
+// wolfbook_status for that.
 // ---------------------------------------------------------------------------
 
-class GetKernelStateTool {
+class InspectSymbolsTool {
     constructor(getController) {
         this._getController = getController;
     }
@@ -2015,19 +2278,25 @@ class GetKernelStateTool {
     }
 
     async invoke(options, _token) {
-        const controller = this._getController?.();
+        let controller;
+        try {
+            controller = this._getController?.(kernelScopedInput(options));
+        } catch (err) {
+            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(String(err.message))]);
+        }
         if (!controller || !controller.session || controller.kernelStatusString !== 'resolved') {
             return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart('Kernel is not running.')]);
         }
-        if (controller._evalDispatched || controller.executionQueue.queueLength() > 0) {
-            await controller.abortAndWait(8000);
-            if (controller._evalDispatched) {
-                return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
-                    'Kernel did not become idle after abort attempt — try again.'
-                )]);
-            }
-        }
+        const claim = await acquireKernelForAgent(controller, {
+            operationId: options.input?._operationId,
+            owner: 'mcp', kind: 'symbol-inspection',
+            caption: `Inspect symbols ${options.input?.pattern || 'Global`*'}`,
+            policyOverride: options.input?.busyPolicy,
+        });
+        if (claim.result) return claim.result;
+        const lease = claim.lease;
 
+        try {
         // Sanitise pattern: only allow WL symbol-name characters, backtick, and `*`
         const rawPattern = String(options.input?.pattern || 'Global`*');
         const safePattern = rawPattern.replace(/[^A-Za-z0-9$`*?]/g, '')  || 'Global`*';
@@ -2050,8 +2319,34 @@ class GetKernelStateTool {
         // KEY: never call Symbol[s] (evaluates the symbol, can cause recursion abort in WE).
         // Instead serialize OwnValues directly—the stored RuleDelayed holds the RHS without
         // re-evaluating it—then strip the "{HoldPattern[...] :> " prefix.
+        // Filter Wolfbook plumbing by default: init.wl deliberately interns
+        // ~21 VsCode*/WB* symbols into Global` (plus the tools' own $wb* Block
+        // locals), which otherwise head every Global`* dump (feedback §4.5).
+        const includeInternal = options.input?.includeInternal === true;
+        const namesOnly = options.input?.namesOnly === true;
+        const symLimit = Math.max(1, Math.min(1000, Number(options.input?.limit) || 100));
+        const internalFilter = includeInternal ? '' :
+            `$wbS$=Select[$wbS$,!StringMatchQ[#,("VsCode*"|"WB*"|"$wb*"|"$WB*"|"*\`VsCode*"|"*\`WB*"|"*\`$wb*"|"$setKernelConfig"|"ClearGlobals"|"*\`$setKernelConfig"|"*\`ClearGlobals")]&];`;
+        if (namesOnly) {
+            const namesExpr =
+                `Block[{$wbS$=Sort[Names["${safePattern}"]]},${internalFilter}` +
+                `If[$wbS$==={},"(no symbols matching ${safePattern})",` +
+                `StringJoin[Riffle[Take[$wbS$,UpTo[${symLimit}]],"\\n"]]<>If[Length[$wbS$]>${symLimit},"\\n... and "<>ToString[Length[$wbS$]-${symLimit}]<>" more",""]]]`;
+            try {
+                const result = await Promise.race([
+                    trackedEvaluate(controller, `Block[{$wbR$}, $wbR$ = TimeConstrained[(${namesExpr}), 9, "$WBTIMEOUT$"]; If[StringQ[$wbR$], $wbR$, ToString[$wbR$, InputForm]]]`, { interactive: false }),
+                    new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 10000))
+                ]);
+                const val = result?.result?.type === 'string' ? result.result.value : '(no output)';
+                return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
+                    `Symbols (${safePattern}${includeInternal ? '' : ', internals hidden'}):\n${val.replace(/\\n/g, '\n')}`
+                )]);
+            } catch (err) {
+                return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(`Error: ${err.message}`)]);
+            }
+        }
         const wlExpr = [
-            `Block[{$wbS$=Sort[Names["${safePattern}"]],`,
+            `Block[{$wbS$=Sort[Names["${safePattern}"]]},${internalFilter}Block[{$wbS2$=Take[$wbS$,UpTo[${symLimit}]],`,
             `$wbTrunc$=Function[{str,maxLen},If[StringLength[str]>maxLen,StringTake[str,maxLen]<>"...",str]],`,
             // Strip {HoldPattern[...] :> from OwnValues string, and trailing }
             `$wbExVal$=Function[str,StringReplace[StringReplace[str,`,
@@ -2083,10 +2378,10 @@ class GetKernelStateTool {
             `],`,
             `True,Nothing`,
             `]],Nothing]]]},`,
-            `If[$wbS$==={},"(no symbols matching ${safePattern})",`,
-            `With[{$wbLines$=DeleteCases[Map[$wbFmt$,$wbS$],Nothing|$Failed]},`,
+            `If[$wbS2$==={},"(no symbols matching ${safePattern})",`,
+            `With[{$wbLines$=DeleteCases[Map[$wbFmt$,$wbS2$],Nothing|$Failed]},`,
             `If[$wbLines$==={},"(no symbols with definitions matching ${safePattern})",`,
-            `StringJoin[Riffle[$wbLines$,"\\n"]]]]]]`
+            `StringJoin[Riffle[$wbLines$,"\\n"]]<>If[Length[$wbS$]>${symLimit},"\\n... limited to ${symLimit} of "<>ToString[Length[$wbS$]]<>" symbols (pass limit to raise)",""]]]]]]`
         ].join('');
 
         const timeoutSec = 10;
@@ -2096,7 +2391,7 @@ class GetKernelStateTool {
 
         try {
             const result = await Promise.race([
-                controller.session.evaluate(wrapped, { interactive: false }),
+                trackedEvaluate(controller, wrapped, { interactive: false }),
                 new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), timeoutSec * 1000))
             ]);
             if (result?.result?.type === 'string' && result.result.value === '$WBTIMEOUT$') {
@@ -2108,7 +2403,7 @@ class GetKernelStateTool {
                     .replace(/\\012/g, '\n')
                     .replace(/\\n/g, '\n');
                 return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
-                    `Kernel state (${safePattern}):\n${val}`
+                    `Kernel state (${safePattern}${includeInternal ? '' : '; Wolfbook internals hidden — includeInternal:true to show'}):\n${val}`
                 )]);
             }
             return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart('(no output from kernel state query)')]);
@@ -2116,6 +2411,437 @@ class GetKernelStateTool {
             const errMsg = isKernelConnectionError(err.message) ? KERNEL_CRASH_MSG : `Error: ${err.message}`;
             return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(errMsg)]);
         }
+        } finally {
+            controller.arbiter?.release(lease, 'completed');
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// wolfbook_status — ONE side-effect-free status surface (feedback §4.1/§5).
+// scope: kernels | operations | notebook | all.  'clients' (and the clients
+// section of 'all') is rendered by the MCP primary's transport intercept —
+// only it owns the cross-window table.  Never touches controller.session,
+// never shows an editor, never takes a lease.
+// ---------------------------------------------------------------------------
+class StatusTool {
+    constructor(getController) {
+        this._getController = getController;
+        this._manager = getController?.manager;
+    }
+
+    _kernelLines() {
+        const manager = this._manager;
+        if (!manager) return ['(no kernel manager)'];
+        const notebooks = _allNotebookUris ? [..._allNotebookUris().keys()] : [];
+        const rows = manager.list ? manager.list(notebooks) : [];
+        if (!rows.length) return ['(no kernels)'];
+        return rows.map(k => {
+            const nb = (k.notebooks || []).map(p => String(p).split('/').pop()).join(', ');
+            return `${k.kernel_label || '?'} ${k.kernel_id} · ${k.lifecycle || '?'}${k.remote ? ' · remote' : ''}${nb ? ` · ${nb}` : ''}`;
+        });
+    }
+
+    _operationLines(controller) {
+        const journal = controller?.operations?.journal?.(5) || [];
+        if (!journal.length) return ['(no recent operations)'];
+        return journal.map(op => {
+            const mark = op.state === 'failed' ? '✗' : op.state === 'completed' ? '✓' : '·';
+            const when = (op.started_at || '').replace(/^.*T/, '').replace(/\..*$/, '');
+            return `${mark} ${when} ${op.tool || '?'} ${String(op.caption || '').slice(0, 40)} [${op.state}]`;
+        });
+    }
+
+    async _notebookLines(input) {
+        const doc = await resolveNotebookDocument(input?.notebook);
+        if (!doc) return ['(no notebook resolved)'];
+        const binding = this._manager?.bindingFor?.(doc.uri.fsPath);
+        return [
+            `${doc.uri.fsPath.split('/').pop()} · ${doc.cellCount} cells · ${doc.isDirty ? 'DIRTY' : 'saved'} · v${doc.version}`,
+            `path: ${doc.uri.fsPath}`,
+            `kernel binding: ${binding ? `${binding.label} ${binding.id}` : '(none)'}`,
+        ];
+    }
+
+    async invoke(options, _token) {
+        const input = options.input || {};
+        // Legacy shape: wolfbook_kernelStatus alias emits the raw arbiter JSON.
+        if (input._legacyShape) {
+            let controller = null;
+            try { controller = this._getController?.(kernelScopedInput(options)); }
+            catch (err) {
+                return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(String(err.message))]);
+            }
+            const status = controller?.arbiter?.status(controller) || {
+                lifecycle: controller?.kernelStatusString === 'resolved' ? 'idle' : 'offline',
+                busy: !!controller?._evalDispatched,
+                queueDepth: controller?.executionQueue?.queueLength?.() || 0,
+            };
+            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(JSON.stringify(status, null, 2))]);
+        }
+        const scope = input.scope || 'all';
+        let controller = null;
+        try { controller = this._getController?.({ notebook: input.notebook, kernel_id: input.kernel_id }); } catch (_) {}
+        if (!controller) controller = this._manager?.defaultEntry?.controller || null;
+        const sections = [];
+        if (scope === 'kernels' || scope === 'all') sections.push('Kernels:', ...this._kernelLines().map(l => '  ' + l));
+        if (scope === 'operations' || scope === 'all') sections.push('Recent operations:', ...this._operationLines(controller).map(l => '  ' + l));
+        if (scope === 'notebook' || scope === 'all') sections.push('Notebook:', ...(await this._notebookLines(input)).map(l => '  ' + l));
+        if (!sections.length) sections.push(`Unknown scope "${scope}". Use clients | kernels | operations | notebook | all.`);
+        return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(sections.join('\n'))]);
+    }
+}
+
+// Memory-only lifecycle snapshot. This must never touch controller.session.
+class KernelStatusTool {
+    constructor(getController) { this._getController = getController; }
+    async invoke(options, _token) {
+        let controller;
+        try {
+            controller = this._getController?.(kernelScopedInput(options));
+        } catch (err) {
+            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(String(err.message))]);
+        }
+        const status = controller?.arbiter?.status(controller) || {
+            lifecycle: controller?.kernelStatusString === 'resolved' ? 'idle' : 'offline',
+            busy: !!controller?._evalDispatched,
+            queueDepth: controller?.executionQueue?.queueLength?.() || 0,
+        };
+        return new vscode.LanguageModelToolResult([
+            new vscode.LanguageModelTextPart(JSON.stringify(status, null, 2))
+        ]);
+    }
+}
+
+class OperationStatusTool {
+    constructor(getController) { this._getController = getController; }
+    async invoke(options, _token) {
+        const id = String(options.input?.operation_id || '').trim();
+        const { controller, error } = resolveControllerForOperation(this._getController, options, id);
+        if (!controller) {
+            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
+                error ? `Unknown operation_id: ${id || '(missing)'} — and no kernel could be resolved. ${error.message}`
+                      : `Unknown operation_id: ${id || '(missing)'}`
+            )]);
+        }
+        const waitSeconds = Math.max(0, Math.min(300, Number(options.input?.wait_seconds) || 0));
+        if (waitSeconds && controller?.operations) {
+            await controller.operations.wait(id, waitSeconds * 1000);
+        }
+        const snapshot = controller?.operations?.snapshot(id, {
+            includeProgress: options.input?.include_progress !== false,
+            afterSequence: options.input?.after_sequence,
+        });
+        return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
+            snapshot ? JSON.stringify(snapshot, null, 2) : `Unknown operation_id: ${id || '(missing)'}`
+        )]);
+    }
+}
+
+class SaveNotebookTool {
+    async invoke(options, _token) {
+        // Saving needs only the document — never shows/focuses the notebook.
+        const notebook = await resolveNotebookDocument(options.input?.notebook);
+        if (!notebook) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(noEditorMsg(options.input?.notebook))]);
+        const filePath = notebook.uri.fsPath;
+        if (!filePath || /\.nb$/i.test(filePath)) {
+            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
+                'This document cannot be saved in place. Use Save As and choose .wb, .evsnb, or .vsnb.'
+            )]);
+        }
+        const saved = await notebook.save();
+        if (!saved) throw new Error(`VS Code did not save ${filePath}`);
+        const bytes = await fs.promises.readFile(filePath);
+        const stat = await fs.promises.stat(filePath);
+        const result = {
+            path: path.resolve(filePath), bytes: bytes.length,
+            mtime: stat.mtime.toISOString(), sha256: crypto.createHash('sha256').update(bytes).digest('hex'),
+            dirty: notebook.isDirty, version: notebook.version,
+        };
+        return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(JSON.stringify(result, null, 2))]);
+    }
+}
+
+class GetResultTool {
+    constructor(getController) { this._getController = getController; }
+    async invoke(options, _token) {
+        const id = String(options.input?.handle || options.input?.operation_id || '').trim();
+        const { controller, error } = resolveControllerForOperation(this._getController, options, id);
+        if (!controller && error) {
+            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
+                `Unknown result handle: ${id || '(missing)'} — and no kernel could be resolved. ${error.message}`
+            )]);
+        }
+        const op = controller?.operations?.get(id);
+        if (!op) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
+            `Unknown result handle: ${id || '(missing)'}. Operations are kept per kernel (last 50) and are invalidated when that kernel restarts.`
+        )]);
+        const hasPath = Object.prototype.hasOwnProperty.call(options.input || {}, 'path');
+        if (hasPath) {
+            let structured = op.structured;
+            if (structured == null && typeof op.structuredJson === 'string') {
+                try { structured = JSON.parse(op.structuredJson); } catch (_) {}
+            }
+            if (structured == null && typeof op.result === 'string') {
+                const candidate = op.result.replace(/^\s*Out(?:\[\d+\])?=\s*/, '');
+                try { structured = JSON.parse(candidate); } catch (_) {}
+            }
+            if (structured == null) {
+                return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(JSON.stringify({
+                    error: 'No structured JSON result is available for this operation.',
+                    hint: 'Re-run the evaluation with outputForm:"json".'
+                }, null, 2))]);
+            }
+            const resolved = resolveJsonPath(structured, options.input.path);
+            if (resolved.error) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(JSON.stringify(resolved, null, 2))]);
+            if (resolved.root) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(JSON.stringify({
+                handle: op.id, path: [], manifest: resolved.manifest
+            }, null, 2))]);
+            const value = JSON.stringify(resolved.value, null, 2);
+            const offset = Math.max(0, Number(options.input?.offset) || 0);
+            const limit = Math.max(1, Math.min(65536, Number(options.input?.limit) || 8192));
+            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(JSON.stringify({
+                handle: op.id, path: options.input.path, manifest: resolved.manifest,
+                offset, limit, total: value.length,
+                next_offset: offset + limit < value.length ? offset + limit : null,
+                data: value.slice(offset, offset + limit)
+            }, null, 2))]);
+        }
+        const format = options.input?.format === 'json' ? 'json' : 'text';
+        let value = typeof op.result === 'string' ? op.result : JSON.stringify(op.result ?? '');
+        if (format === 'json') {
+            try { value = JSON.stringify(typeof op.result === 'string' ? JSON.parse(op.result) : op.result, null, 2); }
+            catch (_) { return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart('Result is not valid JSON.')]); }
+        }
+        const offset = Math.max(0, Number(options.input?.offset) || 0);
+        const limit = Math.max(1, Math.min(65536, Number(options.input?.limit) || 8192));
+        return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(JSON.stringify({
+            handle: op.id, kernel_id: controller?.kernelIdentity?.kernel_id || op.kernelId || null,
+            format, offset, limit, total: value.length,
+            next_offset: offset + limit < value.length ? offset + limit : null,
+            data: value.slice(offset, offset + limit)
+        }, null, 2))]);
+    }
+}
+
+/** ~20-line post-compaction re-orientation digest.  Memory-only: derived from
+ *  OperationRegistry.journal() + arbiter.status(); never touches the kernel.
+ *  Exported as a pure function for headless tests. */
+function renderJournalDigest(controller) {
+    const kid = controller?.kernelIdentity || {};
+        const status = controller?.arbiter?.status?.(controller) || {};
+        const journal = controller?.operations?.journal(50) || [];
+        const lines = [];
+        lines.push(`Kernel ${kid.label || '?'} ${kid.kernel_id || ''} · ${status.lifecycle || 'unknown'}` +
+            (status.queueDepth ? ` · queue ${status.queueDepth}` : '') +
+            ` · ${journal.length} operation(s) retained`);
+        const notebooks = new Map();
+        for (const op of journal) {
+            if (!op.notebook) continue;
+            const base = String(op.notebook).split('/').pop();
+            notebooks.set(base, (notebooks.get(base) || 0) + 1);
+        }
+        if (notebooks.size) {
+            lines.push('Notebooks touched: ' + [...notebooks.entries()].map(([n, c]) => `${n} (${c} op${c === 1 ? '' : 's'})`).join(', '));
+        }
+        const failures = journal.filter(op => op.state === 'failed' || op.error);
+        const assertions = journal.filter(op => op.assertion);
+        const aborts = journal.filter(op => op.cancellation);
+        lines.push('Last operations:');
+        for (const op of journal.slice(0, 5)) {
+            const mark = op.state === 'failed' ? '✗' : op.state === 'completed' ? '✓' : '·';
+            const when = (op.started_at || '').replace(/^.*T/, '').replace(/\..*$/, '');
+            const what = op.caption || op.tool || '?';
+            const preview = (op.result_preview || '').replace(/\s+/g, ' ').slice(0, 60);
+            const assertNote = op.assertion ? ` ASSERT ${op.assertion.outcome}` : '';
+            lines.push(`  ${mark} ${when}  ${what.slice(0, 40)}  ${(op.elapsed_ms / 1000).toFixed(1)}s${assertNote}${preview ? `  ${preview}` : ''}`);
+        }
+        lines.push(`Failures: ${failures.length} · Assertions: ${assertions.filter(o => o.assertion.outcome === 'PASS').length} pass / ${assertions.filter(o => o.assertion.outcome !== 'PASS').length} fail · Aborts: ${aborts.length}`);
+        const lastErr = failures[0];
+        if (lastErr) lines.push(`Latest error: ${String(lastErr.error || lastErr.result_preview || '').slice(0, 120)} (operation ${String(lastErr.operation_id).slice(0, 8)}…)`);
+        if (controller?.operations?.hasRestarted) lines.push('Note: the kernel restarted this session — earlier operations were invalidated.');
+        return lines.join('\n');
+}
+
+function filterJournal(journal, filters = {}) {
+    const all = Array.isArray(journal) ? journal : [];
+    let items = all;
+    if (filters.tool) {
+        const needle = String(filters.tool).toLowerCase();
+        items = items.filter(op => String(op.tool || '').toLowerCase().includes(needle));
+    }
+    if (filters.state != null) {
+        const states = (Array.isArray(filters.state) ? filters.state : [filters.state]).map(v => String(v).toLowerCase());
+        items = items.filter(op => states.includes(String(op.state || '').toLowerCase()));
+    }
+    if (filters.caption_contains) {
+        const needle = String(filters.caption_contains).toLowerCase();
+        items = items.filter(op => String(op.caption || '').toLowerCase().includes(needle));
+    }
+    if (filters.notebook) {
+        const needle = String(filters.notebook).toLowerCase();
+        items = items.filter(op => {
+            const full = String(op.notebook || '').toLowerCase();
+            return full === needle || path.basename(full) === path.basename(needle);
+        });
+    }
+    return items;
+}
+
+function _journalFilters(input = {}) {
+    // The MCP transport injects the SESSION TARGET's notebook into args when the
+    // caller passed none (routing convenience). Treating that injection as a
+    // journal FILTER silently hid every other notebook's operations — a call
+    // with no explicit filters reported "matched 4 of 10". Only an
+    // explicitly-passed notebook filters (the transport marks its injection).
+    const notebook = input._notebookInjected ? undefined : input.notebook;
+    return { tool: input.tool, state: input.state, caption_contains: input.caption_contains, notebook };
+}
+
+function renderSessionReport(controller, { journal, notebook } = {}) {
+    const operations = Array.isArray(journal) ? journal : controller?.operations?.journal?.(50) || [];
+    const identity = controller?.kernelIdentity || {};
+    const status = controller?.arbiter?.status?.(controller) || {};
+    const lines = [
+        '# Wolfbook session report', '',
+        `Generated: ${new Date().toISOString()}`,
+        `Kernel: ${identity.label || '?'} · ${identity.kernel_id || 'unknown'} · ${status.lifecycle || 'unknown'}`,
+    ];
+    if (controller?.operations?.hasRestarted) lines.push('', '> Warning: the kernel restarted during this retained session; earlier operations may have been invalidated.');
+    const notebooks = [...new Set(operations.map(op => op.notebook).filter(Boolean))];
+    if (notebook && !notebooks.includes(notebook)) notebooks.unshift(notebook);
+    lines.push('', '## Notebooks touched', '', ...(notebooks.length ? notebooks.map(item => `- ${item}`) : ['- None recorded.']));
+    lines.push('', '## Operations', '', '| # | time | tool | caption | state | elapsed | assertion |',
+        '|---:|---|---|---|---|---:|---|');
+    operations.slice(0, 50).forEach((op, index) => {
+        const esc = value => String(value ?? '').replace(/\|/g, '\\|').replace(/\s+/g, ' ');
+        lines.push(`| ${index + 1} | ${esc(op.started_at)} | ${esc(op.tool)} | ${esc(op.caption)} | ${esc(op.state)} | ${Number(op.elapsed_ms || 0)} ms | ${esc(op.assertion?.outcome || '')} |`);
+    });
+    const failures = operations.filter(op => op.state === 'failed' || op.error);
+    lines.push('', '## Failures', '');
+    if (!failures.length) lines.push('None.');
+    for (const op of failures) {
+        lines.push(`### ${op.operation_id} — ${op.caption || op.tool}`, '', String(op.error || 'Operation failed.'), '', '```text', String(op.result_preview || '').slice(0, 400), '```', '');
+    }
+    const abandoned = operations.filter(op => op.state === 'aborted' || op.cancellation || ['pending', 'running'].includes(op.state));
+    lines.push('', '## Aborted / abandoned', '');
+    if (!abandoned.length) lines.push('None.');
+    for (const op of abandoned) lines.push(`- ${op.operation_id}: ${['pending', 'running'].includes(op.state) ? 'still open' : op.state} — ${JSON.stringify(op.cancellation || {})}`);
+    const artifactText = operations.map(op => `${op.result_preview || ''}\n${op.error || ''}`).join('\n');
+    const paths = artifactText.match(/(?:\/[\w. -]+){2,}/g) || [];
+    const hashes = artifactText.match(/\b[a-fA-F0-9]{64}\b/g) || [];
+    lines.push('', '## Saved artifacts (best-effort — extracted from result previews)', '');
+    const artifacts = [...new Set([...paths, ...hashes])].slice(0, 100);
+    lines.push(...(artifacts.length ? artifacts.map(item => `- ${item}`) : ['- None detected in retained previews.']));
+    lines.push('', '## Kernel', '', '```json', JSON.stringify(status, null, 2), '```', '');
+    return lines.join('\n');
+}
+
+class EvaluationJournalTool {
+    constructor(getController) { this._getController = getController; }
+
+    async invoke(options, _token) {
+        let controller;
+        try {
+            controller = this._getController?.(kernelScopedInput(options));
+        } catch (err) {
+            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(String(err.message))]);
+        }
+        if ((options.input?.action || '') === 'digest') {
+            return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(renderJournalDigest(controller))
+            ]);
+        }
+        const all = controller?.operations?.journal(50) || [];
+        const filters = _journalFilters(options.input);
+        const hasFilters = Object.values(filters).some(value => value != null && value !== '');
+        const matched = filterJournal(all, filters);
+        const limit = Math.max(1, Math.min(50, Number(options.input?.limit) || 20));
+        const journal = matched.slice(0, limit);
+        if ((options.input?.action || '') === 'export') {
+            const markdown = renderSessionReport(controller, { journal: matched, notebook: options.input?.notebook });
+            const os = require('os');
+            const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+            const base = path.join(os.tmpdir(), `wolfbook-session-report-${stamp}`);
+            let reportPath = null;
+            for (let i = 1; i <= 20; i++) {
+                const candidate = `${base}${i === 1 ? '' : `-${i}`}.md`;
+                if (!fs.existsSync(candidate)) { reportPath = candidate; break; }
+            }
+            try {
+                if (!reportPath) throw new Error('all 20 collision-safe report filenames already exist');
+                fs.writeFileSync(reportPath, markdown, 'utf8');
+                return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(JSON.stringify({
+                    path: path.resolve(reportPath), operations: matched.length,
+                    bytes: Buffer.byteLength(markdown), preview: markdown.slice(0, 1500)
+                }, null, 2))]);
+            } catch (err) {
+                return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
+                    `Could not write session report: ${err.message}\n\nINLINE REPORT\n\n${markdown}`
+                )]);
+            }
+        }
+        const payload = hasFilters ? { filtered: true, matched: matched.length, of: all.length, operations: journal } : journal;
+        return new vscode.LanguageModelToolResult([
+            new vscode.LanguageModelTextPart(JSON.stringify(payload, null, 2))
+        ]);
+    }
+}
+
+class CancelOperationTool {
+    constructor(getController) { this._getController = getController; }
+
+    async prepareInvocation(options) {
+        const mode = options.input?.mode || 'abort';
+        return { invocationMessage: mode === 'discard-result'
+            ? 'Discard an operation result without interrupting the kernel'
+            : 'Cancel a Wolfbook operation' };
+    }
+
+    async invoke(options) {
+        const id = String(options.input?.operation_id || '').trim();
+        if (!id) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart('operation_id is required.')]);
+        const resolved = resolveControllerForOperation(this._getController, options, id);
+        if (!resolved.controller) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
+            `Unknown operation_id: ${id}${resolved.error ? ` — ${resolved.error.message}` : ''}`
+        )]);
+        const controller = resolved.controller;
+        const op = controller.operations?.get?.(id);
+        if (!op) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(`Unknown operation_id: ${id}`)]);
+        if (!['pending', 'running'].includes(op.state)) {
+            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(JSON.stringify({
+                operation_id: id, cancelled: false, already: op.state
+            }, null, 2))]);
+        }
+        const mode = options.input?.mode === 'discard-result' ? 'discard-result' : 'abort';
+        const reason = options.input?.reason || `wolfbook_cancelOperation ${mode}`;
+        let arbiterResult = null;
+        if (mode === 'discard-result') {
+            controller.operations.abort(id, { requestedBy: 'mcp', reason, mode, ts: Date.now() });
+        } else {
+            try {
+                arbiterResult = await controller.arbiter?.abort?.(controller, {
+                    operationId: id, requestedBy: 'mcp', reason
+                }) || null;
+            } catch (err) {
+                arbiterResult = { aborted: false, error: err.message };
+            } finally {
+                // Even a queued-but-undispatched operation, an operation mismatch,
+                // or a kernel-side abort exception must settle in the registry.
+                controller.operations.abort(id, { requestedBy: 'mcp', reason, mode, ts: Date.now() });
+            }
+        }
+        let note = mode === 'discard-result'
+            ? 'Result discarded; the kernel may still be computing.'
+            : 'Operation cancelled and registry settled.';
+        if (arbiterResult?.uncertain) note = 'Kernel abort is uncertain; poll wolfbook_status.';
+        if (arbiterResult?.reason === 'operation-mismatch') note = 'Kernel is running a different operation; this operation will never run.';
+        const registryState = controller.operations?.get?.(id)?.state || null;
+        return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(JSON.stringify({
+            operation_id: id, mode,
+            kernel_id: controller.kernelIdentity?.kernel_id || op.kernelId || null,
+            arbiter: arbiterResult, registry_state: registryState, note
+        }, null, 2))]);
     }
 }
 
@@ -2145,31 +2871,52 @@ class KernelControlTool {
         return { invocationMessage: 'Abort current kernel evaluation' };
     }
 
+    // Checkpoint files live in the OS temp dir; forward slashes so the path is
+    // valid inside a WL string on every platform.
+    _newCheckpointPath(tag) {
+        const safeName = tag ? String(tag).replace(/[^a-zA-Z0-9_-]/g, '') + '-' : '';
+        return path.join(require('os').tmpdir(), `wolfbook-checkpoint-${safeName}${Date.now()}.mx`)
+            .replace(/\\/g, '/');
+    }
+
     async invoke(options, _token) {
         const action = options.input?.action || 'abort';
-        const controller = this._getController?.();
+        let controller;
+        try {
+            // An abort that names an operation should hit the kernel that OWNS the
+            // operation, not whichever kernel the input/notebook would resolve to.
+            const opId = String(options.input?.operation_id || '').trim();
+            const resolved = resolveControllerForOperation(this._getController, options, action === 'abort' ? opId : null);
+            if (resolved.error) throw resolved.error;
+            controller = resolved.controller;
+        } catch (err) {
+            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(String(err.message))]);
+        }
         if (!controller) {
             return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart('No kernel controller available.')]);
         }
 
         // --- checkpoint: DumpSave all Global` definitions to a temp .mx file ---
         if (action === 'checkpoint') {
+            let lease;
             try {
-                const tag = options.input?.tag || '';
-                const ts = Date.now();
-                const safeName = tag ? tag.replace(/[^a-zA-Z0-9_-]/g, '') + '-' : '';
-                const path = `/tmp/wolfbook-checkpoint-${safeName}${ts}.mx`;
-                const expr = `DumpSave["${path}", "Global\`"]`;
-                const result = await controller.session.evaluate(expr, { interactive: false });
-                this._checkpointPath = path;
+                const claim = await acquireKernelForAgent(controller, {
+                    owner: 'wolfbook_kernelControl', kind: 'checkpoint', caption: 'Save kernel checkpoint'
+                });
+                if (!claim.lease) return claim.error;
+                lease = claim.lease;
+                const checkpointPath = this._newCheckpointPath(options.input?.tag || '');
+                const expr = `DumpSave["${checkpointPath}", "Global\`"]`;
+                await trackedEvaluate(controller, expr, { interactive: false });
+                this._checkpointPath = checkpointPath;
                 return new vscode.LanguageModelToolResult([
-                    new vscode.LanguageModelTextPart(`Checkpoint saved → ${path}\nTo restore later: use action="restore".`)
+                    new vscode.LanguageModelTextPart(`Checkpoint saved → ${checkpointPath}\nTo restore later: use action="restore".`)
                 ]);
             } catch (err) {
                 return new vscode.LanguageModelToolResult([
                     new vscode.LanguageModelTextPart(`Checkpoint failed: ${err.message}`)
                 ]);
-            }
+            } finally { releaseKernelForAgent(controller, lease); }
         }
 
         // --- restore: ClearAll Global`, then Get the checkpoint file ---
@@ -2180,38 +2927,116 @@ class KernelControlTool {
                     new vscode.LanguageModelTextPart('No checkpoint to restore. Call with action="checkpoint" first, or provide a "path" to an .mx file.')
                 ]);
             }
+            let lease;
             try {
+                const claim = await acquireKernelForAgent(controller, {
+                    owner: 'wolfbook_kernelControl', kind: 'restore', caption: 'Restore kernel checkpoint'
+                });
+                if (!claim.lease) return claim.error;
+                lease = claim.lease;
                 const expr = `ClearAll["Global\`*"]; Get["${restorePath}"]; Length[Names["Global\`*"]]`;
-                const result = await controller.session.evaluate(expr, { interactive: false });
-                const symCount = typeof result === 'object' ? (result?.result ?? result?.value ?? JSON.stringify(result)) : result;
+                const result = await trackedEvaluate(controller, expr, { interactive: false });
+                // session.evaluate resolves to { result: {type, value}, messages } —
+                // reach the .value or the message renders "[object Object]".
+                const symCount = result?.result?.value ?? result?.value
+                    ?? (typeof result === 'object' ? '' : result);
+                // Every prior result handle/provenance entry refers to wiped state.
+                controller.operations?.invalidateAll?.('kernel state restored from checkpoint');
                 return new vscode.LanguageModelToolResult([
-                    new vscode.LanguageModelTextPart(`Kernel state restored from ${restorePath} — ${symCount} Global\` symbols loaded.`)
+                    new vscode.LanguageModelTextPart(
+                        `Kernel state restored from ${restorePath}` +
+                        (symCount !== '' && symCount != null ? ` — ${symCount} Global\` symbols loaded.` : '.') +
+                        '\nEarlier operation results were invalidated (they referred to the pre-restore state).')
                 ]);
             } catch (err) {
                 return new vscode.LanguageModelToolResult([
                     new vscode.LanguageModelTextPart(`Restore failed: ${err.message}`)
                 ]);
-            }
+            } finally { releaseKernelForAgent(controller, lease); }
         }
 
         if (action === 'restart') {
+            // Auto-checkpoint before wiping Global` — restart becomes reversible
+            // when the kernel is healthy.  DumpSave needs a RESPONSIVE kernel
+            // (exactly what a stuck restart lacks), so: 'if-idle' (default) only
+            // checkpoints an idle healthy kernel, hard 10 s cap, NEVER blocks the
+            // restart, and the response says truthfully what happened.
+            const cpMode = options.input?.checkpoint_before_restart || 'if-idle';
+            let cpNote = '';
+            if (cpMode !== 'never') {
+                const busy = controller.arbiter?.status?.(controller)?.busy || controller._evalDispatched;
+                const healthy = controller.kernelStatusString === 'resolved';
+                if (!healthy || (busy && cpMode !== 'always')) {
+                    cpNote = `\nCheckpoint skipped — kernel was ${!healthy ? 'not responsive' : 'busy'} (checkpoint_before_restart: "${cpMode}").`;
+                } else {
+                    const checkpointPath = this._newCheckpointPath('pre-restart');
+                    try {
+                        await Promise.race([
+                            trackedEvaluate(controller, `DumpSave["${checkpointPath}", "Global\`"]`, { interactive: false }),
+                            new Promise((_, rej) => setTimeout(() => rej(new Error('checkpoint timed out after 10s')), 10000)),
+                        ]);
+                        this._checkpointPath = checkpointPath;
+                        cpNote = `\nPre-restart checkpoint saved → ${checkpointPath} (action="restore" to load it into the fresh kernel).`;
+                    } catch (cpErr) {
+                        cpNote = `\nCheckpoint skipped — ${cpErr.message}.`;
+                    }
+                }
+            }
             try {
+                controller.arbiter?.invalidate('kernel restart requested by MCP');
+                controller.operations?.invalidateAll('kernel restart requested by MCP');
                 await controller.restartKernel();
-                return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart('Kernel restarted successfully.')]);
+                return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart('Kernel restarted successfully.' + cpNote)]);
             } catch (err) {
-                return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(`Restart failed: ${err.message}`)]);
+                return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(`Restart failed: ${err.message}${cpNote}`)]);
             }
         }
         // action === 'abort'
-        if (!controller._evalDispatched) {
+        if (!controller._evalDispatched && !controller.isAborting) {
             return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart('No evaluation is currently running.')]);
         }
         try {
-            controller.abortEvaluation();
+            await controller.arbiter.abort(controller, {
+                operationId: options.input?.operation_id,
+                requestedBy: 'mcp',
+                reason: options.input?.reason || 'explicit wolfbook_kernelControl abort'
+            });
+            if (options.input?.operation_id) {
+                controller.operations?.abort(options.input.operation_id, {
+                    requestedBy: 'mcp', reason: options.input?.reason || 'explicit abort', ts: Date.now()
+                });
+            }
             return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart('Abort signal sent to kernel.')]);
         } catch (err) {
             return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(`Abort failed: ${err.message}`)]);
         }
+    }
+}
+
+class KernelManagerTool {
+    constructor(getController) { this._manager = getController?.manager; }
+    async invoke(options, _token) {
+        const manager = this._manager;
+        if (!manager) throw new Error('Kernel manager is unavailable.');
+        const input = options.input || {};
+        const action = input.action || 'list';
+        const notebooks = _allNotebookUris ? [..._allNotebookUris().keys()] : [];
+        let result;
+        if (action === 'list') result = { kernels: manager.list(notebooks) };
+        else if (action === 'create') {
+            if (input.acknowledge_resource_cost !== true) throw new Error('Creating another Wolfram process may consume memory and a license seat; retry with acknowledge_resource_cost=true.');
+            const entry = await manager.create({ label: input.label });
+            result = input.notebook
+                ? await manager.bind(input.notebook, entry.id)
+                : manager.describe(entry, null);
+        }
+        else if (action === 'bind' || action === 'select') result = await manager.bind(input.notebook, input.kernel_id);
+        else if (action === 'default') result = await manager.bind(input.notebook, manager.defaultEntry.id);
+        else if (action === 'unbind') result = await manager.unbind(input.notebook);
+        else if (action === 'rename') result = manager.rename(input.kernel_id, input.label);
+        else if (action === 'stop') { await manager.stop(input.kernel_id); result = { stopped: input.kernel_id }; }
+        else throw new Error(`Unknown kernel manager action: ${action}`);
+        return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(JSON.stringify(result, null, 2))]);
     }
 }
 
@@ -2541,10 +3366,11 @@ class MoveCellTool {
         const fromIdx    = fromRes.idx;
         const cellNumber = fromIdx + 1;
         const cell       = srcNotebook.cellAt(fromIdx);
+        const conflict = mutationConflict(cell, options.input || {});
+        if (conflict) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(JSON.stringify(conflict, null, 2))]);
         const kind       = cell.kind;
         const lang       = cell.document.languageId;
         const source     = cell.document.getText();
-        const sourceId   = getCellToolId(cell);
         const stableId   = await _ensureCellToolId(srcNotebook, fromIdx);
         const kindStr    = kind === vscode.NotebookCellKind.Markup ? 'markdown' : 'code';
 
@@ -2627,8 +3453,8 @@ class MoveCellTool {
         appendEventLog(logAction, source.trim().slice(0, 100) || '*(empty)*');
 
         const summary = crossNotebook
-            ? `${verb} ${kindStr} Cell ${cellNumber} (CellId: ${sourceId}) from ${srcNbLabel} to Cell ${newPos} (${posLabel}) of ${dstNbLabel}.`
-            : `${verb} ${kindStr} Cell ${cellNumber} (CellId: ${sourceId}) to Cell ${newPos} (${posLabel}). Notebook now has ${srcNotebook.cellCount} cell(s).`;
+            ? `${verb} ${kindStr} Cell ${cellNumber} (CellId: ${stableId}; kind: ${kindStr}; first line: ${JSON.stringify(source.split('\n')[0].slice(0, 200))}) from ${srcNbLabel} to Cell ${newPos} (${posLabel}) of ${dstNbLabel}.`
+            : `${verb} ${kindStr} Cell ${cellNumber} (CellId: ${stableId}; kind: ${kindStr}; first line: ${JSON.stringify(source.split('\n')[0].slice(0, 200))}) to Cell ${newPos} (${posLabel}). Notebook now has ${srcNotebook.cellCount} cell(s).`;
         return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(summary)]);
     }
 }
@@ -2643,13 +3469,13 @@ class SearchCellsTool {
     }
 
     async invoke(options, _token) {
-        const editor = await resolveNotebookEditor();
-        if (!editor) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart('No active notebook editor.')]);
+        // Routing-neutral read: never shows or focuses the notebook.
+        const notebook = await resolveNotebookDocument(options.input?.notebook);
+        if (!notebook) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(noEditorMsg(options.input?.notebook))]);
 
         const query = options.input?.query;
         if (!query) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart('query parameter is required.')]);
 
-        const notebook   = editor.notebook;
         const isRegex    = options.input?.regex === true;
         const kindFilter = options.input?.kind; // 'code', 'markdown', or undefined for both
         const includeOutput = options.input?.includeOutput !== false;
@@ -2787,8 +3613,8 @@ class FindPackageTool {
     }
 
     async _searchPaclets(query) {
-        const controller = this._getController?.();
-        if (!controller || !controller.session || controller.kernelStatusString !== 'resolved' || controller._evalDispatched) {
+        const controller = this._getController?.(options?.input || {});
+        if (!controller || !controller.session || controller.kernelStatusString !== 'resolved') {
             return '  (kernel not available — start the kernel for Wolfram Paclet Server search)';
         }
         // safeQ: only word chars + dots + hyphens, safe to embed in WL string
@@ -2808,14 +3634,21 @@ class FindPackageTool {
             `]],Take[$r$,UpTo[10]]],"\\n"]],` +
             `"  (none found on Wolfram Paclet Server)"]],` +
             `20,"  (paclet search timed out after 20s)"]`;
+        let lease;
         try {
+            const claim = await acquireKernelForAgent(controller, {
+                owner: 'wolfbook_findPackage', kind: 'paclet-search', caption: `Search paclets for ${query}`
+            });
+            if (!claim.lease) return '  (kernel busy — the running evaluation was not interrupted)';
+            lease = claim.lease;
             const r = await Promise.race([
-                controller.session.evaluate(wlExpr, { interactive: false }),
+                trackedEvaluate(controller, wlExpr, { interactive: false }),
                 new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 22000))
             ]);
             if (r?.result?.type === 'string' && r.result.value) return r.result.value;
             return '  (no results)';
         } catch (_) { return '  (paclet search error)'; }
+        finally { releaseKernelForAgent(controller, lease); }
     }
 }
 
@@ -3131,6 +3964,9 @@ class FileOpsTool {
             const depth    = Math.min(Number(options.input?.depth) || 4, 8);
             const maxFiles = 500;
             const results  = [];
+            // Entries are shown relative to the LISTED BASE (with a header naming
+            // it) — relativising against the workspace root prefixed every entry
+            // of an outside-the-workspace listing with ../../../.. noise.
             const walk = (dir, d) => {
                 if (d > depth || results.length >= maxFiles) return;
                 let entries;
@@ -3138,7 +3974,7 @@ class FileOpsTool {
                 for (const e of entries) {
                     if (e.name.startsWith('.')) continue;
                     const full = path.join(dir, e.name);
-                    const rel  = path.relative(wsRoot, full);
+                    const rel  = path.relative(base, full);
                     if (e.isDirectory()) { results.push(rel + '/'); walk(full, d + 1); }
                     else if (!ext || e.name.endsWith(ext.startsWith('.') ? ext : '.' + ext)) results.push(rel);
                     if (results.length >= maxFiles) break;
@@ -3147,7 +3983,8 @@ class FileOpsTool {
             walk(base, 0);
             const trunc = results.length >= maxFiles;
             return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
-                results.join('\n') + (trunc ? '\n[truncated at 500 entries]' : '') || '(empty directory)')]);
+                `base: ${base}\n` +
+                (results.join('\n') + (trunc ? '\n[truncated at 500 entries]' : '') || '(empty directory)'))]);
         }
 
         return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(`Unknown action "${action}". Use "read", "write", or "list".`)]);
@@ -3936,27 +4773,66 @@ ${detail}
 }
 
 function registerTools(context, getController, debugCtrl, getAskPanel) {
+    // alias(impl, defaults): register one implementation under a second name.
+    // Returns a fresh delegate object so the invoke-wrap loop below installs a
+    // per-name wrapper (journal/toolUsage report the name the agent actually
+    // called). `defaults` merge UNDER caller args — explicit input always wins.
+    const _withDefaults = (options, defaults) => (!defaults ? options
+        : { ...options, input: { ...defaults, ...(options?.input || {}) } });
+    // The wrap loop below replaces the primary instance's invoke; the alias must
+    // call the pre-wrap original (__wolfbookOrigInvoke) or a call would pass
+    // through BOTH wrappers (double operation records / toolUsage events).
+    const alias = (impl, defaults) => ({
+        prepareInvocation: (o, t) => impl.prepareInvocation?.(_withDefaults(o, defaults), t),
+        invoke:            (o, t) => (impl.__wolfbookOrigInvoke || impl.invoke).call(impl, _withDefaults(o, defaults), t),
+    });
+
+    const runCellTool = new RunCellTool(getController);
+    const kernelManagerTool = new KernelManagerTool(getController);
+    const inspectSymbolsTool = new InspectSymbolsTool(getController);
+    const statusTool = new StatusTool(getController);
+    const evaluationJournalTool = new EvaluationJournalTool(getController);
+    // Lazy accessor: the self-test exercises the FINISHED (wrapped) delegates.
+    let toolMap = null;
+    const selfTestTool = new SelfTestTool(getController, () => toolMap);
     const tools = [
         // Core notebook tools (visible in chat panel)
-        { name: 'wolfbook_newNotebook',        impl: new NewNotebookTool() },
-        { name: 'wolfbook_getNotebookContext', impl: new GetNotebookContextTool() },
+        { name: 'wolfbook_newNotebook',        impl: new NewNotebookTool(getController) },
+        { name: 'wolfbook_getNotebookContext', impl: new GetNotebookContextTool(getController, context) },
         { name: 'wolfbook_evaluateExpression', impl: new EvaluateExpressionTool(getController) },
         { name: 'wolfbook_lookupSymbol',       impl: new LookupSymbolTool(getController) },
         { name: 'wolfbook_insertCells',        impl: new InsertCellsTool(getController) },
         { name: 'wolfbook_editCell',           impl: new EditCellTool(getController) },
-        { name: 'wolfbook_runCell',            impl: new RunCellTool(getController) },
+        { name: 'wolfbook_runCell',            impl: runCellTool },
         // wolfbook_runCells: run a contiguous range of cells (startCell/endCell, 1-based)
-        { name: 'wolfbook_runCells',           impl: new RunCellTool(getController) },
-        { name: 'wolfbook_getCellOutput',      impl: new GetCellOutputTool() },
+        { name: 'wolfbook_runCells',           impl: alias(runCellTool) },
+        { name: 'wolfbook_getCellOutput',      impl: new GetCellOutputTool(getController) },
         { name: 'wolfbook_validateSyntax',     impl: new ValidateSyntaxTool(getController) },
         { name: 'wolfbook_latex',              impl: new LatexTool() },
         { name: 'wolfbook_deleteCell',         impl: new DeleteCellTool() },
         { name: 'wolfbook_searchCells',        impl: new SearchCellsTool() },
-        { name: 'wolfbook_getKernelState',     impl: new GetKernelStateTool(getController) },
+        // wolfbook_inspectSymbols is the canonical name — "getKernelState" read as
+        // a status probe but it EVALUATES in the kernel (feedback §4.1).
+        { name: 'wolfbook_inspectSymbols',     impl: inspectSymbolsTool },
+        { name: 'wolfbook_getKernelState',     impl: alias(inspectSymbolsTool) },
+        // wolfbook_status is the ONE side-effect-free status surface; kernelStatus
+        // stays as a legacy-shape alias (raw arbiter JSON).
+        { name: 'wolfbook_status',             impl: statusTool },
+        { name: 'wolfbook_kernelStatus',       impl: alias(statusTool, { _legacyShape: true }) },
+        { name: 'wolfbook_operationStatus',    impl: new OperationStatusTool(getController) },
+        { name: 'wolfbook_evaluationJournal',  impl: evaluationJournalTool },
+        { name: 'wolfbook_journalDigest',      impl: alias(evaluationJournalTool, { action: 'digest' }) },
+        { name: 'wolfbook_exportSessionReport',impl: alias(evaluationJournalTool, { action: 'export' }) },
+        { name: 'wolfbook_cancelOperation',    impl: new CancelOperationTool(getController) },
+        { name: 'wolfbook_selfTest',           impl: selfTestTool },
+        { name: 'wolfbook_saveNotebook',       impl: new SaveNotebookTool() },
+        { name: 'wolfbook_getResult',           impl: new GetResultTool(getController) },
         // Agent-only tools (not shown in chat panel)
         { name: 'wolfbook_moveCell',           impl: new MoveCellTool() },
         { name: 'wolfbook_restoreDeletedCells',impl: new RestoreDeletedCellsTool() },
         { name: 'wolfbook_kernelControl',      impl: new KernelControlTool(getController) },
+        { name: 'wolfbook_kernelManager',      impl: kernelManagerTool },
+        { name: 'wolfbook_selectKernel',       impl: alias(kernelManagerTool) },
         { name: 'wolfbook_kernelCrashLog',     impl: new KernelCrashLogTool() },
         { name: 'wolfbook_findPackage',        impl: new FindPackageTool(getController) },
         { name: 'wolfbook_debugCell',          impl: new DebugCellTool(getController, debugCtrl) },
@@ -4076,15 +4952,118 @@ function registerTools(context, getController, debugCtrl, getAskPanel) {
         // (typical desktop case without a paired iOS device).
         if (typeof impl.invoke === 'function' && !impl.__wolfbookRemoteWrapped) {
             const _origInvoke = impl.invoke.bind(impl);
+            impl.__wolfbookOrigInvoke = _origInvoke;   // aliases call this to skip the wrapper
             impl.invoke = async function (options, token) {
                 const startedAt = Date.now();
+                const operationTools = new Set([
+                    'wolfbook_evaluateExpression', 'wolfbook_insertCells', 'wolfbook_editCell',
+                    'wolfbook_runCell', 'wolfbook_runCells'
+                ]);
+                const input = options?.input || {};
+                const editEvaluates = name !== 'wolfbook_editCell' || (Array.isArray(input.cells)
+                    ? input.cells.some(cell => cell?.evaluate === true || (cell?.evaluate == null && input.evaluate !== false))
+                    : input.evaluate === true);
+                const insertEvaluates = name !== 'wolfbook_insertCells' || input.evaluate !== false;
+                const shouldTrackOperation = operationTools.has(name) && editEvaluates && insertEvaluates;
+                const controller = shouldTrackOperation ? getController?.(input) : null;
+                let operation = null;
+                if (controller?.operations) {
+                    operation = controller.operations.create({
+                        id: options?.input?._operationId,
+                        tool: name, owner: 'mcp', caption: options?.input?.caption,
+                        argsSummary: (() => { try { return JSON.stringify(options?.input || {}); } catch (_) { return ''; } })(),
+                        notebook: options?.input?.notebook,
+                        kernelId: controller.kernelIdentity?.kernel_id || null,
+                        cellId: options?.input?.cellId,
+                        cellNumber: options?.input?.cellNumber,
+                    });
+                    controller.operations.start(operation.id);
+                    options = { ...options, input: { ...(options?.input || {}), _operationId: operation.id } };
+                    const progressSymbol = String(options.input.progress_symbol || '').trim();
+                    if (progressSymbol && /^[A-Za-z$][A-Za-z0-9$`]*$/.test(progressSymbol) && controller.session?.subAuto) {
+                        const interval = Math.max(1000, Math.min(30000, Number(options.input.progress_interval_ms) || 2000));
+                        const sample = async () => {
+                            const op = controller.operations.get(operation.id);
+                            if (!op || !['pending', 'running'].includes(op.state)) return;
+                            try {
+                                const value = await controller.session.subAuto(`ToString[${progressSymbol},InputForm]`);
+                                controller.operations.appendProgress(operation.id, 'monitor', value?.value ?? value);
+                            } catch (_) {
+                                controller.operations.appendProgress(operation.id, 'monitor', 'unavailable');
+                                return;
+                            }
+                            setTimeout(sample, interval);
+                        };
+                        setTimeout(sample, interval);
+                    }
+                }
+                const settleOperationResult = (completedResult) => {
+                    if (!operation) return;
+                    if (completedResult?.__wolfbookBusy) {
+                        controller.operations.fail(operation.id, 'kernel busy; request not started');
+                        return;
+                    }
+                    const finish = () => {
+                        const status = controller.arbiter?.status(controller);
+                        const ownsKernel = status?.activeOperation?.operationId === operation.id;
+                        if (ownsKernel && status.busy) { setTimeout(finish, 250); return; }
+                        let fullResult = (completedResult?.content || [])
+                            .map(part => String(part?.value ?? part?.text ?? '')).join('\n').slice(0, 1048576);
+                        if (/timed out|still running/i.test(fullResult)) {
+                            const completedCells = controller.operations.get(operation.id)?.cells || [];
+                            const recovered = completedCells
+                                .filter(cell => cell.status !== 'running')
+                                .map(cell => `Cell ${cell.cellNumber ?? '?'}: ${cell.resultPreview || '(no output)'}`)
+                                .join('\n');
+                            if (recovered) fullResult = recovered.slice(0, 1048576);
+                        }
+                        controller.operations.complete(operation.id, fullResult, fullResult.slice(0, 1000));
+                    };
+                    finish();
+                };
+
+                if (operation && options?.input?.wait_mode === 'async') {
+                    let backgroundResult;
+                    let backgroundOk = true;
+                    Promise.resolve().then(() => _origInvoke(options, token)).then(result => {
+                        backgroundResult = result;
+                        settleOperationResult(result);
+                    }).catch(err => {
+                        backgroundOk = false;
+                        controller.operations.fail(operation.id, err);
+                    }).finally(() => {
+                        try {
+                            if (_kEventBus.listenerCount('toolUsage') > 0) {
+                                _kEventBus.emit('toolUsage', {
+                                    tool: name, args: options?.input ?? null,
+                                    result: _summariseToolResult(backgroundResult), background: true,
+                                    ok: backgroundOk, durationMs: Date.now() - startedAt, ts: Date.now(),
+                                });
+                            }
+                        } catch (_) {}
+                    });
+                    return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
+                        `Operation started asynchronously.\n\nOperation ID: ${operation.id}\n\n` +
+                        `Kernel ID: ${controller.kernelIdentity?.kernel_id || 'unknown'}\n\n` +
+                        `Use wolfbook_operationStatus or wolfbook_waitEvaluation with operation_id="${operation.id}".`
+                    )]);
+                }
                 let result;
                 let ok = true;
                 try {
                     result = await _origInvoke(options, token);
+                    if (operation) {
+                        settleOperationResult(result);
+                        if (result?.__wolfbookBusy) return result;
+                        result = new vscode.LanguageModelToolResult([
+                            ...(result?.content || []),
+                            new vscode.LanguageModelTextPart(`\nOperation ID: ${operation.id}\nKernel ID: ${controller.kernelIdentity?.kernel_id || 'unknown'}`)
+                        ]);
+                    }
                     return result;
                 } catch (err) {
                     ok = false;
+                    if (operation) controller.operations.fail(operation.id, err);
                     throw err;
                 } finally {
                     try {
@@ -4118,7 +5097,7 @@ function registerTools(context, getController, debugCtrl, getAskPanel) {
     }
 
     // Build and return tool map for MCP server use
-    const toolMap = new Map(tools.map(({ name, impl }) => [name, impl]));
+    toolMap = new Map(tools.map(({ name, impl }) => [name, impl]));
     return toolMap;
 }
 
@@ -4618,4 +5597,7 @@ function registerWolfteamParticipant(context, getController) {
     context.subscriptions.push(participant);
 }
 
-module.exports = { registerTools, registerChatParticipant, registerWolfteamParticipant, buildTranscript, clearEvalLog, AskSpecialistTool, setNotebookResolvedCallback };
+module.exports = { registerTools, registerChatParticipant, registerWolfteamParticipant, buildTranscript, clearEvalLog, AskSpecialistTool, setNotebookResolvedCallback,
+    // pure helpers exported for headless tests
+    _buildExpectCheck, _buildOutputFormWrapper, _parseAssertPrefix, _stripJsonFallback, _describeExpect, _deTexUsage,
+    renderJournalDigest, filterJournal, _journalFilters, renderSessionReport, classifyCellOutputs, CancelOperationTool };

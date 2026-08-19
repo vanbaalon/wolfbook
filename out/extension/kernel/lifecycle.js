@@ -29,6 +29,54 @@ const { clearEvalLog } = require('../tools/index');
 const _diagnose = require('./diagnose');
 
 // ---------------------------------------------------------------------------
+// Host record — ~/.wolfbook/host.json
+//
+// A durable note of what THIS host resolved, for out-of-process consumers such
+// as wolfbook-serve (which drives the same kernel and the same resources/*.wl
+// from plain Node, so a browser client can work with no VS Code window open).
+//
+// Deliberately a plain file, not extension state: it must be readable when
+// VS Code is not running, which rules out globalState, and it must outlive a
+// clean shutdown, which rules out ~/.wolfbook-mcp-registry.json.
+//
+// Written on every successful launch, so it self-heals when Wolfram is upgraded
+// or the extension is updated. Best-effort throughout: this is a convenience for
+// other processes and must never affect the kernel that is starting.
+
+const HOST_RECORD_PATH = path.join(os.homedir(), '.wolfbook', 'host.json');
+
+function writeHostRecord(self) {
+    const executable = self.kernelMetadata?.executable;
+    if (!executable) return;                     // nothing worth recording yet
+
+    const record = {
+        version: 1,
+        extensionDir:     self.extensionPath || null,
+        resourcesDir:     self.extensionPath ? path.join(self.extensionPath, 'resources') : null,
+        kernelExecutable: executable,
+        wolframVersion:   self.kernelMetadata?.wolframVersion || null,
+        platform:         `${process.platform}-${process.arch}`,
+        resolvedAt:       new Date().toISOString(),
+    };
+
+    // Rewrite only when something actually changed, so we are not touching the
+    // file on every kernel restart.
+    let existing = null;
+    try { existing = JSON.parse(fs.readFileSync(HOST_RECORD_PATH, 'utf8')); } catch (_) {}
+    if (existing
+        && existing.extensionDir     === record.extensionDir
+        && existing.kernelExecutable === record.kernelExecutable
+        && existing.wolframVersion   === record.wolframVersion) return;
+
+    fs.mkdirSync(path.dirname(HOST_RECORD_PATH), { recursive: true });
+    // Write-then-rename: a reader must never observe a half-written file.
+    const tmp = `${HOST_RECORD_PATH}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(record, null, 2) + '\n');
+    fs.renameSync(tmp, HOST_RECORD_PATH);
+    devLog(LOG_CHANNELS.KERNEL, `[hostRecord] wrote ${HOST_RECORD_PATH}`, record.kernelExecutable);
+}
+
+// ---------------------------------------------------------------------------
 // Launch-failure diagnostics: figure out WHY the kernel didn't come up
 // (not installed? license? WSTP layer?) and show an actionable message.
 // The heavy lifting (direct-spawn probe, output classification) lives in
@@ -377,6 +425,12 @@ async function launchKernel(self, WstpSession) {
     if (process.platform === "win32") kernelInitPath = kernelInitPath.replace(/\\/g, "/");
 
     const kernelCommand = self.findKernel.resolveKernel();
+    self.kernelMetadata = {
+        executable: kernelCommand,
+        startedAt: Date.now(),
+        pid: null,
+        wolframVersion: null,
+    };
     devLog(LOG_CHANNELS.KERNEL, `[launchKernel] kernel path: ${kernelCommand}`);
 
     if (!WstpSession) {
@@ -639,6 +693,7 @@ async function launchKernel(self, WstpSession) {
         try {
             const _pidExpr = await self.session.evaluate('$ProcessID', { interactive: false });
             if (_pidExpr?.type === 'integer' && typeof _pidExpr.value === 'number') {
+                self.kernelMetadata.pid = _pidExpr.value;
                 _appendPid(_pidExpr.value);
                 scrollLog('[launchKernel] kernel PID registered:', _pidExpr.value);
 
@@ -667,6 +722,35 @@ async function launchKernel(self, WstpSession) {
                 }
             }
         } catch(_) {}
+
+        try {
+            // evaluate() resolves to an EvalResult, whose `.result` is the WExpr —
+            // testing `_versionExpr.type` therefore never matched, and every kernel
+            // reported wolframVersion: null (visible as "wolfram_version": null in
+            // ~/.wolfbook-mcp-registry.json). Accept either shape so this keeps
+            // working if the call is ever switched to sub().
+            const _versionExpr = await self.session.evaluate('$Version', { interactive: false });
+            const _versionW = _versionExpr?.result ?? _versionExpr;
+            if (_versionW?.type === 'string') self.kernelMetadata.wolframVersion = _versionW.value;
+        } catch (_) {}
+
+        // Record where this host found everything, for out-of-process clients.
+        //
+        // WHY: headless consumers (wolfbook-serve, and through it the browser
+        // clients) need the SAME kernel this extension resolved, and they cannot
+        // ask for it — find-kernel.js requires 'vscode', and the MCP registry is
+        // live-routing state that removeEntry() deletes on a clean shutdown. So
+        // nothing durable survives VS Code exiting.
+        //
+        // Re-deriving it is not a safe alternative: picking a kernel means
+        // ranking installs by VERSION (this machine has 14.1 and 15.0.1 side by
+        // side), and a second copy of that logic would silently choose the wrong
+        // one. Writing down the answer is cheaper and cannot drift.
+        //
+        // extensionDir is recorded too: it locates resources/*.wl and the
+        // prebuilt N-API addons, which a glob of ~/.vscode/extensions would miss
+        // for portable installs, --extensions-dir, Insiders and remote hosts.
+        try { writeHostRecord(self); } catch (_) { /* never block kernel launch */ }
 
         // Only mark kernel as resolved AFTER the $ProcessID eval completes.
         // Setting 'resolved' earlier would allow user-queued cells to race with

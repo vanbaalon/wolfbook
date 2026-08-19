@@ -2996,7 +2996,7 @@ async function runFairy(args) {
     const fsp = require('fs/promises');
     await Promise.all([
         // Reset working.wb (with a subtle distinct tint marking it as the agent's scratchpad)
-        fsp.writeFile(workDir.workingNb, JSON.stringify({ cells: [], metadata: { wolframSettings: { backgroundColor: '#F0F8FF' } } }, null, 2), 'utf8').catch(() => {}),
+        fsp.writeFile(workDir.workingNb, JSON.stringify({ cells: [], metadata: {} }, null, 2), 'utf8').catch(() => {}),
         // Reset steps and assumptions (but keep inputs — set by the caller)
         fsp.writeFile(workDir.stepsFile,  JSON.stringify([], null, 2), 'utf8').catch(() => {}),
         fsp.writeFile(workDir.assumFile,  JSON.stringify([], null, 2), 'utf8').catch(() => {}),

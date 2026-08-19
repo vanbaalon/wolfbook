@@ -34,6 +34,11 @@ Wolfbook is a Mathematica-style notebook frontend for VS Code. Create, edit and 
 - Interactive **3D graphics** and coordinate tooltips for 2D plots
 - **Live kernel access for AI agents** — Copilot, Claude Code, Codex, MCP-compatible tools
 - **Mid-evaluation abort**, **Dynamic[]** widgets, debugger and watch panel
+- Globally numbered kernels (`K1`, `K2`, …) with a picker that can bind a
+  notebook to a kernel owned by another live VS Code window, or start a new
+  kernel whose slot and notebook association are restored after window reload;
+  idle unattached kernels can be stopped from the same picker
+- Per-user, per-notebook backgrounds that do not modify shared `.wb` files
 - Open source, Apache 2.0
 
 ---

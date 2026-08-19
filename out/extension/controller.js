@@ -34,6 +34,8 @@ const _encoding = require('./utils/encoding');
 
 // ---- Kernel lifecycle: launchKernel, quitKernel, subkernel, offline UI ----
 const _lifecycle = require('./kernel/lifecycle');
+const { KernelArbiter } = require('./kernel/arbiter');
+const { OperationRegistry } = require('./kernel/operations');
 
 // ---- Scroll / eval-mode management ----
 const _scroll = require('./scroll/manager');
@@ -195,10 +197,13 @@ function _createSilentExecution(cell, controller) {
 }
 
 class WolframNotebookKernel {
-    constructor(extContext) {
+    constructor(extContext, kernelOptions = {}) {
         this.notebookConfig = configCompat.getConfiguration();
-        this._id                 = "wolfram-notebook-kernel";
-        this._label              = "Wolfram Kernel";
+        this._id                 = kernelOptions.controllerId || "wolfram-notebook-kernel";
+        this._label              = kernelOptions.controllerLabel || "Wolfram Kernel";
+        this._claimNotebook      = kernelOptions.claimNotebook || (() => true);
+        this._autoQuitWhenUnselected = kernelOptions.autoQuitWhenUnselected !== false;
+        this._autoSelectActive = kernelOptions.autoSelectActive !== false;
         this._supportedLanguages = ["wolfram"];
 
         this.findKernel         = new find_kernel_1.FindKernel();
@@ -239,6 +244,8 @@ class WolframNotebookKernel {
         this.outputPanel    = new ui_items_1.NotebookOutputPanel("Wolfram Language Notebook");
         this.config         = new notebook_config_1.NotebookConfig();
         this.executionQueue = new notebook_kernel_1.ExecutionQueue();
+        this.arbiter        = new KernelArbiter();
+        this.operations     = new OperationRegistry();
         this.selectedNotebooks = new Set();
         this._quitKernelTimer  = null;
 
@@ -537,7 +544,7 @@ class WolframNotebookKernel {
         // trigger kernel selection.  Setting Preferred makes VS Code automatically
         // select us for every extended-wolfram-notebook without user interaction.
         const _claimNotebook = (nb) => {
-            if (nb.notebookType === 'extended-wolfram-notebook') {
+            if (nb.notebookType === 'extended-wolfram-notebook' && this._claimNotebook(nb)) {
                 this._controller.updateNotebookAffinity(nb, vscode.NotebookControllerAffinity.Preferred);
             }
         };
@@ -555,10 +562,11 @@ class WolframNotebookKernel {
         // Calling notebook.selectKernel with a specific id/extension silently
         // selects our controller (no picker UI) whenever the notebook becomes
         // the active editor, guaranteeing association before any keystroke.
-        vscode.window.onDidChangeActiveNotebookEditor(editor => {
+        if (this._autoSelectActive) vscode.window.onDidChangeActiveNotebookEditor(editor => {
             if (!editor) return;
             const nb = editor.notebook;
             if (nb.notebookType !== 'extended-wolfram-notebook') return;
+            if (!this._claimNotebook(nb)) return;
             this._controller.updateNotebookAffinity(nb, vscode.NotebookControllerAffinity.Preferred);
             vscode.commands.executeCommand('notebook.selectKernel', {
                 id:        this._controller.id,
@@ -1270,7 +1278,7 @@ class WolframNotebookKernel {
             } else {
                 this.selectedNotebooks.delete(notebook);
             }
-            if (this.selectedNotebooks.size === 0) {
+            if (this.selectedNotebooks.size === 0 && this._autoQuitWhenUnselected) {
                 // Debounce: Save As fires selected:false for old URI then selected:true for
                 // new URI in rapid succession.  Wait 500 ms so we don't kill the kernel
                 // needlessly; cancel in the selected:true branch above if it arrives first.
@@ -1659,50 +1667,58 @@ class WolframNotebookKernel {
             scrollLog('execute() —', cells.length, 'cells — multi-cell run, no scroll');
         }
 
+        // ── Dispatch report ──
+        // execute() now reports what actually happened per cell so callers (the
+        // MCP cell pipeline) can distinguish "queued for the kernel" from
+        // "silently skipped" — the root of the phantom-run bug.  VS Code ignores
+        // executeHandler's return value, so Shift+Enter is unaffected.
+        const _report = { dispatched: [], skipped: [], queueDepthAfter: 0 };
+        const _cellRef = (cell) => ({ index: cell.index, uri: cell.document?.uri?.toString?.() || null });
+        // Recover from createNotebookCellExecution "not associated" via the shared
+        // association module (shows the doc + silent notebook.selectKernel).  Never
+        // falls back to the bare kernel-picker UI — that is a modal an agent can
+        // never dismiss, and for humans the association either works or the skip
+        // is reported.
+        const _createExecution = async (cell) => {
+            try {
+                return this._controller.createNotebookCellExecution(cell);
+            } catch (e) {
+                if (!String(e?.message).includes('not associated')) throw e;
+                const { associateNotebook } = require('./kernel/association');
+                // Silent (agent) runs restore the user's active tab afterwards;
+                // human runs happen in the already-active notebook.
+                const assoc = await associateNotebook(this, cell.notebook, { restoreActive: isSilent });
+                if (assoc.associated) {
+                    try { return this._controller.createNotebookCellExecution(cell); } catch (_) {}
+                }
+                scrollLog('[execute] cell', cell.index, 'NOT associated after recovery (', assoc.method, ') — skipping');
+                return null;
+            }
+        };
+
         if (this.isAborting) {
             vscode.window.showWarningMessage("Cannot execute: abort in progress.");
-            return;
+            _report.skipped = cells.map(cell => ({ ..._cellRef(cell), reason: 'aborting' }));
+            return _report;
         }
         if (this.kernelStatusString === "resolved") {
             for (const cell of cells) {
                 // Don't double-queue a cell that already has a pending execution.
-                if (this.executionQueue.hasPendingForCell(cell)) { scrollLog('[execute] cell', cell.index, 'already pending — skipping double-queue'); continue; }
+                if (this.executionQueue.hasPendingForCell(cell)) { scrollLog('[execute] cell', cell.index, 'already pending — skipping double-queue'); _report.skipped.push({ ..._cellRef(cell), reason: 'already-pending' }); continue; }
                 // Always use the real VS Code execution API so outputs are written to
                 // the notebook and visible to the user.  Auto-scroll is suppressed by
                 // the scroll guard (_agentGuardActive) which restores the viewport at Idle.
-                let execution;
-                try {
-                    execution = this._controller.createNotebookCellExecution(cell);
-                } catch (e) {
-                    if (!String(e?.message).includes('not associated')) throw e;
-                    // Controller not associated (first run / Save As).  Set up
-                    // selected:true listener BEFORE triggering selection, then call
-                    // notebook.selectKernel with our specific ID so VS Code selects
-                    // silently (no picker UI) and fires selected:true.
-                    // IMPORTANT: check ev.notebook URI matches — not just ev.selected —
-                    // to avoid resolving early when a DIFFERENT open notebook gets selected.
-                    const _cellNbUri = cell.notebook.uri.toString();
-                    const reAssociated = await new Promise(resolve => {
-                        const d = this._controller.onDidChangeSelectedNotebooks(ev => {
-                            if (ev.selected && ev.notebook.uri.toString() === _cellNbUri) { d.dispose(); resolve(true); }
-                        });
-                        vscode.commands.executeCommand('notebook.selectKernel', {
-                            id: this._controller.id,
-                            extension: 'wolfbook.wolfbook',
-                            label: this._controller.label,
-                        }).then(undefined, () => {});
-                        setTimeout(() => { d.dispose(); resolve(false); }, 3000);
-                    });
-                    if (!reAssociated) { vscode.commands.executeCommand('notebook.selectKernel'); continue; }
-                    execution = this._controller.createNotebookCellExecution(cell);
-                }
+                const execution = await _createExecution(cell);
+                if (!execution) { _report.skipped.push({ ..._cellRef(cell), reason: 'not-associated' }); continue; }
                 const queueId   = this.executionQueue.push(execution);
+                _report.dispatched.push(_cellRef(cell));
                 execution.token.onCancellationRequested(() => {
                     this.outputPanel.print("Cell execution cancelled by user");
                     this.abortEvaluation();
                 });
             }
             scrollLog('[execute] kernel resolved — calling checkoutExecutionQueue | queue:', this.executionQueue.queueLength(), '| silent:', isSilent);
+            _report.queueDepthAfter = this.executionQueue.queueLength();
             this.checkoutExecutionQueue();
         } else {
             // Kernel not running: queue the cells and auto-launch.
@@ -1715,27 +1731,11 @@ class WolframNotebookKernel {
             for (const cell of cells) {
                 // Don't double-queue a cell that already has a pending execution
                 // (guards against rapid Shift+Enter before kernel is ready).
-                if (this.executionQueue.hasPendingForCell(cell)) { scrollLog('[execute] cell', cell.index, 'already pending — skipping'); continue; }
-                let execution;
-                try {
-                    execution = this._controller.createNotebookCellExecution(cell);
-                } catch (e) {
-                    if (!String(e?.message).includes('not associated')) throw e;
-                    const _cellNbUri2 = cell.notebook.uri.toString();
-                    const reAssociated = await new Promise(resolve => {
-                        const d = this._controller.onDidChangeSelectedNotebooks(ev => {
-                            if (ev.selected && ev.notebook.uri.toString() === _cellNbUri2) { d.dispose(); resolve(true); }
-                        });
-                        vscode.commands.executeCommand('notebook.selectKernel', {
-                            id: this._controller.id,
-                            extension: 'wolfbook.wolfbook',
-                            label: this._controller.label,
-                        }).then(undefined, () => {});
-                        setTimeout(() => { d.dispose(); resolve(false); }, 3000);
-                    });
-                    if (!reAssociated) { vscode.commands.executeCommand('notebook.selectKernel'); continue; }
-                    execution = this._controller.createNotebookCellExecution(cell);
-                }
+                if (this.executionQueue.hasPendingForCell(cell)) { scrollLog('[execute] cell', cell.index, 'already pending — skipping'); _report.skipped.push({ ..._cellRef(cell), reason: 'already-pending' }); continue; }
+                const execution = await _createExecution(cell);
+                if (!execution) { _report.skipped.push({ ..._cellRef(cell), reason: 'not-associated' }); continue; }
+                // Queued to run after the kernel launches — dispatched, not skipped.
+                _report.dispatched.push({ ..._cellRef(cell), queuedForLaunch: true });
                 const queueId   = this.executionQueue.push(execution);
                 scrollLog('[execute] queued cell', cell.index, 'as', queueId, '| queue size now:', this.executionQueue.queueLength());
                 // Show the running spinner immediately — don't wait for launchKernel to finish.
@@ -1771,7 +1771,9 @@ class WolframNotebookKernel {
                 // checkoutExecutionQueue() will be called when launchKernel() resolves.
                 scrollLog('[execute] status is launching — cells queued, waiting for launchKernel to resolve | queue:', this.executionQueue.queueLength());
             }
+            _report.queueDepthAfter = this.executionQueue.queueLength();
         }
+        return _report;
     }
 
     // -----------------------------------------------------------------------
@@ -1832,7 +1834,12 @@ class WolframNotebookKernel {
     // -----------------------------------------------------------------------
     // Sub-kernel and shutdown — thin wrappers delegating to kernel/lifecycle.js
     _prewarmSubKernel()                  { /* no-op: subkernel removed */ }
-    quitKernel()                         { _lifecycle.quitKernel(this); }
+    quitKernel() {
+        this.arbiter?.invalidate('kernel quit');
+        this.operations?.invalidateAll('kernel quit');
+        this._abortUncertain = false;   // a fresh kernel has no abort in flight
+        _lifecycle.quitKernel(this);
+    }
 
     // -----------------------------------------------------------------------
     abortEvaluation() { return _editor.abortEvaluation(this); }
@@ -1840,7 +1847,7 @@ class WolframNotebookKernel {
     // Abort any ongoing evaluation and wait for the queue to drain.
     // Used by AI tools to claim priority over user-initiated evaluations.
     // Returns a promise that resolves when the kernel is idle.
-    async abortAndWait(timeoutMs = 10000) {
+    async abortAndWait(timeoutMs = 10000, options = {}) {
         if (this.executionQueue.queueLength() === 0 && !this._evalDispatched && !this.isAborting) {
             scrollLog('[abortAndWait] queue empty, not dispatched, not aborting — already idle');
             return; // already idle
@@ -1850,7 +1857,9 @@ class WolframNotebookKernel {
                   '| isAborting:', this.isAborting);
         // Signal checkout.js to suppress post-end scroll for the aborted user cell.
         this._agentAbortPending = true;
-        vscode.window.showInformationMessage('⚡ AI tool has taken kernel priority — your evaluation was aborted.');
+        if (options.notifyPriority !== false) {
+            vscode.window.showInformationMessage('⚡ AI tool has taken kernel priority — your evaluation was aborted.');
+        }
         this.abortEvaluation();
 
         // abortEvaluation() clears _evalDispatched and the queue immediately,
@@ -1873,22 +1882,65 @@ class WolframNotebookKernel {
             };
             setTimeout(poll, 100);
         });
-        // Force-clear stale abort state on timeout so the next execution isn't blocked.
-        if (this.isAborting) {
-            scrollLog('[abortAndWait] force-clearing isAborting after timeout');
-            this.isAborting = false;
-        }
-        if (this._abortPending) {
-            this._abortPending = false;
-        }
+        // Never invent an abort acknowledgement. If the native link has not
+        // confirmed completion, keep the abort flags and expose faulted state —
+        // but start a watchdog that resolves the uncertainty to a DEFINITE state
+        // instead of reporting 'faulted'/'uncertain' forever (the flag used to be
+        // sticky: abortAndWait early-returns when idle, so nothing ever cleared it).
+        this._abortUncertain = !!(this.isAborting || this._abortPending);
+        if (this._abortUncertain) this._startAbortUncertaintyWatchdog();
         this._agentAbortPending = false;
         scrollLog('[abortAndWait] done — queue:', this.executionQueue.queueLength(),
                   '| evalDispatched:', this._evalDispatched,
                   '| isAborting:', this.isAborting);
     }
 
+    // Reconcile an uncertain abort: probe the link every 2 s for up to 30 s.
+    // A correct answer clears the flag (link is healthy); persistent silence
+    // resolves to kernelStatusString='error' — definite, never indefinitely
+    // 'uncertain'.
+    _startAbortUncertaintyWatchdog() {
+        if (this._abortWatchdogActive) return;
+        this._abortWatchdogActive = true;
+        const deadline = Date.now() + 30000;
+        const probe = async () => {
+            if (!this._abortUncertain) { this._abortWatchdogActive = false; return; }
+            // Idle flags recovering on their own also resolves the uncertainty.
+            if (!this.isAborting && !this._abortPending && !this._evalDispatched &&
+                this.executionQueue.queueLength() === 0) {
+                let ok = false;
+                try {
+                    ok = await Promise.race([
+                        Promise.resolve(this.session?.subAuto?.('1')).then(r => r != null),
+                        new Promise(resolve => setTimeout(() => resolve(false), 1500)),
+                    ]);
+                } catch (_) { ok = false; }
+                if (ok) {
+                    this._abortUncertain = false;
+                    this._abortWatchdogActive = false;
+                    this.arbiter?._record?.('abort-reconciled', { ts: Date.now() });
+                    scrollLog('[abort-watchdog] link answered — uncertainty cleared');
+                    return;
+                }
+            }
+            if (Date.now() >= deadline) {
+                this._abortWatchdogActive = false;
+                this.kernelStatusString = 'error';
+                scrollLog('[abort-watchdog] no answer in 30s — kernel marked error (definite)');
+                return;
+            }
+            setTimeout(probe, 2000);
+        };
+        setTimeout(probe, 2000);
+    }
+
     // -----------------------------------------------------------------------
-    restartKernel() { return _editor.restartKernel(this); }
+    restartKernel() {
+        this.arbiter?.invalidate('kernel restart');
+        this.operations?.invalidateAll('kernel restart');
+        this._abortUncertain = false;   // a fresh kernel has no abort in flight
+        return _editor.restartKernel(this);
+    }
     // -----------------------------------------------------------------------
     writeFileChecked(filePath, text) { return _editor.writeFileChecked(this, filePath, text); }
 }

@@ -89,7 +89,10 @@ At the end of a task, do NOT write "What's the next step?" — call `wolfteam_ch
 
 ## Run success / output handling
 - After `#wolfbookRun` or `#wolfbookEval`: check whether the output is `$Failed`, contains `::` (message), or is empty before proceeding
-- If `#wolfbookRun` times out, call `wolfbook_kernelControl` with action="abort" — never leave the kernel stuck
+- If the five-minute MCP response window returns an operation ID, call
+  `wolfbook_waitEvaluation` to continue waiting for that same run or call
+  `wolfbook_kernelControl` with action="abort" — never start a duplicate run
+  while the original operation remains active.
 - After large computations, use `#wolfbookState` to confirm key symbols are defined
 
 ## INTERACTION TOOLS — Inline User Consultation Without Breaking the Session

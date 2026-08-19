@@ -17,6 +17,7 @@ exports.VSNBContentSerializer = void 0;
 const util = require("util");
 const _outputRenderer = require('./output/renderer');
 const _nbImport = require('./nb-import/index');
+const { parseNotebookJson } = require('./utils/notebook-json');
 class VSNBContentSerializer {
     constructor() {
         // TODO: better label
@@ -36,7 +37,7 @@ class VSNBContentSerializer {
         }
 
         try {
-            notebook = JSON.parse(text);
+            notebook = parseNotebookJson(text);
             
             // Preserve notebook metadata including settings
             const metadata = notebook.metadata || {};

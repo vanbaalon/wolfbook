@@ -97,13 +97,14 @@ function openSSE(port) {
 }
 
 // ── Pending requests waiting for SSE reply ────────────────────────────────
-const pending = new Map();  // id → { resolve }
+const pending = new Map();  // id → { resolve, timeout? }
 
 function onSSEMessage(data) {
     let msg;
     try { msg = JSON.parse(data); } catch { return; }
     if (msg.id != null && pending.has(msg.id)) {
-        const { resolve } = pending.get(msg.id);
+        const { resolve, timeout } = pending.get(msg.id);
+        if (timeout) clearTimeout(timeout);
         pending.delete(msg.id);
         resolve(msg);
     }
@@ -136,19 +137,24 @@ function forwardRequest(sessionPath, port, rpcMsg) {
             headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }
         }, res => { res.resume(); });
         req.on('error', err => {
+            const entry = pending.get(rpcMsg.id);
+            if (entry?.timeout) clearTimeout(entry.timeout);
             pending.delete(rpcMsg.id);
             reject(err);
         });
         req.write(body);
         req.end();
 
-        // Safety timeout — 5 minutes for long tool calls
-        setTimeout(() => {
+        // The server returns a resumable operation response at five minutes.
+        // Keep a transport margin so that response wins this backstop.
+        const timeout = setTimeout(() => {
             if (pending.has(rpcMsg.id)) {
                 pending.delete(rpcMsg.id);
                 resolve({ jsonrpc: '2.0', id: rpcMsg.id, error: { code: -32603, message: 'Timeout' } });
             }
-        }, 300000);
+        }, 330000);
+        const entry = pending.get(rpcMsg.id);
+        if (entry) entry.timeout = timeout;
     });
 }
 

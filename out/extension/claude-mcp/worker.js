@@ -23,6 +23,7 @@ const { setMcpCallActive } = require('../tools/shared');
 
 const http     = require('http');
 const net      = require('net');
+const crypto   = require('crypto');
 const registry = require('./registry');
 
 const PRIMARY_PORT       = 27182;
@@ -36,9 +37,18 @@ class WorkerServer {
      * @param {Map<string,object>} toolMap    name → tool instance (same map as primary)
      * @param {string}             clientId   e.g. "VSCode[ClasterVersion]"
      */
-    constructor(toolMap, clientId) {
+    constructor(toolMap, clientId, getKernels = null, resolveKernel = null, stopKernel = null, getKernelBindings = null) {
         this._toolMap  = toolMap;
         this._clientId = clientId;
+        // Distinguishes this extension-host lifetime from a stale registration
+        // left by an earlier process which happened to use the same client ID.
+        this._registrationGeneration = `${Date.now()}-${crypto.randomUUID()}`;
+        this._getKernels = getKernels;
+        this._resolveKernel = resolveKernel;
+        this._stopKernel = stopKernel;
+        this._getKernelBindings = getKernelBindings;
+        this._kernelTransactions = new Map();
+        this._transactionSweepTimer = setInterval(() => this._sweepKernelTransactions(), 10000);
         this._port     = 0;
         this._server   = null;
         this._notebooks = [];            // fsPath[] — updated by extension.js
@@ -81,6 +91,11 @@ class WorkerServer {
     /** Clean up: stop health polling, remove registry entry, close HTTP server. */
     stop() {
         if (this._healthTimer) { clearInterval(this._healthTimer); this._healthTimer = null; }
+        if (this._transactionSweepTimer) { clearInterval(this._transactionSweepTimer); this._transactionSweepTimer = null; }
+        for (const transaction of this._kernelTransactions.values()) {
+            transaction.entry.controller?.arbiter?.release(transaction.lease, 'broker-stopped');
+        }
+        this._kernelTransactions.clear();
         registry.removeEntry(this._clientId);
         return new Promise(resolve => {
             if (this._server) this._server.close(() => resolve());
@@ -117,6 +132,8 @@ class WorkerServer {
 
         if (req.method === 'POST' && url.pathname === '/invoke') {
             this._handleInvoke(req, res);
+        } else if (req.method === 'POST' && url.pathname === '/kernel-session') {
+            this._handleKernelSession(req, res);
         } else if (req.method === 'GET' && url.pathname === '/notebooks') {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ clientId: this._clientId, notebooks: this._notebooks }));
@@ -135,6 +152,85 @@ class WorkerServer {
             });
         } else {
             res.writeHead(404); res.end();
+        }
+    }
+
+    _handleKernelSession(req, res) {
+        let body = '';
+        req.setEncoding('utf8');
+        req.on('data', chunk => { body += chunk; });
+        req.on('end', async () => {
+            const reply = (status, payload) => {
+                res.writeHead(status, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify(payload));
+            };
+            let msg;
+            try { msg = JSON.parse(body); } catch { return reply(400, { error: 'Bad JSON' }); }
+            if (msg.generation && msg.generation !== this._registrationGeneration) {
+                return reply(409, { error: 'Kernel owner generation changed; refresh the kernel list.', code: 'STALE_KERNEL_OWNER' });
+            }
+            const entry = this._resolveKernel?.(msg.kernelId);
+            if (!entry || entry.remote) return reply(404, { error: `Kernel is not owned by this window: ${msg.kernelId}`, code: 'UNKNOWN_KERNEL' });
+            const ctrl = entry.controller;
+            const transaction = msg.transactionId ? this._kernelTransactions.get(msg.transactionId) : null;
+            try {
+                if (msg.action === 'begin') {
+                    if (!msg.transactionId) throw new Error('transactionId is required.');
+                    if (this._kernelTransactions.has(msg.transactionId)) {
+                        return reply(409, { error: 'Transaction already exists.', code: 'DUPLICATE_TRANSACTION' });
+                    }
+                    const claim = await ctrl.arbiter.acquire(ctrl, {
+                        owner: 'remote-notebook-ui', kind: 'remote-cell', caption: msg.caption,
+                        operationId: msg.transactionId, policy: 'reject',
+                    });
+                    if (claim.busy) return reply(409, { error: 'Kernel is busy.', code: 'KERNEL_BUSY', details: claim.busy });
+                    this._kernelTransactions.set(msg.transactionId, { entry, lease: claim.lease, touchedAt: Date.now() });
+                    return reply(200, { result: { transactionId: msg.transactionId } });
+                }
+                if (msg.action === 'end') {
+                    if (!transaction) return reply(404, { error: 'Remote kernel transaction is no longer active.', code: 'STALE_TRANSACTION' });
+                    ctrl.arbiter.release(transaction.lease, msg.outcome || 'completed');
+                    this._kernelTransactions.delete(msg.transactionId);
+                    return reply(200, { result: true });
+                }
+                if (msg.action === 'status') return reply(200, { result: ctrl.arbiter.status(ctrl) });
+                if (msg.action === 'abort') return reply(200, { result: await ctrl.arbiter.abort(ctrl, { requestedBy: 'remote-notebook-ui', operationId: msg.transactionId || undefined }) });
+                if (msg.action === 'restart') {
+                    if (ctrl.arbiter.status(ctrl).busy) return reply(409, { error: 'Cannot restart a busy kernel.', code: 'KERNEL_BUSY' });
+                    await ctrl.restartKernel(); return reply(200, { result: true });
+                }
+                if (msg.action === 'stop') {
+                    if (ctrl.arbiter.status(ctrl).busy) return reply(409, { error: 'Cannot stop a busy kernel.', code: 'KERNEL_BUSY' });
+                    if (!this._stopKernel) return reply(501, { error: 'Remote kernel stop is unavailable.', code: 'NOT_IMPLEMENTED' });
+                    await this._stopKernel(entry);
+                    return reply(200, { result: true });
+                }
+                if (!transaction || transaction.entry.id !== entry.id) {
+                    return reply(409, { error: 'A live transaction lease is required for remote evaluation.', code: 'TRANSACTION_REQUIRED' });
+                }
+                transaction.touchedAt = Date.now();
+                let result;
+                ctrl._directEvaluationCount = Number(ctrl._directEvaluationCount || 0) + 1;
+                try {
+                    if (msg.action === 'evaluate') result = await ctrl.session.evaluate(String(msg.expression || ''), msg.options || {});
+                    else if (msg.action === 'subAuto') result = await ctrl.session.subAuto(String(msg.expression || ''));
+                    else if (msg.action === 'dialogEval') result = await ctrl.session.dialogEval(String(msg.expression || ''));
+                    else if (msg.action === 'exitDialog') result = await ctrl.session.exitDialog(msg.value);
+                    else return reply(400, { error: `Unsupported kernel session action: ${msg.action}` });
+                } finally { ctrl._directEvaluationCount = Math.max(0, Number(ctrl._directEvaluationCount || 1) - 1); }
+                return reply(200, { result });
+            } catch (error) {
+                return reply(500, { error: error.message || String(error), code: error.code || 'REMOTE_KERNEL_ERROR' });
+            }
+        });
+    }
+
+    _sweepKernelTransactions() {
+        const cutoff = Date.now() - 2 * 60 * 1000;
+        for (const [id, transaction] of this._kernelTransactions) {
+            if (transaction.touchedAt >= cutoff || Number(transaction.entry.controller?._directEvaluationCount || 0) > 0) continue;
+            transaction.entry.controller?.arbiter?.release(transaction.lease, 'remote-client-expired');
+            this._kernelTransactions.delete(id);
         }
     }
 
@@ -195,6 +291,10 @@ class WorkerServer {
             workerPort: this._port,
             pid:        process.pid,
             notebooks:  this._notebooks,
+            kernels:    this._getKernels?.() || [],
+            kernelBindings: this._getKernelBindings?.() || [],
+            generation: this._registrationGeneration,
+            registeredAt: Date.now(),
             appName:    this._clientId.split('[')[0],
             workspace:  (this._clientId.match(/\[([^\]#]+)\]/) || [])[1] || '',
         });
@@ -207,6 +307,10 @@ class WorkerServer {
                 port:      this._port,
                 pid:       process.pid,
                 notebooks: this._notebooks,
+                kernels: this._getKernels?.() || [],
+                kernelBindings: this._getKernelBindings?.() || [],
+                generation: this._registrationGeneration,
+                registeredAt: Date.now(),
             });
             const req = http.request({
                 hostname: '127.0.0.1',
@@ -240,7 +344,12 @@ class WorkerServer {
                     res.on('end', () => {
                         try {
                             const json = JSON.parse(buf);
-                            if (json.status === 'ok') { this._healthFailCount = 0; return; }
+                            if (json.status === 'ok') {
+                                this._healthFailCount = 0;
+                                this._syncRegistry();
+                                this._registerWithPrimary().catch(() => {});
+                                return;
+                            }
                         } catch {}
                         this._onHealthFail();
                     });

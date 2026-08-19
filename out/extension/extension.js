@@ -190,6 +190,7 @@ async function activate(context) {
     const { DebugController }      = require('./debugger/debugController');
     const { WolframDebugAdapter }  = require('./debugger/wolframDebugAdapter');
 
+    let _controllerResolver = () => controller;
     const _bpMgr       = new BreakpointManager(context);
     // Seed _bpMgr from any native breakpoints already present (set before this workspace loaded)
     for (const bp of vscode.debug.breakpoints) {
@@ -199,11 +200,11 @@ async function activate(context) {
     }
     const _watchPanel  = new WatchPanelProvider(context);
     const _askPanel    = new AskSpecialistPanel();
-    const _debugCtrl   = new DebugController(() => controller, _bpMgr, _watchPanel);
+    const _debugCtrl   = new DebugController(() => _controllerResolver(), _bpMgr, _watchPanel);
 
     // ── Evaluate Selection ─────────────────────────────────────────────────
     const evalSel = require('./editor/evaluateSelection');
-    evalSel.register(context, () => controller, _watchPanel);
+    evalSel.register(context, () => _controllerResolver(), _watchPanel);
     require('./execution/global-symbols').register(context);
 
     // ── WL Code Formatter ──────────────────────────────────────────────────
@@ -549,7 +550,7 @@ async function activate(context) {
         vscode.debug.registerDebugAdapterDescriptorFactory('wolfram', {
             createDebugAdapterDescriptor(_session) {
                 return new vscode.DebugAdapterInlineImplementation(
-                    new WolframDebugAdapter(_debugCtrl, _bpMgr, () => controller)
+                    new WolframDebugAdapter(_debugCtrl, _bpMgr, () => _controllerResolver())
                 );
             }
         })
@@ -695,7 +696,449 @@ async function activate(context) {
     }));
     // Setup Notebook client
     let nbKernelenabled = config.get("notebook.kernelEnabled", true);
-    let controller = new controller_1.WolframNotebookKernel(context);
+    const { KernelManager } = require('./kernel/manager');
+    const { reserveKernelLabel, releaseKernelLabel } = require('./kernel/label-registry');
+    let kernelManager;
+    let controller = new controller_1.WolframNotebookKernel(context, {
+        controllerLabel: 'Wolfram K1',
+        autoQuitWhenUnselected: false,
+        autoSelectActive: false,
+        claimNotebook: nb => !kernelManager || kernelManager.bindingFor(nb)?.controller === controller,
+    });
+    kernelManager = new KernelManager(context, {
+        experimental: config.get('kernels.experimentalIsolation', false),
+        maximum: config.get('kernels.maximum', 3),
+        labelAllocator: reserveKernelLabel,
+        labelReleaser: releaseKernelLabel,
+        factory: async () => {
+            let isolated;
+            isolated = new controller_1.WolframNotebookKernel(context, {
+                controllerId: `wolfram-notebook-kernel-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+                controllerLabel: 'Wolfram isolated',
+                autoQuitWhenUnselected: false,
+                autoSelectActive: false,
+                claimNotebook: nb => kernelManager.bindingFor(nb)?.controller === isolated,
+            });
+            isolated.preExecuteHook = controller.preExecuteHook;
+            isolated._onKernelReady = () => { _debugCtrl.refreshLiveWatch(); _refreshKernelIdentity?.(); };
+            return isolated;
+        },
+    });
+    const _defaultKernelEntry = kernelManager.addDefault(controller);
+    context.subscriptions.push({ dispose: () => kernelManager.releaseLabels() });
+    controller._controller.label = `Wolfram ${_defaultKernelEntry.label}`;
+    let _refreshKernelIdentity = () => {};
+    const _trackedKernelControllers = new WeakSet();
+    const _trackBuiltInKernelSelection = (entry, useDefault = false) => {
+        if (_trackedKernelControllers.has(entry.controller)) return null;
+        _trackedKernelControllers.add(entry.controller);
+        const disposable = entry.controller._controller.onDidChangeSelectedNotebooks(async event => {
+            if (!event.selected || event.notebook.notebookType !== 'extended-wolfram-notebook') return;
+            try {
+                await kernelManager.bind(event.notebook.uri.fsPath, entry.id);
+                for (const candidate of kernelManager._entries.values()) {
+                    candidate.controller._controller.updateNotebookAffinity(
+                        event.notebook,
+                        candidate.id === entry.id
+                            ? vscode.NotebookControllerAffinity.Preferred
+                            : vscode.NotebookControllerAffinity.Default
+                    );
+                }
+                _refreshKernelIdentity?.();
+            } catch (error) {
+                vscode.window.showWarningMessage(`Cannot select Wolfram ${entry.label}: ${error.message}`);
+            }
+        });
+        // Remote entries own their subscription (disposed on eviction); local
+        // entries live for the window, so context.subscriptions is fine.
+        if (entry.remote) {
+            (entry._disposables = entry._disposables || []).push(disposable);
+        } else {
+            context.subscriptions.push(disposable);
+        }
+        return disposable;
+    };
+    _trackBuiltInKernelSelection(_defaultKernelEntry, true);
+    let _creatingKernelFromPicker = false;
+    const _selectKernelEntry = async (notebook, entry) => {
+        if (!entry?.controller?._controller) return;
+        entry.controller._controller.updateNotebookAffinity(notebook, vscode.NotebookControllerAffinity.Preferred);
+        await vscode.commands.executeCommand('notebook.selectKernel', {
+            id: entry.controller._controller.id,
+            extension: 'wolfbook.wolfbook',
+            label: entry.controller._controller.label,
+        });
+    };
+    const _startNewKernelForNotebook = async notebook => {
+        if (_creatingKernelFromPicker) return null;
+        const previous = kernelManager.bindingFor(notebook);
+        const localKernelCount = [...kernelManager._entries.values()].filter(entry => !entry.remote).length;
+        if (localKernelCount >= kernelManager.maximum) {
+            vscode.window.showWarningMessage(`The Wolfram kernel limit (${kernelManager.maximum}) has been reached for this window.`);
+            await _selectKernelEntry(notebook, previous);
+            return null;
+        }
+        const confirmation = await vscode.window.showWarningMessage(
+            'Start another Wolfram process? It may consume an additional license seat. This window will remember and restore it after reload.',
+            { modal: true }, 'Start Kernel'
+        );
+        if (confirmation !== 'Start Kernel') {
+            await _selectKernelEntry(notebook, previous);
+            return null;
+        }
+        _creatingKernelFromPicker = true;
+        try {
+            kernelManager.experimental = true;
+            const entry = await kernelManager.create();
+            _trackBuiltInKernelSelection(entry, false);
+            await kernelManager.bind(notebook.uri.fsPath, entry.id);
+            await _selectKernelEntry(notebook, entry);
+            _refreshKernelIdentity?.();
+            vscode.window.showInformationMessage(`Started and selected Wolfram ${entry.label}.`);
+            return entry;
+        } finally {
+            _creatingKernelFromPicker = false;
+        }
+    };
+    // VS Code's native kernel picker only displays NotebookControllers, not
+    // arbitrary commands. A lightweight action controller makes creation
+    // available in that same list; it immediately hands selection to the real
+    // controller after the user confirms the resource cost.
+    const _newKernelActionController = vscode.notebooks.createNotebookController(
+        'wolfram-start-new-kernel', 'extended-wolfram-notebook', '＋ Start New Wolfram Kernel…'
+    );
+    _newKernelActionController.supportedLanguages = controller._controller.supportedLanguages;
+    _newKernelActionController.executeHandler = async cells => {
+        const notebook = cells?.[0]?.notebook || vscode.window.activeNotebookEditor?.notebook;
+        if (notebook) await _startNewKernelForNotebook(notebook);
+    };
+    context.subscriptions.push(_newKernelActionController,
+        _newKernelActionController.onDidChangeSelectedNotebooks(async event => {
+            if (event.selected) await _startNewKernelForNotebook(event.notebook);
+        }));
+    kernelManager.restore().then(entries => {
+        for (const entry of entries) {
+            _trackBuiltInKernelSelection(entry, false);
+            for (const notebook of vscode.workspace.notebookDocuments || []) {
+                if (kernelManager.explicitBindingFor(notebook)?.id === entry.id) {
+                    entry.controller._controller.updateNotebookAffinity(notebook, vscode.NotebookControllerAffinity.Preferred);
+                }
+            }
+        }
+        _refreshKernelIdentity?.();
+    }).catch(error => vscode.window.showWarningMessage(`Could not restore saved Wolfram kernels: ${error.message}`));
+    const { RemoteKernelSession } = require('./claude-mcp/remote-kernel-session');
+    const { listRecent: _listLiveWindows } = require('./claude-mcp/registry');
+    const _liveKernelTopology = () => {
+        const kernels = [];
+        const owners = _listLiveWindows();
+        const attached = new Map();
+        for (const owner of owners) {
+            for (const binding of owner.kernelBindings || []) {
+                if (!attached.has(binding.kernel_id)) attached.set(binding.kernel_id, new Set());
+                for (const notebook of binding.notebooks || []) attached.get(binding.kernel_id).add(notebook);
+            }
+        }
+        for (const owner of owners) {
+            for (const kernel of (owner.kernels || [])) {
+                if (kernel.remote) continue;
+                const notebooks = new Set([...(kernel.notebooks || []), ...(attached.get(kernel.kernel_id) || [])]);
+                kernels.push({ ...kernel, notebooks: [...notebooks], clientId: owner.clientId, ownerPid: owner.pid,
+                    workerPort: owner.workerPort, generation: owner.generation });
+            }
+        }
+        for (const entry of kernelManager._entries.values()) {
+            if (entry.remote || kernels.some(kernel => kernel.kernel_id === entry.id)) continue;
+            kernels.push({ ...kernelManager.describe(entry), clientId: null, ownerPid: process.pid,
+                workerPort: null, generation: null });
+        }
+        const unique = [...new Map(kernels.map(kernel => [kernel.kernel_id, kernel])).values()];
+        unique.sort((a, b) => Number(String(a.kernel_label || '').replace(/^K/, '')) -
+            Number(String(b.kernel_label || '').replace(/^K/, '')) || String(a.kernel_id).localeCompare(String(b.kernel_id)));
+        return unique;
+    };
+    const _remoteKernelDescriptors = () => {
+        return _liveKernelTopology().filter(kernel => Number(kernel.ownerPid) !== process.pid && kernel.workerPort);
+    };
+    const _attachRemoteKernel = descriptor => {
+        const existing = kernelManager.get(descriptor.kernel_id);
+        if (existing) {
+            if (existing.label !== descriptor.kernel_label) {
+                existing.label = descriptor.kernel_label;
+                existing.controller.kernelIdentity.label = descriptor.kernel_label;
+                existing.controller._controller.label = `Wolfram ${descriptor.kernel_label}`;
+            }
+            return existing;
+        }
+        let remote;
+        remote = new controller_1.WolframNotebookKernel(context, {
+            controllerId: `wolfram-remote-${descriptor.kernel_id}`,
+            controllerLabel: `Wolfram ${descriptor.kernel_label}`,
+            autoQuitWhenUnselected: false,
+            autoSelectActive: false,
+            claimNotebook: nb => kernelManager.bindingFor(nb)?.controller === remote,
+        });
+        const session = new RemoteKernelSession(descriptor.workerPort, descriptor.kernel_id, descriptor.generation);
+        remote.session = session;
+        remote.kernelStatusString = 'resolved';
+        remote.kernelMetadata = {
+            executable: descriptor.executable || null,
+            startedAt: descriptor.started_at ? Date.parse(descriptor.started_at) : null,
+            pid: descriptor.process_id || null,
+            wolframVersion: descriptor.wolfram_version || null,
+        };
+        remote.launchKernel = async () => { await session.status(); remote.kernelStatusString = 'resolved'; };
+        remote.quitKernel = () => { remote.kernelStatusString = 'unresolved'; };
+        remote.restartKernel = async () => session.restart();
+        remote.abortAndWait = async () => session.abort();
+        remote.abortEvaluation = () => session.abort();
+        const entry = kernelManager.addRemote(remote, descriptor);
+        const exposeAsCandidate = notebook => {
+            if (notebook.notebookType === 'extended-wolfram-notebook') {
+                remote._controller.updateNotebookAffinity(notebook, vscode.NotebookControllerAffinity.Default);
+            }
+        };
+        for (const notebook of vscode.workspace.notebookDocuments) exposeAsCandidate(notebook);
+        // Owned by the entry so eviction can dispose it — pushing to
+        // context.subscriptions leaked one listener per dead remote generation.
+        (entry._disposables = entry._disposables || []).push(
+            vscode.workspace.onDidOpenNotebookDocument(exposeAsCandidate));
+        _trackBuiltInKernelSelection(entry, false);
+        return entry;
+    };
+    // Evict a dead remote proxy: dispose its listeners and NotebookController and
+    // drop it from the manager, so `manager.size` reflects live kernels again
+    // (a permanently inflated size forced kernel_id on every kernel-scoped call).
+    // Deliberately does NOT release the K-label: the machine-wide label lease
+    // belongs to the OWNER window's PID — releasing it here would let another
+    // window steal the owner's label.
+    const _detachRemoteKernel = (entry) => {
+        try { (entry._disposables || []).forEach(d => { try { d.dispose(); } catch (_) {} }); } catch (_) {}
+        entry._disposables = [];
+        try { _trackedKernelControllers.delete(entry.controller); } catch (_) {}
+        kernelManager.removeRemote(entry.id);
+        _refreshKernelIdentity?.();
+    };
+    const _syncRemoteKernelControllers = () => {
+        const topology = _liveKernelTopology();
+        const controllerLabel = kernel => {
+            const count = (kernel.notebooks || []).length;
+            return `Wolfram ${kernel.kernel_label} · ${count} ${count === 1 ? 'notebook' : 'notebooks'}`;
+        };
+        for (const kernel of topology.filter(item => Number(item.ownerPid) === process.pid)) {
+            const local = kernelManager.get(kernel.kernel_id);
+            if (local && local.label !== kernel.kernel_label) {
+                local.label = kernel.kernel_label;
+                local.controller.kernelIdentity.label = kernel.kernel_label;
+                local.controller._controller.label = `Wolfram ${kernel.kernel_label}`;
+                kernelManager._emit();
+            }
+            if (local) local.controller._controller.label = controllerLabel(kernel);
+        }
+        const descriptors = topology.filter(kernel => Number(kernel.ownerPid) !== process.pid && kernel.workerPort);
+        const liveIds = new Set(descriptors.map(item => item.kernel_id));
+        for (const descriptor of descriptors) {
+            try {
+                const entry = _attachRemoteKernel(descriptor);
+                entry.ownerUnavailable = false;
+                entry.missedSyncs = 0;
+                entry.controller.kernelStatusString = descriptor.lifecycle === 'faulted' ? 'error' : 'resolved';
+                entry.controller._controller.label = controllerLabel(descriptor);
+            } catch (error) {
+                console.error(`[Wolfbook Kernels] Failed to expose remote ${descriptor.kernel_label} (${descriptor.kernel_id}):`, error);
+            }
+        }
+        // Debounced eviction (3 consecutive missed syncs ≈ 4.5 s): a remote whose
+        // owner window is gone is REMOVED, not just flagged — otherwise dead
+        // generations accumulate forever and every kernel-scoped call demands
+        // kernel_id ("this window has multiple live kernels").
+        for (const entry of [...kernelManager._entries.values()]) {
+            if (!entry.remote || liveIds.has(entry.id)) continue;
+            entry.missedSyncs = (entry.missedSyncs || 0) + 1;
+            entry.ownerUnavailable = true;
+            entry.controller.kernelStatusString = 'error';
+            if (entry.missedSyncs >= 3) _detachRemoteKernel(entry);
+        }
+    };
+    const _stopUnattachedKernel = async notebook => {
+        _syncRemoteKernelControllers();
+        const topology = _liveKernelTopology();
+        const candidates = topology.filter(kernel => (kernel.notebooks || []).length === 0 && !kernel.busy);
+        if (!candidates.length) {
+            vscode.window.showInformationMessage('There are no idle Wolfram kernels without notebook bindings.');
+            if (notebook) await _selectKernelEntry(notebook, kernelManager.bindingFor(notebook));
+            return;
+        }
+        const picked = await vscode.window.showQuickPick(candidates.map(kernel => ({
+            label: `$(debug-stop) Stop Wolfram ${kernel.kernel_label}`,
+            description: kernel.kernel_id,
+            detail: `${kernel.clientId || 'This window'} · ${kernel.lifecycle}`,
+            kernel,
+        })), { placeHolder: 'Select an unattached kernel to stop' });
+        if (!picked) {
+            if (notebook) await _selectKernelEntry(notebook, kernelManager.bindingFor(notebook));
+            return;
+        }
+        const confirmed = await vscode.window.showWarningMessage(
+            `Stop Wolfram ${picked.kernel.kernel_label}? This kernel is not attached to any notebook and its in-memory definitions will be lost.`,
+            { modal: true }, 'Stop Kernel'
+        );
+        if (confirmed !== 'Stop Kernel') {
+            if (notebook) await _selectKernelEntry(notebook, kernelManager.bindingFor(notebook));
+            return;
+        }
+        const local = kernelManager.get(picked.kernel.kernel_id);
+        if (local && !local.remote) {
+            if (local.isDefault) await local.controller.quitKernel();
+            else await kernelManager.stop(local.id);
+        } else {
+            const session = new RemoteKernelSession(picked.kernel.workerPort, picked.kernel.kernel_id, picked.kernel.generation);
+            await session.stop();
+        }
+        if (notebook) await _selectKernelEntry(notebook, kernelManager.bindingFor(notebook));
+        _refreshKernelIdentity?.();
+        vscode.window.showInformationMessage(`Stopped Wolfram ${picked.kernel.kernel_label}.`);
+    };
+    const _stopUnattachedActionController = vscode.notebooks.createNotebookController(
+        'wolfram-stop-unattached-kernel', 'extended-wolfram-notebook', '− Stop Unattached Wolfram Kernel…'
+    );
+    _stopUnattachedActionController.supportedLanguages = controller._controller.supportedLanguages;
+    _stopUnattachedActionController.executeHandler = async cells => {
+        await _stopUnattachedKernel(cells?.[0]?.notebook || vscode.window.activeNotebookEditor?.notebook);
+    };
+    context.subscriptions.push(_stopUnattachedActionController,
+        _stopUnattachedActionController.onDidChangeSelectedNotebooks(async event => {
+            if (event.selected) await _stopUnattachedKernel(event.notebook);
+        }));
+    const _remoteControllerTimer = setInterval(_syncRemoteKernelControllers, 1500);
+    setTimeout(_syncRemoteKernelControllers, 250);
+    context.subscriptions.push({ dispose: () => clearInterval(_remoteControllerTimer) });
+    const _resolveController = (input = {}) => kernelManager.resolveController({
+        // Kernel-scoped calls (_kernelOnly) must NOT inherit the active notebook:
+        // injecting it makes a CORRECT explicit kernel_id fail with
+        // KERNEL_TARGET_CHANGED whenever it differs from the active notebook's
+        // binding — the caller is addressing a kernel, not a notebook.
+        notebook: input._kernelOnly === true
+            ? (input.notebook || null)
+            : (input.notebook || vscode.window.activeNotebookEditor?.notebook?.uri?.fsPath),
+        kernel_id: input.kernel_id,
+        requireExplicit: input._kernelOnly === true,
+    });
+    _resolveController.manager = kernelManager;
+    _controllerResolver = _resolveController;
+    const _kernelIdentityItem = vscode.window.createStatusBarItem(
+        'wolfbook-kernel-identity', vscode.StatusBarAlignment.Right, 100
+    );
+    _kernelIdentityItem.name = 'Wolfbook Kernel Identity';
+    _kernelIdentityItem.command = 'wolfbook.manageKernelBinding';
+    _refreshKernelIdentity = () => {
+        const notebook = vscode.window.activeNotebookEditor?.notebook?.uri?.fsPath;
+        const entry = kernelManager.bindingFor(notebook);
+        const openNotebooks = (vscode.workspace.notebookDocuments || [])
+            .filter(nb => nb.notebookType === 'extended-wolfram-notebook').map(nb => nb.uri.fsPath);
+        const info = _liveKernelTopology().find(kernel => kernel.kernel_id === entry?.id)
+            || kernelManager.list(openNotebooks).find(kernel => kernel.kernel_id === entry?.id)
+            || kernelManager.describe(entry, notebook);
+        const attachmentCount = (info.notebooks || []).length;
+        _kernelIdentityItem.text = `$(server-process) Wolfram ${info.kernel_label || 'unbound'} · ${attachmentCount}`;
+        _kernelIdentityItem.tooltip = new vscode.MarkdownString(
+            `**Wolfram ${info.kernel_label || 'Unbound'}**  \n` +
+            `Kernel ID: \`${info.kernel_id || 'none'}\`  \nState: ${info.lifecycle}  \n` +
+            `PID: ${info.process_id || 'unavailable'}  \nStarted: ${info.started_at || 'not started'}  \n` +
+            `Version: ${info.wolfram_version || 'unavailable'}  \nExecutable: \`${info.executable || 'unavailable'}\`  \n` +
+            `Notebooks: ${(info.notebooks || []).map(p => path.basename(p)).join(', ') || '(none)'}` +
+            (info.active_operation ? `  \nOperation: \`${info.active_operation.operationId}\` — ${info.active_operation.caption}` : '')
+        );
+        _kernelIdentityItem.show();
+    };
+    context.subscriptions.push(_kernelIdentityItem,
+        vscode.window.onDidChangeActiveNotebookEditor(_refreshKernelIdentity),
+        vscode.commands.registerCommand('wolfbook.manageKernelBinding', async () => {
+            const notebook = vscode.window.activeNotebookEditor?.notebook?.uri?.fsPath;
+            if (!notebook) return vscode.window.showInformationMessage('Open a Wolfbook notebook first.');
+            _syncRemoteKernelControllers();
+            const remoteDescriptors = _remoteKernelDescriptors();
+            const remoteIds = new Set(remoteDescriptors.map(kernel => kernel.kernel_id));
+            for (const entry of [...kernelManager._entries.values()]) {
+                if (entry.remote && !remoteIds.has(entry.id)) {
+                    entry.controller.kernelStatusString = 'error';
+                    entry.ownerUnavailable = true;
+                }
+            }
+            const entries = kernelManager.list([notebook]);
+            const topologyById = new Map(_liveKernelTopology().map(kernel => [kernel.kernel_id, kernel]));
+            const current = kernelManager.bindingFor(notebook);
+            const picks = entries.map(k => ({
+                label: (() => {
+                    const count = (topologyById.get(k.kernel_id)?.notebooks || k.notebooks).length;
+                    return `$(server-process) Wolfram ${k.kernel_label} · ${count} ${count === 1 ? 'notebook' : 'notebooks'} · ${k.lifecycle}`;
+                })(),
+                description: k.kernel_id,
+                detail: k.remote ? `Owned by ${k.owner_client_id}` : (k.notebooks.length ? 'Current notebook binding' : 'This window'),
+                kernelId: k.kernel_id,
+            }));
+            for (const k of remoteDescriptors) {
+                if (entries.some(entry => entry.kernel_id === k.kernel_id)) continue;
+                picks.push({
+                    label: `$(remote) Wolfram ${k.kernel_label} · ${k.lifecycle}`,
+                    description: k.kernel_id,
+                    detail: `Owned by ${k.clientId}`,
+                    kernelId: k.kernel_id, remoteDescriptor: k,
+                });
+            }
+            const localKernelCount = [...kernelManager._entries.values()].filter(entry => !entry.remote).length;
+            if (localKernelCount < kernelManager.maximum) {
+                picks.push({
+                    label: '$(add) Start new Wolfram kernel…',
+                    description: `Up to ${kernelManager.maximum} in this VS Code window`,
+                    detail: 'The new kernel and notebook binding will be restored after this window reloads.',
+                    create: true,
+                });
+            }
+            picks.push(
+                ...(!current.remote ? [{ label: `$(edit) Rename Wolfram ${current.label}`, action: 'rename', kernelId: current.id }] : []),
+                { label: `$(debug-restart) Restart Wolfram ${current.label}`, action: 'restart', kernelId: current.id },
+                { label: current.remote ? `$(close) Detach Wolfram ${current.label} from this window` : `$(debug-stop) Stop Wolfram ${current.label}`, action: 'stop', kernelId: current.id }
+            );
+            const picked = await vscode.window.showQuickPick(picks, { placeHolder: 'Select the kernel for this notebook' });
+            if (!picked) return;
+            if (picked.action === 'rename') {
+                const label = await vscode.window.showInputBox({ prompt: 'Kernel display label', value: current.label, validateInput: v => v.trim() ? null : 'Label cannot be empty' });
+                if (label != null) kernelManager.rename(picked.kernelId, label);
+                _refreshKernelIdentity(); return;
+            }
+            if (picked.action === 'restart') {
+                if (current.controller.arbiter?.status(current.controller)?.busy) return vscode.window.showWarningMessage('Abort the active operation before restarting this kernel.');
+                current.controller.arbiter?.invalidate('kernel restart requested from kernel picker');
+                current.controller.operations?.invalidateAll('kernel restart requested from kernel picker');
+                await current.controller.restartKernel(); _refreshKernelIdentity(); return;
+            }
+            if (picked.action === 'stop') {
+                if (current.controller.arbiter?.status(current.controller)?.busy) return vscode.window.showWarningMessage('Cannot stop a busy kernel; abort it first.');
+                if (current.remote) _detachRemoteKernel(current);
+                else if (current.isDefault) await current.controller.quitKernel();
+                else await kernelManager.stop(current.id);
+                _refreshKernelIdentity(); return;
+            }
+            if (picked.create) {
+                await _startNewKernelForNotebook(vscode.window.activeNotebookEditor.notebook);
+                return;
+            }
+            let entry = kernelManager.get(picked.kernelId) || _attachRemoteKernel(picked.remoteDescriptor);
+            await kernelManager.bind(notebook, entry.id);
+            entry.controller._controller.updateNotebookAffinity(
+                vscode.window.activeNotebookEditor.notebook, vscode.NotebookControllerAffinity.Preferred
+            );
+            await vscode.commands.executeCommand('notebook.selectKernel', {
+                id: entry.controller._controller.id, extension: 'wolfbook.wolfbook', label: entry.controller._controller.label,
+            });
+            _refreshKernelIdentity();
+            vscode.window.showInformationMessage(`Notebook bound to ${entry.label} (${entry.id}). Kernel definitions are not copied.`);
+        })
+    );
+    _refreshKernelIdentity();
+    const _kernelIdentityTimer = setInterval(_refreshKernelIdentity, 1000);
+    context.subscriptions.push({ dispose: () => clearInterval(_kernelIdentityTimer) });
     _activeController = controller;  // expose for deactivate()
 
     // Wire auto-format hook: formats cells before execution when autoFormat is on.
@@ -710,7 +1153,7 @@ async function activate(context) {
         };
     }
     // Refresh watch panel once kernel is fully ready (guards against early eval during init.wl)
-    controller._onKernelReady = () => _debugCtrl.refreshLiveWatch();
+    controller._onKernelReady = () => { _debugCtrl.refreshLiveWatch(); _refreshKernelIdentity(); };
     if (nbKernelenabled && kernelAvailable) {
         controller.launchKernel().then(() => {
             // Deferred watch refresh: variables now show actual values instead of
@@ -724,10 +1167,10 @@ async function activate(context) {
     }
     // Late-bind the Oberon Wolfram-shim to the live controller so the Fairy
     // can call `wolfram_eval` (MVP-2b). Safe no-op if Oberon failed to load.
-    try { if (_oberon && typeof _oberon.setKernelController === 'function') _oberon.setKernelController(() => controller); } catch (_) {}
+    try { if (_oberon && typeof _oberon.setKernelController === 'function') _oberon.setKernelController(() => _resolveController()); } catch (_) {}
 
     // Register Copilot language model tools (Phase 4)
-    const _toolMap = _tools.registerTools(context, () => controller, _debugCtrl, () => _askPanel);
+    const _toolMap = _tools.registerTools(context, _resolveController, _debugCtrl, () => _askPanel);
 
     // Late-bind notebook tools for Oberon's Fairy so it can read/edit the
     // charm notebook during revision runs. Uses the same tool implementations
@@ -758,16 +1201,16 @@ async function activate(context) {
     }
 
     // Register @wolfbook chat participant
-    _tools.registerChatParticipant(context, () => controller);
+    _tools.registerChatParticipant(context, () => _resolveController());
     // Register @wolfteam collaborative chat participant
-    _tools.registerWolfteamParticipant(context, () => controller);
+    _tools.registerWolfteamParticipant(context, () => _resolveController());
 
     // ── Wolfbook Remote Host bridge (optional addon extension) ─────────────
     // Registers wolfbook.remote.* commands consumed by the
     // wolfbook.wolfbook-remote-host addon. Failure to register MUST NOT break
     // the main extension activation.
     try {
-        require('./remote').register(context, () => controller, () => _toolMap);
+        require('./remote').register(context, () => _resolveController(), () => _toolMap);
         const _remoteEventBus = require('./remote/eventBus');
         _remoteEventBus.on('remoteConnected', ({ connected }) => {
             try { _watchPanel.setRemoteStatus(connected); } catch (_) {}
@@ -817,7 +1260,15 @@ async function activate(context) {
     }
     const _pkgJson   = path.join(context.extensionPath, 'package.json');
     const _mcpSchema = loadMCPSchemas(_pkgJson);
-    let   _mcpServer = new WolframMCPServer(_toolMap, _mcpSchema);
+    const _mcpExposureOptions = {
+        canonicalProjection: config.get('mcp.canonicalOutputProjection', false),
+        renderCache: config.get('mcp.renderCache', false),
+        boundedResults: config.get('mcp.boundedResults', false),
+        resultThreshold: config.get('mcp.resultHandleThreshold', 24000),
+        exposeDeprecatedTools: config.get('mcp.exposeDeprecatedTools', false),
+        profile: config.get('mcp.profile', 'full'),
+    };
+    let   _mcpServer = new WolframMCPServer(_toolMap, _mcpSchema, _mcpExposureOptions);
 
     // Stable client identity for this window
     const _appName  = (vscode.env && vscode.env.appName) || 'VSCode';
@@ -961,14 +1412,35 @@ async function activate(context) {
 
     /** Shared logic to start a WorkerServer for non-primary windows (or after election). */
     const _startWorker = () => {
-        const ws = new WorkerServer(_toolMap, _clientId);
+        const ws = new WorkerServer(
+            _toolMap, _clientId,
+            () => kernelManager.list(_getOpenNbPaths()).filter(kernel => !kernel.remote),
+            kernelId => {
+                const entry = kernelManager.get(kernelId);
+                return entry && !entry.remote ? entry : null;
+            },
+            async entry => {
+                const current = _liveKernelTopology().find(kernel => kernel.kernel_id === entry.id);
+                if ((current?.notebooks || []).length) {
+                    const error = new Error('Kernel acquired a notebook binding; refresh before stopping it.');
+                    error.code = 'KERNEL_ATTACHED'; throw error;
+                }
+                if (entry.isDefault) await entry.controller.quitKernel();
+                else await kernelManager.stop(entry.id);
+            },
+            () => kernelManager.list(_getOpenNbPaths()).map(kernel => ({
+                kernel_id: kernel.kernel_id,
+                notebooks: kernel.notebooks,
+            }))
+        );
         ws.updateNotebooks(_getOpenNbPaths());
         ws.onPromoted(async () => {
             devLog(LOG_CHANNELS.EXTENSION, '[Wolfbook MCP] Election won — promoting to primary');
             try {
-                const newPrimary = new WolframMCPServer(_toolMap, _mcpSchema);
+                const newPrimary = new WolframMCPServer(_toolMap, _mcpSchema, _mcpExposureOptions);
                 await newPrimary.startAsPrimary();
                 newPrimary.setOwnClientInfo(_clientId, _getOpenNbPaths());
+                newPrimary.setKernelProvider(() => kernelManager.list(_getOpenNbPaths()).filter(kernel => !kernel.remote));
                 _activeMCPServer = newPrimary;
                 _mcpServer = newPrimary;
                 await newPrimary.notifyWorkers();
@@ -1001,11 +1473,17 @@ async function activate(context) {
         }
         // ── We are the primary ──────────────────────────────────────────────
         _mcpServer.setOwnClientInfo(_clientId, _getOpenNbPaths());
+        _mcpServer.setKernelProvider(() => kernelManager.list(_getOpenNbPaths()).filter(kernel => !kernel.remote));
+        // Every window owns a worker endpoint, including the MCP primary. This
+        // endpoint is also the cross-window kernel broker used by the UI picker.
+        _workerServer = _startWorker();
         // Auto-set session target when Copilot resolves a notebook in this window,
         // so MCP agents inherit the target without needing an explicit wolfbook_setTarget call.
         _tools.setNotebookResolvedCallback((notebook) => {
             if (!_mcpServer._sessionTargets.has('copilot')) {
-                _mcpServer._sessionTargets.set('copilot', { clientId: _clientId, notebook });
+                // ts lets setTarget age this lock (a ts-less copilot entry rendered
+                // "locked NaN min ago" and could never be evicted without force).
+                _mcpServer._sessionTargets.set('copilot', { clientId: _clientId, notebook, ts: Date.now() });
             }
         });
         devLog(LOG_CHANNELS.EXTENSION, `[Wolfbook MCP] Primary ready — port ${port}, client: ${_clientId}`);
@@ -1046,8 +1524,22 @@ async function activate(context) {
         _workerServer?.updateNotebooks(paths);
     };
     context.subscriptions.push(
+        kernelManager.onDidChange(_syncNotebooks),
         vscode.workspace.onDidOpenNotebookDocument(() => _syncNotebooks()),
-        vscode.workspace.onDidCloseNotebookDocument(() => _syncNotebooks()),
+        vscode.workspace.onDidCloseNotebookDocument((closedNotebook) => {
+            _syncNotebooks();
+            const entry = kernelManager.explicitBindingFor(closedNotebook?.uri?.fsPath);
+            if (!entry || entry.isDefault) return;
+            setTimeout(async () => {
+                const stillBoundOpen = _getOpenNbPaths().some(nb => kernelManager.bindingFor(nb)?.id === entry.id);
+                if (stillBoundOpen || entry.controller?.arbiter?.status(entry.controller)?.busy) return;
+                const choice = await vscode.window.showInformationMessage(
+                    `No open notebook uses Wolfram ${entry.label}. Stop this isolated kernel?`,
+                    'Stop Kernel', 'Keep Running'
+                );
+                if (choice === 'Stop Kernel') await kernelManager.stop(entry.id);
+            }, 500);
+        }),
         vscode.window.tabGroups?.onDidChangeTabs?.(() => _syncNotebooks()) ?? { dispose: () => {} }
     );
 
@@ -1187,33 +1679,38 @@ async function activate(context) {
     // Update WBDirectory[] and NotebookDirectory[] whenever the active notebook changes
     function _updateKernelNotebookDir(ed) {
         if (!ed || ed.notebook?.notebookType !== 'extended-wolfram-notebook') return;
-        if (controller.kernelStatusString !== 'resolved') return;
+        const activeController = _resolveController({ notebook: ed.notebook.uri.fsPath });
+        if (activeController.kernelStatusString !== 'resolved') return;
         let _nbDir = require('path').dirname(ed.notebook.uri.fsPath);
         if (process.platform === 'win32') _nbDir = _nbDir.replace(/\\/g, '/');
         const _esc = _nbDir.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-        controller.session?.evaluate(
+        activeController.session?.evaluate(
             `Unprotect[NotebookDirectory, WBDirectory]; NotebookDirectory[] = "${_esc}"; Protect[NotebookDirectory]; WBDirectory[] = "${_esc}"; Protect[WBDirectory]`,
             { interactive: false }
         ).then(() => {
-            if (controller.kernelStatusString === 'resolved') _debugCtrl.refreshLiveWatch();
+            if (activeController.kernelStatusString === 'resolved') _debugCtrl.refreshLiveWatch();
         }).catch(() => {});
     }
     context.subscriptions.push(vscode_1.window.onDidChangeActiveNotebookEditor(ed => _updateKernelNotebookDir(ed)));
     context.subscriptions.push(vscode_1.commands.registerCommand("wolfbook.launchKernel", () => {
         if (nbKernelenabled) {
             client.outputChannel.appendLine("Launching Wolfram Kernel");
-            controller.launchKernel().then(() => {
-                if (controller.kernelStatusString === 'resolved') _debugCtrl.refreshLiveWatch();
+            const activeController = _resolveController();
+            activeController.launchKernel().then(() => {
+                if (activeController.kernelStatusString === 'resolved') _debugCtrl.refreshLiveWatch();
             }).catch(() => {});
         }
     }));
-    context.subscriptions.push(vscode_1.commands.registerCommand("wolfbook.abortEvaluation", () => {
+    context.subscriptions.push(vscode_1.commands.registerCommand("wolfbook.abortEvaluation", async () => {
         // If a debug session is active, let it handle the abort — it exits Dialog[]
         // gracefully before aborting so the kernel is fully released.
         if (_debugCtrl.isActive) {
-            _debugCtrl.stop();
+            await _debugCtrl.stop();
         } else {
-            controller.abortEvaluation();
+            const activeController = _resolveController();
+            await activeController.arbiter.abort(activeController, {
+                requestedBy: 'user', reason: 'VS Code Abort command'
+            });
         }
         // Always hard-reset all debugger flags so abort is the reliable last resort.
         // This catches stuck states even when debug wasn't "active" (e.g. _finishing
@@ -1221,13 +1718,13 @@ async function activate(context) {
         _debugCtrl.resetAllState();
     }));
     context.subscriptions.push(vscode_1.commands.registerCommand("wolfbook.openDialogSubsession", () => {
-        controller.openDialogSubsession();
+        _resolveController().openDialogSubsession();
     }));
     context.subscriptions.push(vscode_1.commands.registerCommand("wolfbook.pasteImageCell", (args) => {
-        controller.pasteImageAsCell(args || {});
+        _resolveController().pasteImageAsCell(args || {});
     }));
     context.subscriptions.push(vscode_1.commands.registerCommand("wolfbook.pasteImageCellBelow", () => {
-        controller.pasteImageAsCell({ insertBelow: true });
+        _resolveController().pasteImageAsCell({ insertBelow: true });
     }));
     // Auto-format status bar toggle — mirrors wolfbook.formatter.autoFormat setting.
     const _cfg = vscode.workspace.getConfiguration('wolfbook');
@@ -1284,7 +1781,7 @@ async function activate(context) {
     context.subscriptions.push(vscode_1.commands.registerCommand("wolfbook.restartKernel", () => {
         // Hard-reset all debugger state before restarting kernel
         _debugCtrl.resetAllState();
-        controller.restartKernel();
+        _resolveController().restartKernel();
     }));
 
     // Execute cell via keyboard (Shift+Enter): bypasses VS Code's built-in
@@ -1297,24 +1794,36 @@ async function activate(context) {
     // console.log('[scroll] notebook.cell.execute auto-scroll') ← original built-in, bypassed here
     context.subscriptions.push(vscode_1.commands.registerCommand("wolfbook.executeCell", async () => {
         scrollLog('[scroll] Shift+Enter detected — evaluation triggered, waiting for first output');
+        const editor = vscode.window.activeNotebookEditor;
+        if (!editor) return;
+        const initialSelection = editor.selections?.[0];
+        const initialCell = initialSelection ? editor.notebook.cellAt(initialSelection.start) : null;
+        // A fresh notebook has no explicit association. Do not let the first
+        // Shift+Enter disappear into VS Code's unassociated-controller path:
+        // open Wolfbook's full picker, then continue the same execution after
+        // the user chooses an existing or newly-created kernel.
+        if (initialCell?.kind === vscode.NotebookCellKind.Code &&
+            !kernelManager.explicitBindingFor(editor.notebook.uri.fsPath)) {
+            await vscode.commands.executeCommand('wolfbook.manageKernelBinding');
+            if (!kernelManager.explicitBindingFor(editor.notebook.uri.fsPath)) return;
+        }
+        const _execController = _resolveController({ notebook: editor.notebook.uri.fsPath });
 
         // ---- Save cursor position NOW — before VS Code's Shift+Enter processing
         // exits edit mode and blurs the cell's text editor.
         const _preSaveTxtEd = vscode.window.activeTextEditor;
         if (_preSaveTxtEd) {
-            controller._refineSavedCursor    = _preSaveTxtEd.selection;
-            controller._refineSavedCursorUri = _preSaveTxtEd.document.uri.toString();
+            _execController._refineSavedCursor    = _preSaveTxtEd.selection;
+            _execController._refineSavedCursorUri = _preSaveTxtEd.document.uri.toString();
             scrollLog('[executeCell] pre-exec cursor saved:',
                 `anchor(${_preSaveTxtEd.selection.anchor.line},${_preSaveTxtEd.selection.anchor.character})`,
                 `active(${_preSaveTxtEd.selection.active.line},${_preSaveTxtEd.selection.active.character})`);
         } else {
-            controller._refineSavedCursor    = null;
-            controller._refineSavedCursorUri = null;
+            _execController._refineSavedCursor    = null;
+            _execController._refineSavedCursorUri = null;
             scrollLog('[executeCell] no activeTextEditor at Shift+Enter time — cursor not saved');
         }
 
-        const editor = vscode.window.activeNotebookEditor;
-        if (!editor) return;
         const sel = editor.selections;
         if (!sel || sel.length === 0) return;
         const cell = editor.notebook.cellAt(sel[0].start);
@@ -1337,22 +1846,22 @@ async function activate(context) {
         // ---- Save viewport + selection for refine-mode scroll guard ----
         // Saved NOW — before ANY execution-related scroll can fire.
         // The scroll guard in scroll/manager.js restores these at Idle.
-        controller._scrollGuardSavedViewport   = editor.visibleRanges[0] || null;
-        controller._scrollGuardSavedSelections = [...editor.selections];
+        _execController._scrollGuardSavedViewport   = editor.visibleRanges[0] || null;
+        _execController._scrollGuardSavedSelections = [...editor.selections];
         scrollLog('[executeCell] viewport saved: start',
-            controller._scrollGuardSavedViewport?.start,
-            '| selections:', controller._scrollGuardSavedSelections.map(r => r.start + '-' + r.end).join(', '));
+            _execController._scrollGuardSavedViewport?.start,
+            '| selections:', _execController._scrollGuardSavedSelections.map(r => r.start + '-' + r.end).join(', '));
 
         // ---- Mode detection (read-only, no side-effects) ----
         // Mirrors controller.execute() logic so we can pre-empt for advance mode.
         const _cellUri    = cell.document.uri.toString();
         const _curSrc     = cell.document.getText();
-        const _lastSrc    = controller._cellLastSource.get(_cellUri);
+        const _lastSrc    = _execController._cellLastSource.get(_cellUri);
         const _srcChanged = (_lastSrc !== undefined && _lastSrc !== _curSrc)
-                         || (_lastSrc === undefined  && controller._cellDirty.has(_cellUri));
+                         || (_lastSrc === undefined  && _execController._cellDirty.has(_cellUri));
         const _autoMode   = _srcChanged ? 'refine' : 'advance';
-        const _preMode    = (controller._evalModeOverride !== 'auto')
-                          ? controller._evalModeOverride : _autoMode;
+        const _preMode    = (_execController._evalModeOverride !== 'auto')
+                          ? _execController._evalModeOverride : _autoMode;
 
         // ---- PRE-EMPT scroll for advance mode only ----
         // Advance: AtTop — pin cell at top immediately so output fills in below.
@@ -1379,19 +1888,19 @@ async function activate(context) {
             await new Promise(r => setTimeout(r, 200));
         }
 
-        controller._wolframExecPending = true;
-        controller.execute([cell], editor.notebook, controller._controller);
+        _execController._wolframExecPending = true;
+        _execController.execute([cell], editor.notebook, _execController._controller);
     }));
 
     // Eval mode toggle commands — cycle: auto → advance → refine → auto
     context.subscriptions.push(vscode_1.commands.registerCommand("wolfbook.evalMode.auto", () => {
-        controller.setEvalMode('advance');  // auto was active → switch to advance
+        _execController.setEvalMode('advance');  // auto was active → switch to advance
     }));
     context.subscriptions.push(vscode_1.commands.registerCommand("wolfbook.evalMode.advance", () => {
-        controller.setEvalMode('refine');   // advance was active → switch to refine
+        _execController.setEvalMode('refine');   // advance was active → switch to refine
     }));
     context.subscriptions.push(vscode_1.commands.registerCommand("wolfbook.evalMode.refine", () => {
-        controller.setEvalMode('auto');     // refine was active → reset to auto
+        _execController.setEvalMode('auto');     // refine was active → reset to auto
     }));
 
     // Format switching commands
@@ -1455,6 +1964,7 @@ async function activate(context) {
     
     // Expand truncated output command
     context.subscriptions.push(vscode_1.commands.registerCommand("wolfbook.expandTruncatedOutput", async (args) => {
+        const activeController = _resolveController();
         devLog(LOG_CHANNELS.EXTENSION, '[Extension] ========================================');
         devLog(LOG_CHANNELS.EXTENSION, '[Extension] Expand truncated output command triggered!');
         devLog(LOG_CHANNELS.EXTENSION, '[Extension] Args received:', JSON.stringify(args));
@@ -1467,9 +1977,9 @@ async function activate(context) {
             // UUID passed from command: URI link
             uuid = args.uuid;
             devLog(LOG_CHANNELS.EXTENSION, '[Extension] Using UUID from command args:', uuid);
-        } else if (controller.lastTruncatedExecution && controller.lastTruncatedExecution.truncatedOutputId) {
+        } else if (activeController.lastTruncatedExecution && activeController.lastTruncatedExecution.truncatedOutputId) {
             // Fallback to stored UUID (for toolbar button)
-            uuid = controller.lastTruncatedExecution.truncatedOutputId;
+            uuid = activeController.lastTruncatedExecution.truncatedOutputId;
             devLog(LOG_CHANNELS.EXTENSION, '[Extension] Using UUID from lastTruncatedExecution:', uuid);
         } else {
             devLog(LOG_CHANNELS.EXTENSION, '[Extension] No UUID available!');
@@ -1477,7 +1987,7 @@ async function activate(context) {
         
         if (uuid) {
             devLog(LOG_CHANNELS.EXTENSION, '[Extension] Sending expand-output message to kernel with UUID:', uuid);
-            controller.postMessageToKernel({
+            activeController.postMessageToKernel({
                 type: "expand-output",
                 uuid: uuid
             });
@@ -1945,7 +2455,7 @@ async function activate(context) {
         try { await vscode.commands.executeCommand('wolfbook.watchPanel.focus'); } catch(_) {}
         // Use same eval-sel pipeline: kernel → BTL render → evalSelUpdate
         // Works for built-in AND user-defined symbols; falls back to LSP Markdown if kernel is off
-        await evalSel.docLookup(controller, cacheKey, _watchPanel, fallbackMd);
+        await evalSel.docLookup(_resolveController(), cacheKey, _watchPanel, fallbackMd);
     }));
 
     // Setup Escape Mode (Esc key for Mathematica-style aliases)
@@ -1962,7 +2472,7 @@ async function activate(context) {
 
     // Setup refine-mode scroll guard: pins viewport to evaluated cell during
     // streaming output, cancelling VS Code's internal appendOutput-triggered scrolls.
-    _scrollMgr.registerExecutionScrollGuard(context, () => controller);
+    _scrollMgr.registerExecutionScrollGuard(context, () => _resolveController());
     devLog(LOG_CHANNELS.EXTENSION, '[Extension] Execution scroll guard registered');
 
     // Setup Notebook Settings — already registered early above
@@ -2520,7 +3030,7 @@ async function activate(context) {
     // Register the .wslide custom editor provider
     const slideEditorProvider_1 = require('./slideEditorProvider');
     const slideProvider = new slideEditorProvider_1.SlideEditorProvider(context);
-    slideProvider.setGetController(() => controller);
+    slideProvider.setGetController(() => _resolveController());
     context.subscriptions.push(
         vscode.window.registerCustomEditorProvider(
             'wolfbook.slideEditor',

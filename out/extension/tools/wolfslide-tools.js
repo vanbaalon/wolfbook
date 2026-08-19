@@ -7,13 +7,15 @@ const util   = require("util");
 const fs     = require("fs");
 const path   = require("path");
 const {
-    normalizeToolContent, getCellToolId, resolveCellIndex,
-    resolveNotebookEditor, checkMarkdownKaTeX,
+    normalizeToolContent, decodeToolContent, findControlChar, getCellToolId, resolveCellIndex,
+    resolveNotebookEditor, resolveNotebookDocument, checkMarkdownKaTeX,
+    acquireKernelForAgent, releaseKernelForAgent, trackedKernelEvaluate,
 } = require('./shared');
 // decodeWstpText is used by _parseEvalResult (SVG/BOXES branches). Without this
 // require, any non-graphics eval (even `1+1`, which returns a BOXES: result)
 // threw "decodeWstpText is not defined" — see Day2 wslide feedback §H.
 const { decodeWstpText } = require('../utils/encoding');
+const { readCommittedOutputs } = require('./cell-pipeline');
 
 // =============================================================================
 // Wolfslide tools  —  manipulate .wslide custom editors
@@ -2633,21 +2635,30 @@ class WolfslideInsertEvalBlockTool {
     }
 
     async _evalBlockExpr(input, imgW) {
+        let controller;
+        let lease;
         try {
-            const controller = this._getController?.();
-            if (!controller?.session || controller._evalDispatched) return null;
+            controller = this._getController?.();
+            if (!controller?.session) return null;
+            const claim = await acquireKernelForAgent(controller, {
+                owner: 'wolfslide_insertEvalBlock', kind: 'slide-evaluation', caption: 'Evaluate inserted slide block'
+            });
+            if (!claim.lease) return { type: 'error', error: claim.busy?.message || 'Kernel is busy; evaluation was not interrupted.' };
+            lease = claim.lease;
             const timeout = 30;
             const escaped = input.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
             const expr = _buildEvalExpr(escaped, timeout, imgW);
             const raceTimeout = new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), (timeout + 10) * 1000));
             const evalResult = await Promise.race([
-                controller.session.evaluate(expr, { interactive: false }),
+                trackedKernelEvaluate(controller, expr, { interactive: false }),
                 raceTimeout
             ]);
             const resultStr = (evalResult?.result?.type === 'string' && evalResult.result.value) ? evalResult.result.value : String(evalResult?.result ?? '');
             return _parseEvalResult(resultStr, imgW);
         } catch (err) {
             return { type: 'error', error: err.message || String(err) };
+        } finally {
+            releaseKernelForAgent(controller, lease);
         }
     }
 }
@@ -2675,16 +2686,20 @@ class WolfslideRunEvalBlockTool {
 
         const controller = this._getController?.();
         if (!controller?.session) return _slideResult('Kernel not connected. Start a Wolfram kernel first.');
-        if (controller._evalDispatched) return _slideResult('Kernel is busy. Try again shortly.');
-
+        let lease;
         try {
+            const claim = await acquireKernelForAgent(controller, {
+                owner: 'wolfslide_runEvalBlock', kind: 'slide-evaluation', caption: `Evaluate slide block ${blockId}`
+            });
+            if (!claim.lease) return claim.error;
+            lease = claim.lease;
             const imgW = found.block.w || 800;
             const timeout = 30;
             const escaped = input.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
             const expr = _buildEvalExpr(escaped, timeout, imgW);
             const raceTimeout = new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), (timeout + 10) * 1000));
             const evalResult = await Promise.race([
-                controller.session.evaluate(expr, { interactive: false }),
+                trackedKernelEvaluate(controller, expr, { interactive: false }),
                 raceTimeout
             ]);
             const resultStr = (evalResult?.result?.type === 'string' && evalResult.result.value) ? evalResult.result.value : String(evalResult?.result ?? '');
@@ -2693,6 +2708,8 @@ class WolfslideRunEvalBlockTool {
             return _slideResult(`Evaluated eval block ${blockId}. Result: ${found.block.output.type}${found.block.output.error ? ' — ' + found.block.output.error : ''}`);
         } catch (err) {
             return _slideResult(`Evaluation failed: ${err.message || err}`);
+        } finally {
+            releaseKernelForAgent(controller, lease);
         }
     }
 }
@@ -2702,16 +2719,17 @@ class WolfslideRunEvalBlockTool {
 // ---------------------------------------------------------------------------
 
 class GetCellOutputTool {
+    constructor(getController) { this._getController = getController; }
     async prepareInvocation(options, _token) {
         const n = options.input?.cellId || options.input?.cellNumber;
         return { invocationMessage: `Read output of cell ${n}` };
     }
 
     async invoke(options, _token) {
-        const editor = await resolveNotebookEditor();
-        if (!editor) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart('No active notebook editor.')]);
+        // Routing-neutral read: never shows or focuses the notebook.
+        const notebook = await resolveNotebookDocument(options.input?.notebook);
+        if (!notebook) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart('No Wolfram notebook resolved. Pass notebook, or set a session target.')]);
 
-        const notebook = editor.notebook;
         const by = options.input?.cellId != null ? options.input.cellId : options.input?.cellNumber;
         if (by == null) {
             if (options.input?.cellIndex != null) {
@@ -2732,34 +2750,28 @@ class GetCellOutputTool {
         const cell       = notebook.cellAt(idx);
         const cellId     = getCellToolId(cell);
         const cellNumber = idx + 1;
-        const decoder    = new util.TextDecoder();
-        const outs       = [];
-        const msgOuts    = [];
-
-        for (const output of cell.outputs) {
-            const mimes     = output.items.map(it => it.mime);
-            const plainItem = output.items.find(it => it.mime === 'text/plain');
-            const isErrSentinel = mimes.includes('x-application/wolfram-language-html') &&
-                                  mimes.includes('application/vnd.code.notebook.error');
-            if (!plainItem) continue;
-            try {
-                const txt = decoder.decode(plainItem.data).trim();
-                if (!txt) continue;
-                if (isErrSentinel) msgOuts.push(txt);
-                else outs.push(txt);
-            } catch (_) {}
+        const controller = this._getController?.();
+        const registry = controller?.operations;
+        const provenance = registry?.cellState(
+            notebook.uri.fsPath, cellId) || null;
+        const committed = readCommittedOutputs(cell);
+        let state;
+        if (provenance) state = provenance.status;
+        else if (registry?.hasRestarted) state = 'unknown';
+        else if (committed.outputs.length || committed.messages.length) state = 'unknown';
+        else state = 'never-run';
+        if (state === 'success-with-output' && committed.outputs.length === 0) state = 'success-Null';
+        if (committed.aborted) state = 'aborted';
+        else if (committed.failed) state = 'failed';
+        else if (committed.messages.length && !['running', 'stale', 'aborted', 'failed'].includes(state)) {
+            state = 'completed-with-messages';
         }
-
-        if (outs.length === 0 && msgOuts.length === 0) {
-            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
-                `Cell ${cellNumber} (CellId: ${cellId}): no output (not evaluated yet or suppressed result).`
-            )]);
-        }
-
-        const parts = [`Cell ${cellNumber} (CellId: ${cellId}) output:`];
-        if (outs.length > 0) parts.push(outs.join('\n'));
-        if (msgOuts.length > 0) parts.push(`\n\u26A0 Kernel messages:\n${msgOuts.join('\n')}`);
-        return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(parts.join('\n'))]);
+        return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(JSON.stringify({
+            cell_number: cellNumber, cell_id: cellId, state,
+            output: committed.outputs.length ? committed.outputs.join('\n') : null,
+            messages: committed.messages,
+            provenance,
+        }, null, 2))]);
     }
 }
 
@@ -2780,12 +2792,20 @@ class ValidateSyntaxTool {
     }
 
     async invoke(options, _token) {
-        const editor = await resolveNotebookEditor();
-        if (!editor) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart('No active notebook editor.')]);
+        // Routing-neutral read: never shows or focuses the notebook.
+        const notebook = await resolveNotebookDocument(options.input?.notebook);
+        if (!notebook) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart('No Wolfram notebook resolved. Pass notebook, or set a session target.')]);
 
-        const notebook    = editor.notebook;
         const controller  = this._getController?.();
-        const hasKernel   = controller?.session && controller.kernelStatusString === 'resolved' && !controller._evalDispatched;
+        const hasKernel   = controller?.session && controller.kernelStatusString === 'resolved';
+        let lease;
+        if (hasKernel) {
+            const claim = await acquireKernelForAgent(controller, {
+                owner: 'wolfbook_validateSyntax', kind: 'syntax-validation', caption: 'Validate notebook syntax'
+            });
+            if (!claim.lease) return claim.error;
+            lease = claim.lease;
+        }
 
         let from = 1, to = notebook.cellCount;
         if (options.input?.cellIndex != null) {
@@ -2811,7 +2831,7 @@ class ValidateSyntaxTool {
         let codeChecked   = 0;
         let mdChecked     = 0;
 
-        for (let n = from; n <= to; n++) {
+        try { for (let n = from; n <= to; n++) {
             const cell   = notebook.cellAt(n - 1);
             const cellId = getCellToolId(cell);
 
@@ -2841,7 +2861,7 @@ class ValidateSyntaxTool {
                 const expr = `Block[{$wbSrc$="${esc}"}, If[SyntaxQ[$wbSrc$], "OK", "SYNTAX_ERROR at char " <> ToString[SyntaxLength[$wbSrc$] + 1]]]`;
                 try {
                     const result = await Promise.race([
-                        controller.session.evaluate(expr, { interactive: false }),
+                        trackedKernelEvaluate(controller, expr, { interactive: false }),
                         new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 5000))
                     ]);
                     const val = result?.result?.value || '';
@@ -2872,6 +2892,8 @@ class ValidateSyntaxTool {
                     codeErrors.push(`  Cell ${n} (${cellId}): unmatched brackets/string${depth > 0 ? ` (depth=${depth})` : ''}`);
                 }
             }
+        } } finally {
+            releaseKernelForAgent(controller, lease);
         }
 
         const totalChecked = codeChecked + mdChecked;
@@ -2927,12 +2949,18 @@ class SaveLatexTool {
             )]);
         }
         // Unescape double-encoded escape sequences (\n, \", \\)
-        content = normalizeToolContent(content);
+        try { content = decodeToolContent(content, options.input?.content_encoding); }
+        catch (err) { return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(err.message)]); }
+        const control = findControlChar(content);
+        const controlWarning = control
+            ? `\nWarning: content contains U+${control.code.toString(16).toUpperCase().padStart(4, '0')} at ${control.line}:${control.col}; preserved because form-feed can be legal in TeX.`
+            : '';
         // Resolve relative paths against the active notebook directory
         let absPath = filePath;
         if (!path.isAbsolute(filePath)) {
-            const editor = await resolveNotebookEditor();
-            const base   = editor ? path.dirname(editor.notebook.uri.fsPath) : process.cwd();
+            // Base-dir lookup only — must not show/focus any notebook.
+            const doc  = await resolveNotebookDocument();
+            const base = doc ? path.dirname(doc.uri.fsPath) : process.cwd();
             absPath = path.join(base, filePath);
         }
         try {
@@ -2941,7 +2969,7 @@ class SaveLatexTool {
             const lines = content.split('\n').length;
             const bytes = Buffer.byteLength(content, 'utf8');
             return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
-                `Saved: ${absPath}\n${lines} lines, ${bytes} bytes`
+                `Saved: ${absPath}\n${lines} lines, ${bytes} bytes${controlWarning}`
             )]);
         } catch (err) {
             return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
@@ -2970,8 +2998,9 @@ class CompileLatexTool {
         }
         let absPath = filePath;
         if (!path.isAbsolute(filePath)) {
-            const editor = await resolveNotebookEditor();
-            const base   = editor ? path.dirname(editor.notebook.uri.fsPath) : process.cwd();
+            // Base-dir lookup only — must not show/focus any notebook.
+            const doc  = await resolveNotebookDocument();
+            const base = doc ? path.dirname(doc.uri.fsPath) : process.cwd();
             absPath = path.join(base, filePath);
         }
         if (!fs.existsSync(absPath)) {
@@ -3032,8 +3061,9 @@ class GetLatexErrorsTool {
         }
         let absPath = filePath;
         if (!path.isAbsolute(filePath)) {
-            const editor = await resolveNotebookEditor();
-            const base   = editor ? path.dirname(editor.notebook.uri.fsPath) : process.cwd();
+            // Base-dir lookup only — must not show/focus any notebook.
+            const doc  = await resolveNotebookDocument();
+            const base = doc ? path.dirname(doc.uri.fsPath) : process.cwd();
             absPath = path.join(base, filePath);
         }
         // Auto-detect: if .tex given, read the .log

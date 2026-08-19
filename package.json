@@ -219,6 +219,44 @@
           "markdownDescription": "Enable the MCP (Model Context Protocol) server so Claude and other MCP agents can connect to this window's Wolfbook tools. Disable to prevent external agent connections. Requires window reload to take effect.",
           "order": 2
         },
+        "wolfbook.mcp.canonicalOutputProjection": {
+          "scope": "window", "type": "boolean", "default": false,
+          "markdownDescription": "Preview the versioned canonical notebook projection through MCP: source, plain/LaTeX previews, and MIME/hash manifests without persisted renderer HTML. Does not change .wb files. Requires reload.",
+          "order": 3
+        },
+        "wolfbook.mcp.renderCache": {
+          "scope": "window", "type": "boolean", "default": false,
+          "markdownDescription": "Allow the canonical MCP projection to cache derivable rendered HTML in the extension global-storage content-addressed cache. Never writes cache data into notebooks. Requires reload.",
+          "order": 4
+        },
+        "wolfbook.mcp.boundedResults": {
+          "scope": "window", "type": "boolean", "default": false,
+          "markdownDescription": "Replace large MCP text responses with a preview and expiring result handle retrievable through wolfbook_getResult. Requires reload.",
+          "order": 5
+        },
+        "wolfbook.mcp.resultHandleThreshold": {
+          "scope": "window", "type": "integer", "default": 24000, "minimum": 4096, "maximum": 1000000,
+          "markdownDescription": "Character threshold for bounded MCP result envelopes.",
+          "order": 6
+        },
+        "wolfbook.mcp.profile": {
+          "scope": "window", "type": "string", "enum": ["notebook", "slides", "full"], "default": "full",
+          "markdownDescription": "Which tool families the MCP server advertises in tools/list. `notebook` hides the wolfslide_* family and agent extras; `slides` hides most notebook tools; `full` advertises everything. Hidden tools still work when called by name. Requires reload.",
+          "order": 7
+        },
+        "wolfbook.mcp.exposeDeprecatedTools": {
+          "scope": "window", "type": "boolean", "default": false,
+          "markdownDescription": "Advertise deprecated MCP tool names (tagged `mcp:deprecated`) in tools/list with a DEPRECATED prefix. When off, the names still work when called directly but are not listed. Requires reload.",
+          "order": 8
+        },
+        "wolfbook.ai.busyPolicy": {
+          "scope": "window",
+          "type": "string",
+          "enum": ["reject", "preempt"],
+          "default": "reject",
+          "markdownDescription": "Policy when an AI tool requests the Wolfram kernel while another evaluation is running. `reject` preserves the running work and returns structured busy status. `preempt` restores legacy AI-priority behavior and must also be explicitly requested by the tool call.",
+          "order": 3
+        },
         "wolfbook.remote.allowHostExtension": {
           "scope": "window",
           "type": "boolean",
@@ -463,6 +501,36 @@
             }
           },
           "order": 5
+        },
+        "wolfbook.notebook.appearanceByUri": {
+          "type": "object",
+          "default": {},
+          "scope": "window",
+          "markdownDescription": "Per-user notebook appearance keyed by notebook URI. Wolfbook writes this to the local VS Code user settings, never to the shared `.wb` file.",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "backgroundColor": { "type": "string" },
+              "backgroundImagePath": { "type": "string" }
+            }
+          },
+          "order": 6
+        },
+        "wolfbook.kernels.experimentalIsolation": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "markdownDescription": "Allow explicit per-notebook Wolfram kernels in this VS Code window. Kernel slots and notebook bindings are restored after reload; definitions are never copied between kernels.",
+          "order": 7
+        },
+        "wolfbook.kernels.maximum": {
+          "type": "integer",
+          "default": 3,
+          "minimum": 1,
+          "maximum": 8,
+          "scope": "window",
+          "markdownDescription": "Maximum live Wolfram kernels in one window when experimental isolation is enabled. Each kernel consumes a separate Wolfram process/license seat.",
+          "order": 8
         },
         "wolfbook.oberon.enabled": {
           "type": "boolean",
@@ -987,6 +1055,10 @@
         "title": "Open in System Editor"
       },
       {
+        "command": "wolfbook.manageKernelBinding",
+        "title": "Wolfbook: Select or Create Notebook Kernel"
+      },
+      {
         "command": "wolfbook.saveNbCopyAsWb",
         "title": "Wolfbook: Save .nb copy as .wb",
         "icon": "$(save-as)"
@@ -1449,12 +1521,12 @@
         },
         {
           "command": "wolfbook.abortEvaluation",
-          "when": "(notebookType == wolfram-notebook || notebookType == extended-wolfram-notebook) && wolframKernelActive",
+          "when": "notebookType == wolfram-notebook || notebookType == extended-wolfram-notebook",
           "group": "navigation@-2"
         },
         {
           "command": "wolfbook.restartKernel",
-          "when": "(notebookType == wolfram-notebook || notebookType == extended-wolfram-notebook) && wolframKernelActive",
+          "when": "notebookType == wolfram-notebook || notebookType == extended-wolfram-notebook",
           "group": "navigation@-1"
         },
         {
@@ -2073,10 +2145,10 @@
       },
       {
         "name": "wolfbook_newNotebook",
-        "displayName": "Wolfbook: New Notebook",
+        "displayName": "Wolfbook: Open or Create Notebook",
         "toolReferenceName": "wolfbookNewNotebook",
         "canBeReferencedInPrompt": true,
-        "modelDescription": "Create a new Wolfbook .wb/.evsnb/.vsnb notebook file, open it in VS Code as a notebook editor, wait until the editor is visible and ready, and make it the current MCP session target for subsequent Wolfbook editing tools. Use this before building a notebook from scratch. Pass path as an absolute path or workspace-relative filename; relative paths are resolved against the active notebook directory or workspace root. By default existing files are not overwritten.",
+        "modelDescription": "Open or create a Wolfbook .wb/.evsnb/.vsnb notebook, make it the current MCP target, and ensure it has an explicit kernel binding plus a confirmed VS Code controller association. Initial cells are NOT evaluated unless evaluate:true is passed. ESCAPING HAS THREE LAYERS (JavaScript → Wolfbook → WL/Markdown): JavaScript may consume \\v, \\b, or \\f before Wolfbook sees them. Prefer String.raw or content_encoding:'base64' for exact source; content_encoding:'raw' disables Wolfbook's compatibility unescaping. Corrupt C0 controls are rejected before the file is written.",
         "inputSchema": {
           "type": "object",
           "required": [],
@@ -2095,7 +2167,7 @@
             },
             "overwrite": {
               "type": "boolean",
-              "description": "If true, replace an existing notebook at the target path. Default false."
+              "description": "If true, replace an existing notebook with the supplied cells/metadata. If false (default), an existing notebook is opened without modification."
             },
             "target": {
               "type": "boolean",
@@ -2120,6 +2192,11 @@
                   },
                   "content": {
                     "type": "string"
+                  },
+                  "content_encoding": {
+                    "type": "string",
+                    "enum": ["auto", "raw", "base64"],
+                    "description": "auto (default) applies legacy escape repair; raw preserves the supplied string; base64 decodes once and bypasses normalizers."
                   }
                 },
                 "required": [
@@ -2131,6 +2208,14 @@
             "metadata": {
               "type": "object",
               "description": "Optional notebook-level metadata to include in the new file."
+            },
+            "evaluate": {
+              "type": "boolean",
+              "description": "If true, run the initial code cells through the kernel after the notebook opens (evidence-gated, stops at the first failure). Default false — initial cells are NOT evaluated."
+            },
+            "timeoutSeconds": {
+              "type": "number",
+              "description": "Total budget for evaluate:true across all initial cells. Default 60."
             }
           }
         }
@@ -2171,6 +2256,14 @@
             "brief": {
               "type": "boolean",
               "description": "If true, return a compact one-line-per-cell summary (number, kind, first line, output preview) instead of full source and outputs. Faster for large notebooks when you only need to locate a cell."
+            },
+            "kind": { "type": "string", "enum": ["code", "markdown"], "description": "Brief mode only: include only this cell kind." },
+            "has_output": { "type": "boolean", "description": "Brief mode only: filter by whether the cell has any output." },
+            "has_errors": { "type": "boolean", "description": "Brief mode only: filter by Wolfbook error output MIME evidence." },
+            "output_projection": {
+              "type": "string",
+              "enum": ["legacy", "canonical"],
+              "description": "Optional MCP-facing output view. canonical returns versioned source, compact previews, and MIME/hash manifests without persisted render HTML; it never changes the notebook file."
             }
           }
         }
@@ -2179,7 +2272,7 @@
         "name": "wolfbook_evaluateExpression",
         "displayName": "Wolfbook: Evaluate Expression",
         "toolReferenceName": "wolfbookEval",
-        "modelDescription": "Evaluates a Wolfram Language expression in the active notebook's live kernel and returns the result as InputForm text. CRITICAL — multi-expression pitfall: passing multiple lines WITHOUT semicolons in single-expression mode (multiLine:false) causes the kernel to interpret newline-separated subexpressions as Times[...] multiplication, NOT as sequential statements — always use explicit semicolons (;) between statements, or set multiLine:true. Set multiLine:true to evaluate each non-empty line as a separate, independent expression — results are labeled Out[1]=, Out[2]=, etc.; lines ending with ; are evaluated silently. State accumulates across lines. Use outputForm to control the result format: 'Short' for truncated previews of large expressions, 'TeXForm' for LaTeX, 'MatrixForm'/'TableForm' for structured display. Default timeout is 30 s. Do not use for long-running computations.",
+        "modelDescription": "Evaluates a Wolfram Language expression in the active notebook's live kernel and returns the result as InputForm text. CRITICAL — multi-expression pitfall: passing multiple lines WITHOUT semicolons in single-expression mode (multiLine:false) causes the kernel to interpret newline-separated subexpressions as Times[...] multiplication, NOT as sequential statements — always use explicit semicolons (;) between statements, or set multiLine:true. Set multiLine:true to evaluate each non-empty line as a separate, independent expression — results are labeled Out[1]=, Out[2]=, etc.; lines ending with ; are evaluated silently. State accumulates across lines. Use outputForm to control the result format. Default timeout is 30 s. For intentionally long work use wait_mode:'async', a caption, and retain the returned operation ID.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
@@ -2192,15 +2285,38 @@
               "type": "number",
               "description": "Maximum seconds to wait for result (default: 30)."
             },
+            "wait_mode": { "type": "string", "enum": ["up_to_timeout", "async"], "description": "Return immediately with an operation ID when async; otherwise wait up to timeoutSeconds (default)." },
+            "caption": { "type": "string", "maxLength": 160, "description": "Short human-readable reminder of what this operation is doing." },
+            "progress_symbol": { "type": "string", "description": "Optional Wolfram symbol whose changing value reports semantic progress during a long run." },
+            "progress_interval_ms": { "type": "number", "minimum": 1000, "description": "Progress sampling interval; minimum 1000 ms." },
             "outputForm": {
               "type": "string",
               "enum": [
                 "Short",
                 "TeXForm",
                 "MatrixForm",
-                "TableForm"
+                "TableForm",
+                "json"
               ],
-              "description": "Wrap the result in the chosen form before returning. 'Short' truncates large expressions (useful for previewing), 'TeXForm' returns LaTeX, 'MatrixForm'/'TableForm' for matrices/tables. Default: InputForm."
+              "description": "Wrap the result in the chosen form before returning. 'Short' truncates large expressions (useful for previewing), 'TeXForm' returns LaTeX, 'MatrixForm'/'TableForm' for matrices/tables, 'json' exports numeric tables/lists/associations machine-readably via ExportString (silently falls back to InputForm with a label when the expression is not JSON-exportable). Default: InputForm."
+            },
+            "expect": {
+              "type": "object",
+              "description": "Optional assertion, checked kernel-side in the SAME round trip (no second evaluation). The response starts with 'ASSERT PASS'/'ASSERT FAIL' and the outcome is journaled on the operation. In multiLine mode the assertion applies to the LAST statement only. The call itself is not an error on FAIL.",
+              "properties": {
+                "equals": { "type": "string", "description": "WL expression; passes when SameQ (or numeric ==) with the result." },
+                "matches": { "type": "string", "description": "WL pattern; passes when MatchQ[result, pattern]." },
+                "numeric": {
+                  "type": "object",
+                  "properties": {
+                    "value": { "type": "string", "description": "Expected numeric value (WL expression)." },
+                    "tolerance": { "type": "string", "description": "Absolute tolerance, WL expression. Default 10^-10." }
+                  },
+                  "description": "Passes when Abs[N[result - value]] <= tolerance."
+                },
+                "isTrue": { "type": "boolean", "description": "Passes when TrueQ[result]." },
+                "freeOfMessages": { "type": "boolean", "description": "Passes only when the evaluation produced no kernel messages." }
+              }
             },
             "multiLine": {
               "type": "boolean",
@@ -2228,6 +2344,11 @@
             "fetchWeb": {
               "type": "boolean",
               "description": "If true, fetch the full reference page from reference.wolfram.com and append it to the in-kernel result. Use for built-in System symbols when you need detailed option descriptions, notes, or compatibility info. Defaults to false."
+            },
+            "format": {
+              "type": "string",
+              "enum": ["text", "markdown", "tex"],
+              "description": "Usage-string rendering. 'text' (default) converts the embedded TeX to plain text — 3-4× cheaper and just as useful; 'tex' keeps the raw $...$ LaTeX; 'markdown' is an alias of tex kept for compatibility."
             }
           },
           "required": [
@@ -2239,7 +2360,7 @@
         "name": "wolfbook_insertCells",
         "displayName": "Wolfbook: Insert Cells",
         "toolReferenceName": "wolfbookInsertCells",
-        "modelDescription": "Insert one or more cells into the notebook. For a SINGLE cell: pass top-level 'kind' ('code' or 'markdown') and 'content'. For MULTIPLE cells: pass a 'cells' array of {kind, content} objects that will be inserted as a contiguous block. Use 'position' ('before'|'after', default 'after') and 'afterCellId' (preferred) or 'afterCell' (1-based number) to control placement. All inserted code cells are evaluated through the notebook pipeline by default (evaluate defaults to true) — output will appear in the notebook; pass evaluate:false to insert without running. Avoid inserting large duplicate blocks — use wolfbook_editCell to update existing cells.",
+        "modelDescription": "Insert one or more cells into the notebook. All inserted code cells are evaluated by default; pass evaluate:false to insert without running. ESCAPING HAS THREE LAYERS (JavaScript → Wolfbook → WL/Markdown): JavaScript may consume \\v, \\b, or \\f. Prefer String.raw or content_encoding:'base64' for exact source; raw disables Wolfbook compatibility unescaping. Corrupt C0 controls reject the entire insertion before any cells are modified.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
@@ -2256,6 +2377,7 @@
               "type": "string",
               "description": "Cell source text for single-cell shorthand (use with 'kind'). Ignored if 'cells' array is provided."
             },
+            "content_encoding": { "type": "string", "enum": ["auto", "raw", "base64"], "description": "Default encoding for top-level content and items that do not override it." },
             "cells": {
               "type": "array",
               "description": "Ordered list of cells to insert as a contiguous block. Each item: {kind: 'code'|'markdown', content: string}.",
@@ -2273,6 +2395,11 @@
                   "content": {
                     "type": "string",
                     "description": "The cell source text."
+                  },
+                  "content_encoding": {
+                    "type": "string",
+                    "enum": ["auto", "raw", "base64"],
+                    "description": "Decode mode for this item; overrides top-level content_encoding."
                   }
                 },
                 "required": [
@@ -2304,7 +2431,12 @@
             "timeoutSeconds": {
               "type": "number",
               "description": "Timeout in seconds for evaluation when evaluate=true. Defaults to 30."
-            }
+            },
+            "wait_mode": { "type": "string", "enum": ["up_to_timeout", "async"], "description": "Return immediately with an operation ID when async; otherwise wait normally." },
+            "notebook": { "type": "string", "description": "Target notebook filename or absolute path. Omit to use the session target." },
+            "caption": { "type": "string", "maxLength": 160, "description": "Short human-readable reminder of what this operation is doing." }
+            ,"progress_symbol": { "type": "string", "description": "Optional Wolfram symbol whose changing value reports semantic progress during evaluation." }
+            ,"progress_interval_ms": { "type": "number", "minimum": 1000, "description": "Progress sampling interval; minimum 1000 ms." }
           }
         }
       },
@@ -2312,7 +2444,7 @@
         "name": "wolfbook_editCell",
         "displayName": "Wolfbook: Edit Cell",
         "toolReferenceName": "wolfbookEdit",
-        "modelDescription": "Replaces the source code of one or more cells. SINGLE CELL: provide cellId (preferred, stable) or cellNumber (1-based) plus content. BATCH: provide a 'cells' array of {cellId, content} objects — all cells are edited sequentially and evaluated by default (evaluate defaults to true in batch mode, catching errors immediately). Each item may set evaluate:false to skip its evaluation. Set a top-level timeoutSeconds (default 30) per cell. IMPORTANT: pass real newlines — do not use literal \\n; use an actual multi-line string. Content must be syntactically correct Wolfram Language. Accepts 'newContent' as alias for 'content'. Returns diff and eval output per cell.",
+        "modelDescription": "Replace the source of one or more cells. ESCAPING HAS THREE LAYERS (JavaScript → Wolfbook → WL/Markdown): JavaScript may consume \\v, \\b, or \\f. Prefer String.raw or content_encoding:'base64' for exact source; raw disables Wolfbook compatibility unescaping. Corrupt C0 controls reject a single edit before WorkspaceEdit; in batch mode that item is skipped and siblings continue. expected_source_prefix is always compared verbatim and is never decoded.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
@@ -2329,6 +2461,7 @@
               "type": "string",
               "description": "Single-cell mode: new source text for the cell."
             },
+            "content_encoding": { "type": "string", "enum": ["auto", "raw", "base64"], "description": "Default decode mode for single content and batch items without an override." },
             "cells": {
               "type": "array",
               "description": "Batch mode: array of cells to edit. Each item must have cellId (preferred) or cellNumber, and content. Optionally set evaluate:false on an item to skip evaluation of that cell.",
@@ -2347,10 +2480,19 @@
                     "type": "string",
                     "description": "New source text for this cell."
                   },
+                  "content_encoding": {
+                    "type": "string",
+                    "enum": ["auto", "raw", "base64"],
+                    "description": "Decode mode for this item; overrides top-level content_encoding."
+                  },
                   "evaluate": {
                     "type": "boolean",
                     "description": "Override per-cell evaluation (default: inherits top-level evaluate which defaults to true)."
-                  }
+                  },
+                  "expected_cell_id": { "type": "string", "description": "Reject this item if the resolved CellId differs." },
+                  "expected_kind": { "type": "string", "enum": ["code", "markdown"] },
+                  "expected_source_prefix": { "type": "string" },
+                  "expected_source_hash": { "type": "string" }
                 },
                 "required": [
                   "content"
@@ -2364,7 +2506,15 @@
             "timeoutSeconds": {
               "type": "number",
               "description": "Max seconds to wait per cell evaluation (default: 30 for batch, 15 for single-cell)."
-            }
+            },
+            "wait_mode": { "type": "string", "enum": ["up_to_timeout", "async"], "description": "Return immediately with an operation ID when async; otherwise wait normally." },
+            "caption": { "type": "string", "maxLength": 160, "description": "Short human-readable reminder of what this operation is doing." },
+            "progress_symbol": { "type": "string", "description": "Optional Wolfram symbol whose changing value reports semantic progress during evaluation." },
+            "progress_interval_ms": { "type": "number", "minimum": 1000, "description": "Progress sampling interval; minimum 1000 ms." },
+            "expected_cell_id": { "type": "string", "description": "Reject if the resolved cell ID differs." },
+            "expected_kind": { "type": "string", "enum": ["code", "markdown"], "description": "Reject if the current cell kind differs." },
+            "expected_source_prefix": { "type": "string", "description": "Reject unless current source starts with this text." },
+            "expected_source_hash": { "type": "string", "description": "Reject unless current source SHA-256 matches." }
           }
         }
       },
@@ -2372,7 +2522,7 @@
         "name": "wolfbook_runCell",
         "displayName": "Wolfbook: Run Cell(s)",
         "toolReferenceName": "wolfbookRun",
-        "modelDescription": "Execute cells in the notebook. SINGLE CELL MODE: provide 'cellId' (stable identifier, preferred) or 'cellNumber' (1-based) — the cell is re-run with its existing source. There is no 'code' parameter; to run different code use wolfbook_evaluateExpression or first edit the cell with wolfbook_editCell. RANGE MODE (prefer wolfbook_runCells for this): omit cellId/cellNumber and provide 'startCell' and 'endCell' to execute a block of cells. Set 'stopOnError':true (default) to halt on first error. Returns cell output after execution.",
+        "modelDescription": "Execute cells in the notebook. SINGLE CELL MODE: provide 'cellId' (stable identifier, preferred) or 'cellNumber' (1-based) — the cell is re-run with its existing source. There is no 'code' parameter; to run different code use wolfbook_evaluateExpression or first edit the cell with wolfbook_editCell. RANGE MODE: omit cellId/cellNumber and provide 'startCell' and 'endCell' to execute a block of cells sequentially (this replaces the deprecated wolfbook_runCells). Set 'stopOnError':true (default) to halt on first error. Returns cell output after execution. A ✓ in the response is evidence-backed (per-cell provenance or the VS Code execution record); the states 'dispatched-unconfirmed' and 'NOT executed' mean the code could not be confirmed to reach the kernel — follow the remedy line in the response.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
@@ -2404,7 +2554,15 @@
             "errorsOnly": {
               "type": "boolean",
               "description": "Range mode: if true, only include cells that produced kernel messages/warnings in the output. Cells with no messages are silently skipped. Default false."
-            }
+            },
+            "caption": { "type": "string", "maxLength": 160, "description": "Short human-readable reminder of what this operation is doing." },
+            "wait_mode": { "type": "string", "enum": ["up_to_timeout", "async"], "description": "Return immediately with an operation ID when async; otherwise wait up to timeoutSeconds." },
+            "busyPolicy": { "type": "string", "enum": ["reject", "preempt"], "description": "Busy behavior. reject is the safe default; preempt works only when enabled in settings." },
+            "progress_symbol": { "type": "string", "description": "Optional Wolfram symbol whose changing value reports semantic progress during a long run." },
+            "progress_interval_ms": { "type": "number", "minimum": 1000, "description": "Progress sampling interval; minimum 1000 ms." },
+            "stop_on_failure": { "type": "boolean", "description": "Range mode: stop only on structured failure; default true." },
+            "message_policy": { "type": "string", "enum": ["collect", "stop"], "description": "Range mode: collect messages by default, or stop on any structured message." },
+            "notebook": { "type": "string", "description": "Target notebook filename or absolute path. Omit to use the session target." }
           }
         }
       },
@@ -2442,7 +2600,11 @@
             "saveToRecovery": {
               "type": "boolean",
               "description": "If true (default), save deleted cell content to ai_deleted_cells.md before removing."
-            }
+            },
+            "expected_cell_id": { "type": "string", "description": "Single-cell deletion precondition." },
+            "expected_kind": { "type": "string", "enum": ["code", "markdown"] },
+            "expected_source_prefix": { "type": "string" },
+            "expected_source_hash": { "type": "string" }
           }
         }
       },
@@ -2482,10 +2644,40 @@
         }
       },
       {
+        "name": "wolfbook_inspectSymbols",
+        "displayName": "Wolfbook: Inspect Symbols",
+        "toolReferenceName": "wolfbookInspectSymbols",
+        "modelDescription": "Inspect user-defined symbols by evaluating a query in the Wolfram kernel (values or rule counts per symbol, matching a context pattern). This is NOT a status check — it evaluates in the kernel; use wolfbook_status for a side-effect-free lifecycle snapshot. Wolfbook's own plumbing symbols (VsCode*, WB*, $wb*) are hidden by default.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pattern": {
+              "type": "string",
+              "description": "Wolfram context pattern to match symbols against (default: 'Global`*'). Examples: 'Global`*', 'QSC`*', 'Global`Q*'."
+            },
+            "includeInternal": {
+              "type": "boolean",
+              "description": "Include Wolfbook plumbing symbols (VsCode*, WB*, $wb*) in the listing. Default false."
+            },
+            "limit": {
+              "type": "number",
+              "description": "Maximum symbols to report (default 100)."
+            },
+            "namesOnly": {
+              "type": "boolean",
+              "description": "Return only symbol names (cheap for a wide Global`* sweep). Default false."
+            }
+          },
+          "required": []
+        }
+      },
+      {
         "name": "wolfbook_getKernelState",
-        "displayName": "Wolfbook: Get Kernel State",
+        "displayName": "Wolfbook: Get Kernel State (deprecated)",
         "toolReferenceName": "wolfbookState",
-        "modelDescription": "Returns a summary of the current Wolfram kernel state: all user-defined symbols matching a context pattern, showing their values (for direct assignments) or rule counts (for functions with DownValues). Default pattern 'Global`*' shows everything defined interactively. Use a narrower pattern like 'QSC`*' to inspect a specific package context. Call this before inserting or editing code to understand what is already defined and avoid naming conflicts.",
+        "tags": ["mcp:deprecated", "mcp:replacedBy:wolfbook_inspectSymbols"],
+        "modelDescription": "Inspects symbols by evaluating a query in the Wolfram kernel; this is NOT a busy/status check. Use wolfbook_status to inspect lifecycle without touching the kernel. Returns user-defined symbols matching a context pattern, with values or rule counts.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
@@ -2496,6 +2688,164 @@
             }
           },
           "required": []
+        }
+      },
+      {
+        "name": "wolfbook_journalDigest",
+        "displayName": "Wolfbook: Journal Digest",
+        "toolReferenceName": "wolfbookJournalDigest",
+        "tags": ["mcp:hidden"],
+        "modelDescription": "Alias of wolfbook_evaluationJournal action=\"digest\": a ~20-line summary of the session (kernel, notebooks touched, last operations, failure/assertion counts).",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        }
+      },
+      {
+        "name": "wolfbook_status",
+        "displayName": "Wolfbook: Status",
+        "toolReferenceName": "wolfbookStatus",
+        "canBeReferencedInPrompt": true,
+        "modelDescription": "ONE side-effect-free status surface. scope=\"all\" (default, ~15 lines): connected clients, kernels in this window, recent operations, and the target notebook's state. scope=\"clients\" | \"kernels\" | \"operations\" | \"notebook\" for a single section. Never sends a WSTP packet, never shows an editor, never interrupts running work. To inspect SYMBOLS (which evaluates in the kernel) use wolfbook_inspectSymbols instead.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "scope": { "type": "string", "enum": ["all", "clients", "kernels", "operations", "notebook"], "description": "Which section(s) to return. Default all." },
+            "notebook": { "type": "string", "description": "Notebook for the notebook section; omit for the session target." }
+          },
+          "required": []
+        }
+      },
+      {
+        "name": "wolfbook_selfTest",
+        "displayName": "Wolfbook: MCP Self-Test",
+        "toolReferenceName": "wolfbookSelfTest",
+        "canBeReferencedInPrompt": true,
+        "modelDescription": "End-to-end self-check of the Wolfbook MCP toolchain: resolves the kernel, evaluates 1+1, creates a temp notebook, verifies the controller association, runs a cell and confirms the symbol landed in the kernel, checks save SHA-256 against disk, checks journal provenance and operation-id resolution, then cleans up. Returns pass/fail per stage. Run after an extension update or when tool behavior seems wrong.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "scope": { "type": "string", "enum": ["quick", "full"], "description": "quick (default) skips the edit-rerun stage; full runs everything." },
+            "keepArtifacts": { "type": "boolean", "description": "Keep the temp notebook instead of deleting it (for debugging). Default false." }
+          },
+          "required": []
+        }
+      },
+      {
+        "name": "wolfbook_kernelStatus",
+        "displayName": "Wolfbook: Kernel Status",
+        "toolReferenceName": "wolfbookKernelStatus",
+        "canBeReferencedInPrompt": true,
+        "tags": ["mcp:deprecated", "mcp:replacedBy:wolfbook_status"],
+        "modelDescription": "Instant, side-effect-free snapshot of Wolfram kernel lifecycle and active operation. Never sends a WSTP packet, waits, or interrupts running work. Use this before probing a possibly busy kernel.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        }
+      },
+      {
+        "name": "wolfbook_operationStatus",
+        "displayName": "Wolfbook: Operation Status",
+        "toolReferenceName": "wolfbookOperationStatus",
+        "canBeReferencedInPrompt": true,
+        "modelDescription": "Read lifecycle, timing, caption, result preview, and bounded progress for a kernel operation ID. This is side-effect-free and never interrupts the kernel.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "operation_id": { "type": "string", "description": "Operation ID returned by a Wolfbook execution tool." },
+            "include_progress": { "type": "boolean", "description": "Include bounded Print/message progress (default true)." },
+            "after_sequence": { "type": "number", "description": "Return progress entries newer than this sequence number." },
+            "wait_seconds": { "type": "number", "minimum": 0, "maximum": 300, "description": "Optionally wait this many seconds for completion before returning status." }
+          },
+          "required": ["operation_id"]
+        }
+      },
+      {
+        "name": "wolfbook_evaluationJournal",
+        "displayName": "Wolfbook: Evaluation Journal",
+        "toolReferenceName": "wolfbookEvaluationJournal",
+        "canBeReferencedInPrompt": true,
+        "modelDescription": "Return a bounded list of recent kernel operations with captions, targets, timing, state, and result previews. Useful after context compaction or reconnect. action=\"digest\" returns a ~20-line human-readable summary instead (kernel line, notebooks touched, last operations, failure/assertion counts) — the cheapest post-compaction re-orientation call.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "limit": { "type": "number", "description": "Number of recent operations (default 20, maximum 50)." },
+            "action": { "type": "string", "enum": ["full", "digest", "export"], "description": "full (default) = JSON journal; digest = summary; export = write a Markdown session report." },
+            "tool": { "type": "string", "description": "Case-insensitive tool-name substring filter." },
+            "state": { "description": "Exact state filter or array of states.", "oneOf": [{"type":"string"},{"type":"array","items":{"type":"string"}}] },
+            "caption_contains": { "type": "string", "description": "Case-insensitive caption substring filter." },
+            "notebook": { "type": "string", "description": "Full notebook path or basename filter." }
+          },
+          "required": []
+        }
+      },
+      {
+        "name": "wolfbook_cancelOperation",
+        "displayName": "Wolfbook: Cancel Operation",
+        "toolReferenceName": "wolfbookCancelOperation",
+        "canBeReferencedInPrompt": true,
+        "modelDescription": "Cancel one specific queued or running Wolfbook operation and always settle its registry record. mode='abort' asks the owning kernel arbiter to abort; mode='discard-result' only discards the operation result and never touches the kernel.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "operation_id": { "type": "string", "description": "Operation ID returned by an evaluation tool." },
+            "mode": { "type": "string", "enum": ["abort", "discard-result"], "description": "abort (default) interrupts matching kernel work; discard-result settles only the registry." },
+            "reason": { "type": "string", "description": "Reason recorded in cancellation metadata." }
+          },
+          "required": ["operation_id"]
+        }
+      },
+      {
+        "name": "wolfbook_exportSessionReport",
+        "displayName": "Wolfbook: Export Session Report",
+        "toolReferenceName": "wolfbookExportSessionReport",
+        "canBeReferencedInPrompt": true,
+        "modelDescription": "Export a portable Markdown report of retained operations, failures, cancellations, notebook paths, best-effort artifact references, and kernel status. This is the visible alias of evaluationJournal action='export'.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "limit": { "type": "number", "description": "Retained for compatibility; reports include every matched retained operation up to 50." },
+            "tool": { "type": "string", "description": "Case-insensitive tool-name substring filter." },
+            "state": { "description": "Exact state filter or array of states.", "oneOf": [{"type":"string"},{"type":"array","items":{"type":"string"}}] },
+            "caption_contains": { "type": "string", "description": "Case-insensitive caption substring filter." },
+            "notebook": { "type": "string", "description": "Full notebook path or basename filter." }
+          },
+          "required": []
+        }
+      },
+      {
+        "name": "wolfbook_saveNotebook",
+        "displayName": "Wolfbook: Save Notebook",
+        "toolReferenceName": "wolfbookSaveNotebook",
+        "canBeReferencedInPrompt": true,
+        "modelDescription": "Save a Wolfbook notebook and verify the exact on-disk bytes by reading them back. Returns canonical path, byte count, mtime, SHA-256, dirty state, and document version.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "notebook": { "type": "string", "description": "Notebook filename or absolute path; omit for the active notebook." }
+          },
+          "required": []
+        }
+      },
+      {
+        "name": "wolfbook_getResult",
+        "displayName": "Wolfbook: Get Result",
+        "toolReferenceName": "wolfbookGetResult",
+        "canBeReferencedInPrompt": true,
+        "modelDescription": "Read a bounded slice of a completed operation result. Operation IDs are also result handles.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "handle": { "type": "string", "description": "Operation ID/result handle." },
+            "offset": { "type": "number", "minimum": 0 },
+            "limit": { "type": "number", "minimum": 1, "maximum": 65536 },
+            "format": { "type": "string", "enum": ["text", "json"], "description": "Return text (default) or pretty-printed JSON when the stored result is valid JSON." }
+            ,"path": { "type": "array", "items": { "oneOf": [{"type":"string"},{"type":"number"}] }, "description": "JSON path into a structured outputForm:'json' result. [] returns a root manifest; non-empty paths return a node manifest plus a bounded slice." }
+          },
+          "required": ["handle"]
         }
       },
       {
@@ -2534,7 +2884,11 @@
             "copy": {
               "type": "boolean",
               "description": "If true, copy the cell (leave source intact). If false or omitted, move it (delete from source)."
-            }
+            },
+            "expected_cell_id": { "type": "string", "description": "Reject if the resolved source cell ID differs." },
+            "expected_kind": { "type": "string", "enum": ["code", "markdown"] },
+            "expected_source_prefix": { "type": "string" },
+            "expected_source_hash": { "type": "string" }
           }
         }
       },
@@ -2577,7 +2931,7 @@
         "displayName": "Wolfbook: Kernel Control",
         "toolReferenceName": "wolfbookKernelControl",
         "canBeReferencedInPrompt": true,
-        "modelDescription": "Kernel lifecycle control. action='restart': restart the Wolfram Language kernel (clears all definitions and memory — use only when stuck or crashed). action='abort': abort the currently running evaluation without restarting (safe when a cell is hung). action='checkpoint': save a snapshot of all Global` definitions to a temp .mx file (fast, safe, non-destructive). action='restore': reload a previous checkpoint — ClearAll Global` then Get the .mx file. Use checkpoint/restore to create safe rollback points before risky refactors. Check wolfbook_getKernelState first to confirm kernel state before acting.",
+        "modelDescription": "Kernel lifecycle control. restart/checkpoint/restore manage the kernel. abort stops the evaluation currently dispatched to the kernel. To cancel a queued operation by ID, or discard its future result without touching the kernel, use wolfbook_cancelOperation.",
         "inputSchema": {
           "type": "object",
           "required": [
@@ -2601,7 +2955,49 @@
             "path": {
               "type": "string",
               "description": "Path to a specific .mx checkpoint file to restore. Only used with action='restore'. If omitted, restores the most recent checkpoint from this session."
-            }
+            },
+            "checkpoint_before_restart": {
+              "type": "string",
+              "enum": ["if-idle", "always", "never"],
+              "description": "action='restart' only: auto-checkpoint Global` before restarting. 'if-idle' (default) checkpoints only a healthy idle kernel; 'always' tries even when busy; 'never' skips. Hard 10 s cap; never blocks the restart; the response states truthfully whether a checkpoint was saved."
+            },
+            "operation_id": { "type": "string", "description": "For abort: operation expected to own the active kernel evaluation." },
+            "reason": { "type": "string", "description": "Human-readable cancellation reason recorded in the journal." }
+          }
+        }
+      },
+      {
+        "name": "wolfbook_kernelManager",
+        "displayName": "Wolfbook: Kernel Manager",
+        "toolReferenceName": "wolfbookKernels",
+        "canBeReferencedInPrompt": true,
+        "modelDescription": "Lists explicit kernel identities and notebook bindings. With experimental isolation enabled, can create a bounded isolated kernel, bind/unbind a notebook locally, or stop a non-default idle kernel. Bindings never modify the .wb file.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "action": { "type": "string", "enum": ["list", "create", "bind", "select", "default", "unbind", "rename", "stop"], "default": "list" },
+            "kernel_id": { "type": "string", "description": "Opaque kernel ID returned by action=list." },
+            "notebook": { "type": "string", "description": "Notebook path or filename for bind/unbind." },
+            "label": { "type": "string", "description": "Optional presentation label for a newly created kernel." }
+            ,"acknowledge_resource_cost": { "type": "boolean", "description": "Required true for create: acknowledges that another Wolfram process consumes memory and may consume a license seat." }
+          }
+        }
+      },
+      {
+        "name": "wolfbook_selectKernel",
+        "displayName": "Wolfbook: Select Notebook Kernel",
+        "toolReferenceName": "wolfbookSelectKernel",
+        "canBeReferencedInPrompt": true,
+        "tags": ["mcp:hidden"],
+        "modelDescription": "Select which live Wolfram kernel a notebook uses. Use action=list to discover kernel_id values, action=select to bind a notebook to one of them, action=default to bind it to this VS Code window's default kernel, or action=create to start a new isolated kernel. Multiple notebooks may deliberately share one kernel. Bindings are local VS Code state and never modify the .wb file.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "action": { "type": "string", "enum": ["list", "select", "default", "create"], "default": "list" },
+            "notebook": { "type": "string", "description": "Absolute notebook path. Required for select/default and optional for create." },
+            "kernel_id": { "type": "string", "description": "Opaque kernel ID returned by action=list. Required for select." },
+            "label": { "type": "string", "description": "Optional label for a newly created kernel." },
+            "acknowledge_resource_cost": { "type": "boolean", "description": "Required true for create because another Wolfram process may consume a license seat." }
           }
         }
       },
@@ -3609,7 +4005,7 @@
         "name": "wolfbook_getCellOutput",
         "displayName": "Wolfbook: Cell Output",
         "toolReferenceName": "wolfbookCellOutput",
-        "modelDescription": "Read the current text/plain output of a single notebook cell without re-running it. Returns the result and any kernel messages shown below the cell.",
+        "modelDescription": "Read committed text/plain output and MCP-side execution provenance without re-running the cell. State is one of never-run, running, success-with-output, success-Null, completed-with-messages, failed, aborted, stale, or unknown (for example after a kernel restart or for output loaded from disk without current-session provenance).",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
@@ -3683,6 +4079,7 @@
               "type": "string",
               "description": "LaTeX source content (required for 'save' and 'build' actions)."
             },
+            "content_encoding": { "type": "string", "enum": ["auto", "raw", "base64"], "description": "Decode mode for content. Control characters are preserved with a warning for TeX compatibility." },
             "engine": {
               "type": "string",
               "enum": [
@@ -4132,6 +4529,7 @@
         "displayName": "Wolfbook: Run Cell Range",
         "toolReferenceName": "wolfbookRunCells",
         "canBeReferencedInPrompt": true,
+        "tags": ["mcp:hidden"],
         "modelDescription": "Run a contiguous range of notebook cells sequentially and return their combined output. Use startCell/endCell (1-based cell numbers) to specify the range. Cells are run in order; if stopOnError is true (default), execution stops on the first error. Returns a summary line per cell showing output or error. Prefer this over repeated wolfbook_runCell calls when executing consecutive cells.",
         "inputSchema": {
           "type": "object",
@@ -4155,7 +4553,14 @@
             "notebook": {
               "type": "string",
               "description": "Notebook filename to target. Defaults to the active open notebook."
-            }
+            },
+            "caption": { "type": "string", "maxLength": 160, "description": "Short human-readable reminder of what this operation is doing." },
+            "wait_mode": { "type": "string", "enum": ["up_to_timeout", "async"], "description": "Return immediately with an operation ID when async; otherwise wait up to timeoutSeconds." },
+            "busyPolicy": { "type": "string", "enum": ["reject", "preempt"] },
+            "progress_symbol": { "type": "string", "description": "Optional Wolfram symbol to sample during execution." },
+            "progress_interval_ms": { "type": "number", "minimum": 1000 },
+            "stop_on_failure": { "type": "boolean", "description": "Stop only on structured failure; default true." },
+            "message_policy": { "type": "string", "enum": ["collect", "stop"], "description": "collect is the default." }
           }
         }
       },

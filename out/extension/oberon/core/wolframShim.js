@@ -561,8 +561,15 @@ async function runNotebook(nbPath, opts) {
     const ctrl = status.available ? status.controller : null;
     const useSilent = !!(ctrl && typeof ctrl.execute === 'function');
 
+    let fairyLease = null;
     if (useSilent) {
-        try { await ctrl.abortAndWait(5000); } catch (_) {}
+        const allowPreempt = vscode.workspace.getConfiguration('wolfbook.ai').get('busyPolicy', 'reject') === 'preempt';
+        const claim = await ctrl.arbiter?.acquire(ctrl, {
+            owner: 'fairy', kind: 'fairy-run', caption: opts?.caption || `Fairy run ${path.basename(nbPath)}`,
+            notebook: nbPath, policy: allowPreempt ? 'preempt' : 'reject'
+        });
+        if (!claim?.lease) return { allClean: false, busy: claim?.busy || true, allResults: [] };
+        fairyLease = claim.lease;
         ctrl._silentExecution = true;
     }
 
@@ -664,6 +671,7 @@ async function runNotebook(nbPath, opts) {
         if (useSilent && ctrl) {
             ctrl._silentExecution = false;
             ctrl._agentGuardActive = false;
+            ctrl.arbiter?.release(fairyLease, 'completed');
         }
     }
 
@@ -782,54 +790,13 @@ function _snapshotViewport() { return null; }
  * triggers onDidChangeSelectedNotebooks for the now-active notebook.
  */
 async function associateNotebook(nbDoc) {
-    const vscode = (() => { try { return require('vscode'); } catch (_) { return null; } })();
-    if (!vscode) return;
+    // Thin wrapper — the shared implementation lives in kernel/association.js
+    // (extracted 2026-08-18 so the MCP cell pipeline uses the same fix).
     const ks = kernelStatus();
     if (!ks.available) return;
-    const ctrl = ks.controller;
-    if (ctrl.selectedNotebooks.has(nbDoc)) return;
-
-    // Set affinity so VS Code prefers us for future opens of this notebook type.
-    try {
-        ctrl._controller.updateNotebookAffinity(
-            nbDoc, vscode.NotebookControllerAffinity.Preferred);
-    } catch (_) {}
-
-    // Show the notebook as the active editor (preserveFocus so the user's
-    // keyboard focus stays where it is).  This is required because
-    // notebook.selectKernel operates on the currently active notebook editor.
-    try {
-        await vscode.window.showNotebookDocument(nbDoc, {
-            viewColumn:    vscode.ViewColumn.Active,
-            preserveFocus: true,
-        });
-    } catch (_) {}
-
-    // notebook.selectKernel with id+extension silently selects our controller
-    // for the now-active notebook.  Wait for onDidChangeSelectedNotebooks
-    // confirming the specific notebook was selected (not some other tab).
-    if (!ctrl.selectedNotebooks.has(nbDoc)) {
-        const nbUri = nbDoc.uri.toString();
-        await new Promise(resolve => {
-            const d = ctrl._controller.onDidChangeSelectedNotebooks(ev => {
-                if (ev.selected && ev.notebook.uri.toString() === nbUri) {
-                    d.dispose(); resolve();
-                }
-            });
-            vscode.commands.executeCommand('notebook.selectKernel', {
-                id:        ctrl._controller.id,
-                extension: 'wolfbook.wolfbook',
-                label:     ctrl._controller.label,
-            }).then(undefined, () => {});
-            // Fallback poll in case the event fires before the listener is registered.
-            const check = () => {
-                if (ctrl.selectedNotebooks.has(nbDoc)) { d.dispose(); resolve(); return; }
-                setTimeout(check, 50);
-            };
-            setTimeout(check, 50);
-            setTimeout(() => { d.dispose(); resolve(); }, 3000);
-        });
-    }
+    const { associateNotebook: assoc } = require('../../kernel/association');
+    // Oberon shows the working notebook deliberately — keep it active.
+    await assoc(ks.controller, nbDoc, { restoreActive: false });
 }
 
 // ── Agent-view side channel (Oberon-only, on-demand) ─────────────────────────

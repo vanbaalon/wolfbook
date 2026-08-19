@@ -4,6 +4,116 @@ All notable changes to **Wolfbook** are documented here.
 
 ---
 
+## Unreleased
+
+### Added
+
+- **Long MCP evaluations can be continued instead of being disconnected.** If
+  a tool is still running after five minutes, Wolfbook returns an operation ID
+  and lets the model choose `wolfbook_waitEvaluation` to wait another five
+  minutes or `wolfbook_kernelControl(action:"abort")` to stop. Each continuation
+  renews a ten-minute transport lease. Transport expiry never aborts kernel
+  work it cannot prove it owns. This also replaces the shorter two-minute
+  cutoff for tools routed to another VS Code window.
+- **Safe kernel arbitration and resumable execution operations.** Agent calls
+  now reject with structured busy state instead of silently aborting an active
+  user or agent computation. New `wolfbook_kernelStatus`,
+  `wolfbook_operationStatus`, `wolfbook_evaluationJournal`, and bounded
+  `wolfbook_getResult` tools expose lifecycle, captions, progress and results.
+- Long evaluations accept a short `caption` and optional `progress_symbol` for
+  bounded semantic progress monitoring through the existing subsession channel.
+- Added `wolfbook_saveNotebook`, which reads saved bytes back and reports their
+  SHA-256, size, mtime, dirty state and document version.
+- Cell edits, deletion and movement accept optimistic source/kind/ID
+  preconditions; stale mutations return conflict details without changing the
+  notebook. Single-cell edit-and-evaluate now uses the notebook execution
+  pipeline and reports committed cell output.
+- Range execution distinguishes structured messages from `$Failed`/`$Aborted`;
+  messages are collected by default rather than stopping the range.
+- The in-memory MCP operation registry now carries cell execution provenance
+  (operation ID, source SHA-256 and lifecycle state) without changing `.wb`
+  metadata or serialization. Results produced for a source that changed during
+  execution are marked stale and are not attached; `getCellOutput` distinguishes
+  current-session states and reports `unknown` when provenance is unavailable.
+- Worker windows reliably re-register after a fast primary-window restart, so
+  multi-window notebook targeting does not silently lose healthy clients.
+- MCP client listings normalize and deduplicate repeated notebook paths.
+- Kernel execution tools now accept `wait_mode:"async"` and return immediately
+  with a durable operation UUID. Transport and execution layers share that UUID,
+  so status/results remain recoverable after SSE reconnects and across registered
+  worker windows even when the new session has no remembered target.
+- Operation status includes bounded, sequence-numbered `Print` output, kernel
+  messages and monitored-symbol progress. Completed operations retain a bounded
+  result preview and retrieval-expiry timestamp; timeout responses recover the
+  committed cell result after the kernel becomes idle.
+- Expiring a transport waiter only forgets the network-side waiter. It never
+  aborts kernel work; explicit attributed cancellation remains available by
+  operation ID.
+- **Explicit kernel identity and optional notebook isolation.** Every window now
+  exposes an opaque kernel ID and visible controller labels such as `Wolfram K1`
+  and `Wolfram K2`. The kernel picker shows lifecycle/process metadata and can
+  select, create, rename, restart, or stop the targeted kernel. Machine-local
+  live leases keep numbered labels distinct across VS Code windows. Notebook
+  bindings are kept in local VS Code workspace state, shown in MCP discovery/context output, and
+  asserted by `kernel_id` so rebinding cannot silently redirect an agent.
+  `wolfbook_kernelManager` lists bindings and, behind the experimental setting,
+  creates and binds bounded isolated kernels without changing `.wb` files.
+  The existing multi-window MCP worker bridge also brokers transactional cell
+  execution, allowing the kernel picker to bind a notebook to a kernel owned by
+  another live VS Code window without transferring WSTP ownership. Owner-host
+  generation changes fail stale instead of silently falling back to K1.
+- The kernel picker can now start another local Wolfram process even when
+  isolation was not pre-enabled. Local logical kernel slots, their `K1`/`K2`/…
+  labels, and notebook bindings persist in VS Code workspace state and are
+  recreated after extension-host reload; stopping a kernel removes its saved
+  slot. Runtime routing IDs remain fresh, and no kernel state is written to the
+  `.wb` file.
+- The native kernel picker now also provides **Stop Unattached Wolfram
+  Kernel…**. It lists only idle kernels with no notebook bindings, confirms the
+  loss of in-memory definitions, and asks the owning VS Code window to stop a
+  remotely owned process through the existing MCP worker broker.
+- Kernel labels and the Wolfbook status item show how many notebooks are
+  attached (for example, `Wolfram K2 · 3 notebooks`). Counts are aggregated
+  across VS Code windows, so sharing one stateful kernel between several `.wb`
+  files remains fully supported and visible.
+- Shift+Enter in a newly created notebook now opens Wolfbook's kernel picker
+  when no explicit kernel association exists. After K1/K2 or a new kernel is
+  chosen, the original cell execution continues instead of being silently
+  dropped by VS Code's unassociated-controller path.
+- `wolfbook_newNotebook` now persists an explicit default-kernel binding before
+  returning the new notebook as an MCP target. A focused
+  `wolfbook_selectKernel` MCP tool lets agents list kernels and select the
+  default, an existing shared kernel, or a newly created kernel without using
+  VS Code UI.
+- `wolfbook_newNotebook` is now an idempotent open-or-create operation. A `.wb`
+  written by a generic filesystem tool can be opened and targeted through the
+  same tool without adding another MCP command: existing bytes and an existing
+  K2/K3 binding are preserved, while an unbound file receives the window's
+  default kernel automatically.
+
+### Fixed
+
+- Abort and Restart no longer disappear from a Wolfbook toolbar when another
+  local or remote controller changes a legacy global `wolframKernelActive`
+  context flag. In the multi-kernel design, availability is notebook-specific;
+  the controls therefore remain visible for every Wolfbook notebook and route
+  to its current binding when invoked.
+- The optional remote-host kernel poller no longer emits an exception every
+  second when a multi-kernel window has no active notebook from which to infer
+  an unambiguous target.
+- **Measured MCP canonical output projection.** An opt-in versioned projection
+  returns exact source, compact plain/LaTeX previews and MIME/hash manifests
+  instead of renderer HTML. A 587-notebook corpus measured 89.33% aggregate and
+  72.53% median size reduction with zero source/item-count mismatches. Optional
+  content-addressed render caching and uniform expiring result handles remain
+  outside notebook storage and are separately gated by settings.
+- Notebook background colour and image choices are now stored per notebook URI
+  in the local VS Code user settings. Changing appearance no longer edits the
+  shared `.wb` file or workspace settings, preventing Dropbox collaborators'
+  appearance choices from repeatedly overwriting one another.
+
+---
+
 ## [2.8.8] - 2026-08-16
 
 ### Added

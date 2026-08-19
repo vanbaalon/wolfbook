@@ -566,7 +566,12 @@ function _makeApi(getController, getToolMap) {
         if (!_checkSecret(secret)) return _bad('bad_secret');
         const ctrl = getController?.();
         if (!ctrl) return _bad('kernel_not_ready');
-        try { await ctrl.abortAndWait?.(5000); } catch (_) {}
+        try {
+            await ctrl.arbiter?.abort(ctrl, {
+                operationId: args?.operationId,
+                requestedBy: 'remote', reason: args?.reason || 'explicit remote abort', timeoutMs: 5000
+            });
+        } catch (_) {}
         if (args?.evalId) _evalsInFlight.delete(args.evalId);
         return { ok: true };
     }
@@ -924,7 +929,9 @@ function _registerEventListeners(context, getController) {
     // Kernel-state poller (lightweight)
     let lastKernelState = null;
     const tick = setInterval(() => {
-        const ctrl = getController?.();
+        let ctrl;
+        try { ctrl = getController?.(); }
+        catch (_) { return; } // no active notebook: no unambiguous kernel in a multi-kernel window
         if (!ctrl) return;
         const s = ctrl.kernelStatusString === 'resolved'
             ? ((ctrl._evalDispatched || ctrl.executionQueue.queueLength() > 0) ? 'busy' : 'idle')

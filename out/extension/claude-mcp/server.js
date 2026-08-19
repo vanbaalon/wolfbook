@@ -17,9 +17,12 @@ const crypto = require('crypto');
 const path   = require('path');
 const fs     = require('fs');
 const { setMcpCallActive } = require('../tools/shared');
+const { McpResultStore } = require('./result-store');
 
 const DEFAULT_PORT  = 27182;
 const PORT_RANGE    = 20;  // try DEFAULT_PORT … DEFAULT_PORT+PORT_RANGE if busy
+const OPERATION_WAIT_MS  = 300000;  // return control to the model every 5 minutes
+const OPERATION_LEASE_MS = 600000;  // forget transport waiter if the model is silent
 
 /**
  * Probe whether a Wolfbook MCP server is already running on the given port.
@@ -48,7 +51,7 @@ class WolframMCPServer {
      * @param {Map<string, object>} toolMap   name → tool class instance
      * @param {object[]}            mcpSchemas  MCP-formatted {name,description,inputSchema}
      */
-    constructor(toolMap, mcpSchemas) {
+    constructor(toolMap, mcpSchemas, operationOptions = {}) {
         this._tools   = toolMap;
         this._schemas = mcpSchemas;
         this._sessions = new Map();   // sessionId → http.ServerResponse (SSE)
@@ -59,10 +62,57 @@ class WolframMCPServer {
         this._workers      = new Map();  // clientId → { port, pid, notebooks }
         this._ownClientId  = null;       // set by extension.js after election/start
         this._ownNotebooks = [];         // updated by extension.js on notebook open/close
+        this._ownRegistrationGeneration = `${Date.now()}-${crypto.randomUUID()}`;
+        this._getOwnKernels = null;
         // Session targets: one target per MCP session (SSE connection)
         // Map: sessionId → { clientId, notebook } | null
         // 'copilot' is a synthetic sessionId used when Copilot auto-sets a target
         this._sessionTargets = new Map();  // sessionId → { clientId, notebook, ts }
+        // Session-target durability: targets die with their SSE connection, so a
+        // reconnecting client (same clientInfo.name) adopts its last target
+        // instead of erroring on every call (marked 'adopted-target' in the footer).
+        this._sessionClientNames = new Map();  // sessionId → clientInfo.name
+        this._lastTargetByClient = new Map();  // clientInfo.name → { target, ts }
+        this._operations = new Map(); // operationId → managed long-running call
+        this._operationWaitMs = operationOptions.waitMs || OPERATION_WAIT_MS;
+        this._operationLeaseMs = operationOptions.leaseMs || OPERATION_LEASE_MS;
+        this._canonicalProjection = !!operationOptions.canonicalProjection;
+        this._renderCache = !!operationOptions.renderCache;
+        this._boundedResults = !!operationOptions.boundedResults;
+        this._resultThreshold = Math.max(4096, Number(operationOptions.resultThreshold) || 24000);
+        this._resultStore = new McpResultStore(operationOptions.resultStoreOptions);
+        // Tool surface exposure (Phase 0.2): tags on package.json languageModelTools
+        // entries drive tools/list visibility. `mcp:hidden` → never listed;
+        // `mcp:deprecated` → listed only when exposeDeprecatedTools, with a
+        // DEPRECATED prefix (mcp:replacedBy:<name> names the successor);
+        // profile 'notebook' drops wolfslide_*, non-'full' drops fairy/gold/wolfteam
+        // unless tagged mcp:core. Hidden ≠ removed: tools/call resolves from
+        // this._tools, so every name keeps working — the zero-breakage guarantee.
+        this._exposeDeprecatedTools = !!operationOptions.exposeDeprecatedTools;
+        this._profile = ['notebook', 'slides', 'full'].includes(operationOptions.profile)
+            ? operationOptions.profile : 'full';
+    }
+
+    /** Phase 0.2: should this schema entry appear in tools/list? */
+    _isToolVisible(t) {
+        const tags = Array.isArray(t.tags) ? t.tags : [];
+        if (tags.includes('mcp:hidden')) return false;
+        if (tags.includes('mcp:deprecated') && !this._exposeDeprecatedTools) return false;
+        if (this._profile !== 'full' && !tags.includes('mcp:core')) {
+            if (this._profile === 'notebook' && t.name.startsWith('wolfslide_')) return false;
+            if (this._profile === 'slides' && t.name.startsWith('wolfbook_') &&
+                !/^wolfbook_(evaluateExpression|kernel|list_clients|setTarget|operationStatus|waitEvaluation|getResult)/.test(t.name)) return false;
+            if (/^(wolfbook_fairy_|wolfbook_gold_|wolfteam_)/.test(t.name)) return false;
+        }
+        return true;
+    }
+
+    /** Phase 0.2: description with deprecation prefix when tagged. */
+    _describeTool(t) {
+        const tags = Array.isArray(t.tags) ? t.tags : [];
+        if (!tags.includes('mcp:deprecated')) return t.description;
+        const replacedBy = tags.find(x => x.startsWith('mcp:replacedBy:'))?.slice('mcp:replacedBy:'.length);
+        return `DEPRECATED${replacedBy ? ` — use \`${replacedBy}\` instead` : ''}. ${t.description}`;
     }
 
     /** Start listening. Returns the actual port used.
@@ -93,6 +143,10 @@ class WolframMCPServer {
             srv.listen(port, '127.0.0.1', () => {
                 this._port = srv.address().port;
                 console.log(`[Wolfbook MCP] Listening on http://127.0.0.1:${this._port}/sse`);
+                // A primary can restart quickly enough that workers never hit
+                // their health-failure threshold. Re-discover the durable
+                // registry on every primary start, not only after an election.
+                setTimeout(() => this.notifyWorkers().catch(() => {}), 250);
                 resolve(this._port);
             });
             srv.on('error', err => {
@@ -122,6 +176,8 @@ class WolframMCPServer {
     updateOwnNotebooks(notebooks) {
         this._ownNotebooks = notebooks || [];
     }
+
+    setKernelProvider(provider) { this._getOwnKernels = provider; }
 
     /**
      * Start directly on PRIMARY_PORT without probing first.
@@ -156,6 +212,7 @@ class WolframMCPServer {
     }
 
     stop() {
+        for (const operationId of this._operations.keys()) this._forgetOperation(operationId);
         if (this._secondary) return Promise.resolve(); // not our server to close
         return new Promise(resolve => {
             if (this._server) this._server.close(() => resolve());
@@ -200,11 +257,14 @@ class WolframMCPServer {
         req.on('end', () => {
             try {
                 const info = JSON.parse(body);
-                if (info.clientId) {
+                if (info.clientId && info.clientId !== this._ownClientId) {
                     this._workers.set(info.clientId, {
                         port:      info.port,
                         pid:       info.pid,
                         notebooks: info.notebooks || [],
+                        kernels:   info.kernels || [],
+                        generation: info.generation || null,
+                        registeredAt: Number(info.registeredAt || Date.now()),
                     });
                 }
             } catch {}
@@ -227,6 +287,7 @@ class WolframMCPServer {
         req.on('close', () => {
             this._sessions.delete(sessionId);
             this._sessionTargets.delete(sessionId);  // release any target claim
+            this._sessionClientNames.delete(sessionId);
         });
     }
 
@@ -251,7 +312,11 @@ class WolframMCPServer {
 
             let result, error;
             try {
-                result = await this._dispatch(msg.method, msg.params || {}, sessionId);
+                const isManagedToolCall = msg.method === 'tools/call' &&
+                    msg.params?.name !== 'wolfbook_waitEvaluation';
+                result = isManagedToolCall
+                    ? await this._runManagedToolCall(msg.params || {}, sessionId)
+                    : await this._dispatch(msg.method, msg.params || {}, sessionId);
             } catch (e) {
                 const code = (typeof e.code === 'number') ? e.code : -32603;
                 error = { code, message: String(e.message || e) };
@@ -272,12 +337,15 @@ class WolframMCPServer {
     // ── MCP method dispatch ────────────────────────────────────────────────
     async _dispatch(method, params, sessionId = 'mcp') {
         switch (method) {
-            case 'initialize':
+            case 'initialize': {
+                const clientName = params?.clientInfo?.name;
+                if (clientName) this._sessionClientNames.set(sessionId, String(clientName));
                 return {
                     protocolVersion: '2024-11-05',
                     capabilities:    { tools: {} },
                     serverInfo:      { name: 'wolfbook', version: '1.0.0' },
                 };
+            }
 
             case 'ping':
                 return {};
@@ -292,13 +360,21 @@ class WolframMCPServer {
                         '"Antigravity[ClasterVersion]". Omit to auto-route by notebook ' +
                         'path. Use wolfbook_list_clients to see available clients.',
                 };
+                const KERNEL_ID_PARAM = {
+                    type: 'string',
+                    description: 'Opaque kernel ID from wolfbook_list_clients. For notebook tools this is an assertion; a changed binding is rejected.',
+                };
                 const injectClientId = (schema) => {
                     if (!schema || schema.type !== 'object') return schema;
-                    return { ...schema, properties: { ...schema.properties, client_id: CLIENT_ID_PARAM } };
+                    return { ...schema, properties: { ...schema.properties, client_id: CLIENT_ID_PARAM, kernel_id: KERNEL_ID_PARAM } };
                 };
-                const tools = this._schemas.map(t => ({
-                    ...t, inputSchema: injectClientId(t.inputSchema),
-                }));
+                const tools = this._schemas
+                    .filter(t => this._isToolVisible(t))
+                    .map(({ tags, ...t }) => ({
+                        ...t,
+                        description: this._describeTool({ ...t, tags }),
+                        inputSchema: injectClientId(t.inputSchema),
+                    }));
                 // Synthetic tools — not in _tools map, handled in tools/call
                 tools.push({
                     name: 'wolfbook_list_clients',
@@ -323,9 +399,30 @@ class WolframMCPServer {
                         properties: {
                             client_id: { type: 'string', description: 'Client to target (from wolfbook_list_clients). Omit to target own window.' },
                             notebook:  { type: 'string', description: 'Notebook filename to switch to and target (e.g. "proto2.wb"). Omit to leave notebook selection unchanged.' },
+                            kernel_id: { type: 'string', description: 'Optional kernel binding assertion from wolfbook_list_clients.' },
                             force:     { type: 'boolean', description: 'If true, evict any existing session lock on this notebook and claim it for this session. Use when wolfbook_list_clients shows a stale lock from a dead session.' },
                         },
                         required: [],
+                    },
+                });
+                tools.push({
+                    name: 'wolfbook_waitEvaluation',
+                    description:
+                        'Continue waiting for a Wolfbook operation that was still running after ' +
+                        'the five-minute MCP response window. Pass the operation_id returned by ' +
+                        'the earlier call. Waits for up to another five minutes and returns the ' +
+                        'original result. To stop it, call wolfbook_kernelControl with action="abort".',
+                    inputSchema: {
+                        type: 'object',
+                        properties: {
+                            operation_id: {
+                                type: 'string',
+                                description: 'Operation ID returned by a long-running Wolfbook call.',
+                            },
+                            client_id: CLIENT_ID_PARAM,
+                            kernel_id: KERNEL_ID_PARAM,
+                        },
+                        required: ['operation_id'],
                     },
                 });
                 return { tools };
@@ -336,12 +433,38 @@ class WolframMCPServer {
 
                 // ── Synthetic: wolfbook_list_clients ────────────────────────
                 if (name === 'wolfbook_list_clients') {
-                    return { content: [{ type: 'text', text: this._buildClientListText() }], isError: false };
+                    return { content: [
+                        { type: 'text', text: this._buildClientListText() },
+                        { type: 'text', text: JSON.stringify({ clients: this._buildClientList() }, null, 2) }
+                    ], isError: false };
                 }
 
                 // ── Synthetic: wolfbook_setTarget ────────────────────────────
                 if (name === 'wolfbook_setTarget') {
                     return this._handleSetTarget(rawArgs || {}, sessionId);
+                }
+                if (name === 'wolfbook_waitEvaluation') {
+                    return this._waitEvaluation(rawArgs || {}, sessionId);
+                }
+                if (name === 'wolfbook_operationStatus') {
+                    return this._operationStatus(rawArgs || {}, sessionId);
+                }
+                // ── wolfbook_status: the primary owns the cross-window clients
+                // table; kernel/operations/notebook scopes come from the routed
+                // window's StatusTool.  _clientsHandled guards the recursion.
+                if (name === 'wolfbook_status' && !rawArgs?._clientsHandled) {
+                    const scope = rawArgs?.scope || 'all';
+                    const clientsText = (scope === 'clients' || scope === 'all')
+                        ? this._buildClientListText() : null;
+                    if (scope === 'clients') {
+                        return { content: [{ type: 'text', text: clientsText }], isError: false };
+                    }
+                    const inner = await this._dispatch('tools/call',
+                        { name, arguments: { ...(rawArgs || {}), _clientsHandled: true } }, sessionId);
+                    if (clientsText && Array.isArray(inner?.content)) {
+                        return { ...inner, content: [{ type: 'text', text: `Clients:\n${clientsText}\n` }, ...inner.content] };
+                    }
+                    return inner;
                 }
 
                 // ── Extract & strip client_id routing hint ───────────────────
@@ -361,34 +484,69 @@ class WolframMCPServer {
                     }
                     const result = await this._invokeWorker(worker.port, name, args);
                     const newTarget = this._maybeTargetNewNotebook(name, args, sessionId, targetClientId, result);
-                    return newTarget ? this._appendTargetFooter(result, newTarget) : result;
+                    return this._appendTargetFooter(result,
+                        newTarget || { clientId: targetClientId, notebook: args.notebook || null },
+                        'explicit client_id');
                 }
 
-                // ── Auto-route by notebook name in args ──────────────────────
-                if (!targetClientId) {
-                    const workerEntry = this._findWorkerByNotebook(args);
-                    if (workerEntry) return this._invokeWorker(workerEntry.port, name, args);
+                // ── One routing law: explicit client_id > session target >
+                // notebook auto-route > error.  The session target OUTRANKS the
+                // notebook auto-route: a read of another notebook must never
+                // silently move execution off the declared target.
+                let sessionTarget = this._sessionTargets.get(sessionId) || null;
+                if (!sessionTarget && !targetClientId) {
+                    // Reconnected client (same clientInfo.name): adopt its last
+                    // declared target (≤60 min old) instead of erroring.
+                    const clientName = this._sessionClientNames.get(sessionId);
+                    const last = clientName ? this._lastTargetByClient.get(clientName) : null;
+                    if (last && Date.now() - last.ts < 3600000) {
+                        sessionTarget = { ...last.target, _adopted: true };
+                        this._sessionTargets.set(sessionId, sessionTarget);
+                    }
                 }
-
-                // ── Route via session target ─────────────────────────────────
-                const sessionTarget = this._sessionTargets.get(sessionId) || null;
                 if (!targetClientId && sessionTarget) {
-                    const { clientId: stClientId, notebook: stNotebook } = sessionTarget;
-                    // Inject the session notebook into args when the tool hasn't specified one
-                    if (stNotebook && !args.notebook) args.notebook = stNotebook;
+                    const { clientId: stClientId, notebook: stNotebook, kernelId: stKernelId } = sessionTarget;
+                    const currentKernel = this._resolveNotebookKernel(stClientId, stNotebook);
+                    if (stKernelId && currentKernel?.kernel_id !== stKernelId) {
+                        return { content: [{ type: 'text', text: JSON.stringify({
+                            error: 'target-changed', client_id: stClientId, notebook: stNotebook,
+                            previous_kernel_id: stKernelId, current_binding: currentKernel || { lifecycle: 'unbound' },
+                            action: 'Call wolfbook_setTarget again to explicitly accept the new kernel.'
+                        }, null, 2) }], isError: false };
+                    }
+                    // Inject the session notebook into args when the tool hasn't specified one.
+                    // _notebookInjected lets tools distinguish routing convenience from an
+                    // EXPLICIT notebook argument (the evaluation journal must not treat the
+                    // injected value as a filter — it silently hid other notebooks' ops).
+                    if (stNotebook && !args.notebook) { args.notebook = stNotebook; args._notebookInjected = true; }
+                    if (stKernelId && !args.kernel_id) args.kernel_id = stKernelId;
                     if (stClientId && stClientId !== this._ownClientId) {
                         const worker = this._workers.get(stClientId);
                         if (worker) {
                             const result = await this._invokeWorker(worker.port, name, args);
                             const newTarget = this._maybeTargetNewNotebook(name, args, sessionId, stClientId, result);
-                            return this._appendTargetFooter(result, newTarget || sessionTarget);
+                            return this._appendTargetFooter(result, newTarget || sessionTarget,
+                                sessionTarget._adopted ? 'adopted-target' : 'session-target');
                         }
+                    }
+                }
+
+                // ── Auto-route by notebook name in args (no target fixed) ─────
+                if (!targetClientId && !sessionTarget) {
+                    const workerEntry = this._findWorkerByNotebook(args);
+                    if (workerEntry) {
+                        const result = await this._invokeWorker(workerEntry.port, name, args);
+                        return this._appendTargetFooter(result, {
+                            clientId: workerEntry.clientId || null,
+                            notebook: args.notebook || null,
+                        }, 'notebook auto-route');
                     }
                 }
 
                 // ── No target set in a multi-window session ────────────────────
                 // When other windows are connected, require an explicit target so we
                 // never silently run in the wrong window.
+                this._pruneWorkers();
                 if (!targetClientId && !sessionTarget && this._workers.size > 0) {
                     return {
                         content: [{ type: 'text', text:
@@ -452,7 +610,10 @@ class WolframMCPServer {
                     isError: false,
                 };
                 const newTarget = this._maybeTargetNewNotebook(name, args, sessionId, targetClientId || this._ownClientId, result);
-                return this._appendTargetFooter(result, newTarget || this._sessionTargets.get(sessionId) || null);
+                const localTarget = newTarget || this._sessionTargets.get(sessionId) || null;
+                return this._appendTargetFooter(result,
+                    localTarget || { clientId: this._ownClientId, notebook: args.notebook || null },
+                    localTarget ? undefined : 'local window');
             }
 
             default: {
@@ -463,12 +624,265 @@ class WolframMCPServer {
         }
     }
 
+    // ── Long-running operation management ──────────────────────────────
+
+    async _runManagedToolCall(params, sessionId) {
+        const directHandle = String(params?.arguments?.handle || params?.arguments?.operation_id || '');
+        if (params?.name === 'wolfbook_getResult' && directHandle.startsWith('result_')) {
+            const slice = this._resultStore.get(directHandle, params.arguments?.offset, params.arguments?.limit,
+                params.arguments?.format, params.arguments?.path);
+            return { content: [{ type: 'text', text: slice ? JSON.stringify(slice, null, 2) : 'Unknown or expired result handle.' }], isError: !slice || !!slice.error };
+        }
+        const operationId = crypto.randomUUID();
+        // Use one UUID at both transport and execution layers. This means the
+        // handle returned at the five-minute boundary remains discoverable in
+        // the per-window registry even after this transport waiter is gone.
+        const dispatchedParams = {
+            ...params,
+            arguments: {
+                ...(params?.arguments || {}), _operationId: operationId,
+                ...(this._canonicalProjection && params?.name === 'wolfbook_getNotebookContext'
+                    ? { _mcpProjection: true, _mcpCache: this._renderCache } : {}),
+            },
+        };
+        const operation = {
+            id: operationId,
+            name: params?.name || 'unknown tool',
+            sessionId,
+            params: dispatchedParams,
+            status: 'pending',
+            result: null,
+            error: null,
+            leaseTimer: null,
+            kernelId: dispatchedParams.arguments?.kernel_id || this._sessionTargets.get(sessionId)?.kernelId || null,
+        };
+
+        operation.promise = this._dispatch('tools/call', dispatchedParams, sessionId).then(
+            result => { operation.status = 'fulfilled'; operation.result = result; return result; },
+            error => { operation.status = 'rejected'; operation.error = error; throw error; }
+        );
+        // This promise may outlive the JSON-RPC request that created it.
+        operation.promise.catch(() => {});
+        this._operations.set(operationId, operation);
+
+        const settled = await this._waitForOperation(operation, this._operationWaitMs);
+        if (settled) {
+            this._forgetOperation(operationId);
+            if (operation.status === 'rejected') throw operation.error;
+            return this._boundResult(operation.result, params?.name, operation.kernelId);
+        }
+
+        this._renewOperationLease(operation);
+        return this._operationStillRunningResult(operation);
+    }
+
+    _boundResult(result, toolName, kernelId = null) {
+        if (!this._boundedResults || toolName === 'wolfbook_getResult' || !result?.content) return result;
+        let changed = false;
+        const content = result.content.map(part => {
+            if (part?.type !== 'text' || String(part.text || '').length <= this._resultThreshold) return part;
+            changed = true;
+            const envelope = this._resultStore.envelope(
+                String(part.text), Math.min(4000, this._resultThreshold), 'text', { kernel_id: kernelId }
+            );
+            return { type: 'text', text: JSON.stringify(envelope, null, 2) };
+        });
+        return changed ? { ...result, content } : result;
+    }
+
+    async _waitEvaluation(args, sessionId) {
+        const operationId = String(args.operation_id || '').trim();
+        const targetClientId = String(args.client_id || '').trim();
+        // Never drop an explicitly supplied kernel_id — an error demanding a
+        // parameter must not come from a path that strips that parameter.
+        const kernelId = String(args.kernel_id || '').trim() || undefined;
+        const operation = this._operations.get(operationId);
+        if (!operation) {
+            this._pruneWorkers();
+            // Execution-layer IDs outlive the original tools/call and SSE
+            // session. Their UUID is the capability; collect them from the
+            // per-window registry rather than treating them as transport IDs.
+            const target = targetClientId || this._sessionTargets.get(sessionId)?.clientId;
+            if (target && target !== this._ownClientId) {
+                const worker = this._workers.get(target);
+                if (worker) return this._invokeWorker(worker.port, 'wolfbook_operationStatus', {
+                    operation_id: operationId, include_progress: true, wait_seconds: 300, kernel_id: kernelId
+                });
+            }
+            if (operationId) {
+                // A reconnected session may have lost its target. Probe the
+                // primary and every registered worker by UUID, then wait only
+                // on the window that actually owns the execution operation.
+                const localProbe = await this._invokeLocalOperationStatus(operationId, 0, true, kernelId);
+                if (!this._isUnknownOperationResult(localProbe)) {
+                    return this._invokeLocalOperationStatus(operationId, 300, true, kernelId);
+                }
+                for (const worker of this._workers.values()) {
+                    let probe;
+                    try {
+                        probe = await this._invokeWorker(worker.port, 'wolfbook_operationStatus', {
+                            operation_id: operationId, include_progress: false, wait_seconds: 0, kernel_id: kernelId
+                        });
+                    } catch (_) { continue; }
+                    if (!this._isUnknownOperationResult(probe)) {
+                        return this._invokeWorker(worker.port, 'wolfbook_operationStatus', {
+                            operation_id: operationId, include_progress: true, wait_seconds: 300, kernel_id: kernelId
+                        });
+                    }
+                }
+            }
+            return {
+                content: [{ type: 'text', text:
+                    `Unknown or expired operation_id: ${operationId || '(missing)'}. ` +
+                    'It may already have been collected or expired.' }],
+                isError: true,
+            };
+        }
+
+        this._renewOperationLease(operation);
+        const settled = await this._waitForOperation(operation, this._operationWaitMs);
+        if (!settled) {
+            this._renewOperationLease(operation);
+            return this._operationStillRunningResult(operation);
+        }
+
+        this._forgetOperation(operationId);
+        if (operation.status === 'rejected') throw operation.error;
+        return this._boundResult(operation.result, operation.name, operation.kernelId);
+    }
+
+    /** Resolve a durable execution UUID without requiring the new SSE session
+     *  to reconstruct its old notebook target first. */
+    async _operationStatus(args, sessionId) {
+        const operationId = String(args.operation_id || '').trim();
+        const targetClientId = String(args.client_id || '').trim();
+        const includeProgress = args.include_progress !== false;
+        const waitSeconds = Math.max(0, Math.min(300, Number(args.wait_seconds) || 0));
+        // Forward kernel_id — the schema advertises it, so dropping it here made
+        // the demanded fix impossible by construction.
+        const kernelId = String(args.kernel_id || '').trim() || undefined;
+        if (!operationId) {
+            return { content: [{ type: 'text', text: 'Missing operation_id.' }], isError: true };
+        }
+        this._pruneWorkers();
+
+        const target = targetClientId || this._sessionTargets.get(sessionId)?.clientId;
+        if (target && target !== this._ownClientId) {
+            const worker = this._workers.get(target);
+            if (!worker) return { content: [{ type: 'text', text: `Unknown client: "${target}".` }], isError: true };
+            return this._invokeWorker(worker.port, 'wolfbook_operationStatus', {
+                operation_id: operationId, include_progress: includeProgress, wait_seconds: waitSeconds, kernel_id: kernelId
+            });
+        }
+
+        const probeErrors = [];
+        const localProbe = await this._invokeLocalOperationStatus(operationId, 0, false, kernelId);
+        if (localProbe._probeError) probeErrors.push(`local: ${localProbe._probeError}`);
+        if (!this._isUnknownOperationResult(localProbe)) {
+            return this._invokeLocalOperationStatus(operationId, waitSeconds, includeProgress, kernelId);
+        }
+        for (const [workerClientId, worker] of this._workers.entries()) {
+            let probe;
+            try {
+                probe = await this._invokeWorker(worker.port, 'wolfbook_operationStatus', {
+                    operation_id: operationId, include_progress: false, wait_seconds: 0, kernel_id: kernelId
+                });
+            } catch (err) { probeErrors.push(`${workerClientId}: ${err.message}`); continue; }
+            if (!this._isUnknownOperationResult(probe)) {
+                return this._invokeWorker(worker.port, 'wolfbook_operationStatus', {
+                    operation_id: operationId, include_progress: includeProgress, wait_seconds: waitSeconds, kernel_id: kernelId
+                });
+            }
+        }
+        return { content: [{ type: 'text', text:
+            `Unknown operation_id: ${operationId}. Probed this window and ${this._workers.size} other window(s). ` +
+            'Operations are kept per kernel (last 50) and are invalidated when that kernel restarts.' +
+            (probeErrors.length ? `\nProbe failures: ${probeErrors.join('; ')}` : '')
+        }], isError: true };
+    }
+
+    async _invokeLocalOperationStatus(operationId, waitSeconds, includeProgress = true, kernelId = undefined) {
+        const statusTool = this._tools.get('wolfbook_operationStatus');
+        if (!statusTool) return { content: [{ type: 'text', text: `Unknown operation_id: ${operationId}` }], isError: true };
+        const token = { isCancellationRequested: false, onCancellationRequested: () => ({ dispose() {} }) };
+        // A tool throw (e.g. kernel resolution) must surface as a probe miss,
+        // not escape to _handleMessage as a bare JSON-RPC -32603.
+        let result;
+        try {
+            result = await statusTool.invoke({ input: {
+                operation_id: operationId, include_progress: includeProgress, wait_seconds: waitSeconds,
+                ...(kernelId ? { kernel_id: kernelId } : {}),
+            }, skipConfirm: true }, token);
+        } catch (err) {
+            return { content: [{ type: 'text', text: `Unknown operation_id: ${operationId}` }],
+                isError: true, _probeError: err.message };
+        }
+        return {
+            content: (result?.content || []).map(part => ({ type: 'text', text: String(part.value ?? part.text ?? '') })),
+            isError: false,
+        };
+    }
+
+    _isUnknownOperationResult(result) {
+        const text = (result?.content || []).filter(part => part?.type === 'text')
+            .map(part => String(part.text || '')).join('\n');
+        return result?.isError === true || /Unknown operation_id:/i.test(text);
+    }
+
+    _waitForOperation(operation, waitMs) {
+        if (operation.status !== 'pending') return Promise.resolve(true);
+        return new Promise(resolve => {
+            const timer = setTimeout(() => resolve(false), waitMs);
+            operation.promise.then(
+                () => { clearTimeout(timer); resolve(true); },
+                () => { clearTimeout(timer); resolve(true); }
+            );
+        });
+    }
+
+    _operationStillRunningResult(operation) {
+        return {
+            content: [{ type: 'text', text:
+                'Operation still running after 5 minutes. It has not been aborted.\n\n' +
+                `Operation ID: ${operation.id}\n\n` +
+                'Choose one:\n' +
+                `- Continue: call wolfbook_waitEvaluation with operation_id="${operation.id}".\n` +
+                '- Stop: call wolfbook_kernelControl with action="abort".\n\n' +
+                'If neither action is taken within 10 minutes, Wolfbook forgets only the transport waiter; kernel work is not aborted and the same ID remains discoverable in the execution journal.'
+            }],
+            isError: false,
+        };
+    }
+
+    _renewOperationLease(operation) {
+        if (operation.leaseTimer) clearTimeout(operation.leaseTimer);
+        operation.leaseTimer = setTimeout(
+            () => this._expireOperation(operation.id), this._operationLeaseMs);
+    }
+
+    async _expireOperation(operationId) {
+        const operation = this._operations.get(operationId);
+        if (!operation) return;
+        // Transport operations do not own the kernel lease. Never abort from
+        // this registry: the per-window execution registry/arbiter is the only
+        // authority that can prove which operation is currently running.
+        this._forgetOperation(operationId);
+    }
+
+    _forgetOperation(operationId) {
+        const operation = this._operations.get(operationId);
+        if (operation?.leaseTimer) clearTimeout(operation.leaseTimer);
+        this._operations.delete(operationId);
+    }
+
     // ── Session target helpers ─────────────────────────────────────────
 
     _maybeTargetNewNotebook(name, args, sessionId, clientId, result) {
         if (name !== 'wolfbook_newNotebook' || args?.target === false || result?.isError) return null;
         const firstText = String(result?.content?.find?.(p => p?.type === 'text')?.text || '');
-        if (!/^Created and opened\b/.test(firstText)) return null;
+        // Target on open-existing too — newNotebook's contract is "make this the
+        // MCP target", whether or not the file already existed.
+        if (!/^(Created and opened|Opened existing)\b/.test(firstText)) return null;
         const raw = String(args?.path || args?.filename || '').trim();
         if (!raw) return null;
         const withExt = raw.match(/\.(wb|evsnb|vsnb)$/i) ? raw : `${raw}.wb`;
@@ -476,14 +890,18 @@ class WolframMCPServer {
         if (!notebook) return null;
         const target = { clientId: clientId || null, notebook, ts: Date.now() };
         this._sessionTargets.set(sessionId, target);
+        const clientName = this._sessionClientNames.get(sessionId);
+        if (clientName) this._lastTargetByClient.set(clientName, { target, ts: Date.now() });
         return target;
     }
 
     /** Handle wolfbook_setTarget: validate, check conflicts, then persist per-session target. */
     _handleSetTarget(args, sessionId = 'mcp') {
+        this._pruneWorkers();
         const targetCid = (args.client_id || '').trim() || null;
         const targetNb  = (args.notebook  || '').trim() || null;
         const force     = !!args.force;
+        const assertedKernel = (args.kernel_id || '').trim() || null;
 
         // Omit both → clear this session's target
         if (!targetCid && !targetNb) {
@@ -507,7 +925,11 @@ class WolframMCPServer {
                 if (sid === sessionId) continue;  // same session updating its own target
                 const sameClient = !targetCid || !t.clientId || t.clientId === targetCid;
                 if (sameClient && t.notebook && t.notebook.toLowerCase() === targetNb.toLowerCase()) {
-                    if (force) {
+                    // A stale Copilot pseudo-lock (>10 min, or ts-less from an older
+                    // build) yields without force — a read-only tool having set it
+                    // must not lock out a real MCP session indefinitely.
+                    const copilotStale = sid === 'copilot' && (!t.ts || Date.now() - t.ts > 600000);
+                    if (force || copilotStale) {
                         // Evict the stale lock
                         evicted.push(sid);
                     } else {
@@ -517,7 +939,8 @@ class WolframMCPServer {
                             content: [{ type: 'text', text:
                                 `Cannot claim "${targetNb}" — it is already targeted by ${who}${age}.\n` +
                                 `Use wolfbook_list_clients to see current targets. ` +
-                                `If that session is dead, use wolfbook_setTarget with force:true to evict the lock.`
+                                `If that session is dead, use wolfbook_setTarget with force:true to evict the lock.\n\n` +
+                                `Current binding: ${JSON.stringify(this._resolveNotebookKernel(targetCid, targetNb) || { lifecycle: 'unbound' })}`
                             }],
                             isError: false,
                         };
@@ -527,23 +950,49 @@ class WolframMCPServer {
             for (const sid of evicted) this._sessionTargets.delete(sid);
         }
 
-        this._sessionTargets.set(sessionId, { clientId: targetCid, notebook: targetNb, ts: Date.now() });
+        const binding = this._resolveNotebookKernel(targetCid, targetNb);
+        if (assertedKernel && binding?.kernel_id !== assertedKernel) {
+            return { content: [{ type: 'text', text: JSON.stringify({
+                error: 'kernel-target-mismatch', client_id: targetCid, notebook: targetNb,
+                asserted_kernel_id: assertedKernel, current_binding: binding || { lifecycle: 'unbound' }
+            }, null, 2) }], isError: false };
+        }
+        const kernelId = binding?.kernel_id || null;
+        const targetRecord = { clientId: targetCid, notebook: targetNb, kernelId, ts: Date.now() };
+        this._sessionTargets.set(sessionId, targetRecord);
+        const clientName = this._sessionClientNames.get(sessionId);
+        if (clientName) this._lastTargetByClient.set(clientName, { target: targetRecord, ts: Date.now() });
 
         const parts = [];
         if (targetNb)  parts.push(`notebook: **${targetNb}**`);
         if (targetCid) parts.push(`client: **${targetCid}**`);
+        if (kernelId) parts.push(`kernel: **${binding.kernel_label} · ${kernelId}**`);
         return {
-            content: [{ type: 'text', text: `Session target set — ${parts.join(', ')}. All subsequent tool calls will auto-route there.` }],
+            content: [{ type: 'text', text:
+                `Session target set — ${parts.join(', ')}. All subsequent tool calls will auto-route there.\n\n` +
+                JSON.stringify({ client_id: targetCid, notebook: targetNb, kernel_id: kernelId }, null, 2)
+            }],
             isError: false,
         };
     }
 
+    _resolveNotebookKernel(clientId, notebook) {
+        if (!notebook) return null;
+        const client = this._buildClientList().find(c => !clientId || c.clientId === clientId);
+        if (!client) return null;
+        const base = value => String(value || '').replace(/\\/g, '/').split('/').pop().toLowerCase();
+        const wanted = base(notebook);
+        return (client.kernels || []).find(kernel =>
+            (kernel.notebooks || []).some(value => base(value) === wanted)) || null;
+    }
+
     /** Append a compact [Target: ...] footer when a session target is active. */
-    _appendTargetFooter(result, target) {
+    _appendTargetFooter(result, target, via) {
         if (!target) return result;
-        const { clientId, notebook } = target;
-        const label = [notebook, clientId].filter(Boolean).join(' @ ');
-        const footer = `\n\n└ *Target: ${label}*`;
+        const { clientId, notebook, kernelId } = target;
+        const label = [notebook, clientId, kernelId].filter(Boolean).join(' @ ');
+        if (!label) return result;
+        const footer = `\n\n└ *Target: ${label}${via ? ` · via: ${via}` : ''}*`;
         if (result?.content?.[0]?.type === 'text') {
             return {
                 ...result,
@@ -556,6 +1005,27 @@ class WolframMCPServer {
     // ── Worker routing helpers ────────────────────────────────────────────────
 
     /** Proxy a tool call to another window's WorkerServer. */
+    /** Drop dead windows from the worker table: their PID is gone or their
+     *  registration is stale.  Without this, every window this primary has
+     *  ever seen stays a routing candidate forever (list_clients ghosts,
+     *  misrouted notebook auto-routes, wasted operation probes). */
+    _pruneWorkers() {
+        let isPidAlive = null;
+        try { ({ isPidAlive } = require('./registry')); } catch (_) {}
+        const WORKER_TTL_MS = 60000;   // workers re-register every ~5 s
+        for (const [clientId, info] of [...this._workers.entries()]) {
+            const dead = (isPidAlive && info.pid && !isPidAlive(info.pid)) ||
+                (info.registeredAt && Date.now() - info.registeredAt > WORKER_TTL_MS);
+            if (dead) this._workers.delete(clientId);
+        }
+    }
+
+    _dropWorkerByPort(workerPort) {
+        for (const [clientId, info] of [...this._workers.entries()]) {
+            if (info.port === workerPort) this._workers.delete(clientId);
+        }
+    }
+
     _invokeWorker(workerPort, name, args) {
         return new Promise((resolve, reject) => {
             const body = JSON.stringify({ name, arguments: args });
@@ -568,7 +1038,7 @@ class WolframMCPServer {
                     'Content-Type':   'application/json',
                     'Content-Length': Buffer.byteLength(body),
                 },
-                timeout: 120000,   // tools can take a while (kernel execution)
+                timeout: 0,        // primary operation manager owns long-call deadlines
             }, res => {
                 let data = '';
                 res.on('data', d => { data += d; });
@@ -594,7 +1064,16 @@ class WolframMCPServer {
                     }
                 });
             });
-            req.on('error',   e => reject(e));
+            req.on('error',   e => {
+                // A refused/reset connection means the window is gone — evict it
+                // so it stops being a routing candidate.
+                if (['ECONNREFUSED', 'ECONNRESET', 'EPIPE'].includes(e?.code)) {
+                    this._dropWorkerByPort(workerPort);
+                    reject(new Error(`Worker window is no longer reachable (${e.code}); it has been removed from the client list.`));
+                    return;
+                }
+                reject(e);
+            });
             req.on('timeout', () => { req.destroy(); reject(new Error('Worker tool call timed out')); });
             req.write(body);
             req.end();
@@ -605,6 +1084,7 @@ class WolframMCPServer {
      *  worker that has it open.  Returns the worker info object or null. */
     _findWorkerByNotebook(args) {
         if (!args || typeof args !== 'object') return null;
+        this._pruneWorkers();
         const NB_EXTS = ['.wb', '.evsnb', '.vsnb'];
         // Notebooks are stored as full paths in the registry.  The agent may
         // pass just a basename (e.g. "proto2.wb") or a full path — match both.
@@ -613,9 +1093,9 @@ class WolframMCPServer {
             if (typeof val !== 'string') continue;
             if (!NB_EXTS.some(ext => val.toLowerCase().endsWith(ext))) continue;
             const targetBase = _base(val);
-            for (const info of this._workers.values()) {
+            for (const [clientId, info] of this._workers.entries()) {
                 if ((info.notebooks || []).some(nb => nb === val || _base(nb) === targetBase)) {
-                    return info;
+                    return { clientId, ...info };
                 }
             }
         }
@@ -624,21 +1104,36 @@ class WolframMCPServer {
 
     /** Build structured client list (used by /workers endpoint and wolfbook_list_clients). */
     _buildClientList() {
+        this._pruneWorkers();
+        const dedupe = notebooks => {
+            const seen = new Set();
+            return (notebooks || []).filter(value => {
+                const key = String(value || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+                if (!key || seen.has(key)) return false;
+                seen.add(key); return true;
+            });
+        };
         const list = [];
         if (this._ownClientId) {
             list.push({
                 clientId:  this._ownClientId,
                 role:      'primary',
-                notebooks: this._ownNotebooks,
+                notebooks: dedupe(this._ownNotebooks),
+                kernels: this._getOwnKernels?.() || [],
                 pid:       process.pid,
+                generation: this._ownRegistrationGeneration,
+                registeredAt: null,
             });
         }
         for (const [clientId, info] of this._workers) {
             list.push({
                 clientId,
                 role:      'worker',
-                notebooks: info.notebooks || [],
+                notebooks: dedupe(info.notebooks),
+                kernels: info.kernels || [],
                 pid:       info.pid,
+                generation: info.generation || null,
+                registeredAt: info.registeredAt || null,
             });
         }
         return list;
@@ -665,9 +1160,14 @@ class WolframMCPServer {
                 : c.notebooks.map(n => {
                     const base = _base(n);
                     const tag  = claimed.get(base.toLowerCase());
-                    return tag ? `  • ${base}  ⟵ *in use by ${tag}*` : `  • ${base}`;
+                    const binding = (c.kernels || []).find(k => (k.notebooks || []).some(nb => _base(nb).toLowerCase() === base.toLowerCase()));
+                    const identity = binding
+                        ? `  [${binding.kernel_label} · ${binding.kernel_id} · ${binding.lifecycle}]`
+                        : '  [unbound]';
+                    return tag ? `  • ${base}${identity}  ⟵ *in use by ${tag}*` : `  • ${base}${identity}`;
                 }).join('\n');
-            return `${c.clientId}  [${c.role}]\n${nbList}`;
+            const generation = c.generation ? ` · generation ${c.generation}` : '';
+            return `${c.clientId}  [${c.role}${generation}]\n${nbList}`;
         });
 
         // Show all active session targets
@@ -723,6 +1223,7 @@ function loadMCPSchemas(packageJsonPath) {
             name:        t.name,
             description: t.modelDescription || t.displayName || t.name,
             inputSchema: sanitizeInputSchema(t.inputSchema || { type: 'object', properties: {} }),
+            tags:        Array.isArray(t.tags) ? t.tags : [],
         }));
     } catch (e) {
         console.warn('[Wolfbook MCP] Could not load package.json schemas:', e.message);

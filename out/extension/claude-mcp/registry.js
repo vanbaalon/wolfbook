@@ -9,7 +9,7 @@
 //
 // File format:
 // [
-//   { clientId, workerPort, pid, notebooks, appName, workspace, ts }
+//   { clientId, workerPort, pid, notebooks, kernels, generation, registeredAt, appName, workspace, ts }
 // ]
 // ---------------------------------------------------------------------------
 
@@ -39,7 +39,8 @@ function _write(entries) {
 
 function _isAlive(pid) {
     if (!pid || typeof pid !== 'number') return false;
-    try { process.kill(pid, 0); return true; } catch { return false; }
+    try { process.kill(pid, 0); return true; }
+    catch (error) { return error?.code === 'EPERM'; }
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────
@@ -83,6 +84,14 @@ function listAlive() {
     return _read().filter(e => _isAlive(e.pid));
 }
 
+/** Real-time bridge view based on worker heartbeats. This avoids relying on
+ * process.kill(pid, 0), which can return EPERM between sandboxed extension
+ * hosts even when both are healthy. */
+function listRecent(maxAgeMs = 15000) {
+    const cutoff = Date.now() - Math.max(5000, Number(maxAgeMs) || 15000);
+    return _read().filter(entry => Number(entry.ts || 0) >= cutoff && entry.workerPort);
+}
+
 /**
  * Assign a unique client ID for this window.
  *
@@ -115,4 +124,4 @@ function assignClientId(appName, workspaceName) {
     return `${base}#${n}`;
 }
 
-module.exports = { writeEntry, removeEntry, cleanStale, listAlive, assignClientId };
+module.exports = { writeEntry, removeEntry, cleanStale, listAlive, listRecent, assignClientId, isPidAlive: _isAlive };

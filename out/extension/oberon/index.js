@@ -589,7 +589,7 @@ function activate(context, opts = {}) {
                                 const nbUri = vscode.Uri.file(nbPath);
                                 // Subtle distinct tint so the agent's scratchpad reads as
                                 // "not your work" (Powder Blue; auto-inverts to dark blue).
-                                await fsp.writeFile(nbPath, JSON.stringify({ cells: [], metadata: { wolframSettings: { backgroundColor: '#F0F8FF' } } }, null, 2), 'utf8');
+                                await fsp.writeFile(nbPath, JSON.stringify({ cells: [], metadata: {} }, null, 2), 'utf8');
                                 for (const tabGroup of vscode.window.tabGroups.all) {
                                     for (const tab of tabGroup.tabs) {
                                         if (tab.input instanceof vscode.TabInputNotebook &&
@@ -1119,7 +1119,7 @@ function activate(context, opts = {}) {
                                     // returning a cached in-memory document with stale cells.
                                     // Subtle distinct tint so the agent's scratchpad reads as
                                 // "not your work" (Powder Blue; auto-inverts to dark blue).
-                                await fsp.writeFile(nbPath, JSON.stringify({ cells: [], metadata: { wolframSettings: { backgroundColor: '#F0F8FF' } } }, null, 2), 'utf8');
+                                await fsp.writeFile(nbPath, JSON.stringify({ cells: [], metadata: {} }, null, 2), 'utf8');
 
                                     // Close any existing editor tab showing working.wb so VS Code
                                     // is forced to re-read from disk when openNotebookDocument runs.
@@ -2122,7 +2122,7 @@ function _makeFairyLiveView(bus) {
             try {
                 const fsp = require('fs/promises');
                 const nbUri = vscode.Uri.file(nbPath);
-                await fsp.writeFile(nbPath, JSON.stringify({ cells: [], metadata: { wolframSettings: { backgroundColor: '#F0F8FF' } } }, null, 2), 'utf8');
+                await fsp.writeFile(nbPath, JSON.stringify({ cells: [], metadata: {} }, null, 2), 'utf8');
                 for (const tabGroup of vscode.window.tabGroups.all) {
                     for (const tab of tabGroup.tabs) {
                         if (tab.input instanceof vscode.TabInputNotebook &&

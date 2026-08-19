@@ -132,6 +132,7 @@ class DebugController {
         this._debugPrintOut  = null;     // current vscode.NotebookCellOutput for print
         this._restartPending = false;    // debounce cell-edit restart
         this._stopping       = false;    // set by stop() to suppress auto-advance
+        this._arbiterLease   = null;     // owns the kernel for the full debug session
 
         // DAP adapter events
         this._onDidPause  = new vscode.EventEmitter();
@@ -490,6 +491,18 @@ class DebugController {
             return;
         }
 
+        if (ctrl.arbiter) {
+            const claim = await ctrl.arbiter.acquire(ctrl, {
+                owner: 'wolfbook-debugger', kind: 'debug-session', policy: 'reject',
+                caption: `Debug ${cell.document.uri.path.split('/').pop()}`
+            });
+            if (!claim.lease) {
+                vscode.window.showWarningMessage('Kernel is busy; the running evaluation was not interrupted.');
+                return;
+            }
+            this._arbiterLease = claim.lease;
+        }
+
         this._cell           = cell;
         this._xfm            = xfm;
         this._active         = true;
@@ -674,7 +687,7 @@ class DebugController {
         // Abort the running evaluation
         if (ctrl) {
             scrollLog('[wolfbook-debug] stop: aborting evaluation');
-            try { ctrl.abortEvaluation(); } catch (_) {}
+            try { await ctrl.arbiter.abort(ctrl, { requestedBy: 'user', reason: 'debug session stopped' }); } catch (_) {}
         }
 
         // Force-finalize immediately — don't rely on _evalPromise rejection which
@@ -1142,6 +1155,11 @@ class DebugController {
     }
 
     _cleanup() {
+        const ctrl = this._getController();
+        if (this._arbiterLease) {
+            try { ctrl?.arbiter?.release(this._arbiterLease, this._stopping ? 'aborted' : 'completed'); } catch (_) {}
+            this._arbiterLease = null;
+        }
         this._active        = false;
         this._cell          = null;
         this._xfm           = null;
@@ -1158,7 +1176,6 @@ class DebugController {
         vscode.commands.executeCommand('setContext', 'wolfbook.debugActive', false);
         if (this._watchPanel) this._watchPanel.setDebugActive(false);
         // Restore dynAutoMode if Dynamic widgets are still active after debug ends.
-        const ctrl = this._getController();
         if (ctrl?.session && ctrl._dynamicWidgets?.size > 0) {
             try { ctrl.session.setDynAutoMode?.(true); } catch (_) {}
         }
@@ -1335,7 +1352,7 @@ class DebugController {
         this._restartPending = true;
         const cell = this._cell;    // capture before cleanup
         const ctrl = this._getController();
-        if (ctrl) ctrl.abortEvaluation();
+        if (ctrl) ctrl.arbiter.abort(ctrl, { requestedBy: 'system', reason: 'debugged cell edited' }).catch(() => {});
         // _finishDebug fires via _evalPromise rejection; delay prompt until settled
         setTimeout(() => {
             this._restartPending = false;

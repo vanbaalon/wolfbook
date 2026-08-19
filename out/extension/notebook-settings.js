@@ -17,6 +17,8 @@ const _PROMPTS_DIR   = path.join(_WOLFBOOK_DIR, 'prompts');
 // Active preset is stored per-workspace in VS Code settings (wolfbook.activeSystemPrompt)
 // so different projects can have different active prompts.
 const _ACTIVE_PRESET_KEY = 'activeSystemPrompt';
+const _APPEARANCE_KEY = 'notebook.appearanceByUri';
+const _APPEARANCE_FIELDS = new Set(['backgroundColor', 'backgroundImagePath']);
 
 function _ensurePromptsDir() {
     if (!fs.existsSync(_PROMPTS_DIR)) fs.mkdirSync(_PROMPTS_DIR, { recursive: true });
@@ -586,12 +588,26 @@ async function showSettingsUI(notebook) {
 function getNotebookSettings(notebook) {
     const uri = notebook.uri.toString();
     if (notebookSettingsStore.has(uri)) return notebookSettingsStore.get(uri);
-    if (notebook.metadata && notebook.metadata.wolframSettings) {
-        const settings = notebook.metadata.wolframSettings;
-        notebookSettingsStore.set(uri, settings);
-        return settings;
+    const legacy = notebook.metadata?.wolframSettings || {};
+    const appearances = vscode.workspace.getConfiguration('wolfbook').get(_APPEARANCE_KEY, {}) || {};
+    const local = appearances[uri] || {};
+    const settings = {
+        ...legacy,
+        backgroundColor: Object.prototype.hasOwnProperty.call(local, 'backgroundColor')
+            ? local.backgroundColor : (legacy.backgroundColor || ''),
+        backgroundImagePath: Object.prototype.hasOwnProperty.call(local, 'backgroundImagePath')
+            ? local.backgroundImagePath : (legacy.backgroundImagePath || ''),
+    };
+    notebookSettingsStore.set(uri, settings);
+    // One-way, non-document migration: preserve an existing appearance locally
+    // so future Dropbox metadata changes from collaborators cannot make it blink.
+    if (!appearances[uri] && (legacy.backgroundColor || legacy.backgroundImagePath)) {
+        const migrated = { backgroundColor: legacy.backgroundColor || '', backgroundImagePath: legacy.backgroundImagePath || '' };
+        vscode.workspace.getConfiguration('wolfbook').update(
+            _APPEARANCE_KEY, { ...appearances, [uri]: migrated }, vscode.ConfigurationTarget.Global
+        ).catch(() => {});
     }
-    return { backgroundColor: '', backgroundImagePath: '' };
+    return settings;
 }
 
 async function updateNotebookSettings(notebook, newSettings) {
@@ -600,11 +616,25 @@ async function updateNotebookSettings(notebook, newSettings) {
     const updatedSettings = { ...currentSettings, ...newSettings };
     notebookSettingsStore.set(uri, updatedSettings);
 
-    const edit         = new vscode.WorkspaceEdit();
-    const metadata     = { ...notebook.metadata, wolframSettings: updatedSettings };
-    const notebookEdit = vscode.NotebookEdit.updateNotebookMetadata(metadata);
-    edit.set(notebook.uri, [notebookEdit]);
-    await vscode.workspace.applyEdit(edit);
+    const appearancePatch = Object.fromEntries(Object.entries(newSettings).filter(([key]) => _APPEARANCE_FIELDS.has(key)));
+    if (Object.keys(appearancePatch).length) {
+        const cfg = vscode.workspace.getConfiguration('wolfbook');
+        const appearances = cfg.get(_APPEARANCE_KEY, {}) || {};
+        const previous = appearances[uri] || {};
+        await cfg.update(_APPEARANCE_KEY, {
+            ...appearances,
+            [uri]: { ...previous, ...appearancePatch },
+        }, vscode.ConfigurationTarget.Global);
+    }
+
+    const documentPatch = Object.fromEntries(Object.entries(newSettings).filter(([key]) => !_APPEARANCE_FIELDS.has(key)));
+    if (Object.keys(documentPatch).length) {
+        const edit = new vscode.WorkspaceEdit();
+        const legacy = notebook.metadata?.wolframSettings || {};
+        const metadata = { ...notebook.metadata, wolframSettings: { ...legacy, ...documentPatch } };
+        edit.set(notebook.uri, [vscode.NotebookEdit.updateNotebookMetadata(metadata)]);
+        await vscode.workspace.applyEdit(edit);
+    }
     await applyNotebookSettings(notebook);
 }
 
@@ -697,7 +727,7 @@ async function applyNotebookSettings(notebook) {
             updated['notebook.cellHoverBackground']            = baseColor;
         }
         if (!_notebookColorsUnchanged(currentColors, updated)) {
-            await config.update('colorCustomizations', updated, vscode.ConfigurationTarget.Workspace);
+            await config.update('colorCustomizations', updated, vscode.ConfigurationTarget.Global);
         }
 
     } else if (!settings.backgroundImagePath) {
@@ -727,12 +757,12 @@ async function applyNotebookSettings(notebook) {
                 'notebook.cellHoverBackground':            outer,
             };
             if (!_notebookColorsUnchanged(currentColors, updated)) {
-                await config.update('colorCustomizations', updated, vscode.ConfigurationTarget.Workspace);
+                await config.update('colorCustomizations', updated, vscode.ConfigurationTarget.Global);
             }
         } else if (_NOTEBOOK_COLOR_KEYS.some(k => currentColors[k])) {
             const updated = { ...currentColors };
             for (const k of _NOTEBOOK_COLOR_KEYS) delete updated[k];
-            await config.update('colorCustomizations', updated, vscode.ConfigurationTarget.Workspace);
+            await config.update('colorCustomizations', updated, vscode.ConfigurationTarget.Global);
         }
     }
 

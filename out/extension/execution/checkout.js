@@ -9,6 +9,21 @@ const { scrollLog, wstpLog } = require('../utils/dev-logger');
 const _output = require('../output/renderer');
 const { splitIntoSubexpressions } = require('../utils/wl-parse');
 
+function _operationOutputPreview(cell) {
+    const parts = [];
+    for (const output of (cell?.outputs || [])) {
+        for (const item of (output.items || [])) {
+            if (item.mime !== 'text/plain') continue;
+            try {
+                const value = Buffer.from(item.data).toString('utf8').trim();
+                if (value) parts.push(value);
+            } catch (_) {}
+        }
+    }
+    return parts.join('\n').slice(0, 16384);
+}
+
+
 async function checkoutExecutionQueue(self) {
     let currentExecution;
     try {
@@ -21,6 +36,21 @@ async function checkoutExecutionQueue(self) {
         return;
     }
 
+    // A cell transaction proxied from another VS Code window owns this kernel
+    // through the arbiter even though it does not appear in this window's local
+    // execution queue. Keep locally queued cells pending until that transaction
+    // releases; never interleave them between its setup/render evaluations.
+    const _brokerLease = self.arbiter?.status(self)?.activeOperation;
+    if (_brokerLease?.owner === 'remote-notebook-ui') {
+        if (!self._remoteLeaseWaitTimer) {
+            self._remoteLeaseWaitTimer = setTimeout(() => {
+                self._remoteLeaseWaitTimer = null;
+                self.checkoutExecutionQueue();
+            }, 250);
+        }
+        return;
+    }
+
     // Was this cell queued via openDialogSubsession() on an idle kernel?
     // If so, add the "subsession" badge to every Out[...] label this run.
     const _isSubsession = self._subsessionCellUris.delete(
@@ -28,6 +58,18 @@ async function checkoutExecutionQueue(self) {
     );
 
     const code = currentExecution.execution.cell.document.getText();
+    const _cellForOperation = currentExecution.execution.cell;
+    const _cellOperationId = self.arbiter?.status(self)?.activeOperation?.operationId || null;
+    const _rawCellToolId = String(_cellForOperation.metadata?.toolId ||
+        _cellForOperation.document.uri.fragment || _cellForOperation.document.uri.toString());
+    // Canonical form (decoded, unpadded) so journal provenance shows the same
+    // id every tool surface emits — persisted metadata may hold padded ids.
+    const _cellToolId = (() => {
+        let id = _rawCellToolId.startsWith('vscode-notebook-cell:')
+            ? _rawCellToolId.slice(_rawCellToolId.lastIndexOf('#') + 1) : _rawCellToolId;
+        try { id = decodeURIComponent(id); } catch (_) {}
+        return id.replace(/=+$/, '');
+    })();
 
     // Cancel the Dynamic loop for this cell before starting a new execution.
     // cancel() resolves state._cancelPromise, which unblocks any pending
@@ -133,6 +175,9 @@ async function checkoutExecutionQueue(self) {
 
     try {
         if (!self.session) throw new Error("No kernel session — please launch the kernel first.");
+        if (self.session.beginTransaction) {
+            await self.session.beginTransaction(`Evaluate ${path.basename(currentExecution.execution.cell.notebook.uri.fsPath)} cell ${currentExecution.execution.cell.index + 1}`);
+        }
 
         // ---- Split cell into top-level sub-expressions ----
         // Done entirely in JS on the raw source text so that:
@@ -289,6 +334,7 @@ async function checkoutExecutionQueue(self) {
 
         let firstLineNum   = 0;
         let anyAborted     = false;
+        let anyFailed      = false;
         let anyMessages    = false;   // true if any kernel message was emitted this cell
         let msgTexts       = [];      // message texts, accumulated for the consolidated AI-context output at cell end
         let _firstMsgRange = null;    // range of first runtime message — used to anchor the combined diagnostic
@@ -359,6 +405,13 @@ async function checkoutExecutionQueue(self) {
         // (syntax check sub() / VsCodeSetImgDir), and sending interrupt() on
         // those calls desynchronises the WSTP packet stream.
         self._evalDispatched = true;
+        // A successful new dispatch proves the link is alive — clear any stale
+        // abort uncertainty so the kernel stops reporting 'faulted'.
+        self._abortUncertain = false;
+        if (_cellOperationId) self.operations?.beginCell(_cellOperationId, {
+            notebook: _cellForOperation.notebook.uri.fsPath,
+            cellId: _cellToolId, cellNumber: _cellForOperation.index + 1, source: code
+        });
         // NOTE: _cellEpoch increments at the END of the cell (just before executionQueue.end())
         // so LiveCells counts a cell only after all sub-expressions have finished and
         // all outputs have been committed and are visible.
@@ -776,6 +829,7 @@ async function checkoutExecutionQueue(self) {
                     // internal kernel communication noise, not user-visible output.
                     if (line.includes('Your options are:') &&
                         (line.includes('interrupt') || line.includes('abort') || line.includes('continue'))) return;
+                    if (_cellOperationId) self.operations?.appendProgress(_cellOperationId, 'print', line);
                     // Route WBPrint packets (*WBP* prefix) to the WBPrint queue —
                     // these replace their output in-place rather than accumulating.
                     if (line.startsWith('*WBP*')) {
@@ -797,6 +851,7 @@ async function checkoutExecutionQueue(self) {
                 onMessage: async msg => {
                     anyMessages = true;
                     msgTexts.push(msg);
+                    if (_cellOperationId) self.operations?.appendProgress(_cellOperationId, 'message', msg);
                     // Highlight the source line(s) in the input with a pink background.
                     self.applyRuntimeMsgDecoration(execCell, _subStartLine, _subEndLine);
                     // Track the range of the first message so we can anchor the combined diagnostic.
@@ -858,6 +913,15 @@ async function checkoutExecutionQueue(self) {
             if (printLineQueue.length > 0) await flushPrint();
             wbpFlushPending = false;
             if (wbpLineQueue.length > 0) await flushWbp();
+
+            // Preserve structured terminal symbols before rendering turns
+            // $Failed into the human-facing "No output at Out[n]" fallback.
+            const _terminalSymbol = r?.result?.type === 'symbol' ? r.result.value : null;
+            let _terminalTree = '';
+            try { _terminalTree = JSON.stringify(r?.result ?? null); } catch (_) {}
+            if (_terminalSymbol === '$Failed' || /\$Failed/.test(_terminalTree)) anyFailed = true;
+            if (_terminalSymbol === '$Aborted' || /\$Aborted/.test(_terminalTree)) anyAborted = true;
+            self.writeDebugLog(`[CHECKOUT] raw terminal result: ${_terminalTree.slice(0, 500)} | failed=${anyFailed} | aborted=${anyAborted}`);
 
             if (r.aborted) {
                 scrollLog('[checkout] r.aborted received — sub-expr', i, 'cell', currentExecution.execution.cell.index,
@@ -1336,8 +1400,23 @@ async function checkoutExecutionQueue(self) {
                 vscode.NotebookCellOutputItem.error({ name: 'WolframKernelMessage', message: _combinedMsgs, stack: '' }),
             ]));
         }
+        const _cellResultPreview = _operationOutputPreview(currentExecution.execution.cell);
+        const _structuredAborted = anyAborted || /(^|\W)\$Aborted(\W|$)/.test(_cellResultPreview);
+        const _structuredFailed = anyFailed || /(^|\W)\$Failed(\W|$)/.test(_cellResultPreview);
+        const _cellProvenance = _cellOperationId ? self.operations?.finishCell(_cellOperationId, {
+            cellId: _cellToolId,
+            currentSource: currentExecution.execution.cell.document.getText(),
+            status: _structuredAborted ? 'aborted' : (_structuredFailed ? 'failed' : (anyMessages ? 'completed-with-messages' :
+                (currentExecution.hasOutput ? 'success-with-output' : 'success-Null'))),
+            outputCount: currentExecution.execution.cell.outputs.length,
+            messageCount: msgTexts.length,
+            resultPreview: _cellResultPreview,
+        }) : null;
+        if (_cellProvenance?.status === 'stale') {
+            try { await currentExecution.execution.replaceOutput([]); } catch (_) {}
+        }
         // anyMessages: mark cell as errored so VS Code shows the Copilot AI-fix button
-        self.executionQueue.end(currentExecution.id, !anyAborted && !anyMessages);
+        self.executionQueue.end(currentExecution.id, !anyAborted && !anyFailed && !anyMessages);
         self._evalDispatched = false;
         self._evalEndedAt = Date.now();
         // Refresh Global` symbol highlighting once the kernel is idle.
@@ -1544,6 +1623,10 @@ async function checkoutExecutionQueue(self) {
         // checkout loop is done and VS Code must return to non-evaluating state.
         self._evalDispatched = false;
         self._evalEndedAt = Date.now();
+        if (_cellOperationId) self.operations?.finishCell(_cellOperationId, {
+            cellId: _cellToolId, currentSource: currentExecution.execution.cell.document.getText(),
+            status: self.isAborting ? 'aborted' : 'failed', outputCount: 0, messageCount: 0
+        });
         scrollLog('[checkout-catch] _evalDispatched = false | err:', err?.message);
 
         // "Cannot modify cell output after calling resolve" (VS Code ≤ 1.80) or
@@ -1608,6 +1691,10 @@ async function checkoutExecutionQueue(self) {
         }
         // Non-fatal error: queue already cleared above, nothing more to dequeue.
         return;
+    } finally {
+        if (self.session?.endTransaction) {
+            try { await self.session.endTransaction(self.isAborting ? 'aborted' : 'completed'); } catch (_) {}
+        }
     }
 
     // Normal completion — advance to the next queued cell.

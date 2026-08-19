@@ -14,6 +14,60 @@ const logPaths = require("../utils/log-paths");
 let _mcpCallActive = false;
 function setMcpCallActive(v) { _mcpCallActive = v; }
 
+async function acquireKernelForAgent(ctrl, options = {}) {
+    if (!ctrl?.arbiter) return { lease: null };
+    const configured = vscode.workspace.getConfiguration('wolfbook').get('ai.busyPolicy', 'reject');
+    const requested = options.policyOverride || options.policy || 'reject';
+    const policy = requested === 'preempt' && configured === 'preempt' ? 'preempt' : 'reject';
+    const acquired = await ctrl.arbiter.acquire(ctrl, { ...options, policy });
+    if (acquired.lease) return acquired;
+    const busy = acquired.busy;
+    const text = [
+        'Kernel is busy; the running evaluation was not interrupted.',
+        '',
+        '```json', JSON.stringify(busy, null, 2), '```',
+        '',
+        busy.operation_id
+            ? `Use wolfbook_operationStatus or wolfbook_waitEvaluation with operation_id="${busy.operation_id}", or explicitly abort it.`
+            : 'Use wolfbook_kernelStatus to inspect it, wait, or explicitly abort it.',
+    ].join('\n');
+    const error = new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(text)]);
+    error.__wolfbookBusy = true;
+    return { busy, error, result: error };
+}
+
+function releaseKernelForAgent(ctrl, lease, outcome = 'completed') {
+    if (!ctrl?.arbiter || !lease) return;
+    const isBusy = () => !!(ctrl._evalDispatched || Number(ctrl._directEvaluationCount || 0) > 0 || ctrl.isAborting || ctrl._abortPending ||
+        (ctrl.executionQueue?.queueLength?.() || 0) > 0);
+    if (!isBusy()) { ctrl.arbiter.release(lease, outcome); return; }
+    // The MCP observation timeout may expire while the notebook execution keeps
+    // running. Retain ownership until two consecutive idle samples so another
+    // agent cannot claim and preempt/overlap the still-active kernel work.
+    let idleSamples = 0;
+    const poll = () => {
+        if (!ctrl.arbiter?.status(ctrl).activeOperation ||
+            ctrl.arbiter.status(ctrl).activeOperation.operationId !== lease.operationId) return;
+        if (isBusy()) idleSamples = 0;
+        else if (++idleSamples >= 2) { ctrl.arbiter.release(lease, outcome); return; }
+        setTimeout(poll, 200);
+    };
+    setTimeout(poll, 200);
+}
+
+function trackedKernelEvaluate(controller, expression, options) {
+    controller._directEvaluationCount = Number(controller._directEvaluationCount || 0) + 1;
+    let promise;
+    try { promise = controller.session.evaluate(expression, options); }
+    catch (err) {
+        controller._directEvaluationCount = Math.max(0, controller._directEvaluationCount - 1);
+        throw err;
+    }
+    return Promise.resolve(promise).finally(() => {
+        controller._directEvaluationCount = Math.max(0, Number(controller._directEvaluationCount || 1) - 1);
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Shared: append an entry to the evaluation log for the active notebook.
 // The log lives under globalStorage (see utils/log-paths.js), NOT beside the
@@ -145,6 +199,61 @@ function normalizeToolContent(s) {
         c = c.replace(/\\u([0-9A-Fa-f]{4})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
     }
     return c;
+}
+
+// Raw C0 controls are never meaningful notebook source. Keep the three
+// whitespace controls that are valid in both WL and Markdown.
+const CONTROL_CHAR_RE = /[\x00-\x08\x0B\x0C\x0E-\x1F]/;
+
+function findControlChar(text) {
+    const value = String(text);
+    const match = CONTROL_CHAR_RE.exec(value);
+    if (!match) return null;
+    const index = match.index;
+    const before = value.slice(0, index);
+    const line = before.split('\n').length;
+    const lastNewline = before.lastIndexOf('\n');
+    return {
+        index,
+        code: match[0].charCodeAt(0),
+        line,
+        col: index - lastNewline,
+        context: value.slice(Math.max(0, index - 20), Math.min(value.length, index + 21)),
+    };
+}
+
+function decodeToolContent(raw, encoding) {
+    const mode = encoding == null || encoding === '' ? 'auto' : String(encoding);
+    const value = String(raw ?? '');
+    if (mode === 'raw') return value;
+    if (mode === 'auto') return normalizeToolContent(value);
+    if (mode !== 'base64') throw new Error(`Invalid content_encoding ${JSON.stringify(mode)}. Use "auto", "raw", or "base64".`);
+    if (value === '') return '';
+    if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) {
+        throw new Error('Invalid base64 content: use standard base64 with valid padding. No cells were modified.');
+    }
+    const decoded = Buffer.from(value, 'base64');
+    if (decoded.toString('base64').replace(/=+$/, '') !== value.replace(/=+$/, '')) {
+        throw new Error('Invalid base64 content: round-trip validation failed. No cells were modified.');
+    }
+    return decoded.toString('utf8');
+}
+
+function prepareCellContent({ content, kind, encoding }) {
+    const text = decodeToolContent(content, encoding);
+    const bad = findControlChar(text);
+    if (bad) {
+        const code = `U+${bad.code.toString(16).toUpperCase().padStart(4, '0')}`;
+        throw new Error(
+            `Rejected control character ${code} at ${bad.line}:${bad.col} near ${JSON.stringify(bad.context)}. ` +
+            'No cells were modified. Send the content with content_encoding:"base64", or use String.raw at the JavaScript layer so backslash escapes are not consumed.'
+        );
+    }
+    if (String(kind).toLowerCase() === 'markdown') {
+        const normalized = normalizeMarkdownMath(text);
+        return { text: normalized.text, converted: normalized.converted, encoding: encoding || 'auto' };
+    }
+    return { text, converted: false, encoding: encoding || 'auto' };
 }
 
 /**
@@ -579,12 +688,12 @@ function buildTranscript(notebook, startCell, endCell, editor) {
 }
 
 /** Extract the short cell ID from a vscode-notebook-cell URI (just the fragment). */
-function _shortCellId(uriOrId) {
-    if (typeof uriOrId === 'string' && uriOrId.startsWith('vscode-notebook-cell:')) {
-        const h = uriOrId.lastIndexOf('#');
-        if (h >= 0 && h < uriOrId.length - 1) return uriOrId.slice(h + 1);
-    }
-    return uriOrId;
+function _canonCellId(uriOrId) {
+    let value = String(uriOrId ?? '');
+    const hash = value.lastIndexOf('#');
+    if (hash >= 0) value = value.slice(hash + 1);
+    try { value = decodeURIComponent(value); } catch (_) {}
+    return value.replace(/=+$/, '');
 }
 
 /** Get (or lazily assign) a stable CellId that survives move operations.
@@ -592,8 +701,8 @@ function _shortCellId(uriOrId) {
  *  and stable within a session. Old full-URI stored values are migrated on the fly. */
 function getCellToolId(cell) {
     const meta = cell?.metadata;
-    if (meta?.toolId) return _shortCellId(meta.toolId);
-    return _shortCellId(cell?.document?.uri?.toString?.() || '');
+    if (meta?.toolId) return _canonCellId(meta.toolId);
+    return _canonCellId(cell?.document?.uri?.toString?.() || '');
 }
 
 /** Assign a stable toolId to a cell's metadata if it doesn't already have one.
@@ -601,8 +710,8 @@ function getCellToolId(cell) {
 async function _ensureCellToolId(notebook, cellIndex) {
     const cell = notebook.cellAt(cellIndex);
     const existing = cell.metadata?.toolId;
-    if (existing) return _shortCellId(existing);
-    const id = _shortCellId(cell.document.uri.toString());
+    if (existing) return _canonCellId(existing);
+    const id = _canonCellId(cell.document.uri.toString());
     const edit = new vscode.WorkspaceEdit();
     const newMeta = { ...(cell.metadata || {}), toolId: id };
     edit.set(notebook.uri, [vscode.NotebookEdit.updateCellMetadata(cellIndex, newMeta)]);
@@ -636,17 +745,10 @@ function resolveCellIndex(notebook, ref, fieldName) {
             return { idx: n - 1 };
         }
 
+        const canonical = _canonCellId(raw);
         for (let i = 0; i < count; i++) {
             const id = getCellToolId(notebook.cellAt(i));
-            if (id === raw) return { idx: i };
-        }
-        // Fallback: agent may have a full vscode-notebook-cell URI from an older context;
-        // extract the fragment and try again.
-        const frag = _shortCellId(raw);
-        if (frag !== raw) {
-            for (let i = 0; i < count; i++) {
-                if (getCellToolId(notebook.cellAt(i)) === frag) return { idx: i };
-            }
+            if (_canonCellId(id) === canonical) return { idx: i };
         }
         return { error: `${fieldName} not found: ${raw}` };
     }
@@ -765,6 +867,47 @@ function _allNotebookUris() {
 }
 
 /**
+ * READ-ONLY notebook resolution: returns a NotebookDocument without ever
+ * calling showNotebookDocument or firing _onNotebookResolved.  Reads must not
+ * change the active editor, steal focus, or set the Copilot session target —
+ * a read that mutates routing is a trap (feedback 2026-08-18 §3.3).
+ *
+ * Law: explicit name (basename or absolute path) → exact match or null, NO
+ * fallback.  No name → the active wolfbook notebook, else the sole open
+ * wolfbook notebook (zero ambiguity), else null.
+ *
+ * @param {string} [targetName]
+ * @returns {Promise<import('vscode').NotebookDocument|null>}
+ */
+async function resolveNotebookDocument(targetName) {
+    const _openWithTimeout = (uri, ms = 8000) => Promise.race([
+        vscode.workspace.openNotebookDocument(uri),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('openNotebookDocument timed out')), ms)),
+    ]);
+    if (targetName) {
+        const norm = String(targetName).trim().toLowerCase();
+        for (const [fsPath, uri] of _allNotebookUris()) {
+            const base = fsPath.split('/').pop().toLowerCase();
+            if (base !== norm && fsPath.toLowerCase() !== norm) continue;
+            const loaded = vscode.workspace.notebookDocuments.find(d => d.uri.fsPath === fsPath);
+            if (loaded) return loaded;
+            try { return await _openWithTimeout(uri); } catch (_) { return null; }
+        }
+        return null;
+    }
+    const active = vscode.window.activeNotebookEditor?.notebook;
+    if (active && NB_EXTS.some(ext => active.uri.fsPath.endsWith(ext))) return active;
+    const all = [..._allNotebookUris().entries()];
+    if (all.length === 1) {
+        const [fsPath, uri] = all[0];
+        const loaded = vscode.workspace.notebookDocuments.find(d => d.uri.fsPath === fsPath);
+        if (loaded) return loaded;
+        try { return await _openWithTimeout(uri); } catch (_) { return null; }
+    }
+    return null;
+}
+
+/**
  * Resolve (and optionally bring to front) a notebook editor.
  * @param {string}  [targetName]          - filename to match (case-insensitive)
  * @param {object}  [opts]
@@ -795,11 +938,14 @@ async function resolveNotebookEditor(targetName, opts = {}) {
     // If a specific notebook is requested, find it among all known tabs/docs
     if (targetName) {
         const normTarget = targetName.trim().toLowerCase();
+        const matchesTarget = fsPath => {
+            const full = String(fsPath || '').toLowerCase();
+            return full === normTarget || path.basename(full) === normTarget;
+        };
 
         // 1. Check visible editors first (fast path — already loaded)
         for (const ed of vscode.window.visibleNotebookEditors) {
-            const name = ed.notebook.uri.fsPath.split('/').pop().toLowerCase();
-            if (name === normTarget) {
+            if (matchesTarget(ed.notebook.uri.fsPath)) {
                 if (ed.notebook.uri.toString() !== activeUri) {
                     if (!await _confirmSwitch(ed.notebook.uri.fsPath.split('/').pop())) return null;
                 }
@@ -815,8 +961,7 @@ async function resolveNotebookEditor(targetName, opts = {}) {
         }
         // 2. Check all in-memory notebook documents (loaded but not visible)
         for (const doc of vscode.workspace.notebookDocuments) {
-            const name = doc.uri.fsPath.split('/').pop().toLowerCase();
-            if (name === normTarget) {
+            if (matchesTarget(doc.uri.fsPath)) {
                 if (doc.uri.toString() !== activeUri) {
                     if (!await _confirmSwitch(doc.uri.fsPath.split('/').pop())) return null;
                 }
@@ -841,8 +986,7 @@ async function resolveNotebookEditor(targetName, opts = {}) {
         ]);
         const allUris = _allNotebookUris();
         for (const [fsPath, uri] of allUris) {
-            const name = fsPath.split('/').pop().toLowerCase();
-            if (name === normTarget) {
+            if (matchesTarget(fsPath)) {
                 if (uri.toString() !== activeUri) {
                     if (!await _confirmSwitch(fsPath.split('/').pop())) return null;
                 }
@@ -933,6 +1077,10 @@ module.exports = {
     appendEventLog,
     normalizeToolContent,
     normalizeMarkdownMath,
+    CONTROL_CHAR_RE,
+    findControlChar,
+    decodeToolContent,
+    prepareCellContent,
     splitWLIntoStatements,
     checkMarkdownKaTeX,
     _katexWarnings,
@@ -944,6 +1092,7 @@ module.exports = {
     _restoreViewport,
     buildTranscript,
     getCellToolId,
+    _canonCellId,
     _ensureCellToolId,
     formatCellRef,
     resolveCellIndex,
@@ -955,6 +1104,10 @@ module.exports = {
     setNotebookResolvedCallback,
     _allNotebookUris,
     resolveNotebookEditor,
+    resolveNotebookDocument,
     noEditorMsg,
     setMcpCallActive,
+    acquireKernelForAgent,
+    releaseKernelForAgent,
+    trackedKernelEvaluate,
 };
