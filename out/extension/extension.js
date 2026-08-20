@@ -2012,6 +2012,16 @@ async function activate(context) {
     // the commands and the first-open notice.
     require('./nb-import/index').registerNbImport(context);
 
+    // Wolfbook TeX (Stage 1): structural projection of .tex files — outline,
+    // folding, CodeLens, deterministic diagnostics, and the model the paper_*
+    // tools read. Never fatal: a .tex feature failing must not stop the
+    // notebook extension from activating.
+    try {
+        require('./tex/index').registerTexSupport(context);
+    } catch (texErr) {
+        console.error('[wolfbook] TeX support failed to register:', texErr && texErr.message);
+    }
+
     // Setup Unicode replacer for \[Name] -> Unicode conversion
     const extensionPath = context.extensionPath;
     (0, unicode_replacer_1.registerUnicodeReplacer)(context, extensionPath);

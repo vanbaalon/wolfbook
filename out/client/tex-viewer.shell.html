@@ -1,0 +1,235 @@
+<!-- tex-viewer.shell.html — the Page view's markup and styling.
+     Kept OUT of texViewer.js on purpose: the headless harness
+     (Experiments/wolfbook-tex/e-viewer/check-panel.mjs) serves this exact
+     file, so what is measured is what ships. A second copy of a viewer has
+     already cost this project once — see the 3D note in CLAUDE.md. -->
+<style>
+  :root { color-scheme: light dark; }
+  body { margin:0; font-family: var(--vscode-font-family); font-size: 12px;
+         background: var(--vscode-editor-background); color: var(--vscode-foreground);
+         display:flex; flex-direction:column; height:100vh; }
+
+  /* --- toolbar --- */
+  header { display:flex; align-items:center; gap:8px; padding:5px 10px;
+           background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+           border-bottom:1px solid var(--vscode-panel-border); flex:0 0 auto;
+           user-select:none; white-space:nowrap; overflow:hidden; }
+  header button { display:inline-flex; align-items:center; justify-content:center;
+           min-width:26px; height:24px; padding:0 8px; border:none; border-radius:4px;
+           background:transparent; color: var(--vscode-foreground);
+           cursor:pointer; font-size:12px; line-height:1; }
+  header button:hover { background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,.18)); }
+  header button:active { transform: translateY(0.5px); }
+  #recompile { background: var(--vscode-button-background);
+           color: var(--vscode-button-foreground); font-weight:500; }
+  #recompile:hover { background: var(--vscode-button-hoverBackground); }
+  .zoomgroup { display:inline-flex; align-items:center;
+           border:1px solid var(--vscode-panel-border); border-radius:4px; }
+  .zoomgroup button { min-width:24px; padding:0 6px; border-radius:3px; }
+  #zoom { min-width:42px; text-align:center; opacity:.85; font-size:11px;
+          font-variant-numeric: tabular-nums; }
+  label.follow { display:inline-flex; align-items:center; gap:5px; height:22px;
+          padding:0 9px; border-radius:11px; cursor:pointer; opacity:.85;
+          border:1px solid var(--vscode-panel-border); }
+  label.follow:hover { opacity:1; }
+  label.follow:has(input:checked) {
+          background: var(--vscode-badge-background); color: var(--vscode-badge-foreground);
+          border-color: transparent; opacity:1; }
+  label.follow input { position:absolute; opacity:0; pointer-events:none; width:0; height:0; }
+  #where { margin-left:auto; opacity:.8; font-variant-numeric: tabular-nums;
+           overflow:hidden; text-overflow:ellipsis; }
+  .pp { opacity:.5; font-variant-numeric: tabular-nums; }
+
+  /* --- pages --- */
+  main { flex:1 1 auto; overflow:auto; padding:20px 16px;
+         scrollbar-gutter: stable;
+         background: var(--vscode-editorPane-background, var(--vscode-editor-background)); }
+  /* Fit means edge to edge: the horizontal padding would otherwise inset the
+     page by 16px on each side, which is exactly the margin Fit is meant to
+     remove. The page keeps its shadow, so the boundary is still visible. */
+  body.fitted main { padding-left:0; padding-right:0; }
+  body.fitted .page { border-radius:0; }
+  body.fitted .page canvas { border-radius:0; }
+  #pages { display:flex; flex-direction:column; align-items:center; gap:18px; }
+  .page { position:relative; background:#fff; border-radius:2px;
+          box-shadow: 0 1px 3px rgba(0,0,0,.22), 0 4px 16px rgba(0,0,0,.22); }
+  .page canvas { display:block; border-radius:2px; }
+
+  /* DARK PAGES ARE A FILTER ON THE ELEMENT, NEVER A REWRITE OF THE PIXELS.
+     `snapToInk` reads the canvas back with getImageData and calls anything
+     below red 140 ink, on the assumption of black type on white paper. A CSS
+     filter changes what is DISPLAYED and leaves the backing store exactly as
+     pdf.js drew it, so word-precise highlighting keeps working here; inverting
+     the pixels themselves would quietly invert that test instead.
+
+     0.905 rather than a full invert: black type becomes #ededed on a #181818
+     page rather than pure white on pure black, which is what the eye wants for
+     a long read. hue-rotate puts coloured figures back near their own hue. */
+  .wb-dark-pages .page { background:#181818;
+          box-shadow: 0 1px 3px rgba(0,0,0,.5), 0 4px 18px rgba(0,0,0,.55); }
+  .wb-dark-pages .page canvas { filter: invert(0.905) hue-rotate(180deg); }
+  .wb-dark-pages .pagenum { opacity:.55; }
+  #pagetheme { font-size:13px; }
+  .pagenum { position:absolute; top:-16px; right:2px; font-size:10px; opacity:.45;
+             font-variant-numeric: tabular-nums; }
+
+  /* The highlight is a MARKER PEN, not a box.
+     A red outline reads as an error and boxes the text in, which is exactly
+     wrong for "here is where you are" — and around a single glyph in an
+     equation a border is bigger than the thing it points at. A translucent
+     wash sits behind the type, leaves it fully readable, and still shows the
+     honesty flag: solid amber = fresh, hatched = only probably current, grey =
+     stale. It then FADES, because a marker that never goes away competes with
+     the text you are trying to read. */
+  .hl { position:absolute; pointer-events:none; border-radius:2px;
+        background:rgba(255,196,0,.40); mix-blend-mode:multiply;
+        animation: hlfade 3s ease-out forwards; }
+  .hl.approx { background:repeating-linear-gradient(45deg,
+                 rgba(255,196,0,.40) 0 4px, rgba(255,196,0,.16) 4px 8px); }
+  .hl.stale  { background:rgba(150,150,160,.34); }
+  .hl.pinned { animation:none; }
+  @keyframes hlfade { 0%,55% { opacity:1; } 100% { opacity:0; } }
+  /* A darkened page would swallow a multiply blend, so the wash goes on top
+     instead. Keyed off the PAGE theme, not `prefers-color-scheme`: that is the
+     operating system's preference, and a light VS Code theme on a dark desktop
+     used to get the wrong one of these. */
+  .wb-dark-pages .hl { mix-blend-mode: normal; background:rgba(255,196,0,.30); }
+  .wb-dark-pages .hl.approx { background:repeating-linear-gradient(45deg,
+                 rgba(255,196,0,.30) 0 4px, rgba(255,196,0,.10) 4px 8px); }
+  .wb-dark-pages .hl.stale { background:rgba(170,170,180,.26); }
+  /* --- the comparison overlay ---
+     A separate layer from .hl on purpose: paintHighlight removes every .hl on
+     each cursor move, so a diff sharing that class would be wiped by the next
+     keystroke. These persist until the comparison is closed.
+
+     The COLOUR says what happened, the TREATMENT says how well we know where:
+     a solid wash means the change is on those exact rows; a dotted outline
+     means we could only place the enclosing object (most equation lines carry
+     no SyncTeX record at all); a caret means inserted text, which has no
+     position in this render by construction and must never be widened into a
+     block that claims one. */
+  .dh { position:absolute; pointer-events:none; border-radius:2px; z-index:5; }
+  .dh-change { background: rgba(255,196,0,.30); }
+  .dh-del    { background: rgba(240,80,80,.26); }
+  .dh-add    { background: rgba(80,200,120,.26); }
+  .dh-object { background:none; outline:2px dotted rgba(255,196,0,.85); outline-offset:1px; }
+  .dh-gap    { background:none; border-left:3px solid rgba(80,200,120,.95);
+               height:14px !important; margin-top:-7px; border-radius:0; }
+  .dh-focus  { box-shadow: 0 0 0 2px var(--vscode-focusBorder, #4a9eff); }
+  .wb-dark-pages .dh-change { background: rgba(255,196,0,.26); }
+  .wb-dark-pages .dh-del    { background: rgba(240,80,80,.24); }
+  .wb-dark-pages .dh-add    { background: rgba(80,200,120,.24); }
+
+  #diffbar { display:none; align-items:center; gap:8px; padding:4px 10px;
+             background: var(--vscode-editorWidget-background, transparent);
+             border-bottom:1px solid var(--vscode-panel-border); flex:0 0 auto;
+             white-space:nowrap; overflow:hidden; }
+  #diffbar button { background:transparent; border:none; color:inherit;
+             cursor:pointer; border-radius:3px; height:22px; min-width:24px; padding:0 7px; }
+  #diffbar button:hover { background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,.18)); }
+  #diffwhat { font-weight:600; }
+  #diffcount { font-variant-numeric: tabular-nums; opacity:.85; min-width:44px; text-align:center; }
+  #diffcensus { opacity:.7; overflow:hidden; text-overflow:ellipsis; }
+  #diffclose { margin-left:auto; }
+  .ping { position:absolute; width:14px; height:14px; margin:-7px 0 0 -7px;
+          border:2px solid rgba(60,140,220,.95); border-radius:50%;
+          animation: ping .7s ease-out forwards; pointer-events:none; }
+  @keyframes ping { to { transform:scale(2.6); opacity:0; } }
+
+  /* --- the mini-editor card (right-click a block) --- */
+  .editcard { position:absolute; z-index:30; text-align:left;
+          background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+          color: var(--vscode-editorWidget-foreground, var(--vscode-foreground));
+          border:1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border));
+          border-radius:6px; overflow:hidden;
+          box-shadow: 0 8px 28px rgba(0,0,0,.4); }
+  .ec-head { display:flex; align-items:center; gap:8px; padding:4px 6px 4px 10px;
+          background: var(--vscode-editorGroupHeader-tabsBackground, transparent);
+          border-bottom:1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border)); }
+  .ec-title { font-weight:600; }
+  .ec-lines { opacity:.55; font-size:11px; overflow:hidden; text-overflow:ellipsis; }
+  .ec-spacer { flex:1; }
+  .ec-head button { border:none; background:transparent; cursor:pointer;
+          color:inherit; border-radius:3px; height:20px; min-width:20px;
+          padding:0 6px; font-size:11px; opacity:.8; }
+  .ec-head button:hover { opacity:1;
+          background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,.18)); }
+  /* TWO LAYERS, ONE SET OF CHARACTERS.
+     A textarea cannot colour its own text, so the highlighted copy sits in a
+     <pre> underneath and the textarea lies transparently on top of it: caret
+     and selection from the textarea, colours from the layer behind. They only
+     stay aligned while every metric that affects wrapping is identical — font,
+     size, line height, padding, white-space, word-break, ligatures — so those
+     are set ONCE, on both. The layer is the size-driver; the textarea is given
+     its full content height in JS and never scrolls itself, so the wrapper
+     scrolls both together and there is no scroll offset to keep in sync. */
+  .ec-editor { position:relative; max-height:min(360px, 45vh); overflow:auto;
+          background: var(--vscode-input-background, transparent); }
+  .ec-hl, .editcard textarea {
+          margin:0; padding:8px 10px; border:0;
+          font-family: var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, monospace);
+          font-size:12px; line-height:1.55; tab-size:2;
+          white-space:pre-wrap; word-wrap:break-word; overflow-wrap:break-word;
+          font-variant-ligatures:none; letter-spacing:normal; }
+  .ec-hl { display:block; min-height:48px; pointer-events:none;
+          color: var(--vscode-editor-foreground, var(--vscode-foreground)); }
+  .editcard textarea { position:absolute; top:0; left:0; width:100%;
+          box-sizing:border-box; display:block; resize:none; overflow:hidden;
+          background:transparent; color:transparent; outline:none;
+          caret-color: var(--vscode-editorCursor-foreground, var(--vscode-foreground)); }
+  /* The text is transparent, but its SELECTION still paints — which is what
+     makes a click on the page visible as a selection here. */
+  .editcard textarea::selection {
+          background: var(--vscode-editor-selectionBackground, rgba(90,140,220,.45)); }
+  /* Where an inverse click landed, in the same amber as the page marker. */
+  .ec-sel { background: rgba(255,196,0,.32); border-radius:2px; color:inherit; }
+  .ec-caret { display:inline-block; width:0; }
+  /* LaTeX tokens. The charts-* variables are the theme-aware palette a webview
+     is actually given; editor token colours are not exposed as CSS. */
+  .tc { color: var(--vscode-charts-blue, #4fc1ff); }                        /* \command */
+  .tk { color: var(--vscode-charts-purple, #c586c0); }                      /* \begin \end */
+  .te { color: var(--vscode-charts-yellow, #dcdcaa); }                      /* env name */
+  .tm { color: var(--vscode-charts-orange, #ce9178); }                      /* $ \[ \] */
+  .tb { color: var(--vscode-descriptionForeground, #999); }                 /* braces */
+  .to { color: var(--vscode-charts-purple, #c586c0); }                      /* & \\ */
+  .tx { color: var(--vscode-charts-green, #6a9955); font-style:italic; }    /* % comment */
+  .ec-hint { padding:3px 10px 4px; opacity:.5; font-size:10.5px;
+          border-top:1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border)); }
+
+  /* --- status bar --- */
+  #status { display:flex; align-items:center; gap:6px; padding:3px 10px;
+            border-top:1px solid var(--vscode-panel-border);
+            background: var(--vscode-editorWidget-background, transparent);
+            flex:0 0 auto; opacity:.85; min-height:17px; }
+  #status::before { content:''; width:6px; height:6px; border-radius:50%;
+            background: var(--vscode-charts-green, #89d185); opacity:.7; flex:0 0 auto; }
+  #status.err::before { background: var(--vscode-errorForeground, #f48771); }
+  #status.warn::before { background: var(--vscode-editorWarning-foreground, #cca700); }
+  #status.err { color: var(--vscode-errorForeground); }
+  #status.warn { color: var(--vscode-editorWarning-foreground); }
+  footer { display:flex; }
+</style>
+<header>
+  <button id="recompile" title="Recompile the paper">⟳ Compile</button>
+  <span class="zoomgroup">
+    <button id="zoomout" title="Zoom out (⌘−)">−</button><span id="zoom">125%</span><button id="zoomin" title="Zoom in (⌘+)">+</button>
+  </span>
+  <button id="fit" title="Fit the page width (⌘0)">Fit</button>
+  <button id="compare" title="Compare with another version of this paper">⇄</button>
+  <button id="pagetheme" title="Page appearance" aria-pressed="false">☀</button>
+  <button id="full" title="Full screen (Esc to leave, double-click a word to go there and edit)">⛶</button>
+  <label class="follow" title="Highlight in the page whatever the editor cursor is on"><input type="checkbox" id="follow" checked> follow</label>
+  <label class="follow" title="Keep the highlight instead of letting it fade"><input type="checkbox" id="pin"> pin</label>
+  <span id="where"></span>
+  <span class="pp">/ <span id="pagecount">?</span> pp</span>
+</header>
+<div id="diffbar">
+  <span id="diffwhat"></span>
+  <button id="diffprev" title="Previous change">‹</button>
+  <span id="diffcount"></span>
+  <button id="diffnext" title="Next change">›</button>
+  <span id="diffcensus"></span>
+  <button id="diffclose" title="Stop comparing">✕</button>
+</div>
+<main><div id="pages" title="Click a word or symbol to find it in the source. Cmd/Ctrl-click selects more of what encloses it; add Shift to go back in. Double-click jumps to the editor. Right-click edits the paragraph or equation in place."></div></main>
+<footer><div id="status">starting…</div></footer>

@@ -101,6 +101,17 @@ const {
     GetCellOutputTool, ValidateSyntaxTool, LatexTool,
 } = require('./wolfslide-tools');
 
+// Wolfbook TeX (Stage 1): structural projection of .tex + guarded edits.
+const {
+    PaperGetOutlineTool, PaperGetObjectTool, PaperGetSectionTool,
+    PaperFindReferencesTool, PaperMathematicaBlocksTool,
+    PaperPreviewEditTool, PaperApplyEditTool,
+    // `PaperSearchTool` is already taken in this file by the LITERATURE search
+    // (wolfbook_paperSearch, Semantic Scholar/arXiv). Ours searches the open
+    // paper's own objects, so it is aliased rather than renamed upstream.
+    PaperSearchTool: PaperSearchObjectsTool,
+} = require('./tex-tools');
+
 function mutationConflict(cell, input = {}) {
     const source = cell.document.getText();
     const id = getCellToolId(cell);
@@ -4796,6 +4807,16 @@ function registerTools(context, getController, debugCtrl, getAskPanel) {
     let toolMap = null;
     const selfTestTool = new SelfTestTool(getController, () => toolMap);
     const tools = [
+        // Wolfbook TeX — the paper_* surface (Stage 1: read + guarded edit)
+        { name: 'paper_getOutline',        impl: new PaperGetOutlineTool() },
+        { name: 'paper_getObject',         impl: new PaperGetObjectTool() },
+        { name: 'paper_getSection',        impl: new PaperGetSectionTool() },
+        { name: 'paper_findReferences',    impl: new PaperFindReferencesTool() },
+        { name: 'paper_search',            impl: new PaperSearchObjectsTool() },
+        { name: 'paper_mathematicaBlocks', impl: new PaperMathematicaBlocksTool() },
+        { name: 'paper_previewEdit',       impl: new PaperPreviewEditTool() },
+        { name: 'paper_applyEdit',         impl: new PaperApplyEditTool() },
+
         // Core notebook tools (visible in chat panel)
         { name: 'wolfbook_newNotebook',        impl: new NewNotebookTool(getController) },
         { name: 'wolfbook_getNotebookContext', impl: new GetNotebookContextTool(getController, context) },

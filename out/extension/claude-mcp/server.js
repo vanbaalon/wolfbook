@@ -99,6 +99,15 @@ class WolframMCPServer {
         if (tags.includes('mcp:hidden')) return false;
         if (tags.includes('mcp:deprecated') && !this._exposeDeprecatedTools) return false;
         if (this._profile !== 'full' && !tags.includes('mcp:core')) {
+            // Wolfbook TeX. `paper_*` matches none of the prefixes below, so
+            // without this clause it would pass every filter and show up even
+            // in the slides profile — the opposite of hidden. The `paper`
+            // profile is the mirror case: a paper session does not want the
+            // notebook and slide families advertised at it.
+            if (t.name.startsWith('paper_')) {
+                return this._profile === 'paper' || this._profile === 'notebook';
+            }
+            if (this._profile === 'paper') return false;
             if (this._profile === 'notebook' && t.name.startsWith('wolfslide_')) return false;
             if (this._profile === 'slides' && t.name.startsWith('wolfbook_') &&
                 !/^wolfbook_(evaluateExpression|kernel|list_clients|setTarget|operationStatus|waitEvaluation|getResult)/.test(t.name)) return false;

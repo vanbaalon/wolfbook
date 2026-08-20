@@ -8,7 +8,11 @@
     "vscode": "^1.95.0"
   },
   "activationEvents": [
-    "onUri"
+    "onUri",
+    "onLanguage:latex",
+    "onLanguage:tex",
+    "workspaceContains:**/*.tex",
+    "onWebviewPanel:wolfbook.texViewer"
   ],
   "repository": {
     "type": "git",
@@ -220,39 +224,62 @@
           "order": 2
         },
         "wolfbook.mcp.canonicalOutputProjection": {
-          "scope": "window", "type": "boolean", "default": false,
+          "scope": "window",
+          "type": "boolean",
+          "default": false,
           "markdownDescription": "Preview the versioned canonical notebook projection through MCP: source, plain/LaTeX previews, and MIME/hash manifests without persisted renderer HTML. Does not change .wb files. Requires reload.",
           "order": 3
         },
         "wolfbook.mcp.renderCache": {
-          "scope": "window", "type": "boolean", "default": false,
+          "scope": "window",
+          "type": "boolean",
+          "default": false,
           "markdownDescription": "Allow the canonical MCP projection to cache derivable rendered HTML in the extension global-storage content-addressed cache. Never writes cache data into notebooks. Requires reload.",
           "order": 4
         },
         "wolfbook.mcp.boundedResults": {
-          "scope": "window", "type": "boolean", "default": false,
+          "scope": "window",
+          "type": "boolean",
+          "default": false,
           "markdownDescription": "Replace large MCP text responses with a preview and expiring result handle retrievable through wolfbook_getResult. Requires reload.",
           "order": 5
         },
         "wolfbook.mcp.resultHandleThreshold": {
-          "scope": "window", "type": "integer", "default": 24000, "minimum": 4096, "maximum": 1000000,
+          "scope": "window",
+          "type": "integer",
+          "default": 24000,
+          "minimum": 4096,
+          "maximum": 1000000,
           "markdownDescription": "Character threshold for bounded MCP result envelopes.",
           "order": 6
         },
         "wolfbook.mcp.profile": {
-          "scope": "window", "type": "string", "enum": ["notebook", "slides", "full"], "default": "full",
-          "markdownDescription": "Which tool families the MCP server advertises in tools/list. `notebook` hides the wolfslide_* family and agent extras; `slides` hides most notebook tools; `full` advertises everything. Hidden tools still work when called by name. Requires reload.",
+          "scope": "window",
+          "type": "string",
+          "enum": [
+            "notebook",
+            "slides",
+            "paper",
+            "full"
+          ],
+          "default": "full",
+          "markdownDescription": "Which tool families the MCP server advertises in tools/list. `notebook` hides the wolfslide_* family and agent extras (paper_* stays visible); `slides` hides most notebook tools and all paper_* tools; `paper` advertises only the Wolfbook TeX paper_* family; `full` advertises everything. Hidden tools still work when called by name. Requires reload.",
           "order": 7
         },
         "wolfbook.mcp.exposeDeprecatedTools": {
-          "scope": "window", "type": "boolean", "default": false,
+          "scope": "window",
+          "type": "boolean",
+          "default": false,
           "markdownDescription": "Advertise deprecated MCP tool names (tagged `mcp:deprecated`) in tools/list with a DEPRECATED prefix. When off, the names still work when called directly but are not listed. Requires reload.",
           "order": 8
         },
         "wolfbook.ai.busyPolicy": {
           "scope": "window",
           "type": "string",
-          "enum": ["reject", "preempt"],
+          "enum": [
+            "reject",
+            "preempt"
+          ],
           "default": "reject",
           "markdownDescription": "Policy when an AI tool requests the Wolfram kernel while another evaluation is running. `reject` preserves the running work and returns structured busy status. `preempt` restores legacy AI-priority behavior and must also be explicitly requested by the tool call.",
           "order": 3
@@ -373,7 +400,7 @@
         "wolfbook.notebook.rendering.interactive3D": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "Attach interactive 3D data to `Graphics3D` outputs. The picture still renders as a static image \u2014 dragging it turns it into a rotatable WebGL view, and the **3D** output button opens it directly. Turn off to skip the extra work (roughly 70\u2013200 ms per 3D output) if you never rotate plots."
+          "markdownDescription": "Attach interactive 3D data to `Graphics3D` outputs. The picture still renders as a static image — dragging it turns it into a rotatable WebGL view, and the **3D** output button opens it directly. Turn off to skip the extra work (roughly 70–200 ms per 3D output) if you never rotate plots."
         },
         "wolfbook.notebook.rendering.plotTooltips": {
           "type": "boolean",
@@ -510,8 +537,12 @@
           "additionalProperties": {
             "type": "object",
             "properties": {
-              "backgroundColor": { "type": "string" },
-              "backgroundImagePath": { "type": "string" }
+              "backgroundColor": {
+                "type": "string"
+              },
+              "backgroundImagePath": {
+                "type": "string"
+              }
             }
           },
           "order": 6
@@ -997,6 +1028,102 @@
           "scope": "window",
           "description": "**Experimental.** Per-cell timeout (seconds) used by replayNotebook when re-evaluating a Charm notebook after a kernel restart (revision or Skeptic kernel-busy recovery).",
           "order": 201
+        },
+        "wolfbook.tex.enable": {
+          "scope": "window",
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Enable Wolfbook TeX: outline, folding, CodeLens and deterministic diagnostics for `.tex` files, plus the `paper_*` agent tools. Wolfbook deliberately does **not** contribute a `latex` language or grammar, so it coexists with LaTeX Workshop rather than competing with it. Requires reload."
+        },
+        "wolfbook.tex.diagnostics": {
+          "scope": "window",
+          "type": "string",
+          "enum": [
+            "semantic",
+            "off"
+          ],
+          "default": "semantic",
+          "markdownDescription": "`semantic` reports unresolved `\\\\ref`, duplicate `\\\\label`, unbalanced environments and managed-block states — all computed without a compiler, so they are safe on the keystroke path. Compile errors stay with LaTeX Workshop. `off` disables them."
+        },
+        "wolfbook.tex.codeLens": {
+          "scope": "window",
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Show `Ask · Find refs · Copy key` above equations, figures and tables, and the state of each managed `%Mathematica` block."
+        },
+        "wolfbook.tex.compile": {
+          "scope": "window",
+          "type": "string",
+          "enum": [
+            "onSave",
+            "manual",
+            "off"
+          ],
+          "default": "onSave",
+          "markdownDescription": "When to build the render map. `onSave` compiles the paper out-of-tree after each save (typing is never blocked; a large paper takes ~15 s). `manual` compiles only via **Wolfbook: Compile Paper**. `off` disables compiling entirely — the structural outline and diagnostics still work."
+        },
+        "wolfbook.tex.engine": {
+          "scope": "window",
+          "type": "string",
+          "enum": [
+            "pdflatex",
+            "lualatex",
+            "xelatex"
+          ],
+          "default": "pdflatex",
+          "markdownDescription": "Engine passed to `latexmk`. Compiles run **out of tree** in a temp directory, so your project is never written to; a `.latexmkrc` in the project is still honoured."
+        },
+        "wolfbook.tex.liveRender": {
+          "type": "boolean",
+          "default": true,
+          "description": "Recompile the paper from the unsaved editor buffer shortly after you stop typing, so the Page view keeps up without a save. The .tex file on disk is never written."
+        },
+        "wolfbook.tex.liveRenderDelayMs": {
+          "type": "number",
+          "default": 900,
+          "minimum": 200,
+          "maximum": 10000,
+          "description": "How long to wait after the last keystroke before a live recompile. Longer is calmer; shorter is more immediate."
+        },
+        "wolfbook.tex.fullScreenMode": {
+          "type": "string",
+          "enum": [
+            "maximize",
+            "fullScreen",
+            "zen"
+          ],
+          "enumDescriptions": [
+            "Maximise the Page view within the VS Code window.",
+            "Maximise it and put the window itself into full screen.",
+            "Use Zen Mode, which also hides the status bar and tabs."
+          ],
+          "default": "maximize",
+          "description": "What the Page view’s full-screen button does. Esc always leaves, and whatever was toggled on is toggled back off."
+        },
+        "wolfbook.tex.lockViewerGroup": {
+          "type": "boolean",
+          "default": true,
+          "description": "Lock the editor group the Page view opens in, so clicking a file or a search result does not open it on top of the paper."
+        },
+        "wolfbook.tex.viewerFollowsTex": {
+          "type": "boolean",
+          "default": true,
+          "description": "Close the Page view when you switch to a file that is not a .tex, and bring it back — at the same place — when you return to one."
+        },
+        "wolfbook.tex.pageTheme": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "light",
+            "dark"
+          ],
+          "enumDescriptions": [
+            "Follow the VS Code colour theme: dark themes darken the pages.",
+            "Always show the paper on white, as it will be printed — even in a dark theme.",
+            "Always darken the pages."
+          ],
+          "default": "auto",
+          "description": "How the compiled pages are shown in the Page view. Darkening inverts the rendered image, so figures and photographs invert with it; the toolbar's sun/moon button switches this without opening settings."
         }
       }
     },
@@ -1409,6 +1536,60 @@
         "title": "SkilXiv: Review Skill Corrections (claims the kernel disproved)",
         "category": "SkilXiv (Experimental)",
         "icon": "$(warning)"
+      },
+      {
+        "command": "wolfbook.tex.showProjection",
+        "title": "Show Paper Projection (TeX)",
+        "category": "Wolfbook"
+      },
+      {
+        "command": "wolfbook.tex.compile",
+        "title": "Compile Paper (TeX)",
+        "category": "Wolfbook"
+      },
+      {
+        "command": "wolfbook.tex.showLog",
+        "title": "Show Compile Log (TeX)",
+        "category": "Wolfbook"
+      },
+      {
+        "command": "wolfbook.tex.goToPage",
+        "title": "Go to Page (TeX)",
+        "category": "Wolfbook"
+      },
+      {
+        "command": "wolfbook.tex.whereAmI",
+        "title": "Where Am I in the Paper? (TeX)",
+        "category": "Wolfbook"
+      },
+      {
+        "command": "wolfbook.tex.openViewer",
+        "title": "Open Paper",
+        "category": "Wolfbook",
+        "icon": {
+          "light": "./icons/wolfbook-paper.png",
+          "dark": "./icons/wolfbook-paper.png"
+        }
+      },
+      {
+        "command": "wolfbook.tex.showTimingLog",
+        "title": "Show Page-Mode Timings",
+        "category": "Wolfbook"
+      },
+      {
+        "command": "wolfbook.tex.compareWithDisk",
+        "title": "Compare with the File on Disk (TeX)",
+        "category": "Wolfbook"
+      },
+      {
+        "command": "wolfbook.tex.compareWithGit",
+        "title": "Compare with a Git Revision (TeX)",
+        "category": "Wolfbook"
+      },
+      {
+        "command": "wolfbook.tex.compareWith",
+        "title": "Compare This Paper With… (TeX)",
+        "category": "Wolfbook"
       }
     ],
     "menus": {
@@ -1629,6 +1810,13 @@
           "command": "wolfbook.pasteImageCellBelow",
           "when": "notebookType == extended-wolfram-notebook",
           "group": "navigation"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "wolfbook.tex.openViewer",
+          "when": "resourceExtname == .tex",
+          "group": "navigation@1"
         }
       ]
     },
@@ -2195,7 +2383,11 @@
                   },
                   "content_encoding": {
                     "type": "string",
-                    "enum": ["auto", "raw", "base64"],
+                    "enum": [
+                      "auto",
+                      "raw",
+                      "base64"
+                    ],
                     "description": "auto (default) applies legacy escape repair; raw preserves the supplied string; base64 decodes once and bypasses normalizers."
                   }
                 },
@@ -2257,12 +2449,28 @@
               "type": "boolean",
               "description": "If true, return a compact one-line-per-cell summary (number, kind, first line, output preview) instead of full source and outputs. Faster for large notebooks when you only need to locate a cell."
             },
-            "kind": { "type": "string", "enum": ["code", "markdown"], "description": "Brief mode only: include only this cell kind." },
-            "has_output": { "type": "boolean", "description": "Brief mode only: filter by whether the cell has any output." },
-            "has_errors": { "type": "boolean", "description": "Brief mode only: filter by Wolfbook error output MIME evidence." },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "code",
+                "markdown"
+              ],
+              "description": "Brief mode only: include only this cell kind."
+            },
+            "has_output": {
+              "type": "boolean",
+              "description": "Brief mode only: filter by whether the cell has any output."
+            },
+            "has_errors": {
+              "type": "boolean",
+              "description": "Brief mode only: filter by Wolfbook error output MIME evidence."
+            },
             "output_projection": {
               "type": "string",
-              "enum": ["legacy", "canonical"],
+              "enum": [
+                "legacy",
+                "canonical"
+              ],
               "description": "Optional MCP-facing output view. canonical returns versioned source, compact previews, and MIME/hash manifests without persisted render HTML; it never changes the notebook file."
             }
           }
@@ -2285,10 +2493,28 @@
               "type": "number",
               "description": "Maximum seconds to wait for result (default: 30)."
             },
-            "wait_mode": { "type": "string", "enum": ["up_to_timeout", "async"], "description": "Return immediately with an operation ID when async; otherwise wait up to timeoutSeconds (default)." },
-            "caption": { "type": "string", "maxLength": 160, "description": "Short human-readable reminder of what this operation is doing." },
-            "progress_symbol": { "type": "string", "description": "Optional Wolfram symbol whose changing value reports semantic progress during a long run." },
-            "progress_interval_ms": { "type": "number", "minimum": 1000, "description": "Progress sampling interval; minimum 1000 ms." },
+            "wait_mode": {
+              "type": "string",
+              "enum": [
+                "up_to_timeout",
+                "async"
+              ],
+              "description": "Return immediately with an operation ID when async; otherwise wait up to timeoutSeconds (default)."
+            },
+            "caption": {
+              "type": "string",
+              "maxLength": 160,
+              "description": "Short human-readable reminder of what this operation is doing."
+            },
+            "progress_symbol": {
+              "type": "string",
+              "description": "Optional Wolfram symbol whose changing value reports semantic progress during a long run."
+            },
+            "progress_interval_ms": {
+              "type": "number",
+              "minimum": 1000,
+              "description": "Progress sampling interval; minimum 1000 ms."
+            },
             "outputForm": {
               "type": "string",
               "enum": [
@@ -2304,18 +2530,36 @@
               "type": "object",
               "description": "Optional assertion, checked kernel-side in the SAME round trip (no second evaluation). The response starts with 'ASSERT PASS'/'ASSERT FAIL' and the outcome is journaled on the operation. In multiLine mode the assertion applies to the LAST statement only. The call itself is not an error on FAIL.",
               "properties": {
-                "equals": { "type": "string", "description": "WL expression; passes when SameQ (or numeric ==) with the result." },
-                "matches": { "type": "string", "description": "WL pattern; passes when MatchQ[result, pattern]." },
+                "equals": {
+                  "type": "string",
+                  "description": "WL expression; passes when SameQ (or numeric ==) with the result."
+                },
+                "matches": {
+                  "type": "string",
+                  "description": "WL pattern; passes when MatchQ[result, pattern]."
+                },
                 "numeric": {
                   "type": "object",
                   "properties": {
-                    "value": { "type": "string", "description": "Expected numeric value (WL expression)." },
-                    "tolerance": { "type": "string", "description": "Absolute tolerance, WL expression. Default 10^-10." }
+                    "value": {
+                      "type": "string",
+                      "description": "Expected numeric value (WL expression)."
+                    },
+                    "tolerance": {
+                      "type": "string",
+                      "description": "Absolute tolerance, WL expression. Default 10^-10."
+                    }
                   },
                   "description": "Passes when Abs[N[result - value]] <= tolerance."
                 },
-                "isTrue": { "type": "boolean", "description": "Passes when TrueQ[result]." },
-                "freeOfMessages": { "type": "boolean", "description": "Passes only when the evaluation produced no kernel messages." }
+                "isTrue": {
+                  "type": "boolean",
+                  "description": "Passes when TrueQ[result]."
+                },
+                "freeOfMessages": {
+                  "type": "boolean",
+                  "description": "Passes only when the evaluation produced no kernel messages."
+                }
               }
             },
             "multiLine": {
@@ -2347,7 +2591,11 @@
             },
             "format": {
               "type": "string",
-              "enum": ["text", "markdown", "tex"],
+              "enum": [
+                "text",
+                "markdown",
+                "tex"
+              ],
               "description": "Usage-string rendering. 'text' (default) converts the embedded TeX to plain text — 3-4× cheaper and just as useful; 'tex' keeps the raw $...$ LaTeX; 'markdown' is an alias of tex kept for compatibility."
             }
           },
@@ -2377,7 +2625,15 @@
               "type": "string",
               "description": "Cell source text for single-cell shorthand (use with 'kind'). Ignored if 'cells' array is provided."
             },
-            "content_encoding": { "type": "string", "enum": ["auto", "raw", "base64"], "description": "Default encoding for top-level content and items that do not override it." },
+            "content_encoding": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "raw",
+                "base64"
+              ],
+              "description": "Default encoding for top-level content and items that do not override it."
+            },
             "cells": {
               "type": "array",
               "description": "Ordered list of cells to insert as a contiguous block. Each item: {kind: 'code'|'markdown', content: string}.",
@@ -2398,7 +2654,11 @@
                   },
                   "content_encoding": {
                     "type": "string",
-                    "enum": ["auto", "raw", "base64"],
+                    "enum": [
+                      "auto",
+                      "raw",
+                      "base64"
+                    ],
                     "description": "Decode mode for this item; overrides top-level content_encoding."
                   }
                 },
@@ -2432,11 +2692,32 @@
               "type": "number",
               "description": "Timeout in seconds for evaluation when evaluate=true. Defaults to 30."
             },
-            "wait_mode": { "type": "string", "enum": ["up_to_timeout", "async"], "description": "Return immediately with an operation ID when async; otherwise wait normally." },
-            "notebook": { "type": "string", "description": "Target notebook filename or absolute path. Omit to use the session target." },
-            "caption": { "type": "string", "maxLength": 160, "description": "Short human-readable reminder of what this operation is doing." }
-            ,"progress_symbol": { "type": "string", "description": "Optional Wolfram symbol whose changing value reports semantic progress during evaluation." }
-            ,"progress_interval_ms": { "type": "number", "minimum": 1000, "description": "Progress sampling interval; minimum 1000 ms." }
+            "wait_mode": {
+              "type": "string",
+              "enum": [
+                "up_to_timeout",
+                "async"
+              ],
+              "description": "Return immediately with an operation ID when async; otherwise wait normally."
+            },
+            "notebook": {
+              "type": "string",
+              "description": "Target notebook filename or absolute path. Omit to use the session target."
+            },
+            "caption": {
+              "type": "string",
+              "maxLength": 160,
+              "description": "Short human-readable reminder of what this operation is doing."
+            },
+            "progress_symbol": {
+              "type": "string",
+              "description": "Optional Wolfram symbol whose changing value reports semantic progress during evaluation."
+            },
+            "progress_interval_ms": {
+              "type": "number",
+              "minimum": 1000,
+              "description": "Progress sampling interval; minimum 1000 ms."
+            }
           }
         }
       },
@@ -2461,7 +2742,15 @@
               "type": "string",
               "description": "Single-cell mode: new source text for the cell."
             },
-            "content_encoding": { "type": "string", "enum": ["auto", "raw", "base64"], "description": "Default decode mode for single content and batch items without an override." },
+            "content_encoding": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "raw",
+                "base64"
+              ],
+              "description": "Default decode mode for single content and batch items without an override."
+            },
             "cells": {
               "type": "array",
               "description": "Batch mode: array of cells to edit. Each item must have cellId (preferred) or cellNumber, and content. Optionally set evaluate:false on an item to skip evaluation of that cell.",
@@ -2482,17 +2771,34 @@
                   },
                   "content_encoding": {
                     "type": "string",
-                    "enum": ["auto", "raw", "base64"],
+                    "enum": [
+                      "auto",
+                      "raw",
+                      "base64"
+                    ],
                     "description": "Decode mode for this item; overrides top-level content_encoding."
                   },
                   "evaluate": {
                     "type": "boolean",
                     "description": "Override per-cell evaluation (default: inherits top-level evaluate which defaults to true)."
                   },
-                  "expected_cell_id": { "type": "string", "description": "Reject this item if the resolved CellId differs." },
-                  "expected_kind": { "type": "string", "enum": ["code", "markdown"] },
-                  "expected_source_prefix": { "type": "string" },
-                  "expected_source_hash": { "type": "string" }
+                  "expected_cell_id": {
+                    "type": "string",
+                    "description": "Reject this item if the resolved CellId differs."
+                  },
+                  "expected_kind": {
+                    "type": "string",
+                    "enum": [
+                      "code",
+                      "markdown"
+                    ]
+                  },
+                  "expected_source_prefix": {
+                    "type": "string"
+                  },
+                  "expected_source_hash": {
+                    "type": "string"
+                  }
                 },
                 "required": [
                   "content"
@@ -2507,14 +2813,48 @@
               "type": "number",
               "description": "Max seconds to wait per cell evaluation (default: 30 for batch, 15 for single-cell)."
             },
-            "wait_mode": { "type": "string", "enum": ["up_to_timeout", "async"], "description": "Return immediately with an operation ID when async; otherwise wait normally." },
-            "caption": { "type": "string", "maxLength": 160, "description": "Short human-readable reminder of what this operation is doing." },
-            "progress_symbol": { "type": "string", "description": "Optional Wolfram symbol whose changing value reports semantic progress during evaluation." },
-            "progress_interval_ms": { "type": "number", "minimum": 1000, "description": "Progress sampling interval; minimum 1000 ms." },
-            "expected_cell_id": { "type": "string", "description": "Reject if the resolved cell ID differs." },
-            "expected_kind": { "type": "string", "enum": ["code", "markdown"], "description": "Reject if the current cell kind differs." },
-            "expected_source_prefix": { "type": "string", "description": "Reject unless current source starts with this text." },
-            "expected_source_hash": { "type": "string", "description": "Reject unless current source SHA-256 matches." }
+            "wait_mode": {
+              "type": "string",
+              "enum": [
+                "up_to_timeout",
+                "async"
+              ],
+              "description": "Return immediately with an operation ID when async; otherwise wait normally."
+            },
+            "caption": {
+              "type": "string",
+              "maxLength": 160,
+              "description": "Short human-readable reminder of what this operation is doing."
+            },
+            "progress_symbol": {
+              "type": "string",
+              "description": "Optional Wolfram symbol whose changing value reports semantic progress during evaluation."
+            },
+            "progress_interval_ms": {
+              "type": "number",
+              "minimum": 1000,
+              "description": "Progress sampling interval; minimum 1000 ms."
+            },
+            "expected_cell_id": {
+              "type": "string",
+              "description": "Reject if the resolved cell ID differs."
+            },
+            "expected_kind": {
+              "type": "string",
+              "enum": [
+                "code",
+                "markdown"
+              ],
+              "description": "Reject if the current cell kind differs."
+            },
+            "expected_source_prefix": {
+              "type": "string",
+              "description": "Reject unless current source starts with this text."
+            },
+            "expected_source_hash": {
+              "type": "string",
+              "description": "Reject unless current source SHA-256 matches."
+            }
           }
         }
       },
@@ -2555,14 +2895,52 @@
               "type": "boolean",
               "description": "Range mode: if true, only include cells that produced kernel messages/warnings in the output. Cells with no messages are silently skipped. Default false."
             },
-            "caption": { "type": "string", "maxLength": 160, "description": "Short human-readable reminder of what this operation is doing." },
-            "wait_mode": { "type": "string", "enum": ["up_to_timeout", "async"], "description": "Return immediately with an operation ID when async; otherwise wait up to timeoutSeconds." },
-            "busyPolicy": { "type": "string", "enum": ["reject", "preempt"], "description": "Busy behavior. reject is the safe default; preempt works only when enabled in settings." },
-            "progress_symbol": { "type": "string", "description": "Optional Wolfram symbol whose changing value reports semantic progress during a long run." },
-            "progress_interval_ms": { "type": "number", "minimum": 1000, "description": "Progress sampling interval; minimum 1000 ms." },
-            "stop_on_failure": { "type": "boolean", "description": "Range mode: stop only on structured failure; default true." },
-            "message_policy": { "type": "string", "enum": ["collect", "stop"], "description": "Range mode: collect messages by default, or stop on any structured message." },
-            "notebook": { "type": "string", "description": "Target notebook filename or absolute path. Omit to use the session target." }
+            "caption": {
+              "type": "string",
+              "maxLength": 160,
+              "description": "Short human-readable reminder of what this operation is doing."
+            },
+            "wait_mode": {
+              "type": "string",
+              "enum": [
+                "up_to_timeout",
+                "async"
+              ],
+              "description": "Return immediately with an operation ID when async; otherwise wait up to timeoutSeconds."
+            },
+            "busyPolicy": {
+              "type": "string",
+              "enum": [
+                "reject",
+                "preempt"
+              ],
+              "description": "Busy behavior. reject is the safe default; preempt works only when enabled in settings."
+            },
+            "progress_symbol": {
+              "type": "string",
+              "description": "Optional Wolfram symbol whose changing value reports semantic progress during a long run."
+            },
+            "progress_interval_ms": {
+              "type": "number",
+              "minimum": 1000,
+              "description": "Progress sampling interval; minimum 1000 ms."
+            },
+            "stop_on_failure": {
+              "type": "boolean",
+              "description": "Range mode: stop only on structured failure; default true."
+            },
+            "message_policy": {
+              "type": "string",
+              "enum": [
+                "collect",
+                "stop"
+              ],
+              "description": "Range mode: collect messages by default, or stop on any structured message."
+            },
+            "notebook": {
+              "type": "string",
+              "description": "Target notebook filename or absolute path. Omit to use the session target."
+            }
           }
         }
       },
@@ -2601,10 +2979,23 @@
               "type": "boolean",
               "description": "If true (default), save deleted cell content to ai_deleted_cells.md before removing."
             },
-            "expected_cell_id": { "type": "string", "description": "Single-cell deletion precondition." },
-            "expected_kind": { "type": "string", "enum": ["code", "markdown"] },
-            "expected_source_prefix": { "type": "string" },
-            "expected_source_hash": { "type": "string" }
+            "expected_cell_id": {
+              "type": "string",
+              "description": "Single-cell deletion precondition."
+            },
+            "expected_kind": {
+              "type": "string",
+              "enum": [
+                "code",
+                "markdown"
+              ]
+            },
+            "expected_source_prefix": {
+              "type": "string"
+            },
+            "expected_source_hash": {
+              "type": "string"
+            }
           }
         }
       },
@@ -2676,7 +3067,10 @@
         "name": "wolfbook_getKernelState",
         "displayName": "Wolfbook: Get Kernel State (deprecated)",
         "toolReferenceName": "wolfbookState",
-        "tags": ["mcp:deprecated", "mcp:replacedBy:wolfbook_inspectSymbols"],
+        "tags": [
+          "mcp:deprecated",
+          "mcp:replacedBy:wolfbook_inspectSymbols"
+        ],
         "modelDescription": "Inspects symbols by evaluating a query in the Wolfram kernel; this is NOT a busy/status check. Use wolfbook_status to inspect lifecycle without touching the kernel. Returns user-defined symbols matching a context pattern, with values or rule counts.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
@@ -2694,7 +3088,9 @@
         "name": "wolfbook_journalDigest",
         "displayName": "Wolfbook: Journal Digest",
         "toolReferenceName": "wolfbookJournalDigest",
-        "tags": ["mcp:hidden"],
+        "tags": [
+          "mcp:hidden"
+        ],
         "modelDescription": "Alias of wolfbook_evaluationJournal action=\"digest\": a ~20-line summary of the session (kernel, notebooks touched, last operations, failure/assertion counts).",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
@@ -2712,8 +3108,21 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "scope": { "type": "string", "enum": ["all", "clients", "kernels", "operations", "notebook"], "description": "Which section(s) to return. Default all." },
-            "notebook": { "type": "string", "description": "Notebook for the notebook section; omit for the session target." }
+            "scope": {
+              "type": "string",
+              "enum": [
+                "all",
+                "clients",
+                "kernels",
+                "operations",
+                "notebook"
+              ],
+              "description": "Which section(s) to return. Default all."
+            },
+            "notebook": {
+              "type": "string",
+              "description": "Notebook for the notebook section; omit for the session target."
+            }
           },
           "required": []
         }
@@ -2727,8 +3136,18 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "scope": { "type": "string", "enum": ["quick", "full"], "description": "quick (default) skips the edit-rerun stage; full runs everything." },
-            "keepArtifacts": { "type": "boolean", "description": "Keep the temp notebook instead of deleting it (for debugging). Default false." }
+            "scope": {
+              "type": "string",
+              "enum": [
+                "quick",
+                "full"
+              ],
+              "description": "quick (default) skips the edit-rerun stage; full runs everything."
+            },
+            "keepArtifacts": {
+              "type": "boolean",
+              "description": "Keep the temp notebook instead of deleting it (for debugging). Default false."
+            }
           },
           "required": []
         }
@@ -2738,7 +3157,10 @@
         "displayName": "Wolfbook: Kernel Status",
         "toolReferenceName": "wolfbookKernelStatus",
         "canBeReferencedInPrompt": true,
-        "tags": ["mcp:deprecated", "mcp:replacedBy:wolfbook_status"],
+        "tags": [
+          "mcp:deprecated",
+          "mcp:replacedBy:wolfbook_status"
+        ],
         "modelDescription": "Instant, side-effect-free snapshot of Wolfram kernel lifecycle and active operation. Never sends a WSTP packet, waits, or interrupts running work. Use this before probing a possibly busy kernel.",
         "inputSchema": {
           "type": "object",
@@ -2755,12 +3177,28 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "operation_id": { "type": "string", "description": "Operation ID returned by a Wolfbook execution tool." },
-            "include_progress": { "type": "boolean", "description": "Include bounded Print/message progress (default true)." },
-            "after_sequence": { "type": "number", "description": "Return progress entries newer than this sequence number." },
-            "wait_seconds": { "type": "number", "minimum": 0, "maximum": 300, "description": "Optionally wait this many seconds for completion before returning status." }
+            "operation_id": {
+              "type": "string",
+              "description": "Operation ID returned by a Wolfbook execution tool."
+            },
+            "include_progress": {
+              "type": "boolean",
+              "description": "Include bounded Print/message progress (default true)."
+            },
+            "after_sequence": {
+              "type": "number",
+              "description": "Return progress entries newer than this sequence number."
+            },
+            "wait_seconds": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 300,
+              "description": "Optionally wait this many seconds for completion before returning status."
+            }
           },
-          "required": ["operation_id"]
+          "required": [
+            "operation_id"
+          ]
         }
       },
       {
@@ -2772,12 +3210,45 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "limit": { "type": "number", "description": "Number of recent operations (default 20, maximum 50)." },
-            "action": { "type": "string", "enum": ["full", "digest", "export"], "description": "full (default) = JSON journal; digest = summary; export = write a Markdown session report." },
-            "tool": { "type": "string", "description": "Case-insensitive tool-name substring filter." },
-            "state": { "description": "Exact state filter or array of states.", "oneOf": [{"type":"string"},{"type":"array","items":{"type":"string"}}] },
-            "caption_contains": { "type": "string", "description": "Case-insensitive caption substring filter." },
-            "notebook": { "type": "string", "description": "Full notebook path or basename filter." }
+            "limit": {
+              "type": "number",
+              "description": "Number of recent operations (default 20, maximum 50)."
+            },
+            "action": {
+              "type": "string",
+              "enum": [
+                "full",
+                "digest",
+                "export"
+              ],
+              "description": "full (default) = JSON journal; digest = summary; export = write a Markdown session report."
+            },
+            "tool": {
+              "type": "string",
+              "description": "Case-insensitive tool-name substring filter."
+            },
+            "state": {
+              "description": "Exact state filter or array of states.",
+              "oneOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
+            },
+            "caption_contains": {
+              "type": "string",
+              "description": "Case-insensitive caption substring filter."
+            },
+            "notebook": {
+              "type": "string",
+              "description": "Full notebook path or basename filter."
+            }
           },
           "required": []
         }
@@ -2791,11 +3262,26 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "operation_id": { "type": "string", "description": "Operation ID returned by an evaluation tool." },
-            "mode": { "type": "string", "enum": ["abort", "discard-result"], "description": "abort (default) interrupts matching kernel work; discard-result settles only the registry." },
-            "reason": { "type": "string", "description": "Reason recorded in cancellation metadata." }
+            "operation_id": {
+              "type": "string",
+              "description": "Operation ID returned by an evaluation tool."
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "abort",
+                "discard-result"
+              ],
+              "description": "abort (default) interrupts matching kernel work; discard-result settles only the registry."
+            },
+            "reason": {
+              "type": "string",
+              "description": "Reason recorded in cancellation metadata."
+            }
           },
-          "required": ["operation_id"]
+          "required": [
+            "operation_id"
+          ]
         }
       },
       {
@@ -2807,11 +3293,36 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "limit": { "type": "number", "description": "Retained for compatibility; reports include every matched retained operation up to 50." },
-            "tool": { "type": "string", "description": "Case-insensitive tool-name substring filter." },
-            "state": { "description": "Exact state filter or array of states.", "oneOf": [{"type":"string"},{"type":"array","items":{"type":"string"}}] },
-            "caption_contains": { "type": "string", "description": "Case-insensitive caption substring filter." },
-            "notebook": { "type": "string", "description": "Full notebook path or basename filter." }
+            "limit": {
+              "type": "number",
+              "description": "Retained for compatibility; reports include every matched retained operation up to 50."
+            },
+            "tool": {
+              "type": "string",
+              "description": "Case-insensitive tool-name substring filter."
+            },
+            "state": {
+              "description": "Exact state filter or array of states.",
+              "oneOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
+            },
+            "caption_contains": {
+              "type": "string",
+              "description": "Case-insensitive caption substring filter."
+            },
+            "notebook": {
+              "type": "string",
+              "description": "Full notebook path or basename filter."
+            }
           },
           "required": []
         }
@@ -2825,7 +3336,10 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "notebook": { "type": "string", "description": "Notebook filename or absolute path; omit for the active notebook." }
+            "notebook": {
+              "type": "string",
+              "description": "Notebook filename or absolute path; omit for the active notebook."
+            }
           },
           "required": []
         }
@@ -2839,13 +3353,45 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "handle": { "type": "string", "description": "Operation ID/result handle." },
-            "offset": { "type": "number", "minimum": 0 },
-            "limit": { "type": "number", "minimum": 1, "maximum": 65536 },
-            "format": { "type": "string", "enum": ["text", "json"], "description": "Return text (default) or pretty-printed JSON when the stored result is valid JSON." }
-            ,"path": { "type": "array", "items": { "oneOf": [{"type":"string"},{"type":"number"}] }, "description": "JSON path into a structured outputForm:'json' result. [] returns a root manifest; non-empty paths return a node manifest plus a bounded slice." }
+            "handle": {
+              "type": "string",
+              "description": "Operation ID/result handle."
+            },
+            "offset": {
+              "type": "number",
+              "minimum": 0
+            },
+            "limit": {
+              "type": "number",
+              "minimum": 1,
+              "maximum": 65536
+            },
+            "format": {
+              "type": "string",
+              "enum": [
+                "text",
+                "json"
+              ],
+              "description": "Return text (default) or pretty-printed JSON when the stored result is valid JSON."
+            },
+            "path": {
+              "type": "array",
+              "items": {
+                "oneOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "number"
+                  }
+                ]
+              },
+              "description": "JSON path into a structured outputForm:'json' result. [] returns a root manifest; non-empty paths return a node manifest plus a bounded slice."
+            }
           },
-          "required": ["handle"]
+          "required": [
+            "handle"
+          ]
         }
       },
       {
@@ -2885,10 +3431,23 @@
               "type": "boolean",
               "description": "If true, copy the cell (leave source intact). If false or omitted, move it (delete from source)."
             },
-            "expected_cell_id": { "type": "string", "description": "Reject if the resolved source cell ID differs." },
-            "expected_kind": { "type": "string", "enum": ["code", "markdown"] },
-            "expected_source_prefix": { "type": "string" },
-            "expected_source_hash": { "type": "string" }
+            "expected_cell_id": {
+              "type": "string",
+              "description": "Reject if the resolved source cell ID differs."
+            },
+            "expected_kind": {
+              "type": "string",
+              "enum": [
+                "code",
+                "markdown"
+              ]
+            },
+            "expected_source_prefix": {
+              "type": "string"
+            },
+            "expected_source_hash": {
+              "type": "string"
+            }
           }
         }
       },
@@ -2958,11 +3517,21 @@
             },
             "checkpoint_before_restart": {
               "type": "string",
-              "enum": ["if-idle", "always", "never"],
+              "enum": [
+                "if-idle",
+                "always",
+                "never"
+              ],
               "description": "action='restart' only: auto-checkpoint Global` before restarting. 'if-idle' (default) checkpoints only a healthy idle kernel; 'always' tries even when busy; 'never' skips. Hard 10 s cap; never blocks the restart; the response states truthfully whether a checkpoint was saved."
             },
-            "operation_id": { "type": "string", "description": "For abort: operation expected to own the active kernel evaluation." },
-            "reason": { "type": "string", "description": "Human-readable cancellation reason recorded in the journal." }
+            "operation_id": {
+              "type": "string",
+              "description": "For abort: operation expected to own the active kernel evaluation."
+            },
+            "reason": {
+              "type": "string",
+              "description": "Human-readable cancellation reason recorded in the journal."
+            }
           }
         }
       },
@@ -2975,11 +3544,36 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "action": { "type": "string", "enum": ["list", "create", "bind", "select", "default", "unbind", "rename", "stop"], "default": "list" },
-            "kernel_id": { "type": "string", "description": "Opaque kernel ID returned by action=list." },
-            "notebook": { "type": "string", "description": "Notebook path or filename for bind/unbind." },
-            "label": { "type": "string", "description": "Optional presentation label for a newly created kernel." }
-            ,"acknowledge_resource_cost": { "type": "boolean", "description": "Required true for create: acknowledges that another Wolfram process consumes memory and may consume a license seat." }
+            "action": {
+              "type": "string",
+              "enum": [
+                "list",
+                "create",
+                "bind",
+                "select",
+                "default",
+                "unbind",
+                "rename",
+                "stop"
+              ],
+              "default": "list"
+            },
+            "kernel_id": {
+              "type": "string",
+              "description": "Opaque kernel ID returned by action=list."
+            },
+            "notebook": {
+              "type": "string",
+              "description": "Notebook path or filename for bind/unbind."
+            },
+            "label": {
+              "type": "string",
+              "description": "Optional presentation label for a newly created kernel."
+            },
+            "acknowledge_resource_cost": {
+              "type": "boolean",
+              "description": "Required true for create: acknowledges that another Wolfram process consumes memory and may consume a license seat."
+            }
           }
         }
       },
@@ -2988,16 +3582,39 @@
         "displayName": "Wolfbook: Select Notebook Kernel",
         "toolReferenceName": "wolfbookSelectKernel",
         "canBeReferencedInPrompt": true,
-        "tags": ["mcp:hidden"],
+        "tags": [
+          "mcp:hidden"
+        ],
         "modelDescription": "Select which live Wolfram kernel a notebook uses. Use action=list to discover kernel_id values, action=select to bind a notebook to one of them, action=default to bind it to this VS Code window's default kernel, or action=create to start a new isolated kernel. Multiple notebooks may deliberately share one kernel. Bindings are local VS Code state and never modify the .wb file.",
         "inputSchema": {
           "type": "object",
           "properties": {
-            "action": { "type": "string", "enum": ["list", "select", "default", "create"], "default": "list" },
-            "notebook": { "type": "string", "description": "Absolute notebook path. Required for select/default and optional for create." },
-            "kernel_id": { "type": "string", "description": "Opaque kernel ID returned by action=list. Required for select." },
-            "label": { "type": "string", "description": "Optional label for a newly created kernel." },
-            "acknowledge_resource_cost": { "type": "boolean", "description": "Required true for create because another Wolfram process may consume a license seat." }
+            "action": {
+              "type": "string",
+              "enum": [
+                "list",
+                "select",
+                "default",
+                "create"
+              ],
+              "default": "list"
+            },
+            "notebook": {
+              "type": "string",
+              "description": "Absolute notebook path. Required for select/default and optional for create."
+            },
+            "kernel_id": {
+              "type": "string",
+              "description": "Opaque kernel ID returned by action=list. Required for select."
+            },
+            "label": {
+              "type": "string",
+              "description": "Optional label for a newly created kernel."
+            },
+            "acknowledge_resource_cost": {
+              "type": "boolean",
+              "description": "Required true for create because another Wolfram process may consume a license seat."
+            }
           }
         }
       },
@@ -4079,7 +4696,15 @@
               "type": "string",
               "description": "LaTeX source content (required for 'save' and 'build' actions)."
             },
-            "content_encoding": { "type": "string", "enum": ["auto", "raw", "base64"], "description": "Decode mode for content. Control characters are preserved with a warning for TeX compatibility." },
+            "content_encoding": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "raw",
+                "base64"
+              ],
+              "description": "Decode mode for content. Control characters are preserved with a warning for TeX compatibility."
+            },
             "engine": {
               "type": "string",
               "enum": [
@@ -4529,7 +5154,9 @@
         "displayName": "Wolfbook: Run Cell Range",
         "toolReferenceName": "wolfbookRunCells",
         "canBeReferencedInPrompt": true,
-        "tags": ["mcp:hidden"],
+        "tags": [
+          "mcp:hidden"
+        ],
         "modelDescription": "Run a contiguous range of notebook cells sequentially and return their combined output. Use startCell/endCell (1-based cell numbers) to specify the range. Cells are run in order; if stopOnError is true (default), execution stops on the first error. Returns a summary line per cell showing output or error. Prefer this over repeated wolfbook_runCell calls when executing consecutive cells.",
         "inputSchema": {
           "type": "object",
@@ -4554,13 +5181,46 @@
               "type": "string",
               "description": "Notebook filename to target. Defaults to the active open notebook."
             },
-            "caption": { "type": "string", "maxLength": 160, "description": "Short human-readable reminder of what this operation is doing." },
-            "wait_mode": { "type": "string", "enum": ["up_to_timeout", "async"], "description": "Return immediately with an operation ID when async; otherwise wait up to timeoutSeconds." },
-            "busyPolicy": { "type": "string", "enum": ["reject", "preempt"] },
-            "progress_symbol": { "type": "string", "description": "Optional Wolfram symbol to sample during execution." },
-            "progress_interval_ms": { "type": "number", "minimum": 1000 },
-            "stop_on_failure": { "type": "boolean", "description": "Stop only on structured failure; default true." },
-            "message_policy": { "type": "string", "enum": ["collect", "stop"], "description": "collect is the default." }
+            "caption": {
+              "type": "string",
+              "maxLength": 160,
+              "description": "Short human-readable reminder of what this operation is doing."
+            },
+            "wait_mode": {
+              "type": "string",
+              "enum": [
+                "up_to_timeout",
+                "async"
+              ],
+              "description": "Return immediately with an operation ID when async; otherwise wait up to timeoutSeconds."
+            },
+            "busyPolicy": {
+              "type": "string",
+              "enum": [
+                "reject",
+                "preempt"
+              ]
+            },
+            "progress_symbol": {
+              "type": "string",
+              "description": "Optional Wolfram symbol to sample during execution."
+            },
+            "progress_interval_ms": {
+              "type": "number",
+              "minimum": 1000
+            },
+            "stop_on_failure": {
+              "type": "boolean",
+              "description": "Stop only on structured failure; default true."
+            },
+            "message_policy": {
+              "type": "string",
+              "enum": [
+                "collect",
+                "stop"
+              ],
+              "description": "collect is the default."
+            }
           }
         }
       },
@@ -4581,6 +5241,262 @@
               "description": "Absolute path to the image file to display."
             }
           }
+        }
+      },
+      {
+        "name": "paper_getOutline",
+        "displayName": "Paper: Outline",
+        "toolReferenceName": "paperOutline",
+        "modelDescription": "Structural outline of a LaTeX paper: nested sections, per-kind object counts, managed Mathematica block states, and parse warnings. Start here before any other paper_* call. Set include_project for the root file and the \\\\input/\\\\include graph. Read-only.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "file": {
+              "type": "string",
+              "description": "Path to the .tex file. Absolute, workspace-relative, or a bare basename. Omit to use the active/only open .tex."
+            },
+            "include_project": {
+              "type": "boolean",
+              "description": "Also resolve the root file and walk the \\\\input/\\\\include graph."
+            }
+          }
+        }
+      },
+      {
+        "name": "paper_getObject",
+        "displayName": "Paper: Get Object",
+        "toolReferenceName": "paperObject",
+        "modelDescription": "Fetch one semantic object (equation, figure, table, paragraph, section, theorem) from a LaTeX paper with its source text, line range and sourceHash. Address it by \\\\label, stableKey, or objectId. The returned sourceHash is what you pass to paper_applyEdit as expected_source_hash. Read-only.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "file": {
+              "type": "string",
+              "description": "Path to the .tex file. Absolute, workspace-relative, or a bare basename. Omit to use the active/only open .tex."
+            },
+            "selector": {
+              "type": "string",
+              "description": "A \\\\label (e.g. eq:dispersion), a stableKey, or an objectId."
+            },
+            "include_neighbours": {
+              "type": "boolean",
+              "description": "Also return the preceding and following objects."
+            },
+            "max_chars": {
+              "type": "number",
+              "description": "Truncate the returned text (default 4000)."
+            }
+          },
+          "required": [
+            "selector"
+          ]
+        }
+      },
+      {
+        "name": "paper_getSection",
+        "displayName": "Paper: Get Section",
+        "toolReferenceName": "paperSection",
+        "modelDescription": "Fetch a section of a LaTeX paper and every addressable object inside it. Selector matches a heading by \\\\label, stableKey, or a substring of its title; omit it for the first section. Read-only.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "file": {
+              "type": "string",
+              "description": "Path to the .tex file. Absolute, workspace-relative, or a bare basename. Omit to use the active/only open .tex."
+            },
+            "selector": {
+              "type": "string",
+              "description": "Heading label, stableKey, or part of its title."
+            },
+            "include_text": {
+              "type": "boolean",
+              "description": "Include the section's raw source."
+            },
+            "max_chars": {
+              "type": "number",
+              "description": "Cap on returned text (default 8000)."
+            }
+          }
+        }
+      },
+      {
+        "name": "paper_findReferences",
+        "displayName": "Paper: Find References",
+        "toolReferenceName": "paperRefs",
+        "modelDescription": "Cross-reference health for a LaTeX paper. With `name`: where that label is declared, what object it names, and everything that \\\\ref or \\\\cite-s it. Without: all unresolved refs, duplicate labels and unused labels in the file. Read-only.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "file": {
+              "type": "string",
+              "description": "Path to the .tex file. Absolute, workspace-relative, or a bare basename. Omit to use the active/only open .tex."
+            },
+            "name": {
+              "type": "string",
+              "description": "A label or citation key. Omit for a whole-file report."
+            }
+          }
+        }
+      },
+      {
+        "name": "paper_search",
+        "displayName": "Paper: Search Objects",
+        "toolReferenceName": "paperSearchObjects",
+        "modelDescription": "Search the objects of the OPEN LaTeX paper by text, returning matching equations/paragraphs/figures with excerpts and their stableKeys. This searches the user's own document; for published literature use wolfbook_paperSearch instead. Read-only.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "file": {
+              "type": "string",
+              "description": "Path to the .tex file. Absolute, workspace-relative, or a bare basename. Omit to use the active/only open .tex."
+            },
+            "query": {
+              "type": "string",
+              "description": "Text to find, or a regular expression when regex is true."
+            },
+            "regex": {
+              "type": "boolean",
+              "description": "Treat query as a case-insensitive regular expression."
+            },
+            "kinds": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Restrict to these object kinds, e.g. display-equation, figure, paragraph."
+            },
+            "limit": {
+              "type": "number",
+              "description": "Maximum hits (default 25)."
+            }
+          },
+          "required": [
+            "query"
+          ]
+        }
+      },
+      {
+        "name": "paper_mathematicaBlocks",
+        "displayName": "Paper: Managed Blocks",
+        "toolReferenceName": "paperMmaBlocks",
+        "modelDescription": "List the managed %Mathematica computation blocks in a .tex file and classify each as fresh, stale, modified-by-user, orphaned, malformed or no-output. Classification only: executing a block is not available yet. Read-only.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "file": {
+              "type": "string",
+              "description": "Path to the .tex file. Absolute, workspace-relative, or a bare basename. Omit to use the active/only open .tex."
+            },
+            "state": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Only blocks in these states."
+            },
+            "include_code": {
+              "type": "boolean",
+              "description": "Include each block's Wolfram source."
+            }
+          }
+        }
+      },
+      {
+        "name": "paper_previewEdit",
+        "displayName": "Paper: Preview Edit",
+        "toolReferenceName": "paperPreviewEdit",
+        "modelDescription": "Show what replacing one object's source would do, WITHOUT writing anything: the before/after text, the line delta, and any parse warnings the change would introduce. Returns the sourceHash to pass to paper_applyEdit. Read-only.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "file": {
+              "type": "string",
+              "description": "Path to the .tex file. Absolute, workspace-relative, or a bare basename. Omit to use the active/only open .tex."
+            },
+            "selector": {
+              "type": "string",
+              "description": "A \\\\label, stableKey, or objectId."
+            },
+            "new_text": {
+              "type": "string",
+              "description": "Replacement source for the whole object, including its \\\\begin/\\\\end."
+            },
+            "expected_source_hash": {
+              "type": "string",
+              "description": "Reject unless the object's current source SHA-256 matches."
+            },
+            "expected_object_id": {
+              "type": "string",
+              "description": "Reject unless the objectId matches."
+            },
+            "expected_stable_key": {
+              "type": "string",
+              "description": "Reject unless the stableKey matches."
+            },
+            "expected_source_prefix": {
+              "type": "string",
+              "description": "Reject unless the current source starts with this."
+            }
+          },
+          "required": [
+            "selector",
+            "new_text"
+          ]
+        }
+      },
+      {
+        "name": "paper_applyEdit",
+        "displayName": "Paper: Apply Edit",
+        "toolReferenceName": "paperApplyEdit",
+        "modelDescription": "Replace one object's source in a .tex file via WorkspaceEdit, so the change is undoable with Cmd-Z. ALWAYS pass expected_source_hash from paper_getObject or paper_previewEdit: a stale edit is then rejected with a structured conflict naming the current hash, instead of overwriting a change you did not see. The file must be open in the editor.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "file": {
+              "type": "string",
+              "description": "Path to the .tex file. Absolute, workspace-relative, or a bare basename. Omit to use the active/only open .tex."
+            },
+            "selector": {
+              "type": "string",
+              "description": "A \\\\label, stableKey, or objectId."
+            },
+            "new_text": {
+              "type": "string",
+              "description": "Replacement source for the whole object, including its \\\\begin/\\\\end."
+            },
+            "expected_source_hash": {
+              "type": "string",
+              "description": "Reject unless the object's current source SHA-256 matches. Strongly recommended."
+            },
+            "expected_object_id": {
+              "type": "string",
+              "description": "Reject unless the objectId matches."
+            },
+            "expected_stable_key": {
+              "type": "string",
+              "description": "Reject unless the stableKey matches."
+            },
+            "expected_source_prefix": {
+              "type": "string",
+              "description": "Reject unless the current source starts with this."
+            },
+            "save": {
+              "type": "boolean",
+              "description": "Save the document after applying."
+            }
+          },
+          "required": [
+            "selector",
+            "new_text"
+          ]
         }
       }
     ],

@@ -34,6 +34,10 @@ function makeVscodeStub(overrides = {}) {
         Uri: {
             file: (p) => ({ fsPath: p, scheme: 'file', path: p, toString: () => `file://${p}` }),
             parse: (s) => ({ fsPath: s.replace(/^file:\/\//, ''), scheme: 'file', toString: () => s }),
+            joinPath: (base, ...parts) => {
+                const p = require('path').join(base.fsPath || base.path || '', ...parts);
+                return { fsPath: p, scheme: 'file', path: p, toString: () => `file://${p}` };
+            },
         },
         EventEmitter: class {
             constructor() { this._listeners = new Set(); }
@@ -60,6 +64,12 @@ function makeVscodeStub(overrides = {}) {
             onDidChangeNotebookDocument: () => ({ dispose: () => {} }),
             onDidOpenNotebookDocument: () => ({ dispose: () => {} }),
             applyEdit: async () => true,
+            // Enough of a watcher that code registering one can be executed.
+            // A handler kept here would let a test fire an external change.
+            createFileSystemWatcher: () => {
+                const sub = () => ({ dispose: () => {} });
+                return { onDidChange: sub, onDidCreate: sub, onDidDelete: sub, dispose: () => {} };
+            },
             fs: { readFile: async () => new Uint8Array(), writeFile: async () => {} },
         },
         commands: {
