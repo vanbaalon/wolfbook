@@ -23,5 +23,7 @@ assert(server.includes('kernel_label'));
 assert(!serializer.includes('kernel_id'), 'kernel identity must not enter the notebook serializer');
 assert(notebookSettings.includes("_APPEARANCE_KEY = 'notebook.appearanceByUri'"));
 assert(notebookSettings.includes("vscode.ConfigurationTarget.Global"));
+assert(notebookSettings.includes('const _NOTEBOOK_COLOR_TARGET = vscode.ConfigurationTarget.Workspace'),
+    'rendered notebook colours must be workspace-scoped so VS Code windows cannot race');
 assert(!notebookSettings.includes('wolframSettings: updatedSettings'), 'appearance must not be written wholesale into notebook metadata');
 console.log('phase 5 static guards: OK');

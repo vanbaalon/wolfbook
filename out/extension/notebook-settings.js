@@ -112,6 +112,89 @@ const _NOTEBOOK_COLOR_KEYS = [
     'notebook.cellHoverBackground',
 ];
 
+// workbench.colorCustomizations is not resource-scoped: a Global update affects
+// every VS Code window.  With several Wolfbook windows open, whichever notebook
+// applied last erased the colours required by the others.  Keep only the saved
+// per-URI appearance in Global user settings; materialise its workbench tokens
+// at Workspace scope so they win over legacy workspace values and cannot race
+// with another window.
+const _NOTEBOOK_COLOR_TARGET = vscode.ConfigurationTarget.Workspace;
+
+// Earlier Wolfbook builds wrote the effective notebook palette into
+// workbench.colorCustomizations at Workspace scope.  Appearance storage now
+// lives in the user's global settings, but those old workspace values have
+// higher precedence and can pin a notebook to the light palette forever.
+//
+// Be deliberately conservative: only claim a block that has Wolfbook's full
+// nine-key shape and its characteristic equal outer/container colours.  A
+// partial notebook customization is assumed to belong to the user and is left
+// untouched.
+const _LEGACY_OUTER_COLOR_KEYS = [
+    'notebook.focusedCellBackground',
+    'notebook.selectedCellBackground',
+    'notebook.inactiveSelectedCellBackground',
+    'notebook.cellHoverBackground',
+];
+
+function _withoutLegacyWolfbookNotebookColors(colors) {
+    if (!colors || typeof colors !== 'object' || Array.isArray(colors)) return null;
+    if (!_NOTEBOOK_COLOR_KEYS.every(key => Object.prototype.hasOwnProperty.call(colors, key))) return null;
+
+    const outer = colors['notebook.editorBackground'];
+    if (typeof outer !== 'string' || !outer) return null;
+    if (!_LEGACY_OUTER_COLOR_KEYS.every(key => colors[key] === outer)) return null;
+    if (colors['notebook.cellBorderColor'] !== colors['notebook.inactiveFocusedCellBorder']) return null;
+    if (typeof colors['notebook.cellEditorBackground'] !== 'string' ||
+        typeof colors['notebook.collapsedCellBackground'] !== 'string') return null;
+
+    const cleaned = { ...colors };
+    for (const key of _NOTEBOOK_COLOR_KEYS) delete cleaned[key];
+    return cleaned;
+}
+
+async function _cleanLegacyWorkspaceNotebookColors() {
+    const cleanedScopes = [];
+
+    const cleanScope = async (config, inspectionField, target, label) => {
+        const inspected = config.inspect('colorCustomizations');
+        const legacy = inspected && inspected[inspectionField];
+        const cleaned = _withoutLegacyWolfbookNotebookColors(legacy);
+        if (cleaned === null) return;
+        await config.update(
+            'colorCustomizations',
+            Object.keys(cleaned).length ? cleaned : undefined,
+            target
+        );
+        cleanedScopes.push(label);
+    };
+
+    const workspaceConfig = vscode.workspace.getConfiguration('workbench');
+    await cleanScope(
+        workspaceConfig,
+        'workspaceValue',
+        vscode.ConfigurationTarget.Workspace,
+        'workspace'
+    );
+
+    // In multi-root workspaces each folder can carry an additional override.
+    for (const folder of vscode.workspace.workspaceFolders || []) {
+        const folderConfig = vscode.workspace.getConfiguration('workbench', folder.uri);
+        await cleanScope(
+            folderConfig,
+            'workspaceFolderValue',
+            vscode.ConfigurationTarget.WorkspaceFolder,
+            `workspace folder ${folder.name}`
+        );
+    }
+
+    if (cleanedScopes.length) {
+        devLog(LOG_CHANNELS.EXTENSION,
+            '[NotebookSettings] Removed legacy notebook colour overrides from:',
+            cleanedScopes.join(', '));
+    }
+    return cleanedScopes;
+}
+
 /** Returns true if all notebook color keys are identical between two colorCustomizations objects. */
 function _notebookColorsUnchanged(current, updated) {
     for (const key of _NOTEBOOK_COLOR_KEYS) {
@@ -269,11 +352,18 @@ function registerNotebookSettings(context) {
         })
     );
 
-    vscode.window.visibleNotebookEditors.forEach(editor => {
-        if (editor.notebook.notebookType === 'extended-wolfram-notebook') {
-            applyNotebookSettings(editor.notebook);
-        }
-    });
+    // Clean old higher-precedence workspace colours before applying the current
+    // per-user appearance.  Always run the initial apply, even if inspection or
+    // cleanup fails, so a malformed settings object cannot disable notebooks.
+    _cleanLegacyWorkspaceNotebookColors()
+        .catch(err => console.warn('[NotebookSettings] Legacy colour cleanup failed:', err))
+        .finally(() => {
+            vscode.window.visibleNotebookEditors.forEach(editor => {
+                if (editor.notebook.notebookType === 'extended-wolfram-notebook') {
+                    applyNotebookSettings(editor.notebook);
+                }
+            });
+        });
 
     // Ensure user has a prompt preset directory with the default prompt
     _ensureDefaultPrompt();
@@ -727,7 +817,7 @@ async function applyNotebookSettings(notebook) {
             updated['notebook.cellHoverBackground']            = baseColor;
         }
         if (!_notebookColorsUnchanged(currentColors, updated)) {
-            await config.update('colorCustomizations', updated, vscode.ConfigurationTarget.Global);
+            await config.update('colorCustomizations', updated, _NOTEBOOK_COLOR_TARGET);
         }
 
     } else if (!settings.backgroundImagePath) {
@@ -757,12 +847,12 @@ async function applyNotebookSettings(notebook) {
                 'notebook.cellHoverBackground':            outer,
             };
             if (!_notebookColorsUnchanged(currentColors, updated)) {
-                await config.update('colorCustomizations', updated, vscode.ConfigurationTarget.Global);
+                await config.update('colorCustomizations', updated, _NOTEBOOK_COLOR_TARGET);
             }
         } else if (_NOTEBOOK_COLOR_KEYS.some(k => currentColors[k])) {
             const updated = { ...currentColors };
             for (const k of _NOTEBOOK_COLOR_KEYS) delete updated[k];
-            await config.update('colorCustomizations', updated, vscode.ConfigurationTarget.Global);
+            await config.update('colorCustomizations', updated, _NOTEBOOK_COLOR_TARGET);
         }
     }
 
@@ -899,6 +989,9 @@ function _showSystemPromptEditor(initialText, promptName) {
 }
 
 exports.BACKGROUND_COLORS = BACKGROUND_COLORS;
+// Exported for the migration regression tests.  These remain internal APIs.
+exports._withoutLegacyWolfbookNotebookColors = _withoutLegacyWolfbookNotebookColors;
+exports._cleanLegacyWorkspaceNotebookColors = _cleanLegacyWorkspaceNotebookColors;
 // Canonical list of workbench.colorCustomizations keys this module writes.
 // Exported so the kernel-offline gray/restore cycle (kernel/lifecycle.js) operates
 // on the EXACT same set — otherwise coloured cell elements are left un-grayed while
