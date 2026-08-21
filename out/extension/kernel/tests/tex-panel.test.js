@@ -115,6 +115,21 @@ test('the highlight is a wash with a fade, not a red box', () => {
         'pinning stops the fade');
 });
 
+test('EVERY open is timed, not just the first', () => {
+    // The module-level marks are reported once per session (state.reportedTiming),
+    // so live rebuilds — the thing that happens hundreds of times while writing —
+    // were invisible. Asserted against the SHIPPED client, which is the only
+    // client: a harness that drives its own copy measures nothing.
+    const js = fs.readFileSync(CLIENT_JS, 'utf8');
+    assert.ok(/kind:\s*'open'/.test(js), 'the client posts a per-open timing report');
+    assert.ok(/omark\('total'\)/.test(js), 'including the total');
+    assert.ok(/omark\('parse'\)/.test(js) && /omark\('visible'\)/.test(js),
+        'and the phases worth blaming');
+    // The text-layer sweep walks every page, so its cost belongs in the log too.
+    assert.ok(/type:\s*'textLayerDone'[\s\S]{0,160}ms:/.test(js),
+        'the text-layer sweep reports how long it took');
+});
+
 console.log('the Page view panel (markup, CSP, one-copy rule)\n');
 results.forEach(r => console.log(r));
 console.log(`\n${pass} passed, ${fail} failed`);

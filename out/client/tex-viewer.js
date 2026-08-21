@@ -104,9 +104,10 @@ function status(text, kind = '') {
 // diagnosed from the log rather than guessed at. A webview is not the headless
 // browser the harness measures: the worker may be refused, fonts arrive over a
 // different protocol, and neither shows up in a local http test.
-const T0 = (typeof performance !== 'undefined' ? performance.now() : 0);
+const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+const T0 = now();
 const marks = [];
-const mark = (name) => marks.push([name, Math.round(performance.now() - T0)]);
+const mark = (name) => marks.push([name, Math.round(now() - T0)]);
 mark('module');
 
 /**
@@ -171,6 +172,13 @@ async function loadPdfjs(base) {
 async function openDocument(msg) {
     const pdfjs = await loadPdfjs(msg.base);
     status('loading…');
+    // PER-OPEN timing, distinct from the module-level marks above: those
+    // measure cold start and are reported once, which meant a LIVE rebuild —
+    // the thing that happens hundreds of times in a session — was never timed
+    // at all. Cheap enough to leave on: five clock reads and one message.
+    const tOpen = now();
+    const openMarks = [];
+    const omark = (name) => openMarks.push(`${name} ${Math.round(now() - tOpen)}ms`);
     try {
         // Bytes, not a URL: the extension reads the file and posts it, which
         // avoids localResourceRoots and the /var -> /private/var symlink that
@@ -193,9 +201,11 @@ async function openDocument(msg) {
         });
         const prev = state.doc;
         mark('bytes decoded');
+        omark('decode');
         const anchor = scrollAnchor();
         state.doc = await task.promise;
         mark('document parsed');
+        omark('parse');
         const samePagination = msg.live && state.pageCount === state.doc.numPages
             && pagesEl().children.length === state.doc.numPages;
         state.pageCount = state.doc.numPages;
@@ -232,7 +242,11 @@ async function openDocument(msg) {
             const vis = visiblePages();
             await Promise.all(vis.map(renderPage));
             restoreAnchor(anchor);
-            for (const n of wasRendered) if (!vis.includes(n)) renderPage(n);
+            omark('visible');
+            // Awaited so the rest of the repaint can be timed too. These pages
+            // are off screen, so waiting for them costs the reader nothing.
+            await Promise.all(wasRendered.filter(n => !vis.includes(n)).map(renderPage));
+            omark('offscreen');
             if (state.highlight) paintHighlight();
         } else {
             // A RECOMPILE MUST NOT SEND THE READER BACK TO PAGE ONE.
@@ -256,6 +270,15 @@ async function openDocument(msg) {
             }
         }
         if (prev) { try { await prev.destroy(); } catch (_) { /* already gone */ } }
+        omark('total');
+        // What this ONE open cost — the number that says whether a live
+        // rebuild is quick, and which phase to blame when it is not.
+        vscode.postMessage({
+            type: 'timing', kind: 'open', generation: msg.generation,
+            live: !!msg.live, pages: state.pageCount,
+            bytes: msg.pdfBase64 ? msg.pdfBase64.length : 0,
+            marks: openMarks,
+        });
         // Now that the pages are the new ones, ask for the highlight again.
         vscode.postMessage({ type: 'opened', generation: msg.generation });
         // …and hand over the glyphs, so the extension can align them against
@@ -521,6 +544,7 @@ function foldGlyphs(s) {
 async function sendTextLayer(generation) {
     if (!state.doc || state.textLayerSent === generation) return;
     state.textLayerSent = generation;
+    const tSweep = now();
     for (let n = 1; n <= state.pageCount; n++) {
         if (state.generation !== generation) return;      // a newer compile landed
         let items = [];
@@ -559,7 +583,10 @@ async function sendTextLayer(generation) {
         // Yield between pages so a 40-page paper cannot stall the first paint.
         await new Promise(r => setTimeout(r, 0));
     }
-    vscode.postMessage({ type: 'textLayerDone', generation, pages: state.pageCount });
+    vscode.postMessage({
+        type: 'textLayerDone', generation, pages: state.pageCount,
+        ms: Math.round(now() - tSweep),
+    });
 }
 
 const wordKey = (s) => {

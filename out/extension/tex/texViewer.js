@@ -721,8 +721,17 @@ class TexViewer {
                 // the outside, and a VS Code webview is not the headless
                 // browser the harness measures — the worker can be refused and
                 // fonts arrive over a different protocol.
-                const phases = (m.marks || []).map(([k, v]) => `${k} ${v}ms`).join(' · ');
-                this._log(`viewer: ${phases}${m.worker ? ' · ' + m.worker : ''}`);
+                // Two kinds arrive here: the once-per-session cold-start marks
+                // (arrays), and one report per document opened (strings), which
+                // is what makes a LIVE rebuild measurable at all.
+                const phases = (m.marks || [])
+                    .map((x) => (Array.isArray(x) ? `${x[0]} ${x[1]}ms` : String(x))).join(' · ');
+                if (m.kind === 'open') {
+                    this._log(`viewer open: gen ${m.generation}${m.live ? ' live' : ''} · ` +
+                        `${m.pages} pages · ${((m.bytes || 0) / 1398101).toFixed(2)} MB · ${phases}`);
+                } else {
+                    this._log(`viewer: ${phases}${m.worker ? ' · ' + m.worker : ''}`);
+                }
                 break;
             }
             case 'opened':
@@ -737,7 +746,8 @@ class TexViewer {
                 break;
             case 'textLayer': this._onTextLayer(m); break;
             case 'textLayerDone':
-                this._log(`text layer complete for generation ${m.generation}: ${m.pages} pages`);
+                this._log(`text layer complete for generation ${m.generation}: ` +
+                    `${m.pages} pages${m.ms != null ? ` in ${m.ms} ms` : ''}`);
                 break;
             case 'pageTheme': await this._setPageTheme(m.value); break;
             case 'diffFocus': await this._focusHunk(m.id); break;
