@@ -284,6 +284,11 @@ const SYMBOL_GLYPHS = {
     imath: 'ı', jmath: 'ȷ', angle: '∠', triangle: '△', Box: '□', square: '□',
     diamond: '⋄', bullet: '∙', ast: '∗', odot: '⊙', ominus: '⊖', oslash: '⊘',
     cdots: '⋯', vdots: '⋮', ddots: '⋱', prime: '′', degree: '°', surd: '√',
+    // An ellipsis prints as separate dots, and a reader clicks one of them. As
+    // one opaque marker it matched nothing; as three dots each of them resolves
+    // to the command that printed it — the projection maps every character of a
+    // multi-character expansion back to the whole call.
+    ldots: '...', dots: '...',
     dag: '†', ddag: '‡', ddagger: '‡',
     lceil: '⌈', rceil: '⌉', lfloor: '⌊', rfloor: '⌋',
     Vert: '‖', lVert: '‖', rVert: '‖', vert: '|', lvert: '|', rvert: '|',
@@ -440,7 +445,12 @@ function foldGlyphs(s) {
 // − → are all category Sm), so clicking one resolved to the nearest letter
 // instead. The webview (out/client/tex-viewer.js itemWords) carries a literal
 // copy of this class — keep the two in sync.
-const MATH_GLYPH_RE = () => /[-\p{L}\p{N}\p{Sm}\p{Sk}·⋅†‡′″‖§¶°√⟨⟩⌈⌉⌊⌋()[\]/]/gu;
+// PUNCTUATION IS PART OF THE MATHS. `x_{m,k}` prints a comma, `k=0,1,2` prints
+// three, and a full stop ends a displayed sentence — all of them are in the
+// source, all of them are clicked, and while they were not in this class they
+// could not resolve to anything: measured, every comma in the reference
+// equation landed on the symbol beside it.
+const MATH_GLYPH_RE = () => /[-,.\p{L}\p{N}\p{Sm}\p{Sk}·⋅†‡′″‖§¶°√⟨⟩⌈⌉⌊⌋()[\]/]/gu;
 
 // Symbols must survive normalisation or a click on Ψ could never match: the
 // letters-and-digits filter would erase it to the empty string.
@@ -560,6 +570,101 @@ function findWordInLine(lineSrc, targetWord, hint = 0.5, opts = {}) {
 }
 
 /**
+ * WHICH WORD, DECIDED BY THE WORDS AROUND IT.
+ *
+ * Every position-based answer to "which of these identical words did you click"
+ * is fighting SyncTeX's line attribution, and MEASURED (check-occurrence.mjs)
+ * that attribution is wrong at exactly the places it matters most: the first
+ * word of a continuation row is attributed to the line the paragraph ENDS on,
+ * and a word sitting across a row break can carry its neighbour's line number.
+ * A source line's first word is nearly always at a row break, which is why
+ * "clicking the first word of a line" was its own bug report.
+ *
+ * Reading is the way out, and it is what a person does: `kernel` between `the`
+ * and `section` is a different `kernel` from the one between `the` and `again`.
+ * The printed neighbours come from the PDF's own text layer, in reading order,
+ * so they are immune to every attribution error above — and matching them
+ * against the source projection identifies the LINE as well as the column,
+ * which means a wrong line coming in does not produce a wrong answer going out.
+ *
+ * The window is several lines wide because prose flows across source lines: a
+ * word at the start of line 12 has its printed predecessors at the end of
+ * line 11.
+ *
+ * @param {string[]} lines        the whole file, 0-based
+ * @param {number} centerLine     1-based line the map thinks was clicked
+ * @param {string} word           the printed word
+ * @param {string[]} before       printed words before it, nearest LAST
+ * @param {string[]} after        printed words after it, nearest FIRST
+ * @param {object} [opts]         {macros, span} — span defaults to 2 lines
+ * @returns {{line:number,start:number,end:number,word:string,score:number,
+ *            exact:boolean,unique:boolean}|null}
+ */
+function locateByContext(lines, centerLine, word, before, after, opts = {}) {
+    const target = norm(word);
+    if (!target || !Array.isArray(lines) || !lines.length) return null;
+    const span = Number.isFinite(opts.span) ? opts.span : 2;
+    const lo = Math.max(1, centerLine - span);
+    const hi = Math.min(lines.length, centerLine + span);
+
+    // The projected word sequence of the whole window, in reading order, each
+    // word remembering the line and columns it came from.
+    const seq = [];
+    for (let n = lo; n <= hi; n++) {
+        for (const w of visibleWords(lines[n - 1] || '', { macros: opts.macros })) {
+            seq.push({ n, w, key: norm(w.word) });
+        }
+    }
+    const hits = [];
+    for (let i = 0; i < seq.length; i++) if (seq[i].key === target) hits.push(i);
+    if (!hits.length) return null;
+
+    const bef = (before || []).map(norm).filter(Boolean);
+    const aft = (after || []).map(norm).filter(Boolean);
+    if (!bef.length && !aft.length) return null;
+
+    // NEARER NEIGHBOURS COUNT FOR MORE. A neighbour three words away can be a
+    // coincidence; the word immediately beside it rarely is. Weighting also
+    // breaks ties the plain count leaves: two candidates each matching two of
+    // four context words are not equally good if one of them matches the two
+    // ADJACENT ones.
+    const weight = (d) => 1 / d;
+    let best = null; let bestScore = 0; let ties = 0;
+    for (const i of hits) {
+        let score = 0;
+        for (let k = 0; k < bef.length; k++) {
+            const d = bef.length - k;                 // bef is nearest-LAST
+            const j = i - d;
+            if (j >= 0 && seq[j].key === bef[k]) score += weight(d);
+        }
+        for (let k = 0; k < aft.length; k++) {
+            const d = k + 1;                          // aft is nearest-FIRST
+            const j = i + d;
+            if (j < seq.length && seq[j].key === aft[k]) score += weight(d);
+        }
+        if (score > bestScore + 1e-9) { bestScore = score; best = i; ties = 1; }
+        else if (Math.abs(score - bestScore) < 1e-9 && score > 0) ties++;
+    }
+    // NO EVIDENCE MEANS NO ANSWER. A tie between two candidates is exactly the
+    // case the caller's other heuristics exist for; claiming one of them here
+    // would just be guessing with more machinery.
+    if (best == null || bestScore <= 0 || ties > 1) return null;
+    const { n, w } = seq[best];
+    return {
+        line: n,
+        start: w.sourceStart,
+        end: w.sourceEnd,
+        word: w.word,
+        score: bestScore,
+        exact: true,
+        unique: ties === 1,
+        occurrence: 1,
+        total: 1,
+        inMath: !!w.inMath,
+    };
+}
+
+/**
  * The inline-maths regions of a LINE: $…$, \\(…\\), \\[…\\] on one line.
  *
  * A display environment is recognised from the document model, but $E=mc^2$ in
@@ -631,7 +736,7 @@ function wordAtColumn(lineSrc, column, opts = {}) {
 }
 
 module.exports = {
-    visibleProjection, visibleWords, findWordInLine, wordAtColumn,
+    visibleProjection, visibleWords, findWordInLine, wordAtColumn, locateByContext,
     collectMacros, mathRegions, isInMath, OPAQUE, SYMBOL_GLYPHS,
     foldGlyphs, MATH_GLYPH_RE, MATH_OPERATORS, ACCENT_GLYPHS,
 };

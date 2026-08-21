@@ -30,6 +30,7 @@
 // jump somewhere wrong.
 
 const { visibleProjection, MATH_GLYPH_RE, foldGlyphs } = require('./texWords');
+const { LEVEL, roleIndex, comparePaths } = require('./mathStructure');
 
 /** The alignment's own honesty flags, finer than RenderMap's. */
 const PRECISION = {
@@ -159,21 +160,64 @@ function sourceTokens(o = {}) {
     try { proj = visibleProjection(body, { inMath: o.inMath !== false, macros: o.macros }); }
     catch (_) { return []; }
 
+    let roles = null;
+    try { roles = roleIndex(body); } catch (_) { roles = null; }
+
     const out = [];
     const re = MATH_GLYPH_RE();
     let m;
     while ((m = re.exec(proj.text)) !== null) {
         const i = m.index;
-        const from = at(proj.map[i]);
-        const to = at(proj.end[i] ?? (proj.map[i] + 1));
+        const off = proj.map[i];
+        const from = at(off);
+        const to = at(proj.end[i] ?? (off + 1));
+        const r = roles ? roles.at(off) : null;
         out.push({
             key: keyOf(m[0]), ch: m[0],
             line: from.line, startCol: from.col,
             endLine: to.line, endCol: to.col,
             inMath: !!proj.math[i],
+            role: r ? r.role : 'base',
+            level: r ? r.level : LEVEL.BASE,
+            path: r ? r.path : [off],
+            chain: r ? (r.chain || []) : [],
         });
     }
-    return out;
+
+    // CANONICAL ORDER, SO THE PAGE CAN BE PUT INTO THE SAME ONE.
+    //
+    // `x^{a}_{b}` and `x_{b}^{a}` are one picture written two ways, and the
+    // page draws the subscript and the superscript in the same places either
+    // way. Putting the source into the order the page uses — base, then its
+    // subscript, then its superscript — is what lets a monotone alignment pair
+    // them. Reordering costs nothing: every token carries its own source range,
+    // so only the SEQUENCE moves.
+    //
+    // BUT ONLY THE GROUPS MOVE. Sorting everything by source offset also
+    // reversed `\dot x`, whose mark is written BEFORE the base and printed
+    // AFTER it — measured: the source came out `˙ x` against a rendered `x ˙`,
+    // one transposition, and a monotone alignment drops one side of those. So
+    // the projection's own order is kept for everything outside a group, and a
+    // group is inserted after the last such token that precedes it.
+    const firstOf = new Map();
+    for (let i = 0; i < out.length; i++) {
+        const g = out[i].chain[0];
+        if (g && !firstOf.has(g)) firstOf.set(g, i);
+    }
+    const plainBefore = [];
+    let lastPlain = -1;
+    for (let i = 0; i < out.length; i++) {
+        plainBefore.push(lastPlain);
+        if (!out[i].chain.length) lastPlain = i;
+    }
+    const keyOfToken = (t, i) => {
+        if (!t.chain.length) return [i, 0, i];
+        const at = plainBefore[firstOf.get(t.chain[0])] ?? -1;
+        return [at, 1, ...t.chain.map(c => c.rank), i];
+    };
+    const keyed = out.map((t, i) => ({ t, key: keyOfToken(t, i) }));
+    keyed.sort((a, b) => comparePaths(a.key, b.key));
+    return keyed.map(k => k.t);
 }
 
 /**
@@ -237,32 +281,260 @@ function renderedGlyphs(items, bandBp = 4, symbolFonts = null) {
     }
     if (!glyphs.length) return [];
 
-    // READING ORDER COMES FROM VERTICAL OVERLAP, NOT FROM BASELINES.
+    // READING ORDER IS BY PRINTED ROW, AND A ROW IS A BASELINE PLUS WHAT HANGS
+    // OFF IT.
     //
-    // A superscript sits on its own baseline ~9bp above the body one, so
-    // grouping by baseline made `x^2` two separate bands and — because the
-    // superscript is HIGHER — put the 2 before everything else on the line:
-    // the rendered sequence for one equation began "2R=D..." where the source
-    // says "R...x2". Boxes tell the truth instead: a superscript's box
-    // OVERLAPS the box of the glyph it modifies, while a fraction's numerator
-    // and denominator do not overlap each other at all. So a line is a run of
-    // glyphs whose vertical extents connect, and within it, left to right.
+    // Grouping by BASELINE alone put a superscript in a band of its own and —
+    // being higher — before everything on its line: one equation's sequence
+    // began "2R=D…" where the source says "R…x2". Chaining glyphs whose BOXES
+    // overlap fixed that and created a worse problem, because in a display
+    // every band touches the next: the prose above overlaps the superscripts,
+    // which overlap the body row, which overlaps the subscripts. Measured on
+    // the reference paper, a whole equation plus the paragraph above it
+    // collapsed into ONE "line", and the widest baseline in it — the prose —
+    // was taken for the line's own. Every script then hung off a word of the
+    // paragraph and was emitted in a block at the end, so not one of the
+    // equation's six α's paired with anything.
+    //
+    // So: the rows are the baselines that carry the BODY of the line — full
+    // size, and wide — and everything else joins the row it is nearest to.
+    // `orderLine` then does the within-row work it was always meant to do.
     glyphs.sort((p, q) => p.page - q.page || p.y - q.y || p.x - q.x);
-    const lines = [];
+    const tolOf = (list) => Math.max(1, (Math.max(...list.map(g => g.h || 0)) || 10) * 0.25);
+
+    const out = [];
+    const byPage = new Map();
     for (const g of glyphs) {
-        const last = lines[lines.length - 1];
-        const top = g.y; const bottom = g.y + g.h;
-        if (last && last.page === g.page && top < last.bottom - 0.5) {
+        if (!byPage.has(g.page)) byPage.set(g.page, []);
+        byPage.get(g.page).push(g);
+    }
+    for (const page of [...byPage.keys()].sort((a, b) => a - b)) {
+        const pageGlyphs = byPage.get(page);
+        const tol = tolOf(pageGlyphs);
+        const hMax = Math.max(...pageGlyphs.map(g => g.h || 0)) || 10;
+
+        // Baselines, and how much ink each carries.
+        const bands = [];
+        for (const g of pageGlyphs.slice().sort((p, q) => p.baseline - q.baseline || p.x - q.x)) {
+            const last = bands[bands.length - 1];
+            if (last && Math.abs(last.baseline - g.baseline) <= tol) {
+                last.items.push(g);
+                last.x0 = Math.min(last.x0, g.x);
+                last.x1 = Math.max(last.x1, g.x + g.w);
+                continue;
+            }
+            bands.push({ baseline: g.baseline, x0: g.x, x1: g.x + g.w, items: [g] });
+        }
+        const widest = Math.max(...bands.map(b => b.x1 - b.x0));
+        // A ROW is a baseline carrying full-size ink across a good part of the
+        // line. A script band is neither; a numerator is full size but narrow.
+        const rows = bands.filter(b => (b.x1 - b.x0) >= widest * 0.3 &&
+            b.items.some(g => (g.h || 0) >= hMax * 0.85));
+        if (!rows.length) { out.push(...orderLine(pageGlyphs)); continue; }
+
+        const buckets = rows.map(r => ({ baseline: r.baseline, items: [...r.items] }));
+        for (const b of bands) {
+            if (rows.includes(b)) continue;
+            let best = 0;
+            for (let i = 1; i < buckets.length; i++) {
+                if (Math.abs(b.baseline - buckets[i].baseline) <
+                    Math.abs(b.baseline - buckets[best].baseline)) best = i;
+            }
+            buckets[best].items.push(...b.items);
+        }
+        buckets.sort((a, b) => a.baseline - b.baseline);
+        for (const b of buckets) out.push(...orderLine(b.items));
+    }
+    return out;
+}
+
+/**
+ * ONE LINE OF MATHS, PUT INTO THE ORDER IT WAS WRITTEN IN.
+ *
+ * WITHIN a line, "left to right" is not reading order and never was. Measured
+ * (`check-math.mjs`): `U_{m,k}^{\pm}` comes out `U m ± k`, because the
+ * superscript's x falls between the subscript's two glyphs; and
+ * `s+\frac{|m|}{2}+k` comes out `| m 2 |`, because the denominator sits under
+ * the middle of the numerator. The source says `U m k ±` and `| m | 2`. A
+ * monotone alignment cannot absorb a transposition — it drops one side, and a
+ * dropped glyph is a glyph that cannot be clicked. That is exactly the reported
+ * bug: the superscript and the denominator resolved to nothing, so a click on
+ * them fell back to whatever happened to be nearest.
+ *
+ * So the line is taken apart the way it was put together. Glyphs are clustered
+ * by baseline and horizontal contiguity; clusters that sit OVER each other are
+ * paired; and each pair is either a fraction or a pair of scripts.
+ *
+ * WHICH ONE, DECIDED BY MEASUREMENT RATHER THAN BY SIZE. Size looks like the
+ * answer — scripts are set smaller — but it fails on the nested fraction, whose
+ * halves are script-sized, and on inline fractions. Alignment does not: a
+ * fraction is CENTRED, its narrower half inset over the wider one, while two
+ * scripts both START just after the base they hang off. Measured on the corpus:
+ * for `U_{m,k}^{\pm}` the two clusters start 1 bp apart and their centres are
+ * 3 bp apart; for `\frac{|m|}{2}` the starts are 6 bp apart and the centres
+ * 0.5 bp. So whichever of those two distances is the smaller says which
+ * construct it is — and that decides the order, because TeX writes a fraction
+ * numerator-first and a script subscript-first.
+ */
+function orderLine(items) {
+    if (items.length < 2) return items.slice();
+
+    // THE BODY SIZE, AND WHY IT IS NOT THE TALLEST GLYPH. A stretched delimiter
+    // is half again as tall as the type around it, so taking the maximum makes
+    // the tolerance too generous and scripts start counting as body text. The
+    // upper-median is the size most of the line is set in.
+    const hs = items.map(g => g.h || 0).filter(h => h > 0).sort((a, b) => a - b);
+    const bodyH = hs.length ? hs[Math.min(hs.length - 1, Math.floor(hs.length * 0.6))] : 10;
+    const hMax = Math.max(...items.map(g => g.h || 0)) || bodyH;
+    const tol = Math.max(1, bodyH * 0.25);
+    // SIZE DECIDES A SCRIPT, NOT THE BASELINE OFFSET ALONE. Measured: the α of
+    // `\theta_\alpha` sits 1.7 bp below the body baseline — well inside any
+    // sane tolerance — while the α of `x_{\alpha,n}` sits 3.3 bp below. They
+    // are the same kind of thing and must be classified the same way, and what
+    // they have in common is that both are SET SMALLER.
+    const small = (g) => (g.h || 0) < bodyH * 0.85;
+
+    // The line's own baseline: where the body-size ink sits.
+    const tally = new Map();
+    for (const g of items) {
+        if (small(g)) continue;
+        const k = Math.round(g.baseline * 2) / 2;
+        tally.set(k, (tally.get(k) || 0) + Math.max(1, g.w || 1));
+    }
+    let main = null; let mainWidth = 0;
+    for (const [k, w] of tally) if (w > mainWidth || (w === mainWidth && main != null && k < main)) { main = k; mainWidth = w; }
+    if (main == null) main = Math.round((items[0].baseline || 0) * 2) / 2;
+
+    // A fraction's halves are body-size but sit off the line, and neither is
+    // the line — detected, not assumed, exactly as before.
+    {
+        const rivals = new Map();
+        for (const g of items) {
+            if (small(g) || Math.abs(g.baseline - main) <= tol) continue;
+            const k = Math.round(g.baseline * 2) / 2;
+            rivals.set(k, (rivals.get(k) || 0) + Math.max(1, g.w || 1));
+        }
+        for (const w of rivals.values()) if (w >= mainWidth * 0.6) { main = null; break; }
+    }
+
+    const levelOf = (g) => {
+        if (main != null && !small(g) && Math.abs(g.baseline - main) <= tol) return 'base';
+        const above = main != null ? g.baseline < main : g.baseline < (items[0].baseline || 0);
+        if (small(g)) return above ? 'sup' : 'sub';
+        return above ? 'num' : 'den';
+    };
+    for (const g of items) {
+        g.role = levelOf(g);
+        g.level = g.role === 'base' ? 'base' : (g.role === 'sup' || g.role === 'num') ? 'above' : 'below';
+    }
+
+    // Clusters: one role, one baseline, contiguous in x.
+    const sorted = items.slice().sort((p, q) =>
+        p.baseline - q.baseline || p.x - q.x);
+    const clusters = [];
+    for (const g of sorted) {
+        const last = clusters[clusters.length - 1];
+        // THE GAP TEST NEEDS BOTH ENDS. Sorted by baseline first, each new
+        // baseline starts over at a small x — so a one-sided "close enough on
+        // the right" test says every one of them continues the LAST cluster on
+        // the line, and its glyphs come out in a block at the far end.
+        const gap = last ? g.x - last.x1 : Infinity;
+        if (last && last.role === g.role && Math.abs(last.baseline - g.baseline) <= tol &&
+            gap <= bodyH && gap >= -bodyH * 0.5) {
             last.items.push(g);
-            if (bottom > last.bottom) last.bottom = bottom;
+            last.x1 = Math.max(last.x1, g.x + g.w);
             continue;
         }
-        lines.push({ page: g.page, top, bottom, items: [g] });
+        clusters.push({ baseline: g.baseline, role: g.role, x0: g.x, x1: g.x + g.w, items: [g], h: g.h || bodyH });
     }
+    for (const c of clusters) c.items.sort((p, q) => p.x - q.x);
+    if (clusters.length === 1) return clusters[0].items;
+
+    const isBase = (c) => c.role === 'base';
+
+    // Pair the non-base clusters that sit over each other, strongest overlap
+    // first: a subscript with its superscript, a numerator with its denominator.
+    const cand = [];
+    const free = clusters.filter(c => !isBase(c));
+    for (let i = 0; i < free.length; i++) {
+        for (let j = i + 1; j < free.length; j++) {
+            const a = free[i]; const b = free[j];
+            if (Math.abs(a.baseline - b.baseline) <= tol) continue;
+            const lo = Math.max(a.x0, b.x0); const hi = Math.min(a.x1, b.x1);
+            const narrow = Math.max(1, Math.min(a.x1 - a.x0, b.x1 - b.x0));
+            const frac = (hi - lo) / narrow;
+            if (frac > 0.5) cand.push({ a, b, frac });
+        }
+    }
+    cand.sort((p, q) => q.frac - p.frac);
+    const paired = new Set();
+    const pairs = [];
+    for (const c of cand) {
+        if (paired.has(c.a) || paired.has(c.b)) continue;
+        paired.add(c.a); paired.add(c.b);
+        const upper = c.a.baseline < c.b.baseline ? c.a : c.b;
+        const lower = upper === c.a ? c.b : c.a;
+        // A fraction is CENTRED, its narrower half inset over the wider one;
+        // two scripts both START just after the base they hang off.
+        const dStart = Math.abs(upper.x0 - lower.x0);
+        const dCentre = Math.abs((upper.x0 + upper.x1) / 2 - (lower.x0 + lower.x1) / 2);
+        const isFraction = dCentre <= dStart;
+        for (const g of upper.items) { g.level = 'above'; g.role = isFraction ? 'num' : 'sup'; }
+        for (const g of lower.items) { g.level = 'below'; g.role = isFraction ? 'den' : 'sub'; }
+        pairs.push({ upper, lower, isFraction, x0: Math.min(upper.x0, lower.x0) });
+    }
+
+    // What is left: base material, and lone halves — a subscript with no
+    // superscript, a numerator whose denominator is a bar and a digit we could
+    // not cluster with it.
+    const baseClusters = clusters.filter(isBase);
+    const loose = clusters.filter(c => !isBase(c) && !paired.has(c));
+    const baseGlyphs = [];
+    for (const c of baseClusters) baseGlyphs.push(...c.items);
+    baseGlyphs.sort((p, q) => p.x - q.x);
+
+    const units = [];
+    for (const c of baseClusters) units.push({ kind: 'base', x0: c.x0, glyphs: c.items });
+    for (const p of pairs) {
+        units.push({
+            kind: p.isFraction ? 'fraction' : 'scripts',
+            x0: p.x0,
+            glyphs: p.isFraction
+                ? [...p.upper.items, ...p.lower.items]      // numerator, denominator
+                : [...p.lower.items, ...p.upper.items],     // subscript, superscript
+        });
+    }
+    for (const c of loose) units.push({ kind: 'script', x0: c.x0, glyphs: c.items });
+
+    // Every unit hangs off the last base glyph at or before it; scripts follow
+    // that glyph immediately, fractions and base material take their place in
+    // the left-to-right sequence.
+    const anchorOf = (u) => {
+        let at = -1;
+        for (let i = 0; i < baseGlyphs.length; i++) {
+            if (baseGlyphs[i].x <= u.x0 + hMax * 0.3) at = i;
+        }
+        return at;
+    };
+    const attached = new Map();
+    const top = [];
+    for (const u of units) {
+        if (u.kind === 'base') { top.push(u); continue; }
+        if (u.kind === 'fraction') { top.push(u); continue; }
+        const at = anchorOf(u);
+        if (at < 0) { top.push(u); continue; }
+        const g = baseGlyphs[at];
+        if (!attached.has(g)) attached.set(g, []);
+        attached.get(g).push(u);
+    }
+    top.sort((p, q) => p.x0 - q.x0);
+
     const out = [];
-    for (const ln of lines) {
-        ln.items.sort((p, q) => p.x - q.x);
-        for (const g of ln.items) out.push(g);
+    for (const u of top) {
+        for (const g of u.glyphs) {
+            out.push(g);
+            for (const s of (attached.get(g) || [])) out.push(...s.glyphs);
+        }
     }
     return out;
 }
@@ -300,11 +572,26 @@ function align(srcKeys, renKeys, opts = {}) {
 
     const MATCH = 3; const MISMATCH = -2; const WILDCARD = 1;
     const GAP = Number.isFinite(opts.gap) ? opts.gap : -2;
-    // A wildcard is worth pairing but not worth trusting — except against a
-    // glyph a math-extension font actually draws, where it is as good as an
-    // exact match. See EXTENSIBLE.
-    const score = opts.score || ((a, b) => {
-        if (a === b) return MATCH;
+    // WHERE A GLYPH SITS IS PART OF WHAT IT IS.
+    //
+    // `\frac{x+x}{x+x}` prints four identical x's, and character identity
+    // cannot tell them apart — measured, the numerator's x and the
+    // denominator's x resolved to the SAME source token. Their LEVEL can:
+    // above, below, or on the baseline, agreed between the source's structure
+    // and the page's geometry.
+    //
+    // The penalty is deliberately soft rather than a veto. The page cannot
+    // always tell a superscript from a numerator (a display fraction is full
+    // size, an inline one is not), so a disagreement has to cost a pairing
+    // some score without ever losing it to a gap.
+    const srcLv = opts.srcLevels || null;
+    const renLv = opts.renLevels || null;
+    const SAME_LEVEL = MATCH; const OTHER_LEVEL = 1.2;
+    const score = opts.score || ((a, b, i, j) => {
+        if (a === b) {
+            if (!srcLv || !renLv || i == null || j == null) return MATCH;
+            return srcLv[i] === renLv[j] ? SAME_LEVEL : OTHER_LEVEL;
+        }
         if (a === WILD || b === WILD) {
             const other = a === WILD ? b : a;
             return EXTENSIBLE.has(other) ? MATCH : WILDCARD;
@@ -326,7 +613,7 @@ function align(srcKeys, renKeys, opts = {}) {
         back[i * W] = 1;
         const sk = srcKeys[i - 1];
         for (let j = 1; j <= m; j++) {
-            const diag = prev[j - 1] + score(sk, renKeys[j - 1]);
+            const diag = prev[j - 1] + score(sk, renKeys[j - 1], i - 1, j - 1);
             const up = prev[j] + GAP;
             const left = cur[j - 1] + GAP;
             let best = diag; let move = 0;
@@ -366,7 +653,10 @@ function buildObjectMap(o = {}) {
     const glyphs = renderedGlyphs(o.items, o.bandBp,
         o.symbolFonts || symbolicFonts(o.items));
     const { srcToRen, renToSrc, matched } = align(
-        tokens.map(t => t.key), glyphs.map(g => g.key));
+        tokens.map(t => t.key), glyphs.map(g => g.key), {
+            srcLevels: tokens.map(t => t.level || 'base'),
+            renLevels: glyphs.map(g => g.level || 'base'),
+        });
     return {
         tokens,
         glyphs,
@@ -397,6 +687,73 @@ function glyphAtPoint(map, page, xBp, yTopBp) {
     return { index: best, distance: bestD };
 }
 
+/**
+ * WHAT IS CERTAIN AROUND A GLYPH THAT PAIRED WITH NOTHING.
+ *
+ * Some rendered glyphs have no source token and never will: the parentheses a
+ * `pmatrix` draws are the environment's, not anyone's characters; a stretched
+ * `\bigl(` reports as a control code; the dots of `\ldots` are one command.
+ * Answering those with the nearest token that happens to be close is how a
+ * click on a delimiter ends up selecting an `x` — a confident wrong jump, which
+ * is the one outcome worth avoiding.
+ *
+ * What IS certain is the neighbourhood. The paired glyphs either side name two
+ * source tokens, and the structural path they share — `mathStructure` puts one
+ * on every token — is the smallest construct that provably contains the click:
+ * the subscript group, the numerator, else the object itself. Selecting that is
+ * true, and it is the thing a reader would edit anyway.
+ *
+ * @returns {{startLine,startCol,endLine,endCol,depth}|null}
+ */
+function groupAround(map, glyphIndex) {
+    if (!map || !map.tokens.length) return null;
+    let left = -1; let right = -1;
+    for (let i = glyphIndex - 1; i >= 0; i--) if (map.renToSrc[i] >= 0) { left = map.renToSrc[i]; break; }
+    for (let i = glyphIndex + 1; i < map.glyphs.length; i++) if (map.renToSrc[i] >= 0) { right = map.renToSrc[i]; break; }
+    const a = left >= 0 ? map.tokens[left] : null;
+    const b = right >= 0 ? map.tokens[right] : null;
+    if (!a && !b) return null;
+
+    // The common structural prefix. A path is [anchor, rank, …, ownOffset], so
+    // dropping the last element leaves the enclosing groups; the shared prefix
+    // of the two neighbours is the construct they are both inside.
+    const pa = (a && a.path ? a.path : []).slice(0, -1);
+    const pb = (b && b.path ? b.path : []).slice(0, -1);
+    const prefix = [];
+    if (a && b) {
+        for (let i = 0; i + 1 < Math.min(pa.length, pb.length) + 1; i += 2) {
+            if (pa[i] === pb[i] && pa[i + 1] === pb[i + 1]) prefix.push(pa[i], pa[i + 1]);
+            else break;
+        }
+    } else {
+        // ONE-SIDED: the closing delimiter of a matrix has nothing paired to its
+        // right, and taking its only neighbour's full path would answer with
+        // the innermost cell — `x` — when what encloses the click is the matrix
+        // body. With one witness, step out one level.
+        const only = a ? pa : pb;
+        for (let i = 0; i + 1 < only.length - 1; i += 2) prefix.push(only[i], only[i + 1]);
+    }
+
+    const inPrefix = (t) => {
+        const p = t.path || [];
+        if (p.length < prefix.length + 1) return false;
+        for (let i = 0; i < prefix.length; i++) if (p[i] !== prefix[i]) return false;
+        return true;
+    };
+    const members = prefix.length ? map.tokens.filter(inPrefix) : map.tokens;
+    if (!members.length) return null;
+    let startLine = Infinity; let startCol = 0; let endLine = -Infinity; let endCol = 0;
+    for (const t of members) {
+        if (t.line < startLine || (t.line === startLine && t.startCol < startCol)) {
+            startLine = t.line; startCol = t.startCol;
+        }
+        if (t.endLine > endLine || (t.endLine === endLine && t.endCol > endCol)) {
+            endLine = t.endLine; endCol = t.endCol;
+        }
+    }
+    return { startLine, startCol, endLine, endCol, depth: prefix.length / 2 };
+}
+
 /** The source token covering a (line, column), or the nearest one on that line. */
 function tokenAt(map, line, col) {
     let exact = -1; let near = -1; let nearD = Infinity;
@@ -415,5 +772,5 @@ function tokenAt(map, line, col) {
 
 module.exports = {
     PRECISION, sourceTokens, renderedGlyphs, align, buildObjectMap,
-    glyphAtPoint, tokenAt, keyOf, symbolicFonts, WILD,
+    glyphAtPoint, tokenAt, groupAround, keyOf, symbolicFonts, WILD,
 };

@@ -115,6 +115,59 @@ test('the highlight is a wash with a fade, not a red box', () => {
         'pinning stops the fade');
 });
 
+test('THE MINI-EDITOR SELECTION IS NOT OPAQUE — an opaque one erases the code', () => {
+    // The card is two layers holding the same characters: a coloured <pre> and,
+    // exactly on top of it, a textarea whose own text is TRANSPARENT. So a
+    // selection background painted at full opacity does not tint the selected
+    // text, it hides it — a solid dark block where the code was, which is what
+    // `--vscode-editor-selectionBackground` is in most dark themes.
+    const shell = fs.readFileSync(SHELL, 'utf8');
+    const rule = /\.editcard textarea::selection\s*\{([^}]*)\}/.exec(shell);
+    assert.ok(rule, 'the textarea has a selection rule');
+    const body = rule[1];
+    assert.ok(/color-mix\(/.test(body) || /rgba\([^)]*,\s*0?\.\d+\s*\)/.test(body),
+        'and it is mixed down to a wash, never a bare opaque theme colour');
+    assert.ok(!/background:\s*var\(--vscode-editor-selectionBackground[^;]*\);\s*\}/.test(body),
+        'the raw theme colour on its own is the bug this test exists for');
+    // The inverse-click mark below it is an outline for the same reason: two
+    // fills over one run of characters is a smear, not a highlight.
+    const sel = /\.ec-sel\s*\{([^}]*)\}/.exec(shell);
+    assert.ok(sel, 'there is an .ec-sel rule');
+    assert.ok(/box-shadow:\s*inset|outline:/.test(sel[1]), 'it draws an outline');
+});
+
+test('the mini-editor card is draggable by its title, and steps between blocks', () => {
+    const js = fs.readFileSync(CLIENT_JS, 'utf8');
+    const shell = fs.readFileSync(SHELL, 'utf8');
+    assert.ok(/function makeDraggable\(/.test(js), 'the drag handler exists');
+    assert.ok(/makeDraggable\(card, head\)/.test(js), 'and is wired to the HEADER, not the card');
+    assert.ok(/state\.edit\.pos = \{ fx:/.test(js),
+        'the position is remembered as a fraction of the page, so zoom cannot strand it');
+    assert.ok(/\.ec-head\s*\{[^}]*user-select:none/.test(shell),
+        'dragging the header must not select its text');
+    assert.ok(/type: 'editStep'/.test(js), 'the card posts block steps');
+    assert.ok(/altKey && \(ev\.key === 'ArrowUp'/.test(js), 'and ⌥↑/⌥↓ do it from the keyboard');
+});
+
+test('a click ships WHERE the repeated words are, not just how many', () => {
+    // Counting occurrences along the printed ROW is not counting them along the
+    // SOURCE LINE — a row routinely carries the tail of one line and the head of
+    // the next. The webview therefore ships the positions and lets the
+    // extension, which has the SyncTeX rows, do the counting.
+    const js = fs.readFileSync(CLIENT_JS, 'utf8');
+    assert.ok(/wordSpots:/.test(js) && /wordAt:/.test(js), 'the click carries the prose spots');
+    assert.ok(/glyphSpots:/.test(js) && /glyphAt:/.test(js), 'and the maths ones');
+    assert.ok(/const cx = w\.x \+ w\.w \/ 2;/.test(js),
+        'and the forward direction filters candidates by WORD, not by text item');
+    // Positions can only ever be as good as SyncTeX's line attribution, and
+    // measured, that attribution is wrong at row boundaries — where a source
+    // line's first word almost always sits. The printed NEIGHBOURS are not.
+    assert.ok(/wordContext:/.test(js), 'the click carries the words around it');
+    assert.ok(/function readingContext\(/.test(js), 'gathered in reading order');
+    assert.ok(/all\.sort\(\(a, b\) => a\.row - b\.row \|\| a\.x - b\.x\)/.test(js),
+        'by clustering rows first — a "close enough" comparator is not a total order');
+});
+
 test('EVERY open is timed, not just the first', () => {
     // The module-level marks are reported once per session (state.reportedTiming),
     // so live rebuilds — the thing that happens hundreds of times while writing —

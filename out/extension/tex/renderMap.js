@@ -461,6 +461,86 @@ class RenderMap {
      *   row, `xs` being the sorted glyph-run positions for column refinement.
      */
     /**
+     * REPAIR THE LINE ATTRIBUTION OF THE ODD RECORD, PER PRINTED ROW.
+     *
+     * MEASURED on a hard-wrapped paragraph (`check-occurrence.mjs`, and the
+     * dump that produced it): the FIRST record of every continuation row of a
+     * paragraph is attributed not to the source line whose word it marks, but
+     * to the line the paragraph ENDS on — the `\par`. In a four-line paragraph
+     * ending at line 8 the rows begin
+     *
+     *     L8@77.8:c  L5@100.5:c  L5@137.1:c  …        (row 2)
+     *     L8@92.0:c  L6@95.7:k   L6@113.4:c  …        (row 3)
+     *
+     * where 77.8 and 92.0 are the first WORDS of those rows, and they belong to
+     * lines 5 and 6. Two user-visible bugs came straight out of this: clicking
+     * the first word of a row jumped to `\end{document}`, and — because
+     * `lineRows` then started the row AFTER that word — the occurrence count
+     * for a repeated word was one short, so clicking the second one selected
+     * the first. The same shape produces stray single kerns mid-row.
+     *
+     * THE RULE, and why it is safe: within one printed row the source lines can
+     * only go FORWARDS. A run of records carrying a line NUMBER GREATER than
+     * the run that follows it cannot be right. Only SINGLETON runs are repaired
+     * — a real word contributes at least two records (its character record and
+     * the interword kern after it), so a line that genuinely owns part of a row
+     * is never a singleton — and only within one file.
+     *
+     * @returns {Map<object,{tag:number,line:number}>} corrections by record
+     */
+    _rowRepairs(page) {
+        if (!this._repairByPage) this._repairByPage = new Map();
+        const cached = this._repairByPage.get(page);
+        if (cached) return cached;
+        const fixes = new Map();
+        const pg = this.doc && this.doc.pages.get(page);
+        if (!pg) { this._repairByPage.set(page, fixes); return fixes; }
+        const pageSp = this.pageSizeSp;
+
+        const rows = new Map();
+        for (const b of pg.boxes) {
+            if (b.type !== 'char' && b.type !== 'math' && b.type !== 'kern') continue;
+            if (!saneBox(b, pageSp)) continue;
+            if (!rows.has(b.v)) rows.set(b.v, []);
+            rows.get(b.v).push(b);
+        }
+        for (const list of rows.values()) {
+            list.sort((a, b) => a.h - b.h);
+            const runs = [];
+            for (const b of list) {
+                const last = runs[runs.length - 1];
+                if (last && last.tag === b.tag && last.line === b.line) last.items.push(b);
+                else runs.push({ tag: b.tag, line: b.line, items: [b] });
+            }
+            for (let i = 0; i < runs.length; i++) {
+                const r = runs[i];
+                if (r.items.length >= 2) continue;
+                let prv = null; let nxt = null;
+                for (let j = i - 1; j >= 0; j--) if (runs[j].items.length >= 2) { prv = runs[j]; break; }
+                for (let j = i + 1; j < runs.length; j++) if (runs[j].items.length >= 2) { nxt = runs[j]; break; }
+                let adopt = null;
+                if (nxt && r.tag === nxt.tag && r.line > nxt.line) adopt = nxt;
+                else if (prv && r.tag === prv.tag && r.line < prv.line) adopt = prv;
+                if (adopt) for (const b of r.items) fixes.set(b, { tag: adopt.tag, line: adopt.line });
+            }
+        }
+        this._repairByPage.set(page, fixes);
+        return fixes;
+    }
+
+    /** The record's source line, after the per-row repair above. */
+    _boxLine(b) {
+        const fix = this._rowRepairs(b.page).get(b);
+        return fix ? fix.line : b.line;
+    }
+
+    /** The record's file tag, after the per-row repair above. */
+    _boxTag(b) {
+        const fix = this._rowRepairs(b.page).get(b);
+        return fix ? fix.tag : b.tag;
+    }
+
+    /**
      * The source line whose TYPESET ROW contains a point.
      *
      * `renderToSource` walks the box hierarchy, which is right for objects and
@@ -474,7 +554,22 @@ class RenderMap {
      * this page, which row does the click land on, and which source line put
      * the ink nearest the pointer? That is what a reader means by "this word".
      *
-     * @returns {{file:string,line:number,dx:number}|null}
+     * IT ANSWERS FOR A POINT THAT IS MERELY NEAR, and says how near.
+     *
+     * Only the rows whose band CONTAINED the point used to count, and the gaps
+     * between bands are not small: `\abovedisplayskip`, `\parskip`, and the
+     * space around a float are all several points of nothing. A click a few
+     * points below the last line of a paragraph therefore matched no row at
+     * all, and the caller fell back to the box hierarchy — which answers with
+     * the display equation below, the exact complaint "slightly away from the
+     * word and it selects the equation". So the nearest row wins instead, with
+     * `dy` reported so the caller can decide how much slack it will allow.
+     *
+     * Vertical distance dominates: a click sitting inside an equation's band
+     * but well to the right of its ink must not be captured by the prose line
+     * above, whose ink happens to reach further across. Hence dy * 6 + dx.
+     *
+     * @returns {{file:string,line:number,dx:number,dy:number,lead:number}|null}
      */
     /** The object a line belongs to, exactly or nearest — see `_objectAt`. */
     objectAtLine(file, line) { return this._objectAt(file, line); }
@@ -487,6 +582,9 @@ class RenderMap {
         const vSp = yTopBp / spToBp(1);
         const lead = this._leadingSp();
         const pageSp = this.pageSizeSp;
+        // How far outside a row's own band a point may sit and still be that
+        // row's. Beyond one and a half lines it is genuinely somewhere else.
+        const reach = lead * 1.5;
 
         let best = null;
         for (const b of pg.boxes) {
@@ -496,16 +594,26 @@ class RenderMap {
             // below, in the same 0.78/0.22 split lineRows uses.
             const top = b.v - lead * 0.78;
             const bottom = b.v + lead * 0.22;
-            if (vSp < top || vSp > bottom) continue;
+            const dy = vSp < top ? top - vSp : (vSp > bottom ? vSp - bottom : 0);
+            if (dy > reach) continue;
             const left = b.h;
             const right = b.h + (b.W > 0 ? b.W : 0);
             const dx = hSp < left ? left - hSp : (hSp > right ? hSp - right : 0);
-            if (!best || dx < best.dx) best = { tag: b.tag, line: b.line, dx };
+            const score = dy * 6 + dx;
+            if (!best || score < best.score) {
+                best = { tag: this._boxTag(b), line: this._boxLine(b), dx, dy, score };
+            }
         }
         if (!best) return null;
         const file = this.doc.inputs.get(best.tag);
         if (!file) return null;
-        return { file, line: this._toCurrentLine(file, best.line), dx: spToBp(best.dx) };
+        return {
+            file,
+            line: this._toCurrentLine(file, best.line),
+            dx: spToBp(best.dx),
+            dy: spToBp(best.dy),
+            lead: spToBp(lead),
+        };
     }
 
     lineRows(file, line) {
@@ -518,9 +626,12 @@ class RenderMap {
         const byRow = new Map();
         for (const page of this.doc.pages.values()) {
             for (const b of page.boxes) {
-                if (b.tag !== tag || b.line !== g.line) continue;
                 if (b.type !== 'char' && b.type !== 'math' && b.type !== 'kern') continue;
                 if (!saneBox(b, pageSp)) continue;
+                // The repaired attribution, or a row starts one word late — see
+                // `_rowRepairs`. That missing first word is what made a repeated
+                // word resolve to the occurrence before the one clicked.
+                if (this._boxTag(b) !== tag || this._boxLine(b) !== g.line) continue;
                 // Baselines are exact, so a plain key groups a row reliably.
                 const key = `${b.page}|${b.v}`;
                 if (!byRow.has(key)) byRow.set(key, { page: b.page, v: b.v, xs: [] });
@@ -581,18 +692,44 @@ class RenderMap {
      */
     _leadingSp() {
         if (this._lead != null) return this._lead;
-        // THE MODE, NOT THE MEDIAN. Subscripts and superscripts sit on their
-        // own baselines a few points from the body one, and on a physics paper
-        // there are enough of them to drag the median down: the median gap on
-        // draft.tex is 6.3 bp where the real leading is 15. Body-text lines are
-        // by far the most COMMON gap, so a histogram finds them and the small
-        // math offsets stay a minority.
+        // THE MODE, NOT THE MEDIAN — AND ONLY BETWEEN BODY-TEXT ROWS.
+        //
+        // Subscripts and superscripts sit on their own baselines a few points
+        // from the body one, and there are enough of them on a physics paper to
+        // drag the MEDIAN down: 6.3 bp on draft.tex where the true leading is
+        // 15. A histogram was supposed to fix that by finding the commonest gap
+        // — but on a paper that is mostly equations the commonest gap IS the
+        // maths one. Measured on the reference paper (89 displays): the mode
+        // came out 4.5 bp against a true 13.6, every row rect became a third of
+        // its real height, and clicks on a subscript fell outside their own
+        // row. That is what made a click on the α of `\theta_\alpha` resolve to
+        // the first α on the line.
+        //
+        // Body text is distinguishable from maths by WIDTH: a text line runs
+        // most of the way across the measure, while a numerator or a subscript
+        // is a few points wide. So the histogram is built from the gaps between
+        // WIDE baselines only, and the maths offsets stop being candidates at
+        // all rather than merely being outvoted.
         const hist = new Map();
         let seen = 0;
         for (const page of this.doc.pages.values()) {
-            const vs = [...new Set(page.boxes
-                .filter(b => b.type === 'char')
-                .map(b => b.v))].sort((a, b) => a - b);
+            // Ink extent per baseline.
+            const extent = new Map();
+            for (const b of page.boxes) {
+                if (b.type !== 'char') continue;
+                const cur = extent.get(b.v);
+                const right = b.h + (b.W > 0 ? b.W : 0);
+                if (!cur) { extent.set(b.v, { x0: b.h, x1: right }); continue; }
+                if (b.h < cur.x0) cur.x0 = b.h;
+                if (right > cur.x1) cur.x1 = right;
+            }
+            if (!extent.size) continue;
+            let widest = 0;
+            for (const e of extent.values()) widest = Math.max(widest, e.x1 - e.x0);
+            const vs = [...extent.entries()]
+                .filter(([, e]) => (e.x1 - e.x0) >= widest * 0.35)
+                .map(([v]) => v)
+                .sort((a, b) => a - b);
             for (let i = 1; i < vs.length; i++) {
                 const d = vs[i] - vs[i - 1];
                 if (d <= 0) continue;
@@ -604,8 +741,21 @@ class RenderMap {
             }
             if (seen > 8000) break;
         }
-        let best = 0; let bestN = 0;
-        for (const [bp, n] of hist) if (n > bestN) { bestN = n; best = bp; }
+        // AND THE SMALLEST GAP THAT IS COMMON, not simply the commonest.
+        //
+        // The gaps between wide rows are of two kinds: consecutive lines of a
+        // paragraph, which is the leading, and the space around a display,
+        // which is larger and varies. On a paper with many equations the second
+        // kind can be the more numerous — measured at 28.5 bp on a fixture of
+        // twelve displays — and the leading is then outvoted by a quantity that
+        // is not a leading at all. A leading is the SMALL common gap: the
+        // displays add space, they never remove it.
+        let bestN = 0;
+        for (const n of hist.values()) if (n > bestN) bestN = n;
+        let best = 0;
+        for (const [bp, n] of [...hist.entries()].sort((a, b) => a[0] - b[0])) {
+            if (n >= bestN * 0.25) { best = bp; break; }
+        }
         this._lead = (best || 12) / spToBp(1);
         return this._lead;
     }

@@ -248,6 +248,7 @@ async function openDocument(msg) {
             await Promise.all(wasRendered.filter(n => !vis.includes(n)).map(renderPage));
             omark('offscreen');
             if (state.highlight) paintHighlight();
+            if (state.selection) paintSelection(state.selection);
         } else {
             // A RECOMPILE MUST NOT SEND THE READER BACK TO PAGE ONE.
             //
@@ -415,6 +416,7 @@ async function renderPage(n) {
         // `page.view` is the CropBox-aware box; the MediaBox is the wrong frame.
         state.rendered.set(n, { canvas, viewport: vp, view: page.view, rotate: page.rotate });
         if (state.highlight && state.highlight.page === n) paintHighlight();
+        if (state.selection) paintSelection(state.selection);
         if (state.diff) paintDiff();
         if (state.edit) paintEditCard();
     })().finally(() => state.pending.delete(n));
@@ -656,7 +658,7 @@ function itemWords(it, glyphs) {
     // letters, digits, and the operators TeX prints (≤ ↑ ∫ = + − → are all
     // category Sm, which the old letters-and-digits class silently excluded,
     // sending every operator click to the nearest letter instead).
-    const re = glyphs ? /[-\p{L}\p{N}\p{Sm}\p{Sk}·⋅†‡′″‖§¶°√⟨⟩⌈⌉⌊⌋()[\]/]/gu
+    const re = glyphs ? /[-,.\p{L}\p{N}\p{Sm}\p{Sk}·⋅†‡′″‖§¶°√⟨⟩⌈⌉⌊⌋()[\]/]/gu
         : /[\p{L}\p{N}][\p{L}\p{N}'’-]*/gu;
     const p = prefixWidths(it);
     let m;
@@ -667,6 +669,8 @@ function itemWords(it, glyphs) {
     }
     return out;
 }
+
+const round2 = (n) => Math.round(n * 100) / 100;
 
 /** The word nearest a click, and how far along its row it sits. */
 async function wordAtPoint(n, vx, vy, glyphs) {
@@ -689,9 +693,16 @@ async function wordAtPoint(n, vx, vy, glyphs) {
     }
     if (!best) return null;
     // A click in blank space is NOT a click on the nearest thing three words
-    // away — claiming one silently moved the cursor somewhere surprising.
-    // Refusing here lets the extension fall back to the honest line answer.
-    if (bestD > Math.max(18, (best.h || 10) * 2.5)) return null;
+    // away — claiming one silently moved the cursor somewhere surprising. So a
+    // word beyond arm's length is reported as FAR rather than as a hit, and the
+    // extension uses it only where its alternative was the whole line.
+    //
+    // That alternative is what made "a bit to the right of the last word"
+    // select the entire line, which is never what a click means. The reach is
+    // generous — a couple of words — because past that there really is nothing
+    // to point at.
+    const far = bestD > Math.max(18, (best.h || 10) * 2.5);
+    if (far && bestD > Math.max(120, (best.h || 10) * 10)) return null;
     // How far along the printed row the word sits, for tie-breaking a word
     // that occurs several times in one source line.
     const rowItems = pool.filter(it => Math.abs(it.y - best.y) < best.h * 0.6);
@@ -707,9 +718,86 @@ async function wordAtPoint(n, vx, vy, glyphs) {
             if (wordKey(w.word) === key && w.x <= best.x + 0.01) occurrence++;
         }
     }
+
+    // ...AND THE SAME QUESTION ASKED IN A FORM THE EXTENSION CAN ANSWER BETTER.
+    //
+    // Counting along the printed row is only right when the row and the source
+    // line hold the same words, and they routinely do not: TeX fills a row from
+    // as many source lines as it needs, so a row often carries the tail of one
+    // line and the head of the next. Counted along the row, the second "the" of
+    // a sentence could be the FIRST one on its source line — which is exactly
+    // the reported bug, two identical words on a line and the wrong one chosen.
+    //
+    // Only the extension knows where this source line's ink actually sits (it
+    // has the SyncTeX rows), so ship it the positions and let it do the
+    // counting: every same-keyed word near this row, in page bp, plus which of
+    // them was clicked. A window of a few rows covers a wrapped source line
+    // without shipping the whole page.
+    const spots = [];
+    let at = null;
+    const near = best.h > 0 ? best.h * 5 : 60;
+    for (const it of items) {
+        if (Math.abs(it.y - best.y) > near) continue;
+        for (const w of itemWords(it, glyphs)) {
+            if (wordKey(w.word) !== key) continue;
+            const c = fromViewport(n, w.x + w.w / 2, w.y + w.h / 2);
+            if (!c) continue;
+            const spot = { page: n, x: round2(c.xBp), y: round2(c.yTopBp) };
+            spots.push(spot);
+            if (w.x === best.x && w.y === best.y && w.word === best.word) at = spot;
+        }
+    }
+
+    // ...AND THE WORDS EITHER SIDE OF IT, WHICH IS HOW A PERSON WOULD TELL.
+    //
+    // Positions can only ever be as good as SyncTeX's line attribution, and
+    // measured, that attribution is wrong exactly where it hurts: the first
+    // word of a continuation row is filed under the line the PARAGRAPH ends on,
+    // and a word straddling a row break can carry its neighbour's line number.
+    // The printed neighbours have no such problem — they are what the page
+    // says — and `kernel` between `the` and `section` is a different `kernel`
+    // from the one between `the` and `again`. Reading order, so the context
+    // crosses row breaks the way the sentence does.
+    const context = readingContext(items, best, glyphs, 4);
+
     return {
         word: best.word, rect: best, occurrence: Math.max(1, occurrence),
         rowFraction: hi > lo ? (best.x - lo) / (hi - lo) : 0.5,
+        spots: at ? spots : [], at, context, far,
+    };
+}
+
+/**
+ * The `count` printed words either side of `best`, in reading order.
+ *
+ * Rows are recovered by clustering baselines rather than by exact equality: a
+ * subscript or a size change puts a word a point or two off its neighbours'
+ * baseline, and treating that as its own row would scramble the order.
+ */
+function readingContext(items, best, glyphs, count) {
+    const all = [];
+    for (const it of items || []) for (const w of itemWords(it, glyphs)) all.push(w);
+    if (!all.length) return null;
+    // Cluster into rows FIRST, then order within each. Comparing baselines
+    // inside the comparator itself is not a total order — "close enough to be
+    // equal" is not transitive — and an intransitive comparator scrambles the
+    // sequence this whole idea depends on.
+    const band = Math.max(2, (best.h || 10) * 0.6);
+    all.sort((a, b) => a.y - b.y || a.x - b.x);
+    let row = 0; let refY = all[0].y;
+    for (const w of all) {
+        if (w.y - refY > band) { row++; refY = w.y; }
+        w.row = row;
+    }
+    all.sort((a, b) => a.row - b.row || a.x - b.x);
+    let me = -1;
+    for (let i = 0; i < all.length; i++) {
+        if (all[i].x === best.x && all[i].y === best.y && all[i].word === best.word) { me = i; break; }
+    }
+    if (me < 0) return null;
+    return {
+        before: all.slice(Math.max(0, me - count), me).map(w => w.word),
+        after: all.slice(me + 1, me + 1 + count).map(w => w.word),
     };
 }
 
@@ -727,7 +815,16 @@ async function wordInRows(rows, word, occurrence, glyphs) {
             if (it.y + it.h < v.y - 1 || it.y > v.y + v.h + 1) continue;
             if (it.x + it.w < v.x - 2 || it.x > v.x + v.w + 2) continue;
             for (const w of itemWords(it, glyphs)) {
-                if (wordKey(w.word) === target) hits.push({ page: row.page, ...w });
+                if (wordKey(w.word) !== target) continue;
+                // AND ONLY THE WORDS INSIDE IT. The row rect is this SOURCE
+                // LINE's own ink; a pdf.js text item is a run of characters and
+                // can straddle the join between two source lines. Filtering
+                // whole items therefore let the neighbouring line's words into
+                // the count, and the n-th occurrence came out as somebody
+                // else's word.
+                const cx = w.x + w.w / 2;
+                if (cx < v.x - 2 || cx > v.x + v.w + 2) continue;
+                hits.push({ page: row.page, ...w });
             }
         }
     }
@@ -917,6 +1014,228 @@ function paintHighlight() {
     }
 }
 
+// --- THE SELECTED FRAGMENT, MARKED THE WAY A SELECTION IS -------------------
+//
+// A cursor gets a wash over one word; a RANGE gets the shape a reader already
+// knows: an opening mark, the rest of that line, the whole width of the lines
+// between, the last line up to the closing mark, and a closing mark. The fill
+// is deliberately faint — it has to sit under the type without competing with
+// it — while the two brackets are solid, because they are the precise part.
+//
+// The ends are resolved through the same text-layer narrowing the highlight
+// uses (`wordInRows`), so the marks land on the exact glyph the selection
+// starts and ends at rather than at the edge of its row.
+
+/** A mark in bp, as viewport pixels on its own page. */
+function markToPx(mark) {
+    if (!mark) return null;
+    const v = rectToViewport(mark.page, { page: mark.page, x: mark.x, y: mark.y, w: 0.5, h: mark.h });
+    return v ? { x: v.x, y: v.y, h: v.h } : null;
+}
+
+/**
+ * The printed rows of a page, from the text layer: baselines clustered, each
+ * row spanning its own ink.
+ *
+ * The equation NUMBER is dropped — it sits on the row but belongs to no line of
+ * text, and a selection that swallows it looks like it has over-reached.
+ */
+function inkRows(items) {
+    const rows = [];
+    for (const it of (items || []).slice().sort((a, b) => a.y - b.y || a.x - b.x)) {
+        if (!it.str || !it.str.trim()) continue;
+        const last = rows[rows.length - 1];
+        if (last && it.y < last.y + last.h * 0.6 && it.y + it.h > last.y + last.h * 0.4) {
+            last.x = Math.min(last.x, it.x);
+            last.x1 = Math.max(last.x1, it.x + it.w);
+            last.h = Math.max(last.h, it.h);
+            last.items.push(it);
+            continue;
+        }
+        rows.push({ x: it.x, x1: it.x + it.w, y: it.y, h: it.h, items: [it] });
+    }
+    for (const r of rows) {
+        r.items.sort((a, b) => a.x - b.x);
+        const n = r.items.length;
+        if (n > 1) {
+            const lastItem = r.items[n - 1];
+            const prev = r.items[n - 2];
+            const gap = lastItem.x - (prev.x + prev.w);
+            if (gap > r.h * 3 && /^[([]?[0-9]+[A-Za-z.]*[)\]]?$/.test(lastItem.str.trim())) {
+                r.x1 = prev.x + prev.w;
+            }
+        }
+        r.w = r.x1 - r.x;
+    }
+    return rows.filter(r => r.w > 0);
+}
+
+async function paintSelection(span) {
+    for (const el of document.querySelectorAll('.selfill, .selbrk')) el.remove();
+    state.selection = span || null;
+    // A PENDING START HAS NO ROWS BY DEFINITION — it is one end of a selection
+    // that does not exist yet — so the emptiness test must not swallow it.
+    if (!span) return;
+    if (!span.pendingStart && !(span.rows && span.rows.length)) return;
+
+    for (const r of (span.rows || [])) await renderPage(r.page);
+    for (const r of ((span.start && span.start.rects) || [])) await renderPage(r.page);
+
+    const edge = async (anchor, side) => {
+        if (!anchor || !anchor.rects || !anchor.rects.length) return null;
+        // The very start or end of a line: the mark goes at the row's edge, not
+        // at its first or last WORD. A heading's number, and the punctuation
+        // after the last word, are part of the line that was selected.
+        if ((side === 'start' && anchor.atLineStart) || (side === 'end' && anchor.atLineEnd)) {
+            const r = anchor.rects[side === 'start' ? 0 : anchor.rects.length - 1];
+            return { page: r.page, x: side === 'start' ? r.x : r.x + r.w, y: r.y, h: r.h };
+        }
+        let hit = null;
+        if (anchor.word) {
+            try { hit = await wordInRows(anchor.rects, anchor.word, anchor.occurrence, !!anchor.glyph); }
+            catch (_) { hit = null; }
+        }
+        if (hit) {
+            const a = fromViewport(hit.page, hit.x, hit.y);
+            const b = fromViewport(hit.page, hit.x + hit.w, hit.y + hit.h);
+            if (a && b) {
+                return { page: hit.page, x: side === 'start' ? a.xBp : b.xBp,
+                    y: a.yTopBp, h: b.yTopBp - a.yTopBp };
+            }
+        }
+        // No text-layer answer: the end of the row is the honest edge.
+        const r = anchor.rects[side === 'start' ? 0 : anchor.rects.length - 1];
+        return { page: r.page, x: side === 'start' ? r.x : r.x + r.w, y: r.y, h: r.h };
+    };
+
+    const from = await edge(span.start, 'start');
+    // A SELECTION BEING PICKED HAS ONE END SO FAR. Showing a fill or a closing
+    // mark before the second shift-click would claim a range that does not
+    // exist yet; the single mark says "from here" and nothing more.
+    const to = span.pendingStart ? null : await edge(span.end, 'end');
+    if (span.pendingStart) {
+        if (from) {
+            const wrap = pagesEl().querySelector(`.page[data-page="${from.page}"]`);
+            const v = wrap && rectToViewport(from.page, { page: from.page, x: from.x, y: from.y, w: 0.5, h: from.h });
+            if (wrap && v) {
+                const el = document.createElement('div');
+                el.className = 'selbrk start pending';
+                el.style.left = `${v.x}px`; el.style.top = `${v.y}px`;
+                el.style.height = `${v.h}px`;
+                wrap.appendChild(el);
+            }
+        }
+        return;
+    }
+    // THE BANDS FOLLOW THE INK, NOT THE SYNCTEX ROWS.
+    //
+    // A row rectangle is built from SyncTeX records, and those under-cover the
+    // printed row at BOTH ends: the first record of a row is often misfiled, so
+    // the rectangle starts at the second word, and the last record is a POINT at
+    // its word's start, so the rectangle stops before that word's ink. Measured
+    // (`check-select.mjs`): the first word of a paragraph came out at 0.00
+    // coverage, `coordinate-` at 0.03, and a whole last line at 0.00 — which is
+    // exactly what was reported, "some bits are not covered at all".
+    //
+    // The page itself has no such gaps. The rows the reader sees are the rows of
+    // the TEXT LAYER, so the shape is built from those: every printed row
+    // between the two marks, each spanning its own ink, with the first and last
+    // cut at the marks. The SyncTeX rows are still what PLACES the marks; they
+    // are simply not what measures the lines.
+    const startPx = markToPx(from);
+    const endPx = markToPx(to) || startPx;
+    if (!startPx || !endPx) return;
+
+    const parts = [];
+    const rowsSeen = [];
+    for (let p = Math.min(from.page, to.page); p <= Math.max(from.page, to.page); p++) {
+        const wrap = pagesEl().querySelector(`.page[data-page="${p}"]`);
+        if (!wrap || !state.rendered.has(p)) continue;
+        // eslint-disable-next-line no-await-in-loop
+        const items = await textItems(p);
+        const rows = inkRows(items);
+        for (const r of rows) {
+            const mid = r.y + r.h / 2;
+            if (p === from.page && mid < startPx.y - 1) continue;
+            if (p === to.page && mid > endPx.y + endPx.h + 1) continue;
+            const isFirst = p === from.page && mid < startPx.y + startPx.h + 1;
+            const isLast = p === to.page && mid > endPx.y - 1;
+            // AN END THAT IS THE LINE'S OWN EDGE SNAPS TO THE INK. The row
+            // rectangle cannot be trusted for it — measured, the first row of a
+            // paragraph had its SyncTeX left edge 28 bp inside the first word,
+            // so the band began in the middle of "These". Where the selection
+            // starts at the start of a line, the answer is simply "this row".
+            const x0 = (isFirst && !(span.start && span.start.atLineStart))
+                ? Math.max(r.x, Math.min(startPx.x, r.x + r.w)) : r.x;
+            const x1 = (isLast && !(span.end && span.end.atLineEnd))
+                ? Math.min(r.x + r.w, Math.max(endPx.x, r.x)) : r.x + r.w;
+            if (x1 <= x0) continue;
+            rowsSeen.push({ page: p, x: x0, y: r.y, w: x1 - x0, h: r.h });
+        }
+    }
+    if (!rowsSeen.length) return;
+
+    // AND THE BANDS TILE. Row boxes are the ink's own height, so consecutive
+    // ones leave a pale gap between them; a selection is continuous and should
+    // look it. Each band reaches down to where the next one starts, unless that
+    // is more than a line and a half away — a page break, or a gap the
+    // selection genuinely does not cross.
+    for (let i = 0; i < rowsSeen.length; i++) {
+        const b = rowsSeen[i];
+        const next = rowsSeen[i + 1];
+        if (next && next.page === b.page && next.y > b.y && next.y - b.y < b.h * 2.2) {
+            b.h = next.y - b.y;
+        }
+        parts.push(b);
+    }
+
+    for (const p of parts) {
+        const wrap = pagesEl().querySelector(`.page[data-page="${p.page}"]`);
+        if (!wrap || !state.rendered.has(p.page) || !(p.w > 0)) continue;
+        const el = document.createElement('div');
+        el.className = 'selfill';
+        el.style.left = `${p.x}px`; el.style.top = `${p.y}px`;
+        el.style.width = `${p.w}px`; el.style.height = `${p.h}px`;
+        wrap.appendChild(el);
+    }
+
+    // THE MARKS ARE THE ENDS OF THE SHAPE. Placing them from the anchors
+    // separately let them disagree with the fill they bracket — the mark inside
+    // the first word while the band began after it. Taking them from the
+    // painted parts makes that impossible.
+    const brackets = [
+        { side: 'start', page: parts[0].page, x: parts[0].x, y: parts[0].y, h: parts[0].h },
+        { side: 'end',
+            page: parts[parts.length - 1].page,
+            x: parts[parts.length - 1].x + parts[parts.length - 1].w,
+            y: parts[parts.length - 1].y,
+            h: parts[parts.length - 1].h },
+    ];
+    for (const b of brackets) {
+        const wrap = pagesEl().querySelector(`.page[data-page="${b.page}"]`);
+        if (!wrap || !state.rendered.has(b.page)) continue;
+        const el = document.createElement('div');
+        el.className = `selbrk ${b.side}`;
+        el.style.left = `${b.x}px`; el.style.top = `${b.y}px`;
+        el.style.height = `${b.h}px`;
+        wrap.appendChild(el);
+    }
+
+    if (span.reveal !== false && from) {
+        state.highlight = null;
+        const wrap = pagesEl().querySelector(`.page[data-page="${from.page}"]`);
+        const main = document.querySelector('main');
+        if (wrap && main) {
+            const v = rectToViewport(from.page, { page: from.page, x: from.x, y: from.y, w: 1, h: from.h });
+            const top = wrap.offsetTop + (v ? v.y : 0);
+            const margin = Math.min(120, main.clientHeight * 0.15);
+            if (top < main.scrollTop + margin || top > main.scrollTop + main.clientHeight - margin) {
+                main.scrollTo({ top: Math.max(0, top - main.clientHeight * 0.35), behavior: 'smooth' });
+            }
+        }
+    }
+}
+
 function goToPage(n, rects) {
     const wrap = pagesEl().querySelector(`.page[data-page="${n}"]`);
     if (!wrap) return;
@@ -990,6 +1309,11 @@ pagesEl().addEventListener('click', (ev) => {
         // walk back in.
         widen: !!(ev.metaKey || ev.ctrlKey),
         shrink: !!ev.shiftKey,
+        // SHIFT ALONE PICKS THE ENDS OF A SELECTION: once for where it starts,
+        // once for where it ends. It is free to mean that because shrinking is
+        // only ever asked for WITH Cmd — walking back in along a ladder one has
+        // walked out of.
+        pick: !!ev.shiftKey && !(ev.metaKey || ev.ctrlKey),
     });
 });
 
@@ -1141,6 +1465,68 @@ function syncHighlight(card) {
     ta.style.height = `${pre.offsetHeight}px`;
 }
 
+/**
+ * DRAG THE CARD BY ITS TITLE BAR.
+ *
+ * The card is pinned under the block it edits, which is the right DEFAULT and
+ * a poor rule: the block it is covering is often the one you want to read while
+ * you type. So the header is a handle.
+ *
+ * The position is remembered as a FRACTION of its page, not as pixels, because
+ * everything that repaints the card can also have changed the page's size —
+ * zoom, a panel resize, a recompile that reflows the block. Fractions survive
+ * all of them; pixels put a moved card somewhere arbitrary after the first
+ * zoom. Double-click the header to give it back to the automatic placement.
+ */
+function makeDraggable(card, handle) {
+    handle.style.cursor = 'move';
+    handle.addEventListener('pointerdown', (ev) => {
+        if (ev.button !== 0) return;
+        if (ev.target.closest('button')) return;          // the buttons are not a handle
+        const wrap = card.parentElement;
+        if (!wrap) return;
+        const W = wrap.clientWidth || 600;
+        const H = wrap.clientHeight || 800;
+        const x0 = ev.clientX; const y0 = ev.clientY;
+        const left0 = parseFloat(card.style.left) || 0;
+        const top0 = parseFloat(card.style.top) || 0;
+        let moved = false;
+        // The pointer is captured so the drag survives leaving the header —
+        // and so leaving the WINDOW cannot strand the card mid-drag.
+        try { handle.setPointerCapture(ev.pointerId); } catch (_) { /* fine */ }
+        ev.preventDefault();
+
+        const move = (e2) => {
+            const dx = e2.clientX - x0; const dy = e2.clientY - y0;
+            if (!moved && Math.hypot(dx, dy) < 3) return;  // a click is not a drag
+            moved = true;
+            const cw = card.offsetWidth || 320;
+            // Always leave a grabbable strip of the card on the page, or it
+            // can be dragged somewhere it can never be dragged back from.
+            const left = Math.max(-cw * 0.5, Math.min(left0 + dx, W - cw * 0.5));
+            const top = Math.max(0, Math.min(top0 + dy, Math.max(0, H - 24)));
+            card.style.left = `${left}px`;
+            card.style.top = `${top}px`;
+            if (state.edit) state.edit.pos = { fx: left / W, fy: top / H };
+        };
+        const up = () => {
+            handle.removeEventListener('pointermove', move);
+            handle.removeEventListener('pointerup', up);
+            handle.removeEventListener('pointercancel', up);
+            try { handle.releasePointerCapture(ev.pointerId); } catch (_) { /* fine */ }
+        };
+        handle.addEventListener('pointermove', move);
+        handle.addEventListener('pointerup', up);
+        handle.addEventListener('pointercancel', up);
+    });
+    // Back to the automatic placement under the block.
+    handle.addEventListener('dblclick', (ev) => {
+        if (ev.target.closest('button')) return;
+        if (state.edit) state.edit.pos = null;
+        paintEditCard();
+    });
+}
+
 function buildEditCard(e) {
     const card = document.createElement('div');
     card.className = 'editcard';
@@ -1156,6 +1542,7 @@ function buildEditCard(e) {
     const title = document.createElement('span');
     title.className = 'ec-title';
     title.textContent = e.label || 'edit';
+    head.title = 'Drag to move · double-click to re-pin under the block';
     const lines = document.createElement('span');
     lines.className = 'ec-lines';
     lines.textContent = `${e.file || ''} · ${e.startLine === e.endLine
@@ -1168,12 +1555,16 @@ function buildEditCard(e) {
         b.addEventListener('click', fn);
         return b;
     };
+    const step = (d) => vscode.postMessage({ type: 'editStep', editId: state.edit.id, delta: d });
     head.append(title, lines, spacer,
+        btn('‹', 'Previous block (⌥↑)', () => step(-1)),
+        btn('›', 'Next block (⌥↓)', () => step(1)),
         btn('↗', 'Open this range in the editor', () =>
             vscode.postMessage({ type: 'editReveal', editId: e.id })),
         btn('save', 'Save the file (⌘S)', () =>
             vscode.postMessage({ type: 'editSave', editId: e.id })),
         btn('✕', 'Close (Esc)', () => closeEditCard()));
+    makeDraggable(card, head);
 
     // The highlight layer sits UNDER a transparent-text textarea; see
     // highlightLatex for why they must hold identical characters.
@@ -1198,6 +1589,15 @@ function buildEditCard(e) {
     });
     ta.addEventListener('keydown', (ev) => {
         ev.stopPropagation();                     // Esc here must not exit full screen
+        if (ev.altKey && (ev.key === 'ArrowUp' || ev.key === 'ArrowDown')) {
+            ev.preventDefault();
+            clearTimeout(debounce);
+            // Flush first: stepping replaces the session, and an unsent edit
+            // belonging to the OLD block would be applied to the new one.
+            vscode.postMessage({ type: 'editChange', editId: e.id, text: ta.value });
+            step(ev.key === 'ArrowUp' ? -1 : 1);
+            return;
+        }
         if (ev.key === 'Escape') { ev.preventDefault(); closeEditCard(); }
         else if ((ev.metaKey || ev.ctrlKey) && (ev.key === 's' || ev.key === 'Enter')) {
             ev.preventDefault();
@@ -1209,7 +1609,7 @@ function buildEditCard(e) {
 
     const hint = document.createElement('div');
     hint.className = 'ec-hint';
-    hint.textContent = 'synced with the editor as you type · click the page to jump here · ⌘S saves · Esc closes';
+    hint.textContent = 'drag the title to move · ⌥↑/⌥↓ previous/next block · click the page to jump here · ⌘S saves · Esc closes';
 
     card.append(head, box, hint);
     return card;
@@ -1268,8 +1668,18 @@ function paintEditCard(focus = false) {
     const hi = Math.max(lo, Math.min(W - cw, visRight - cw - 14));
     const x = Math.max(lo, Math.min(left == null ? 32 : left, hi));
     card.style.width = `${cw}px`;
-    card.style.left = `${x}px`;
-    card.style.top = `${bottom + 8}px`;
+    if (e.pos) {
+        // MOVED BY HAND — the reader's placement outranks the block's. Clamped
+        // to the page it lives on, so a resize or a zoom cannot leave it
+        // stranded off the edge with nothing left to grab.
+        const H = wrap.clientHeight || 800;
+        card.style.left = `${Math.max(-cw * 0.5,
+            Math.min(e.pos.fx * W, W - cw * 0.5))}px`;
+        card.style.top = `${Math.max(0, Math.min(e.pos.fy * H, Math.max(0, H - 24)))}px`;
+    } else {
+        card.style.left = `${x}px`;
+        card.style.top = `${bottom + 8}px`;
+    }
 
     // FOCUS ONLY ONCE THE CARD IS WHERE IT IS GOING TO BE, AND NEVER LET THE
     // BROWSER DO THE SCROLLING.
@@ -1338,12 +1748,21 @@ function sendClick(n, pt, cx, cy, extra, type = 'click') {
     Promise.all([wordAtPoint(n, cx, cy, false), wordAtPoint(n, cx, cy, true)])
         .then(([hit, g]) => vscode.postMessage({
             ...base,
-            word: hit ? hit.word : undefined,
+            // A FAR word is not a hit — it is the answer to "what is nearest",
+            // kept apart so it can never outrank a real one.
+            word: hit && !hit.far ? hit.word : undefined,
+            farWord: hit && hit.far ? hit.word : undefined,
             rowFraction: hit ? hit.rowFraction : undefined,
             wordOccurrence: hit ? hit.occurrence : undefined,
-            glyph: g ? g.word : undefined,
+            wordSpots: hit && hit.at ? hit.spots : undefined,
+            wordAt: hit ? hit.at : undefined,
+            wordContext: hit ? hit.context : undefined,
+            glyph: g && !g.far ? g.word : undefined,
             glyphFraction: g ? g.rowFraction : undefined,
             glyphOccurrence: g ? g.occurrence : undefined,
+            glyphSpots: g && g.at ? g.spots : undefined,
+            glyphAt: g ? g.at : undefined,
+            glyphContext: g ? g.context : undefined,
         }))
         .catch(() => vscode.postMessage(base));
 }
@@ -1552,14 +1971,30 @@ window.addEventListener('message', async (ev) => {
             if (msg.label) el('where').textContent = msg.label;
             break;
         }
+        case 'selection':
+            // A range replaces the cursor's wash: the two are answers to
+            // different questions and showing both at once reads as neither.
+            if (msg.span) {
+                for (const box of document.querySelectorAll('.hl')) box.remove();
+                state.highlight = null;
+            }
+            await paintSelection(msg.span ? { ...msg.span, reveal: msg.reveal } : null);
+            if (msg.label) el('where').textContent = msg.label;
+            break;
         case 'status': status(msg.text, msg.kind || ''); break;
         case 'setFollow': state.followCursor = !!msg.value; el('follow').checked = state.followCursor; break;
         case 'editOpen': {
+            // A card the reader has MOVED keeps its place while they step from
+            // block to block — the whole point of moving it was to choose where
+            // to look. A right-click, which says "edit this one, here", pins it
+            // back under the block it names.
+            const keepPos = msg.stepped && state.edit ? state.edit.pos : null;
             closeEditCard(false);                  // one session at a time
             state.edit = {
                 id: msg.editId, text: msg.text || '', label: msg.label,
                 file: msg.file, startLine: msg.startLine, endLine: msg.endLine,
                 rects: msg.rects || [], page: (msg.rects && msg.rects[0] && msg.rects[0].page) || 1,
+                pos: keepPos || null,
             };
             const page = state.edit.rects.length
                 ? state.edit.rects[state.edit.rects.length - 1].page : state.edit.page;

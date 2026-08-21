@@ -54,6 +54,7 @@ const { buildModel } = require('../../tex/texModel');
 const { RenderMap, FLAG } = require('../../tex/renderMap');
 const { findWordInLine } = require('../../tex/texWords');
 const { paragraphSpan } = require('../../tex/texSelect');
+const { buildObjectMap } = require('../../tex/glyphAlign');
 Module._load = origLoad;
 
 // --- a document shaped like the real paper ----------------------------------
@@ -75,6 +76,18 @@ const SRC = [
     'A long paragraph that runs across several source lines, so that',
     'selecting the paragraph instead of the word is unmistakable, and',
     'a clamp that keeps a plain click on one line can be measured.',
+    '',
+    // TWO IDENTICAL WORDS ON ONE LINE: the case where knowing WHICH occurrence
+    // was clicked is the difference between the right answer and the first one.
+    'The kernel of the operator is the kernel we started from.',
+    '',
+    // A HEADING THAT WRAPS IN THE SOURCE: the click lands on its second line,
+    // which is a one-line "paragraph" between two blanks — the fragment the
+    // card used to open on.
+    '\\subsection{A first example: the \\texorpdfstring{$J=1$}{J=1} BPS--BPS',
+    'overlap}',
+    '',
+    'Body text under that heading, so the heading is not the last thing here.',
     '\\end{document}',
 ].join('\n');
 const LINES = SRC.split('\n');
@@ -497,6 +510,44 @@ test('an equation highlight uses its ROWS, never its over-tall box', async () =>
     }
 });
 
+test('THE REPORTED MESS: a fraction does not scatter the highlight into patches', async () => {
+    // `lineRows` groups ink by BASELINE, and a display fraction puts its
+    // numerator and denominator on baselines of their own. Painting those
+    // separately drew a patch over the |m|, another under it over the 2, and a
+    // strip across the rest — "this looks broken, better highlight nothing".
+    const v = makeViewer(null, null);
+    const st = v.coord.roots.get(FILE);
+    st.map.lineRows = (f, n) => (n === 7 ? [
+        { page: 1, x: 200, y: 470, w: 20, h: 13.5 },     // |m|, the numerator
+        { page: 1, x: 100, y: 478, w: 300, h: 13.5 },    // the line's own baseline
+        { page: 1, x: 203, y: 486, w: 10, h: 13.5 },     // 2, the denominator
+    ] : []);
+    v.syncFromEditor(editorAt(7, 4));
+    const h = v.posted.find(p => p.type === 'highlight');
+    assert.ok(h, 'a highlight was posted');
+    assert.strictEqual(h.rects.length, 1, `ONE band, got ${h.rects.length}`);
+    const r = h.rects[0];
+    assert.strictEqual(r.x, 100, 'spanning the whole line');
+    assert.strictEqual(r.y, 470, 'from the top of the numerator');
+    assert.strictEqual(r.y + r.h, 499.5, 'to the bottom of the denominator');
+    assert.strictEqual(r.w, 300);
+});
+
+test('…but successive printed lines stay separate bands', async () => {
+    // The other direction matters just as much: merging everything would turn a
+    // wrapped line into one box covering the ends of its neighbours' lines too.
+    // Stacked pieces of ONE printed line overlap; successive lines only touch.
+    const v = makeViewer(null, null);
+    const st = v.coord.roots.get(FILE);
+    st.map.lineRows = (f, n) => (n === 5 ? [
+        { page: 1, x: 400, y: 86, w: 100, h: 13.5 },     // the tail of the row above
+        { page: 1, x: 70, y: 99.5, w: 300, h: 13.5 },    // and the row it wraps onto
+    ] : []);
+    v.syncFromEditor(editorAt(5, LINES[4].indexOf('wavefunction')));
+    const h = v.posted.find(p => p.type === 'highlight');
+    assert.strictEqual(h.rects.length, 2, 'two rows, two bands');
+});
+
 test('the box is still the fallback when an object has no rows of its own', async () => {
     const v = makeViewer(null, null, true);          // lineRows returns nothing
     v.syncFromEditor(editorAt(7, 4));
@@ -556,6 +607,158 @@ test('a glyph attributed to a neighbouring line of the SAME equation is rescued'
     assert.strictEqual(selected.start.line, 6, 'the equation body line (0-based 6)');
     const got = LINES[6].slice(selected.start.character, selected.end.character);
     assert.strictEqual(got, '\\bx', `expected the macro on the rescued line, got ${JSON.stringify(got)}`);
+});
+
+// --- A SELECTED FRAGMENT ------------------------------------------------------
+
+const rangeAt = (l1, c1, l2, c2) => ({
+    document: doc,
+    selection: {
+        active: new Position(l2 - 1, c2),
+        start: new Position(l1 - 1, c1),
+        end: new Position(l2 - 1, c2),
+    },
+});
+
+test('a SELECTION posts a span with both ends and the rows it crosses', () => {
+    // A range asks a different question from a cursor — where does this PIECE
+    // of the source sit — and is answered with a marked span, not a wash.
+    const v = makeViewer(null, null);
+    const st = v.coord.roots.get(FILE);
+    st.map.lineRows = (f, n) => (n >= 5 && n <= 9
+        ? [{ page: 1, x: 100, y: 100 + (n - 5) * 14, w: 300, h: 13 }] : []);
+    v.syncFromEditor(rangeAt(5, 3, 9, 10));
+    const m = v.posted.find(p => p.type === 'selection');
+    assert.ok(m && m.span, 'a selection span was posted');
+    assert.strictEqual(m.span.start.line, 5);
+    assert.strictEqual(m.span.end.line, 9);
+    assert.strictEqual(m.span.rows.length, 5, 'one row per line it crosses');
+    assert.ok(m.span.start.word, 'the opening end names its word, so the panel can place it exactly');
+    assert.ok(m.span.rows.every(r => typeof r.line === 'number'),
+        'every row says which line it came from');
+    assert.ok(!v.posted.find(p => p.type === 'highlight'),
+        'and no cursor highlight competes with it');
+});
+
+test('collapsing the selection clears the span', () => {
+    const v = makeViewer(null, null);
+    v.syncFromEditor(editorAt(5, 3));
+    const m = v.posted.filter(p => p.type === 'selection').pop();
+    assert.ok(m, 'a selection message is posted either way');
+    assert.strictEqual(m.span, null, 'with no span when the cursor is a point');
+    assert.ok(v.posted.find(p => p.type === 'highlight'), 'and the cursor highlight is back');
+});
+
+test('a selection inside ONE line still names both ends', () => {
+    const v = makeViewer(null, null);
+    const st = v.coord.roots.get(FILE);
+    st.map.lineRows = (f, n) => (n === 5 ? [{ page: 1, x: 100, y: 100, w: 300, h: 13 }] : []);
+    const at = LINES[4].indexOf('transformed');
+    v.syncFromEditor(rangeAt(5, at, 5, at + 11));
+    const m = v.posted.find(p => p.type === 'selection');
+    assert.ok(m && m.span, 'a span was posted');
+    assert.strictEqual(m.span.rows.length, 1, 'one row');
+    assert.strictEqual(m.span.start.word, 'transformed');
+    assert.ok(m.span.end.word, 'and the far end names a word too');
+});
+
+test('THE REPORTED BUG: a click marks the word, it does not select a range', async () => {
+    // An inverse click SELECTS the word it resolved to — that is the point of
+    // it — and a selected word is a non-empty selection. Reading every non-empty
+    // selection as the reader's turned every click into a red range instead of
+    // the amber marker for the word under the pointer.
+    const v = makeViewer({ file: FILE, line: 5, flag: FLAG.FRESH, object: null },
+        { file: FILE, line: 5, dx: 2 });
+    const st = v.coord.roots.get(FILE);
+    st.map.lineRows = (f, n) => [{ page: 1, x: 100, y: 100 * n, w: 300, h: 13 }];
+    selected = null;
+    await v._jumpToSource({ page: 1, xBp: 100, yTopBp: 100, word: 'wavefunction', rowFraction: 0.4 });
+    assert.ok(selected && selected.start.character !== selected.end.character,
+        'the click really did select a word');
+
+    // Now the editor reports that selection back, as VS Code does.
+    v.posted.length = 0;
+    v.syncFromEditor({ document: doc, selection: {
+        active: selected.end, start: selected.start, end: selected.end,
+    } });
+    const span = v.posted.find(p => p.type === 'selection');
+    assert.ok(!span || !span.span, 'no range is painted for it');
+    const h = v.posted.find(p => p.type === 'highlight');
+    assert.ok(h, 'the word gets its marker instead');
+    assert.strictEqual(h.word, 'wavefunction');
+});
+
+test('…but the SAME text selected by hand later IS a range', async () => {
+    const v = makeViewer({ file: FILE, line: 5, flag: FLAG.FRESH, object: null },
+        { file: FILE, line: 5, dx: 2 });
+    const st = v.coord.roots.get(FILE);
+    st.map.lineRows = (f, n) => [{ page: 1, x: 100, y: 100 * n, w: 300, h: 13 }];
+    selected = null;
+    await v._jumpToSource({ page: 1, xBp: 100, yTopBp: 100, word: 'wavefunction', rowFraction: 0.4 });
+    // Reach past the two-second window the click owns.
+    v._selfRange.at -= 5000;
+    v.posted.length = 0;
+    v.syncFromEditor({ document: doc, selection: {
+        active: selected.end, start: selected.start, end: selected.end,
+    } });
+    const span = v.posted.find(p => p.type === 'selection');
+    assert.ok(span && span.span, 'a range the reader made is painted as one');
+});
+
+test('SHIFT-CLICK PICKS THE ENDS: first the start, then the range', async () => {
+    // The reverse of dragging a selection in the editor. Both ends resolve
+    // exactly as a plain click does, so the gesture adds no new way of being
+    // wrong — it only remembers the first answer until the second arrives.
+    const v = makeViewer({ file: FILE, line: 5, flag: FLAG.FRESH, object: null },
+        { file: FILE, line: 5, dx: 2 });
+    const st = v.coord.roots.get(FILE);
+    st.map.lineRows = (f, n) => (n >= 5 && n <= 9
+        ? [{ page: 1, x: 100, y: 100 + (n - 5) * 14, w: 300, h: 13 }] : []);
+
+    // First shift-click: a pending mark, no range, and the editor is not moved.
+    selected = null;
+    await v._jumpToSource({ page: 1, xBp: 100, yTopBp: 100, word: 'transformed', rowFraction: 0.2, pick: true });
+    const first = v.posted.filter(p => p.type === 'selection').pop();
+    assert.ok(first && first.span && first.span.pendingStart, 'the start is marked as pending');
+    assert.ok(!first.span.rows.length, 'with no span yet');
+    assert.ok(v._pickAnchor, 'and the anchor is remembered');
+
+    // Second shift-click, further down: the range closes.
+    v.posted.length = 0;
+    v.coord.roots.get(FILE).map.renderToSource = () => ({ file: FILE, line: 9, flag: FLAG.FRESH, object: null });
+    v.coord.roots.get(FILE).map.lineAtPoint = () => ({ file: FILE, line: 9, dx: 2 });
+    await v._jumpToSource({ page: 1, xBp: 100, yTopBp: 156, word: 'closes', rowFraction: 0.2, pick: true });
+    const done = v.posted.filter(p => p.type === 'selection').pop();
+    assert.ok(done && done.span && !done.span.pendingStart, 'a real span is posted');
+    assert.strictEqual(done.span.start.line, 5, 'from the first pick');
+    assert.strictEqual(done.span.end.line, 9, 'to the second');
+    assert.ok(selected && selected.start.line === 4 && selected.end.line === 8,
+        'and the editor holds that selection');
+    assert.strictEqual(v._pickAnchor, null, 'the anchor is spent');
+});
+
+test('picking the ends in the WRONG order still makes a forward range', async () => {
+    const v = makeViewer({ file: FILE, line: 9, flag: FLAG.FRESH, object: null },
+        { file: FILE, line: 9, dx: 2 });
+    const st = v.coord.roots.get(FILE);
+    st.map.lineRows = (f, n) => [{ page: 1, x: 100, y: 100 + n * 14, w: 300, h: 13 }];
+    await v._jumpToSource({ page: 1, xBp: 100, yTopBp: 200, word: 'closes', rowFraction: 0.2, pick: true });
+    st.map.renderToSource = () => ({ file: FILE, line: 5, flag: FLAG.FRESH, object: null });
+    st.map.lineAtPoint = () => ({ file: FILE, line: 5, dx: 2 });
+    selected = null;
+    await v._jumpToSource({ page: 1, xBp: 100, yTopBp: 100, word: 'transformed', rowFraction: 0.2, pick: true });
+    assert.ok(selected.start.line < selected.end.line, 'the earlier position is the start');
+    assert.strictEqual(selected.start.line, 4);
+});
+
+test('a plain click abandons a half-made selection', async () => {
+    const v = makeViewer({ file: FILE, line: 5, flag: FLAG.FRESH, object: null },
+        { file: FILE, line: 5, dx: 2 });
+    await v._jumpToSource({ page: 1, xBp: 100, yTopBp: 100, word: 'transformed', rowFraction: 0.2, pick: true });
+    assert.ok(v._pickAnchor, 'armed');
+    await v._jumpToSource({ page: 1, xBp: 100, yTopBp: 100, word: 'wavefunction', rowFraction: 0.4 });
+    assert.strictEqual(v._pickAnchor, null,
+        'a click three minutes later must not silently become a range');
 });
 
 // --- the mini-editor session -------------------------------------------------
@@ -618,6 +821,98 @@ test('the mini-editor round trip: open, type, no echo, editor change flows back'
     } finally {
         stub.workspace.openTextDocument = oldOpen;
         stub.workspace.applyEdit = async () => true;
+    }
+});
+
+test('THE REPORTED BUG: a wrapped heading opens whole, not as its last fragment', async () => {
+    // `section-heading` is not a container kind — the ladder skips it, because
+    // a heading annotates its section rather than enclosing it — so the card
+    // fell through to the paragraph scanner. A heading whose title wraps in the
+    // SOURCE then opened on the orphan line: a card containing `overlap}`.
+    const HEAD = LINES.findIndex(l => l.startsWith('\\subsection{A first example')) + 1;
+    assert.ok(HEAD > 1, 'the fixture has a wrapped heading');
+    assert.strictEqual(LINES[HEAD], 'overlap}', 'whose second line is the orphan');
+
+    const mdoc = new MutableDoc(SRC, FILE);
+    const oldOpen = stub.workspace.openTextDocument;
+    stub.workspace.openTextDocument = async () => mdoc;
+    stub.workspace.onDidChangeTextDocument = () => ({ dispose() {} });
+    try {
+        // The click resolves to the SECOND line of the heading, as it does on
+        // the real paper: that is where the ink of the wrapped title sits.
+        const v = makeViewer({ file: FILE, line: HEAD + 1, flag: FLAG.FRESH, object: null },
+            { file: FILE, line: HEAD + 1, dx: 2 });
+        await v._onMessage({ type: 'editHere', page: 1, xBp: 100, yTopBp: 100 * (HEAD + 1) + 6 });
+        const eo = v.posted.find(p => p.type === 'editOpen');
+        assert.ok(eo, 'a card opened');
+        assert.strictEqual(eo.startLine, HEAD, `from the \\subsection line, got ${eo.startLine}`);
+        assert.strictEqual(eo.endLine, HEAD + 1, 'through the line that closes its brace');
+        assert.ok(eo.text.startsWith('\\subsection{'), `holding the whole command, got ${JSON.stringify(eo.text.slice(0, 24))}`);
+        assert.ok(eo.text.trimEnd().endsWith('overlap}'), 'right through to the closing brace');
+        assert.ok(/^subsection · A first example/.test(eo.label),
+            `and it says what it is: ${JSON.stringify(eo.label)}`);
+
+        // The FIRST line of the heading opens the same block, not a paragraph.
+        const v2 = makeViewer({ file: FILE, line: HEAD, flag: FLAG.FRESH, object: null },
+            { file: FILE, line: HEAD, dx: 2 });
+        await v2._onMessage({ type: 'editHere', page: 1, xBp: 100, yTopBp: 100 * HEAD + 6 });
+        const eo2 = v2.posted.find(p => p.type === 'editOpen');
+        assert.strictEqual(eo2.startLine, HEAD, 'same block from the other end');
+        assert.strictEqual(eo2.endLine, HEAD + 1);
+    } finally {
+        stub.workspace.openTextDocument = oldOpen;
+    }
+});
+
+test('the card steps to the next block and back, and stops at the ends', async () => {
+    // ‹ › walk exactly the blocks a right-click would have opened, which is why
+    // both go through the same `_blockAt`. Prose paragraphs are not objects in
+    // the model at all, so the walk is by LINE: past the current block's last
+    // line to the next line with anything on it, then ask what block is there.
+    const mdoc = new MutableDoc(SRC, FILE);
+    const oldOpen = stub.workspace.openTextDocument;
+    stub.workspace.openTextDocument = async () => mdoc;
+    stub.workspace.onDidChangeTextDocument = () => ({ dispose() {} });
+    try {
+        const v = makeViewer({ file: FILE, line: 7, flag: FLAG.FRESH, object: null },
+            { file: FILE, line: 7, dx: 2 });
+        await v._onMessage({ type: 'editHere', page: 1, xBp: 100, yTopBp: 700 });
+        const eq = v.posted.find(p => p.type === 'editOpen');
+        assert.strictEqual(eq.startLine, 6, 'the equation is open');
+
+        // Forward: the prose after it.
+        v.posted.length = 0;
+        await v._onMessage({ type: 'editStep', editId: eq.editId, delta: 1 });
+        const next = v.posted.find(p => p.type === 'editOpen');
+        assert.ok(next, 'stepping posts a new session');
+        assert.ok(next.startLine > eq.endLine, `a later block, got line ${next.startLine}`);
+        assert.strictEqual(next.editId, v._edit.id, 'and the session really moved');
+        assert.ok(next.text.length, 'with the block source');
+        assert.strictEqual(next.stepped, true, 'flagged as a step, so a moved card stays put');
+
+        // Back again: the equation.
+        v.posted.length = 0;
+        await v._onMessage({ type: 'editStep', editId: next.editId, delta: -1 });
+        const back = v.posted.find(p => p.type === 'editOpen');
+        assert.ok(back, 'and back');
+        assert.strictEqual(back.startLine, 6, `the equation again, got ${back.startLine}`);
+
+        // A stale editId is ignored — the card that sent it is gone.
+        v.posted.length = 0;
+        await v._onMessage({ type: 'editStep', editId: eq.editId, delta: 1 });
+        assert.ok(!v.posted.find(p => p.type === 'editOpen'), 'a stale step does nothing');
+
+        // Walking off the end says so rather than wrapping to the title.
+        let guard = 0;
+        while (guard++ < 20) {
+            v.posted.length = 0;
+            await v._onMessage({ type: 'editStep', editId: v._edit.id, delta: 1 });
+            const st2 = v.posted.find(p => p.type === 'status' && p.kind === 'warn');
+            if (st2) { assert.ok(/block/.test(st2.text), st2.text); break; }
+        }
+        assert.ok(guard < 20, 'the walk terminates at the end of the file');
+    } finally {
+        stub.workspace.openTextDocument = oldOpen;
     }
 });
 
@@ -1074,40 +1369,295 @@ test('a failed compile is reported in the panel, not swallowed', async () => {
     assert.strictEqual(err.kind, 'err');
 });
 
-test('an inverse click FLASHES the editor selection, then clears it', async () => {
-    // The page marks where you are with a wash that fades; the editor end of
-    // the same gesture should land the same way rather than just appearing.
+test('an inverse click OUTLINES the clicked range, and takes it away in ONE step', async () => {
+    // WHAT THIS REPLACED, and why. The marker used to be a translucent amber
+    // WASH faked into a fade: seven decoration types at falling alpha, swapped
+    // on a timer. Two things are wrong with that and no amount of tuning fixes
+    // either. A decoration cannot animate, so the "fade" is a handful of
+    // visible steps; and it paints on top of the selection VS Code has already
+    // drawn over the very same characters, so two translucent layers muddy each
+    // other and the text under them. It looked broken because it was.
+    //
+    // The contract now: ONE decoration, a BORDER, painted once, cleared once.
     const v = makeViewer({ file: FILE, line: 5, flag: FLAG.FRESH, object: null },
         { file: FILE, line: 5, dx: 2 });
     const painted = [];
+    let cleared = 0;
     const ed = {
         document: doc,
         set selection(x) { selected = x; },
         get selection() { return selected; },
         revealRange: () => {},
-        setDecorations: (type, ranges) => { if (ranges.length) painted.push(type); },
+        setDecorations: (type, ranges) => { if (ranges.length) painted.push(type); else cleared++; },
     };
     const oldShow = stub.window.showTextDocument;
     stub.window.showTextDocument = async () => ed;
-    let made = 0;
     stub.window.createTextEditorDecorationType = (o) => ({ o, dispose() {} });
     stub.OverviewRulerLane = { Center: 2 };
     try {
         await v._jumpToSource({ page: 1, xBp: 100, yTopBp: 100, word: 'wavefunction', rowFraction: 0.4 });
-        assert.ok(painted.length >= 1, 'something was painted over the selection');
-        // Falling alpha: the first step is the strongest.
-        const a = (t) => Number(/rgba\(255,196,0,([\d.]+)\)/.exec(t.o.backgroundColor)[1]);
-        assert.ok(a(painted[0]) > 0.2, `starts visible: ${a(painted[0])}`);
-        assert.ok(v._flash._types.length > 1, 'and it has steps to fade through');
-        const alphas = v._flash._types.map(a);
-        for (let i = 1; i < alphas.length; i++) {
-            assert.ok(alphas[i] < alphas[i - 1], 'each step is fainter than the last');
-        }
+        assert.strictEqual(painted.length, 1, 'painted exactly once — no ladder of steps');
+        const o = painted[0].o;
+        assert.ok(/1px solid rgba\(255,196,0/.test(o.border || ''),
+            `an amber border, got ${JSON.stringify(o.border)}`);
+        // A whisper of fill is allowed so the border can be found; a WASH is not.
+        const fill = Number((/rgba\(255,196,0,([\d.]+)\)/.exec(o.backgroundColor || 'rgba(0,0,0,0)') || [])[1] || 0);
+        assert.ok(fill <= 0.15, `it must not stain the text: ${fill}`);
+        assert.ok(o.overviewRulerColor, 'and it marks the ruler, like the page does');
+        assert.strictEqual(v._flash._types, undefined, 'the fade ladder is gone for good');
+
         v._flash.clear();
+        assert.ok(cleared >= 1, 'clearing really removes it');
     } finally {
         stub.window.showTextDocument = oldShow;
-        void made;
     }
+});
+
+// --- PROSE INSIDE AN OBJECT ---------------------------------------------------
+
+/**
+ * A viewer whose glyph alignment is REAL but built from synthetic ink.
+ *
+ * The alignment only runs when the clicked line belongs to a non-approximate
+ * object — a heading, a figure, or one of the paragraphs the model does treat
+ * as objects — and that is precisely the case the reported bug appeared in, so
+ * a test of prose resolution has to arrange it rather than avoid it.
+ */
+function viewerWithAlignment(line, opts = {}) {
+    const v = makeViewer({ file: FILE, line, flag: FLAG.FRESH, object: null },
+        { file: FILE, line, dx: 2 });
+    const text = LINES[line - 1];
+    // One item per character, left to right on one baseline, 8 bp apart.
+    const items = [];
+    for (let i = 0; i < text.length; i++) {
+        const ch = text[i];
+        if (!ch.trim()) continue;
+        items.push({ page: 1, str: ch, x: 100 + i * 8, w: 7, y: 90, h: 10, baseline: 100 });
+    }
+    const map = buildObjectMap({
+        lines: LINES, startLine: line, endLine: line, inMath: false, items,
+    });
+    v._objectMap = () => (opts.noMap ? null : map);
+    v._map = map;
+    return v;
+}
+
+test('THE REPORTED BUG: prose inside an object selects the WORD, not one letter', async () => {
+    // Where a paragraph or a heading IS a model object, the click goes through
+    // the glyph alignment, which works character by character — right inside an
+    // equation, wrong in a sentence. When the name search then found nothing,
+    // the character itself was the answer and a click on a word put ONE LETTER
+    // in the editor. The alignment has already said which character; the word
+    // is the token containing that column.
+    const LN = 5;
+    const text = LINES[LN - 1];
+    const at = text.indexOf('wavefunction');
+    assert.ok(at > 0, 'the fixture line has that word');
+    const v = viewerWithAlignment(LN);
+    selected = null;
+    // No word from the webview — the case that used to fall through to a glyph.
+    await v._jumpToSource({ page: 1, xBp: 100 + (at + 4) * 8, yTopBp: 95 });
+    assert.ok(selected, 'it answers');
+    const got = LINES[selected.start.line].slice(selected.start.character, selected.end.character);
+    assert.strictEqual(got, 'wavefunction', `the whole word, got ${JSON.stringify(got)}`);
+});
+
+test('…and a click between words there is still not a letter', async () => {
+    const LN = 5;
+    const text = LINES[LN - 1];
+    const at = text.indexOf(' as a thing');
+    assert.ok(at > 0);
+    const v = viewerWithAlignment(LN);
+    selected = null;
+    await v._jumpToSource({ page: 1, xBp: 100 + at * 8, yTopBp: 95 });
+    assert.ok(selected, 'it answers');
+    const got = LINES[selected.start.line].slice(selected.start.character, selected.end.character);
+    assert.ok(got.length > 1 || got === '', `never a lone letter, got ${JSON.stringify(got)}`);
+});
+
+test('AN UNPAIRED GLYPH IN PROSE DOES NOT SELECT THE PARAGRAPH', async () => {
+    // The enclosing-construct answer is a MATHS answer: prose has no numerator
+    // or subscript to fall back to, so "the smallest certain thing" there is the
+    // whole object — which is how a click on a word came back with a paragraph.
+    // Two things now prevent it, the maths gate and the word expansion above;
+    // this asserts the OUTCOME they exist for rather than either mechanism.
+    const LN = 5;
+    const v = viewerWithAlignment(LN);
+    // A glyph the source cannot explain, sitting in the middle of the line.
+    v._map.renToSrc[3] = -1;
+    selected = null;
+    await v._jumpToSource({ page: 1, xBp: 100 + 3 * 8 + 3, yTopBp: 95 });
+    assert.ok(selected, 'it answers');
+    assert.strictEqual(selected.start.line, selected.end.line,
+        'and stays on one line rather than swallowing the paragraph');
+});
+
+// --- WHICH of two identical words ---------------------------------------------
+
+const REPEAT_LN = LINES.findIndex(l => l.startsWith('The kernel of the operator')) + 1;
+
+/** A click carrying the webview's spot list, positioned inside the row rect. */
+const repeatClick = (xs, at, extra = {}) => ({
+    page: 1, xBp: 100, yTopBp: 100 * REPEAT_LN + 6, word: 'kernel', rowFraction: 0.05,
+    // What counting along the printed ROW would have said — deliberately the
+    // WRONG answer here, so the test can tell which count was used.
+    wordOccurrence: 1,
+    wordSpots: xs.map(x => ({ page: 1, x, y: 100 * REPEAT_LN + 6 })),
+    wordAt: { page: 1, x: at, y: 100 * REPEAT_LN + 6 },
+    ...extra,
+});
+
+test('THE REPORTED BUG: two identical words on a line, and the clicked one wins', async () => {
+    // A printed row is a band across the page; a source line is a range of
+    // characters, and TeX fills each row from as many source lines as it needs.
+    // So "the second `kernel` on this row" is not "the second `kernel` on this
+    // source line", and when the row began mid-sentence the count came out one
+    // short — the first occurrence was selected however far down the line you
+    // clicked. The webview now ships WHERE each candidate is; `lineRows` says
+    // which of them are on this line; and the count is done there.
+    assert.ok(REPEAT_LN > 1, 'the fixture has a line with a repeated word');
+    const src = LINES[REPEAT_LN - 1];
+    const first = src.indexOf('kernel');
+    const second = src.indexOf('kernel', first + 1);
+    assert.ok(second > first, 'and it really repeats');
+
+    const v = makeViewer({ file: FILE, line: REPEAT_LN, flag: FLAG.FRESH, object: null },
+        { file: FILE, line: REPEAT_LN, dx: 2 });
+    // The fake map's row for this line is x = 100..400 — both spots sit in it.
+    selected = null;
+    await v._jumpToSource(repeatClick([150, 320], 320));
+    assert.strictEqual(selected.start.character, second,
+        `the SECOND kernel, got column ${selected.start.character} (first is at ${first})`);
+    assert.strictEqual(src.slice(selected.start.character, selected.end.character), 'kernel');
+
+    // …and the first one when that is the one under the pointer.
+    selected = null;
+    await v._jumpToSource(repeatClick([150, 320], 150));
+    assert.strictEqual(selected.start.character, first, 'the FIRST kernel this time');
+});
+
+test('spots that belong to a NEIGHBOURING source line are not counted', async () => {
+    // The row rect the fake map reports for this line is x = 100..400. A spot
+    // outside it is another line's word sharing the same printed row — the
+    // exact thing that made the count disagree with the source.
+    const src = LINES[REPEAT_LN - 1];
+    const second = src.indexOf('kernel', src.indexOf('kernel') + 1);
+    const v = makeViewer({ file: FILE, line: REPEAT_LN, flag: FLAG.FRESH, object: null },
+        { file: FILE, line: REPEAT_LN, dx: 2 });
+    selected = null;
+    // Two foreign spots to the LEFT of the row would have pushed the clicked
+    // word to occurrence 3 if they had been counted.
+    await v._jumpToSource(repeatClick([20, 60, 150, 320], 320));
+    assert.strictEqual(selected.start.character, second, 'still the second kernel');
+});
+
+test('with no spots to count, the row-local occurrence is still honoured', async () => {
+    // Backwards compatibility with a payload from an older webview, and the
+    // path taken when the click was not on a word the text layer could place.
+    const src = LINES[REPEAT_LN - 1];
+    const second = src.indexOf('kernel', src.indexOf('kernel') + 1);
+    const v = makeViewer({ file: FILE, line: REPEAT_LN, flag: FLAG.FRESH, object: null },
+        { file: FILE, line: REPEAT_LN, dx: 2 });
+    selected = null;
+    await v._jumpToSource({
+        page: 1, xBp: 100, yTopBp: 100 * REPEAT_LN + 6,
+        word: 'kernel', rowFraction: 0.05, wordOccurrence: 2,
+    });
+    assert.strictEqual(selected.start.character, second, 'the second, from the row-local count');
+});
+
+test('THE REPORTED BUG: a click past the end of a line selects a WORD, not the line', async () => {
+    // The honest fallback was the whole LINE, so a click a little to the right
+    // of the last word put the entire line in the editor. The panel knows which
+    // word was nearest — it declined to call it a hit — and where the
+    // alternative is a whole line, the nearest word is the better answer.
+    const v = makeViewer({ file: FILE, line: 5, flag: FLAG.FRESH, object: null },
+        { file: FILE, line: 5, dx: 40 });
+    selected = null;
+    await v._jumpToSource({
+        page: 1, xBp: 400, yTopBp: 100,
+        farWord: 'twice', rowFraction: 0.95,
+    });
+    assert.ok(selected, 'it answers');
+    const got = LINES[selected.start.line].slice(selected.start.character, selected.end.character);
+    assert.strictEqual(got, 'twice', `the nearest word, got ${JSON.stringify(got)}`);
+    assert.ok(selected.end.character - selected.start.character < LINES[4].length,
+        'and not the whole line');
+});
+
+test('a far word never outranks a real hit', async () => {
+    // It is reported separately for exactly this reason: it must not be able to
+    // beat the word actually under the pointer, or the click gets less precise.
+    const v = makeViewer({ file: FILE, line: 5, flag: FLAG.FRESH, object: null },
+        { file: FILE, line: 5, dx: 2 });
+    selected = null;
+    await v._jumpToSource({
+        page: 1, xBp: 100, yTopBp: 100,
+        word: 'wavefunction', rowFraction: 0.4, farWord: 'twice',
+    });
+    const got = LINES[selected.start.line].slice(selected.start.character, selected.end.character);
+    assert.strictEqual(got, 'wavefunction', 'the word under the pointer wins');
+});
+
+// --- the highlight the EDITOR sends back --------------------------------------
+
+test('THE REPORTED BUG: an equation highlight excludes its NUMBER', async () => {
+    // Measured on the reference paper: the rows of one display come back as the
+    // equation itself (x=160..435) plus the tag, filed under `\begin{equation}`
+    // and set in the margin (x=515.9..599.1) — which painted a wide amber band
+    // above and beside the equation. "Selects some weird domain."
+    const v = makeViewer(null, null);
+    const st = v.coord.roots.get(FILE);
+    // THE SHAPE THE PAPER ACTUALLY HAS. A display's own content line commonly
+    // carries NO SyncTeX rows — measured at 71% — so the line the cursor is on
+    // has nothing to paint, the OBJECT becomes the unit, and its rows are the
+    // ones that include the number filed under `\begin{equation}`.
+    st.map.lineRows = (f, n) => {
+        if (n === 6) return [{ page: 1, x: 515.9, y: 211.3, w: 83.2, h: 13.5 }];   // the tag
+        if (n === 7) return [];                                                    // the cursor's line
+        if (n === 8) return [{ page: 1, x: 160.2, y: 228.5, w: 274.8, h: 13.5 },   // the equation
+            { page: 1, x: 512.9, y: 237.3, w: 4.3, h: 13.5 }];                     // and a stray
+        return [];
+    };
+    v.syncFromEditor(editorAt(7, 4));
+    const h = v.posted.find(p => p.type === 'highlight');
+    assert.ok(h && h.rects.length, 'a highlight was posted');
+    assert.strictEqual(h.rects.length, 1, `ONE band, got ${h.rects.length}`);
+    assert.ok(h.rects[0].x < 200 && h.rects[0].x + h.rects[0].w < 440,
+        `over the equation, not the margin: x=${h.rects[0].x}..${h.rects[0].x + h.rects[0].w}`);
+});
+
+// --- a click that misses the ink ---------------------------------------------
+
+test('THE REPORTED BUG: a click slightly off a word does not jump to the equation', async () => {
+    // `_resolvePoint` used to take the printed-row answer only when the point
+    // was INSIDE a row's band and within 24 bp of its ink. Everywhere else the
+    // box hierarchy answered — and on prose the box hierarchy answers with the
+    // display equation below, because `\[` plants a zero-width record on the
+    // paragraph's last baseline. A few points off a word therefore selected the
+    // equation. The slack is now stated in units of the LEADING.
+    const eqBox = { file: FILE, line: 7, flag: FLAG.FRESH, object: null };
+
+    // Six bp below a 15 bp line: still that line.
+    const v = makeViewer(eqBox, { file: FILE, line: 5, dx: 2, dy: 6, lead: 15 });
+    assert.strictEqual(v._resolvePoint(v.coord.roots.get(FILE), { page: 1, xBp: 100, yTopBp: 100 }).line, 5,
+        'a near miss belongs to the row it missed');
+
+    // In the white space after a short line: still that line.
+    const v2 = makeViewer(eqBox, { file: FILE, line: 5, dx: 60, dy: 1, lead: 15 });
+    assert.strictEqual(v2._resolvePoint(v2.coord.roots.get(FILE), { page: 1, xBp: 100, yTopBp: 100 }).line, 5,
+        'so does a click in the white space after the line');
+
+    // Two lines away: the box hierarchy is the honest answer again — which is
+    // what keeps a figure's interior resolving to the figure.
+    const v3 = makeViewer(eqBox, { file: FILE, line: 5, dx: 2, dy: 40, lead: 15 });
+    assert.strictEqual(v3._resolvePoint(v3.coord.roots.get(FILE), { page: 1, xBp: 100, yTopBp: 100 }).line, 7,
+        'but a genuinely distant point is not claimed by the row');
+
+    // And the whole point: the selection lands on the prose, not the equation.
+    selected = null;
+    await v._jumpToSource({ page: 1, xBp: 100, yTopBp: 100, word: 'wavefunction', rowFraction: 0.4 });
+    assert.strictEqual(selected.start.line, 4, 'the prose line, not the equation');
 });
 
 test('a host with no overview-ruler enum still jumps', async () => {

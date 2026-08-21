@@ -41,6 +41,10 @@ page so that the render map has something real to point at.
 E(p) = \\sqrt{1 + 16 g^2 \\sin^2 \\tfrac{p}{2}}
 \\end{equation}
 More prose after the first equation, again long enough to be a real paragraph.
+
+The kernel of the operator is the kernel we started from, and a reader who
+has read the kernel section will recognise the kernel again immediately, so
+kernel counting is the only thing that this paragraph is really about here.
 \\clearpage
 \\section{Second}
 \\label{sec:two}
@@ -93,6 +97,40 @@ async function main() {
         assert.strictEqual(rm._baseFlag(), FLAG.FRESH);
         rm.noteEdit('/p.tex', 1, +2);
         assert.strictEqual(rm._baseFlag(), FLAG.PROBABLY_CURRENT);
+    });
+
+    await test('THE LEADING IS THE SMALL COMMON GAP BETWEEN WIDE ROWS', () => {
+        // MEASURED on the reference paper (89 displays): the commonest gap
+        // between baselines came out 4.5 bp — a subscript offset — against a
+        // true leading of 13.6. Every row rect was then a third of its real
+        // height, so a subscript printed on a prose line fell OUTSIDE that
+        // line's own row, and a click on the α of `\theta_\alpha` resolved to
+        // the first α on the line instead.
+        //
+        // Two things distinguish a leading from a maths offset, and this builds
+        // a record set with both: body text rows are WIDE, and the leading is
+        // the SMALL common gap — displays add space, they never remove it.
+        const BP = 72.27 * 65536 / 72;              // one bp, in sp
+        const boxes = [];
+        for (let i = 0; i < 30; i++) {
+            const v = (100 + i * 13.6) * BP;
+            boxes.push({ type: 'char', page: 1, tag: 1, line: i + 1, v, h: 0, W: 400 * BP, H: 0, D: 0 });
+            // Six script baselines per line, 4.5 bp off, a few points wide —
+            // the shape of an equation-heavy page, and far more numerous.
+            for (let k = 0; k < 6; k++) {
+                for (const off of [-4.5, 4.5]) {
+                    boxes.push({ type: 'char', page: 1, tag: 1, line: i + 1,
+                        v: v + off * BP, h: (100 + k * 20) * BP, W: 6 * BP, H: 0, D: 0 });
+                }
+            }
+        }
+        // Wide rows are 13.6 apart; the displays around them are further.
+        const rm = new RenderMap({ generation: { generation: 1 } });
+        rm.doc = { pages: new Map([[1, { boxes }]]), inputs: new Map([[1, '/p.tex']]) };
+        rm._lead = null;
+        const leadBp = rm._leadingSp() * (72 / (72.27 * 65536));
+        assert.ok(Math.abs(leadBp - 13.6) < 1.0,
+            `the text leading, not the script offset: got ${leadBp.toFixed(1)}`);
     });
 
     if (!hasLatexmk) {
@@ -181,6 +219,163 @@ async function main() {
             assert.strictEqual(hit.object.kind, 'display-equation');
             assert.strictEqual(hit.object.label, 'eq:one');
             assert.ok(!hit.object.approximate, 'and exactly, not by proximity');
+        });
+
+        await test('THE LEADING IS THE TEXT LEADING, even on a paper made of maths', async () => {
+            // MEASURED on the reference paper (89 displays): the commonest gap
+            // between baselines was 4.5 bp — a subscript offset — against a true
+            // leading of 13.6, because on an equation-heavy paper the maths
+            // offsets outnumber the text lines. Every row rect then came out a
+            // third of its real height, and a click on a subscript fell outside
+            // its own row: that is what made the α of `\theta_\alpha` resolve to
+            // the first α on the line.
+            const mathy = [
+                '\\documentclass[11pt,a4paper]{article}',
+                '\\usepackage{amsmath}',
+                '\\usepackage[margin=1in]{geometry}',
+                '\\begin{document}',
+                'At site $\\alpha$, with inhomogeneity $\\theta_\\alpha$ and',
+                '$0<s_\\alpha<1$, the allowed separated values form two half-towers:',
+            ];
+            // Prose BETWEEN the displays, because a paper has paragraphs: a
+            // document that is nothing but equations has no text leading to
+            // find, and asserting one would be asserting a fiction.
+            // The RATIO of the reference paper: paragraphs of ordinary prose,
+            // and displays dense with scripts and fractions — each of which
+            // contributes several baselines a few points apart. That is what
+            // outvoted the text lines and produced a 4.5 bp "leading".
+            for (let i = 0; i < 12; i++) {
+                for (let k = 0; k < 3; k++) {
+                    mathy.push(`Ordinary sentence number ${k} of paragraph ${i}, long enough to run`,
+                        'across the measure the way body text does in a real paper.');
+                }
+                mathy.push('');
+                mathy.push('\\begin{equation}',
+                    `x_{\\alpha,${i}}^{\\uparrow} = \\frac{a_{${i}}}{b_{${i}}} + \\frac{p^{2}}{q_{3}} ` +
+                    `+ y_{\\beta}^{\\downarrow} + \\frac{u_{7}}{v^{8}} + z_{9}^{10}`,
+                    '\\end{equation}');
+            }
+            mathy.push('\\end{document}', '');
+            const mdir = fs.mkdtempSync(path.join(os.tmpdir(), 'wbrm-lead-'));
+            const mroot = path.join(mdir, 'm.tex');
+            fs.writeFileSync(mroot, mathy.join('\n'));
+            const mgen = await compile({ root: mroot, sourceFiles: [mroot], timeoutMs: 120000 });
+            assert.strictEqual(mgen.ok, true, 'the maths-heavy fixture compiled');
+            const mm = new RenderMap({ generation: mgen, model: buildModel(scanTex(mathy.join('\n'), { file: mroot }), { file: mroot }) });
+            const leadBp = mm._leadingSp() * (72 / (72.27 * 65536));
+            assert.ok(leadBp > 10 && leadBp < 20,
+                `an 11pt document leads at ~13.6 bp, got ${leadBp.toFixed(1)}`);
+
+            // And the consequence the bug was actually about: the row of the
+            // prose line is a whole text line tall, so the subscript printed on
+            // it is INSIDE its own row.
+            const row = mm.lineRows(mroot, 5)[0];
+            assert.ok(row, 'the prose line printed a row');
+            assert.ok(row.h > 10, `the row is a text line tall, got ${row.h.toFixed(1)}`);
+            try { fs.rmSync(mdir, { recursive: true, force: true }); } catch (_) { /* fine */ }
+            try { if (mgen.outDir) fs.rmSync(mgen.outDir, { recursive: true, force: true }); } catch (_) { /* fine */ }
+        });
+
+        await test('A CLICK THAT MISSES THE INK STILL LANDS ON THE NEAREST ROW', () => {
+            // THE REPORTED BUG. Only the row whose band CONTAINED the point used
+            // to count, and the gaps between bands are not small: the space
+            // above a display equation is several points of nothing. A click a
+            // few points below the last line of a paragraph therefore matched no
+            // row at all, the caller fell back to the box hierarchy, and the box
+            // hierarchy answers prose with the equation below it — "slightly
+            // away from the word and it selects the equation".
+            // The line immediately ABOVE the display equation: the gap under it
+            // is \abovedisplayskip, which is the gap the bug was about. (A
+            // prose line with another prose line under it has no gap at all —
+            // the bands tile — so it cannot exercise this.)
+            const proseLine = PAPER.split('\n')
+                .findIndex(l => l.startsWith('page so that the render map')) + 1;
+            assert.ok(proseLine > 1, 'the fixture has that line');
+            const rows = rm.lineRows(root, proseLine);
+            assert.ok(rows.length, 'and it printed a row');
+            const r0 = rows[0];
+
+            // Dead centre: unchanged behaviour, dy = 0.
+            const on = rm.lineAtPoint(r0.page, r0.x + r0.w / 2, r0.y + r0.h / 2);
+            assert.ok(on, 'a point on the ink resolves');
+            assert.strictEqual(on.line, proseLine);
+            assert.strictEqual(on.dy, 0, 'and reports no vertical miss');
+            assert.ok(on.lead > 0, 'the leading comes back with it, as the scale for "near"');
+
+            // Four points BELOW the row's own band — the gap that used to
+            // resolve to the equation.
+            const below = rm.lineAtPoint(r0.page, r0.x + r0.w / 2, r0.y + r0.h + 4);
+            assert.ok(below, 'a point just below the row still resolves');
+            assert.strictEqual(below.line, proseLine,
+                `expected the prose line back, got ${below && below.line}`);
+            assert.ok(below.dy > 0 && below.dy < below.lead,
+                `and says how far it missed by: ${below && below.dy}`);
+
+            // Far away is still far away: two inches down is not this line.
+            const far = rm.lineAtPoint(r0.page, r0.x + r0.w / 2, r0.y + r0.h + 144);
+            assert.ok(!far || far.line !== proseLine,
+                'a point two inches away is NOT claimed by this row');
+        });
+
+        await test('THE FIRST WORD OF A CONTINUATION ROW IS NOT \\end{document}', () => {
+            // MEASURED, and the cause of two separate bug reports. SyncTeX
+            // files the FIRST record of every continuation row of a paragraph
+            // under the line the paragraph ENDS on — the \\par — not under the
+            // line whose word it marks. In this fixture that is the
+            // \\clearpage/\\end line, so clicking the first word of a wrapped
+            // line jumped there; and because `lineRows` then started the row
+            // one word late, a repeated word came out one occurrence short.
+            const lines = PAPER.split('\n');
+            const first = lines.findIndex(l => l.startsWith('The kernel of the operator')) + 1;
+            assert.ok(first > 1, 'the fixture has the hard-wrapped paragraph');
+            const last = lines.findIndex(l => l.startsWith('kernel counting')) + 1;
+
+            // Every row of every line of the paragraph, and who owns its start.
+            const owners = new Map();
+            for (let n = first; n <= last; n++) {
+                for (const r of rm.lineRows(root, n)) owners.set(`${r.page}|${r.y.toFixed(1)}`, n);
+            }
+            assert.ok(owners.size >= 3, 'it really wrapped into several rows');
+
+            // The paragraph's own lines own every one of its rows: no row of it
+            // is attributed to a line outside the paragraph.
+            for (const [, n] of owners) {
+                assert.ok(n >= first && n <= last, `row owned by line ${n}, outside ${first}..${last}`);
+            }
+
+            // The click itself: on the first word of a continuation row.
+            const rows = [];
+            for (let n = first; n <= last; n++) {
+                for (const r of rm.lineRows(root, n)) rows.push({ n, ...r });
+            }
+            rows.sort((a, b) => a.page - b.page || a.y - b.y || a.x - b.x);
+            const cont = rows.find(r => r.x < 200 && r.y > rows[0].y);
+            assert.ok(cont, 'there is a continuation row');
+            const hit = rm.lineAtPoint(cont.page, cont.x + 2, cont.y + cont.h / 2);
+            assert.ok(hit, 'clicking its first word resolves');
+            assert.ok(hit.line >= first && hit.line <= last,
+                `to a line OF THE PARAGRAPH, got ${hit.line} (paragraph is ${first}..${last})`);
+
+            // ABLATION — the same query with the repair switched off, which is
+            // the behaviour that shipped and was reported. Without it the click
+            // lands on a line outside the paragraph altogether.
+            const unrepaired = new RenderMap({ generation: gen, model });
+            unrepaired._rowRepairs = () => new Map();
+            const before = unrepaired.lineAtPoint(cont.page, cont.x + 2, cont.y + cont.h / 2);
+            assert.ok(before && (before.line < first || before.line > last),
+                `without the repair the same click lands outside the paragraph ` +
+                `(got ${before && before.line}; if this ever fails, SyncTeX changed ` +
+                `and the repair may no longer be needed)`);
+            // And the row it starts is the one the repair recovers: unrepaired,
+            // the paragraph's rows begin one word late.
+            const rawRows = [];
+            for (let n = first; n <= last; n++) {
+                for (const r of unrepaired.lineRows(root, n)) rawRows.push({ n, ...r });
+            }
+            const rawCont = rawRows.filter(r => r.page === cont.page &&
+                Math.abs(r.y - cont.y) < 1).sort((a, b) => a.x - b.x)[0];
+            assert.ok(rawCont && rawCont.x > cont.x,
+                `and its row started further right (${rawCont && rawCont.x.toFixed(1)} vs ${cont.x.toFixed(1)})`);
         });
 
         await test('a click BETWEEN objects still resolves, flagged approximate', () => {

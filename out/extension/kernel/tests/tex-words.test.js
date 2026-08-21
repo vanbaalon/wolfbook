@@ -17,7 +17,7 @@ const test = (name, fn) => {
 
 const {
     visibleProjection, visibleWords, findWordInLine, wordAtColumn,
-    collectMacros, mathRegions, isInMath, OPAQUE,
+    collectMacros, mathRegions, isInMath, OPAQUE, locateByContext,
 } = require('../../tex/texWords');
 
 // The real line from draft.tex that exposed the problem.
@@ -231,7 +231,10 @@ test('a macro projects to what it PRINTS, and selects the CALL', () => {
     const got = visibleWords(PSI_LINE, MM);
     // \bdx is \dot{\boldsymbol{x}}, which prints TWO marks: the x and the dot
     // above it, in that order — which is the order pdf.js reports them in.
-    assert.deepStrictEqual(got.map(g => g.word), ['Ψ', 'S', 'o', 'V', '(', 'x', 'x', '˙', ')']);
+    // The comma between the arguments is a glyph too: it is printed, it is in
+    // the source, and it is clicked — before it was in the class, every comma
+    // in an equation resolved to the symbol beside it.
+    assert.deepStrictEqual(got.map(g => g.word), ['Ψ', 'S', 'o', 'V', '(', 'x', ',', 'x', '˙', ')']);
     // Each expanded glyph selects the whole macro call, not one character of
     // it — `\bx` is the thing a writer would edit.
     const xs = got.filter(g => g.word === 'x');
@@ -243,8 +246,9 @@ test('a macro projects to what it PRINTS, and selects the CALL', () => {
 test('without the macro table the same line projects to almost nothing', () => {
     // The regression this whole mechanism exists to prevent.
     const blind = visibleWords(PSI_LINE, { scope: 'math', inMath: true });
-    // Ψ and the parens are directly printable; every macro-hidden letter is not.
-    assert.deepStrictEqual(blind.map(g => g.word), ['Ψ', '(', ')'],
+    // Ψ, the parens and the comma are directly printable; every macro-hidden
+    // letter is not.
+    assert.deepStrictEqual(blind.map(g => g.word), ['Ψ', '(', ',', ')'],
         `expected only the directly-printable marks, got ${JSON.stringify(blind.map(g => g.word))}`);
     assert.ok(visibleWords(PSI_LINE, MM).length >= 5, 'and a full one with macros');
 });
@@ -373,6 +377,68 @@ test('an accent prints its own mark, AFTER its argument, and selects the command
     assert.strictEqual(src.slice(x.start, x.end), 'x', 'and the base still selects the base');
     const hat = findWordInLine(src, 'ˆ', 0.9, { scope: 'math', inMath: true });
     assert.strictEqual(src.slice(hat.start, hat.end), '\\widehat');
+});
+
+// --- WHICH of several identical words, decided by the ones around it ---------
+
+const PARA = [
+    'The kernel of the operator is the kernel we started from, and a reader who',
+    'has read the kernel section will recognise the kernel again immediately, so',
+    'kernel counting is the only thing that this paragraph is really about here,',
+];
+
+test('context picks the RIGHT repeat of a word on one line', () => {
+    // Position-based answers are at the mercy of SyncTeX's line attribution,
+    // which is measurably wrong at row boundaries. The printed neighbours are
+    // not: `kernel` between `the` and `section` is a different `kernel` from
+    // the one between `the` and `again`.
+    const first = locateByContext(PARA, 2, 'kernel', ['has', 'read', 'the'], ['section', 'will']);
+    assert.ok(first, 'the first one resolves');
+    assert.strictEqual(first.line, 2);
+    assert.strictEqual(first.start, PARA[1].indexOf('kernel'));
+
+    const second = locateByContext(PARA, 2, 'kernel', ['will', 'recognise', 'the'], ['again', 'immediately']);
+    assert.ok(second, 'and so does the second');
+    assert.strictEqual(second.line, 2);
+    assert.strictEqual(second.start, PARA[1].indexOf('kernel', first.start + 1));
+});
+
+test('IT FIXES THE LINE TOO, which is the point', () => {
+    // The reported bug in its purest form: the map says line 2 (SyncTeX filed
+    // the first word of a continuation row under the wrong line), but the
+    // neighbours say otherwise, and the neighbours are what the page printed.
+    const found = locateByContext(PARA, 2, 'kernel', ['immediately', 'so'], ['counting', 'is']);
+    assert.ok(found, 'it resolves');
+    assert.strictEqual(found.line, 3, `the line the context implies, got ${found.line}`);
+    assert.strictEqual(found.start, 0, 'the word at the very start of it');
+});
+
+test('context reaches ACROSS the source line break, because prose does', () => {
+    // The predecessors of the first word of line 2 are printed at the end of
+    // line 1 — a window of one line could never match them.
+    const found = locateByContext(PARA, 2, 'has', ['and', 'a', 'reader', 'who'], ['read', 'the']);
+    assert.ok(found, 'it resolves');
+    assert.strictEqual(found.line, 2);
+    assert.strictEqual(found.start, 0);
+});
+
+test('AN AMBIGUOUS CONTEXT ANSWERS NOTHING, rather than guessing', () => {
+    // Two candidates fitting equally well is exactly the case the position
+    // heuristics exist for. Answering here would be guessing with machinery.
+    const lines = ['a b a b a b', ''];
+    assert.strictEqual(locateByContext(lines, 1, 'a', ['b'], ['b']), null,
+        'every `a` has the same neighbours');
+    assert.strictEqual(locateByContext(lines, 1, 'a', [], []), null, 'and no context is no evidence');
+    assert.strictEqual(locateByContext(PARA, 2, 'nowhere', ['has'], ['read']), null,
+        'a word that is not there resolves to nothing');
+});
+
+test('the nearest neighbour counts for more than a distant one', () => {
+    // Weighting is what breaks a tie between two candidates that each match two
+    // of four context words.
+    const lines = ['x one target two y', 'z one other two w'];
+    const found = locateByContext(lines, 1, 'target', ['one'], ['two']);
+    assert.ok(found && found.line === 1, 'the adjacent match wins');
 });
 
 console.log('word-level source <-> render mapping\n');

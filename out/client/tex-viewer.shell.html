@@ -97,6 +97,26 @@
   .wb-dark-pages .hl.approx { background:repeating-linear-gradient(45deg,
                  rgba(255,196,0,.30) 0 4px, rgba(255,196,0,.10) 4px 8px); }
   .wb-dark-pages .hl.stale { background:rgba(170,170,180,.26); }
+  /* --- A SELECTED FRAGMENT ---------------------------------------------
+     Two solid marks and a wash between them. The marks are the precise part —
+     they sit on the exact glyph the selection starts and ends at — so they are
+     drawn at full strength; the fill only has to say "this much", and has to
+     leave the type under it perfectly readable, so it is barely there.
+     Red, and only this is red: nothing else in the page view uses it, so a
+     selection can never be mistaken for the amber "where you are" marker. */
+  .selfill { position:absolute; pointer-events:none; z-index:4;
+             background: rgba(220,50,50,.10); }
+  .selbrk  { position:absolute; pointer-events:none; z-index:6; width:5px;
+             border-top:2px solid rgba(210,40,40,.95);
+             border-bottom:2px solid rgba(210,40,40,.95); }
+  .selbrk.start { border-left:2px solid rgba(210,40,40,.95); margin-left:-2px; }
+  .selbrk.end   { border-right:2px solid rgba(210,40,40,.95); margin-left:-3px; }
+  /* Waiting for its other end: the same mark, breathing, so it is plainly a
+     state and not a finished selection. */
+  .selbrk.pending { animation: selpulse 1.4s ease-in-out infinite; }
+  @keyframes selpulse { 0%,100% { opacity:1; } 50% { opacity:.35; } }
+  .wb-dark-pages .selfill { background: rgba(255,90,90,.14); }
+
   /* --- the comparison overlay ---
      A separate layer from .hl on purpose: paintHighlight removes every .hl on
      each cursor move, so a diff sharing that class would be wiped by the next
@@ -143,9 +163,12 @@
           border:1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border));
           border-radius:6px; overflow:hidden;
           box-shadow: 0 8px 28px rgba(0,0,0,.4); }
+  /* The header is also the DRAG HANDLE (see makeDraggable): it must not start
+     a text selection under the pointer, or a drag paints the title blue. */
   .ec-head { display:flex; align-items:center; gap:8px; padding:4px 6px 4px 10px;
           background: var(--vscode-editorGroupHeader-tabsBackground, transparent);
-          border-bottom:1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border)); }
+          border-bottom:1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border));
+          user-select:none; -webkit-user-select:none; touch-action:none; }
   .ec-title { font-weight:600; }
   .ec-lines { opacity:.55; font-size:11px; overflow:hidden; text-overflow:ellipsis; }
   .ec-spacer { flex:1; }
@@ -177,13 +200,29 @@
           box-sizing:border-box; display:block; resize:none; overflow:hidden;
           background:transparent; color:transparent; outline:none;
           caret-color: var(--vscode-editorCursor-foreground, var(--vscode-foreground)); }
-  /* The text is transparent, but its SELECTION still paints — which is what
-     makes a click on the page visible as a selection here. */
+  /* THE SELECTION MUST NOT BE OPAQUE, and this is the one place in the whole
+     panel where that is a hard requirement rather than a preference.
+     The textarea's own text is transparent — the characters you can read are
+     the ones in the layer BEHIND it — so a selection background painted at full
+     opacity does not tint the selected text, it ERASES it: a solid dark block
+     where the code was. (Which is what `--vscode-editor-selectionBackground` is
+     in most dark themes.) Mixing it down to a wash lets the coloured layer
+     through, so a selection here looks like a selection anywhere else. */
   .editcard textarea::selection {
-          background: var(--vscode-editor-selectionBackground, rgba(90,140,220,.45)); }
-  /* Where an inverse click landed, in the same amber as the page marker. */
-  .ec-sel { background: rgba(255,196,0,.32); border-radius:2px; color:inherit; }
-  .ec-caret { display:inline-block; width:0; }
+          background: rgba(90,140,220,.32);
+          background: color-mix(in srgb,
+                      var(--vscode-editor-selectionBackground, #3a6ea5) 38%, transparent); }
+  /* WHERE AN INVERSE CLICK LANDED — an outline, matching the editor's own
+     marker. It used to be an amber FILL, which stacked on top of the
+     textarea's selection over the very same characters and turned them into a
+     smear; a border marks the range without touching what is inside it. */
+  .ec-sel { background:none; color:inherit; border-radius:2px;
+          box-shadow: inset 0 0 0 1px rgba(255,196,0,.95);
+          background-color: rgba(255,196,0,.10); }
+  /* A zero-width mark: where the caret would be if the click selected nothing.
+     It needs a mark of its own — an outline around nothing draws nothing. */
+  .ec-caret { display:inline-block; width:0; background:none; box-shadow:none;
+          border-left:2px solid rgba(255,196,0,.95); margin-left:-1px; }
   /* LaTeX tokens. The charts-* variables are the theme-aware palette a webview
      is actually given; editor token colours are not exposed as CSS. */
   .tc { color: var(--vscode-charts-blue, #4fc1ff); }                        /* \command */

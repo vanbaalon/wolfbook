@@ -17,12 +17,172 @@ const fs = require('fs');
 const { FLAG } = require('./renderMap');
 const {
     wordAtColumn, findWordInLine, collectMacros, isInMath, mathRegions,
+    locateByContext,
 } = require('./texWords');
 const { selectionLadder, paragraphSpan, CONTAINER_KINDS } = require('./texSelect');
-const { buildObjectMap, glyphAtPoint, tokenAt, symbolicFonts } = require('./glyphAlign');
+const { buildObjectMap, glyphAtPoint, tokenAt, groupAround, symbolicFonts } = require('./glyphAlign');
 const { buildComparison, describeSummary } = require('./texCompare');
 const { shipDecision } = require('./livePolicy');
 const { sectionSpans } = require('./texModel');
+
+/**
+ * THE EQUATION NUMBER IS NOT PART OF THE EQUATION.
+ *
+ * `(18)` sits on the display's own row, so it arrives with the object's ink and
+ * joins the sequence being aligned — measured, the rendered side of one
+ * fixture ended `… 0 1 2 ( 1 )` against a source that has no such tokens. It
+ * costs alignment, and a click on it can only end somewhere arbitrary.
+ *
+ * It is recognised by the two things that are true of every tag and of nothing
+ * else on the row: it is the LAST ink, separated from the equation by a gap
+ * several times the line height (TeX sets it flush to the margin), and it reads
+ * as a number in parentheses. Removing it leaves a click on the number with no
+ * glyph of its own, which resolves to the enclosing equation — the honest
+ * answer, and the useful one.
+ */
+const TAG_TEXT = /^[([]?[0-9]+[A-Za-z.]*[)\]]?$/;
+
+function dropEquationTags(items) {
+    const rows = new Map();
+    for (const it of items) {
+        const k = `${it.page}|${Math.round((it.baseline ?? it.y) * 2) / 2}`;
+        if (!rows.has(k)) rows.set(k, []);
+        rows.get(k).push(it);
+    }
+    for (const row of rows.values()) row.sort((a, b) => a.x - b.x);
+    // The object's own ink, so a row that is NOTHING BUT a tag can be told from
+    // a row that happens to start with a number. A display whose whole body is
+    // a fraction puts its number on the axis, alone on a baseline of its own —
+    // there is no gap to measure there, only the fact that it sits to the right
+    // of everything else the object printed.
+    //
+    // Measured per ROW, not per item: pdf.js may report `(18)` as three items,
+    // and `(` on its own is not tag-shaped, so an item-wise test counts the
+    // tag's own parenthesis as body and the tag then looks flush with it.
+    let bodyRight = -Infinity;
+    for (const row of rows.values()) {
+        const whole = row.map(r => r.str).join('').trim();
+        if (!whole || TAG_TEXT.test(whole)) continue;
+        for (const it of row) bodyRight = Math.max(bodyRight, it.x + (it.w || 0));
+    }
+
+    const drop = new Set();
+    for (const row of rows.values()) {
+        if (row.length < 2) {
+            const t = String(row[0] && row[0].str || '').trim();
+            if (t && TAG_TEXT.test(t) && row[0].x > bodyRight + (row[0].h || 10)) drop.add(row[0]);
+            continue;
+        }
+        const whole = row.map(r => r.str).join('').trim();
+        if (TAG_TEXT.test(whole) && row[0].x > bodyRight + (row[0].h || 10)) {
+            for (const r of row) drop.add(r);
+            continue;
+        }
+        const h = Math.max(...row.map(r => r.h || 0)) || 10;
+        // Walk in from the right while the ink still reads as a tag.
+        let cut = row.length;
+        for (let i = row.length - 1; i > 0; i--) {
+            const gap = row[i].x - (row[i - 1].x + (row[i - 1].w || 0));
+            const text = row.slice(i, cut).map(r => r.str).join('').trim();
+            if (gap > h * 3 && TAG_TEXT.test(text)) { for (let k = i; k < cut; k++) drop.add(row[k]); break; }
+            if (gap > h * 3) break;                 // a wide gap that is not a tag
+        }
+    }
+    if (!drop.size) return items;
+    for (let i = items.length - 1; i >= 0; i--) if (drop.has(items[i])) items.splice(i, 1);
+    return items;
+}
+
+/**
+ * DROP THE INK THAT IS NOT THE OBJECT — the equation number, and the strays.
+ *
+ * MEASURED on the reference paper. The rows of one display come back as
+ *
+ *     L126 \begin{equation}   x=515.9..599.1   y=211.3..224.8
+ *     L135 …the equation…      x=160.2..435.0   y=228.5..258.9
+ *     L137 \end{equation}      x=512.9..517.2   y=237.3..250.8
+ *
+ * The first is the equation NUMBER, filed under the `\begin` line and set out
+ * in the margin — it even runs past the text measure, to x=599 on a 595 bp
+ * page. Highlighting the union of those rows therefore painted a wide amber
+ * band in the margin ABOVE the equation, and another sliver beside it: reported
+ * as "selects some weird domain" and "the whole equation plus a bit more".
+ *
+ * A tag is recognised by being both NARROW and entirely to one side of the
+ * object's real content — never by its text, which is why this also removes the
+ * `\end` sliver and anything else TeX files under a delimiter line.
+ */
+function dropStrayRows(rects) {
+    const byPage = new Map();
+    for (const r of rects || []) {
+        if (!byPage.has(r.page)) byPage.set(r.page, []);
+        byPage.get(r.page).push(r);
+    }
+    const keep = [];
+    for (const rows of byPage.values()) {
+        if (rows.length < 2) { keep.push(...rows); continue; }
+        const widest = Math.max(...rows.map(r => r.w));
+        // The content is what carries the ink; a tag never does.
+        const body = rows.filter(r => r.w >= widest * 0.4);
+        if (!body.length) { keep.push(...rows); continue; }
+        const left = Math.min(...body.map(r => r.x));
+        const right = Math.max(...body.map(r => r.x + r.w));
+        for (const r of rows) {
+            const narrow = r.w < widest * 0.4;
+            const outside = r.x > right + 2 || r.x + r.w < left - 2;
+            if (narrow && outside) continue;
+            keep.push(r);
+        }
+    }
+    return keep;
+}
+
+/**
+ * ONE BAND PER PRINTED LINE, not one per BASELINE.
+ *
+ * `lineRows` groups ink by baseline, and a display fraction puts its numerator
+ * and denominator on baselines of their own. So a one-line equation containing
+ * `\frac{|m|}{2}` came back as three rows, and painting them separately drew a
+ * little amber patch over the `|m|`, another under it over the `2`, and a long
+ * strip across the rest of the line. Reported with a screenshot: "this looks
+ * broken — better highlight nothing than make such a mess".
+ *
+ * Merging by VERTICAL OVERLAP rather than merging everything is what keeps this
+ * honest in the other direction. The stacked pieces of one printed line overlap
+ * each other by several points, so they become one band; the successive lines of
+ * a paragraph or an `align` merely TILE — they touch and do not overlap — so
+ * they stay separate bands and the highlight still follows the text instead of
+ * becoming one big box over everything between the first line and the last.
+ *
+ * (The object's own SyncTeX box is not an option: it includes
+ * `\abovedisplayskip`, so it reaches up over the paragraph above the equation.)
+ */
+function mergeRows(rects) {
+    const byPage = new Map();
+    for (const r of rects || []) {
+        if (!r || !Number.isFinite(r.x) || !Number.isFinite(r.y)) continue;
+        if (!byPage.has(r.page)) byPage.set(r.page, []);
+        byPage.get(r.page).push(r);
+    }
+    const out = [];
+    const OVERLAP = 1;              // bp: touching rows are not overlapping rows
+    for (const page of [...byPage.keys()].sort((a, b) => a - b)) {
+        const rows = byPage.get(page).slice().sort((a, b) => a.y - b.y || a.x - b.x);
+        let cur = null;
+        for (const r of rows) {
+            if (cur && r.y < cur.y1 - OVERLAP) {
+                cur.x0 = Math.min(cur.x0, r.x);
+                cur.x1 = Math.max(cur.x1, r.x + r.w);
+                cur.y1 = Math.max(cur.y1, r.y + r.h);
+                continue;
+            }
+            if (cur) out.push(cur);
+            cur = { page, x0: r.x, y0: r.y, x1: r.x + r.w, y1: r.y + r.h };
+        }
+        if (cur) out.push(cur);
+    }
+    return out.map(b => ({ page: b.page, x: b.x0, y: b.y0, w: b.x1 - b.x0, h: b.y1 - b.y0 }));
+}
 
 /** Kinds whose whole box is a sensible highlight when nothing finer resolves. */
 const BLOCK_KINDS = ['display-equation', 'figure', 'table', 'tabular', 'theorem'];
@@ -48,90 +208,80 @@ const VIEW_TYPE = 'wolfbook.texViewer';
 const ROOT_KEY = 'wolfbook.tex.viewerRoot';
 
 /**
- * The amber wash, in the EDITOR, fading back to an ordinary selection.
+ * WHERE THE CLICK LANDED, IN THE EDITOR — an outline, not a wash.
  *
- * The page marks where you are with a wash that fades over three seconds; an
- * inverse click should land the same way at the other end, or the two halves of
- * one gesture look like two unrelated things. VS Code decorations cannot
- * animate, so the fade is stepped: a handful of decoration types at falling
- * alpha, swapped on a timer and then dropped, leaving the selection VS Code
- * would have drawn anyway.
+ * This used to be a translucent amber fill faked into a fade: seven decoration
+ * types at falling alpha, swapped on a timer. It looked wrong, and for two
+ * reasons that no amount of tuning fixes. A decoration cannot animate, so the
+ * "fade" is a handful of visible steps rather than a fade; and it paints ON TOP
+ * of the selection VS Code has already drawn over the same characters, so the
+ * two translucent layers muddy each other and the text underneath.
  *
- * The types are created once and reused — creating one per click leaks a
+ * So the marker is now a thin rounded BORDER around the range, drawn once and
+ * removed once. It says "this is the thing you clicked" without touching the
+ * colours of the text inside it, it cannot fight the selection, and there is no
+ * intermediate state in which it can look half-broken. It is cleared on the
+ * next click, or after `ms`, whichever comes first.
+ *
+ * The type is created once and reused — creating one per click leaks a
  * renderer-side object every time.
  */
 class EditorFlash {
-    constructor(steps = 7, ms = 2400) {
-        this.steps = steps;
+    constructor(ms = 2600) {
         this.ms = ms;
-        this._types = null;
+        this._type = null;
         this._timer = null;
         this._active = null;
     }
 
     _make() {
-        if (this._types) return this._types;
+        if (this._type) return this._type;
         // Read the enum defensively: it is absent in some hosts, and a
         // decoration is decoration — a missing one must never be able to break
         // the jump it decorates. (A test caught exactly that: reading
         // `.Center` off undefined threw out of every single inverse click.)
         const lane = (vscode.OverviewRulerLane && vscode.OverviewRulerLane.Center) ?? 2;
-        const types = [];
-        for (let i = 0; i < this.steps; i++) {
-            const a = 0.42 * (1 - i / this.steps);
-            try {
-                types.push(vscode.window.createTextEditorDecorationType({
-                    backgroundColor: `rgba(255,196,0,${a.toFixed(3)})`,
-                    borderRadius: '2px',
-                    // The paper scrolls to what you clicked; so should the ruler.
-                    overviewRulerColor: i === 0 ? 'rgba(255,196,0,0.8)' : undefined,
-                    overviewRulerLane: i === 0 ? lane : undefined,
-                }));
-            } catch (_) { break; }
-        }
-        this._types = types;
-        return this._types;
+        try {
+            this._type = vscode.window.createTextEditorDecorationType({
+                border: '1px solid rgba(255,196,0,0.95)',
+                borderRadius: '3px',
+                // The border alone can be lost against bright syntax colours;
+                // a whisper of fill is enough to find it without staining the
+                // text the way the old 0.42-alpha wash did.
+                backgroundColor: 'rgba(255,196,0,0.10)',
+                // The paper scrolls to what you clicked; so should the ruler.
+                overviewRulerColor: 'rgba(255,196,0,0.8)',
+                overviewRulerLane: lane,
+            });
+        } catch (_) { this._type = null; }
+        return this._type;
     }
 
-    /** Paint `range` in `editor` and fade it out. */
+    /** Outline `range` in `editor`, and take it away again cleanly. */
     show(editor, range) {
         if (!editor || !range) return;
         this.clear();
-        let types = [];
-        try { types = this._make(); } catch (_) { return; }
-        if (!types.length) return;
+        let type = null;
+        try { type = this._make(); } catch (_) { return; }
+        if (!type) return;
         this._active = editor;
-        let i = 0;
-        const step = () => {
-            if (!this._active) return;
-            for (let k = 0; k < types.length; k++) {
-                try { this._active.setDecorations(types[k], k === i ? [range] : []); }
-                catch (_) { /* the editor closed under us */ }
-            }
-            i++;
-            if (i < types.length) {
-                this._timer = setTimeout(step, this.ms / types.length);
-            } else {
-                this._timer = setTimeout(() => this.clear(), this.ms / types.length);
-            }
-        };
-        step();
+        try { editor.setDecorations(type, [range]); }
+        catch (_) { this._active = null; return; }
+        this._timer = setTimeout(() => this.clear(), this.ms);
     }
 
     clear() {
         if (this._timer) { clearTimeout(this._timer); this._timer = null; }
-        if (this._active && this._types) {
-            for (const t of this._types) {
-                try { this._active.setDecorations(t, []); } catch (_) { /* gone */ }
-            }
+        if (this._active && this._type) {
+            try { this._active.setDecorations(this._type, []); } catch (_) { /* gone */ }
         }
         this._active = null;
     }
 
     dispose() {
         this.clear();
-        for (const t of (this._types || [])) { try { t.dispose(); } catch (_) { /* gone */ } }
-        this._types = null;
+        try { if (this._type) this._type.dispose(); } catch (_) { /* gone */ }
+        this._type = null;
     }
 }
 
@@ -577,6 +727,27 @@ class TexViewer {
         const st = this.coord.stateFor(doc);
         if (!st || !st.map || !st.map.available) return;
 
+        // A RANGE IS NOT A CURSOR. Selecting a fragment asks a different
+        // question — where does this PIECE of the source sit on the page — and
+        // it is answered with a marked span rather than one glyph's wash.
+        const sel = editor.selection;
+        const ranged = sel && sel.start && sel.end &&
+            (sel.start.line !== sel.end.line || sel.start.character !== sel.end.character);
+        // A SELECTION THE PAGE ITSELF JUST MADE IS NOT A USER SELECTION.
+        //
+        // An inverse click selects the word it resolved to — that is the point
+        // of it — and a selected word is a non-empty selection, so every click
+        // came back as a red RANGE instead of the amber marker for the word
+        // under the pointer. Reported: "click on the first The and it selects
+        // an interval". The range the click set is remembered and recognised;
+        // anything else, including the reader dragging over that same text, is
+        // theirs.
+        if (ranged && !this._isOwnSelection(doc, sel)) {
+            this._postSelection(st, doc, sel);
+            return;
+        }
+        this._post({ type: 'selection', span: null });
+
         const line = editor.selection.active.line + 1;
         const column = editor.selection.active.character;
         const { model } = this.projection.get(doc);
@@ -647,12 +818,19 @@ class TexViewer {
             const g = wordAtColumn(lineSrc, column, { scope: 'math', inMath: true, macros });
             if (g) {
                 word = g; glyph = true;
-                rects = st.map.lineRows(doc.uri.fsPath, line)
-                    .map(r => ({ page: r.page, x: r.x, y: r.y, w: r.w, h: r.h }));
+                rects = mergeRows(st.map.lineRows(doc.uri.fsPath, line)
+                    .map(r => ({ page: r.page, x: r.x, y: r.y, w: r.w, h: r.h })));
             }
         }
         if (!rects.length && objectIsTheUnit) {
-            word = null; glyph = false;
+            // KEEP THE GLYPH IF ONE RESOLVED. A display's own content lines
+            // usually have NO SyncTeX rows — 71% on the reference paper — so a
+            // cursor inside an equation lands here, and clearing the glyph left
+            // the panel with nothing to narrow to: the whole equation lit up
+            // when the cursor was on a single α. The object's rows are the
+            // search REGION; `wordInRows` still finds the glyph inside them.
+            // Clearing is right only when nothing resolved — a figure, a table.
+            if (!word) { word = null; glyph = false; }
             // THE OBJECT'S ROWS, NOT ITS BOX.
             //
             // A display's SyncTeX box includes \abovedisplayskip, so it reaches
@@ -668,15 +846,17 @@ class TexViewer {
                 }
             }
             if (rows.length) {
-                rects = rows;
+                // One band per printed LINE, not one per baseline — see mergeRows —
+                // and not the equation number, which is not part of the equation.
+                rects = mergeRows(dropStrayRows(rows));
             } else {
                 const r = st.map.objectRenderBoxes(obj);
                 rects = r.rects;
                 flag = r.flag || flag;
             }
         } else if (!rects.length) {
-            rects = st.map.lineRows(doc.uri.fsPath, line)
-                .map(r => ({ page: r.page, x: r.x, y: r.y, w: r.w, h: r.h }));
+            rects = mergeRows(st.map.lineRows(doc.uri.fsPath, line)
+                .map(r => ({ page: r.page, x: r.x, y: r.y, w: r.w, h: r.h })));
             word = wordAtColumn(lineSrc, column, { macros });
         }
         if (!rects.length) {
@@ -703,6 +883,122 @@ class TexViewer {
             reveal: !fromClick,
             title: obj ? obj.stableKey : `line ${line}`,
             label: `${where} · p.${rects[0].page} · ${flag}`,
+        });
+    }
+
+    /**
+     * WHERE A SELECTED FRAGMENT SITS ON THE PAGE.
+     *
+     * The two ends are resolved the same way a cursor is — the row(s) of the
+     * line, plus the word or glyph at the column, which the panel narrows to an
+     * exact rect using the PDF's own text layer. What is new is the SPAN: every
+     * row the selection crosses, so the panel can draw the shape a reader
+     * expects of a selection — from the opening mark to the end of its line,
+     * the whole width of the lines between, and the last line up to the closing
+     * mark.
+     *
+     * The rows are sent as they are, per line: merging them here would lose the
+     * page breaks and the first/last row, which are the parts the shape is
+     * built from.
+     */
+    /**
+     * Is this selection the one an inverse click just made?
+     *
+     * Matched on the range AND on the moment: the same text selected by hand a
+     * minute later is the reader's, and should be marked as a range.
+     */
+    _isOwnSelection(doc, sel) {
+        const r = this._selfRange;
+        if (!r || r.file !== doc.uri.fsPath) return false;
+        if (Date.now() - r.at > 2000) return false;
+        return sel.start.line === r.sl && sel.start.character === r.sc &&
+            sel.end.line === r.el && sel.end.character === r.ec;
+    }
+
+    /** One end of a selection: its row(s), and the word the panel narrows to. */
+    _selectionAnchor(st, doc, line, column) {
+        const file = doc.uri.fsPath;
+        const macros = this._macrosFor(doc);
+        const text = doc.lineAt(Math.max(0, Math.min(line - 1, doc.lineCount - 1))).text;
+        // WIDENED, BECAUSE A ROW RECTANGLE UNDER-COVERS ITS ROW. It is built
+        // from SyncTeX records: the first of a row is often misfiled, so the
+        // rectangle starts at the SECOND word, and the last is a point at its
+        // word's start, so it stops before that word's ink. Searching the text
+        // layer inside such a rectangle cannot find the first or last word of a
+        // line — measured, the opening mark of a paragraph landed after its
+        // first word every time. A line's worth of slack on each side is enough
+        // to reach them and not enough to reach the next line's.
+        const rows = mergeRows(dropStrayRows(st.map.lineRows(file, line)
+            .map(r => ({ page: r.page, x: r.x - 14, y: r.y, w: r.w + 28, h: r.h }))));
+        // A DISPLAY'S OWN LINES USUALLY HAVE NO ROWS — 71% of them on the
+        // reference paper — so an end of a selection inside one has nothing to
+        // be placed against, and the whole span went unpainted. The object it
+        // belongs to does have rows.
+        if (!rows.length) {
+            const model = this._modelFor(doc);
+            const obj = ((model && model.objects) || [])
+                .filter(o => o.sourceRange && (!o.sourceRange.file || o.sourceRange.file === file) &&
+                    o.sourceRange.startLine <= line && o.sourceRange.endLine >= line &&
+                    !['label', 'ref', 'cite', 'include'].includes(o.kind))
+                .sort((a, b) => (a.sourceRange.endLine - a.sourceRange.startLine) -
+                    (b.sourceRange.endLine - b.sourceRange.startLine))[0];
+            if (obj) {
+                const all = [];
+                for (let n = obj.sourceRange.startLine; n <= obj.sourceRange.endLine; n++) {
+                    for (const r of st.map.lineRows(file, n)) {
+                        all.push({ page: r.page, x: r.x - 14, y: r.y, w: r.w + 28, h: r.h });
+                    }
+                }
+                rows.push(...mergeRows(dropStrayRows(all)));
+            }
+        }
+
+        const inMath = isInMath(text, column);
+        const w = wordAtColumn(text, column, { macros, scope: inMath ? 'math' : 'prose', inMath })
+            || wordAtColumn(text, column, { macros });
+        // AT THE START OF A LINE THE MARK BELONGS AT THE MARGIN, not at the
+        // first word: a heading's printed NUMBER sits to the left of its title
+        // and is part of the line the reader selected.
+        const firstCol = text.search(/\S/);
+        return {
+            line,
+            rects: rows,
+            word: w ? w.word : undefined,
+            occurrence: w ? w.occurrence : undefined,
+            glyph: !!(w && w.inMath) || inMath,
+            atLineStart: firstCol < 0 || column <= firstCol,
+            atLineEnd: column >= text.replace(/\s+$/, '').length,
+        };
+    }
+
+    _postSelection(st, doc, sel) {
+        const file = doc.uri.fsPath;
+        const startLine = sel.start.line + 1;
+        const endLine = Math.min(sel.end.line + 1, doc.lineCount);
+
+        const anchorAt = (line, column) => this._selectionAnchor(st, doc, line, column);
+
+        // Every row the selection crosses, in reading order, with the line each
+        // came from — the panel needs the first and last separately.
+        const rows = [];
+        for (let n = startLine; n <= endLine; n++) {
+            for (const r of mergeRows(dropStrayRows(st.map.lineRows(file, n)
+                .map(x => ({ page: x.page, x: x.x, y: x.y, w: x.w, h: x.h }))))) {
+                rows.push({ ...r, line: n });
+            }
+        }
+        if (!rows.length) { this._post({ type: 'selection', span: null }); return; }
+
+        this._post({
+            type: 'selection',
+            span: {
+                start: anchorAt(startLine, sel.start.character),
+                end: anchorAt(endLine, sel.end.character),
+                rows,
+                lines: endLine - startLine + 1,
+            },
+            reveal: Date.now() - this._invertedAt >= 1500,
+            label: `selection · ${endLine - startLine + 1} line${endLine === startLine ? '' : 's'}`,
         });
     }
 
@@ -762,6 +1058,7 @@ class TexViewer {
                 await this._openEditSession(m);
                 await this._jumpToSource(m);
                 break;
+            case 'editStep': await this._stepEditSession(m); break;
             case 'editChange': await this._applyEditChange(m); break;
             case 'editClose': this._edit = null; break;
             case 'editSave': await this._saveEditDoc(); break;
@@ -823,24 +1120,43 @@ class TexViewer {
         const endLine = obj.endLine ?? obj.sourceRange?.endLine;
         let built = null;
         try {
-            const seen = new Set();
-            const items = [];
+            // THE OBJECT'S OWN AREA, NOT ITS ROWS ONE BY ONE.
+            //
+            // A row rect is one text line high, and that height comes from the
+            // document's estimated leading — which a maths-heavy document gets
+            // wrong: measured on a corpus of displays it came out 4.5 bp
+            // against a true 13.6, and every band shrank until the subscripts
+            // and the numerator of an equation fell OUTSIDE their own row and
+            // were dropped. A dropped glyph cannot be clicked, and nothing in
+            // the census says why.
+            //
+            // A display is not a text line anyway; it is a 2-D box. So the
+            // rows are unioned per page and the union collects the ink. What
+            // keeps a neighbour's ink out is not the band — it is the OWNER
+            // test below, which asks SyncTeX which source line printed that
+            // piece of ink and drops everything from outside this object.
+            const area = new Map();
             for (let n = startLine; n <= endLine; n++) {
                 for (const r of st.map.lineRows(file, n)) {
-                    const rk = `${r.page}|${r.y.toFixed(2)}|${r.x.toFixed(2)}`;
-                    if (seen.has(rk)) continue;
-                    seen.add(rk);
-                    for (const it of (this._text.pages.get(r.page) || [])) {
-                        if (!it.str || !it.str.trim()) continue;
-                        if (it.baseline < r.y - 2 || it.baseline > r.y + r.h + 2) continue;
-                        if (it.x + it.w < r.x - 2 || it.x > r.x + r.w + 2) continue;
-                        const owner = st.map.lineAtPoint(r.page, it.x + it.w / 2, it.baseline - 1);
-                        if (!owner || owner.file !== file || owner.line < startLine || owner.line > endLine) continue;
-                        items.push({ ...it, page: r.page });
-                    }
+                    const cur = area.get(r.page);
+                    if (!cur) { area.set(r.page, { x0: r.x, y0: r.y, x1: r.x + r.w, y1: r.y + r.h }); continue; }
+                    cur.x0 = Math.min(cur.x0, r.x); cur.y0 = Math.min(cur.y0, r.y);
+                    cur.x1 = Math.max(cur.x1, r.x + r.w); cur.y1 = Math.max(cur.y1, r.y + r.h);
+                }
+            }
+            const items = [];
+            for (const [page, a] of area) {
+                for (const it of (this._text.pages.get(page) || [])) {
+                    if (!it.str || !it.str.trim()) continue;
+                    if (it.baseline < a.y0 - 2 || it.baseline > a.y1 + 2) continue;
+                    if (it.x + it.w < a.x0 - 2 || it.x > a.x1 + 2) continue;
+                    const owner = st.map.lineAtPoint(page, it.x + it.w / 2, it.baseline - 1);
+                    if (!owner || owner.file !== file || owner.line < startLine || owner.line > endLine) continue;
+                    items.push({ ...it, page });
                 }
             }
             if (items.length) {
+                dropEquationTags(items);
                 const lines = doc.getText().split(/\r?\n/);
                 built = buildObjectMap({
                     lines, startLine, endLine,
@@ -881,10 +1197,87 @@ class TexViewer {
      * instead; it is preferred whenever it lands close to real ink, with the
      * box answer as the fallback (and still the winner for floats).
      */
+    /**
+     * WHICH occurrence of a repeated word was clicked — counted on the SOURCE
+     * LINE, not on the printed row.
+     *
+     * THE TWO ARE NOT THE SAME SET, and that is the bug this exists to fix. A
+     * printed row is a band across the page; a source line is a range of
+     * characters. LaTeX fills each row from as many source lines as it needs,
+     * so a row routinely carries the tail of one line and the head of the next.
+     * The webview can only count along the row it can see — so "the second
+     * `the` on this row" was matched against "the second `the` in this source
+     * line", and when the row began mid-sentence the two disagreed and the
+     * FIRST occurrence won.
+     *
+     * `lineRows` knows exactly where this source line's own ink sits on each of
+     * the rows it printed. Keeping only the spots inside those rectangles, in
+     * reading order, gives the occurrence index the source-side search wants.
+     *
+     * @param {{x:number,y:number}[]} spots  every same-word hit near the click,
+     *   in bp, page coordinates — sent by the webview with the click.
+     * @param {{x:number,y:number}} at  the one that was clicked.
+     * @returns {number} the 1-based occurrence, or 0 when it cannot be told.
+     */
+    _occurrenceOnLine(st, file, line, spots, at) {
+        if (!Array.isArray(spots) || !spots.length || !at) return 0;
+        let rows = [];
+        try { rows = st.map.lineRows(file, line) || []; } catch (_) { return 0; }
+        if (!rows.length) return 0;
+        const ordered = rows.slice().sort((a, b) => a.page - b.page || a.y - b.y);
+        const PAD = 1;
+        const rowOf = (s) => ordered.findIndex(r =>
+            (s.page == null || s.page === r.page) &&
+            s.x >= r.x - PAD && s.x <= r.x + r.w + PAD &&
+            s.y >= r.y - PAD && s.y <= r.y + r.h + PAD);
+
+        const mine = [];
+        for (const s2 of spots) {
+            const i = rowOf(s2);
+            if (i >= 0) mine.push({ ...s2, row: i });
+        }
+        if (!mine.length) return 0;
+        mine.sort((a, b) => a.row - b.row || a.x - b.x);
+        // The clicked spot is one OF the spots, so an exact-ish match is
+        // expected; without one we have not identified it and must not guess.
+        let hit = -1; let bestD = Infinity;
+        for (let i = 0; i < mine.length; i++) {
+            const d = Math.hypot(mine[i].x - at.x, mine[i].y - at.y);
+            if (d < bestD) { bestD = d; hit = i; }
+        }
+        return (hit >= 0 && bestD < 1.5) ? hit + 1 : 0;
+    }
+
+    /**
+     * WHAT WAS CLICKED — the printed row, or the box that encloses the point.
+     *
+     * A CLICK THAT MISSES THE INK MUST STILL LAND ON THE NEAREST LINE. The row
+     * answer used to require the point to be inside a row's own band and
+     * within 24 bp of its ink; everywhere else the box hierarchy answered, and
+     * on prose the box hierarchy answers with the display equation below (see
+     * `renderMap.lineAtPoint` — `\[` plants a zero-width record on the
+     * paragraph's last baseline). That is the reported bug: a click a few
+     * points off a word selected the equation above or below it.
+     *
+     * So the slack is stated in units of the LEADING, which is the only scale
+     * that means anything here:
+     *   - vertically, up to nine tenths of a line away from the row's band;
+     *   - horizontally, 24 bp — or a whole inch when the point is sitting
+     *     squarely on the row, which is the click that lands in the white
+     *     space after a short line.
+     * Anything further out is genuinely somewhere else, and the box answer —
+     * which is the right one for a figure or a table, whose interiors print no
+     * characters at all — takes over.
+     */
     _resolvePoint(st, m) {
         const row = st.map.lineAtPoint(m.page, m.xBp, m.yTopBp);
         const box = st.map.renderToSource(m.page, m.xBp, m.yTopBp);
-        return (row && row.dx < 24)
+        const dy = (row && row.dy) || 0;
+        const lead = (row && row.lead > 0) ? row.lead : 12;
+        const nearRow = !!row && (row.dx < 24
+            ? dy < lead * 0.9
+            : (row.dx < 72 && dy < lead * 0.5));
+        return nearRow
             ? {
                 flag: (box && box.flag) || st.map._baseFlag(),
                 file: row.file,
@@ -931,13 +1324,20 @@ class TexViewer {
         // viewer's "n-th same glyph on the row" picks among repeats exactly;
         // across wrapped rows the fraction hint stays the tie-break.
         const singleRow = st.map.lineRows(hit.file, hit.line).length === 1;
+        // Counted against this line's own printed rectangles when the webview
+        // sent the positions to count with; the row-local count is the fallback
+        // for an older payload, and only where the line printed as one row.
+        const wordOcc = this._occurrenceOnLine(st, hit.file, hit.line, m.wordSpots, m.wordAt)
+            || (singleRow ? m.wordOccurrence : 0);
+        const glyphOcc = this._occurrenceOnLine(st, hit.file, hit.line, m.glyphSpots, m.glyphAt)
+            || (singleRow ? m.glyphOccurrence : 0);
         const proseHit = m.word
             ? findWordInLine(lineSrc, m.word, m.rowFraction ?? 0.5,
-                { macros, occurrence: singleRow ? m.wordOccurrence : 0 })
+                { macros, occurrence: wordOcc })
             : null;
         const mathHit = m.glyph
             ? findWordInLine(lineSrc, m.glyph, m.glyphFraction ?? 0.5,
-                { scope: 'math', inMath: true, macros, occurrence: singleRow ? m.glyphOccurrence : 0 })
+                { scope: 'math', inMath: true, macros, occurrence: glyphOcc })
             : null;
         let w = (proseHit && proseHit.exact) ? proseHit
             : (mathHit && mathHit.exact) ? mathHit
@@ -954,6 +1354,7 @@ class TexViewer {
         const alignObj = hit.object && !hit.object.approximate ? hit.object : null;
         const amap = this._objectMap(st, doc, alignObj);
         let aligned = null;
+        let ambiguous = null;
         if (amap) {
             const g = glyphAtPoint(amap, m.page, m.xBp, m.yTopBp);
             // 12 bp is about one line of body text: further than that and the
@@ -961,6 +1362,19 @@ class TexViewer {
             if (g.index >= 0 && g.distance < 12) {
                 const ti = amap.renToSrc[g.index];
                 if (ti >= 0) aligned = amap.tokens[ti];
+                // PAIRED WITH NOTHING. Some glyphs have no source token at all
+                // — a pmatrix's own parentheses, a stretched delimiter the PDF
+                // reports as a control code, the dots of an ellipsis. What is
+                // certain is the construct they sit in, so that is the answer.
+                //
+                // MATHS ONLY. In prose there are no constructs to fall back to,
+                // so the "smallest certain thing" is the whole paragraph — and
+                // answering a click on a word with its entire paragraph is
+                // exactly the coarseness this feature exists to avoid. Prose has
+                // better fallbacks of its own: the word, then the line.
+                else if (alignObj && MATH_KINDS.includes(alignObj.kind)) {
+                    ambiguous = groupAround(amap, g.index);
+                }
             }
         }
         if (aligned) {
@@ -982,14 +1396,80 @@ class TexViewer {
             // In prose the alignment's real contribution is the LINE — which is
             // the part SyncTeX gets wrong — so it fixes the line and the word
             // stays the unit.
+            //
+            // AND WHEN THE NAME SEARCH FINDS NOTHING, THE CHARACTER IS STILL A
+            // POSITION. Falling back to the glyph token there is what put a
+            // single letter in the editor when a word was clicked — reported on
+            // headings and on the paragraphs the model does treat as objects.
+            // The alignment has already said WHICH character; the word is
+            // simply the token containing that column.
             const isMath = (alignObj && MATH_KINDS.includes(alignObj.kind)) || aligned.inMath;
             if (isMath) {
                 w = glyphToken;
             } else {
+                // The occurrence hint has to come along: recomputing without
+                // it threw away the only thing that can tell two identical
+                // words on one line apart, and the first one always won.
                 const pw = m.word
-                    ? findWordInLine(lineSrc, m.word, m.rowFraction ?? 0.5, { macros })
+                    ? findWordInLine(lineSrc, m.word, m.rowFraction ?? 0.5, {
+                        macros,
+                        occurrence: this._occurrenceOnLine(
+                            st, hit.file, hit.line, m.wordSpots, m.wordAt),
+                    })
                     : null;
-                w = (pw && pw.exact) ? pw : (pw || glyphToken);
+                let around = null;
+                if (!(pw && pw.exact)) {
+                    const at = wordAtColumn(lineSrc, aligned.startCol, { macros });
+                    if (at) {
+                        around = {
+                            start: at.sourceStart,
+                            end: at.sourceEnd,
+                            word: at.word,
+                            exact: true,
+                            occurrence: at.occurrence,
+                            total: at.total,
+                            inMath: !!at.inMath,
+                        };
+                    }
+                }
+                w = (pw && pw.exact) ? pw : (around || pw || glyphToken);
+            }
+        }
+
+        // THE WORDS AROUND IT OUTRANK EVERY POSITION, BECAUSE THEY CANNOT BE
+        // MISFILED.
+        //
+        // Everything above reasons from SyncTeX's line attribution, and
+        // measured (`Experiments/wolfbook-tex/e-viewer/check-occurrence.mjs`)
+        // that attribution is wrong at the two places that matter most: the
+        // FIRST word of a continuation row is filed under the line the
+        // PARAGRAPH ends on, and a word sitting across a row break can carry
+        // its neighbour's line number. A source line's first word is nearly
+        // always at a row break — which is why "clicking the first word of a
+        // line" arrived as a bug report of its own.
+        //
+        // The printed neighbours have no such problem: they are what the page
+        // says. Matching them against the projection of a few lines around the
+        // guess pins down the LINE as well as the column, so a misfiled record
+        // coming in stops being a wrong selection going out. It answers only
+        // when the evidence is unambiguous — a tie returns nothing and the
+        // heuristics above stand.
+        //
+        // PROSE ONLY. In maths the alignment already answers by position, which
+        // is stronger than context there: single glyphs repeat constantly and
+        // their neighbours are mostly other single glyphs.
+        if (m.word && m.wordContext && !(w && w.inMath) &&
+            !(aligned && aligned.inMath)) {
+            const found = locateByContext(doc.getText().split(/\r?\n/), hit.line,
+                m.word, m.wordContext.before, m.wordContext.after, { macros });
+            if (found) {
+                if (found.line !== hit.line) {
+                    hit.line = found.line;
+                    lineIdx = Math.max(0, Math.min(found.line - 1, doc.lineCount - 1));
+                    lineSrc = doc.lineAt(lineIdx).text;
+                    hit.object = st.map.objectAtLine(hit.file, found.line) || undefined;
+                }
+                w = found;
             }
         }
 
@@ -1019,6 +1499,44 @@ class TexViewer {
                     break;
                 }
             }
+        }
+
+        // AN UNCERTAIN GLYPH SELECTS WHAT IS CERTAIN AROUND IT.
+        //
+        // Reaching here with an unpaired glyph and no exact name match means
+        // every remaining candidate is a guess — and a confident wrong jump is
+        // worse than a true coarse one. `groupAround` gives the smallest
+        // construct that provably contains the click: the subscript group, the
+        // numerator, else the object.
+        let groupStep = null;
+        if (ambiguous && !(w && w.exact)) {
+            const clamp = (ln) => Math.max(0, Math.min(ln - 1, doc.lineCount - 1));
+            const s0 = clamp(ambiguous.startLine);
+            const s1 = clamp(ambiguous.endLine);
+            groupStep = {
+                kind: 'group',
+                label: ambiguous.depth > 0 ? 'enclosing group' : 'this expression',
+                lines: s1 - s0 + 1,
+                start: { line: s0 + 1, col: Math.min(ambiguous.startCol, doc.lineAt(s0).text.length) },
+                end: { line: s1 + 1, col: Math.min(ambiguous.endCol, doc.lineAt(s1).text.length) },
+            };
+            w = null;                       // the word rung is not available here
+        }
+
+        // NOTHING RESOLVED, BUT SOMETHING WAS NEAREST.
+        //
+        // The honest fallback used to be the whole LINE, and a click a little to
+        // the right of the last word therefore selected the entire line — which
+        // is never what a click means. The panel knows which word was nearest;
+        // it simply declined to call it a hit. Where the alternative is a whole
+        // line, the nearest word is the better answer, and it is still bounded
+        // by the spaces either side of it.
+        if (!w && m.farWord) {
+            const near = findWordInLine(lineSrc, m.farWord, m.rowFraction ?? 0.5, {
+                macros,
+                occurrence: this._occurrenceOnLine(st, hit.file, hit.line, m.wordSpots, m.wordAt),
+            });
+            if (near) w = near;
         }
 
         // WIDENING IS OPT-IN, ON Cmd/Ctrl.
@@ -1055,6 +1573,9 @@ class TexViewer {
         }
 
         let step = this._ladder.items[this._ladder.index];
+        // The certain-group answer outranks the ladder's fallback, but only for
+        // a plain click: Cmd-click is a request to walk the ladder itself.
+        if (groupStep && !m.widen) step = groupStep;
 
         // A PLAIN CLICK NEVER SELECTS MORE THAN THE THING IT LANDED ON.
         //
@@ -1070,7 +1591,7 @@ class TexViewer {
         // `wordAtPoint` in the webview refuses rather than claiming a glyph
         // several words away, so no word is sent, nothing resolves, and the
         // rung after `word` used to be taken instead.
-        if (!m.widen && step && !PLAIN_CLICK_KINDS.has(step.kind)) step = null;
+        if (!m.widen && step && step.kind !== 'group' && !PLAIN_CLICK_KINDS.has(step.kind)) step = null;
         // FULL SCREEN MUST SURVIVE A CLICK.
         //
         // Full screen is `toggleMaximizeEditorGroup`: only the viewer's group is
@@ -1101,7 +1622,9 @@ class TexViewer {
                 new vscode.Position(Math.min(step.end.line - 1, doc.lineCount - 1), step.end.col));
             const more = this._ladder.index < this._ladder.items.length - 1
                 ? ` · ${process.platform === 'darwin' ? '⌘' : 'Ctrl+'}click to widen` : '';
-            what = `${step.label} (line ${step.start.line})${more}`;
+            what = step.kind === 'group'
+                ? `${step.label} — that symbol has no source token of its own`
+                : `${step.label} (line ${step.start.line})${more}`;
         } else {
             // SAY WHY THE ANSWER IS COARSE. This is the honest fallback, and
             // without a reason it reads as the feature simply misbehaving.
@@ -1110,6 +1633,64 @@ class TexViewer {
                 ? `no match for ${JSON.stringify(m.glyph || m.word)} here`
                 : 'nothing under the pointer');
         }
+        // SHIFT-CLICK PICKS THE ENDS OF A SELECTION.
+        //
+        // The first one remembers where the selection starts and marks it on the
+        // page; the second closes the range, selects it in the editor and paints
+        // the span. Everything up to here is the ordinary resolution, so the
+        // ends land on the same exact token a plain click would have chosen —
+        // this gesture adds no new way of being wrong.
+        if (m.pick) {
+            const anchor = this._pickAnchor;
+            if (!anchor || anchor.file !== hit.file) {
+                this._pickAnchor = { file: hit.file, position: range.start, label: what };
+                this._post({
+                    type: 'selection',
+                    span: {
+                        pendingStart: true,
+                        start: this._selectionAnchor(st, doc, hit.line, range.start.character),
+                        end: null, rows: [], lines: 1,
+                    },
+                    reveal: false,
+                    label: `selection starts at ${what} · shift-click the other end`,
+                });
+                this._post({ type: 'status', text: 'selection start — shift-click the other end', kind: 'ok' });
+                return;
+            }
+            this._pickAnchor = null;
+            const a = anchor.position;
+            const b = range.end;
+            const forwards = a.line < b.line || (a.line === b.line && a.character <= b.character);
+            const from = forwards ? a : b;
+            const to = forwards ? b : a;
+            const picked = new vscode.Selection(from, to);
+            if (editor) {
+                editor.selection = picked;
+                editor.revealRange(picked, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+            }
+            // Post it directly rather than relying on the editor's own change
+            // event: in full screen there may be no visible editor at all, and
+            // the page must still show what was picked.
+            this._postSelection(st, doc, picked);
+            this._post({
+                type: 'status',
+                text: `selected lines ${from.line + 1}–${to.line + 1}`,
+                kind: 'ok',
+            });
+            return;
+        }
+        // A plain click abandons a half-made selection: leaving it armed would
+        // turn an ordinary click three minutes later into a mystery range.
+        this._pickAnchor = null;
+
+        // Remember what this click is about to select, so the change event it
+        // provokes is not mistaken for the reader making a selection.
+        this._selfRange = {
+            file: doc.uri.fsPath,
+            sl: range.start.line, sc: range.start.character,
+            el: range.end.line, ec: range.end.character,
+            at: Date.now(),
+        };
         if (editor) {
             editor.selection = new vscode.Selection(range.start, range.end);
             editor.revealRange(range, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
@@ -1364,6 +1945,160 @@ class TexViewer {
         return rects;
     }
 
+    /**
+     * The CELL at a line: the innermost container object — an equation, a
+     * figure, a theorem — else the prose paragraph around it.
+     *
+     * Shared by opening a card and by stepping one, so ‹ › walk exactly the
+     * blocks a right-click would have opened.
+     */
+    _blockAt(doc, lines, file, line) {
+        const model = this._modelFor(doc);
+        const objects = (model && model.objects) || [];
+
+        // A HEADING IS A BLOCK, AND ITS BLOCK IS THE WHOLE COMMAND.
+        //
+        // `section-heading` is not a container kind — the selection ladder
+        // deliberately skips it, because a heading annotates the section rather
+        // than enclosing it — so the card used to fall through to the paragraph
+        // scanner. On a heading that wraps in the SOURCE, which a long title
+        // does,
+        //
+        //     \subsection{A first example: the \texorpdfstring{$J=1$}{J=1} BPS--BPS
+        //     overlap}
+        //
+        // the click resolves to the second line, the paragraph scanner sees one
+        // line between two blanks, and the card opens on the fragment
+        // `overlap}` — reported, with a screenshot. The heading's own range is
+        // in the model, brace-matched across lines, so use it.
+        const heading = objects
+            .filter(o => o.kind === 'section-heading' && o.sourceRange &&
+                (!o.sourceRange.file || o.sourceRange.file === file) &&
+                o.sourceRange.startLine <= line && o.sourceRange.endLine >= line)
+            .sort((a, b) => (a.sourceRange.endLine - a.sourceRange.startLine) -
+                (b.sourceRange.endLine - b.sourceRange.startLine))[0];
+        if (heading) {
+            const title = String(heading.title || '').replace(/\s+/g, ' ').trim();
+            return {
+                startLine: heading.sourceRange.startLine,
+                endLine: heading.sourceRange.endLine,
+                label: title
+                    ? `${heading.cmd} · ${title.length > 34 ? `${title.slice(0, 33)}…` : title}`
+                    : (heading.cmd || 'heading'),
+            };
+        }
+
+        const obj = objects
+            .filter(o => o.sourceRange && CONTAINER_KINDS.has(o.kind) &&
+                (!o.sourceRange.file || o.sourceRange.file === file) &&
+                o.sourceRange.startLine <= line && o.sourceRange.endLine >= line)
+            .sort((a, b) => (a.sourceRange.endLine - a.sourceRange.startLine) -
+                (b.sourceRange.endLine - b.sourceRange.startLine))[0];
+        if (obj && obj.sourceRange.endLine - obj.sourceRange.startLine <= 80) {
+            return {
+                startLine: obj.sourceRange.startLine,
+                endLine: obj.sourceRange.endLine,
+                label: obj.label ? `${obj.kind} ${obj.label}` : (obj.envName || obj.kind),
+            };
+        }
+        const para = paragraphSpan(lines, line);
+        if (para) return { startLine: para.startLine, endLine: para.endLine, label: 'paragraph' };
+        return { startLine: line, endLine: line, label: `line ${line}` };
+    }
+
+    /**
+     * Move the open card to the block before or after the one it holds.
+     *
+     * WALKING BY LINE, NOT BY A LIST OF BLOCKS. A "cell" here is whatever a
+     * right-click at a line would have opened, and prose paragraphs are not
+     * objects in the model at all — so the next cell is found by stepping past
+     * the current block's last line to the next line with anything on it, and
+     * asking the same question there. Blank lines, `\end{...}` gaps and
+     * comment-only lines are skipped, and the walk stops at the ends of the
+     * file rather than wrapping: wrapping from the last equation to the title
+     * would look like the button did something random.
+     */
+    async _stepEditSession(m) {
+        const s = this._edit;
+        const st = this.root && this.coord.roots.get(this.root);
+        if (!s || !st || !st.map || m.editId !== s.id) return;
+        const delta = m.delta < 0 ? -1 : 1;
+        const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(s.file));
+        const lines = doc.getText().split(/\r?\n/);
+        const here = {
+            start: doc.positionAt(s.startOffset).line + 1,
+            end: doc.positionAt(s.endOffset).line + 1,
+        };
+
+        const meaningful = (n) => {
+            const t = (lines[n - 1] || '').trim();
+            return t !== '' && !t.startsWith('%');
+        };
+        let n = delta > 0 ? here.end + 1 : here.start - 1;
+        while (n >= 1 && n <= lines.length && !meaningful(n)) n += delta;
+        if (n < 1 || n > lines.length) {
+            this._post({
+                type: 'status',
+                text: delta > 0 ? 'last block in the file' : 'first block in the file',
+                kind: 'warn',
+            });
+            return;
+        }
+        let block = this._blockAt(doc, lines, s.file, n);
+        // A degenerate step — the same block again, which happens when the
+        // line we landed on belongs to a container that also holds the current
+        // one — would leave the reader pressing a button that does nothing. So
+        // keep walking past it, once.
+        if (block.startLine === here.start && block.endLine === here.end) {
+            n = delta > 0 ? block.endLine + 1 : block.startLine - 1;
+            while (n >= 1 && n <= lines.length && !meaningful(n)) n += delta;
+            if (n < 1 || n > lines.length) {
+                this._post({ type: 'status', text: 'no further block', kind: 'warn' });
+                return;
+            }
+            block = this._blockAt(doc, lines, s.file, n);
+        }
+        await this._openBlockSession(doc, s.file, block, st);
+        this._post({ type: 'status', text: `→ ${block.label} (line ${block.startLine})`, kind: 'ok' });
+    }
+
+    /** Open (or move) the card onto an already-decided block. */
+    async _openBlockSession(doc, file, block, st) {
+        const lines = doc.getText().split(/\r?\n/);
+        const startPos = new vscode.Position(block.startLine - 1, 0);
+        const endPos = new vscode.Position(
+            block.endLine - 1, (lines[block.endLine - 1] || '').length);
+        const s = {
+            id: ++this._editSeq,
+            file,
+            startOffset: doc.offsetAt(startPos),
+            endOffset: doc.offsetAt(endPos),
+            lastText: doc.getText(new vscode.Range(startPos, endPos)),
+        };
+        this._edit = s;
+        this._ensureDocListener();
+        let rects = this._editRects(st, file, block.startLine, block.endLine);
+        if (!rects.length) {
+            // No measurable rows (a figure, an unmapped block): anchor on the
+            // PAGE at least, or the card would jump the reader back to page 1.
+            try {
+                const r = st.map.sourceToRender(file, block.startLine, block.endLine);
+                if (r && r.page) rects = [{ page: r.page, x: 72, y: 72, w: 4, h: 4 }];
+            } catch (_) { /* the card can live without an anchor */ }
+        }
+        this._post({
+            type: 'editOpen',
+            editId: s.id,
+            label: block.label,
+            file: path.basename(file),
+            startLine: block.startLine,
+            endLine: block.endLine,
+            text: s.lastText,
+            rects,
+            stepped: true,
+        });
+    }
+
     async _openEditSession(m) {
         const st = this.root && this.coord.roots.get(this.root);
         if (!st || !st.map || !st.map.available) return;
@@ -1376,25 +2111,7 @@ class TexViewer {
         const lines = doc.getText().split(/\r?\n/);
         const line = Math.max(1, Math.min(hit.line, lines.length));
 
-        // The CELL under the pointer: the innermost container object — an
-        // equation, figure, theorem — else the prose paragraph.
-        const model = this._modelFor(doc);
-        const obj = ((model && model.objects) || [])
-            .filter(o => o.sourceRange && CONTAINER_KINDS.has(o.kind) &&
-                (!o.sourceRange.file || o.sourceRange.file === hit.file) &&
-                o.sourceRange.startLine <= line && o.sourceRange.endLine >= line)
-            .sort((a, b) => (a.sourceRange.endLine - a.sourceRange.startLine) -
-                (b.sourceRange.endLine - b.sourceRange.startLine))[0];
-        let startLine; let endLine; let label;
-        if (obj && obj.sourceRange.endLine - obj.sourceRange.startLine <= 80) {
-            startLine = obj.sourceRange.startLine;
-            endLine = obj.sourceRange.endLine;
-            label = obj.label ? `${obj.kind} ${obj.label}` : (obj.envName || obj.kind);
-        } else {
-            const para = paragraphSpan(lines, line);
-            if (para) { startLine = para.startLine; endLine = para.endLine; label = 'paragraph'; }
-            else { startLine = line; endLine = line; label = `line ${line}`; }
-        }
+        const { startLine, endLine, label } = this._blockAt(doc, lines, hit.file, line);
 
         const startPos = new vscode.Position(startLine - 1, 0);
         const endPos = new vscode.Position(endLine - 1, (lines[endLine - 1] || '').length);
@@ -1545,11 +2262,13 @@ class TexViewer {
         const MAX_LINES = 60;      // a whole section is thousands of rows
         const rects = [];
         if (step.lines <= MAX_LINES) {
+            const rows = [];
             for (let n = step.start.line; n <= step.end.line; n++) {
                 for (const r of st.map.lineRows(file, n)) {
-                    rects.push({ page: r.page, x: r.x, y: r.y, w: r.w, h: r.h });
+                    rows.push({ page: r.page, x: r.x, y: r.y, w: r.w, h: r.h });
                 }
             }
+            rects.push(...mergeRows(dropStrayRows(rows)));
         }
         const a = st.map.sourceToRender(file, step.start.line);
         const b = st.map.sourceToRender(file, step.end.line);

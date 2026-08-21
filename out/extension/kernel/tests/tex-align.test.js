@@ -27,8 +27,9 @@ const test = (name, fn) => {
 
 const {
     sourceTokens, renderedGlyphs, align, buildObjectMap, glyphAtPoint, tokenAt,
-    keyOf, symbolicFonts,
+    groupAround, keyOf, symbolicFonts,
 } = require('../../tex/glyphAlign');
+const { roleIndex, mathSpans } = require('../../tex/mathStructure');
 const { collectMacros } = require('../../tex/texWords');
 
 // A real equation from the reference paper, macros and all.
@@ -127,6 +128,53 @@ test('READING ORDER: a superscript belongs to its line, a fraction does not', ()
         { page: 1, str: 'a', x: 10, y: 100, w: 6, h: 10, baseline: 110 },   // upper
     ]);
     assert.strictEqual(frac.map(g => g.ch).join(''), 'ab', 'numerator, then denominator');
+});
+
+test('A SUBSCRIPT IS KNOWN BY ITS SIZE, not only by how far it drops', () => {
+    // MEASURED on the paper: the α of `\\theta_\\alpha` sits 1.7 bp below the
+    // body baseline while the α of `x_{\\alpha,n}` sits 3.3 bp below — the same
+    // kind of thing, and any tolerance that catches one calls the other body
+    // text. What they have in common is that both are SET SMALLER.
+    const gs = renderedGlyphs([
+        { page: 1, str: 'θ', x: 100, y: 90, w: 8, h: 11, baseline: 101 },
+        { page: 1, str: 'α', x: 108, y: 94, w: 5, h: 8, baseline: 102.7 },   // barely dropped
+        { page: 1, str: '+', x: 116, y: 90, w: 7, h: 11, baseline: 101 },
+        { page: 1, str: 'x', x: 126, y: 90, w: 7, h: 11, baseline: 101 },
+        { page: 1, str: 'n', x: 133, y: 95, w: 5, h: 8, baseline: 104.3 },   // plainly dropped
+    ]);
+    assert.strictEqual(gs.map(g => g.ch).join(''), 'θα+xn', 'reading order, scripts beside their bases');
+    const level = Object.fromEntries(gs.map(g => [g.ch, g.level]));
+    assert.strictEqual(level['α'], 'below', 'the barely-dropped subscript is still a subscript');
+    assert.strictEqual(level['n'], 'below');
+    assert.strictEqual(level['θ'], 'base');
+});
+
+test('A SCRIPT NEVER JOINS THE CLUSTER AT THE FAR END OF THE LINE', () => {
+    // Glyphs are clustered by baseline first, so each new baseline starts over
+    // at a small x. A one-sided "close enough on the right" gap test then said
+    // every one of them continued the LAST cluster on the line — measured, the
+    // four subscript α of one equation came out as a block after everything
+    // else, and not one of them paired with a source token.
+    const items = [];
+    for (let i = 0; i < 6; i++) {
+        items.push({ page: 1, str: 'x', x: 100 + i * 30, y: 90, w: 8, h: 11, baseline: 101 });
+    }
+    items.push({ page: 1, str: 'a', x: 108, y: 94, w: 5, h: 8, baseline: 102.7 });   // a script early on
+    const gs = renderedGlyphs(items);
+    assert.strictEqual(gs.map(g => g.ch).join(''), 'xaxxxxx',
+        `the script belongs beside the FIRST x, got ${gs.map(g => g.ch).join('')}`);
+});
+
+test('AN ACCENT IS WRITTEN BEFORE ITS BASE AND PRINTED AFTER IT', () => {
+    // `\\dot x` puts the mark first in the source and second on the page. The
+    // projection already knows that; sorting the tokens by source offset undid
+    // it, and the transposition cost the alignment both glyphs — measured, six
+    // of one fixture's failures.
+    const seq = sourceTokens({
+        lines: ['\\dot x_{\\alpha,\\dot n}^{\\uparrow}'], startLine: 1, endLine: 1, inMath: true,
+    }).map(t => t.ch).join(' ');
+    assert.strictEqual(seq, 'x ˙ α , n ˙ ↑',
+        `base, its accent, then the scripts — got ${JSON.stringify(seq)}`);
 });
 
 test('the whole equation aligns, and a click resolves to the right macro', () => {
@@ -307,6 +355,126 @@ test('the tex sources contain no RAW control bytes', () => {
         }
     }
     assert.deepStrictEqual(offenders, [], `raw control bytes in: ${offenders.join(', ')}`);
+});
+
+// --- STRUCTURE: the two sides must agree on where a glyph SITS ---------------
+
+test('the source knows a subscript from a superscript, and both from a fraction', () => {
+    const idx = roleIndex('U_{m,k}^{\\pm}=\\frac{|m|}{2}');
+    const role = (needle, from = 0) => idx.at(('U_{m,k}^{\\pm}=\\frac{|m|}{2}').indexOf(needle, from));
+    assert.strictEqual(role('m').role, 'sub', 'the m of the subscript');
+    assert.strictEqual(role('m').level, 'below');
+    assert.strictEqual(role('pm').role, 'sup', 'the superscript');
+    assert.strictEqual(role('pm').level, 'above');
+    assert.strictEqual(role('|').role, 'num', 'the numerator');
+    assert.strictEqual(role('|').level, 'above');
+    assert.strictEqual(role('2').role, 'den', 'the denominator');
+    assert.strictEqual(role('2').level, 'below');
+    assert.strictEqual(role('U').role, 'base');
+});
+
+test('BOTH SCRIPTS OF ONE BASE SHARE ITS ANCHOR, whichever order they are written', () => {
+    // `x^{a}_{b}` and `x_{b}^{a}` are one picture written two ways. If the
+    // second script anchored to the FIRST script's group instead of to `x`,
+    // the two spellings would canonicalise into two different orders and only
+    // one of them could match the page.
+    for (const src of ['x^{a}_{b}', 'x_{b}^{a}']) {
+        const spans = mathSpans(src);
+        assert.strictEqual(spans.length, 2, src);
+        assert.strictEqual(spans[0].anchor, 0, `${src}: first script hangs off x`);
+        assert.strictEqual(spans[1].anchor, 0, `${src}: and so does the second`);
+    }
+    // …and the canonical order is the same for both.
+    const order = (src) => sourceTokens({ lines: [src], startLine: 1, endLine: 1, inMath: true })
+        .map(t => t.ch).join('');
+    assert.strictEqual(order('x^{a}_{b}'), 'xba', 'subscript first, then superscript');
+    assert.strictEqual(order('x_{b}^{a}'), 'xba', 'the other spelling, the same sequence');
+});
+
+test('a nested fraction keeps its own numerator and denominator', () => {
+    const src = '\\frac{x+\\frac{y}{z}}{w}';
+    const idx = roleIndex(src);
+    assert.strictEqual(idx.at(src.indexOf('y')).role, 'num', 'the inner numerator');
+    assert.strictEqual(idx.at(src.indexOf('z')).role, 'den', 'the inner denominator');
+    assert.strictEqual(idx.at(src.indexOf('w')).role, 'den', 'the outer denominator');
+    assert.strictEqual(idx.at(src.indexOf('y')).depth, 2, 'and it knows it is nested');
+});
+
+test('THE PAGE IS PUT INTO THE SAME ORDER — scripts after their base', () => {
+    // MEASURED as `U m ± k` against a source of `U m k ±`: the superscript's x
+    // falls between the subscript's glyphs, so left-to-right is not reading
+    // order and the alignment dropped whichever side lost the transposition.
+    const base = (x, ch) => ({ page: 1, str: ch, x, w: 8, y: 100, h: 10, baseline: 110 });
+    const sub = (x, ch) => ({ page: 1, str: ch, x, w: 5, y: 106, h: 7, baseline: 114 });
+    const sup = (x, ch) => ({ page: 1, str: ch, x, w: 5, y: 96, h: 7, baseline: 105 });
+    const got = renderedGlyphs([
+        base(10, 'U'), sub(19, 'm'), sup(20, 'p'), sub(26, 'k'), base(36, '='),
+    ]).map(g => g.ch).join('');
+    assert.strictEqual(got, 'Umkp=', `subscript, then superscript: got ${got}`);
+});
+
+test('…and a fraction numerator-first, which is the other order', () => {
+    // The discriminator is alignment, not size: two scripts START together
+    // beside their base, a fraction is CENTRED, its halves over each other.
+    // The boxes OVERLAP vertically, as a real display's do — that is what makes
+    // the numerator, the axis and the denominator one printed line rather than
+    // three, and it is the geometry the ordering has to cope with.
+    const row = (x, ch) => ({ page: 1, str: ch, x, w: 8, y: 100, h: 10, baseline: 110 });
+    const num = (x, ch) => ({ page: 1, str: ch, x, w: 8, y: 92, h: 10, baseline: 102 });
+    const den = (x, ch) => ({ page: 1, str: ch, x, w: 8, y: 108, h: 10, baseline: 118 });
+    const got = renderedGlyphs([
+        row(10, 's'), row(20, '+'),
+        num(30, 'a'), num(39, 'b'), den(34, '2'),
+        row(52, '+'), row(62, 'k'),
+    ]).map(g => g.ch).join('');
+    assert.strictEqual(got, 's+ab2+k', `numerator, then denominator: got ${got}`);
+});
+
+test('the LEVEL keeps a numerator from pairing with a denominator', () => {
+    // \frac{x}{x} prints two identical x's, and character identity cannot tell
+    // them apart — measured, both resolved to the SAME source token.
+    const src = '\\frac{x+x}{x+x}';
+    const row = (x, ch, baseline, y) => ({ page: 1, str: ch, x, w: 8, y, h: 10, baseline });
+    const map = buildObjectMap({
+        lines: [src], startLine: 1, endLine: 1, inMath: true,
+        items: [
+            row(10, 'x', 98, 88), row(19, '+', 98, 88), row(28, 'x', 98, 88),
+            row(10, 'x', 122, 112), row(19, '+', 122, 112), row(28, 'x', 122, 112),
+        ],
+    });
+    assert.strictEqual(map.tokens.length, 6);
+    assert.strictEqual(map.glyphs.length, 6);
+    for (let i = 0; i < 6; i++) {
+        assert.ok(map.srcToRen[i] >= 0, `token ${i} (${map.tokens[i].ch}) found a glyph`);
+    }
+    // The numerator's tokens must own the UPPER glyphs, one each.
+    const cols = map.tokens.map((t, i) => ({ ch: t.ch, level: t.level, y: map.glyphs[map.srcToRen[i]].y }));
+    for (const c of cols) {
+        if (c.level === 'above') assert.strictEqual(c.y, 88, `${c.ch}: a numerator token takes an upper glyph`);
+        if (c.level === 'below') assert.strictEqual(c.y, 112, `${c.ch}: a denominator token takes a lower glyph`);
+    }
+    const used = new Set([...map.srcToRen]);
+    assert.strictEqual(used.size, 6, 'and no two tokens share one glyph');
+});
+
+test('a glyph nothing printed answers with the construct around it', () => {
+    // A pmatrix's own parentheses, a stretched delimiter, the dots of \ldots:
+    // there is no source token, and the nearest one is a confident wrong jump.
+    const src = 'a+\\frac{b}{c}+d';
+    const row = (x, ch, baseline, y) => ({ page: 1, str: ch, x, w: 8, y, h: 10, baseline });
+    const map = buildObjectMap({
+        lines: [src], startLine: 1, endLine: 1, inMath: true,
+        items: [
+            row(10, 'a', 110, 100), row(19, '+', 110, 100),
+            row(30, 'b', 98, 88), row(30, 'c', 122, 112),
+            row(42, '+', 110, 100), row(51, 'd', 110, 100),
+        ],
+    });
+    const bi = map.glyphs.findIndex(g => g.ch === 'b');
+    const g = groupAround(map, bi);
+    assert.ok(g, 'it answers');
+    assert.ok(g.startCol >= 0 && g.endCol > g.startCol, 'with a real range');
+    assert.ok(src.slice(g.startCol, g.endCol).length <= src.length, 'inside the object');
 });
 
 console.log('source token <-> rendered glyph alignment\n');
