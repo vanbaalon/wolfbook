@@ -846,6 +846,50 @@ test('picking the ends in the WRONG order still makes a forward range', async ()
     assert.strictEqual(selected.start.line, 4);
 });
 
+test('THE REPORTED BUG: a line with no rows of its own borrows the row its ink is in', () => {
+    // A short continuation line is typeset INTO its predecessor's row and
+    // SyncTeX files the whole row under the predecessor — on the reference
+    // paper line 91 is the single word `therefore`, printed at the end of line
+    // 90's row, with no records at all. Selecting it painted nothing.
+    const v = makeViewer(null, null);
+    const st = v.coord.roots.get(FILE);
+    const ROW = { page: 1, x: 100, y: 200, w: 300, h: 13 };
+    st.map.lineRows = (f, n) => (n === 12 ? [ROW] : []);
+
+    const a = v._selectionAnchor(st, doc, 13, 3);
+    assert.ok(a.rects.length, 'the neighbouring row stands in for the missing one');
+    assert.strictEqual(a.rects[0].y, ROW.y, 'and it is the row above');
+
+    // …so selecting one word of it is answered, instead of clearing the page.
+    const at = LINES[12].indexOf('unmistakable');
+    v.posted.length = 0;
+    v.syncFromEditor(rangeAt(13, at, 13, at + 12));
+    const h = v.posted.find(p => p.type === 'highlight');
+    assert.ok(h && h.word === 'unmistakable', 'the word is marked');
+    assert.ok(h.rects.length, 'in a region to search');
+});
+
+test('a span whose lines print no rows of their own is still painted', () => {
+    const v = makeViewer(null, null);
+    const st = v.coord.roots.get(FILE);
+    st.map.lineRows = (f, n) => (n === 12 ? [{ page: 1, x: 100, y: 200, w: 300, h: 13 }] : []);
+    v.syncFromEditor(rangeAt(13, 0, 14, 20));
+    const m = v.posted.find(p => p.type === 'selection' && p.span);
+    assert.ok(m, 'a span is posted from the ends alone');
+    assert.strictEqual(m.span.rows.length, 1, 'the one row both lines share, once');
+});
+
+test('but a borrow never crosses a paragraph', () => {
+    // Past a blank line or an environment delimiter the ink is somebody else's,
+    // and a mark placed in it would be a lie rather than an approximation.
+    const v = makeViewer(null, null);
+    const st = v.coord.roots.get(FILE);
+    st.map.lineRows = (f, n) => (n === 12 ? [{ page: 1, x: 100, y: 200, w: 300, h: 13 }] : []);
+    // Line 16 is its own paragraph, blank lines either side.
+    const a = v._selectionAnchor(st, doc, 16, 3);
+    assert.strictEqual(a.rects.length, 0, 'nothing is borrowed across the gap');
+});
+
 test('A BRACKET CAN BE TAKEN HOLD OF: the other end stays put', async () => {
     // Resizing is the same drag with the opposite end as its anchor, so it goes
     // through the same resolution and has no second way of being wrong.

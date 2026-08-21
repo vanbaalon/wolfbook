@@ -1030,7 +1030,10 @@ function paintHighlight() {
 function markToPx(mark) {
     if (!mark) return null;
     const v = rectToViewport(mark.page, { page: mark.page, x: mark.x, y: mark.y, w: 0.5, h: mark.h });
-    return v ? { x: v.x, y: v.y, h: v.h } : null;
+    // `word` travels with it: a mark the TEXT LAYER placed is trustworthy at a
+    // line end, where the row's own edge is not — the row may carry the next
+    // source line's words too.
+    return v ? { x: v.x, y: v.y, h: v.h, word: !!mark.word } : null;
 }
 
 /**
@@ -1083,29 +1086,43 @@ async function paintSelection(span) {
 
     const edge = async (anchor, side) => {
         if (!anchor || !anchor.rects || !anchor.rects.length) return null;
-        // The very start or end of a line: the mark goes at the row's edge, not
-        // at its first or last WORD. A heading's number, and the punctuation
-        // after the last word, are part of the line that was selected.
-        if ((side === 'start' && anchor.atLineStart) || (side === 'end' && anchor.atLineEnd)) {
+        const rowEdge = () => {
             const r = anchor.rects[side === 'start' ? 0 : anchor.rects.length - 1];
-            return { page: r.page, x: side === 'start' ? r.x : r.x + r.w, y: r.y, h: r.h };
-        }
+            return { page: r.page, x: side === 'start' ? r.x : r.x + r.w, y: r.y, h: r.h, word: false };
+        };
+        // The very START of a line goes at the row's edge, not at its first
+        // WORD: a heading's printed number sits to the left of its title and is
+        // part of the line that was selected.
+        if (side === 'start' && anchor.atLineStart) return rowEdge();
         let hit = null;
         if (anchor.word) {
             try { hit = await wordInRows(anchor.rects, anchor.word, anchor.occurrence, !!anchor.glyph); }
             catch (_) { hit = null; }
         }
-        if (hit) {
-            const a = fromViewport(hit.page, hit.x, hit.y);
-            const b = fromViewport(hit.page, hit.x + hit.w, hit.y + hit.h);
-            if (a && b) {
-                return { page: hit.page, x: side === 'start' ? a.xBp : b.xBp,
-                    y: a.yTopBp, h: b.yTopBp - a.yTopBp };
-            }
+        if (!hit) return rowEdge();
+        const a = fromViewport(hit.page, hit.x, hit.y);
+        const b = fromViewport(hit.page, hit.x + hit.w, hit.y + hit.h);
+        if (!(a && b)) return rowEdge();
+        let x = side === 'start' ? a.xBp : b.xBp;
+        if (side === 'end' && anchor.atLineEnd) {
+            // THE END OF A LINE IS NOT THE END OF ITS ROW.
+            //
+            // A short continuation line is typeset INTO its predecessor's row —
+            // on the reference paper line 90 ends with "is" and line 91's single
+            // word "therefore" is printed after it — so ending at the row's edge
+            // put the closing bracket a word beyond what was selected. The row
+            // edge is still right when this word IS the row's last ink, where it
+            // keeps the punctuation that follows it; the test is whether
+            // anything else is printed to its right.
+            try {
+                const rows = inkRows(await textItems(hit.page));
+                const mid = hit.y + hit.h / 2;
+                const row = rows.find(r => mid >= r.y - 1 && mid <= r.y + r.h + 1);
+                const right = row && fromViewport(hit.page, row.x + row.w, hit.y);
+                if (right && right.xBp - x < (b.xBp - a.xBp) * 0.6 + 4) x = right.xBp;
+            } catch (_) { /* the word's own edge is answer enough */ }
         }
-        // No text-layer answer: the end of the row is the honest edge.
-        const r = anchor.rects[side === 'start' ? 0 : anchor.rects.length - 1];
-        return { page: r.page, x: side === 'start' ? r.x : r.x + r.w, y: r.y, h: r.h };
+        return { page: hit.page, x, y: a.yTopBp, h: b.yTopBp - a.yTopBp, word: true };
     };
 
     const from = await edge(span.start, 'start');
@@ -1167,7 +1184,11 @@ async function paintSelection(span) {
             // starts at the start of a line, the answer is simply "this row".
             const x0 = (isFirst && !(span.start && span.start.atLineStart))
                 ? Math.max(r.x, Math.min(startPx.x, r.x + r.w)) : r.x;
-            const x1 = (isLast && !(span.end && span.end.atLineEnd))
+            // …and the same for the closing end, UNLESS the text layer placed
+            // it: a word-resolved mark is the honest edge even at a line end,
+            // and it is the only thing that stops the band from running on into
+            // the next source line's word on the same row.
+            const x1 = (isLast && !(span.end && span.end.atLineEnd && !endPx.word))
                 ? Math.min(r.x + r.w, Math.max(endPx.x, r.x)) : r.x + r.w;
             if (x1 <= x0) continue;
             rowsSeen.push({ page: p, x: x0, y: r.y, w: x1 - x0, h: r.h });

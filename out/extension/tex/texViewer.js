@@ -954,6 +954,32 @@ class TexViewer {
     }
 
     /**
+     * The rows of the nearest line that HAS any, within the same paragraph.
+     *
+     * Only a neighbour inside the same run of prose will do: a blank line or an
+     * environment delimiter ends the paragraph, and past it the ink is somebody
+     * else's. Up first — a continuation is typeset into the row its predecessor
+     * started — then down, for a first line whose own record was misfiled.
+     */
+    _neighbourRows(st, doc, line, reach = 4) {
+        const file = doc.uri.fsPath;
+        const breaks = (n) => {
+            if (n < 1 || n > doc.lineCount) return true;
+            const t = doc.lineAt(n - 1).text;
+            return !t.trim() || /\\(begin|end)\s*\{/.test(t) || /^\s*\\(section|subsection|subsubsection|chapter|item)\b/.test(t);
+        };
+        for (const step of [-1, 1]) {
+            for (let d = 1; d <= reach; d++) {
+                const n = line + step * d;
+                if (breaks(n)) break;
+                const rows = this._searchRows(st, file, n);
+                if (rows.length) return rows;
+            }
+        }
+        return [];
+    }
+
+    /**
      * Take hold of one END of the selection that is already there.
      *
      * Dragging a bracket is the same gesture as dragging out a new range, with
@@ -1005,6 +1031,17 @@ class TexViewer {
                 rows.push(...mergeRows(dropStrayRows(all)));
             }
         }
+        // STILL NOTHING? THE ROW THAT CARRIES THIS LINE'S INK BELONGS TO
+        // ANOTHER LINE.
+        //
+        // A short continuation line is typeset INTO the row its predecessor
+        // started, and SyncTeX files the whole row under the predecessor. On
+        // the reference paper line 91 is the single word `therefore`, printed
+        // at the end of line 90's row, and it has no records at all: selecting
+        // it painted nothing, and a selection ENDING on it had no mark. The
+        // neighbouring line's row is the region its ink is in — the word name
+        // and occurrence are what pick the word out of it.
+        if (!rows.length) rows.push(...this._neighbourRows(st, doc, line));
 
         const inMath = isInMath(text, column);
         const w = wordAtColumn(text, column, { macros, scope: inMath ? 'math' : 'prose', inMath })
@@ -1120,6 +1157,21 @@ class TexViewer {
                 rows.push({ ...r, line: n });
             }
         }
+        const ends = [anchorAt(startLine, sel.start.character), anchorAt(endLine, sel.end.character)];
+        if (!rows.length) {
+            // Every line of it was typeset into somebody else's row — see
+            // _neighbourRows. The ends know which rows those are, and the marks
+            // are what cut the band down to the words that were selected.
+            const seen = new Set();
+            for (const a of ends) {
+                for (const r of a.rects) {
+                    const key = `${r.page}:${Math.round(r.x)}:${Math.round(r.y)}`;
+                    if (seen.has(key)) continue;
+                    seen.add(key);
+                    rows.push({ ...r, line: a.line });
+                }
+            }
+        }
         if (!rows.length) { this._post({ type: 'selection', span: null }); return; }
 
         // What is on screen, so a bracket can be taken hold of later.
@@ -1131,8 +1183,8 @@ class TexViewer {
         this._post({
             type: 'selection',
             span: {
-                start: anchorAt(startLine, sel.start.character),
-                end: anchorAt(endLine, sel.end.character),
+                start: ends[0],
+                end: ends[1],
                 rows,
                 lines: endLine - startLine + 1,
             },
