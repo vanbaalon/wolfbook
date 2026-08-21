@@ -1285,6 +1285,7 @@ function revealHighlight() {
 // --- interaction -------------------------------------------------------------
 
 pagesEl().addEventListener('click', (ev) => {
+    if (state.swallowClick) return;               // the tail of a shift-drag
     const wrap = ev.target.closest('.page');
     if (!wrap) return;
     const n = Number(wrap.dataset.page);
@@ -1315,6 +1316,68 @@ pagesEl().addEventListener('click', (ev) => {
         // walked out of.
         pick: !!ev.shiftKey && !(ev.metaKey || ev.ctrlKey),
     });
+});
+
+// --- SHIFT-DRAG SELECTS, AND SHOWS IT WHILE THE HAND IS MOVING ---------------
+//
+// Press with Shift, move, let go: the two ends are resolved exactly as a click
+// resolves one, and the span is repainted on every move so the reader sees what
+// they are taking. The editor is only touched on release — a drag that moved
+// the cursor on every step would drag the editor across the file too.
+//
+// Shift is kept as the modifier because a plain drag still scrolls the page,
+// and a shift-click that never moves still works as "pick this end", so the
+// two-click gesture survives for anyone who prefers it.
+let dragSel = null;
+
+pagesEl().addEventListener('mousedown', (ev) => {
+    if (ev.button !== 0 || !ev.shiftKey || ev.metaKey || ev.ctrlKey || ev.altKey) return;
+    const wrap = ev.target.closest('.page');
+    if (!wrap) return;
+    const n = Number(wrap.dataset.page);
+    if (!state.rendered.has(n)) return;
+    const r = wrap.getBoundingClientRect();
+    const pt = fromViewport(n, ev.clientX - r.left, ev.clientY - r.top);
+    if (!pt) return;
+    ev.preventDefault();
+    dragSel = { moved: false, last: 0 };
+    sendClick(n, pt, ev.clientX - r.left, ev.clientY - r.top, { pick: true });
+});
+
+window.addEventListener('mousemove', (ev) => {
+    if (!dragSel) return;
+    const now = performance.now();
+    if (now - dragSel.last < 60) return;          // one repaint per frame or two
+    const wrap = document.elementFromPoint(ev.clientX, ev.clientY);
+    const page = wrap && wrap.closest ? wrap.closest('.page') : null;
+    if (!page) return;
+    const n = Number(page.dataset.page);
+    if (!state.rendered.has(n)) return;
+    const r = page.getBoundingClientRect();
+    const pt = fromViewport(n, ev.clientX - r.left, ev.clientY - r.top);
+    if (!pt) return;
+    dragSel.last = now;
+    dragSel.moved = true;
+    sendClick(n, pt, ev.clientX - r.left, ev.clientY - r.top, { pick: true, live: true });
+});
+
+window.addEventListener('mouseup', (ev) => {
+    if (!dragSel) return;
+    const moved = dragSel.moved;
+    dragSel = null;
+    if (!moved) return;                            // a shift-CLICK: leave it to the click handler
+    const page = (ev.target.closest ? ev.target.closest('.page') : null) ||
+        pagesEl().querySelector('.page');
+    if (!page) return;
+    const n = Number(page.dataset.page);
+    if (!state.rendered.has(n)) return;
+    const r = page.getBoundingClientRect();
+    const pt = fromViewport(n, ev.clientX - r.left, ev.clientY - r.top);
+    if (!pt) return;
+    // The click event that follows a drag must not pick a third end.
+    state.swallowClick = true;
+    setTimeout(() => { state.swallowClick = false; }, 250);
+    sendClick(n, pt, ev.clientX - r.left, ev.clientY - r.top, { pick: true });
 });
 
 /**
@@ -1952,7 +2015,11 @@ window.addEventListener('message', async (ev) => {
                 // to the single word the cursor is on.
                 for (const r of rects) await renderPage(r.page);
                 try {
-                    const w = await wordInRows(rects, msg.word, msg.occurrence, !!msg.glyph);
+                    // Search the WIDER region the extension supplies: a row
+                    // rectangle misses its line's first and last word, and the
+                    // n-th occurrence counted inside it is somebody else's.
+                    const w = await wordInRows(msg.searchRects && msg.searchRects.length
+                        ? msg.searchRects : rects, msg.word, msg.occurrence, !!msg.glyph);
                     if (w) {
                         const back = fromViewport(w.page, w.x, w.y);
                         const far = fromViewport(w.page, w.x + w.w, w.y + w.h);

@@ -705,6 +705,30 @@ test('…but the SAME text selected by hand later IS a range', async () => {
     assert.ok(span && span.span, 'a range the reader made is painted as one');
 });
 
+test('THE REPORTED BUG: a short TAIL row is not mistaken for an equation number', async () => {
+    // The tag rule drops a row that is narrow and off to one side. A wrapped
+    // source line's last row is also narrow and off to one side — measured, line
+    // 74 of the reference paper prints "Q-operator is" as an 11 bp row — and the
+    // selection lost its last line. A tag sits BESIDE the content; a tail row
+    // sits BELOW it.
+    const v = makeViewer(null, null);
+    const st = v.coord.roots.get(FILE);
+    st.map.lineRows = (f, n) => (n === 5 ? [
+        { page: 1, x: 355, y: 594, w: 161, h: 13 },    // the tail of the row above
+        { page: 1, x: 132, y: 608, w: 11, h: 13 },     // and its own short row
+    ] : []);
+    v.syncFromEditor({ document: doc, selection: {
+        active: new Position(4, 0),
+        start: new Position(4, 0),
+        end: new Position(4, LINES[4].length),
+    } });
+    const m = v.posted.find(p => p.type === 'selection');
+    assert.ok(m && m.span, 'a span was posted');
+    assert.strictEqual(m.span.rows.length, 2, `both rows survive, got ${m.span.rows.length}`);
+    assert.ok(m.span.end.rects.some(r => Math.abs(r.y - 608) < 1),
+        'and the far end can be placed on the short one');
+});
+
 test('SHIFT-CLICK PICKS THE ENDS: first the start, then the range', async () => {
     // The reverse of dragging a selection in the editor. Both ends resolve
     // exactly as a plain click does, so the gesture adds no new way of being
@@ -735,6 +759,36 @@ test('SHIFT-CLICK PICKS THE ENDS: first the start, then the range', async () => 
     assert.ok(selected && selected.start.line === 4 && selected.end.line === 8,
         'and the editor holds that selection');
     assert.strictEqual(v._pickAnchor, null, 'the anchor is spent');
+});
+
+test('A DRAG PREVIEWS THE RANGE AND ONLY COMMITS ON RELEASE', async () => {
+    // While the button is down the page shows what is being taken; the editor
+    // is left alone, or a drag across the page would drag the cursor across the
+    // file with it.
+    const v = makeViewer({ file: FILE, line: 5, flag: FLAG.FRESH, object: null },
+        { file: FILE, line: 5, dx: 2 });
+    const st = v.coord.roots.get(FILE);
+    st.map.lineRows = (f, n) => [{ page: 1, x: 100, y: 100 * n, w: 300, h: 13 }];
+    selected = null;
+    await v._jumpToSource({ page: 1, xBp: 100, yTopBp: 100, word: 'transformed', rowFraction: 0.2, pick: true });
+    const before = selected;
+
+    // Moving: a span is posted, the anchor survives, the editor does not move.
+    st.map.renderToSource = () => ({ file: FILE, line: 9, flag: FLAG.FRESH, object: null });
+    st.map.lineAtPoint = () => ({ file: FILE, line: 9, dx: 2 });
+    v.posted.length = 0;
+    await v._jumpToSource({ page: 1, xBp: 100, yTopBp: 900, word: 'closes', rowFraction: 0.2, pick: true, live: true });
+    const preview = v.posted.filter(p => p.type === 'selection').pop();
+    assert.ok(preview && preview.span && !preview.span.pendingStart, 'the range is previewed');
+    assert.ok(v._pickAnchor, 'and the anchor survives the move');
+    assert.strictEqual(selected, before, 'the editor is not touched mid-drag');
+
+    // Releasing commits it.
+    v.posted.length = 0;
+    await v._jumpToSource({ page: 1, xBp: 100, yTopBp: 900, word: 'closes', rowFraction: 0.2, pick: true });
+    assert.ok(selected && selected.start.line === 4 && selected.end.line === 8,
+        'release selects the range in the editor');
+    assert.strictEqual(v._pickAnchor, null, 'and the drag is over');
 });
 
 test('picking the ends in the WRONG order still makes a forward range', async () => {

@@ -129,10 +129,16 @@ function dropStrayRows(rects) {
         const right = Math.max(...body.map(r => r.x + r.w));
         for (const r of rows) {
             const narrow = r.w < widest * 0.4;
-            const outside = r.x > right + 2 || r.x + r.w < left - 2;
-            if (narrow && outside) continue;
+            // TO THE RIGHT, AND ONLY TO THE RIGHT. A tag is set flush to the
+            // right margin; a wrapped line's last row continues at the LEFT
+            // one. Dropping both sides also deleted the tail row — measured,
+            // line 74 of the reference paper prints "Q-operator is" as an 11 bp
+            // row of its own, and the selection lost its last line.
+            const rightOf = r.x > right + 2;
+            if (narrow && rightOf) continue;
             keep.push(r);
         }
+        void left;
     }
     return keep;
 }
@@ -876,6 +882,13 @@ class TexViewer {
         this._post({
             type: 'highlight',
             rects,
+            // WHERE TO LOOK IS NOT WHAT TO PAINT. The row rectangles under-cover
+            // their row at both ends, so a search inside them misses the line's
+            // first and last word and counts the wrong occurrence — measured,
+            // clicking the first `The` of a line lit the `the` on the next one.
+            // The wider region is for finding; `rects` stays the honest fallback
+            // to paint when nothing is found.
+            searchRects: word ? this._searchRows(st, doc.uri.fsPath, line) : undefined,
             word: word ? word.word : undefined,
             occurrence: word ? word.occurrence : undefined,
             glyph,
@@ -915,6 +928,47 @@ class TexViewer {
             sel.end.line === r.el && sel.end.character === r.ec;
     }
 
+    /**
+     * A LINE'S ROWS, WIDENED TO THE LINE'S REAL SHARE OF EACH PRINTED ROW.
+     *
+     * A row rectangle is built from SyncTeX records and under-covers its row at
+     * both ends: the first record is often misfiled, so the rectangle starts at
+     * the SECOND word, and the last is a dimensionless point at its word's
+     * start, so it stops before that word's ink. The panel searches the text
+     * layer INSIDE these rectangles, so the first word of a line is not among
+     * the candidates — and the n-th occurrence it counts is then somebody
+     * else's. Measured: clicking the first `The` of a line highlighted the
+     * `the` on the next.
+     *
+     * The honest bound is the NEIGHBOURS: this line's share of a printed row
+     * runs from where the previous line's ink stops to where the next line's
+     * ink starts. Widening to those edges reaches the first and last word and
+     * cannot reach into another line's.
+     */
+    _searchRows(st, file, line) {
+        const own = mergeRows(dropStrayRows(st.map.lineRows(file, line)
+            .map(r => ({ page: r.page, x: r.x, y: r.y, w: r.w, h: r.h }))));
+        if (!own.length) return own;
+        const near = (n) => {
+            try { return st.map.lineRows(file, n) || []; } catch (_) { return []; }
+        };
+        const before = near(line - 1);
+        const after = near(line + 1);
+        const sameRow = (a, b) => a.page === b.page &&
+            Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y) > Math.min(a.h, b.h) * 0.5;
+        return own.map((r) => {
+            let x0 = r.x - 20;
+            let x1 = r.x + r.w + 20;
+            for (const p of before) {
+                if (sameRow(p, r) && p.x + p.w <= r.x + 2) x0 = Math.max(x0, p.x + p.w + 1);
+            }
+            for (const n of after) {
+                if (sameRow(n, r) && n.x >= r.x + r.w - 2) x1 = Math.min(x1, n.x - 1);
+            }
+            return { page: r.page, x: Math.min(x0, r.x), y: r.y, w: Math.max(x1, r.x + r.w) - Math.min(x0, r.x), h: r.h };
+        });
+    }
+
     /** One end of a selection: its row(s), and the word the panel narrows to. */
     _selectionAnchor(st, doc, line, column) {
         const file = doc.uri.fsPath;
@@ -928,8 +982,7 @@ class TexViewer {
         // line — measured, the opening mark of a paragraph landed after its
         // first word every time. A line's worth of slack on each side is enough
         // to reach them and not enough to reach the next line's.
-        const rows = mergeRows(dropStrayRows(st.map.lineRows(file, line)
-            .map(r => ({ page: r.page, x: r.x - 14, y: r.y, w: r.w + 28, h: r.h }))));
+        const rows = this._searchRows(st, file, line);
         // A DISPLAY'S OWN LINES USUALLY HAVE NO ROWS — 71% of them on the
         // reference paper — so an end of a selection inside one has nothing to
         // be placed against, and the whole span went unpainted. The object it
@@ -946,7 +999,7 @@ class TexViewer {
                 const all = [];
                 for (let n = obj.sourceRange.startLine; n <= obj.sourceRange.endLine; n++) {
                     for (const r of st.map.lineRows(file, n)) {
-                        all.push({ page: r.page, x: r.x - 14, y: r.y, w: r.w + 28, h: r.h });
+                        all.push({ page: r.page, x: r.x, y: r.y, w: r.w, h: r.h });
                     }
                 }
                 rows.push(...mergeRows(dropStrayRows(all)));
@@ -1657,13 +1710,21 @@ class TexViewer {
                 this._post({ type: 'status', text: 'selection start — shift-click the other end', kind: 'ok' });
                 return;
             }
-            this._pickAnchor = null;
             const a = anchor.position;
             const b = range.end;
             const forwards = a.line < b.line || (a.line === b.line && a.character <= b.character);
             const from = forwards ? a : b;
             const to = forwards ? b : a;
             const picked = new vscode.Selection(from, to);
+            // A DRAG IN PROGRESS SHOWS, IT DOES NOT COMMIT. While the button is
+            // down the page previews the range on every move; the editor is
+            // only touched when the reader lets go, so a drag across a page
+            // does not drag the editor's cursor across the file with it.
+            if (m.live) {
+                this._postSelection(st, doc, picked);
+                return;
+            }
+            this._pickAnchor = null;
             if (editor) {
                 editor.selection = picked;
                 editor.revealRange(picked, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
