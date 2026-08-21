@@ -654,12 +654,42 @@ test('a selection inside ONE line still names both ends', () => {
     const st = v.coord.roots.get(FILE);
     st.map.lineRows = (f, n) => (n === 5 ? [{ page: 1, x: 100, y: 100, w: 300, h: 13 }] : []);
     const at = LINES[4].indexOf('transformed');
-    v.syncFromEditor(rangeAt(5, at, 5, at + 11));
-    const m = v.posted.find(p => p.type === 'selection');
+    // Two words, so it is a range and not the one-word marker below.
+    v.syncFromEditor(rangeAt(5, at, 5, at + LINES[4].slice(at).indexOf(' ', 12)));
+    const m = v.posted.find(p => p.type === 'selection' && p.span);
     assert.ok(m && m.span, 'a span was posted');
     assert.strictEqual(m.span.rows.length, 1, 'one row');
     assert.strictEqual(m.span.start.word, 'transformed');
     assert.ok(m.span.end.word, 'and the far end names a word too');
+});
+
+test('ONE WORD IS MARKED, NOT BRACKETED', () => {
+    // Brackets around a single word, plus a wash across the sliver between
+    // them, say nothing the amber marker did not — and unlike the marker they
+    // stay on the page.
+    const v = makeViewer(null, null);
+    const st = v.coord.roots.get(FILE);
+    st.map.lineRows = (f, n) => (n === 5 ? [{ page: 1, x: 100, y: 100, w: 300, h: 13 }] : []);
+    const at = LINES[4].indexOf('transformed');
+    v.syncFromEditor(rangeAt(5, at, 5, at + 11));
+    assert.ok(!v.posted.find(p => p.type === 'selection' && p.span), 'no span');
+    const cleared = v.posted.find(p => p.type === 'selection' && p.span === null);
+    assert.ok(cleared, 'and any overlay already on the page is cleared first');
+    const h = v.posted.find(p => p.type === 'highlight');
+    assert.ok(h, 'the word gets the marker a click would have given it');
+    assert.strictEqual(h.word, 'transformed');
+    assert.ok(h.searchRects && h.searchRects.length, 'searched in the widened row');
+    assert.ok(!v._lastSelection, 'with no bracket to take hold of afterwards');
+});
+
+test('a PARTIAL word is marked too — the whole word it is part of', () => {
+    const v = makeViewer(null, null);
+    const st = v.coord.roots.get(FILE);
+    st.map.lineRows = (f, n) => (n === 5 ? [{ page: 1, x: 100, y: 100, w: 300, h: 13 }] : []);
+    const at = LINES[4].indexOf('transformed');
+    v.syncFromEditor(rangeAt(5, at + 2, 5, at + 6));
+    const h = v.posted.find(p => p.type === 'highlight');
+    assert.ok(h && h.word === 'transformed', 'the word the fragment belongs to');
 });
 
 test('THE REPORTED BUG: a click marks the word, it does not select a range', async () => {
@@ -688,7 +718,7 @@ test('THE REPORTED BUG: a click marks the word, it does not select a range', asy
     assert.strictEqual(h.word, 'wavefunction');
 });
 
-test('…but the SAME text selected by hand later IS a range', async () => {
+test('…but a HAND-MADE range later is painted as a range', async () => {
     const v = makeViewer({ file: FILE, line: 5, flag: FLAG.FRESH, object: null },
         { file: FILE, line: 5, dx: 2 });
     const st = v.coord.roots.get(FILE);
@@ -698,10 +728,12 @@ test('…but the SAME text selected by hand later IS a range', async () => {
     // Reach past the two-second window the click owns.
     v._selfRange.at -= 5000;
     v.posted.length = 0;
-    v.syncFromEditor({ document: doc, selection: {
-        active: selected.end, start: selected.start, end: selected.end,
-    } });
-    const span = v.posted.find(p => p.type === 'selection');
+    // Widened by hand to two words: one word is a marker whoever made it, so
+    // the ownership window is only observable on a real range.
+    const start = { line: 4, character: LINES[4].indexOf('transformed') };
+    const end = { line: 4, character: LINES[4].length };
+    v.syncFromEditor({ document: doc, selection: { active: end, start, end } });
+    const span = v.posted.find(p => p.type === 'selection' && p.span);
     assert.ok(span && span.span, 'a range the reader made is painted as one');
 });
 

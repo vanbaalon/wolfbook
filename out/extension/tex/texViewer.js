@@ -796,27 +796,7 @@ class TexViewer {
         // exact rect of the glyph that token printed — so the highlight is that
         // glyph, with no name matching in the webview and no chance of the two
         // directions disagreeing about what corresponds to what.
-        const alignObj = this._objectForLine(st, doc, line);
-        const amap = this._objectMap(st, doc, alignObj);
-        if (amap) {
-            const t = tokenAt(amap, line, column);
-            if (t.index >= 0) {
-                const gi = amap.srcToRen[t.index];
-                if (gi >= 0) {
-                    const g = amap.glyphs[gi];
-                    this._post({
-                        type: 'highlight',
-                        rects: [{ page: g.page, x: g.x, y: g.y, w: g.w, h: g.h }],
-                        glyph: true,
-                        flag: flag === FLAG.FRESH ? 'fresh' : flag === FLAG.STALE ? 'stale' : 'approx',
-                        reveal: Date.now() - this._invertedAt >= 1500,
-                        title: obj ? obj.stableKey : `line ${line}`,
-                        label: `${JSON.stringify(amap.tokens[t.index].ch)} · p.${g.page} · ${flag}`,
-                    });
-                    return;
-                }
-            }
-        }
+        if (this._postAlignedGlyph(st, doc, line, column, obj ? obj.stableKey : `line ${line}`)) return;
 
         // MATHS NARROWS TOO. A display equation is an object, but "the whole
         // equation" is a poor answer to where the cursor is in a six-line
@@ -1044,10 +1024,90 @@ class TexViewer {
         };
     }
 
+    /**
+     * THE GLYPH THE ALIGNMENT ITSELF NAMES.
+     *
+     * Forward and inverse are the same table read the other way: if the
+     * alignment can place the token at this column it also knows the exact
+     * rect of the glyph that token printed — no name matching in the webview,
+     * and no chance of the two directions disagreeing about what corresponds
+     * to what. Returns false when the column is unaligned, so the caller can
+     * fall back to searching the text layer by name.
+     */
+    _postAlignedGlyph(st, doc, line, column, title) {
+        const amap = this._objectMap(st, doc, this._objectForLine(st, doc, line));
+        if (!amap) return false;
+        const t = tokenAt(amap, line, column);
+        if (t.index < 0) return false;
+        const gi = amap.srcToRen[t.index];
+        if (!(gi >= 0)) return false;
+        const g = amap.glyphs[gi];
+        const flag = st.map._baseFlag();
+        this._post({
+            type: 'highlight',
+            rects: [{ page: g.page, x: g.x, y: g.y, w: g.w, h: g.h }],
+            glyph: true,
+            flag: flag === FLAG.FRESH ? 'fresh' : flag === FLAG.STALE ? 'stale' : 'approx',
+            reveal: Date.now() - this._invertedAt >= 1500,
+            title,
+            label: `${JSON.stringify(amap.tokens[t.index].ch)} · p.${g.page} · ${flag}`,
+        });
+        return true;
+    }
+
+    /**
+     * ONE WORD IS A PLACE, NOT A RANGE.
+     *
+     * Bracketing a single word between two red marks and washing the sliver
+     * between them says nothing the marker did not already say, and it says it
+     * in three pieces of chrome that then stay on the page. A selection of one
+     * word or one symbol therefore gets the same amber marker a click gets —
+     * which fades on its own. Returns false when the word cannot be placed, so
+     * the span remains the fallback.
+     */
+    _postWordMarker(st, doc, line, column) {
+        const file = doc.uri.fsPath;
+        if (this._postAlignedGlyph(st, doc, line, column, `line ${line}`)) {
+            this._lastSelection = null;
+            return true;
+        }
+        const a = this._selectionAnchor(st, doc, line, column);
+        if (!a.rects.length || !a.word) return false;
+        // Nothing is bracketed, so there is nothing to take hold of.
+        this._lastSelection = null;
+        const paint = mergeRows(dropStrayRows(st.map.lineRows(file, line)
+            .map(r => ({ page: r.page, x: r.x, y: r.y, w: r.w, h: r.h }))));
+        const rects = paint.length ? paint : a.rects;
+        const flag = st.map._baseFlag();
+        this._post({
+            type: 'highlight',
+            rects,
+            searchRects: a.rects,
+            word: a.word,
+            occurrence: a.occurrence,
+            glyph: a.glyph,
+            flag: flag === FLAG.FRESH ? 'fresh' : flag === FLAG.STALE ? 'stale' : 'approx',
+            reveal: Date.now() - this._invertedAt >= 1500,
+            title: `line ${line}`,
+            label: `"${a.word}" · p.${rects[0].page} · ${flag}`,
+        });
+        return true;
+    }
+
     _postSelection(st, doc, sel) {
         const file = doc.uri.fsPath;
         const startLine = sel.start.line + 1;
         const endLine = Math.min(sel.end.line + 1, doc.lineCount);
+
+        // A ONE-WORD SELECTION IS MARKED, NOT BRACKETED — see _postWordMarker.
+        // The overlay is cleared first: a `highlight` does not replace a span,
+        // the two are drawn by different code, and both at once reads as
+        // neither.
+        const text = doc.getText(sel).trim();
+        if (startLine === endLine && text && !/\s/.test(text)) {
+            this._post({ type: 'selection', span: null });
+            if (this._postWordMarker(st, doc, startLine, sel.start.character)) return;
+        }
 
         const anchorAt = (line, column) => this._selectionAnchor(st, doc, line, column);
 
