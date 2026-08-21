@@ -834,7 +834,11 @@ async function offerReload(doc, diskText, output) {
             if (!isTex(doc)) return;
             const mode = cfg().get('compile', 'onSave');
             if (mode !== 'onSave') return;
-            await coord.build(doc);
+            // AUTHORITATIVE: a live build may have stopped after one pass, and
+            // its snapshot hash matches the saved bytes — so without this the
+            // save would see "already current" and leave the paper's
+            // cross-references a pass behind.
+            await coord.build(doc, { authoritative: true });
             paintRender();
         }),
     );

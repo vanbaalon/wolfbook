@@ -21,6 +21,7 @@ const {
 const { selectionLadder, paragraphSpan, CONTAINER_KINDS } = require('./texSelect');
 const { buildObjectMap, glyphAtPoint, tokenAt, symbolicFonts } = require('./glyphAlign');
 const { buildComparison, describeSummary } = require('./texCompare');
+const { shipDecision } = require('./livePolicy');
 const { sectionSpans } = require('./texModel');
 
 /** Kinds whose whole box is a sensible highlight when nothing finer resolves. */
@@ -146,7 +147,11 @@ class TexViewer {
         this.projection = projection;
         this.panel = null;
         this.root = null;          // the root .tex this panel is showing
+        // The generation whose BYTES the webview holds — not simply the newest
+        // one. _text.generation and _objMaps are keyed on it, so it may only
+        // advance when a document actually crossed into the panel.
         this.shownGeneration = null;
+        this.shownPdfHash = null;
         this.followCursor = true;
         this.shownAnything = false;
         this._ladder = null;       // {page, xBp, yBp, items, index, file}
@@ -235,6 +240,8 @@ class TexViewer {
             }
             this.panel = null;
             this.shownGeneration = null;
+            // A future panel is a different webview holding nothing.
+            this.shownPdfHash = null;
             this.shownAnything = false;
             this._ladder = null;
             this._edit = null;
@@ -323,7 +330,38 @@ class TexViewer {
             });
             return;
         }
-        if (!force && this.shownGeneration === st.generation.generation) return;
+        // THE PAGES ON SCREEN MAY ALREADY BE THIS COMPILE'S PAGES.
+        //
+        // pdfHash is a CONTENT hash (compileService.pdfContentHash), so it is
+        // not fooled by /CreationDate moving on every run. When it matches,
+        // shipping would base64 the whole PDF, re-parse it in pdf.js, repaint
+        // every visible canvas, sweep every page's text layer and drop every
+        // glyph alignment — to arrive at the pixels already displayed. Typing a
+        // comment, or a word that does not reflow its line, is exactly this.
+        //
+        // shownGeneration is deliberately NOT advanced here: it names the
+        // generation whose BYTES the webview holds, and _text.generation and
+        // _objMaps are keyed on it. Bumping it would invalidate the glyph maps
+        // for nothing, which is the cost this branch exists to avoid.
+        const decision = shipDecision({
+            force,
+            shownGeneration: this.shownGeneration,
+            shownPdfHash: this.shownPdfHash,
+            gen: st.generation,
+        });
+        if (!decision.ship) {
+            if (decision.reason === 'identical pdf') {
+                this._log(`generation ${st.generation.generation}: ${decision.reason} — nothing shipped`);
+                // The ink did not move, but the SOURCE did (that is why we
+                // recompiled), so the map did. Re-answer from the new map
+                // without disturbing the document the webview already holds —
+                // this is the round trip the 'opened' handshake would have
+                // triggered had we shipped.
+                try { this.syncFromEditor(vscode.window.activeTextEditor); } catch (_) { /* best effort */ }
+                this._postEditAnchor().catch(() => { /* no open card */ });
+            }
+            return;
+        }
         if (!fs.existsSync(st.generation.pdfPath)) {
             this._post({ type: 'status', text: 'the compiled PDF has gone missing', kind: 'err' });
             return;
@@ -344,11 +382,13 @@ class TexViewer {
         // whole class of problem (roots, symlinks, sandbox rules) and costs one
         // copy per compile, which is nothing beside a 17 s LaTeX run.
         let data = null;
+        const tRead = Date.now();
         try { data = fs.readFileSync(st.generation.pdfPath).toString('base64'); }
         catch (e) {
             this._post({ type: 'status', text: `could not read the PDF: ${e.message}`, kind: 'err' });
             return;
         }
+        const readMs = Date.now() - tRead;
         this._post({
             type: 'open',
             base: w.asWebviewUri(vscode.Uri.joinPath(
@@ -364,9 +404,12 @@ class TexViewer {
             live: !!st.generation.live && this.shownAnything,
         });
         this.shownAnything = true;
+        // What the webview now holds — the key the next refresh compares.
+        this.shownPdfHash = st.generation.pdfHash || null;
         this._post({ type: 'setFollow', value: this.followCursor });
         this._log(`sent generation ${st.generation.generation} ` +
-            `(${(data.length / 1398101).toFixed(2)} MB of PDF) in ${Date.now() - t0} ms`);
+            `(${(data.length / 1398101).toFixed(2)} MB of PDF) in ${Date.now() - t0} ms ` +
+            `· read ${readMs} ms`);
     }
 
     /**
@@ -510,6 +553,7 @@ class TexViewer {
         const p = this.panel;
         this.panel = null;                 // dispose() must not run the teardown twice
         this.shownGeneration = null;
+        this.shownPdfHash = null;
         try { p.dispose(); } catch (_) { /* already gone */ }
     }
 

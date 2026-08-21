@@ -1083,7 +1083,19 @@
           "default": 900,
           "minimum": 200,
           "maximum": 10000,
-          "description": "How long to wait after the last keystroke before a live recompile. Longer is calmer; shorter is more immediate."
+          "description": "The LONGEST Wolfbook will wait after the last keystroke before a live recompile. Papers that rebuild quickly recompile sooner: the wait tracks how long the last live rebuild actually took, so a fast paper feels immediate while a long one stays calm."
+        },
+        "wolfbook.tex.liveSinglePass": {
+          "type": "boolean",
+          "default": true,
+          "description": "While you type, run a single LaTeX pass instead of the full rerun loop. This is what makes a long paper repaint in a moment rather than a minute. Cross-references, the table of contents and page numbers can lag briefly; a full rebuild runs when you pause or save and corrects them."
+        },
+        "wolfbook.tex.authoritativeDelayMs": {
+          "type": "number",
+          "default": 4000,
+          "minimum": 0,
+          "maximum": 60000,
+          "description": "How long after the last keystroke to run the full rebuild that converges cross-references. 0 turns it off, leaving saving as the moment things converge. Always sits behind the live rebuild."
         },
         "wolfbook.tex.fullScreenMode": {
           "type": "string",

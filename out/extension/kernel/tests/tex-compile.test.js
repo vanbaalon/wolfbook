@@ -22,6 +22,7 @@ const skip = (name, why) => { skipped++; results.push(`  --   ${name}  (${why})`
 const { parseLog, needsRerun, unwrap, detectWrapWidth } = require('../../tex/texLog');
 const {
     compile, defaultOutDir, pdfContentHash, snapshotSources, generationIsCurrent, mirrorSkeleton,
+    saveGeneration, probeInitCode, MAX_PASSES_CODE,
 } = require('../../tex/compileService');
 
 const hasLatexmk = (() => {
@@ -176,6 +177,47 @@ async function main() {
         fs.rmSync(dir, { recursive: true, force: true });
     });
 
+    await test('the per-file hash cache gives the same answer as a fresh read', () => {
+        // Hashes are cached on (size, mtime). Dropbox touches mtimes without
+        // changing bytes, which must cost a re-read and NOT a different digest.
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wbsnapc-'));
+        const a = path.join(dir, 'a.tex');
+        fs.writeFileSync(a, 'the same bytes');
+        const h1 = snapshotSources([a]);
+        // Rewrite identical content with a new mtime: cache MISS, same answer.
+        const future = new Date(Date.now() + 60000);
+        fs.writeFileSync(a, 'the same bytes');
+        fs.utimesSync(a, future, future);
+        assert.strictEqual(snapshotSources([a]), h1, 'an mtime-only change does not change the digest');
+        // And a real content change still registers through the cache.
+        fs.writeFileSync(a, 'different bytes');
+        fs.utimesSync(a, future, future);
+        assert.notStrictEqual(snapshotSources([a]), h1, 'a content change does');
+        fs.rmSync(dir, { recursive: true, force: true });
+    });
+
+    await test('an unsaved buffer beats the file on disk, whatever its mtime', () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wbsnapo-'));
+        const a = path.join(dir, 'a.tex');
+        fs.writeFileSync(a, 'on disk');
+        const typed = snapshotSources([a], new Map([[a, 'in the editor']]));
+        assert.notStrictEqual(typed, snapshotSources([a]), 'the buffer is what was compiled');
+        // Saving that exact text must leave the generation current — the bytes
+        // are identical, so recompiling would be a visible swap for nothing.
+        fs.writeFileSync(a, 'in the editor');
+        assert.strictEqual(snapshotSources([a]), typed);
+        fs.rmSync(dir, { recursive: true, force: true });
+    });
+
+    await test('a capped generation is never persisted as a baseline', () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wbsavegen-'));
+        const base = { outDir: dir, ok: true, pdfPath: path.join(dir, 'x.pdf') };
+        assert.strictEqual(saveGeneration({ ...base, passesLimited: false }), true);
+        assert.strictEqual(saveGeneration({ ...base, passesLimited: true }), false,
+            'its cross-references may be a pass behind — never restore it as finished');
+        fs.rmSync(dir, { recursive: true, force: true });
+    });
+
     await test('generationIsCurrent is false once a source changes', () => {
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wbgen-'));
         const f = path.join(dir, 'p.tex');
@@ -268,6 +310,147 @@ async function main() {
             assert.strictEqual(treeHash(dir), before, 'project untouched by an aborted compile');
             fs.rmSync(dir, { recursive: true, force: true });
             fs.rmSync(r.outDir, { recursive: true, force: true });
+        });
+
+        // --- the pass cap, against the real latexmk ------------------------
+        //
+        // This is the assertion that pins the two-speed compile to latexmk's
+        // actual behaviour rather than to a reading of its source.
+
+        const TWO_PASS = '\\documentclass{article}\n\\begin{document}\n' +
+            '\\tableofcontents\n\\section{Alpha}\n' +
+            'See section~\\ref{sec:later} on page~\\pageref{sec:later}.\n' +
+            '\\newpage\n\\section{Beta}\\label{sec:later}\nText.\n\\end{document}\n';
+
+        await test('a paper that needs two passes gets them when uncapped', async () => {
+            const { dir, root } = mkProject('twopass.tex', TWO_PASS);
+            const r = await compile({ root, sourceFiles: [root], timeoutMs: 120000 });
+            assert.strictEqual(r.ok, true);
+            assert.ok(r.passes >= 2, `converged in ${r.passes} passes`);
+            assert.strictEqual(r.passesLimited, false, 'nothing was capped');
+            assert.strictEqual(r.maxPasses, null);
+            fs.rmSync(dir, { recursive: true, force: true });
+            fs.rmSync(r.outDir, { recursive: true, force: true });
+        });
+
+        await test('CAPPED AT ONE PASS: still a PDF, and it says so', async () => {
+            // Measured against latexmk 4.88: it exits 12 and warns on STDERR,
+            // but the pass-1 PDF survives — which is the whole trade.
+            const { dir, root } = mkProject('twopass.tex', TWO_PASS);
+            const r = await compile({ root, sourceFiles: [root], maxPasses: 1, timeoutMs: 120000 });
+            assert.strictEqual(r.ok, true, 'a PDF exists despite latexmk reporting failure');
+            assert.ok(r.pdfPath && fs.existsSync(r.pdfPath), 'and it is on disk');
+            assert.strictEqual(r.passes, 1, 'exactly one engine pass');
+            assert.strictEqual(r.passesLimited, true, 'AND THE CAP IS DETECTED (it warns on stderr)');
+            assert.strictEqual(r.rcUnsupported, false);
+            fs.rmSync(dir, { recursive: true, force: true });
+            fs.rmSync(r.outDir, { recursive: true, force: true });
+        });
+
+        await test('a paper that converges in one pass is NOT reported as capped', async () => {
+            // The common typing case: one pass was enough, so the generation is
+            // fully authoritative and no correction needs scheduling at all.
+            const { dir, root } = mkProject('simple.tex',
+                '\\documentclass{article}\\begin{document}\nPlain text.\n\\end{document}\n');
+            const r = await compile({ root, sourceFiles: [root], maxPasses: 1, timeoutMs: 120000 });
+            assert.strictEqual(r.ok, true);
+            assert.strictEqual(r.passesLimited, false);
+            fs.rmSync(dir, { recursive: true, force: true });
+            fs.rmSync(r.outDir, { recursive: true, force: true });
+        });
+
+        await test('latexmk accepts our cap code, and refuses a broken one', async () => {
+            assert.strictEqual(await probeInitCode(MAX_PASSES_CODE(1)), true);
+            assert.strictEqual(await probeInitCode('this is not perl('), false);
+            // An unknown variable is a silent no-op, not an error — which is
+            // what makes the cap safe if latexmk ever renames $max_repeat.
+            assert.strictEqual(await probeInitCode('$no_such_var_xyz=1;'), true);
+        });
+
+        await test('THE PAGE SIZE IS READ FROM A COMPRESSED PDF, NOT ASSUMED', async () => {
+            // MEASURED: pdfTeX hides the page tree in a FlateDecode /ObjStm, so
+            // a plain byte scan for /MediaBox finds nothing at all — the old
+            // reader missed every time and returned the A4 default, silently
+            // wrong for any other paper size. A US-letter document is the
+            // control: if the inflation regressed, this reads 595x842.
+            const { dir, root } = mkProject('sized.tex',
+                '\\documentclass{article}\\usepackage[letterpaper]{geometry}\n' +
+                '\\begin{document}\nx\n\\end{document}\n');
+            const r = await compile({ root, sourceFiles: [root], timeoutMs: 120000 });
+            assert.ok(r.pageSize, 'a page size is recorded');
+            assert.ok(Math.abs(r.pageSize.widthBp - 612) < 2,
+                `US letter is 612 bp wide, got ${r.pageSize.widthBp}`);
+            assert.ok(Math.abs(r.pageSize.heightBp - 792) < 2,
+                `and 792 bp tall, got ${r.pageSize.heightBp}`);
+            fs.rmSync(dir, { recursive: true, force: true });
+            fs.rmSync(r.outDir, { recursive: true, force: true });
+        });
+
+        await test('the page count survives without the log saying so', async () => {
+            const { dir, root } = mkProject('pages.tex',
+                '\\documentclass{article}\\begin{document}\na\\newpage b\\newpage c\n\\end{document}\n');
+            const r = await compile({ root, sourceFiles: [root], timeoutMs: 120000 });
+            assert.strictEqual(r.pageCount, 3);
+            const geo = require('../../tex/compileService').pdfGeometry(fs.readFileSync(r.pdfPath));
+            assert.strictEqual(geo.pageCount, 3, 'and the geometry reader agrees on its own');
+            fs.rmSync(dir, { recursive: true, force: true });
+            fs.rmSync(r.outDir, { recursive: true, force: true });
+        });
+
+        // --- ONE latexmk PER OUT DIR ----------------------------------------
+
+        await test('A SECOND COMPILE WAITS FOR THE FIRST TO REALLY DIE', async () => {
+            // The bug: renderUi aborts the running compile and immediately asks
+            // for another, which used to delete and rewrite the _wblive overlay
+            // and respawn into the same out dir while the dying pdflatex still
+            // held it. Without the gate the overlay B writes can be destroyed —
+            // or destroy A's — mid-run.
+            //
+            // A prints AAAA, B prints BBBB, both through the overlay, both into
+            // ONE out dir. B's PDF must contain B's text.
+            const { dir, root } = mkProject('race.tex', 'placeholder\n');
+            const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wbrace-out-'));
+            const doc = (word) => '\\documentclass{article}\\usepackage{pgfplots}' +
+                '\\pgfplotsset{compat=1.18}\n\\begin{document}\n' + word + '\n' +
+                '\\begin{tikzpicture}\\begin{axis}\\addplot3[surf,samples=25,domain=-3:3]' +
+                '{exp(-x^2-y^2)*cos(deg(x*y))};\\end{axis}\\end{tikzpicture}\n\\end{document}\n';
+
+            const ac = new AbortController();
+            const pA = compile({
+                root, sourceFiles: [root], outDir, signal: ac.signal, timeoutMs: 120000,
+                overlay: new Map([[root, doc('AAAA')]]),
+            });
+            await new Promise(r => setTimeout(r, 800));
+            ac.abort();
+            const pB = compile({
+                root, sourceFiles: [root], outDir, timeoutMs: 120000,
+                overlay: new Map([[root, doc('BBBB')]]),
+            });
+            const [, rB] = await Promise.all([pA, pB]);
+
+            assert.ok(rB.queuedMs > 0, `B waited for A (${rB.queuedMs} ms)`);
+            assert.strictEqual(rB.ok, true, 'and then compiled cleanly');
+            const text = fs.readFileSync(rB.pdfPath).toString('latin1');
+            assert.ok(text.startsWith('%PDF'), 'a real PDF');
+            // The overlay B wrote must have survived until B's engine read it.
+            const overlaid = fs.readFileSync(path.join(outDir, '_wblive', 'race.tex'), 'utf8');
+            assert.ok(overlaid.includes('BBBB'), 'B\'s overlay is intact');
+            assert.ok(!overlaid.includes('AAAA'), 'and A\'s is gone');
+
+            fs.rmSync(dir, { recursive: true, force: true });
+            fs.rmSync(outDir, { recursive: true, force: true });
+        });
+
+        await test('a compile aborted before it starts returns a record, never a throw', async () => {
+            const { dir, root } = mkProject('pre.tex',
+                '\\documentclass{article}\\begin{document}\nx\n\\end{document}\n');
+            const ac = new AbortController();
+            ac.abort();
+            const r = await compile({ root, sourceFiles: [root], signal: ac.signal, timeoutMs: 30000 });
+            assert.strictEqual(r.cancelled, true);
+            assert.strictEqual(r.ok, false);
+            assert.ok(r.generation > 0, 'still a numbered generation');
+            fs.rmSync(dir, { recursive: true, force: true });
         });
     }
 

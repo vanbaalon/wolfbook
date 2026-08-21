@@ -17,9 +17,14 @@ const path = require('path');
 const os = require('os');
 const fs = require('fs');
 
-const { compile, generationIsCurrent, saveGeneration, loadGeneration } = require('./compileService');
+const {
+    compile, saveGeneration, loadGeneration, probeInitCode, snapshotSources, MAX_PASSES_CODE,
+} = require('./compileService');
 const { RenderMap, FLAG } = require('./renderMap');
 const { findRoot, buildGraph } = require('./texProject');
+const {
+    nextLiveDelayMs, blendLiveMs, synctexUnchanged, generationSatisfies, authoritativeDelayMs,
+} = require('./livePolicy');
 
 const FLAG_ICON = {
     [FLAG.FRESH]: '$(pass-filled)',
@@ -55,6 +60,10 @@ class RootState {
         this.lastError = null;
         this.compiling = false;
         this.liveCompiling = false;
+        // How long this paper's live rebuilds actually take, smoothed. Null
+        // until the first one finishes, and null means "use the ceiling".
+        this.liveMsEwma = null;
+        this.authoritativeRunning = false;
     }
 }
 
@@ -68,12 +77,16 @@ class RenderCoordinator {
         this._emitter = new vscode.EventEmitter();
         this.onDidChange = this._emitter.event;
         this._liveTimers = new Map();    // rootPath -> debounce handle
+        this._idleTimers = new Map();    // rootPath -> the full-rebuild handle
+        this._capOk = null;              // can latexmk take our -e? probed once
     }
 
     dispose() {
         for (const s of this.roots.values()) if (s.running) s.running.abort();
         for (const t of this._liveTimers.values()) clearTimeout(t);
+        for (const t of this._idleTimers.values()) clearTimeout(t);
         this._liveTimers.clear();
+        this._idleTimers.clear();
         this._emitter.dispose();
     }
 
@@ -112,13 +125,69 @@ class RenderCoordinator {
         // Someone who turned compiling off did not ask for it back by typing.
         if (cfg.get('compile', 'onSave') === 'off') return;
         const root = this.rootFor(doc);
-        const wait = delayMs ?? Math.max(200, cfg.get('liveRenderDelayMs', 900));
+        const st = this.roots.get(root);
+        // THE SETTING IS THE CEILING, NOT THE VALUE. A paper that rebuilds in
+        // 400 ms should feel immediate; one that takes 17 s must stay calm,
+        // because firing sooner than the last build finished only queues work
+        // the next keystroke will cancel.
+        const wait = delayMs ?? nextLiveDelayMs({
+            lastMs: st && st.liveMsEwma,
+            ceilingMs: Math.max(200, cfg.get('liveRenderDelayMs', 900)),
+        });
         const prev = this._liveTimers.get(root);
         if (prev) clearTimeout(prev);
         this._liveTimers.set(root, setTimeout(() => {
             this._liveTimers.delete(root);
             this.build(doc, { live: true }).catch(() => { /* reported via state */ });
         }, wait));
+        // Typing also postpones the full rebuild that converges cross-references.
+        this._armAuthoritative(root, wait);
+    }
+
+    /**
+     * A full rebuild once the typing really stops.
+     *
+     * Live builds may stop after one engine pass, so cross-references, the
+     * table of contents and page numbers can lag while you type. Paying for
+     * convergence on every pause would defeat the point, so the correction is
+     * deferred to a real gap — and it is usually FREE to apply: if the full
+     * build produces the same PDF, texViewer.refresh recognises the content
+     * hash and ships nothing at all.
+     *
+     * LIVE ALWAYS WINS. A keystroke re-arms this timer, it refuses to start
+     * while anything is compiling, and compileService serialises the out dir
+     * regardless.
+     */
+    _armAuthoritative(root, liveDelayMs) {
+        const prev = this._idleTimers.get(root);
+        if (prev) clearTimeout(prev);
+        const cfg = vscode.workspace.getConfiguration('wolfbook.tex');
+        const wait = authoritativeDelayMs({
+            configuredMs: cfg.get('authoritativeDelayMs', 4000),
+            liveDelayMs,
+        });
+        if (!wait) return;
+        this._idleTimers.set(root, setTimeout(() => {
+            this._idleTimers.delete(root);
+            const st = this.roots.get(root);
+            // Nothing to converge unless a build actually stopped short.
+            if (!st || !st.generation || !st.generation.passesLimited) return;
+            if (st.compiling) { this._armAuthoritative(root, liveDelayMs); return; }
+            this.buildAuthoritative(root).catch(() => { /* reported via state */ });
+        }, wait));
+    }
+
+    /** The background full rebuild. Quiet by construction: no progress toast. */
+    async buildAuthoritative(root) {
+        const st = this.roots.get(root);
+        if (!st || st.compiling) return;
+        let doc;
+        try { doc = await vscode.workspace.openTextDocument(vscode.Uri.file(root)); }
+        catch (_) { return; }
+        st.authoritativeRunning = true;
+        this._emitter.fire(st);
+        try { await this.build(doc, { authoritative: true, quiet: true }); }
+        finally { st.authoritativeRunning = false; this._emitter.fire(st); }
     }
 
     rootFor(doc) {
@@ -172,8 +241,19 @@ class RenderCoordinator {
         return true;
     }
 
-    isCurrent(st, overlay) {
-        return !!st.generation && generationIsCurrent(st.generation, st.files, overlay);
+    /**
+     * Is this root's generation good enough for what is asking?
+     *
+     * A ONE-PASS BUILD DOES NOT SATISFY A SAVE. Its snapshot hash matches — the
+     * bytes really are what was compiled — so the old test said "current" and
+     * the save did nothing, leaving cross-references a pass behind for as long
+     * as the reader kept typing.
+     */
+    isCurrent(st, snapshot, { authoritative = false } = {}) {
+        const g = st.generation;
+        if (!g || !g.sourceSnapshotHash) return false;
+        if (g.sourceSnapshotHash !== snapshot) return false;
+        return generationSatisfies(g, { authoritative });
     }
 
     /**
@@ -181,11 +261,17 @@ class RenderCoordinator {
      * Only one compile per root at a time; a second request cancels the first,
      * which is cheap (45-80 ms process-group kill, measured).
      */
-    async build(doc, { force = false, live = false } = {}) {
+    async build(doc, { force = false, live = false, authoritative = false, quiet = false } = {}) {
         const root = this.rootFor(doc);
         const st = this.roots.get(root);
         const overlay = this.liveOverlay(root);
-        if (!force && this.isCurrent(st, overlay) && st.map) return st;
+        // ONE snapshot per build. It used to be computed twice — here and again
+        // inside compile() — which reads and hashes every source file twice per
+        // keystroke pause, and let the two disagree if a file moved between them.
+        const snapshot = snapshotSources(st.files, overlay);
+        // An explicit Compile is never a capped build.
+        const wantFull = authoritative || force;
+        if (!force && this.isCurrent(st, snapshot, { authoritative: wantFull }) && st.map) return st;
 
         // A COMPILE ALREADY DONE IS NOT WORTH DOING AGAIN.
         //
@@ -227,7 +313,7 @@ class RenderCoordinator {
         // notification per pause would be intolerable.
         let progress = null;
         let progressDone = null;
-        if (!live) {
+        if (!live && !quiet) {
             const ready = new Promise(r => { progressDone = r; });
             vscode.window.withProgress({
                 location: vscode.ProgressLocation.Notification,
@@ -241,20 +327,49 @@ class RenderCoordinator {
         }
         const note = (msg) => { try { if (progress) progress.report({ message: msg }); } catch (_) { /* gone */ } };
         try {
-            const gen = await compile({
+            const cfg = vscode.workspace.getConfiguration('wolfbook.tex');
+            // ONE PASS WHILE TYPING. The correction is scheduled, not skipped:
+            // a limited generation arms the idle rebuild and never satisfies a
+            // save. Capped only when latexmk has been shown to accept the -e.
+            const capWanted = live && !wantFull && cfg.get('liveSinglePass', true);
+            if (capWanted && this._capOk === null) {
+                this._capOk = await probeInitCode(MAX_PASSES_CODE(1));
+                if (!this._capOk) this.log('  latexmk refused the pass cap — live builds stay full');
+            }
+            const compileOpts = {
                 root,
                 sourceFiles: st.files,
+                sourceSnapshotHash: snapshot,
                 overlay,
                 signal: ac.signal,
-                engine: vscode.workspace.getConfiguration('wolfbook.tex').get('engine', 'pdflatex'),
+                // The skeleton only has to be walked when it might have changed.
+                mirror: live ? 'auto' : 'always',
+                engine: cfg.get('engine', 'pdflatex'),
                 onLog: (l) => {
                     const run = /^Latexmk: Run number (\d+)/.exec(l);
                     if (run) { note(`pass ${run[1]}`); return; }
                     const pg = /\[(\d+)[\s{]/.exec(l);
                     if (pg) note(`page ${pg[1]}`);
                 },
+            };
+            let gen = await compile({
+                ...compileOpts,
+                maxPasses: (capWanted && this._capOk) ? 1 : null,
             });
+            // latexmk could not run our initialisation code after all. Retry
+            // once uncapped and never ask again this session.
+            if (gen.rcUnsupported) {
+                this.log('  latexmk rejected the pass cap — rebuilding without it');
+                this._capOk = false;
+                gen = await compile({ ...compileOpts, maxPasses: null });
+            }
             if (ac.signal.aborted) { this.log('  cancelled'); return st; }
+            const prevGen = st.generation;
+            // prevMap and map may now SHARE one parsed SyncTeX doc. That is
+            // safe because the doc is never mutated after construction — the
+            // only mutation in RenderMap is the overlay remap, which the reuse
+            // path skips — and prevMap is read only by diffAgainst.
+            const prevDoc = st.map && st.map.doc;
             st.prevMap = st.map;
             st.generation = gen;
             const model = this._modelFor(root);
@@ -262,12 +377,28 @@ class RenderCoordinator {
                 generation: gen,
                 model,
                 pageSize: this._pageSize(gen),
+                synctexDoc: (prevDoc && synctexUnchanged(prevGen, gen)) ? prevDoc : null,
             });
             st.lastError = gen.ok ? null : (gen.stopReason || 'compile produced no PDF');
             saveGeneration(gen);
+            // Tune the debounce to what this paper actually costs. gen.ms, not
+            // the wall time: queue time is an artefact of the previous build,
+            // and feeding it back would inflate the wait that caused it.
+            if (live && gen.ok && !gen.cancelled) st.liveMsEwma = blendLiveMs(st.liveMsEwma, gen.ms);
             this.log(`  ${gen.ok ? 'ok' : 'FAILED'} · ${gen.pageCount ?? '?'} pages · ` +
-                `${gen.errors} error(s) · ${gen.warnings} warning(s) · ${Date.now() - t0} ms`);
+                `${gen.errors} error(s) · ${gen.warnings} warning(s) · ` +
+                `${gen.passes ?? '?'} pass(es)${gen.passesLimited ? ' (capped)' : ''} · ` +
+                `${gen.ms} ms${gen.queuedMs ? ` (+${gen.queuedMs} ms queued)` : ''} · ` +
+                `${Date.now() - t0} ms total`);
             if (!gen.ok && gen.stopReason) this.log(`  stopped: ${gen.stopReason}`);
+            // A build that stopped short schedules its own correction, even if
+            // the reader types nothing more.
+            if (gen.passesLimited) {
+                this._armAuthoritative(root, nextLiveDelayMs({
+                    lastMs: st.liveMsEwma,
+                    ceilingMs: Math.max(200, cfg.get('liveRenderDelayMs', 900)),
+                }));
+            }
         } catch (e) {
             st.lastError = e && e.message ? e.message : String(e);
             this.log(`  ERROR ${st.lastError}`);
@@ -294,6 +425,9 @@ class RenderCoordinator {
 
     /** Page geometry from the PDF, so a non-A4 class is not silently assumed. */
     _pageSize(gen) {
+        // The compile already read it out of the buffer it had open. The read
+        // below stays for generations restored from an older record.
+        if (gen && gen.pageSize && gen.pageSize.widthBp > 0) return gen.pageSize;
         try {
             const fs = require('fs');
             const buf = fs.readFileSync(gen.pdfPath);
@@ -361,7 +495,10 @@ function makeStatusItem(coord, projection) {
             return;
         }
 
-        const live = st && st.liveCompiling ? ' $(sync~spin)' : '';
+        // The background full rebuild borrows the same quiet spinner the live
+        // rebuild earned: it is background work either way, and the position
+        // readout is what the item is for.
+        const live = st && (st.liveCompiling || st.authoritativeRunning) ? ' $(sync~spin)' : '';
         const line = ed.selection.active.line + 1;
         const file = ed.document.uri.fsPath;
         const r = map.sourceToRender(file, line);
@@ -392,6 +529,11 @@ function makeStatusItem(coord, projection) {
                 : ' — the source moved since the last compile.');
         } else if (r.flag === FLAG.FRESH) {
             md.appendMarkdown('.');
+        }
+        // Say so when the ink is current but the numbering may not be.
+        if (st && st.generation && st.generation.passesLimited) {
+            md.appendMarkdown('\n\nTypeset in a single pass — cross-references and page ' +
+                'numbers may lag until the full rebuild lands. It runs when you pause.');
         }
         md.appendMarkdown('\n\nClick to recompile.');
         item.tooltip = md;

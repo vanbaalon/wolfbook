@@ -66,7 +66,19 @@ class RenderMap {
         this._editShift = new Map();   // file -> sorted [{fromLine, delta}]
 
         const p = this.generation && this.generation.synctexPath;
-        if (p) {
+        if (o.synctexDoc) {
+            // HANDED THE PREVIOUS GENERATION'S PARSE, because the .synctex.gz
+            // bytes are identical (livePolicy.synctexUnchanged). Gunzipping and
+            // parsing a real paper's file is pure waste when it did not move.
+            //
+            // The overlay remap below is SKIPPED for a reused doc: it was
+            // applied when that doc was first built, and identical bytes imply
+            // the same overlay state — saving a buffer changes which paths
+            // SyncTeX records, which changes the bytes, which changes the hash.
+            // Running it twice would map an already-mapped path again.
+            this.doc = o.synctexDoc;
+            this._reusedDoc = true;
+        } else if (p) {
             try { this.doc = parseSynctex(p); }
             catch (e) { this.warnings.push(`synctex unreadable: ${e.message}`); }
         }
@@ -76,7 +88,7 @@ class RenderMap {
         // overlay prefix is mapped away here, once, at the boundary.
         const od = this.generation && this.generation.overlayDir;
         const pd = this.generation && this.generation.projectDir;
-        if (this.doc && od && pd) {
+        if (this.doc && !this._reusedDoc && od && pd) {
             for (const [tag, f] of this.doc.inputs) {
                 if (f.startsWith(od)) this.doc.inputs.set(tag, pd + f.slice(od.length));
             }

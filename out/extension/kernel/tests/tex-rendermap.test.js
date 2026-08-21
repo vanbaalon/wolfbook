@@ -123,6 +123,34 @@ async function main() {
             assert.strictEqual(p1.flag, FLAG.FRESH);
         });
 
+        await test('AN UNCHANGED .synctex IS PARSED ONCE, NOT PER KEYSTROKE', () => {
+            // A live rebuild that does not move the ink writes a byte-identical
+            // .synctex.gz. Gunzipping and re-parsing it is pure waste, so the
+            // new map is handed the previous parse — and must answer identically.
+            const reused = new RenderMap({ generation: gen, model, synctexDoc: rm.doc });
+            assert.strictEqual(reused.doc, rm.doc, 'the parse is shared, not repeated');
+            assert.strictEqual(reused.available, true);
+            assert.strictEqual(reused.pageCount, rm.pageCount);
+            const eq = model.objects.find(o => o.label === 'eq:two');
+            assert.deepStrictEqual(reused.pageForObject(eq), rm.pageForObject(eq),
+                'and gives the same answers as a fresh parse');
+        });
+
+        await test('a reused parse is NOT overlay-remapped a second time', () => {
+            // The remap rewrites inputs that start with the overlay prefix. It
+            // is idempotent only by luck; running it twice on an already-mapped
+            // doc is a bug waiting for a project path that contains the prefix.
+            const overlayGen = {
+                ...gen,
+                overlayDir: '/tmp/fake-overlay',
+                projectDir: '/tmp/fake-project',
+            };
+            const before = [...rm.doc.inputs.values()];
+            const reused = new RenderMap({ generation: overlayGen, model, synctexDoc: rm.doc });
+            assert.deepStrictEqual([...reused.doc.inputs.values()], before,
+                'the shared doc is left exactly as it was');
+        });
+
         await test('objectRenderBoxes returns a LIST, one union per page', () => {
             // A paragraph across a page break is not one rectangle, and every
             // tier scores paragraphs worst. A single-box API cannot say that.

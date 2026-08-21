@@ -39,15 +39,53 @@
 const { spawn } = require('child_process');
 const fs = require('fs');
 const os = require('os');
+const zlib = require('zlib');
 const path = require('path');
 const crypto = require('crypto');
 
 const { parseLog } = require('./texLog');
+const { readPassLimit } = require('./livePolicy');
 
 const sha256 = (b) => crypto.createHash('sha256').update(b).digest('hex');
 
 let _generation = 0;
 const nextGeneration = () => ++_generation;
+
+/**
+ * The latexmk initialisation code that caps a run to N engine passes.
+ *
+ * $max_repeat is latexmk's infinite-loop guard. At 1, pass one runs and a
+ * request for a second trips it: latexmk warns on stderr, sets its failure
+ * flag, and returns — leaving the pass-one PDF in place, which is exactly what
+ * an editor wants while someone is typing.
+ *
+ * SAFE IF THE VARIABLE IS EVER RENAMED: latexmk evaluates -e as plain perl
+ * with no strict-checking, so assigning to a name it does not know is a silent
+ * no-op and the build is merely uncapped. Only a SYNTAX error is fatal, and
+ * probeInitCode catches that in ~50 ms before any real build depends on it.
+ */
+const MAX_PASSES_CODE = (n) => `$max_repeat=${Number(n) || 1};`;
+
+/**
+ * ONE latexmk PER OUT DIR, EVER.
+ *
+ * renderUi aborts the in-flight compile before asking for the next one, and the
+ * group kill is 45-80 ms (Spike D) — but abort() RETURNS IMMEDIATELY, and the
+ * code then went straight on to delete the _wblive overlay and respawn into the
+ * same directory while the dying pdflatex still held it. The .aux, the
+ * .fdb_latexmk and the half-written .synctex.gz are all shared state.
+ *
+ * spawnCollect resolves on 'close', which is after every member of the process
+ * group has dropped the pipe — so awaiting the previous run IS awaiting the
+ * group's death, and no new API is needed for it.
+ */
+const _inFlight = new Map();   // outDir -> a promise that settles when its group is gone
+
+/** Never let a stuck gate become a dead viewer: fall back to today's behaviour. */
+const GATE_TIMEOUT_MS = 30000;
+
+/** Which project each out dir's empty-directory skeleton was mirrored from. */
+const _mirrored = new Map();   // outDir -> projectDir
 
 /** Stable, per-document scratch directory. Never inside the user's project. */
 function defaultOutDir(root) {
@@ -89,6 +127,55 @@ function pdfContentHash(buf) {
     return sha256(Buffer.from(s, 'latin1'));
 }
 
+/**
+ * Page geometry from the PDF — and it is NOT in the plain bytes.
+ *
+ * MEASURED: pdfTeX writes PDF 1.5+, so the page tree lives inside a FlateDecode
+ * /ObjStm and a byte scan for /MediaBox finds NOTHING AT ALL on an ordinary
+ * article. The old reader scanned the first 200 KB, missed every time, and
+ * silently returned the A4 default — which happens to be right for an A4 paper
+ * and quietly wrong for a US-letter one, in a value the render map uses for
+ * page occupancy and box sanity.
+ *
+ * So: try the plain scan (some producers do write it uncompressed), then
+ * inflate the object streams. Z_SYNC_FLUSH is what lets one stream be decoded
+ * out of the middle of a file without knowing its /Length, which is usually an
+ * indirect reference — and the spike's rule is never to find the end by
+ * searching for `endstream`, because binary stream data contains that too.
+ */
+function pdfGeometry(buf) {
+    const readBox = (s) => {
+        const m = /\/MediaBox\s*\[\s*([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)/.exec(s);
+        if (!m) return null;
+        const w = Number(m[3]) - Number(m[1]);
+        const h = Number(m[4]) - Number(m[2]);
+        return (w > 0 && h > 0) ? { widthBp: w, heightBp: h } : null;
+    };
+    const s = buf.toString('latin1');
+    let pageSize = readBox(s);
+    let leaves = (s.match(/\/Type\s*\/Page(?![s\/])/g) || []).length;
+    if (pageSize && leaves) return { pageSize, pageCount: leaves };
+
+    const re = /\/Type\s*\/ObjStm/g;
+    let m;
+    let guard = 0;
+    while ((m = re.exec(s)) && guard++ < 200) {
+        const st = s.indexOf('stream', m.index);
+        if (st < 0) continue;
+        let p = st + 6;
+        if (s[p] === '\r') p++;
+        if (s[p] === '\n') p++;
+        let out;
+        try {
+            out = zlib.inflateSync(buf.subarray(p), { finishFlush: zlib.constants.Z_SYNC_FLUSH })
+                .toString('latin1');
+        } catch (_) { continue; }
+        if (!pageSize) pageSize = readBox(out);
+        leaves += (out.match(/\/Type\s*\/Page(?![s\/])/g) || []).length;
+    }
+    return { pageSize, pageCount: leaves || null };
+}
+
 /** Page count from the PDF itself — the log's number is absent on a failure. */
 function pdfPageCount(buf) {
     const s = buf.toString('latin1');
@@ -100,8 +187,34 @@ function pdfPageCount(buf) {
     return m ? Number(m[1]) : null;
 }
 
+/**
+ * Per-file content hashes, keyed on (size, mtime).
+ *
+ * snapshotSources runs on every build and reads every source file. Caching is
+ * safe in ONE DIRECTION and that is the direction Dropbox errs in: it touches
+ * mtimes without changing bytes, which causes a needless re-read (right answer,
+ * wasted work). The dangerous case — different bytes with size AND mtime
+ * preserved — requires a write that deliberately restores both.
+ */
+const _fileHash = new Map();   // path -> {size, mtimeMs, hash}
+
+function hashFileCached(f) {
+    let stat = null;
+    try { stat = fs.statSync(f); } catch (_) { return '\0missing'; }
+    const hit = _fileHash.get(f);
+    if (hit && hit.size === stat.size && hit.mtimeMs === stat.mtimeMs) return hit.hash;
+    let hash;
+    try { hash = sha256(fs.readFileSync(f)); } catch (_) { return '\0missing'; }
+    _fileHash.set(f, { size: stat.size, mtimeMs: stat.mtimeMs, hash });
+    return hash;
+}
+
 function snapshotSources(files, overlay) {
     const h = crypto.createHash('sha256');
+    // The digest SHAPE changed when per-file hashing arrived, so say so: every
+    // persisted generation record becomes non-current once, pays one compile,
+    // and is warm again. Silently changing it would look like a corrupt cache.
+    h.update('wb-snapshot-v2\0');
     for (const f of [...files].sort()) {
         h.update(f);
         // An unsaved buffer is the truth about what was compiled. Hashing the
@@ -112,8 +225,8 @@ function snapshotSources(files, overlay) {
         // current — the bytes are identical, so recompiling would be work the
         // reader can see (a swap) for a result that cannot differ.
         const dirty = overlay instanceof Map ? overlay.get(f) : undefined;
-        if (dirty !== undefined) { h.update(dirty); continue; }
-        try { h.update(fs.readFileSync(f)); } catch (_) { h.update('\0missing'); }
+        if (dirty !== undefined) { h.update(sha256(Buffer.from(dirty, 'utf8'))); continue; }
+        h.update(hashFileCached(f));
     }
     return h.digest('hex');
 }
@@ -131,16 +244,77 @@ function snapshotSources(files, overlay) {
  * @returns {Promise<object>} the CompileGeneration record
  */
 async function compile(o = {}) {
-    const t0 = Date.now();
+    const queuedAt = Date.now();
     const root = path.resolve(o.root);
     const projectDir = o.projectDir ? path.resolve(o.projectDir) : path.dirname(root);
     const outDir = o.outDir || defaultOutDir(root);
     const engine = o.engine || 'pdflatex';
     const job = path.basename(root).replace(/\.tex$/i, '');
     const timeoutMs = o.timeoutMs ?? 180000;
+    const maxPasses = o.maxPasses || null;
+
+    // Wait for any previous run in this out dir to be REALLY gone (see
+    // _inFlight). A stuck gate must not become a dead viewer, so the wait is
+    // bounded; past it we proceed exactly as the code used to.
+    const prior = _inFlight.get(outDir);
+    if (prior) {
+        let timer = null;
+        try {
+            await Promise.race([
+                prior,
+                new Promise((r) => { timer = setTimeout(r, GATE_TIMEOUT_MS); }),
+            ]);
+        } catch (_) { /* the previous run's failure is its own */ }
+        finally { if (timer) clearTimeout(timer); }
+    }
+    if (o.signal && o.signal.aborted) {
+        return cancelledRecord({ root, projectDir, outDir, engine, queuedAt });
+    }
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    _inFlight.set(outDir, gate);
+    // Queue time is not compile time: the debounce is tuned from `ms`.
+    const t0 = Date.now();
+    try {
+        return await _compileLocked(o, {
+            root, projectDir, outDir, engine, job, timeoutMs, maxPasses, t0, queuedAt,
+        });
+    } finally {
+        if (_inFlight.get(outDir) === gate) _inFlight.delete(outDir);
+        release();
+    }
+}
+
+/** A compile that never ran, in the shape of one that did. Never throws. */
+function cancelledRecord({ root, projectDir, outDir, engine, queuedAt }) {
+    return {
+        ok: false, runner: 'latexmk', engine, root, projectDir, outDir,
+        pdfPath: null, synctexPath: null, logPath: null,
+        generation: nextGeneration(),
+        sourceSnapshotHash: null, overlayDir: null, live: false,
+        pdfHash: null, pdfBytes: null, synctexHash: null, pageCount: null, pageSize: null,
+        diagnostics: [], stopped: false, stopReason: null, errors: 0, warnings: 0,
+        passes: null, maxPasses: null, passesLimited: false, rcUnsupported: false,
+        ms: 0, queuedMs: Date.now() - queuedAt,
+        exit: null, cancelled: true, timedOut: false, dviOnly: false,
+        finishedAt: Date.now(),
+    };
+}
+
+async function _compileLocked(o, ctx) {
+    const { root, projectDir, outDir, engine, job, timeoutMs, maxPasses, t0, queuedAt } = ctx;
 
     fs.mkdirSync(outDir, { recursive: true });
-    mirrorSkeleton(projectDir, outDir);
+    // The skeleton is only walked when it might have changed. A directory the
+    // project GAINS mid-session is picked up by the next save or explicit
+    // Compile (both mirror unconditionally), and if one slips through, pdftex
+    // says "I can't write on file" and the arm below re-mirrors for next time.
+    if (o.mirror === 'auto' && _mirrored.get(outDir) === projectDir) {
+        /* already mirrored this session */
+    } else {
+        mirrorSkeleton(projectDir, outDir);
+        _mirrored.set(outDir, projectDir);
+    }
 
     // COMPILING WHAT IS ON SCREEN, NOT WHAT IS ON DISK.
     //
@@ -194,6 +368,9 @@ async function compile(o = {}) {
         '-synctex=1',
         '-f',                      // NOT -halt-on-error; see the header
         `-outdir=${outDir}`,
+        // Capped only when a caller asked; extraArgs still comes after, so a
+        // caller can override anything we set here.
+        ...(maxPasses ? ['-e', MAX_PASSES_CODE(maxPasses)] : []),
         ...(o.extraArgs || []),
         compileRoot,
     ];
@@ -215,14 +392,20 @@ async function compile(o = {}) {
     try { logText = fs.readFileSync(logPath, 'utf8'); } catch (_) { logText = run.stdout; }
     const parsed = parseLog(logText, { file: root });
 
-    let pdfHash = null; let pageCount = null; let pdfBytes = null;
+    let pdfHash = null; let pageCount = null; let pdfBytes = null; let pageSize = null;
     const hasPdf = fs.existsSync(pdfPath);
     if (hasPdf) {
         const buf = fs.readFileSync(pdfPath);
         pdfBytes = buf.length;
         pdfHash = pdfContentHash(buf);
-        pageCount = parsed.pages ?? pdfPageCount(buf);
+        // Geometry, read while the buffer is already in hand — renderUi used to
+        // re-read the whole PDF from disk for this, and got nothing back.
+        const geo = pdfGeometry(buf);
+        pageSize = geo.pageSize;
+        pageCount = parsed.pages ?? geo.pageCount ?? pdfPageCount(buf);
     }
+    // A directory the project gained since we last mirrored: re-arm the walk.
+    if (/I can't write on file/.test(logText)) _mirrored.delete(outDir);
     let synctexHash = null;
     if (fs.existsSync(synctexPath)) {
         // pdftex writes a zero gzip mtime, so the .gz is byte-stable whenever
@@ -232,6 +415,13 @@ async function compile(o = {}) {
 
     const passes = (run.stdout.match(/Run number \d+/g) || []).length ||
         (run.stdout.match(/^Latexmk: applying rule/gm) || []).length || null;
+
+    // Did the cap actually bite? When one pass was enough — the common case
+    // while typing inside a paragraph — passesLimited is false and this
+    // generation is fully authoritative, so nothing needs correcting later.
+    const { passesLimited, rcUnsupported } = readPassLimit({
+        stdout: run.stdout, stderr: run.stderr, maxPasses,
+    });
 
     return {
         ok: hasPdf && !run.cancelled,
@@ -244,8 +434,11 @@ async function compile(o = {}) {
         synctexPath: synctexHash ? synctexPath : null,
         logPath: fs.existsSync(logPath) ? logPath : null,
         generation: nextGeneration(),
-        sourceSnapshotHash: snapshotSources(o.sourceFiles && o.sourceFiles.length ? o.sourceFiles : [root],
-            overlay),
+        // The caller may have computed this already — it reads and hashes every
+        // source file, and renderUi needs the same answer a moment earlier to
+        // decide whether to compile at all.
+        sourceSnapshotHash: o.sourceSnapshotHash ??
+            snapshotSources(o.sourceFiles && o.sourceFiles.length ? o.sourceFiles : [root], overlay),
         projectDir,
         overlayDir: (overlay && overlay.size) ? overlayDir : null,
         live: !!(overlay && overlay.size),
@@ -253,13 +446,18 @@ async function compile(o = {}) {
         pdfBytes,
         synctexHash,
         pageCount,
+        pageSize,
         diagnostics: parsed.diagnostics,
         stopped: parsed.stopped,
         stopReason: parsed.stopReason,
         errors: parsed.errors,
         warnings: parsed.warnings,
         passes,
+        maxPasses,
+        passesLimited,
+        rcUnsupported,
         ms: Date.now() - t0,
+        queuedMs: t0 - queuedAt,
         exit: run.code,
         cancelled: run.cancelled,
         timedOut: run.timedOut,
@@ -342,8 +540,40 @@ function generationPath(outDir) { return path.join(outDir, 'wolfbook-generation.
  * the out dir already holds the PDF and the .synctex.gz when VS Code restarts.
  * Only the in-memory record was being lost, so the work was redone for nothing.
  */
+/**
+ * Will this latexmk accept our initialisation code?
+ *
+ * -e is executed while the command line is parsed, BEFORE --version prints, so
+ * one ~50 ms run answers it for the session — and a live compile never has to
+ * discover the answer by producing no PDF. Resolves false on any failure,
+ * including latexmk being absent: the caller then simply never caps.
+ */
+function probeInitCode(code, { timeoutMs = 5000 } = {}) {
+    return new Promise((resolve) => {
+        let out = '';
+        let child;
+        try {
+            child = spawn('latexmk', ['-e', code, '--version'], {
+                stdio: ['ignore', 'pipe', 'pipe'],
+            });
+        } catch (_) { resolve(false); return; }
+        const done = (v) => { if (timer) clearTimeout(timer); resolve(v); };
+        const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch (_) {} done(false); }, timeoutMs);
+        child.stdout.on('data', (d) => { out += d; });
+        child.stderr.on('data', (d) => { out += d; });
+        child.on('error', () => done(false));
+        child.on('close', (code2) => {
+            done(code2 === 0 && !/Stopping because executing following code/.test(out));
+        });
+    });
+}
+
 function saveGeneration(gen) {
     if (!gen || !gen.outDir || !gen.ok) return false;
+    // A CAPPED BUILD IS NOT A BASELINE. Its ink is current but its
+    // cross-references may be one pass behind, and a record restored on the
+    // next window open would present that as a finished compile.
+    if (gen.passesLimited) return false;
     try {
         fs.writeFileSync(generationPath(gen.outDir), JSON.stringify(gen), 'utf8');
         return true;
@@ -385,7 +615,10 @@ module.exports = {
     defaultOutDir,
     pdfContentHash,
     pdfPageCount,
+    pdfGeometry,
     snapshotSources,
     generationIsCurrent,
     mirrorSkeleton,
+    probeInitCode,
+    MAX_PASSES_CODE,
 };
