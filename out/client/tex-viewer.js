@@ -1318,20 +1318,32 @@ pagesEl().addEventListener('click', (ev) => {
     });
 });
 
-// --- SHIFT-DRAG SELECTS, AND SHOWS IT WHILE THE HAND IS MOVING ---------------
+// --- DRAG SELECTS, AND SHOWS IT WHILE THE HAND IS MOVING ---------------------
 //
-// Press with Shift, move, let go: the two ends are resolved exactly as a click
-// resolves one, and the span is repainted on every move so the reader sees what
-// they are taking. The editor is only touched on release — a drag that moved
-// the cursor on every step would drag the editor across the file too.
+// Press, move, let go: the two ends are resolved exactly as a click resolves
+// one, the span is repainted on every move, and the editor selects it as it
+// goes, so the page and the editor are never out of step mid-gesture.
 //
-// Shift is kept as the modifier because a plain drag still scrolls the page,
-// and a shift-click that never moves still works as "pick this end", so the
-// two-click gesture survives for anyone who prefers it.
+// A PLAIN drag does it — nothing else was using it, the page scrolls by wheel
+// and scrollbar — and Cmd-drag is left alone for the ladder. A press that never
+// moves is still a click, so every other gesture survives untouched. And once
+// a range is there, either BRACKET can be taken hold of and moved: that is the
+// same drag with the opposite end as its anchor.
 let dragSel = null;
 
+/** Start a drag from a bracket: the other end stays put. */
 pagesEl().addEventListener('mousedown', (ev) => {
-    if (ev.button !== 0 || !ev.shiftKey || ev.metaKey || ev.ctrlKey || ev.altKey) return;
+    const brk = ev.target.closest ? ev.target.closest('.selbrk') : null;
+    if (!brk || ev.button !== 0) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    dragSel = { moved: false, last: 0, adjusting: true };
+    vscode.postMessage({ type: 'selectAdjust', end: brk.classList.contains('end') ? 'end' : 'start' });
+}, true);
+
+pagesEl().addEventListener('mousedown', (ev) => {
+    if (dragSel) return;                                   // a bracket already has it
+    if (ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.altKey) return;
     const wrap = ev.target.closest('.page');
     if (!wrap) return;
     const n = Number(wrap.dataset.page);
@@ -1364,8 +1376,15 @@ window.addEventListener('mousemove', (ev) => {
 window.addEventListener('mouseup', (ev) => {
     if (!dragSel) return;
     const moved = dragSel.moved;
+    const adjusting = dragSel.adjusting;
     dragSel = null;
-    if (!moved) return;                            // a shift-CLICK: leave it to the click handler
+    // A press that never moved is a CLICK, and the click handler owns it —
+    // except on a bracket, where a click means nothing and must not resolve a
+    // word under it.
+    if (!moved) {
+        if (adjusting) { state.swallowClick = true; setTimeout(() => { state.swallowClick = false; }, 250); }
+        return;
+    }
     const page = (ev.target.closest ? ev.target.closest('.page') : null) ||
         pagesEl().querySelector('.page');
     if (!page) return;

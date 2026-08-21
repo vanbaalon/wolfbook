@@ -748,9 +748,13 @@ class TexViewer {
         // an interval". The range the click set is remembered and recognised;
         // anything else, including the reader dragging over that same text, is
         // theirs.
-        if (ranged && !this._isOwnSelection(doc, sel)) {
-            this._postSelection(st, doc, sel);
-            return;
+        if (ranged) {
+            const own = this._isOwnSelection(doc, sel);
+            // A RANGE WE ARE PAINTING RIGHT NOW NEEDS NOTHING FURTHER: the drag
+            // has already posted it, and re-posting on the echo would fight the
+            // preview and scroll the page under the moving hand.
+            if (own && this._selfRange.kind === 'drag') return;
+            if (!own) { this._postSelection(st, doc, sel); return; }
         }
         this._post({ type: 'selection', span: null });
 
@@ -969,6 +973,22 @@ class TexViewer {
         });
     }
 
+    /**
+     * Take hold of one END of the selection that is already there.
+     *
+     * Dragging a bracket is the same gesture as dragging out a new range, with
+     * the OTHER end as the anchor — so it goes through exactly the same
+     * resolution and there is no second way for it to be wrong. The range it
+     * had is remembered by `_postSelection`, which is the only thing that knows
+     * what is currently shown.
+     */
+    _adjustSelection(m) {
+        const sel = this._lastSelection;
+        if (!sel) return;
+        const keep = m.end === 'start' ? sel.end : sel.start;
+        this._pickAnchor = { file: sel.file, position: keep, label: 'selection' };
+    }
+
     /** One end of a selection: its row(s), and the word the panel narrows to. */
     _selectionAnchor(st, doc, line, column) {
         const file = doc.uri.fsPath;
@@ -1042,6 +1062,12 @@ class TexViewer {
         }
         if (!rows.length) { this._post({ type: 'selection', span: null }); return; }
 
+        // What is on screen, so a bracket can be taken hold of later.
+        this._lastSelection = {
+            file,
+            start: new vscode.Position(sel.start.line, sel.start.character),
+            end: new vscode.Position(sel.end.line, sel.end.character),
+        };
         this._post({
             type: 'selection',
             span: {
@@ -1111,6 +1137,7 @@ class TexViewer {
                 await this._openEditSession(m);
                 await this._jumpToSource(m);
                 break;
+            case 'selectAdjust': this._adjustSelection(m); break;
             case 'editStep': await this._stepEditSession(m); break;
             case 'editChange': await this._applyEditChange(m); break;
             case 'editClose': this._edit = null; break;
@@ -1716,12 +1743,21 @@ class TexViewer {
             const from = forwards ? a : b;
             const to = forwards ? b : a;
             const picked = new vscode.Selection(from, to);
-            // A DRAG IN PROGRESS SHOWS, IT DOES NOT COMMIT. While the button is
-            // down the page previews the range on every move; the editor is
-            // only touched when the reader lets go, so a drag across a page
-            // does not drag the editor's cursor across the file with it.
+            // A DRAG IN PROGRESS SHOWS THE RANGE AT BOTH ENDS. The page repaints
+            // it on every move and the editor selects it as it goes, so the two
+            // windows are never out of step while the hand is moving. The
+            // anchor survives until the button is released.
             if (m.live) {
                 this._postSelection(st, doc, picked);
+                if (editor) {
+                    this._selfRange = {
+                        file: doc.uri.fsPath, kind: 'drag',
+                        sl: picked.start.line, sc: picked.start.character,
+                        el: picked.end.line, ec: picked.end.character,
+                        at: Date.now(),
+                    };
+                    editor.selection = picked;
+                }
                 return;
             }
             this._pickAnchor = null;
@@ -1747,7 +1783,7 @@ class TexViewer {
         // Remember what this click is about to select, so the change event it
         // provokes is not mistaken for the reader making a selection.
         this._selfRange = {
-            file: doc.uri.fsPath,
+            file: doc.uri.fsPath, kind: 'click',
             sl: range.start.line, sc: range.start.character,
             el: range.end.line, ec: range.end.character,
             at: Date.now(),

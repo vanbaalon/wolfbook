@@ -106,13 +106,17 @@
      selection can never be mistaken for the amber "where you are" marker. */
   .selfill { position:absolute; pointer-events:none; z-index:4;
              background: rgba(220,50,50,.10); }
-  .selbrk  { position:absolute; pointer-events:none; z-index:6; width:5px;
+  /* GRABBABLE, unlike everything else in the overlay: a bracket is a handle for
+     resizing the selection, so it takes the pointer and says so. */
+  .selbrk  { position:absolute; pointer-events:auto; cursor:col-resize; z-index:6; width:5px;
              border-top:2px solid rgba(210,40,40,.95);
              border-bottom:2px solid rgba(210,40,40,.95); }
   .selbrk.start { border-left:2px solid rgba(210,40,40,.95); margin-left:-2px; }
   .selbrk.end   { border-right:2px solid rgba(210,40,40,.95); margin-left:-3px; }
   /* Waiting for its other end: the same mark, breathing, so it is plainly a
      state and not a finished selection. */
+  /* A wider invisible grip than the mark itself, or it is a 5 px target. */
+  .selbrk::after { content:''; position:absolute; left:-6px; right:-6px; top:-3px; bottom:-3px; }
   .selbrk.pending { animation: selpulse 1.4s ease-in-out infinite; }
   @keyframes selpulse { 0%,100% { opacity:1; } 50% { opacity:.35; } }
   .wb-dark-pages .selfill { background: rgba(255,90,90,.14); }

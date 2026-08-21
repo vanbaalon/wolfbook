@@ -761,10 +761,10 @@ test('SHIFT-CLICK PICKS THE ENDS: first the start, then the range', async () => 
     assert.strictEqual(v._pickAnchor, null, 'the anchor is spent');
 });
 
-test('A DRAG PREVIEWS THE RANGE AND ONLY COMMITS ON RELEASE', async () => {
-    // While the button is down the page shows what is being taken; the editor
-    // is left alone, or a drag across the page would drag the cursor across the
-    // file with it.
+test('A DRAG SHOWS THE RANGE AT BOTH ENDS WHILE THE HAND MOVES', async () => {
+    // The page repaints the span on every move and the editor selects it as it
+    // goes, so the two windows are never out of step mid-gesture. The anchor
+    // survives until the button is released.
     const v = makeViewer({ file: FILE, line: 5, flag: FLAG.FRESH, object: null },
         { file: FILE, line: 5, dx: 2 });
     const st = v.coord.roots.get(FILE);
@@ -781,7 +781,16 @@ test('A DRAG PREVIEWS THE RANGE AND ONLY COMMITS ON RELEASE', async () => {
     const preview = v.posted.filter(p => p.type === 'selection').pop();
     assert.ok(preview && preview.span && !preview.span.pendingStart, 'the range is previewed');
     assert.ok(v._pickAnchor, 'and the anchor survives the move');
-    assert.strictEqual(selected, before, 'the editor is not touched mid-drag');
+    assert.ok(selected && selected !== before && selected.start.line === 4 && selected.end.line === 8,
+        'and the editor follows in real time');
+
+    // The editor echoing that selection back must not re-post it: the drag has
+    // already painted it, and re-posting would scroll the page under the hand.
+    v.posted.length = 0;
+    v.syncFromEditor({ document: doc, selection: {
+        active: selected.end, start: selected.start, end: selected.end,
+    } });
+    assert.ok(!v.posted.find(p => p.type === 'selection'), 'the echo is ignored');
 
     // Releasing commits it.
     v.posted.length = 0;
@@ -803,6 +812,47 @@ test('picking the ends in the WRONG order still makes a forward range', async ()
     await v._jumpToSource({ page: 1, xBp: 100, yTopBp: 100, word: 'transformed', rowFraction: 0.2, pick: true });
     assert.ok(selected.start.line < selected.end.line, 'the earlier position is the start');
     assert.strictEqual(selected.start.line, 4);
+});
+
+test('A BRACKET CAN BE TAKEN HOLD OF: the other end stays put', async () => {
+    // Resizing is the same drag with the opposite end as its anchor, so it goes
+    // through the same resolution and has no second way of being wrong.
+    const v = makeViewer({ file: FILE, line: 5, flag: FLAG.FRESH, object: null },
+        { file: FILE, line: 5, dx: 2 });
+    const st = v.coord.roots.get(FILE);
+    st.map.lineRows = (f, n) => [{ page: 1, x: 100, y: 100 * n, w: 300, h: 13 }];
+
+    // A range is on screen: lines 5 to 9.
+    v.syncFromEditor(rangeAt(5, 3, 9, 10));
+    assert.ok(v._lastSelection, 'the viewer remembers what it is showing');
+
+    // Take hold of the END bracket: the START becomes the anchor.
+    v._onMessage({ type: 'selectAdjust', end: 'end' });
+    assert.ok(v._pickAnchor, 'a drag is armed');
+    assert.strictEqual(v._pickAnchor.position.line, 4, 'anchored at the range start');
+
+    // Moving it up to line 7 shortens the range from the bottom.
+    st.map.renderToSource = () => ({ file: FILE, line: 7, flag: FLAG.FRESH, object: null });
+    st.map.lineAtPoint = () => ({ file: FILE, line: 7, dx: 2 });
+    selected = null;
+    await v._jumpToSource({ page: 1, xBp: 100, yTopBp: 700, word: 'Psi', rowFraction: 0.2, pick: true, live: true });
+    assert.ok(selected, 'the editor follows');
+    assert.strictEqual(selected.start.line, 4, 'the far end did not move');
+    // It shrank: how far depends on what line 7 resolves to — a word, or the
+    // display that encloses it — and either is a legitimate end.
+    assert.ok(selected.end.line < 8, `and the near one moved up, to ${selected.end.line}`);
+
+    // Taking the START bracket anchors on the END instead.
+    v.syncFromEditor(rangeAt(5, 3, 9, 10));
+    v._onMessage({ type: 'selectAdjust', end: 'start' });
+    assert.strictEqual(v._pickAnchor.position.line, 8, 'anchored at the range end');
+});
+
+test('adjusting with nothing selected does nothing', async () => {
+    const v = makeViewer(null, null);
+    v._lastSelection = null;
+    v._onMessage({ type: 'selectAdjust', end: 'end' });
+    assert.ok(!v._pickAnchor, 'no anchor, no phantom drag');
 });
 
 test('a plain click abandons a half-made selection', async () => {
