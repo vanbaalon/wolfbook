@@ -136,7 +136,91 @@ function lastRow(rows) {
     return rows.slice().sort((a, b) => a.page - b.page || a.y - b.y || a.x - b.x)[rows.length - 1];
 }
 
-const CHIP_H = 8;              // bp: the chip's own nominal height, for stacking
+const CHIP_H = 11;             // bp: the chip's own nominal height, for stacking
+const GAP = 5;                 // bp: how far off the text block a column sits
+
+/**
+ * TWO COLUMNS IN THE MARGINS, AND NOTHING ON THE READER'S WORDS.
+ *
+ * MEASURED on the reference paper before this (h-glyphmap/check-chips.mjs):
+ * 87 of 119 badges covered printed glyphs, the 82 declarations used 63
+ * different x positions, and 9 overlapped each other — the reported "big,
+ * obstructing the text, aligned really randomly". All three are the same
+ * mistake: each badge was placed against its own ink (above it, beside it, at
+ * a corner), so it landed wherever that ink happened to be, which in prose is
+ * always ON another line.
+ *
+ * A paper has margins, and they are empty by construction. So: declarations in
+ * the RIGHT margin, references in the LEFT one, every badge in its column at
+ * the same x, vertically level with the row it is about. Two columns also say
+ * which kind a badge is before it is read — a declaration names the thing
+ * beside it, a reference points away.
+ */
+function blockOf(inkFor, page, pageWidth) {
+    const W = pageWidth > 0 ? pageWidth : 595.276;
+    let x0 = Infinity; let x1 = -Infinity;
+    let items = null;
+    try { items = typeof inkFor === 'function' ? inkFor(page) : null; } catch (_) { items = null; }
+    for (const it of items || []) {
+        if (!it || !(it.w > 0)) continue;
+        if (it.x < x0) x0 = it.x;
+        if (it.x + it.w > x1) x1 = it.x + it.w;
+    }
+    // No text layer yet (the first Shift after a compile can beat the sweep):
+    // a printed page's measure is close enough to be a column, and the badges
+    // are re-placed on the next paint anyway.
+    if (!(x1 > x0)) { x0 = W * 0.133; x1 = W * 0.867; }
+    return { x0, x1, W };
+}
+
+/**
+ * A badge in a margin column, level with the middle of `row`.
+ *
+ * `maxW` is how much margin there is: a badge is CAPPED to it and elides the
+ * rest of its name, so the column stays a column and nothing hangs off the
+ * sheet. The full name is one hover away (and in the tooltip), which is the
+ * right trade for a badge that is read at a glance and copied by clicking.
+ */
+function inColumn(row, side, block) {
+    if (!row) return null;
+    const y = row.y + Math.max(0, (row.h || CHIP_H) - CHIP_H) / 2;
+    const x = side === 'left' ? Math.max(2, block.x0 - GAP) : Math.min(block.W - 2, block.x1 + GAP);
+    return {
+        page: row.page,
+        x,
+        y: Math.max(0, y),
+        w: 0, h: CHIP_H,
+        anchor: side,
+        maxW: Math.max(24, side === 'left' ? x - 2 : block.W - x - 2),
+    };
+}
+
+/**
+ * Nothing may sit on top of anything else in a column.
+ *
+ * Vertical only: a column's whole point is one x. Pushing DOWN keeps a badge
+ * below the row it belongs to, which is where a reader looks for an afterthought
+ * — pushing up would put it beside the row above and assert something false
+ * about that row.
+ */
+function stackColumns(chips) {
+    const cols = new Map();
+    for (const c of chips) {
+        if (!c.at) continue;
+        const key = `${c.at.page}|${c.at.anchor || 'right'}`;
+        if (!cols.has(key)) cols.set(key, []);
+        cols.get(key).push(c);
+    }
+    for (const list of cols.values()) {
+        list.sort((a, b) => a.at.y - b.at.y);
+        let floor = -Infinity;
+        for (const c of list) {
+            if (c.at.y < floor) c.at = { ...c.at, y: floor, nudged: true };
+            floor = c.at.y + CHIP_H + 1.5;
+        }
+    }
+    return chips;
+}
 
 /** Anchor a chip to the RIGHT of a row. */
 function atRight(r) {
@@ -290,42 +374,26 @@ function buildLabelChips(deps) {
         const rows = rowsOver(rowsFor, f, startOf(o), endOf(o));
         const { keep, stray } = splitStrayRows(rows);
         let at = null;
-        let side = 'right';
+        const side = 'right';                       // declarations own the right column
         let approx = false;
+        let row = null;
 
         if (kind === 'equation') {
-            // Above the display's own top-right corner — see atTopRight. The
-            // number's row still decides WHICH page and how sure we are.
+            // THE ROW THAT CARRIES THE NUMBER is the one a reader looks at for
+            // "which equation is this" — and on an `align` there is one per
+            // line, so each label stays level with its own.
             const tags = tagRows(rows, pageWidth);
             const tag = tags.length ? tags[tags.length - 1] : pickTagRow(stray);
-            // ONE NUMBER, ONE TITLE; SEVERAL NUMBERS, ONE BADGE EACH.
-            //
-            // A display with a single number has a single name, and that name
-            // belongs at the block's corner like a caption. An `align` prints a
-            // number per line and carries a label per line, so each must stay
-            // beside its own — putting them all at the corner would stack
-            // several different names on one spot.
-            if (tags.length > 1) {
-                at = atNumber(tag);
-                side = 'left';
-            } else {
-                at = atTopRight(keep.length ? keep : rows, pageWidth);
-                side = 'left';
-                if (!at && tag) at = atNumber(tag);
-                if (!tag) approx = true;
-            }
+            row = tag || firstRow(keep) || firstRow(rows);
+            if (!tag) approx = true;
         } else if (kind === 'figure' || kind === 'table') {
             // The caption prints last, and a caption is where a reader looks
             // for "Figure 3".
-            const r = lastRow(keep) || lastRow(rows);
-            if (r) { at = atRight(r); side = 'right'; }
-        } else if (kind === 'section') {
-            const r = firstRow(keep) || firstRow(rows);
-            if (r) { at = atLeft(r); side = 'left'; }
+            row = lastRow(keep) || lastRow(rows);
         } else {
-            const r = firstRow(keep) || firstRow(rows);
-            if (r) { at = atRight(r); }
+            row = firstRow(keep) || firstRow(rows);
         }
+        if (row) at = inColumn(row, side, blockOf(inkFor, row.page, pageWidth));
 
         if (!at && typeof boxFor === 'function') {
             // A float's `\includegraphics` line carries no character records at
@@ -335,7 +403,7 @@ function buildLabelChips(deps) {
             try { box = boxFor(o); } catch (_) { box = null; }
             const rect = box && box.rects && box.rects[0];
             if (rect) {
-                at = { page: rect.page, x: rect.x + rect.w + 3, y: rect.y, w: 0, h: CHIP_H };
+                at = inColumn({ ...rect, page: rect.page }, side, blockOf(inkFor, rect.page, pageWidth));
                 approx = true;
             }
         }
@@ -396,21 +464,23 @@ function buildLabelChips(deps) {
             const f = fileOf(o);
             const printed = printedFor ? (printedFor(name) || {}).printed || '' : '';
             let at = null;
-            let side = 'left';
+            const side = 'right';                   // declarations own the right column
             let approx = true;
 
             // The n-th label takes the n-th number, with the object's own label
-            // holding the last one.
+            // holding the last one — each stays level with ITS row, which is
+            // what keeps an align's five names from stacking on one spot.
             const wanted = ownName && ownName !== name ? i : tags.length - 1;
+            let row = null;
             if (tags.length && wanted >= 0 && wanted < tags.length) {
-                at = atNumber(tags[wanted]);
+                row = tags[wanted];
                 approx = tags.length !== labels.length + (ownName ? 1 : 0);
             } else {
                 const own = rowsOver(rowsFor, f, startOf(o), endOf(o));
-                const r = firstRow(splitStrayRows(own).keep) || firstRow(own) ||
+                row = firstRow(splitStrayRows(own).keep) || firstRow(own) ||
                     firstRow(splitStrayRows(rows).keep);
-                if (r) { at = atLeft(r); }
             }
+            if (row) at = inColumn(row, side, blockOf(inkFor, row.page, pageWidth));
             if (!at) return;
             chips.push({
                 id: `d${id++}`, name, kind, role: 'decl',
@@ -441,25 +511,31 @@ function buildLabelChips(deps) {
             const printed = isCite
                 ? (citeFor ? (citeFor(name) || {}).printed || '' : '')
                 : (printedFor ? (printedFor(name) || {}).printed || '' : '');
+            // A REFERENCE IS MARKED WHERE IT PRINTS AND NAMED IN THE MARGIN.
+            //
+            // The badge used to be moved on top of the printed number, which in
+            // prose means on top of the line above it — the reported
+            // obstruction. The number itself is underlined by the panel instead
+            // (`find` below), and the name goes in the left column, level with
+            // the row it was printed on: nothing is covered, and which line a
+            // badge belongs to is still plain.
             let at = null;
             let approx = true;
+            let row = null;
             if (!isCite) {
                 const hit = findPrintedInk(inkFor, usable, printed);
-                if (hit) { at = above(hit.row, hit.x); approx = false; }
+                if (hit) { row = hit.row; approx = false; }
             }
-            if (!at) {
-                const r = lastRow(usable);
-                at = above(r, r.x + r.w + 2);
-            }
-            // Several keys in one \cite would otherwise stack on one spot.
-            if (i) at = { ...at, y: Math.max(0, at.y - i * (CHIP_H + 1)) };
+            if (!row) row = lastRow(usable);
+            if (row) at = inColumn(row, 'left', blockOf(inkFor, row.page, pageWidth));
+            if (!at) return;
             const broken = !isCite && declared instanceof Set && !declared.has(name);
             chips.push({
                 id: `r${id++}`, name,
                 kind: isCite ? 'cite' : 'ref',
                 role: isCite ? 'cite' : 'ref',
                 cmd: isCite ? 'cite' : (o.cmd === 'eqref' ? 'eqref' : 'ref'),
-                printed, at, side: 'above', approx, broken,
+                printed, at, side: 'left', approx, broken,
                 // WHAT THE PANEL NEEDS TO PLACE THIS ITSELF.
                 //
                 // A reference prints its number INSIDE the prose, and that is
@@ -482,7 +558,7 @@ function buildLabelChips(deps) {
         });
     }
 
-    return chips;
+    return stackColumns(chips);
 }
 
 /**

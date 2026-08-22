@@ -199,9 +199,16 @@
      background at 78%, which is what keeps a chip legible over both white paper
      and a darkened page: the chip is DOM, so the canvas invert filter that
      darkens the page does not touch it. */
+  /* THE BADGE SCALES WITH THE PAGE AND STAYS IN THE MARGIN.
+     A fixed 9px pill is enormous beside a page zoomed out and tiny beside one
+     zoomed in, and it was placed against its own ink — measured, 87 of 119
+     badges sat ON printed words. Now: one column per side, the size tied to
+     --lbc-scale (the page's own zoom), and the width capped to the margin with
+     the rest of the name elided until hover. */
   .lbc { position:absolute; z-index:7; pointer-events:auto; cursor:copy;
-         font: 500 9px/1.35 var(--vscode-font-family); white-space:nowrap;
-         padding:1px 4px; border-radius:3px; letter-spacing:.02em;
+         font: 500 calc(7.4px * var(--lbc-scale, 1))/1.3 var(--vscode-font-family);
+         white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+         padding:0 calc(2.4px * var(--lbc-scale, 1)); border-radius:2px; letter-spacing:.01em;
          color: var(--vscode-textLink-foreground, #3794ff);
          background: rgba(255,255,255,.78);
          background: color-mix(in srgb, var(--vscode-editor-background, #fff) 78%, transparent);
@@ -211,8 +218,10 @@
   /* A 9px pill is a small target; the grip is bigger than the mark, exactly as
      a selection bracket's is. */
   .lbc::after { content:''; position:absolute; inset:-4px; }
+  /* Hovered: the whole name, over everything, out of the column if it must. */
   .lbc:hover { background: var(--vscode-textLink-foreground, #3794ff);
-         color: var(--vscode-editor-background, #fff); }
+         color: var(--vscode-editor-background, #fff);
+         max-width:none !important; z-index:20; overflow:visible; }
   /* Placed against the object rather than its own ink — say so rather than
      imply a precision we do not have. */
   .lbc-approx { border-style:dashed; opacity:.82; }
@@ -244,6 +253,12 @@
   .lbcprev img { display:block; max-width:320px; height:auto; border-radius:2px; }
   /* A \ref to a label that does not exist. The editor already says so with a
      squiggle; the page should not quietly draw it as though it resolved. */
+  /* The reference itself, underlined where it prints: the badge names it in the
+     margin, this says WHICH printed number the name belongs to. */
+  .lbcink { position:absolute; z-index:6; pointer-events:none; border-radius:1px;
+         border-bottom:1.5px solid var(--vscode-textLink-foreground, #3794ff);
+         opacity:.75; }
+  .lbcink.cite { border-bottom-color: var(--vscode-charts-purple, #c586c0); }
   .lbc-broken { color: var(--vscode-errorForeground, #f48771);
          border-color: color-mix(in srgb, var(--vscode-errorForeground, #f48771) 55%, transparent);
          text-decoration: line-through; }

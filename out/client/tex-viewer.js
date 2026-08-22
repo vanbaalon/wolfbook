@@ -243,7 +243,7 @@ async function openDocument(msg) {
         // the render that has just been replaced.
         state.labels = null;
         state.labelsAsked = null;
-        for (const c of document.querySelectorAll('.lbc')) c.remove();
+        for (const c of document.querySelectorAll('.lbc, .lbcink')) c.remove();
         el('where').textContent = '';
 
         if (samePagination) {
@@ -1175,7 +1175,7 @@ async function inkMatching(find, page) {
 }
 
 async function paintLabels() {
-    for (const el of document.querySelectorAll('.lbc')) el.remove();
+    for (const el of document.querySelectorAll('.lbc, .lbcink')) el.remove();
     hideChipPreview();
     if (!labelsVisible() || !state.labels || !state.labels.items) return;
 
@@ -1211,18 +1211,16 @@ async function paintLabels() {
             el.dataset.role = c.role;
             el.dataset.kind = c.kind;
             if (c.cmd) el.dataset.cmd = c.cmd;
+            // ONE COLUMN PER SIDE, IN THE MARGIN. `at.x` is the column's edge:
+            // the left column's badges grow leftwards from it, the right
+            // column's rightwards, and both are capped to the margin they sit
+            // in (`at.maxW`) so a long name elides instead of running off the
+            // sheet or back over the text.
             el.style.left = `${v.x}px`;
             el.style.top = `${v.y}px`;
-            // A chip anchored in the LEFT margin grows leftwards, or it covers
-            // the heading it belongs to — and a chip anchored ABOVE a block
-            // must sit ON TOP of that point rather than hang down from it.
-            // Without the Y half, a label placed 10 bp above an equation still
-            // covered its first row: the anchor is where the chip's BOTTOM
-            // belongs, not its top. Reported as labels sitting inside the
-            // equations they name.
-            const dx = c.side === 'left' ? '-100%' : '0';
-            const dy = c.role === 'decl' && c.kind !== 'section' ? '-100%' : '0';
-            if (dx !== '0' || dy !== '0') el.style.transform = `translate(${dx}, ${dy})`;
+            const anchor = (c.at && c.at.anchor) || c.side;
+            if (anchor === 'left') el.style.transform = 'translateX(-100%)';
+            if (c.at && c.at.maxW > 0) el.style.maxWidth = `${c.at.maxW * state.scale}px`;
             wrap.appendChild(el);
             made.push(el);
             if (c.find) pending.push({ el, chip: c, page });
@@ -1234,16 +1232,31 @@ async function paintLabels() {
         deoverlap(made);
     }
 
-    // The references, moved onto the numbers they printed. Done after the
-    // first paint so the badges appear at once and then settle, rather than
-    // waiting on a text-layer sweep before anything is shown at all.
+    // THE NUMBER IT PRINTED, UNDERLINED — not covered.
+    //
+    // A reference's badge used to be MOVED on top of the number it printed,
+    // which in prose means on top of the line above it: the reported
+    // obstruction. The badge now stays in its column and the printed number is
+    // marked instead, so the pairing is still visible and no word is hidden.
+    // Done after the first paint, so badges appear at once and the marks
+    // settle when the text-layer sweep catches up.
     for (const { el, chip, page } of pending) {
         // eslint-disable-next-line no-await-in-loop
         const hit = await inkMatching(chip.find, page);
         if (!hit || !el.isConnected) continue;
-        el.style.left = `${hit.x}px`;
-        el.style.top = `${Math.max(0, hit.y - el.offsetHeight - 1)}px`;
-        el.style.transform = '';
+        const wrap = pagesEl().querySelector(`.page[data-page="${page}"]`);
+        if (wrap) {
+            const mark = document.createElement('div');
+            mark.className = `lbcink${chip.role === 'cite' ? ' cite' : ''}`;
+            mark.style.left = `${hit.x}px`;
+            mark.style.top = `${hit.y}px`;
+            mark.style.width = `${Math.max(4, hit.w || 8)}px`;
+            mark.style.height = `${Math.max(4, hit.h || 10)}px`;
+            mark.dataset.name = chip.name;
+            wrap.appendChild(mark);
+        }
+        // Level with the row it printed on, still in the margin column.
+        el.style.top = `${Math.max(0, hit.y)}px`;
         el.classList.remove('lbc-approx');
     }
 }
@@ -2754,12 +2767,20 @@ for (const type of ['pointermove', 'pointerdown', 'pointerenter']) {
 }
 document.querySelector('main').addEventListener('pointerleave', () => hideLabels(), { passive: true });
 
+function syncChipScale() {
+    try { document.documentElement.style.setProperty('--lbc-scale', String(state.scale)); }
+    catch (_) { /* the badges just keep their last size */ }
+}
+
 function setScale(s, anchor, keepFit) {
     if (!keepFit && state.fitMode) {
         state.fitMode = false;
         document.body.classList.remove('fitted');
     }
     state.scale = Math.max(0.25, Math.min(6, s));
+    // The label badges are DOM, not canvas: without this they keep the size
+    // they had at the old zoom and swamp a page that has just been zoomed out.
+    syncChipScale();
     el('zoom').textContent = `${Math.round(state.scale * 100)}%`;
     for (const w of pagesEl().children) w.innerHTML = '<div class="pagenum">' + w.dataset.page + '</div>';
     state.rendered.clear();

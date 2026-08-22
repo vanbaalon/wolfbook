@@ -154,13 +154,19 @@ test('AN EQUATION\'S LABEL SITS ABOVE ITS TOP-RIGHT CORNER', () => {
     assert.strictEqual(c.role, 'decl');
     assert.strictEqual(c.printed, '(4)', 'and it shows the printed number');
     assert.strictEqual(c.approx, false);
-    // A label belongs where a caption would — clear of the ink, at the block's
-    // corner — rather than level with whichever row carries the number.
-    // Reported: "current alignment is not good".
-    const body = { x: 160.2, y: 228.5, w: 274.8, h: 13.5 };
-    assert.ok(c.at.y < body.y, `ABOVE the equation: ${c.at.y} vs ${body.y}`);
-    assert.ok(c.at.x <= 595.276 - 4, `and on the paper, got x=${c.at.x}`);
-    assert.strictEqual(c.side, 'left', 'growing left, not off the page');
+    // A BADGE BELONGS IN THE MARGIN, LEVEL WITH WHAT IT NAMES.
+    //
+    // MEASURED before this rule (h-glyphmap/check-chips.mjs): placing each
+    // badge against its own ink — above it, beside it, at a corner — put 87 of
+    // the reference paper's 119 ON printed words, in 63 different x positions.
+    // Declarations now share one column in the right margin.
+    const tag = { x: 515.9, y: 211.3, w: 83.2, h: 13.5 };
+    assert.strictEqual(c.at.anchor, 'right', 'declarations own the right column');
+    assert.ok(c.at.x >= tag.x, `outside the text block, got x=${c.at.x}`);
+    assert.ok(c.at.x <= 595.276 - 2, `and on the paper, got x=${c.at.x}`);
+    assert.ok(Math.abs(c.at.y - tag.y) <= tag.h,
+        `level with its own number: ${c.at.y} vs ${tag.y}`);
+    assert.ok(c.at.maxW > 0, 'and capped to the margin it sits in');
     assert.strictEqual(c.cmd, 'eqref', 'an equation is cited with \\eqref');
 });
 
@@ -183,8 +189,9 @@ test('A WIDE EQUATION STILL YIELDS ITS NUMBER', () => {
     const c = chips.find(x => x.name === 'eq:wide');
     assert.ok(c, 'placed');
     assert.strictEqual(c.approx, false, 'and known exactly, despite the wide body');
-    assert.ok(c.at.x <= 595.276 - 4, `on the paper, got x=${c.at.x}`);
-    assert.ok(c.at.y < 162, `above the equation's own ink, got y=${c.at.y}`);
+    assert.ok(c.at.x <= 595.276 - 2, `on the paper, got x=${c.at.x}`);
+    assert.strictEqual(c.at.anchor, 'right');
+    assert.ok(Math.abs(c.at.y - 162.6) <= 13.5, `level with its number, got y=${c.at.y}`);
 });
 
 test('NO CHIP MAY LAND OFF THE PAPER', () => {
@@ -234,10 +241,13 @@ test('EVERY LABEL OF AN align GETS ITS OWN NUMBER', () => {
     // Each label against the number it should have taken. (Not sorted by
     // `line`: the object's own label reports the block's start line, not its
     // own, so a line sort scrambles the very thing being checked.)
-    const yOf = (n) => chips.find(c => c.role === 'decl' && c.name === n).at.y;
-    assert.strictEqual(yOf('eq:one'), 100, 'the first label takes the first number');
-    assert.strictEqual(yOf('eq:two'), 120);
-    assert.strictEqual(yOf('eq:three'), 140, 'and the last takes the last');
+    const at = (n) => chips.find(c => c.role === 'decl' && c.name === n).at;
+    const near = (n, y) => Math.abs(at(n).y - y) <= 13;
+    assert.ok(near('eq:one', 100), `the first label takes the first number, got ${at('eq:one').y}`);
+    assert.ok(near('eq:two', 120), `got ${at('eq:two').y}`);
+    assert.ok(near('eq:three', 140), `and the last takes the last, got ${at('eq:three').y}`);
+    // One column: three names, one x.
+    assert.strictEqual(new Set(['eq:one', 'eq:two', 'eq:three'].map(n => at(n).x)).size, 1);
 });
 
 test('an equation with NO tag row falls back, and says it is approximate', () => {
@@ -267,8 +277,12 @@ test('a \\section{}\\label{} pair gets ONE chip, in the margin', () => {
     const mine = chips.filter(x => x.name === 'sec:intro');
     assert.strictEqual(mine.length, 1, `one chip, got ${mine.length}`);
     assert.strictEqual(mine[0].kind, 'section');
-    assert.strictEqual(mine[0].side, 'left', 'headings wear their label in the margin');
-    assert.ok(mine[0].at.x < 100, 'pushed left of the heading, not over it');
+    // A heading's label is a DECLARATION, so it joins the declarations' column
+    // in the right margin — one place for "what this thing is called", whether
+    // the thing is a section, an equation or a float.
+    assert.strictEqual(mine[0].at.anchor, 'right', 'declarations wear their label on the right');
+    assert.ok(mine[0].at.x >= 400, `outside the text block, got x=${mine[0].at.x}`);
+    assert.ok(Math.abs(mine[0].at.y - 90) <= 14, 'level with the heading it names');
     assert.strictEqual(mine[0].cmd, 'ref');
 });
 
@@ -363,7 +377,16 @@ test('a \\eqref site is placed over its printed number when the ink is known', (
     const c = chips.find(x => x.name === 'eq:emc');
     assert.ok(c, 'placed');
     assert.strictEqual(c.approx, false, 'exactly, because the ink was found');
-    assert.strictEqual(Math.round(c.at.x), 120, 'over the printed (4)');
+    // THE BADGE NAMES IT FROM THE MARGIN; THE NUMBER ITSELF IS UNDERLINED.
+    //
+    // It used to be moved on top of the printed number, which in prose means on
+    // top of the line above — the reported obstruction. What the panel needs to
+    // draw the underline still travels with the chip (`find`), and the badge
+    // sits in the left column, level with the row that number printed on.
+    assert.strictEqual(c.at.anchor, 'left', 'references own the left column');
+    assert.ok(c.at.x <= 100, `left of the text block, got x=${c.at.x}`);
+    assert.ok(Math.abs(c.at.y - 100) <= 12, `level with its own row, got y=${c.at.y}`);
+    assert.ok(c.find && c.find.text === '(4)', 'and the panel is told what to underline');
 });
 
 test('the same \\eqref with NO text layer still lands, marked approximate', () => {
