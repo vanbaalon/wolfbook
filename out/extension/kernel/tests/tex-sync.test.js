@@ -797,8 +797,19 @@ test('THE REPORTED BUG, on the token that actually brackets: a MATHS token', asy
     v.posted.length = 0;
     v.syncFromEditor({ document: doc, selection: sel });        // a recompile re-asks
 
-    assert.ok(!v.posted.find(p => p.type === 'selection' && p.span),
-        'the unchanged selection is STILL the page\'s, and draws no brackets');
+    // THE CONTRACT CHANGED, DELIBERATELY: more than one word is a SELECTION,
+    // whoever made it, so a widened Cmd-click is drawn on the page the way the
+    // editor draws it. What the original bug was really about is still
+    // enforced: the answer must be the SAME however often it is re-asked —
+    // never a marker one moment and a red span across the equation the next.
+    const again = v.posted.find(p => p.type === 'selection' && p.span);
+    assert.ok(again, 'a range the page made is still a range, and is painted');
+    v.posted.length = 0;
+    v.syncFromEditor({ document: doc, selection: sel });        // and again
+    const third = v.posted.find(p => p.type === 'selection' && p.span);
+    assert.ok(third, 'and it stays painted');
+    assert.deepStrictEqual(third.span.rows, again.span.rows,
+        'identically — the flip-flop that started all this cannot come back');
 });
 
 test('…but once the caret MOVES, that same range selected by hand is the reader\'s', async () => {
@@ -823,8 +834,9 @@ test('…but once the caret MOVES, that same range selected by hand is the reade
 
     v.posted.length = 0;
     v.syncFromEditor({ document: doc, selection: sel });        // the echo
-    assert.ok(!v.posted.find(p => p.type === 'selection' && p.span),
-        'the page\'s own range is not painted as the reader\'s');
+    assert.ok(v.posted.find(p => p.type === 'selection' && p.span),
+        'a multi-word range is painted whoever made it');
+    assert.ok(v._selfRange, 'but the page still knows it made this one');
 
     // The reader clicks somewhere else in the editor.
     const away = new Position(4, 0);
@@ -836,6 +848,36 @@ test('…but once the caret MOVES, that same range selected by hand is the reade
     v.syncFromEditor({ document: doc, selection: sel });
     assert.ok(v.posted.find(p => p.type === 'selection' && p.span),
         'painted as a range, because now it is one');
+});
+
+test('A WIDENED Cmd-CLICK IS SHOWN AS A SELECTION ON THE PAGE', async () => {
+    // Reported: "the Cmd-click feature works nicely in the editor, but the
+    // selected text needs to also be shown as selection in the viewer (when
+    // more than one word)". It used to answer with the amber `highlight` wash
+    // over whole line rows — the cursor's colour, the wrong shape, and nothing
+    // the reader could take hold of, copy or drag.
+    const v = makeViewer({ file: FILE, line: 5, flag: FLAG.FRESH, object: null },
+        { file: FILE, line: 5, dx: 2 });
+    const st = v.coord.roots.get(FILE);
+    st.map.lineRows = (f, n) => [{ page: 1, x: 100, y: 100 * n, w: 300, h: 13 }];
+    const click = { page: 1, xBp: 120, yTopBp: 500, word: 'transformed', rowFraction: 0.3 };
+
+    // A plain click is a place: one word, one marker, no brackets.
+    v.posted.length = 0;
+    await v._jumpToSource(click);
+    assert.ok(!v.posted.find(p => p.type === 'selection' && p.span),
+        'a single word stays a marker');
+
+    // Cmd-click walks out to the container: now it is a range.
+    v.posted.length = 0;
+    await v._jumpToSource({ ...click, widen: true });
+    const span = v.posted.filter(p => p.type === 'selection' && p.span).pop();
+    assert.ok(span, 'the widened selection is drawn on the page as a selection');
+    assert.ok(span.span.rows && span.span.rows.length, 'with the rows it covers');
+    assert.ok(span.span.start && span.span.end, 'and both of its ends marked');
+    assert.ok(selected && (selected.start.line !== selected.end.line ||
+        selected.end.character - selected.start.character > 'transformed'.length),
+        'and the editor holds the same widened range');
 });
 
 test('an event still IN FLIGHT does not retire the click that overtook it', async () => {

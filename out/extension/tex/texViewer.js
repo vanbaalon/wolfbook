@@ -1095,6 +1095,12 @@ class TexViewer {
                 return;
             }
             if (!own) { this._postSelection(st, doc, sel); return; }
+            // A RANGE THE PAGE ITSELF MADE IS STILL A RANGE. One word is a
+            // place and gets the marker (see _postWordMarker); anything wider
+            // came from a Cmd-click walking out through the containers, and
+            // clearing it here is what made the widened selection visible in
+            // the editor and nowhere on the paper.
+            if (this._isMultiWord(doc, sel)) { this._postSelection(st, doc, sel); return; }
         }
         this._post({ type: 'selection', span: null });
 
@@ -1317,6 +1323,15 @@ class TexViewer {
      * — which is what makes the same text selected by hand a minute later the
      * reader's: the caret had to go somewhere else first, and that is an event.
      */
+    /** Does this range cover more than one word? (a selection, not a place) */
+    _isMultiWord(doc, sel) {
+        if (!sel || !doc) return false;
+        if (sel.start.line !== sel.end.line) return true;
+        let text = '';
+        try { text = doc.getText(sel); } catch (_) { return false; }
+        return /\S\s+\S/.test(text.trim());
+    }
+
     _isOwnSelection(doc, sel) {
         const r = this._selfRange;
         if (!r || r.file !== doc.uri.fsPath) return false;
@@ -3395,9 +3410,24 @@ class TexViewer {
         // must not be stolen back.
         this._postEditSelection(doc, range, !m.takeMe);
 
-        // Show the widened container back in the PDF, so the reader can see
-        // what a further click would grow past.
-        if (step && step.kind !== 'word') this._showSpan(st, hit.file, step);
+        // MORE THAN ONE WORD IS A SELECTION, AND THE PAGE SAYS SO.
+        //
+        // A widened Cmd-click selects a group, a sentence, a paragraph or an
+        // object in the editor — and the page used to answer with the amber
+        // "where you are" wash over whole line rows, which is the wrong colour
+        // (amber is the cursor, red is what is selected), the wrong shape (a
+        // partial first and last line are covered whole) and the wrong object:
+        // nothing could be taken hold of, copied or dragged. It is a selection,
+        // so it is drawn as one — with the same word-accurate ends a selection
+        // made in the editor gets. A step too large to outline keeps the label.
+        if (step && step.kind !== 'word') {
+            const sel = new vscode.Selection(range.start, range.end);
+            if (this._isMultiWord(doc, sel) && (step.lines || 1) <= 60) {
+                this._postSelection(st, doc, sel);
+            } else {
+                this._showSpan(st, hit.file, step);
+            }
+        }
 
         // "Take me there": leave full screen, because the editor is what the
         // reader now wants to look at.
