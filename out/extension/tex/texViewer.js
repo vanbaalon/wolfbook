@@ -1451,6 +1451,13 @@ class TexViewer {
         // columns — see the end-mark rule in the panel. Block rows are borrowed
         // too: they belong to the caption or heading, not to this line.
         let borrowed = !rows.length;
+        // ITS OWN INK FIRST, WHEREVER IT PRINTED. Everything below borrows a
+        // neighbour's row, which is a guess about where this line's words are;
+        // the exact map does not have to guess (see _lineInkRects).
+        if (!rows.length) {
+            const ink = this._lineInkRects(st, doc, line);
+            if (ink.length) { rows.push(...ink); borrowed = false; }
+        }
         // A caption's or heading's own line usually has no rows; the block it
         // belongs to does, and that is the region this word's ink is in.
         if (!rows.length && block) rows.push(...this._blockRows(st, file, block));
@@ -1604,6 +1611,32 @@ class TexViewer {
         let start = toks[a].startCol; let end = toks[b].endCol;
         if (!(end > start)) return null;
         let word = lineSrc.slice(start, end);
+        // A DOUBLE HYPHEN IS AN EN DASH: PUNCTUATION BETWEEN WORDS, NOT PART OF
+        // ONE. `upper--upper` is two words a reader points at separately, while
+        // `half-planes` and `single-valuedness` are one word each — that is
+        // TeX's own rule (`--` sets an en dash) and it is the only signal there
+        // is. Measured: without this the highlight for a click on the first
+        // `upper` named `upper--upper` and washed both halves.
+        {
+            const anchor = Math.max(0, t0.startCol - start);
+            const bnd = /-{2,}|[\u2013\u2014]/g;
+            let segFrom = 0; let segTo = word.length; let onDash = false; let mm;
+            while ((mm = bnd.exec(word)) !== null) {
+                const from = mm.index; const to = mm.index + mm[0].length;
+                if (to <= anchor) segFrom = to;
+                else if (from > anchor) { segTo = from; break; }
+                else { onDash = true; break; }   // the dash itself: the run stands
+            }
+            if (!onDash && (segFrom > 0 || segTo < word.length)) {
+                start += segFrom; end = start + (segTo - segFrom);
+                word = lineSrc.slice(start, end);
+            }
+        }
+        // …and a run that begins or ends on punctuation (`$\Gamma$-glued`, whose
+        // maths half is not part of the run) is trimmed to its letters.
+        while (word.length > 1 && !/[\p{L}\p{N}]/u.test(word[0])) { start++; word = word.slice(1); }
+        while (word.length > 1 && !/[\p{L}\p{N}]/u.test(word[word.length - 1])) { end--; word = word.slice(0, -1); }
+        if (!(end > start)) return null;
         if (narrowTo && word !== narrowTo && word.includes(narrowTo)) {
             // the occurrence nearest the hit column
             let best = -1; let bestD = Infinity; let from = 0;
@@ -1618,6 +1651,32 @@ class TexViewer {
         }
         return { start, end, word, line: t0.line };
     }
+    /**
+     * THE INK A SOURCE LINE PRINTED, from the engine's own map.
+     *
+     * A line whose words are typeset into another line's row — a run-in
+     * `\paragraph{…}` heading, a caption's first line — has no row of its own,
+     * and every fallback below it BORROWS a neighbour's row. Measured after the
+     * selection widening shipped: a selection starting on the `\paragraph{`
+     * line borrowed the FIGURE CAPTION above it, so the page bracketed the
+     * caption while the editor held the paragraph. The exact map knows where
+     * that line's glyphs really are; this is that answer, or [] without one.
+     */
+    _lineInkRects(st, doc, line) {
+        if (!st.map || !st.map.exact) return [];
+        const am = this._alignMap(st, doc, line, null);
+        if (!am) return [];
+        const parts = [];
+        for (let i = 0; i < am.tokens.length; i++) {
+            if (am.tokens[i].line !== line) continue;
+            const j = am.srcToRen[i];
+            if (!(j >= 0)) continue;
+            const q = am.glyphs[j];
+            parts.push({ page: q.page, x: q.x, y: q.inkY != null ? q.inkY : q.y, w: q.w, h: q.inkH != null ? q.inkH : q.h });
+        }
+        return parts.length ? mergeRows(parts) : [];
+    }
+
     /**
      * THE ALIGNMENT THAT ANSWERS FOR A LINE — exact when the engine emitted the
      * map, the text-layer object map otherwise.
@@ -1716,10 +1775,12 @@ class TexViewer {
         let rows = [];
         for (let n = startLine; n <= endLine; n++) {
             if (this._lineIsBlank(doc, n)) continue;      // it printed nothing
-            for (const r of mergeRows(dropStrayRows(st.map.lineRows(file, n)
-                .map(x => ({ page: x.page, x: x.x, y: x.y, w: x.w, h: x.h }))))) {
-                rows.push({ ...r, line: n });
-            }
+            let own = mergeRows(dropStrayRows(st.map.lineRows(file, n)
+                .map(x => ({ page: x.page, x: x.x, y: x.y, w: x.w, h: x.h }))));
+            // A line typeset into another line's row — a run-in heading — has
+            // no row of its own, and the wash would skip the words it printed.
+            if (!own.length) own = this._lineInkRects(st, doc, n);
+            for (const r of own) rows.push({ ...r, line: n });
         }
         // A delimiter line collects strays from the page the object did not
         // print on — see clipToSpan. Without this a selected equation painted

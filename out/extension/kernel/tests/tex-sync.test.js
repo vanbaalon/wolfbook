@@ -2976,6 +2976,50 @@ test('A RUN-IN HEADING STILL HIGHLIGHTS: \\paragraph borrows its neighbour rows'
         'with rects borrowed from the neighbouring line, not "unmapped"');
 });
 
+// --- the word a run of source tokens is, with the exact map -----------------
+//
+// EXECUTED, not reasoned about: this is the rule that decides what an exact
+// highlight NAMES and paints, and getting it wrong is what turned a click on
+// the first `upper` of `upper--upper` into a wash over both halves.
+
+test('AN EN DASH SEPARATES WORDS; A HYPHEN DOES NOT', () => {
+    const v = makeViewer();
+    // The token sequence the GlyphMap alignment produces for one line: one
+    // token per printed character, each with its source column.
+    const amapFor = (text, line = 1) => {
+        const tokens = [];
+        for (let i = 0; i < text.length; i++) {
+            if (text[i] === ' ') continue;
+            tokens.push({ ch: text[i], line, startCol: i, endLine: line, endCol: i + 1, inMath: false });
+        }
+        return { tokens, glyphs: [], srcToRen: new Int32Array(tokens.length).fill(-1), renToSrc: new Int32Array(0), exact: true };
+    };
+    const at = (text, col, narrowTo) => {
+        const am = amapFor(text);
+        const ti = am.tokens.findIndex(t => t.startCol === col);
+        assert.ok(ti >= 0, `a token at column ${col}`);
+        return v._wordFromTokens(am, ti, text, narrowTo || null);
+    };
+
+    const line = 'pair is either upper--upper or half-planes and $x$-glued too';
+    // `--` is an en dash: the two halves are separate words…
+    assert.deepStrictEqual(pick(at(line, line.indexOf('upper'))), { word: 'upper', start: 15, end: 20 });
+    assert.deepStrictEqual(pick(at(line, line.indexOf('upper') + 8)), { word: 'upper', start: 22, end: 27 });
+    // …a single hyphen is part of one word…
+    assert.strictEqual(at(line, line.indexOf('half-planes') + 2).word, 'half-planes');
+    assert.strictEqual(at(line, line.indexOf('half-planes') + 6).word, 'half-planes');
+    // …and a run that starts on punctuation left over from inline maths is
+    // trimmed to its letters (`$\Gamma$-glued` -> "glued", never "-glued").
+    assert.strictEqual(at(line, line.indexOf('glued')).word, 'glued');
+    // A click on the dash itself has no better answer than the whole run.
+    assert.strictEqual(at(line, line.indexOf('--')).word, 'upper--upper');
+    // The panel's own word still narrows a repeated run to the nearest one.
+    const rep = 'the lower--lower sum';
+    assert.strictEqual(at(rep, rep.indexOf('lower'), 'lower').start, 4);
+});
+
+function pick(r) { return r && { word: r.word, start: r.start, end: r.end }; }
+
 (async () => {
     for (const [name, fn] of tests) {
         try { await fn(); pass++; results.push('  ok   ' + name); }
