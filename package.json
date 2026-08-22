@@ -1083,6 +1083,13 @@
           "default": "auto",
           "markdownDescription": "How WPaper builds its render map. `auto` (default): when `lualatex` is installed, the WPaper view is compiled with LuaLaTeX plus the wbmap hook, so every printed glyph is mapped to its exact box and source line (exact click-to-source and cursor highlight); a document LuaLaTeX cannot build falls back to `#wolfbook.tex.engine#` with an approximate (SyncTeX) map. `lualatex`: always. `off`: never — use `#wolfbook.tex.engine#` and SyncTeX only."
         },
+        "wolfbook.tex.review.groupWindowSeconds": {
+          "type": "number",
+          "default": 60,
+          "minimum": 0,
+          "maximum": 600,
+          "description": "How close together two writes from an agent must be to count as ONE arrival in the review. An agent rewrites the same paragraph two or three times in a row; grouping them keeps the list about the paper rather than about the writes, and interrupts you once per episode instead of once per write. 0 groups nothing."
+        },
         "wolfbook.tex.liveRender": {
           "type": "boolean",
           "default": true,

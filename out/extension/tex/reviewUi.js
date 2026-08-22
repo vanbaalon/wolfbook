@@ -146,6 +146,20 @@ class ReviewUi {
 
     // ------------------------------------------------------------- sessions --
 
+    /**
+     * One place a session is born, so the grouping window is the same wherever
+     * a change comes from — the file watcher, the MCP tool, or a merge.
+     */
+    _newSession(file, baseText) {
+        let seconds = 60;
+        try {
+            const cfg = vscode.workspace.getConfiguration('wolfbook.tex.review');
+            const v = cfg && cfg.get('groupWindowSeconds', 60);
+            if (Number.isFinite(v) && v >= 0) seconds = v;
+        } catch (_) { /* no configuration in this host */ }
+        return new ReviewSession({ file, baseText, groupWindowMs: seconds * 1000 });
+    }
+
     sessionFor(file) { return this.sessions.get(file) || null; }
 
     /**
@@ -160,7 +174,7 @@ class ReviewUi {
         let s = this.sessions.get(file);
         if (!s) {
             if (typeof o.baseText !== 'string') return null;
-            s = new ReviewSession({ file, baseText: o.baseText });
+            s = this._newSession(file, o.baseText);
             this.sessions.set(file, s);
         }
         s.noteBatch({ source: o.source || 'disk', note: o.note || '' });
@@ -222,7 +236,7 @@ class ReviewUi {
             // agreed to, and diffing it against the merge is precisely the set
             // of changes the agent is asking for.
             if (!this.sessions.has(file)) {
-                this.sessions.set(file, new ReviewSession({ file, baseText: o.ours }));
+                this.sessions.set(file, this._newSession(file, o.ours));
             }
             this.sessions.get(file).noteBatch({
                 source: o.source || 'disk',
@@ -689,7 +703,7 @@ class ReviewUi {
                     // Open the session NOW, on the text as it is before the
                     // write: that is exactly the baseline this change is against.
                     if (!this.sessions.has(ev.file) && typeof ev.baseText === 'string') {
-                        this.sessions.set(ev.file, new ReviewSession({ file: ev.file, baseText: ev.baseText }));
+                        this.sessions.set(ev.file, this._newSession(ev.file, ev.baseText));
                     }
                     return;
                 }

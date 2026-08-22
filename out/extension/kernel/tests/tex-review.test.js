@@ -45,6 +45,12 @@ const AFTER_TWO = AFTER_ONE
         'A closing paragraph that nobody touches.\n\nAn entirely new paragraph the agent added later.');
 
 const fresh = (text) => new ReviewSession({ file: '/p.tex', baseText: text, now: () => 1000 });
+/** A session with a clock the test moves, so grouping can be exercised. */
+const clocked = (text) => {
+    const t = { at: 1_000_000 };
+    const s = new ReviewSession({ file: '/p.tex', baseText: text, now: () => t.at });
+    return { s, t, tick: (ms) => { t.at += ms; } };
+};
 
 test('a hunk is described by the AGENT\'S verb, not the diff\'s', () => {
     // ours = the document now, theirs = the baseline: a hunk with nothing on
@@ -55,11 +61,14 @@ test('a hunk is described by the AGENT\'S verb, not the diff\'s', () => {
 });
 
 test('TWO BATCHES ACCUMULATE INTO ONE LIST — nothing is approved by arriving', () => {
-    const s = fresh(BASE);
+    // Two arrivals, not two writes in one episode: the clock moves past the
+    // grouping window between them (see the grouping tests below).
+    const { s, tick } = clocked(BASE);
     s.noteBatch({ source: 'disk' });
     const first = s.update({ currentText: AFTER_ONE });
     assert.strictEqual(first.hunks.length, 1, 'the first write is one change');
 
+    tick(10 * 60 * 1000);
     s.noteBatch({ source: 'disk' });
     const second = s.update({ currentText: AFTER_TWO });
     assert.strictEqual(second.hunks.length, 2,
@@ -123,9 +132,10 @@ test('KEEP ALL agrees to the document as it stands', () => {
 });
 
 test('KEEP BATCH keeps its own changes and leaves the other batch pending', () => {
-    const s = fresh(BASE);
+    const { s, tick } = clocked(BASE);
     const b1 = s.noteBatch({ source: 'disk' });
     s.update({ currentText: AFTER_ONE });
+    tick(10 * 60 * 1000);
     s.noteBatch({ source: 'disk' });
     s.update({ currentText: AFTER_TWO });
 
@@ -237,6 +247,97 @@ test('nothing here throws on empty, missing or nonsense input', () => {
     assert.strictEqual(s.undo('nope').ok, false);
     assert.strictEqual(s.noteReaderEdit(null), false);
     assert.doesNotThrow(() => s.payload());
+});
+
+test('WRITES CLOSE TOGETHER ARE ONE ARRIVAL, NOT ONE EACH', () => {
+    // Reported: the model changes the same part several times, and each write
+    // became its own group — a list about the writes instead of about the
+    // paper. Consecutive writes from the same source inside the window join
+    // the arrival already open.
+    const { s, tick } = clocked(BASE);
+    s.noteBatch({ source: 'disk' });
+    s.update({ currentText: AFTER_ONE });
+    tick(8000);                                   // eight seconds later
+    s.noteBatch({ source: 'disk' });
+    s.update({ currentText: AFTER_TWO });
+
+    assert.strictEqual(s.hunks.length, 2, 'both changes are pending');
+    const p = s.payload();
+    assert.strictEqual(p.groups.length, 1, 'in ONE arrival');
+    assert.strictEqual(p.groups[0].writes, 2, 'which knows it was two writes');
+    assert.strictEqual(p.groups[0].count, 2);
+    assert.ok(p.groups[0].lastAt > p.groups[0].at, 'and when the last one landed');
+});
+
+test('A REWRITE OF THE SAME PART MOMENTS LATER DOES NOT SPLIT THE LIST', () => {
+    // The literal case from the report: the same sentence written twice.
+    const { s, tick } = clocked(BASE);
+    s.noteBatch({ source: 'disk' });
+    s.update({ currentText: AFTER_ONE });
+    tick(5000);
+    const again = BASE.replace('sum.  They are the two physical half-towers.',
+        'sum.  They are the two physical half-towers, not continuations of one lattice.');
+    s.noteBatch({ source: 'disk' });
+    s.update({ currentText: again });
+
+    assert.strictEqual(s.hunks.length, 1, 'one place changed, so one change');
+    const p = s.payload();
+    assert.strictEqual(p.groups.length, 1, 'and one arrival, not two with one empty');
+    assert.strictEqual(p.groups[0].writes, 2);
+});
+
+test('WRITES FAR APART STAY SEPARATE ARRIVALS', () => {
+    const { s, tick } = clocked(BASE);
+    s.noteBatch({ source: 'disk' });
+    s.update({ currentText: AFTER_ONE });
+    tick(10 * 60 * 1000);                         // ten minutes later: a new session of work
+    s.noteBatch({ source: 'disk' });
+    s.update({ currentText: AFTER_TWO });
+
+    const p = s.payload();
+    assert.strictEqual(p.groups.length, 2, 'an hour of work is not one arrival');
+    assert.strictEqual(p.groups[0].writes, 1);
+    assert.strictEqual(p.groups[0].lastAt >= p.groups[1].lastAt, true, 'newest first');
+});
+
+test('a slow trickle cannot roll one arrival forward for ever', () => {
+    // Each write is inside the window, but the episode as a whole is capped —
+    // otherwise a background agent writing every 30 s would produce a single
+    // group that is hours old and never announced again.
+    const { s, tick } = clocked(BASE);
+    let text = BASE;
+    let ids = new Set();
+    for (let i = 0; i < 40; i++) {
+        text = text.replace('A closing paragraph', `A closing paragraph ${i}`);
+        ids.add(s.noteBatch({ source: 'disk' }));
+        s.update({ currentText: text });
+        tick(30000);                              // half a minute between writes
+    }
+    assert.ok(ids.size > 1, 'the episode was closed and reopened');
+    assert.ok(ids.size < 40, `but not once per write (got ${ids.size})`);
+});
+
+test('a DIFFERENT source is always its own arrival', () => {
+    // The agent's own tool and a write from somewhere else are different
+    // events even a second apart, and the list should say so.
+    const { s, tick } = clocked(BASE);
+    s.noteBatch({ source: 'paper_applyEdit' });
+    s.update({ currentText: AFTER_ONE });
+    tick(1000);
+    s.noteBatch({ source: 'disk' });
+    s.update({ currentText: AFTER_TWO });
+    assert.strictEqual(s.payload().groups.length, 2);
+});
+
+test('grouping can be turned off', () => {
+    const t = { at: 5000 };
+    const s = new ReviewSession({ file: '/p.tex', baseText: BASE, now: () => t.at, groupWindowMs: 0 });
+    s.noteBatch({ source: 'disk' });
+    s.update({ currentText: AFTER_ONE });
+    t.at += 500;
+    s.noteBatch({ source: 'disk' });
+    s.update({ currentText: AFTER_TWO });
+    assert.strictEqual(s.payload().groups.length, 2, 'every write is its own arrival again');
 });
 
 (async () => {

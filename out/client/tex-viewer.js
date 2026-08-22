@@ -1084,7 +1084,11 @@ function renderReview() {
 
     const parts = [];
     for (const g of r.groups) {
-        parts.push(`<div class="grp"><span>${esc(ago(g.at))} · ${esc(g.source)} · ` +
+        // An arrival is an EPISODE: several writes close together are one
+        // group, so the age shown is that of the LAST write in it, and the
+        // number of writes is worth saying when it was more than one.
+        const writes = g.writes > 1 ? ` · ${g.writes} writes` : '';
+        parts.push(`<div class="grp"><span>${esc(ago(g.lastAt || g.at))} · ${esc(g.source)}${writes} · ` +
             `${g.count} change${g.count === 1 ? '' : 's'}</span><span class="sp"></span>` +
             `<button data-batch="${esc(g.id)}">Keep batch</button></div>`);
         for (const h of g.hunks) {

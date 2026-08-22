@@ -70,6 +70,9 @@ class ReviewSession {
         this.baseText = String(o.baseText == null ? '' : o.baseText);
         this.now = typeof o.now === 'function' ? o.now : () => Date.now();
         this.openedAt = this.now();
+        // AN ARRIVAL IS AN EPISODE, NOT A WRITE. See noteBatch.
+        this.groupWindowMs = Number.isFinite(o.groupWindowMs) ? o.groupWindowMs : 60000;
+        this.maxEpisodeMs = Number.isFinite(o.maxEpisodeMs) ? o.maxEpisodeMs : 10 * 60000;
 
         this.batches = [];              // {id, at, source, note, seen}
         this._batchSeq = 0;
@@ -85,12 +88,42 @@ class ReviewSession {
     get pendingCount() { return this.hunks.length; }
     get isEmpty() { return this.hunks.length === 0; }
 
-    /** A new arrival. Hunks first seen after this belong to it. */
+    /**
+     * A new arrival. Hunks first seen after this belong to it.
+     *
+     * ONE EPISODE, NOT ONE WRITE. An agent working on a paper does not write
+     * once: it rewrites the same paragraph twice, fixes the equation under it,
+     * comes back to the sentence it started with. Each of those was its own
+     * arrival, so the list filled with one-change groups — several of them
+     * describing the same part of the paper — and a change that was rewritten
+     * hopped from the group it was in to a new one. Reported as: *the model
+     * may change the same part several times; those should be merged when they
+     * are close together in time.*
+     *
+     * So consecutive writes from the same source join the arrival already
+     * open, as long as the last one was less than `groupWindowMs` ago. The
+     * episode is capped (`maxEpisodeMs`) so a slow trickle of writes cannot
+     * roll one group forward for ever — an hour of work is not one arrival.
+     *
+     * A batch that has already been announced stays announced, which is the
+     * point: an episode interrupts once, not once per write.
+     */
     noteBatch(o = {}) {
+        const at = o.at || this.now();
+        const source = o.source || 'disk';
+        const last = this.batches[this.batches.length - 1];
+        if (last && this.groupWindowMs > 0 && last.source === source &&
+            at - last.lastAt <= this.groupWindowMs && at - last.at <= this.maxEpisodeMs) {
+            last.lastAt = at;
+            last.writes += 1;
+            if (o.note && !last.note) last.note = o.note;
+            this._current = last.id;
+            return last.id;
+        }
         const id = `b${++this._batchSeq}`;
         this.batches.push({
-            id, at: o.at || this.now(),
-            source: o.source || 'disk',
+            id, at, lastAt: at, writes: 1,
+            source,
             note: o.note || '',
             seen: false,
         });
@@ -303,9 +336,11 @@ class ReviewSession {
             byBatch.get(b).push(h);
         }
         const groups = [...byBatch.entries()].map(([id, hs]) => {
-            const b = this.batches.find(x => x.id === id) || { id, at: this.openedAt, source: 'unknown' };
+            const b = this.batches.find(x => x.id === id) ||
+                { id, at: this.openedAt, lastAt: this.openedAt, writes: 1, source: 'unknown' };
             return {
-                id, at: b.at, source: b.source, note: b.note,
+                id, at: b.at, lastAt: b.lastAt || b.at, writes: b.writes || 1,
+                source: b.source, note: b.note,
                 count: hs.length,
                 hunks: hs.map(h => ({
                     id: h.id,
@@ -328,7 +363,7 @@ class ReviewSession {
                     words: wordRangesOf(h),
                 })),
             };
-        }).sort((a, b) => b.at - a.at);
+        }).sort((a, b) => b.lastAt - a.lastAt);
 
         return {
             file: this.file,

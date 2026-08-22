@@ -183,6 +183,11 @@ test('a batch arrives: the status bar counts it and the panel is handed the list
 });
 
 test('ONE TOAST PER BATCH THAT CHANGED SOMETHING, and none while the list is on screen', async () => {
+    // Grouping OFF for this one, so every write is its own arrival — which is
+    // also the check that the setting is read at all.
+    const cfg = stub.workspace.getConfiguration;
+    stub.workspace.getConfiguration = () => ({ get: (k, d) => (k === 'groupWindowSeconds' ? 0 : d) });
+    try {
     const { ui, viewer } = makeUi();
     await ui.noteAgentChange({ file: FILE, baseText: BASE });
     assert.strictEqual(infoCalls.length, 1, 'announced once');
@@ -205,6 +210,7 @@ test('ONE TOAST PER BATCH THAT CHANGED SOMETHING, and none while the list is on 
     DOC._setText(third); fs.writeFileSync(FILE, third);
     await ui.noteAgentChange({ file: FILE, baseText: BASE });
     assert.strictEqual(infoCalls.length, 2, 'not while the reader is already looking at the list');
+    } finally { stub.workspace.getConfiguration = cfg; }
 });
 
 test('EVERY PENDING CHANGE IS DECORATED, AND CLEARED WHEN THE REVIEW ENDS', async () => {
@@ -370,6 +376,35 @@ test('describeHunk says what happened in words', () => {
         '3 words changed');
 });
 
+test('A BURST OF WRITES INTERRUPTS ONCE, AND READS AS ONE ARRIVAL', async () => {
+    // An agent working on a paper writes several times in a row. Each write
+    // used to be its own arrival: its own group in the list and, worse, its
+    // own toast. What the reader wants to know is that the agent has been
+    // through the paper, once.
+    const { ui, posted } = makeUi();
+    const step1 = BASE.replace('The SoV pairing contains both allowed sectors here.',
+        'The SoV pairing contains both allowed sectors in the strip.');
+    const step2 = step1.replace('A second paragraph nobody is arguing about.',
+        'A second paragraph nobody is arguing about. With a new sentence.');
+    const step3 = step2.replace('in the strip.', 'in the physical strip.');
+
+    for (const text of [step1, step2, step3]) {
+        fs.writeFileSync(FILE, text);
+        DOC._setText(text);
+        await ui.noteAgentChange({ file: FILE, baseText: BASE, source: 'disk' });
+    }
+
+    assert.strictEqual(infoCalls.length, 1, 'one interruption for the episode, not three');
+    const last = posted[posted.length - 1];
+    assert.strictEqual(last.groups.length, 1, 'and one arrival in the list');
+    assert.strictEqual(last.groups[0].writes, 3, 'which says it was three writes');
+    assert.strictEqual(last.pending, 2, 'two places changed in the end');
+    // The part written twice is ONE change, in that arrival — not one entry
+    // per write and not stranded in an arrival of its own.
+    const names = last.groups[0].hunks.map(h => h.startLine).sort((a, b) => a - b);
+    assert.strictEqual(new Set(names).size, 2);
+});
+
 // --- EDITING AT THE SAME TIME AS THE AGENT -----------------------------------
 //
 // Reported with a screenshot of VS Code's own refusal: "Failed to save … the
@@ -483,7 +518,10 @@ test('A SECOND WRITE WHILE STILL DIRTY JOINS THE SAME LIST', async () => {
     assert.ok(r);
     const s = ui.sessionFor(FILE);
     assert.strictEqual(s.pendingCount, 2, 'both the first change and the second are waiting');
-    assert.strictEqual(s.batches.length, 2, 'in two arrivals');
+    // Back to back, so they read as one episode of work — with the count of
+    // writes kept, which is what the list shows.
+    assert.strictEqual(s.batches.length, 1);
+    assert.strictEqual(s.batches[0].writes, 2);
 });
 
 (async () => {
