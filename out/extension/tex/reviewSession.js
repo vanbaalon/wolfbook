@@ -24,7 +24,7 @@
 // stable (texCompare), so `firstSeen` can say which arrival first showed a
 // change without the grouping having any say in the diff.
 
-const { splitLines } = require('./texDiff');
+const { splitLines, refineHunk } = require('./texDiff');
 const { buildComparison, describeSummary } = require('./texCompare');
 
 /** What the reader is being asked about — the agent's verb, not the diff's. */
@@ -308,8 +308,13 @@ class ReviewSession {
                         h.theirRange.endLine - h.theirRange.startLine),
                     changedWords: h.changedWords,
                     editedByYou: this.edited.has(h.id),
-                    ourText: h.ourText.slice(0, 400),
-                    theirText: h.theirText.slice(0, 400),
+                    ourText: h.ourText.slice(0, 4000),
+                    theirText: h.theirText.slice(0, 4000),
+                    // WHICH WORDS DIFFER, so the panel can show the change
+                    // itself rather than two blocks of LaTeX to compare by eye.
+                    // Computed here, from the same refineHunk the census
+                    // counts with — the webview never grows a second differ.
+                    words: wordRangesOf(h),
                 })),
             };
         }).sort((a, b) => b.at - a.at);
@@ -324,6 +329,16 @@ class ReviewSession {
             ...o,
         };
     }
+}
+
+/** The differing words on each side of a change, for the panel's diff pane. */
+function wordRangesOf(h) {
+    if (h.verb !== VERB.CHANGE) return null;
+    if ((h.ourText || '').length > 8000 || (h.theirText || '').length > 8000) return null;
+    try {
+        const { aRanges, bRanges } = refineHunk(h.ourText, h.theirText);
+        return { ours: aRanges, theirs: bRanges };
+    } catch (_) { return null; }
 }
 
 // --- offsets, kept local so nothing here needs texCompare's private helpers --

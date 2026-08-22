@@ -298,10 +298,35 @@
      room. At the bottom it PUSHES the pages instead of hiding them: the paper
      keeps its full width, which is the dimension a reader cannot get back by
      scrolling. It grows with its content up to a third of the panel. */
-  #reviewpanel { display:none; flex:0 0 auto; max-height:34vh; overflow:auto; text-align:left;
+  #reviewpanel { display:none; flex:0 0 auto; height:30vh; min-height:120px; text-align:left;
              background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
              border-top:1px solid var(--vscode-panel-border); }
-  body.reviewing #reviewpanel { display:block; }
+  body.reviewing #reviewpanel { display:flex; }
+  /* Two halves: what changed, and — for the one you are looking at — the change
+     itself. A list of names answers "what did it touch"; only the LaTeX answers
+     "should I keep it", and going to the editor to find out is the trip this
+     panel exists to save. */
+  #reviewlist { flex:0 0 46%; max-width:46%; overflow:auto;
+             border-right:1px solid var(--vscode-panel-border); }
+  #reviewdiff { flex:1; overflow:auto; padding:8px 12px;
+             font-family: var(--vscode-editor-font-family, monospace);
+             font-size: calc(var(--vscode-editor-font-size, 12px) * .92); line-height:1.45; }
+  #reviewdiff .rd-head { font-family: var(--vscode-font-family); font-size:11px;
+             opacity:.7; margin-bottom:6px; display:flex; gap:8px; align-items:center; }
+  #reviewdiff .rd-none { font-family: var(--vscode-font-family); font-size:12px; opacity:.6; }
+  #reviewdiff .rd-line { white-space:pre-wrap; word-break:break-word; padding:0 6px;
+             border-left:2px solid transparent; }
+  #reviewdiff .rd-line.was { background: var(--vscode-diffEditor-removedTextBackground, rgba(200,90,70,.18));
+             border-left-color: var(--vscode-gitDecoration-deletedResourceForeground, #c66); }
+  #reviewdiff .rd-line.now { background: var(--vscode-diffEditor-insertedTextBackground, rgba(80,180,120,.18));
+             border-left-color: var(--vscode-gitDecoration-addedResourceForeground, #4a8); }
+  #reviewdiff .rd-sep { height:6px; }
+  #reviewdiff .rd-tag { font-family: var(--vscode-font-family); font-size:10px; opacity:.65;
+             letter-spacing:.06em; text-transform:uppercase; margin:2px 0; }
+  #reviewdiff mark { background: color-mix(in srgb, var(--vscode-editor-foreground, #ccc) 22%, transparent);
+             color:inherit; border-radius:2px; padding:0 1px; }
+  #reviewdiff .was mark { background: color-mix(in srgb, var(--vscode-gitDecoration-deletedResourceForeground, #c66) 38%, transparent); }
+  #reviewdiff .now mark { background: color-mix(in srgb, var(--vscode-gitDecoration-addedResourceForeground, #4a8) 38%, transparent); }
   #reviewpanel .grp { position:sticky; top:0; z-index:1; padding:5px 12px; font-size:11px;
              opacity:.85; display:flex; gap:8px; align-items:center;
              background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
@@ -482,5 +507,5 @@
   <button id="reviewclose" title="Leave the review; nothing is decided">✕</button>
 </div>
 <main><div id="pages" title="Click a word or symbol to find it in the source. Cmd/Ctrl-click selects more of what encloses it; add Shift to go back in. Double-click jumps to the editor. Right-click edits the paragraph or equation in place."></div></main>
-<div id="reviewpanel"></div>
+<div id="reviewpanel"><div id="reviewlist"></div><div id="reviewdiff"></div></div>
 <footer><div id="status">starting…</div></footer>

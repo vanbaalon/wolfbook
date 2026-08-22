@@ -940,11 +940,11 @@ function reviewHunks() {
 }
 
 function renderReview() {
-    const panel = el('reviewpanel');
+    const panel = el('reviewlist');
     const r = state.review;
     document.body.classList.toggle('reviewing', !!(r && r.pending));
     if (!panel) return;
-    if (!r || !r.pending) { panel.innerHTML = ''; paintReview(); return; }
+    if (!r || !r.pending) { panel.innerHTML = ''; renderReviewDiff(); paintReview(); return; }
 
     el('reviewtitle').textContent = `Review · ${r.pending} change${r.pending === 1 ? '' : 's'}`;
     // The census opens with the same count the title just gave; what is worth
@@ -998,7 +998,65 @@ function renderReview() {
         parts.push(`<div class="done">this session: ${kept} kept, ${undone} undone</div>`);
     }
     panel.innerHTML = parts.join('');
+    renderReviewDiff();
     paintReview();
+}
+
+/**
+ * THE CHANGE ITSELF, not just its name.
+ *
+ * A list of labels answers "what did the agent touch"; only the LaTeX answers
+ * "should I keep it", and going to the editor to find out is exactly the trip
+ * this panel exists to save. So the right half shows the selected change as
+ * before/after, with the differing WORDS marked — the ranges come from the
+ * extension (`words`), computed by the same refineHunk the census counts with,
+ * so there is no second differ in here to disagree with the first.
+ */
+function renderReviewDiff() {
+    const pane = el('reviewdiff');
+    if (!pane) return;
+    const r = state.review;
+    const h = r && reviewHunks().find(x => x.id === r.focus);
+    if (!h) {
+        pane.innerHTML = r && r.pending
+            ? '<div class="rd-none">Select a change to see it.</div>' : '';
+        return;
+    }
+    const esc = (x) => String(x == null ? '' : x)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    // Mark the words that differ, line by line, from the ranges given.
+    const block = (text, ranges, cls) => {
+        const lines = String(text || '').split('\n');
+        return lines.map((line, i) => {
+            const marks = (ranges || []).filter(w => w.line === i)
+                .sort((a, b) => a.col - b.col);
+            let out = ''; let at = 0;
+            for (const w of marks) {
+                const from = Math.max(at, Math.min(w.col, line.length));
+                const to = Math.max(from, Math.min(w.col + w.len, line.length));
+                out += esc(line.slice(at, from)) + '<mark>' + esc(line.slice(from, to)) + '</mark>';
+                at = to;
+            }
+            out += esc(line.slice(at));
+            return '<div class="rd-line ' + cls + '">' + (out || '&nbsp;') + '</div>';
+        }).join('');
+    };
+    const words = h.words || {};
+    const parts = [];
+    parts.push('<div class="rd-head"><b>' + esc(h.name || ('line ' + h.startLine)) + '</b>' +
+        '<span>line ' + h.startLine + '</span>' +
+        (h.editedByYou ? '<span>· you edited this</span>' : '') + '</div>');
+    if (h.verb !== 'add' && h.theirText) {
+        parts.push('<div class="rd-tag">before</div>');
+        parts.push(block(h.theirText, words.theirs, 'was'));
+    }
+    if (h.verb !== 'del' && h.ourText) {
+        if (parts.length > 1) parts.push('<div class="rd-sep"></div>');
+        parts.push('<div class="rd-tag">' + (h.verb === 'add' ? 'added' : 'after') + '</div>');
+        parts.push(block(h.ourText, words.ours, 'now'));
+    }
+    pane.innerHTML = parts.join('');
+    pane.scrollTop = 0;
 }
 
 /** The pending changes, marked where they print. */
@@ -1065,7 +1123,13 @@ document.addEventListener('click', (e) => {
     const batch = t.closest('[data-batch]');
     if (batch) { e.preventDefault(); e.stopPropagation(); reviewAct('keepBatch', { batch: batch.dataset.batch }); return; }
     const row = t.closest('.rh');
-    if (row) { e.stopPropagation(); reviewAct('show', { id: row.dataset.hunk }); }
+    if (row) {
+        e.stopPropagation();
+        // Locally first: the diff appears with the click, and the extension's
+        // answer (which also scrolls the page) confirms it a moment later.
+        if (state.review) { state.review.focus = row.dataset.hunk; renderReview(); }
+        reviewAct('show', { id: row.dataset.hunk });
+    }
 }, true);
 
 function paintDiff() {
