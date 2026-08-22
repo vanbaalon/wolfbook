@@ -44,6 +44,23 @@ const { buildLabelChips, formatLabelCopy, altFormat } = require('./labelChips');
  * glyph of its own, which resolves to the enclosing equation — the honest
  * answer, and the useful one.
  */
+/**
+ * HOW MANY TIMES A HINT IS STILL WORTH SHOWING.
+ *
+ * The panel's two long tooltips — what a click does on the page, what clicking
+ * a label badge copies — teach the gestures once and then cover the text they
+ * describe. Reported as "kind of annoying". Each gets three showings and is
+ * then taken off the element.
+ *
+ * MODULE-LEVEL ON PURPOSE: the count must survive closing and reopening the
+ * paper (that is not a new reader) and reset when the window reloads (that is
+ * a new session, and the reminder is fair again). Nothing is written to disk —
+ * a hint budget is not worth a setting, and "after each restart" is exactly
+ * what the reader asked for.
+ */
+const HINT_BUDGET = { pages: 3, chip: 3 };
+const hintsLeft = { ...HINT_BUDGET };
+
 const TAG_TEXT = /^[([]?[0-9]+[A-Za-z.]*[)\]]?$/;
 
 function dropEquationTags(items) {
@@ -1925,8 +1942,12 @@ class TexViewer {
 
     async _onMessage(m) {
         switch (m.type) {
+            case 'hintShown':
+                if (hintsLeft[m.id] > 0) hintsLeft[m.id] -= 1;
+                break;
             case 'ready':
                 this._postTheme();
+                this._post({ type: 'hints', left: { ...hintsLeft } });
                 await this.refresh({ force: true });
                 // The list survives a panel reopen: the session is the truth,
                 // the panel is only its picture.

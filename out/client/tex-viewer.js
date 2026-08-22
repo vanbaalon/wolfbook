@@ -27,6 +27,11 @@
 
 const vscode = acquireVsCodeApi();
 
+// How long a pointer must rest on a hinted element before the browser has
+// drawn its tooltip — i.e. before that showing counts. Declared here because
+// `state` reads it below.
+const HINT_DWELL_DEFAULT = 900;
+
 const state = {
     pdfjs: null,
     doc: null,
@@ -44,9 +49,66 @@ const state = {
     labelsPinned: false,      // the toolbar toggle
     labelsAsked: null,        // the generation we have already asked for
     review: null,             // {pending, groups, census, focus} — the agent's changes
+    hints: { left: { pages: 3, chip: 3 }, dwellMs: HINT_DWELL_DEFAULT },
+    hintText: '',             // the page hint, kept when the attribute is taken away
 };
 
 const el = (id) => document.getElementById(id);
+
+// --- HINTS ARE FOR LEARNING, NOT FOR LIVING WITH ---------------------------
+//
+// The two long tooltips — what a click does on the page, and what clicking a
+// label badge copies — teach the panel's gestures once and are in the way ever
+// after: they cover the very text they are describing. So each has a BUDGET of
+// showings per session (the extension keeps the count, so it survives closing
+// and reopening the paper and resets when the window does), and when it is
+// spent the `title` is taken off the element altogether.
+//
+// A "showing" is a dwell long enough for the browser to have drawn the tooltip
+// — there is no event for a native title appearing, and counting hovers that
+// never showed anything would spend the budget on nothing.
+function hintsLeft(id) {
+    return (state.hints && Number.isFinite(state.hints.left[id])) ? state.hints.left[id] : 0;
+}
+
+function armHint(node, id, text) {
+    if (!node) return;
+    if (hintsLeft(id) <= 0) { node.removeAttribute('title'); return; }
+    node.title = text;
+    if (node.dataset.hintArmed === id) return;
+    node.dataset.hintArmed = id;
+    let timer = null;
+    node.addEventListener('pointerenter', () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => noteHintShown(id), (state.hints && state.hints.dwellMs) || HINT_DWELL_DEFAULT);
+    });
+    const cancel = () => clearTimeout(timer);
+    node.addEventListener('pointerleave', cancel);
+    node.addEventListener('pointerdown', cancel);
+}
+
+function noteHintShown(id) {
+    if (hintsLeft(id) <= 0) return;
+    state.hints.left[id] = hintsLeft(id) - 1;
+    vscode.postMessage({ type: 'hintShown', id });
+    if (state.hints.left[id] <= 0) stripHint(id);
+}
+
+/** Spent: take the tooltip off everything that carries it. */
+function stripHint(id) {
+    for (const node of document.querySelectorAll(`[data-hint-armed="${id}"]`)) {
+        node.removeAttribute('title');
+    }
+}
+
+function applyHints() {
+    const pages = el('pages');
+    if (pages) {
+        if (!state.hintText) state.hintText = pages.getAttribute('title') || '';
+        armHint(pages, 'pages', state.hintText);
+    }
+    if (hintsLeft('chip') <= 0) stripHint('chip');
+}
 const pagesEl = () => el('pages');
 
 // --- theme -------------------------------------------------------------------
@@ -1273,9 +1335,10 @@ async function paintLabels() {
             el.textContent = c.role === 'decl'
                 ? (c.printed ? `${c.name} ${c.printed}` : c.name)
                 : `→ ${c.name}`;
-            el.title = c.broken
-                ? `${c.name} — no \\label with that name`
-                : 'Click to copy the reference · Alt-click for the bare name';
+            // A broken reference is INFORMATION, not a hint: it says what is
+            // wrong and never runs out.
+            if (c.broken) el.title = `${c.name} — no \\label with that name`;
+            else armHint(el, 'chip', 'Click to copy the reference · Alt-click for the bare name');
             el.dataset.name = c.name;
             el.dataset.role = c.role;
             el.dataset.kind = c.kind;
@@ -3106,6 +3169,13 @@ window.addEventListener('message', async (ev) => {
             state.themeFromExtension = true;      // stop listening to the OS guess
             state.setting = msg.setting || 'auto';
             applyTheme(msg.dark, msg.pages);
+            break;
+        case 'hints':
+            state.hints = {
+                left: { ...state.hints.left, ...(msg.left || {}) },
+                dwellMs: Number.isFinite(msg.dwellMs) ? msg.dwellMs : state.hints.dwellMs,
+            };
+            applyHints();
             break;
         case 'review':
             state.review = msg.session || null;

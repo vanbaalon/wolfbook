@@ -880,6 +880,39 @@ test('A WIDENED Cmd-CLICK IS SHOWN AS A SELECTION ON THE PAGE', async () => {
         'and the editor holds the same widened range');
 });
 
+test('A HINT IS OFFERED THREE TIMES PER SESSION, AND THE COUNT OUTLIVES THE PANEL', async () => {
+    // Reported: the page's tooltip and the label badge's are "kind of
+    // annoying" after they have been read. The panel spends the budget and
+    // says so; the count lives in the extension, so closing and reopening the
+    // paper does not hand the reader the same three lessons again.
+    const v = makeViewer();
+    v.posted.length = 0;
+    await v._onMessage({ type: 'ready' });
+    const first = v.posted.find(p => p.type === 'hints');
+    assert.ok(first, 'a panel is told what is left');
+    const start = first.left.pages;
+    assert.ok(start > 0, `and starts with some (got ${start})`);
+
+    await v._onMessage({ type: 'hintShown', id: 'pages' });
+    await v._onMessage({ type: 'hintShown', id: 'pages' });
+
+    // A NEW panel — the reader closed the paper and opened it again.
+    const v2 = makeViewer();
+    v2.posted.length = 0;
+    await v2._onMessage({ type: 'ready' });
+    const again = v2.posted.find(p => p.type === 'hints');
+    assert.strictEqual(again.left.pages, start - 2,
+        'the count is where the reader left it, not back at the beginning');
+
+    // Spent means spent.
+    for (let i = 0; i < start; i++) await v2._onMessage({ type: 'hintShown', id: 'pages' });
+    const v3 = makeViewer();
+    v3.posted.length = 0;
+    await v3._onMessage({ type: 'ready' });
+    assert.strictEqual(v3.posted.find(p => p.type === 'hints').left.pages, 0,
+        'and never goes below nothing');
+});
+
 test('an event still IN FLIGHT does not retire the click that overtook it', async () => {
     // `_selfRange` is recorded synchronously, before `editor.selection` is
     // assigned, so the event carrying the reader's PREVIOUS position can still
