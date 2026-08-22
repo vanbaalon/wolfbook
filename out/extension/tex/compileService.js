@@ -292,7 +292,7 @@ function cancelledRecord({ root, projectDir, outDir, engine, queuedAt }) {
         pdfPath: null, synctexPath: null, logPath: null,
         generation: nextGeneration(),
         sourceSnapshotHash: null, overlayDir: null, live: false,
-        pdfHash: null, pdfBytes: null, synctexHash: null, pageCount: null, pageSize: null,
+        pdfHash: null, pdfBytes: null, synctexHash: null, glyphMapPath: null, glyphMapMetaPath: null, glyphMapHash: null, pageCount: null, pageSize: null,
         diagnostics: [], stopped: false, stopReason: null, errors: 0, warnings: 0,
         passes: null, maxPasses: null, passesLimited: false, rcUnsupported: false,
         ms: 0, queuedMs: Date.now() - queuedAt,
@@ -360,6 +360,35 @@ async function _compileLocked(o, ctx) {
         TEXMFOUTPUT: outDir,
         max_print_line: '1000',   // stop TeX hard-wrapping paths mid-token
     };
+    // THE ENGINE EMITS THE MAP. With lualatex and the wbmap hook, every glyph
+    // shipped is recorded with its exact box and source line into the out dir
+    // (the hook writes by RELATIVE name: the engine's cwd is the out dir, and
+    // `openout_any=p` allows nothing further away). See tex/glyphMap.js.
+    const glyphMap = !!o.glyphMap && engine === 'lualatex';
+    const glyphMapName = `${job}.glyphmap.jsonl`;
+    const glyphMapMetaName = `${job}.glyphmap.meta.json`;
+    if (glyphMap) {
+        env.WB_GLYPHMAP_OUT = glyphMapName;
+        env.WB_GLYPHMAP_META = glyphMapMetaName;
+        // The previous map is KEPT: latexmk may decide nothing changed and not
+        // run the engine at all, and then the PDF is the old one and so is its
+        // map. Staleness is judged after the run instead (see below) — a map
+        // older than a PDF that WAS rewritten is treated as absent.
+    }
+    const runStartedAt = Date.now();
+    // latexmk skips the engine when the sources are up to date — right for the
+    // PDF, wrong when the MAP is missing or older than that PDF (an earlier
+    // build without the hook, or a deleted out file): then the engine must run
+    // once more, so `-g` forces it.
+    let forceRun = false;
+    if (glyphMap) {
+        try {
+            const mapP = path.join(outDir, glyphMapName);
+            const pdfP = path.join(outDir, job + '.pdf');
+            if (!fs.existsSync(mapP)) forceRun = fs.existsSync(pdfP);
+            else if (fs.existsSync(pdfP) && fs.statSync(mapP).mtimeMs < fs.statSync(pdfP).mtimeMs - 1500) forceRun = true;
+        } catch (_) { forceRun = false; }
+    }
 
     const args = [
         `-${engine}`,
@@ -371,6 +400,11 @@ async function _compileLocked(o, ctx) {
         // Capped only when a caller asked; extraArgs still comes after, so a
         // caller can override anything we set here.
         ...(maxPasses ? ['-e', MAX_PASSES_CODE(maxPasses)] : []),
+        // `[[ ]]` and forward slashes: latexmk strips double quotes on the way
+        // to the engine, and a backslash is a TeX escape. `--lua=` cannot be
+        // used instead — luatexbase does not exist yet when it runs.
+        ...(glyphMap ? ['-usepretex', `-pretex=\\directlua{dofile([[${glyphMapHookPath().replace(/\\/g, '/')}]])}`] : []),
+        ...(forceRun ? ['-g'] : []),
         ...(o.extraArgs || []),
         compileRoot,
     ];
@@ -406,6 +440,25 @@ async function _compileLocked(o, ctx) {
     }
     // A directory the project gained since we last mirrored: re-arm the walk.
     if (/I can't write on file/.test(logText)) _mirrored.delete(outDir);
+    // The GlyphMap the hook wrote, if it ran. Hashed like the synctex so a
+    // rebuild with identical output can reuse the parsed map.
+    const glyphMapPath = glyphMap ? path.join(outDir, glyphMapName) : null;
+    const glyphMapMetaPath = glyphMap ? path.join(outDir, glyphMapMetaName) : null;
+    let glyphMapHash = null;
+    if (glyphMapPath && fs.existsSync(glyphMapPath)) {
+        // Valid when written by THIS run, or when the PDF was not rewritten
+        // either (latexmk had nothing to do — the old pair still agree).
+        let fresh = true;
+        try {
+            const mapM = fs.statSync(glyphMapPath).mtimeMs;
+            const pdfM = hasPdf ? fs.statSync(pdfPath).mtimeMs : 0;
+            const pdfRewritten = pdfM >= runStartedAt - 1500;
+            fresh = mapM >= runStartedAt - 1500 || !pdfRewritten;
+        } catch (_) { fresh = false; }
+        if (fresh) {
+            try { glyphMapHash = sha256(fs.readFileSync(glyphMapPath)); } catch (_) { glyphMapHash = null; }
+        }
+    }
     let synctexHash = null;
     if (fs.existsSync(synctexPath)) {
         // pdftex writes a zero gzip mtime, so the .gz is byte-stable whenever
@@ -445,6 +498,9 @@ async function _compileLocked(o, ctx) {
         pdfHash,
         pdfBytes,
         synctexHash,
+        glyphMapPath: glyphMapHash ? glyphMapPath : null,
+        glyphMapMetaPath: glyphMapHash ? glyphMapMetaPath : null,
+        glyphMapHash,
         pageCount,
         pageSize,
         diagnostics: parsed.diagnostics,
@@ -607,7 +663,36 @@ function generationIsCurrent(gen, sourceFiles, overlay) {
     return gen.sourceSnapshotHash === snapshotSources(sourceFiles, overlay);
 }
 
+/**
+ * Where the GlyphMap hook lives: resources/tex/wbmap.lua, resolved from this
+ * file so it is right both in the repo and inside the installed extension.
+ */
+function glyphMapHookPath() {
+    return path.resolve(__dirname, '..', '..', '..', 'resources', 'tex', 'wbmap.lua');
+}
+
+/**
+ * Is lualatex on PATH? Asked once per process; the answer is cached. Never
+ * throws — "no" is a perfectly good answer.
+ */
+let _luaOk = null;
+function probeLualatex() {
+    if (_luaOk !== null) return Promise.resolve(_luaOk);
+    return new Promise((resolve) => {
+        let child;
+        try {
+            child = spawn('lualatex', ['--version'], { stdio: ['ignore', 'pipe', 'pipe'] });
+        } catch (_) { _luaOk = false; return resolve(false); }
+        let out = '';
+        child.stdout.on('data', (d) => { out += d; });
+        child.on('error', () => { _luaOk = false; resolve(false); });
+        child.on('close', (code) => { _luaOk = code === 0 && /LuaTeX|LuaHBTeX/i.test(out); resolve(_luaOk); });
+        setTimeout(() => { try { child.kill(); } catch (_) { /* gone */ } }, 8000);
+    });
+}
+
 module.exports = {
+    glyphMapHookPath, probeLualatex,
     saveGeneration,
     loadGeneration,
     generationPath,

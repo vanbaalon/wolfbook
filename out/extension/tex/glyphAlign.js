@@ -29,7 +29,7 @@
 // Every answer carries how it was reached, so a caller can decline rather than
 // jump somewhere wrong.
 
-const { visibleProjection, MATH_GLYPH_RE, foldGlyphs } = require('./texWords');
+const { visibleProjection, MATH_GLYPH_RE, foldGlyphs, ACCENT_GLYPHS } = require('./texWords');
 const { LEVEL, roleIndex, comparePaths } = require('./mathStructure');
 
 /** The alignment's own honesty flags, finer than RenderMap's. */
@@ -199,6 +199,43 @@ function sourceTokens(o = {}) {
     // one transposition, and a monotone alignment drops one side of those. So
     // the projection's own order is kept for everything outside a group, and a
     // group is inserted after the last such token that precedes it.
+    // SOURCE ORDER, FOR A RENDERED SIDE THAT IS ALREADY IN IT. The engine's
+    // GlyphMap emits TeX's own list order — which is the source order, except
+    // that a script pair is emitted subscript-first — so the only reordering
+    // the projection needs is that one: within a run of scripts hanging off
+    // the same base, subscripts before superscripts. The canonical sort below
+    // was built for a rendered side reconstructed from geometry, and on a
+    // fraction's numerator it hoists the subscripts ahead of everything.
+    if (o.order === 'source') {
+        const res = [];
+        let i = 0;
+        while (i < out.length) {
+            const t = out[i];
+            const anchor = t.chain.length ? t.chain[0] : null;
+            const isScript = (k) => k.chain.length && (k.role === 'sup' || k.role === 'sub') && k.chain[0] === anchor;
+            if (anchor && isScript(t)) {
+                let j = i;
+                while (j < out.length && isScript(out[j])) j++;
+                const run = out.slice(i, j);
+                res.push(...run.filter(k => k.role === 'sub'), ...run.filter(k => k.role !== 'sub'));
+                i = j;
+            } else { res.push(t); i++; }
+        }
+        // AN ACCENT'S MARK PRINTS AFTER THE SCRIPTS OF ITS BASE. MEASURED on
+        // the engine's list order: `\dot x_\alpha^\uparrow` ships x α ↑ ˙ —
+        // LuaTeX attaches the scripts inside the accented nucleus, and the
+        // mark box comes after. The projection writes the mark right after the
+        // base; here it steps over the script run that follows it.
+        const accentSet = new Set(Object.values(ACCENT_GLYPHS || {}));
+        const isMark = (k) => accentSet.has(k.ch) && lines[k.line - 1] && lines[k.line - 1][k.startCol] === '\\';
+        for (let a = 0; a + 1 < res.length; a++) {
+            if (!isMark(res[a])) continue;
+            let b = a + 1;
+            while (b < res.length && res[b].chain.length && (res[b].role === 'sup' || res[b].role === 'sub')) b++;
+            if (b > a + 1) { const mk = res.splice(a, 1)[0]; res.splice(b - 1, 0, mk); a = b - 1; }
+        }
+        return res;
+    }
     const firstOf = new Map();
     for (let i = 0; i < out.length; i++) {
         const g = out[i].chain[0];
@@ -737,10 +774,19 @@ function glyphAtPoint(map, page, xBp, yTopBp) {
         const dy = yTopBp < g.y ? g.y - yTopBp : (yTopBp > g.y + g.h ? yTopBp - (g.y + g.h) : 0);
         // Vertical distance counts double: on a dense equation the glyph on the
         // NEXT line is often horizontally closer than the right one.
-        const d = Math.hypot(dx, dy * 2);
+        let d = Math.hypot(dx, dy * 2);
+        // Among boxes that CONTAIN the point (a base and its script touch at
+        // the edges when the boxes are em boxes): one whose INK contains it
+        // beats one that does not, then the nearest ink centre wins.
+        if (g.inkY != null) {
+            const cx = g.x + g.w / 2; const cy = g.inkY + (g.inkH || 0) / 2;
+            const inkHas = dx === 0 && yTopBp >= g.inkY && yTopBp <= g.inkY + (g.inkH || 0);
+            d = d * 10 + (inkHas ? 0 : 5) + Math.hypot(xBp - cx, yTopBp - cy) / 100;
+        }
         if (d < bestD) { bestD = d; best = i; }
     }
-    return { index: best, distance: bestD };
+    const g0 = best >= 0 ? map.glyphs[best] : null;
+    return { index: best, distance: (g0 && g0.inkY != null) ? bestD / 10 : bestD };
 }
 
 /**

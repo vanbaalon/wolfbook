@@ -1522,7 +1522,7 @@ class TexViewer {
      * fall back to searching the text layer by name.
      */
     _postAlignedGlyph(st, doc, line, column, title) {
-        const amap = this._objectMap(st, doc, this._objectForLine(st, doc, line));
+        const amap = this._alignMap(st, doc, line, null);
         if (!amap) return false;
         const t = tokenAt(amap, line, column);
         if (t.index < 0) return false;
@@ -1530,16 +1530,129 @@ class TexViewer {
         if (!(gi >= 0)) return false;
         const g = amap.glyphs[gi];
         const flag = st.map._baseFlag();
+        const tok = amap.tokens[t.index];
+        // THE UNIT IN PROSE IS THE WORD. The exact map aligns character by
+        // character, which is right in maths and one letter too narrow in a
+        // sentence — so every glyph of the word at the cursor is collected and
+        // painted as one band per printed row, exactly where the engine put it.
+        const inkRect = (q) => ({ page: q.page, x: q.x, y: q.inkY != null ? q.inkY : q.y, w: q.w, h: q.inkH != null ? q.inkH : q.h });
+        let rects = [inkRect(g)];
+        let what = JSON.stringify(tok.ch);
+        let glyph = true;
+        let word; let occurrence;
+        if (amap.exact && !tok.inMath) {
+            const lineSrc = doc.lineAt(Math.max(0, line - 1)).text;
+            const run = this._wordFromTokens(amap, t.index, lineSrc, null);
+            if (run) {
+                // The marker contract: the message names the word and which
+                // occurrence, for the panel's own bookkeeping; `exact` tells it
+                // the rects are already that word and need no narrowing.
+                word = run.word;
+                const at = wordAtColumn(lineSrc, column, { macros: this._macrosFor(doc) });
+                occurrence = (at && at.word === run.word) ? at.occurrence : 1;
+                const parts = [];
+                for (let i = 0; i < amap.tokens.length; i++) {
+                    const k = amap.tokens[i];
+                    if (k.line !== line || k.startCol < run.start || k.startCol >= run.end) continue;
+                    const j = amap.srcToRen[i];
+                    if (j >= 0) parts.push(inkRect(amap.glyphs[j]));
+                }
+                if (parts.length) { rects = mergeRows(parts); what = `"${run.word}"`; glyph = false; }
+            }
+        }
         this._post({
             type: 'highlight',
-            rects: [{ page: g.page, x: g.x, y: g.y, w: g.w, h: g.h }],
-            glyph: true,
+            rects,
+            glyph,
+            word, occurrence,
+            exact: !!amap.exact,
             flag: flag === FLAG.FRESH ? 'fresh' : flag === FLAG.STALE ? 'stale' : 'approx',
             reveal: Date.now() - this._invertedAt >= 1500,
             title,
-            label: `${JSON.stringify(amap.tokens[t.index].ch)} · p.${g.page} · ${flag}`,
+            label: `${what} · p.${g.page} · ${flag}`,
         });
         return true;
+    }
+
+
+    /**
+     * THE WORD A SOURCE TOKEN BELONGS TO, READ OFF THE TOKEN SEQUENCE.
+     *
+     * The exact alignment names one character; in prose the unit is the word.
+     * `wordAtColumn` re-derives words from the line and disagrees with the
+     * projection in the corners — a word glued to inline maths (`$\Gamma$-glued`)
+     * is not a word to it, so the nearest one ("full") was answered instead.
+     * The tokens already carry contiguous source offsets: the word is the run
+     * of word-like tokens around the hit whose source ranges touch.
+     *
+     * `narrowTo`: the word the PANEL saw (split at an en dash, so "upper" out
+     * of `upper--upper`); when the run contains it, the span is narrowed to the
+     * occurrence nearest the hit, so the editor selects what was clicked.
+     *
+     * @returns {{start:number,end:number,word:string,line:number}|null}
+     */
+    _wordFromTokens(amap, ti, lineSrc, narrowTo) {
+        const toks = amap && amap.tokens;
+        if (!toks || ti < 0 || ti >= toks.length) return null;
+        const t0 = toks[ti];
+        const wordy = (t) => t && t.line === t0.line && t.endLine === t0.line && !t.inMath &&
+            /[\p{L}\p{N}'’\-]/u.test(String(t.ch || ''));
+        if (!wordy(t0)) return null;
+        let a = ti; let b = ti;
+        while (a > 0 && wordy(toks[a - 1]) && toks[a - 1].endCol >= toks[a].startCol) a--;
+        while (b + 1 < toks.length && wordy(toks[b + 1]) && toks[b + 1].startCol <= toks[b].endCol) b++;
+        let start = toks[a].startCol; let end = toks[b].endCol;
+        if (!(end > start)) return null;
+        let word = lineSrc.slice(start, end);
+        if (narrowTo && word !== narrowTo && word.includes(narrowTo)) {
+            // the occurrence nearest the hit column
+            let best = -1; let bestD = Infinity; let from = 0;
+            for (;;) {
+                const k = word.indexOf(narrowTo, from);
+                if (k < 0) break;
+                const d = Math.abs(start + k + narrowTo.length / 2 - (t0.startCol + 0.5));
+                if (d < bestD) { bestD = d; best = k; }
+                from = k + 1;
+            }
+            if (best >= 0) { start = start + best; end = start + narrowTo.length; word = narrowTo; }
+        }
+        return { start, end, word, line: t0.line };
+    }
+    /**
+     * THE ALIGNMENT THAT ANSWERS FOR A LINE — exact when the engine emitted the
+     * map, the text-layer object map otherwise.
+     *
+     * With a GlyphMap (tex/glyphMap.js) the window is the construct the line
+     * belongs to — itself, or the caption/heading/align body whose glyphs all
+     * sit on one collector line — and the rendered side is the engine's own
+     * glyph sequence for it. Whether it is aligned as maths is read off the
+     * glyphs (display/cell ink) or the model's object, never guessed from the
+     * nearest object.
+     */
+    _alignMap(st, doc, line, hintObj) {
+        if (st.map && st.map.exact) {
+            const file = doc.uri.fsPath;
+            const lines = doc.getText().split(/\r?\n/);
+            const win = st.map.window(file, line, lines);
+            if (!win) return null;
+            const obj = hintObj && !hintObj.approximate ? hintObj : st.map.objectAtLine(file, line);
+            const objMath = !!(obj && !obj.approximate && (MATH_KINDS.includes(obj.kind) ||
+                (obj.envName && MATH_ENVS.has(String(obj.envName).replace(/\*$/, '')))));
+            const gl = st.map.glyphsForLine(file, win.collector);
+            // DISPLAY INK (kind 2) says maths; CELL ink (kind 4) does not — a
+            // TikZ node's multi-line label is set in an \halign too, and
+            // reading it as maths answered a click on "upper" with one letter.
+            // An align body is told from its source instead.
+            const mathInk = gl.filter(g => g.kind === 2).length;
+            const winSrc = lines.slice(win.startLine - 1, win.endLine).join('\n');
+            // `\\[` must not be read as `\[`: a TikZ node's `\\\\[-1mm]` is a row break.
+            const srcMath = /\\begin\{(equation|align|alignat|gather|multline|flalign|eqnarray|displaymath|dmath|split|aligned|gathered|cases)\*?\}|(^|[^\\])\\\[|\$\$/.test(winSrc);
+            const inMath = objMath || srcMath || (gl.length > 0 && mathInk > gl.length / 2);
+            const am = st.map.lineMap({ file, line, lines, macros: this._macrosFor(doc), inMath });
+            if (am) { am.exact = true; am.inMath = inMath; return am; }
+            return null;
+        }
+        return this._objectMap(st, doc, hintObj || this._objectForLine(st, doc, line));
     }
 
     /**
@@ -2638,11 +2751,23 @@ class TexViewer {
         // SyncTeX never attributed anything to. Only when it has nothing to say
         // does the older per-line search run.
         const alignObj = hit.object && !hit.object.approximate ? hit.object : null;
-        const amap = this._objectMap(st, doc, alignObj);
+        // THE ENGINE'S MAP FIRST. When the compile produced a GlyphMap the
+        // window map answers by exact position and exact line; the text-layer
+        // object map is the fallback for a generation without one.
+        const exactMap = st.map.exact ? this._alignMap(st, doc, hit.line, alignObj) : null;
+        const amap = exactMap || this._objectMap(st, doc, alignObj);
+        const exactHit = !!exactMap;
         let aligned = null;
         let ambiguous = null;
+        let unsourced = false;
         if (amap) {
             const g = glyphAtPoint(amap, m.page, m.xBp, m.yTopBp);
+            if (process.env.WB_JUMP_DEBUG) {
+                const near = amap.glyphs.map((q, i) => ({ i, ch: q.ch, x: +q.x.toFixed(1), y: +q.y.toFixed(1), w: +q.w.toFixed(1), h: +q.h.toFixed(1), iy: q.inkY != null ? +q.inkY.toFixed(1) : null, ih: q.inkH != null ? +q.inkH.toFixed(1) : null }))
+                    .filter(q => q.x - 6 < m.xBp && q.x + q.w + 6 > m.xBp && Math.abs(q.y + q.h / 2 - m.yTopBp) < 14);
+                // eslint-disable-next-line no-console
+                console.log('[jump:near]', JSON.stringify({ at: [+m.xBp.toFixed(1), +m.yTopBp.toFixed(1)], pick: g.index, d: +g.distance.toFixed(2), near }));
+            }
             // 12 bp is about one line of body text: further than that and the
             // click was not really on this object's glyph.
             if (g.index >= 0 && g.distance < 12) {
@@ -2658,8 +2783,25 @@ class TexViewer {
                 // answering a click on a word with its entire paragraph is
                 // exactly the coarseness this feature exists to avoid. Prose has
                 // better fallbacks of its own: the word, then the line.
-                else if (alignObj && MATH_KINDS.includes(alignObj.kind)) {
+                else if ((alignObj && MATH_KINDS.includes(alignObj.kind)) || (exactHit && amap.inMath)) {
                     ambiguous = groupAround(amap, g.index);
+                }
+                // PROSE INK WITH NO SOURCE — "Figure 1:", a section number —
+                // still sits beside ink that has one. The honest answer is that
+                // neighbour's LINE, never the whole float the ladder would
+                // otherwise hand back.
+                else if (exactHit) {
+                    let nb = -1;
+                    for (let k = 1; k < 40 && nb < 0; k++) {
+                        if (g.index + k < amap.glyphs.length && amap.renToSrc[g.index + k] >= 0) nb = amap.renToSrc[g.index + k];
+                        else if (g.index - k >= 0 && amap.renToSrc[g.index - k] >= 0) nb = amap.renToSrc[g.index - k];
+                    }
+                    if (nb >= 0) {
+                        hit.line = amap.tokens[nb].line;
+                        lineIdx = Math.max(0, Math.min(hit.line - 1, doc.lineCount - 1));
+                        lineSrc = doc.lineAt(lineIdx).text;
+                        unsourced = true;
+                    }
                 }
             }
         }
@@ -2692,6 +2834,15 @@ class TexViewer {
             const isMath = (alignObj && MATH_KINDS.includes(alignObj.kind)) || aligned.inMath;
             if (isMath) {
                 w = glyphToken;
+            } else if (exactHit) {
+                // The exact map has said WHICH character; the word is the run
+                // of tokens around it, narrowed to what the panel saw.
+                const ti = amap.tokens.indexOf(aligned);
+                const run = this._wordFromTokens(amap, ti, lineSrc, m.word || null);
+                w = run ? {
+                    start: run.start, end: run.end, word: run.word,
+                    exact: true, occurrence: 1, total: 1, inMath: false,
+                } : glyphToken;
             } else {
                 // The occurrence hint has to come along: recomputing without
                 // it threw away the only thing that can tell two identical
@@ -2756,7 +2907,7 @@ class TexViewer {
         // better was never consulted.
         const clickInMaths = !!(aligned && aligned.inMath) ||
             !!(hit.object && !hit.object.approximate && MATH_KINDS.includes(hit.object.kind));
-        if (m.word && m.wordContext && !clickInMaths) {
+        if (m.word && m.wordContext && !clickInMaths && !(exactHit && aligned)) {
             // HOW FAR TO LOOK: AS FAR AS THE THING THE CLICK IS INSIDE.
             //
             // The default window is two lines either side, which is the right
@@ -2899,6 +3050,19 @@ class TexViewer {
         // The certain-group answer outranks the ladder's fallback, but only for
         // a plain click: Cmd-click is a request to walk the ladder itself.
         if (groupStep && !m.widen) step = groupStep;
+        if (process.env.WB_JUMP_DEBUG) {
+            try {
+                // eslint-disable-next-line no-console
+                console.log('[jump]', JSON.stringify({
+                    at: [m.page, +m.xBp.toFixed(1), +m.yTopBp.toFixed(1)], glyph: m.glyph, word: m.word,
+                    hit: { line: hit.line, exact: !!hit.exact, obj: hit.object && hit.object.kind },
+                    exactHit, window: exactMap && exactMap.window, inMath: exactMap && exactMap.inMath,
+                    aligned: aligned && { ch: aligned.ch, line: aligned.line, col: aligned.startCol, inMath: aligned.inMath },
+                    w: w && { start: w.start, end: w.end, word: w.word, exact: w.exact },
+                    step: step && { kind: step.kind, s: step.start, e: step.end },
+                }));
+            } catch (_) { /* debug only */ }
+        }
 
         // A PLAIN CLICK NEVER SELECTS MORE THAN THE THING IT LANDED ON.
         //
@@ -2915,6 +3079,8 @@ class TexViewer {
         // several words away, so no word is sent, nothing resolves, and the
         // rung after `word` used to be taken instead.
         if (!m.widen && step && step.kind !== 'group' && !PLAIN_CLICK_KINDS.has(step.kind)) step = null;
+        // Ink without a source token answers with its neighbour's line only.
+        if (unsourced && !m.widen && !(w && w.exact)) step = null;
         // FULL SCREEN MUST SURVIVE A CLICK.
         //
         // Full screen is `toggleMaximizeEditorGroup`: only the viewer's group is

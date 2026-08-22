@@ -18,9 +18,10 @@ const os = require('os');
 const fs = require('fs');
 
 const {
-    compile, saveGeneration, loadGeneration, probeInitCode, snapshotSources, MAX_PASSES_CODE,
+    compile, saveGeneration, loadGeneration, probeInitCode, snapshotSources, MAX_PASSES_CODE, probeLualatex,
 } = require('./compileService');
 const { RenderMap, FLAG } = require('./renderMap');
+const { GlyphMap } = require('./glyphMap');
 const { findRoot, buildGraph } = require('./texProject');
 const {
     nextLiveDelayMs, blendLiveMs, synctexUnchanged, generationSatisfies, authoritativeDelayMs,
@@ -49,6 +50,16 @@ function nodeDeps() {
 }
 
 /** One root document's compile state. */
+/**
+ * The map for a generation: exact when the engine emitted one, SyncTeX-only
+ * otherwise. One construction site, so nothing downstream has to know which.
+ */
+function makeMap(o) {
+    const gen = o && o.generation;
+    if (gen && (gen.glyphMapPath || o.glyphDoc)) return new GlyphMap(o);
+    return new RenderMap(o);
+}
+
 class RootState {
     constructor(root) {
         this.root = root;
@@ -283,7 +294,7 @@ class RenderCoordinator {
             const cached = loadGeneration(root, { sourceFiles: st.files, overlay });
             if (cached) {
                 st.generation = cached;
-                st.map = new RenderMap({
+                st.map = makeMap({
                     generation: cached,
                     model: this._modelFor(root),
                     pageSize: this._pageSize(cached),
@@ -352,8 +363,23 @@ class RenderCoordinator {
                     if (pg) note(`page ${pg[1]}`);
                 },
             };
+            // THE ENGINE EMITS THE MAP (tex/glyphMap.js). `mapEngine` auto
+            // means: build the WPaper view with lualatex + the wbmap hook when
+            // lualatex is installed, so the render map is read off the engine
+            // rather than inferred from SyncTeX. A document lualatex cannot
+            // build falls back to the configured engine below, flagged.
+            const mapEngine = cfg.get('mapEngine', 'auto');
+            let wantGlyphMap = false;
+            if (mapEngine === 'lualatex') wantGlyphMap = true;
+            else if (mapEngine === 'auto') {
+                if (this._luaOk == null) this._luaOk = await probeLualatex();
+                wantGlyphMap = !!this._luaOk && !st.glyphMapRefused;
+            }
+            const primaryOpts = wantGlyphMap
+                ? { ...compileOpts, engine: 'lualatex', glyphMap: true }
+                : compileOpts;
             let gen = await compile({
-                ...compileOpts,
+                ...primaryOpts,
                 maxPasses: (capWanted && this._capOk) ? 1 : null,
             });
             // latexmk could not run our initialisation code after all. Retry
@@ -361,6 +387,15 @@ class RenderCoordinator {
             if (gen.rcUnsupported) {
                 this.log('  latexmk rejected the pass cap — rebuilding without it');
                 this._capOk = false;
+                gen = await compile({ ...primaryOpts, maxPasses: null });
+            }
+            // lualatex could not build this document at all (no PDF): rebuild
+            // with the engine the user configured and remember the refusal for
+            // this document so the live loop does not pay twice per keystroke.
+            if (wantGlyphMap && !gen.ok && !gen.cancelled && !ac.signal.aborted &&
+                primaryOpts.engine !== compileOpts.engine) {
+                this.log(`  lualatex produced no PDF (${gen.stopReason || 'unknown reason'}) — rebuilding with ${compileOpts.engine}; the render map will be approximate`);
+                st.glyphMapRefused = true;
                 gen = await compile({ ...compileOpts, maxPasses: null });
             }
             if (ac.signal.aborted) { this.log('  cancelled'); return st; }
@@ -373,12 +408,18 @@ class RenderCoordinator {
             st.prevMap = st.map;
             st.generation = gen;
             const model = this._modelFor(root);
-            st.map = new RenderMap({
+            // The parsed GlyphMap is reused the same way when its bytes did
+            // not move (glyphMapHash): a rebuild that ships nothing new costs
+            // no re-parse either.
+            const prevGlyph = st.map && st.map.gm;
+            st.map = makeMap({
                 generation: gen,
                 model,
                 pageSize: this._pageSize(gen),
                 synctexDoc: (prevDoc && synctexUnchanged(prevGen, gen)) ? prevDoc : null,
+                glyphDoc: (prevGlyph && prevGen && gen.glyphMapHash && prevGen.glyphMapHash === gen.glyphMapHash) ? prevGlyph : null,
             });
+            if (st.map.exact) this.log('  render map: exact (GlyphMap)');
             st.lastError = gen.ok ? null : (gen.stopReason || 'compile produced no PDF');
             saveGeneration(gen);
             // Tune the debounce to what this paper actually costs. gen.ms, not

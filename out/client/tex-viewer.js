@@ -2760,7 +2760,9 @@ window.addEventListener('message', async (ev) => {
             break;
         case 'highlight': {
             let rects = msg.rects || [];
-            if (rects.length && msg.word) {
+            // An EXACT highlight (the engine's own glyph boxes) is painted as
+            // sent; the word name travels for bookkeeping only.
+            if (rects.length && msg.word && !msg.exact) {
                 // Make sure the pages are rendered before asking for their
                 // text, then narrow the highlight from the whole typeset row
                 // to the single word the cursor is on.

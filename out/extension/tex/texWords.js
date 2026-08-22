@@ -34,6 +34,20 @@ const TEXT_ARG_CMDS = new Set([
     'section', 'subsection', 'subsubsection', 'paragraph', 'title', 'author',
 ]);
 
+/** Ellipses: three printed dots each. */
+const DOTS_CMDS = { ldots: '.', dots: '.', dotsc: '.', dotso: '.', cdots: '·', dotsb: '·', dotsm: '·', dotsi: '·' };
+
+/** Delimiter-sizing commands: the delimiter that follows is what prints. */
+const DELIM_CMDS = new Set([
+    'left', 'right', 'middle', 'big', 'Big', 'bigg', 'Bigg', 'bigl', 'bigr', 'Bigl', 'Bigr',
+    'biggl', 'biggr', 'Biggl', 'Biggr', 'bigm', 'Bigm', 'biggm', 'Biggm',
+]);
+const DELIM_GLYPHS = {
+    langle: '⟨', rangle: '⟩', lvert: '|', rvert: '|', vert: '|', lVert: '‖', rVert: '‖', Vert: '‖',
+    lfloor: '⌊', rfloor: '⌋', lceil: '⌈', rceil: '⌉', lbrace: '{', rbrace: '}', lbrack: '[', rbrack: ']',
+    backslash: '\\', uparrow: '↑', downarrow: '↓', updownarrow: '↕', Uparrow: '⇑', Downarrow: '⇓',
+};
+
 /** Control sequences that produce NO visible text at all. */
 const INVISIBLE_CMDS = new Set([
     'begin', 'end', 'label', 'index', 'nonumber', 'noindent', 'centering', 'small', 'footnotesize',
@@ -102,6 +116,17 @@ function visibleProjection(src, opts = {}) {
         if (c === '\\') {
             const m = /^\\([A-Za-z@]+)\s*/.exec(src.slice(i));
             if (!m) {
+                // `\\` ends a row and prints nothing — nor does its optional
+                // vertical-space argument: `\\[-1mm]` used to project as a
+                // backslash and the text "[-1mm]", which then paired with
+                // nothing and pushed the rest of an align body out of step.
+                if (src[i + 1] === '\\') {
+                    i += 2;
+                    if (src[i] === '*') i++;
+                    const ob = /^\s*\[[^\]\n]*\]/.exec(src.slice(i));
+                    if (ob) i += ob[0].length;
+                    continue;
+                }
                 if (i + 1 < n) { push(src[i + 1], i + 1); i += 2; continue; }  // \& \% \_
                 i++; continue;
             }
@@ -114,6 +139,15 @@ function visibleProjection(src, opts = {}) {
             // \Psi prints Ψ, and the PDF's text layer reports Ψ, so the two can
             // be matched. Leaving it opaque is why clicking a Greek letter used
             // to select the whole equation instead.
+            // AN ELLIPSIS IS THREE GLYPHS. `\ldots` prints three periods (and
+            // `\cdots` three centred dots), each a glyph of its own on the
+            // page; one "…" token could pair with only one of them and the
+            // other two fell back to the whole equation.
+            if (DOTS_CMDS[name]) {
+                const to = callStart + 1 + name.length;
+                for (let k = 0; k < 3; k++) push(DOTS_CMDS[name], callStart, inMath, to);
+                continue;
+            }
             const sym = SYMBOL_GLYPHS[name];
             // Span the COMMAND only: the regex ate any trailing space, and a
             // selection that includes it looks sloppy and breaks round trips.
@@ -175,6 +209,33 @@ function visibleProjection(src, opts = {}) {
                         continue;
                     }
                 }
+                continue;
+            }
+            if (inMath && DELIM_CMDS.has(name)) {
+                // `\left[ … \right]` PRINTS ITS DELIMITERS. Treating the `[`
+                // as an optional argument swallowed everything up to the
+                // matching `]` — the whole body of the fraction it enclosed —
+                // so nothing inside a \left…\right pair could be clicked.
+                // The delimiter is the next token: a character, `.` for none,
+                // or a control sequence (\{, \langle, \|, \lvert …).
+                const to = callStart + 1 + name.length;
+                if (src[i] === '\\') {
+                    const dm = /^\\([A-Za-z]+|[{}|])/.exec(src.slice(i));
+                    if (dm) {
+                        const dn = dm[1];
+                        const g = dn === '{' ? '{' : dn === '}' ? '}' : dn === '|' ? '‖'
+                            : (SYMBOL_GLYPHS[dn] || DELIM_GLYPHS[dn] || null);
+                        if (g) push(g, i, true, i + dm[0].length);
+                        i += dm[0].length;
+                        continue;
+                    }
+                } else if (src[i] === '.') { i++; continue; }
+                else if (src[i] && /[()\[\]|\/<>]/.test(src[i])) {
+                    push(src[i] === '<' ? '⟨' : src[i] === '>' ? '⟩' : src[i], i, true, i + 1);
+                    i++;
+                    continue;
+                }
+                void to;
                 continue;
             }
             if (inMath) {

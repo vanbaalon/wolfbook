@@ -1073,6 +1073,12 @@
           "default": "pdflatex",
           "markdownDescription": "Engine passed to `latexmk`. Compiles run **out of tree** in a temp directory, so your project is never written to; a `.latexmkrc` in the project is still honoured."
         },
+        "wolfbook.tex.mapEngine": {
+          "type": "string",
+          "enum": ["auto", "lualatex", "off"],
+          "default": "auto",
+          "markdownDescription": "How WPaper builds its render map. `auto` (default): when `lualatex` is installed, the WPaper view is compiled with LuaLaTeX plus the wbmap hook, so every printed glyph is mapped to its exact box and source line (exact click-to-source and cursor highlight); a document LuaLaTeX cannot build falls back to `#wolfbook.tex.engine#` with an approximate (SyncTeX) map. `lualatex`: always. `off`: never — use `#wolfbook.tex.engine#` and SyncTeX only."
+        },
         "wolfbook.tex.liveRender": {
           "type": "boolean",
           "default": true,
