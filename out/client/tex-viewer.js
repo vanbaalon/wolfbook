@@ -1108,8 +1108,16 @@ function renderReview() {
                 `<span class="name" title="${esc(name)}">${esc(name)}</span>` +
                 `<span class="meta">${esc(size)}</span>` +
                 `<span class="where">${esc(where)}</span>` +
+                // A change the reader has typed inside cannot be UNDONE — that
+                // would throw their own words away — but it can still be kept,
+                // and withholding both left it in the list with no way out.
+                // FIVE COLUMNS, ALWAYS: the flag lives inside the actions cell,
+                // because a sixth grid item wraps onto a line of its own.
                 (h.editedByYou
-                    ? '<span class="flag" title="Undo would throw away what you typed">you edited this</span>'
+                    ? '<span class="acts">' +
+                      '<span class="flag" title="Undo would throw away what you typed">you edited this</span>' +
+                      `<button class="keep" data-keep="${esc(h.id)}" title="Agree to this change, your words included">\u2713 Keep</button>` +
+                      '</span>'
                     : '<span class="acts">' +
                       `<button class="keep" data-keep="${esc(h.id)}" title="Agree to this change">\u2713 Keep</button>` +
                       `<button class="undo" data-undo="${esc(h.id)}" title="Put this back the way it was">\u21ba Undo</button>` +
@@ -1168,9 +1176,20 @@ function renderReviewDiff() {
     };
     const words = h.words || {};
     const parts = [];
+    // THE VERDICTS, HERE TOO. The list's own buttons are in its last column,
+    // which the diff pane squeezes; and a reader looking at the change itself
+    // should be able to answer it without hunting for the row it came from or
+    // for the band on the page. Reported: "hard to find in the viewer".
+    const acts = '<span class="sp"></span><span class="rd-acts">' +
+        '<button class="keep" data-keep="' + esc(h.id) + '" title="Agree to this change">\u2713 Keep</button>' +
+        (h.editedByYou
+            ? '<button class="undo" disabled title="You typed inside this change — undoing it would throw your own words away">\u21ba Undo</button>'
+            : '<button class="undo" data-undo="' + esc(h.id) + '" title="Put this back the way it was">\u21ba Undo</button>') +
+        '</span>';
     parts.push('<div class="rd-head"><b>' + esc(h.name || ('line ' + h.startLine)) + '</b>' +
         '<span>line ' + h.startLine + '</span>' +
-        (h.editedByYou ? '<span>· you edited this</span>' : '') + '</div>');
+        (h.editedByYou ? '<span class="rd-flag">\u00b7 you edited this</span>' : '') +
+        acts + '</div>');
     if (h.verb !== 'add' && h.theirText) {
         parts.push('<div class="rd-tag">before</div>');
         parts.push(block(h.theirText, words.theirs, 'was'));
