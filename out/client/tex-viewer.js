@@ -947,7 +947,9 @@ function renderReview() {
     if (!r || !r.pending) { panel.innerHTML = ''; paintReview(); return; }
 
     el('reviewtitle').textContent = `Review · ${r.pending} change${r.pending === 1 ? '' : 's'}`;
-    el('reviewcensus').textContent = r.census || '';
+    // The census opens with the same count the title just gave; what is worth
+    // saying is the rest of it — how many could be placed, how many could not.
+    el('reviewcensus').textContent = String(r.census || '').split(' · ').slice(1).join(' · ');
 
     const ago = (t) => {
         const s = Math.max(0, Math.round((Date.now() - t) / 1000));
@@ -973,16 +975,19 @@ function renderReview() {
             const size = h.verb === 'change'
                 ? `${h.changedWords || 0} word${h.changedWords === 1 ? '' : 's'} ${verbWord[h.verb]}`
                 : `${h.lines} line${h.lines === 1 ? '' : 's'} ${verbWord[h.verb]}`;
+            // One column each: what happened, to what, how much, where, and the
+            // two verdicts. A wide panel reads down its columns.
             parts.push(
                 `<div class="rh${h.id === r.focus ? ' on' : ''}" data-hunk="${esc(h.id)}">` +
                 `<span class="v ${esc(h.verb)}">${h.verb === 'add' ? '+' : h.verb === 'del' ? '\u2212' : '~'}</span>` +
-                `<span class="what"><span class="name">${esc(name)}</span>` +
-                `<span class="meta">${esc(size)} · ${esc(where)}</span></span>` +
+                `<span class="name" title="${esc(name)}">${esc(name)}</span>` +
+                `<span class="meta">${esc(size)}</span>` +
+                `<span class="where">${esc(where)}</span>` +
                 (h.editedByYou
                     ? '<span class="flag" title="Undo would throw away what you typed">you edited this</span>'
                     : '<span class="acts">' +
-                      `<button class="keep" data-keep="${esc(h.id)}" title="Agree to this change">\u2713</button>` +
-                      `<button class="undo" data-undo="${esc(h.id)}" title="Put this back the way it was">\u21ba</button>` +
+                      `<button class="keep" data-keep="${esc(h.id)}" title="Agree to this change">\u2713 Keep</button>` +
+                      `<button class="undo" data-undo="${esc(h.id)}" title="Put this back the way it was">\u21ba Undo</button>` +
                       '</span>') +
                 '</div>');
         }
