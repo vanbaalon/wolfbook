@@ -1073,12 +1073,48 @@ function registerTexSupport(context) {
     // the panel's list; every arrival — a write to disk, an edit through the
     // MCP tool — is one batch in one session whose baseline only the reader
     // moves.
+    // WHICH SECTION A CHANGE IS IN. The review groups by it, so it must be
+    // answerable without a compile — a paper that will not build is exactly
+    // when the reader most wants to see what an agent did to it. It comes from
+    // the model, not the render map, and is cached per document version
+    // because the list is rebuilt on every keystroke's debounce.
+    const sectionCache = new Map();      // file -> {version, spans}
+    const sectionsFor = (file) => {
+        const doc = vscode.workspace.textDocuments.find(d => d.uri.fsPath === file && !d.isClosed);
+        if (!doc) return [];
+        const hit = sectionCache.get(file);
+        if (hit && hit.version === doc.version) return hit.spans;
+        let spans = [];
+        try {
+            const { model } = projection.get(doc);
+            spans = sectionSpans(model.objects, doc.lineCount, doc.lineCount);
+        } catch (_) { spans = []; }
+        sectionCache.set(file, { version: doc.version, spans });
+        return spans;
+    };
+    /** The INNERMOST sectioning unit a line is in — \subsection over \section. */
+    const sectionAt = (file, line) => {
+        let best = null;
+        for (const sp of sectionsFor(file)) {
+            if (line < sp.startLine || line > sp.endLine) continue;
+            if (!best || sp.level > best.level || sp.startLine > best.startLine) best = sp;
+        }
+        if (!best) return null;
+        return {
+            key: best.stableKey || `s${best.startLine}`,
+            title: best.title,
+            level: best.level,
+            startLine: best.startLine,
+        };
+    };
+
     const review = new ReviewUi({
         coord, viewer, output,
         mapView: (file) => {
             const st = coord.roots.get(coord.rootFor({ uri: { fsPath: file } }) || file) ||
                 coord.roots.get(file);
-            return st ? viewer._compareMap(st, file) : {};
+            const base = st ? viewer._compareMap(st, file) : {};
+            return { ...base, sectionAt: (line) => sectionAt(file, line) };
         },
     });
     review.register(context);

@@ -340,6 +340,140 @@ test('grouping can be turned off', () => {
     assert.strictEqual(s.payload().groups.length, 2, 'every write is its own arrival again');
 });
 
+// --- WHICH PART OF THE PAPER A CHANGE IS IN ---------------------------------
+//
+// Proposed: collate the list by section, with a way to agree to a whole
+// section at once. The session's job is to say which section each change is in
+// (asked of the injected view, so it works with no render map at all) and to
+// keep a named set bottom-up; the grouping itself is the panel's.
+
+const SECTIONED = [
+    '\\documentclass{article}',
+    '\\begin{document}',
+    '\\section{The pairing}',
+    'First section prose that the agent will rewrite.',
+    '',
+    '\\subsection{The upper tower}',
+    'A subsection sentence, also rewritten.',
+    '',
+    '\\section{The measure}',
+    'Second section prose, untouched at first.',
+    'A last line of it.',
+    '\\end{document}',
+].join('\n');
+
+/** The view the extension injects: the innermost heading a line is under. */
+const SECTION_VIEW = {
+    sectionAt: (line) => {
+        if (line >= 9) return { key: 'sec:measure', title: 'The measure', level: 1, startLine: 9 };
+        if (line >= 6) return { key: 'sec:tower', title: 'The upper tower', level: 2, startLine: 6 };
+        if (line >= 3) return { key: 'sec:pairing', title: 'The pairing', level: 1, startLine: 3 };
+        return null;
+    },
+};
+
+test('EVERY CHANGE KNOWS WHICH SECTION IT IS IN', () => {
+    const s = new ReviewSession({ file: '/p.tex', baseText: SECTIONED, now: () => 1000 });
+    const after = SECTIONED
+        .replace('First section prose that the agent will rewrite.', 'First section prose, rewritten.')
+        .replace('A subsection sentence, also rewritten.', 'A subsection sentence, now different.')
+        .replace('Second section prose, untouched at first.', 'Second section prose, touched after all.');
+    s.noteBatch({ source: 'disk' });
+    s.update({ currentText: after, map: SECTION_VIEW });
+    assert.strictEqual(s.hunks.length, 3);
+
+    const p = s.payload();
+    const secs = p.groups.flatMap(g => g.hunks).map(h => h.section && h.section.title).sort();
+    assert.deepStrictEqual(secs, ['The measure', 'The pairing', 'The upper tower']);
+    const sub = p.groups.flatMap(g => g.hunks).find(h => h.section.key === 'sec:tower');
+    assert.strictEqual(sub.section.level, 2, 'the INNERMOST unit, so a subsection is its own group');
+    assert.strictEqual(sub.section.startLine, 6, 'and carries where it starts, for document order');
+});
+
+test('a paper with no sections, or a change above the first one, simply has none', () => {
+    const s = fresh(BASE);
+    s.noteBatch({ source: 'disk' });
+    s.update({ currentText: AFTER_ONE });                 // no map at all
+    assert.strictEqual(s.payload().groups[0].hunks[0].section, null);
+
+    // Changed IN PLACE, so the headings below keep their line numbers — the
+    // view is asked about the document as it is now, not as it was.
+    const s2 = new ReviewSession({ file: '/p.tex', baseText: SECTIONED, now: () => 1000 });
+    s2.noteBatch({ source: 'disk' });
+    s2.update({
+        currentText: SECTIONED.replace('\\documentclass{article}', '\\documentclass[11pt]{article}'),
+        map: SECTION_VIEW,
+    });
+    assert.strictEqual(s2.hunks.length, 1);
+    assert.strictEqual(s2.hunks[0].section, null, 'above the first heading is not in a section');
+});
+
+test('a view that throws does not cost the reader their list', () => {
+    const s = new ReviewSession({ file: '/p.tex', baseText: SECTIONED, now: () => 1000 });
+    s.noteBatch({ source: 'disk' });
+    assert.doesNotThrow(() => s.update({
+        currentText: SECTIONED.replace('A last line of it.', 'A last line, changed.'),
+        map: { sectionAt: () => { throw new Error('no model'); } },
+    }));
+    assert.strictEqual(s.hunks.length, 1);
+    assert.strictEqual(s.hunks[0].section, null);
+});
+
+test('KEEPING A SECTION AGREES TO EXACTLY ITS CHANGES, AND TO NOTHING ELSE', () => {
+    const s = new ReviewSession({ file: '/p.tex', baseText: SECTIONED, now: () => 1000 });
+    const after = SECTIONED
+        .replace('First section prose that the agent will rewrite.', 'First section prose, rewritten.')
+        .replace('A subsection sentence, also rewritten.', 'A subsection sentence, now different.')
+        .replace('Second section prose, untouched at first.', 'Second section prose, touched after all.');
+    s.noteBatch({ source: 'disk' });
+    s.update({ currentText: after, map: SECTION_VIEW });
+
+    const inFirst = s.hunks.filter(h => h.section.key === 'sec:pairing').map(h => h.id);
+    assert.strictEqual(inFirst.length, 1);
+    const r = s.keepMany(inFirst);
+    assert.ok(r.ok);
+    assert.deepStrictEqual(r.kept, inFirst);
+    assert.ok(s.baseText.includes('First section prose, rewritten.'), 'that section is agreed to');
+    assert.ok(!s.baseText.includes('now different'), 'and the subsection under it is NOT');
+    assert.ok(!s.baseText.includes('touched after all'), 'nor the section below it');
+
+    const left = s.update({ currentText: after, map: SECTION_VIEW });
+    assert.strictEqual(left.hunks.length, 2, 'the other two are still waiting');
+});
+
+test('KEEPING SEVERAL AT ONCE IS BOTTOM-UP, or the splices land on stale lines', () => {
+    // The property that makes keepMany more than a loop: keeping a change
+    // rewrites the baseline and moves every line below it, so the lowest one
+    // must be dealt with while the ones above still describe where they are.
+    // Agreeing to ALL of them must therefore give back the document exactly.
+    const s = new ReviewSession({ file: '/p.tex', baseText: SECTIONED, now: () => 1000 });
+    const after = SECTIONED
+        .replace('First section prose that the agent will rewrite.',
+            'First section prose, rewritten\nacross two lines now.')
+        .replace('A subsection sentence, also rewritten.', 'A subsection sentence, now different.')
+        .replace('Second section prose, untouched at first.\nA last line of it.',
+            'Second section prose, and only one line of it.');
+    s.noteBatch({ source: 'disk' });
+    s.update({ currentText: after, map: SECTION_VIEW });
+    assert.ok(s.hunks.length >= 3, `expected several hunks, got ${s.hunks.length}`);
+
+    const r = s.keepMany(s.hunks.map(h => h.id));
+    assert.ok(r.ok);
+    assert.strictEqual(s.baseText, after,
+        'keeping every change gives back the document, byte for byte');
+    assert.strictEqual(s.update({ currentText: after, map: SECTION_VIEW }).hunks.length, 0);
+});
+
+test('keepMany ignores ids that are not in the list, and an empty set', () => {
+    const s = fresh(BASE);
+    s.noteBatch({ source: 'disk' });
+    s.update({ currentText: AFTER_ONE });
+    assert.deepStrictEqual(s.keepMany(['nope']).kept, []);
+    assert.deepStrictEqual(s.keepMany([]).kept, []);
+    assert.doesNotThrow(() => s.keepMany(null));
+    assert.strictEqual(s.hunks.length, 1, 'and nothing was decided');
+});
+
 (async () => {
     console.log('the review session, executed\n');
     for (const [name, fn] of tests) {

@@ -163,7 +163,22 @@ class ReviewSession {
         } catch (_) {
             return { hunks: this.hunks, summary: this.summary, census: describeSummary(this.summary) };
         }
-        const hunks = built.hunks.map(h => ({ ...h, verb: verbOf(h) }));
+        // WHICH SECTION EACH CHANGE IS IN, asked of the injected view (the model
+        // knows; the render map is not consulted, so this still works on a
+        // paper that will not compile). A file with no sectioning commands —
+        // or a change above the first heading — simply has none, and the panel
+        // gathers those under one heading of its own.
+        const sectionOf = (line) => {
+            try {
+                const f = (o.map || {}).sectionAt;
+                const s = typeof f === 'function' ? f(line) : null;
+                return s && s.key ? { key: String(s.key), title: String(s.title || ''),
+                    level: Number(s.level) || 0, startLine: Number(s.startLine) || line } : null;
+            } catch (_) { return null; }
+        };
+        const hunks = built.hunks.map(h => ({
+            ...h, verb: verbOf(h), section: sectionOf(h.ourRange.startLine),
+        }));
 
         const overlaps = (a, b) =>
             a.startLine < Math.max(b.endLine, b.startLine + 1) &&
@@ -266,12 +281,24 @@ class ReviewSession {
         return { ok: true, baseText: this.baseText, kept: ids };
     }
 
-    keepBatch(batchId) {
-        const mine = this._hunksOf(batchId);
-        // Bottom-up: splicing changes the line numbers of everything below it.
+    /**
+     * Keep a named set of changes — a batch, a section, anything the reader
+     * pointed at as a group.
+     *
+     * BOTTOM-UP, ALWAYS: keeping splices text into the baseline, which moves
+     * the line numbers of everything below it, so the lowest change has to be
+     * dealt with while the ones above it still describe where they are.
+     */
+    keepMany(ids) {
+        const want = new Set((ids || []).map(String));
+        const mine = this.hunks.filter(h => want.has(h.id));
         const ordered = mine.slice().sort((a, b) => b.theirRange.startLine - a.theirRange.startLine);
         for (const h of ordered) this.keep(h.id);
         return { ok: true, baseText: this.baseText, kept: mine.map(h => h.id) };
+    }
+
+    keepBatch(batchId) {
+        return this.keepMany(this._hunksOf(batchId).map(h => h.id));
     }
 
     /**
@@ -350,6 +377,7 @@ class ReviewSession {
                     name: h.object ? h.object.name : null,
                     startLine: h.ourRange.startLine,
                     endLine: h.ourRange.endLine,
+                    section: h.section || null,
                     lines: Math.max(h.ourRange.endLine - h.ourRange.startLine,
                         h.theirRange.endLine - h.theirRange.startLine),
                     changedWords: h.changedWords,

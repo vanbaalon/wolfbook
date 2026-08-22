@@ -395,6 +395,13 @@
      Keep and Undo sat outside the visible width — reported as "hard to find".
      The two text columns give way first, and below the width where even that
      is not enough the least load-bearing one is dropped. */
+  /* A SECTION HEADING IN THE LIST is the paper's own structure, so it reads as
+     a heading — not as the timestamp line an arrival group is. */
+  .grp.sec { font-family: var(--vscode-font-family); }
+  .grp.sec .secname { font-weight:600; overflow:hidden; text-overflow:ellipsis;
+             white-space:nowrap; max-width:60%; }
+  .grp.sec .secn { opacity:.6; font-size:10.5px; }
+  #reviewbar #reviewgroup[aria-pressed="true"] { border-color: var(--vscode-focusBorder, #0a84ff); }
   .rh { display:grid; grid-template-columns:14px minmax(70px, 26%) minmax(60px, 1fr) auto auto;
              gap:10px; align-items:baseline; padding:5px 12px; cursor:pointer;
              border-bottom:1px solid rgba(128,128,128,.10); }
@@ -561,6 +568,7 @@
   <span class="t" id="reviewtitle">Review</span>
   <span class="census" id="reviewcensus"></span>
   <span class="sp"></span>
+  <button id="reviewgroup" title="How the list is grouped">by section</button>
   <button id="reviewprev" title="Previous change">‹</button>
   <button id="reviewnext" title="Next change">›</button>
   <button id="reviewkeepall" class="keep" title="Agree to every change">✓ Keep all</button>

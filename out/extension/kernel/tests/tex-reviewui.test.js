@@ -405,6 +405,42 @@ test('A BURST OF WRITES INTERRUPTS ONCE, AND READS AS ONE ARRIVAL', async () => 
     assert.strictEqual(new Set(names).size, 2);
 });
 
+test('KEEPING A SECTION DECIDES ITS CHANGES AND LEAVES THE REST', async () => {
+    // The panel groups by section and sends the ids in that group; the UI's
+    // job is to keep exactly those and repaint. Anything else — keeping the
+    // whole file, or dropping the others from the list — would be the bug the
+    // review exists to prevent.
+    const { ui, posted } = makeUi();
+    const both = BASE
+        .replace('The SoV pairing contains both allowed sectors here.',
+            'The SoV pairing contains both allowed sectors in the strip.')
+        .replace('A second paragraph nobody is arguing about.',
+            'A second paragraph the agent rewrote as well.');
+    DOC._setText(both); fs.writeFileSync(FILE, both);
+    await ui.noteAgentChange({ file: FILE, baseText: BASE, source: 'disk' });
+    const s = ui.sessionFor(FILE);
+    assert.strictEqual(s.pendingCount, 2);
+
+    const first = s.hunks.find(h => h.ourRange.startLine < 4);
+    assert.ok(first, 'the fixture has a change near the top');
+    await ui.keepMany(FILE, [first.id]);
+
+    assert.strictEqual(ui.sessionFor(FILE).pendingCount, 1, 'only the other one is left');
+    assert.ok(ui.sessionFor(FILE).baseText.includes('in the strip.'), 'that one is agreed to');
+    assert.ok(!ui.sessionFor(FILE).baseText.includes('rewrote as well'), 'the other is not');
+    assert.strictEqual(posted[posted.length - 1].pending, 1, 'and the panel is told');
+});
+
+test('keeping a group of nothing does nothing at all', async () => {
+    const { ui } = makeUi();
+    await ui.noteAgentChange({ file: FILE, baseText: BASE, source: 'disk' });
+    const before = ui.sessionFor(FILE).pendingCount;
+    await ui.keepMany(FILE, []);
+    await ui.keepMany(FILE, null);
+    await ui.keepMany('/not/a/file.tex', ['x']);
+    assert.strictEqual(ui.sessionFor(FILE).pendingCount, before);
+});
+
 // --- EDITING AT THE SAME TIME AS THE AGENT -----------------------------------
 //
 // Reported with a screenshot of VS Code's own refusal: "Failed to save … the

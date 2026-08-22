@@ -49,6 +49,7 @@ const state = {
     labelsPinned: false,      // the toolbar toggle
     labelsAsked: null,        // the generation we have already asked for
     review: null,             // {pending, groups, census, focus} — the agent's changes
+    reviewGroup: 'section',   // how the list is collated: 'section' | 'arrival'
     hints: { left: { pages: 3, chip: 3 }, dwellMs: HINT_DWELL_DEFAULT },
     hintText: '',             // the page hint, kept when the attribute is taken away
     tour: null,               // {index,total,id,title,say,doIt,done,point} — the tour card
@@ -1054,6 +1055,50 @@ function wireTour() {
     window.addEventListener('resize', () => { if (state.tour) placeTourRing(state.tour.point); });
 }
 
+/**
+ * The same changes, collated by the section of the paper they are in.
+ *
+ * Document order, not arrival order: reading down the list is reading down the
+ * paper. Changes above the first heading — or in a file with no sectioning at
+ * all — gather under one group of their own rather than vanishing.
+ */
+function renderReviewGroupBtn() {
+    const b = el('reviewgroup');
+    if (!b) return;
+    const bySection = state.reviewGroup === 'section';
+    b.textContent = bySection ? 'by section' : 'by arrival';
+    b.title = bySection
+        ? 'Grouped by the part of the paper each change is in. Click for arrivals instead.'
+        : 'Grouped by when each change arrived. Click for sections instead.';
+    b.setAttribute('aria-pressed', bySection ? 'true' : 'false');
+}
+
+function sectionGroups(r) {
+    const by = new Map();
+    for (const h of (r.groups || []).flatMap(g => g.hunks)) {
+        const sec = h.section;
+        const key = sec && sec.key ? sec.key : '\u0000none';
+        if (!by.has(key)) {
+            by.set(key, {
+                kind: 'section', id: key,
+                title: sec && sec.title ? sec.title : 'before the first section',
+                level: sec ? sec.level : 0,
+                at: sec ? sec.startLine : 0,
+                hunks: [], ids: [],
+            });
+        }
+        const g = by.get(key);
+        g.hunks.push(h);
+        g.ids.push(h.id);
+    }
+    const out = [...by.values()];
+    for (const g of out) {
+        g.count = g.hunks.length;
+        g.hunks.sort((a, b) => a.startLine - b.startLine);
+    }
+    return out.sort((a, b) => a.at - b.at);
+}
+
 function reviewHunks() {
     const r = state.review;
     if (!r || !r.groups) return [];
@@ -1082,15 +1127,36 @@ function renderReview() {
         .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const verbWord = { add: 'added', del: 'removed', change: 'changed' };
 
+    // HOW THE LIST IS COLLATED.
+    //
+    // By ARRIVAL answers "what did the agent just do"; by SECTION answers
+    // "what has happened to this part of my paper", which is the question a
+    // writer asks while reading, and it is the one asked for. The hunks are the
+    // same either way — only the headings and what "keep the group" means
+    // change — so this is a rendering decision and nothing else.
+    const groups = state.reviewGroup === 'arrival' ? r.groups : sectionGroups(r);
+
     const parts = [];
-    for (const g of r.groups) {
+    for (const g of groups) {
         // An arrival is an EPISODE: several writes close together are one
         // group, so the age shown is that of the LAST write in it, and the
         // number of writes is worth saying when it was more than one.
-        const writes = g.writes > 1 ? ` · ${g.writes} writes` : '';
-        parts.push(`<div class="grp"><span>${esc(ago(g.lastAt || g.at))} · ${esc(g.source)}${writes} · ` +
-            `${g.count} change${g.count === 1 ? '' : 's'}</span><span class="sp"></span>` +
-            `<button data-batch="${esc(g.id)}">Keep batch</button></div>`);
+        if (g.kind === 'section') {
+            // The indent carries the level, so a subsection reads as inside the
+            // section above it rather than as a sibling of it.
+            const pad = Math.min(3, Math.max(0, (g.level || 1) - 1)) * 12;
+            parts.push(`<div class="grp sec" style="padding-left:${8 + pad}px">` +
+                `<span class="secname" title="${esc(g.title)}">${esc(g.title)}</span>` +
+                `<span class="secn">${g.count} change${g.count === 1 ? '' : 's'}</span>` +
+                `<span class="sp"></span>` +
+                `<button data-keepmany="${esc(g.ids.join(','))}" ` +
+                `title="Agree to every change in this section">\u2713 Keep section</button></div>`);
+        } else {
+            const writes = g.writes > 1 ? ` · ${g.writes} writes` : '';
+            parts.push(`<div class="grp"><span>${esc(ago(g.lastAt || g.at))} · ${esc(g.source)}${writes} · ` +
+                `${g.count} change${g.count === 1 ? '' : 's'}</span><span class="sp"></span>` +
+                `<button data-batch="${esc(g.id)}">Keep batch</button></div>`);
+        }
         for (const h of g.hunks) {
             const where = h.where === 'rows' ? `p.${h.page} · on the page`
                 : h.where === 'gap' ? `p.${h.page} · marked at the seam`
@@ -1264,6 +1330,14 @@ document.addEventListener('click', (e) => {
     if (keep) { e.preventDefault(); e.stopPropagation(); reviewAct('keep', { id: keep.dataset.keep }); return; }
     const undo = t.closest('[data-undo]');
     if (undo) { e.preventDefault(); e.stopPropagation(); reviewAct('undo', { id: undo.dataset.undo }); return; }
+    // A GROUP THE READER POINTED AT AS ONE — a whole section, most often.
+    const many = t.closest('[data-keepmany]');
+    if (many) {
+        e.preventDefault(); e.stopPropagation();
+        const ids = String(many.dataset.keepmany || '').split(',').filter(Boolean);
+        if (ids.length) reviewAct('keepMany', { ids });
+        return;
+    }
     const batch = t.closest('[data-batch]');
     if (batch) { e.preventDefault(); e.stopPropagation(); reviewAct('keepBatch', { batch: batch.dataset.batch }); return; }
     const row = t.closest('.rh');
@@ -2860,6 +2934,20 @@ el('full').addEventListener('click', () => {
 // what is on screen as an explicit choice — including "white paper in a dark
 // theme", which is what a reader checking how the paper will PRINT wants.
 el('compare').addEventListener('click', () => vscode.postMessage({ type: 'compare' }));
+{
+    const gbtn = el('reviewgroup');
+    if (gbtn) {
+        gbtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            state.reviewGroup = state.reviewGroup === 'section' ? 'arrival' : 'section';
+            // The extension remembers it, so the choice outlives this panel.
+            vscode.postMessage({ type: 'reviewGroup', by: state.reviewGroup });
+            renderReviewGroupBtn();
+            renderReview();
+        });
+        renderReviewGroupBtn();
+    }
+}
 for (const [id, action] of [['reviewprev', 'prev'], ['reviewnext', 'next'],
     ['reviewkeepall', 'keepAll'], ['reviewundoall', 'undoAll'], ['reviewclose', 'close']]) {
     const b = el(id);
@@ -3259,6 +3347,13 @@ window.addEventListener('message', async (ev) => {
                 dwellMs: Number.isFinite(msg.dwellMs) ? msg.dwellMs : state.hints.dwellMs,
             };
             applyHints();
+            break;
+        case 'reviewGroup':
+            if (msg.by === 'section' || msg.by === 'arrival') {
+                state.reviewGroup = msg.by;
+                renderReviewGroupBtn();
+                renderReview();
+            }
             break;
         case 'review':
             state.review = msg.session || null;

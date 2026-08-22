@@ -526,6 +526,16 @@ class ReviewUi {
         await this.refresh(file);
     }
 
+    /** Keep a set the reader pointed at as one — a section, a batch, a picking. */
+    async keepMany(file, ids) {
+        const s = this.sessions.get(file);
+        if (!s || !Array.isArray(ids) || !ids.length) return;
+        const r = s.keepMany(ids);
+        await this.refresh(file);
+        const n = (r.kept || []).length;
+        if (n) this.say(`kept ${n} change${n === 1 ? '' : 's'}`, 'ok');
+    }
+
     async undo(file, id) {
         const s = this.sessions.get(file);
         if (!s) return;

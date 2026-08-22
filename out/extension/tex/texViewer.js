@@ -60,6 +60,7 @@ const { stepAt, satisfies } = require('./tourSteps');
  * what the reader asked for.
  */
 const TOUR_KEY = 'wolfbook.tex.tour';
+const GROUP_KEY = 'wolfbook.tex.reviewGroup';
 const HINT_BUDGET = { pages: 3, chip: 3 };
 const hintsLeft = { ...HINT_BUDGET };
 
@@ -1086,6 +1087,14 @@ class TexViewer {
         }
     }
 
+    /** How the review list is collated: the reader's last choice, or sections. */
+    _reviewGroup() {
+        try {
+            const v = this.context && this.context.globalState && this.context.globalState.get(GROUP_KEY);
+            return v === 'arrival' ? 'arrival' : 'section';
+        } catch (_) { return 'section'; }
+    }
+
     attachReview(review) { this._review = review; }
 
     /** Is the reader looking at the list right now? (the toast asks) */
@@ -1128,6 +1137,7 @@ class TexViewer {
             case 'keepAll': return r.keepAll(file);
             case 'undoAll': return r.undoAll(file);
             case 'keepBatch': return r.keepBatch(file, m.batch);
+            case 'keepMany': return r.keepMany(file, m.ids);
             case 'show': return r.show(file, m.id);
             case 'next': return r.step(file, +1);
             case 'prev': return r.step(file, -1);
@@ -2030,12 +2040,19 @@ class TexViewer {
         try { this._tourObserve(m); } catch (_) { /* the tour never breaks the panel */ }
         switch (m.type) {
             case 'tourAction': this._tourAction(m); return;
+            case 'reviewGroup':
+                // The reader's choice of collation outlives the panel.
+                if (m.by === 'section' || m.by === 'arrival') {
+                    try { this.context.globalState.update(GROUP_KEY, m.by); } catch (_) { /* no state */ }
+                }
+                return;
             case 'hintShown':
                 if (hintsLeft[m.id] > 0) hintsLeft[m.id] -= 1;
                 break;
             case 'ready':
                 this._postTheme();
                 this._post({ type: 'hints', left: { ...hintsLeft } });
+                this._post({ type: 'reviewGroup', by: this._reviewGroup() });
                 // FIRST RUN: the tour opens itself once, after the first page
                 // is on screen — a card over a blank panel teaches nothing.
                 setTimeout(() => {
