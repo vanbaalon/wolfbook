@@ -179,6 +179,33 @@ test('TYPING INSIDE A PENDING CHANGE FLAGS IT, AND UNDO REFUSES', () => {
     assert.ok(s.keep(now.id).ok);
 });
 
+test('AN AGENT REWRITING ITS OWN CHANGE IS NOT "YOU EDITED THIS"', () => {
+    // Reported: a change the agent had just made carried the reader's flag, so
+    // Undo was withheld for it. From the diff's point of view a second agent
+    // write over the same region looks exactly like the reader typing there —
+    // the content-derived id changes and a new hunk covers the same lines — so
+    // the flag can only come from the keystrokes themselves.
+    const s = fresh(BASE);
+    s.noteBatch({ source: 'disk' });
+    s.update({ currentText: AFTER_ONE });
+    assert.strictEqual(s.hunks.length, 1);
+    assert.strictEqual(s.edited.has(s.hunks[0].id), false);
+
+    // The agent writes again, over the very same sentence.
+    const again = BASE.replace('sum.  They are the two physical half-towers.',
+        'sum.  They are the two physical half-towers, not continuations of one lattice.');
+    const b2 = s.noteBatch({ source: 'disk' });
+    s.update({ currentText: again });
+
+    const h = s.hunks[0];
+    assert.strictEqual(s.hunks.length, 1);
+    assert.strictEqual(s.edited.has(h.id), false,
+        'the agent rewriting its own change is still the agent');
+    assert.ok(s.undo(h.id).ok, 'so it can still be undone');
+    assert.strictEqual(s.firstSeen.get(h.id), b2,
+        'and it belongs to the arrival that rewrote it');
+});
+
 test('a change the reader makes identical to the baseline simply leaves', () => {
     const s = fresh(BASE);
     s.noteBatch({ source: 'disk' });

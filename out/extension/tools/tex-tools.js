@@ -547,6 +547,19 @@ class PaperApplyEditTool {
             const unguarded = input.expected_source_hash == null &&
                 input.expected_object_id == null && input.expected_stable_key == null;
 
+            // SAY IT BEFORE WRITING, TOO. This edit goes through the open
+            // buffer, so the change event it provokes looks exactly like the
+            // reader typing — and the review mirrors the reader's typing into
+            // its baseline, which would agree to this edit on their behalf and
+            // leave nothing to review. `r.text` is the document as it stands
+            // now, which is the baseline this change is against.
+            try {
+                announceAgentEdit({
+                    file: r.fsPath, baseText: r.text, phase: 'begin',
+                    source: 'paper_applyEdit',
+                });
+            } catch (_) { /* announcing is never worth failing an edit */ }
+
             const range = new vscode.Range(
                 r.doc.positionAt(obj.sourceRange.startOffset),
                 r.doc.positionAt(obj.sourceRange.endOffset));
@@ -564,7 +577,7 @@ class PaperApplyEditTool {
             // which is the baseline a review opens with.
             try {
                 announceAgentEdit({
-                    file: r.fsPath, baseText: r.text,
+                    file: r.fsPath, baseText: r.text, phase: 'end',
                     source: 'paper_applyEdit',
                     note: obj.label ? `${obj.kind} ${obj.label}` : obj.kind,
                 });

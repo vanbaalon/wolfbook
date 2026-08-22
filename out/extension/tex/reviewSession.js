@@ -140,11 +140,22 @@ class ReviewSession {
             if (this.firstSeen.has(h.id)) continue;
             const stood = previous.find(p => !hunks.some(x => x.id === p.id) &&
                 overlaps(p.ourRange, h.ourRange));
-            if (stood) {
+            // "YOU EDITED THIS" MEANS THE READER TYPED HERE — NOTHING ELSE.
+            //
+            // It used to be inferred from "a hunk stood here and the text has
+            // moved since", which is ALSO what a second agent write over the
+            // same region looks like: the old content-derived id disappears and
+            // a new one covers the same lines. Reported — a change the agent
+            // had just made was labelled as the reader's, and Undo was withheld
+            // for it. The only honest source is `noteReaderEdit`, which is
+            // called for the reader's keystrokes and for nothing else; a flag
+            // set there follows its content onto whatever id it becomes.
+            if (stood && this.edited.has(stood.id)) {
+                this.edited.add(h.id);
                 this.firstSeen.set(h.id, this.firstSeen.get(stood.id) || this._current);
-                if (this.edited.has(stood.id)) this.edited.add(h.id);
-                else if (this._lastText != null && this._lastText !== currentText) this.edited.add(h.id);
             } else {
+                // Rewritten again by the agent: it belongs to the arrival that
+                // rewrote it, not to the one it replaced.
                 this.firstSeen.set(h.id, this._current);
             }
         }

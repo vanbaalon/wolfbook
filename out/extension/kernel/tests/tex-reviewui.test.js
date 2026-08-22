@@ -277,6 +277,45 @@ test('AN EDIT FROM THE MCP TOOL IS REVIEWABLE — the bus carries it', async () 
     assert.strictEqual(s.pendingCount, 1);
 });
 
+test('AN MCP EDIT THROUGH THE BUFFER IS REVIEWABLE, NOT MIRRORED AWAY', async () => {
+    // paper_applyEdit writes through the OPEN BUFFER, so the change event it
+    // provokes is indistinguishable from typing — and the review mirrors the
+    // reader's typing into its baseline. Without the `begin` announcement the
+    // tool's own edit was agreed to on the reader's behalf and never appeared.
+    // The real sequence: a review is already open and has compared once (which
+    // is what arms the mirror), and THEN the tool writes.
+    const { ui } = makeUi({ docText: AGENT, diskText: AGENT });
+    await ui.noteAgentChange({ file: FILE, baseText: BASE, source: 'disk' });
+    assert.strictEqual(ui.sessionFor(FILE).pendingCount, 1, 'one change from the disk write');
+
+    busMod.announceAgentEdit({ file: FILE, baseText: AGENT, phase: 'begin', source: 'paper_applyEdit' });
+    await new Promise(r => setTimeout(r, 5));
+
+    // The tool applies its edit: the buffer changes and goes dirty.
+    const TOOL = AGENT.replace('A second paragraph nobody is arguing about.',
+        'A second paragraph the tool rewrote.');
+    const at = AGENT.indexOf('A second paragraph nobody is arguing about.');
+    DOC._setText(TOOL);
+    DOC.isDirty = true;
+    for (const fn of changeHandlers) {
+        fn({ document: DOC, contentChanges: [{
+            rangeOffset: at,
+            rangeLength: 'A second paragraph nobody is arguing about.'.length,
+            text: 'A second paragraph the tool rewrote.',
+        }] });
+    }
+    busMod.announceAgentEdit({ file: FILE, baseText: AGENT, phase: 'end', source: 'paper_applyEdit', note: 'eq:x' });
+    await new Promise(r => setTimeout(r, 20));
+
+    const s = ui.sessionFor(FILE);
+    assert.ok(s, 'the session is open');
+    assert.strictEqual(s.pendingCount, 2,
+        'the tool\'s edit joins the list instead of being agreed to silently');
+    assert.ok(s.hunks.every(h => !s.edited.has(h.id)),
+        'and neither change is marked as something the reader typed');
+    assert.ok(s.hunks.every(h => s.undo(h.id).ok), 'so both can be undone');
+});
+
 test('the commands are registered and act on the file in front', async () => {
     const { ui } = makeUi();
     await ui.noteAgentChange({ file: FILE, baseText: BASE });

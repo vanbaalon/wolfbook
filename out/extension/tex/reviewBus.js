@@ -12,7 +12,17 @@
 const listeners = new Set();
 
 /**
- * @param {(ev:{file:string, baseText:string, source?:string, note?:string}) => void} fn
+ * An announcement carries a PHASE, because the edit is applied to the open
+ * buffer and the buffer's change event cannot tell who typed it:
+ *
+ *   begin  about to write — the review stops mirroring changes to this file
+ *          into its baseline, which is how the reader's own typing is kept out
+ *          of the list. Without it the tool's edit was mirrored, agreed to on
+ *          the reader's behalf, and never appeared as something to review.
+ *   end    written — open or extend the review.
+ *
+ * @param {(ev:{file:string, baseText:string, phase?:'begin'|'end',
+ *              source?:string, note?:string}) => void} fn
  * @returns {{dispose:()=>void}}
  */
 function onAgentEdit(fn) {

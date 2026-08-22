@@ -117,6 +117,7 @@ class ReviewUi {
         this._disposables = [];
         this._lensEmitter = new vscode.EventEmitter();
         this._toasting = new Set();
+        this._agentWriting = new Map();   // file -> when the tool started writing
 
         // A SURFACE MUST NEVER BE ABLE TO BREAK WHAT IT REPORTS ON. Hosts
         // differ in what they expose (a test stub has no status bar at all),
@@ -502,7 +503,12 @@ class ReviewUi {
             // agent's change — mirroring it into the baseline would agree to it
             // on the reader's behalf and the change would never be seen. Typing
             // leaves the buffer DIRTY; a reload leaves it clean.
-            if (!this._applying && e.document.isDirty) {
+            // …and not while the MCP tool is writing through this very buffer:
+            // its edit arrives here looking exactly like typing. A stale flag
+            // cannot strand the mirror — it is ignored after a few seconds.
+            const writing = this._agentWriting.get(file);
+            const agentBusy = writing != null && Date.now() - writing < 5000;
+            if (!this._applying && !agentBusy && e.document.isDirty) {
                 for (const c of e.contentChanges) {
                     try { s.noteReaderEdit({ offset: c.rangeOffset, length: c.rangeLength, text: c.text }); }
                     catch (_) { /* an unmirrorable edit is not fatal */ }
@@ -520,11 +526,25 @@ class ReviewUi {
         // tool the agent is told to use is the one whose edits cannot be seen.
         context.subscriptions.push(bus.onAgentEdit(async (ev) => {
             try {
+                if (ev.phase === 'begin') {
+                    // The tool edits the OPEN BUFFER, so the change event it
+                    // provokes is indistinguishable from typing — and mirroring
+                    // it into the baseline would agree to the agent's own edit
+                    // on the reader's behalf. Hold the mirror until it is done.
+                    this._agentWriting.set(ev.file, Date.now());
+                    // Open the session NOW, on the text as it is before the
+                    // write: that is exactly the baseline this change is against.
+                    if (!this.sessions.has(ev.file) && typeof ev.baseText === 'string') {
+                        this.sessions.set(ev.file, new ReviewSession({ file: ev.file, baseText: ev.baseText }));
+                    }
+                    return;
+                }
                 await this.noteAgentChange({
                     file: ev.file, baseText: ev.baseText,
                     source: ev.source || 'paper_applyEdit', note: ev.note || '',
                 });
             } catch (e) { this.output.appendLine(`review: ${e.message}`); }
+            finally { if (ev.phase !== 'begin') this._agentWriting.delete(ev.file); }
         }));
 
         context.subscriptions.push({ dispose: () => this.dispose() });
