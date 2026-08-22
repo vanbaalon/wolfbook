@@ -739,6 +739,128 @@ test('…but a HAND-MADE range later is painted as a range', async () => {
     assert.ok(span && span.span, 'a range the reader made is painted as one');
 });
 
+test('THE REPORTED BUG: a click stays a marker however often it is re-asked', async () => {
+    // "left red bracket appearing and disappearing in random places when I
+    // click". The click's selection SITS in the editor, and `syncFromEditor` is
+    // re-run for reasons that are nothing to do with the reader — every
+    // recompile re-answers through the `opened` handshake and through the
+    // identical-PDF branch, a panel restore re-answers, and VS Code emits
+    // selection events of its own when an edit shifts a range. Ownership used
+    // to expire after two seconds, so the SAME unchanged selection was re-read
+    // as the reader's and painted as a red span from one end to the other. In a
+    // display equation that span covers the whole equation — the same report
+    // from the other side: "does not recognise separate symbols".
+    const v = makeViewer({ file: FILE, line: 5, flag: FLAG.FRESH, object: null },
+        { file: FILE, line: 5, dx: 2 });
+    const st = v.coord.roots.get(FILE);
+    st.map.lineRows = (f, n) => [{ page: 1, x: 100, y: 100 * n, w: 300, h: 13 }];
+    selected = null;
+    await v._jumpToSource({ page: 1, xBp: 100, yTopBp: 100, word: 'wavefunction', rowFraction: 0.4 });
+    const sel = { active: selected.end, start: selected.start, end: selected.end };
+
+    v.syncFromEditor({ document: doc, selection: sel });        // the echo
+    v._selfRange.at -= 60000;                                    // a minute of editing
+    v.posted.length = 0;
+    v.syncFromEditor({ document: doc, selection: sel });        // a recompile re-asks
+
+    const span = v.posted.find(p => p.type === 'selection' && p.span);
+    assert.ok(!span, 'the unchanged selection is still not a range');
+    const h = v.posted.find(p => p.type === 'highlight');
+    assert.ok(h && h.word === 'wavefunction', 'and still marks the clicked word');
+});
+
+test('THE REPORTED BUG, on the token that actually brackets: a MATHS token', async () => {
+    // The single-word guard in _postSelection hides the expiry for prose: one
+    // word is marked, not bracketed, whoever selected it. A clicked MATHS token
+    // is often not one word — `\dot u` has a space in it, and equation (10) of
+    // the reference paper contains two of them — so the click's own selection
+    // goes down the span path, and once ownership expired it was painted as a
+    // red bracket pair. Which is what the report describes twice over: "left
+    // red bracket appearing and disappearing in random places when I click",
+    // and the same equation "does not recognise separate symbols".
+    const v = makeViewer({ file: FILE, line: 5, flag: FLAG.FRESH, object: null },
+        { file: FILE, line: 5, dx: 2 });
+    const st = v.coord.roots.get(FILE);
+    st.map.lineRows = (f, n) => [{ page: 1, x: 100, y: 100 * n, w: 300, h: 13 }];
+    // What _jumpToSource records for such a token, verbatim in shape.
+    const start = new Position(4, LINES[4].indexOf('transformed'));
+    const end = new Position(4, LINES[4].length);
+    const sel = { active: end, start, end };
+    v._selfRange = {
+        file: FILE, kind: 'click',
+        sl: start.line, sc: start.character, el: end.line, ec: end.character,
+        at: Date.now(),
+    };
+
+    v.syncFromEditor({ document: doc, selection: sel });        // the echo
+    v._selfRange.at -= 60000;                                    // a minute of editing
+    v.posted.length = 0;
+    v.syncFromEditor({ document: doc, selection: sel });        // a recompile re-asks
+
+    assert.ok(!v.posted.find(p => p.type === 'selection' && p.span),
+        'the unchanged selection is STILL the page\'s, and draws no brackets');
+});
+
+test('…but once the caret MOVES, that same range selected by hand is the reader\'s', async () => {
+    // The retirement rule, which is what replaces the clock: the record is
+    // dropped the moment the selection actually changes. Selecting the same
+    // text again by hand requires the caret to have been somewhere else first,
+    // and that is an event. (A multi-word range, because a single word is
+    // painted as a marker whoever made it — ownership is only observable on a
+    // range.)
+    const v = makeViewer({ file: FILE, line: 5, flag: FLAG.FRESH, object: null },
+        { file: FILE, line: 5, dx: 2 });
+    const st = v.coord.roots.get(FILE);
+    st.map.lineRows = (f, n) => [{ page: 1, x: 100, y: 100 * n, w: 300, h: 13 }];
+    const start = new Position(4, LINES[4].indexOf('transformed'));
+    const end = new Position(4, LINES[4].length);
+    const sel = { active: end, start, end };
+    v._selfRange = {
+        file: FILE, kind: 'click',
+        sl: start.line, sc: start.character, el: end.line, ec: end.character,
+        at: Date.now(),
+    };
+
+    v.posted.length = 0;
+    v.syncFromEditor({ document: doc, selection: sel });        // the echo
+    assert.ok(!v.posted.find(p => p.type === 'selection' && p.span),
+        'the page\'s own range is not painted as the reader\'s');
+
+    // The reader clicks somewhere else in the editor.
+    const away = new Position(4, 0);
+    v.syncFromEditor({ document: doc, selection: { active: away, start: away, end: away } });
+    assert.strictEqual(v._selfRange, null, 'the record retired when the caret moved');
+
+    // …and now drags over the very same text.
+    v.posted.length = 0;
+    v.syncFromEditor({ document: doc, selection: sel });
+    assert.ok(v.posted.find(p => p.type === 'selection' && p.span),
+        'painted as a range, because now it is one');
+});
+
+test('an event still IN FLIGHT does not retire the click that overtook it', async () => {
+    // `_selfRange` is recorded synchronously, before `editor.selection` is
+    // assigned, so the event carrying the reader's PREVIOUS position can still
+    // arrive after it. Clearing on that would resurrect the original bug: the
+    // click's own echo would then be read as a hand-made range.
+    const v = makeViewer({ file: FILE, line: 5, flag: FLAG.FRESH, object: null },
+        { file: FILE, line: 5, dx: 2 });
+    const st = v.coord.roots.get(FILE);
+    st.map.lineRows = (f, n) => [{ page: 1, x: 100, y: 100 * n, w: 300, h: 13 }];
+    selected = null;
+    await v._jumpToSource({ page: 1, xBp: 100, yTopBp: 100, word: 'wavefunction', rowFraction: 0.4 });
+    const sel = { active: selected.end, start: selected.start, end: selected.end };
+
+    // The stale event, delivered late.
+    const stale = new Position(2, 3);
+    v.syncFromEditor({ document: doc, selection: { active: stale, start: stale, end: stale } });
+    // Then the click's own.
+    v.posted.length = 0;
+    v.syncFromEditor({ document: doc, selection: sel });
+    const span = v.posted.find(p => p.type === 'selection' && p.span);
+    assert.ok(!span, 'still recognised as the page\'s own');
+});
+
 test('THE REPORTED BUG: a short TAIL row is not mistaken for an equation number', async () => {
     // The tag rule drops a row that is narrow and off to one side. A wrapped
     // source line's last row is also narrow and off to one side — measured, line

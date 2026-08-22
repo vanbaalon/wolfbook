@@ -929,12 +929,22 @@ class TexViewer {
         // an interval". The range the click set is remembered and recognised;
         // anything else, including the reader dragging over that same text, is
         // theirs.
+        // A selection that has MOVED retires whatever the page last made; one
+        // that has not keeps its identity however often we are re-asked.
+        this._noteSelection(doc, sel);
         if (ranged) {
             const own = this._isOwnSelection(doc, sel);
             // A RANGE WE ARE PAINTING RIGHT NOW NEEDS NOTHING FURTHER: the drag
             // has already posted it, and re-posting on the echo would fight the
-            // preview and scroll the page under the moving hand.
-            if (own && this._selfRange.kind === 'drag') return;
+            // preview and scroll the page under the moving hand. That silence
+            // is for the gesture only — a span made a while ago is still a
+            // span, and a later re-sync must REDRAW it against the new
+            // geometry rather than either ignoring it or wiping it.
+            if (own && this._selfRange.kind === 'drag') {
+                if (Date.now() - this._selfRange.at < 2000) return;
+                this._postSelection(st, doc, sel);
+                return;
+            }
             if (!own) { this._postSelection(st, doc, sel); return; }
         }
         this._post({ type: 'selection', span: null });
@@ -1126,15 +1136,53 @@ class TexViewer {
     /**
      * Is this selection the one an inverse click just made?
      *
-     * Matched on the range AND on the moment: the same text selected by hand a
-     * minute later is the reader's, and should be marked as a range.
+     * IDENTITY, NOT A CLOCK. This used to expire after two seconds, and that
+     * is the reported "left red bracket appearing and disappearing in random
+     * places when I click".
+     *
+     * An inverse click SELECTS the token it resolved to, and that selection
+     * then just sits in the editor. `syncFromEditor` is re-run for reasons
+     * that have nothing to do with the reader: every recompile re-answers
+     * through the `opened` handshake and through the identical-PDF branch, a
+     * panel restore re-answers, and VS Code emits selection events of its own
+     * whenever an edit shifts a range. Every one of those arriving more than
+     * two seconds after the click found an unchanged selection and changed its
+     * mind about whose it was — so the amber marker for one clicked symbol
+     * became a red SPAN across everything between its two ends. In a display
+     * equation that span covers the whole equation, which is the same report
+     * seen from the other side: "does not recognise separate symbols".
+     *
+     * Re-asking the same question about the same selection must give the same
+     * answer. So the range identity alone decides it, and the record is
+     * dropped the moment the selection actually MOVES (`noteSelection` below)
+     * — which is what makes the same text selected by hand a minute later the
+     * reader's: the caret had to go somewhere else first, and that is an event.
      */
     _isOwnSelection(doc, sel) {
         const r = this._selfRange;
         if (!r || r.file !== doc.uri.fsPath) return false;
-        if (Date.now() - r.at > 2000) return false;
         return sel.start.line === r.sl && sel.start.character === r.sc &&
             sel.end.line === r.el && sel.end.character === r.ec;
+    }
+
+    /**
+     * The selection moved: whatever the page made is no longer on screen.
+     *
+     * Only a selection we have ALREADY SEEN can be invalidated. `_selfRange` is
+     * recorded synchronously, before `editor.selection` is assigned, so the
+     * event carrying the reader's PREVIOUS position can still be in flight;
+     * clearing on that would resurrect the very bug the record exists to
+     * prevent. Once the matching event has arrived, any different range is the
+     * reader moving on.
+     */
+    _noteSelection(doc, sel) {
+        const r = this._selfRange;
+        if (!r || !sel || !sel.start || !sel.end) return;
+        if (r.file !== doc.uri.fsPath) return;
+        const same = sel.start.line === r.sl && sel.start.character === r.sc &&
+            sel.end.line === r.el && sel.end.character === r.ec;
+        if (same) { r.seen = true; return; }
+        if (r.seen) this._selfRange = null;
     }
 
     /**
