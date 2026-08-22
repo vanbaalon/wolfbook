@@ -167,6 +167,11 @@ function dropStrayRows(rects) {
  * (The object's own SyncTeX box is not an option: it includes
  * `\abovedisplayskip`, so it reaches up over the paragraph above the equation.)
  */
+/** The honesty flag, as the footer says it. */
+function flagWord(flag) {
+    return flag === FLAG.FRESH ? 'fresh' : flag === FLAG.STALE ? 'stale' : 'approx';
+}
+
 function mergeRows(rects) {
     const byPage = new Map();
     for (const r of rects || []) {
@@ -984,7 +989,20 @@ class TexViewer {
         const doc = editor.document;
         if (!/\.tex$/i.test(doc.uri.fsPath)) return;
         const st = this.coord.stateFor(doc);
-        if (!st || !st.map || !st.map.available) return;
+        // NO MAP MEANS NO ANSWER — AND AN OLD ANSWER LEFT ON THE PAGE IS A LIE.
+        //
+        // A rebuild that fails while the reader types (a half-typed construct,
+        // a missing brace) leaves the state with a map that cannot answer, and
+        // this used to return in silence — so the span and the marker painted
+        // for the PREVIOUS selection stayed on the paper and looked like the
+        // answer to the new one. That is exactly the shape of "I select a
+        // paragraph and it selects the figure": the figure was the answer to
+        // something asked earlier. Clearing is the honest thing to show.
+        if (!st || !st.map || !st.map.available) {
+            this._post({ type: 'selection', span: null });
+            this._post({ type: 'highlight', rects: [], label: 'no render map — the last compile produced none' });
+            return;
+        }
 
         // A RANGE IS NOT A CURSOR. Selecting a fragment asks a different
         // question — where does this PIECE of the source sit on the page — and
@@ -1775,11 +1793,15 @@ class TexViewer {
         let rows = [];
         for (let n = startLine; n <= endLine; n++) {
             if (this._lineIsBlank(doc, n)) continue;      // it printed nothing
-            let own = mergeRows(dropStrayRows(st.map.lineRows(file, n)
-                .map(x => ({ page: x.page, x: x.x, y: x.y, w: x.w, h: x.h }))));
-            // A line typeset into another line's row — a run-in heading — has
-            // no row of its own, and the wash would skip the words it printed.
-            if (!own.length) own = this._lineInkRects(st, doc, n);
+            // ITS OWN GLYPHS, WHEN THE ENGINE EMITTED THEM. A row rectangle is
+            // the whole printed ROW, which routinely carries a neighbouring
+            // source line's words too; the glyphs of THIS line are what the
+            // reader selected. Rows stay the answer without an exact map.
+            let own = this._lineInkRects(st, doc, n);
+            if (!own.length) {
+                own = mergeRows(dropStrayRows(st.map.lineRows(file, n)
+                    .map(x => ({ page: x.page, x: x.x, y: x.y, w: x.w, h: x.h }))));
+            }
             for (const r of own) rows.push({ ...r, line: n });
         }
         // A delimiter line collects strays from the page the object did not
@@ -1818,7 +1840,12 @@ class TexViewer {
                 lines: endLine - startLine + 1,
             },
             reveal: Date.now() - this._invertedAt >= 1500,
-            label: `selection · ${endLine - startLine + 1} line${endLine === startLine ? '' : 's'}`,
+            // THE LABEL IS THE DIAGNOSTIC. A span that lands on the wrong block
+            // is reported as a picture, and the only way to tell a wrong
+            // ANSWER from a displaced MAP is to say which lines were asked
+            // about, which pages answered, and out of which map.
+            label: `lines ${startLine}\u2013${endLine} \u00b7 p.${[...new Set(rows.map(r => r.page))].join(',')}` +
+                ` \u00b7 ${flagWord(st.map._baseFlag())}${st.map.exact ? ' \u00b7 exact' : ''}`,
         });
     }
 

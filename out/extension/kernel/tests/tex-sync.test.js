@@ -3020,6 +3020,23 @@ test('AN EN DASH SEPARATES WORDS; A HYPHEN DOES NOT', () => {
 
 function pick(r) { return r && { word: r.word, start: r.start, end: r.end }; }
 
+test('NO MAP, NO ANSWER: a failed rebuild clears the page instead of leaving the last one', () => {
+    const v = makeViewer();
+    const st = v.coord.stateFor(doc);
+    // Something was on the paper: a span from an earlier selection.
+    v.posted.length = 0;
+    v.syncFromEditor({ document: doc, selection: new stub.Selection(new stub.Position(4, 0), new stub.Position(6, 10)) });
+    assert.ok(v.posted.some(p => p.type === 'selection' && p.span), 'a span was painted first');
+    // Now the rebuild fails and the state has a map that cannot answer.
+    st.map.available = false;
+    v.posted.length = 0;
+    v.syncFromEditor({ document: doc, selection: new stub.Selection(new stub.Position(8, 0), new stub.Position(9, 5)) });
+    const span = v.posted.filter(p => p.type === 'selection').pop();
+    const hl = v.posted.filter(p => p.type === 'highlight').pop();
+    assert.ok(span && span.span === null, 'the old span is cleared, not left standing');
+    assert.ok(hl && hl.rects.length === 0, 'and so is the old marker');
+});
+
 (async () => {
     for (const [name, fn] of tests) {
         try { await fn(); pass++; results.push('  ok   ' + name); }
