@@ -490,6 +490,66 @@ async function main() {
         try { fs.rmSync(gen.outDir, { recursive: true, force: true }); } catch (_) {}
     }
 
+    await test('THE REPORTED BUG: an edited map must not put a prose line INSIDE an equation', () => {
+        // Reproduced on the reference paper by check-paper.mjs, whose displaced
+        // pass answered a click on "coincide" with the single character "n".
+        //
+        // The model is the one that was COMPILED, so its ranges are generation
+        // lines; every public method here speaks CURRENT lines. Once a line has
+        // been added or removed the two frames differ, and a prose line just
+        // above a display equation lands inside that equation's compiled range.
+        // It then comes back as a CONTAINING object with no `approximate` mark
+        // — which the click path reads as "this click was in maths", switching
+        // off the prose rescue that was carrying those answers.
+        // The shape of the paper: a paragraph of prose BETWEEN two displays, so
+        // that a line shifted backwards falls inside the one ABOVE it. One
+        // equation on its own cannot reproduce this — the shifted line simply
+        // moves further away from it and is still, correctly, approximate.
+        const model = {
+            objects: [
+                { objectId: 'e0', stableKey: 'EQ-ABOVE', kind: 'display-equation',
+                    sourceRange: { file: '/p.tex', startLine: 144, endLine: 150 } },
+                { objectId: 'e1', stableKey: 'EQ-BELOW', kind: 'display-equation',
+                    sourceRange: { file: '/p.tex', startLine: 152, endLine: 158 } },
+                { objectId: 's1', stableKey: 'SEC', kind: 'section-heading',
+                    sourceRange: { file: '/p.tex', startLine: 100, endLine: 100 } },
+            ],
+        };
+        const m = new RenderMap({ generation: { generation: 1 }, model });
+
+        const fresh = m.objectAtLine('/p.tex', 151);
+        assert.ok(fresh, 'the prose line between the two displays gets an answer');
+        assert.strictEqual(fresh.approximate, true,
+            'line 151 is in neither equation — it is the prose between them');
+
+        // Two lines removed above: current 149 IS the same physical line as 151.
+        m.noteEdit('/p.tex', 33, -2);
+        const after = m.objectAtLine('/p.tex', 149);
+        assert.ok(after, 'still answered');
+        assert.strictEqual(after.approximate, true,
+            'and it is STILL that prose line, not the inside of the display above it');
+    });
+
+    await test('an edited map reports an object in the frame the caller asked in', () => {
+        // The range that comes back is used to read the CURRENT document — the
+        // maths alignment slices those very lines out of it — so returning
+        // compiled line numbers points it at the wrong text by exactly the shift.
+        const model = {
+            objects: [{ objectId: 'e1', stableKey: 'EQ', kind: 'display-equation',
+                sourceRange: { file: '/p.tex', startLine: 152, endLine: 158 } }],
+        };
+        const m = new RenderMap({ generation: { generation: 1 }, model });
+        const before = m.objectAtLine('/p.tex', 155);
+        assert.deepStrictEqual([before.startLine, before.endLine], [152, 158],
+            'unedited, the two frames are the same');
+
+        m.noteEdit('/p.tex', 33, -2);
+        const o = m.objectAtLine('/p.tex', 153);          // was 155
+        assert.ok(o && !o.approximate, 'a line inside the equation is inside it');
+        assert.deepStrictEqual([o.startLine, o.endLine], [150, 156],
+            'and its range is where those lines are NOW');
+    });
+
     console.log('render map (Stage 2 engine)\n');
     results.forEach(r => console.log(r));
     console.log(`\n${pass} passed, ${fail} failed${skipped ? `, ${skipped} skipped` : ''}`);

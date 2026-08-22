@@ -317,6 +317,33 @@ class RenderMap {
      * yields nothing at all, which is worse than "you landed 2 lines below
      * eq:one". The `approximate` flag is what keeps that honest.
      */
+    /**
+     * TWO FRAMES, AND THEY ARE ONLY THE SAME UNTIL SOMETHING IS EDITED.
+     *
+     * `this.model` is the model of the source that was COMPILED, so its source
+     * ranges are in GENERATION lines. Every public method of this map speaks
+     * CURRENT lines — `sourceToRender` translates its arguments, `lineAtPoint`
+     * translates its answer — and this one was handed current lines and
+     * compared them against compiled ranges anyway.
+     *
+     * While nothing has been edited the two frames coincide and it is right.
+     * Add or remove a single line and they do not, and then a PROSE line one
+     * above a display equation falls INSIDE that equation's compiled range. It
+     * came back as a CONTAINING object rather than a near one, so it carried no
+     * `approximate` mark — and the click path reads exactly that to decide
+     * whether a click was in maths. With the mark gone, the prose rescue
+     * (`locateByContext`) was switched off, every word in the paragraph
+     * resolved to a single CHARACTER, and the highlight went out with no word
+     * for the panel to narrow the row with — so the whole row lit up.
+     *
+     * MEASURED on the reference paper, clicking the same ten words twice
+     * (`check-paper.mjs`): 9 of 10 straight off the compile, 5 of 10 after two
+     * lines were removed. "coincide" came back as "n", "continuous" as "i".
+     *
+     * So the line is translated INTO the compiled frame to be compared, and the
+     * range that comes back is translated OUT of it — leaving every caller in
+     * the current frame, which is the frame the rest of this class promises.
+     */
     _objectAt(file, line) {
         if (!this.model) return null;
         const usable = this.model.objects.filter(o =>
@@ -324,15 +351,18 @@ class RenderMap {
             o.kind !== 'label' && o.kind !== 'ref' && o.kind !== 'cite' && o.kind !== 'include');
         if (!usable.length) return null;
 
+        const gen = this._toGenerationLine(file, line).line;
+
         const shape = (o, extra) => ({
             objectId: o.objectId, stableKey: o.stableKey, kind: o.kind,
             envName: o.envName, label: o.label,
-            startLine: o.sourceRange.startLine, endLine: o.sourceRange.endLine,
+            startLine: this._toCurrentLine(file, o.sourceRange.startLine),
+            endLine: this._toCurrentLine(file, o.sourceRange.endLine),
             ...extra,
         });
 
         const containing = usable.filter(o =>
-            o.sourceRange.startLine <= line && o.sourceRange.endLine >= line);
+            o.sourceRange.startLine <= gen && o.sourceRange.endLine >= gen);
         if (containing.length) {
             // Tightest containing object wins — an equation over its section.
             containing.sort((a, b) =>
@@ -344,16 +374,16 @@ class RenderMap {
         let best = null; let bestD = Infinity;
         for (const o of usable) {
             if (o.kind === 'section-heading') continue;   // too coarse to be "nearest"
-            const d = line < o.sourceRange.startLine
-                ? o.sourceRange.startLine - line
-                : line - o.sourceRange.endLine;
+            const d = gen < o.sourceRange.startLine
+                ? o.sourceRange.startLine - gen
+                : gen - o.sourceRange.endLine;
             if (d < bestD) { bestD = d; best = o; }
         }
         if (!best || bestD > 5) {
             // Fall back to the section, which always contains something.
             const sec = usable.filter(o => o.kind === 'section-heading' &&
-                o.sourceRange.startLine <= line).pop();
-            return sec ? shape(sec, { approximate: true, linesAway: line - sec.sourceRange.startLine }) : null;
+                o.sourceRange.startLine <= gen).pop();
+            return sec ? shape(sec, { approximate: true, linesAway: gen - sec.sourceRange.startLine }) : null;
         }
         return shape(best, { approximate: true, linesAway: bestD });
     }
