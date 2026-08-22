@@ -43,6 +43,7 @@ const state = {
     labelsOn: false,          // Shift is down
     labelsPinned: false,      // the toolbar toggle
     labelsAsked: null,        // the generation we have already asked for
+    review: null,             // {pending, groups, census, focus} — the agent's changes
 };
 
 const el = (id) => document.getElementById(id);
@@ -923,6 +924,144 @@ function snapToInk(hit) {
 // removes every one of them on each cursor move; a diff sharing that class
 // would be erased by the next keystroke. These are `.dh`, they persist until
 // the comparison is closed, and there are many at once.
+
+// --- THE REVIEW: what the agent changed, waiting for a verdict --------------
+//
+// The list, the bands on the page and the chip on the focused change are three
+// views of ONE message (`review`), so they can never disagree about what is
+// pending. Every button posts a verdict and waits to be told the new state —
+// nothing here decides anything locally, because the session in the extension
+// is the only thing that knows what "kept" means for the text.
+
+function reviewHunks() {
+    const r = state.review;
+    if (!r || !r.groups) return [];
+    return r.groups.flatMap(g => g.hunks);
+}
+
+function renderReview() {
+    const panel = el('reviewpanel');
+    const r = state.review;
+    document.body.classList.toggle('reviewing', !!(r && r.pending));
+    if (!panel) return;
+    if (!r || !r.pending) { panel.innerHTML = ''; paintReview(); return; }
+
+    el('reviewtitle').textContent = `Review · ${r.pending} change${r.pending === 1 ? '' : 's'}`;
+    el('reviewcensus').textContent = r.census || '';
+
+    const ago = (t) => {
+        const s = Math.max(0, Math.round((Date.now() - t) / 1000));
+        if (s < 45) return 'just now';
+        if (s < 5400) return `${Math.round(s / 60)} min ago`;
+        return `${Math.round(s / 3600)} h ago`;
+    };
+    const esc = (x) => String(x == null ? '' : x)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const verbWord = { add: 'added', del: 'removed', change: 'changed' };
+
+    const parts = [];
+    for (const g of r.groups) {
+        parts.push(`<div class="grp"><span>${esc(ago(g.at))} · ${esc(g.source)} · ` +
+            `${g.count} change${g.count === 1 ? '' : 's'}</span><span class="sp"></span>` +
+            `<button data-batch="${esc(g.id)}">Keep batch</button></div>`);
+        for (const h of g.hunks) {
+            const where = h.where === 'rows' ? `p.${h.page} · on the page`
+                : h.where === 'gap' ? `p.${h.page} · marked at the seam`
+                    : h.where === 'none' ? 'not locatable on the page'
+                        : `p.${h.page} · approximate`;
+            const name = h.name || `line ${h.startLine}`;
+            const size = h.verb === 'change'
+                ? `${h.changedWords || 0} word${h.changedWords === 1 ? '' : 's'} ${verbWord[h.verb]}`
+                : `${h.lines} line${h.lines === 1 ? '' : 's'} ${verbWord[h.verb]}`;
+            parts.push(
+                `<div class="rh${h.id === r.focus ? ' on' : ''}" data-hunk="${esc(h.id)}">` +
+                `<span class="v ${esc(h.verb)}">${h.verb === 'add' ? '+' : h.verb === 'del' ? '\u2212' : '~'}</span>` +
+                `<span class="what"><span class="name">${esc(name)}</span>` +
+                `<span class="meta">${esc(size)} · ${esc(where)}</span></span>` +
+                (h.editedByYou
+                    ? '<span class="flag" title="Undo would throw away what you typed">you edited this</span>'
+                    : '<span class="acts">' +
+                      `<button class="keep" data-keep="${esc(h.id)}" title="Agree to this change">\u2713</button>` +
+                      `<button class="undo" data-undo="${esc(h.id)}" title="Put this back the way it was">\u21ba</button>` +
+                      '</span>') +
+                '</div>');
+        }
+    }
+    if (r.decided && r.decided.length) {
+        const kept = r.decided.filter(d => d.action === 'kept').length;
+        const undone = r.decided.length - kept;
+        parts.push(`<div class="done">this session: ${kept} kept, ${undone} undone</div>`);
+    }
+    panel.innerHTML = parts.join('');
+    paintReview();
+}
+
+/** The pending changes, marked where they print. */
+function paintReview() {
+    for (const el of document.querySelectorAll('.rband, .rchip')) el.remove();
+    const r = state.review;
+    if (!r || !r.pending) return;
+    for (const h of reviewHunks()) {
+        for (const rect of (h.rects || [])) {
+            const wrap = pagesEl().querySelector(`.page[data-page="${rect.page}"]`);
+            if (!wrap || !state.rendered.has(rect.page)) continue;
+            const v = rectToViewport(rect.page, rect);
+            if (!v) continue;
+            const band = document.createElement('div');
+            band.className = `rband ${h.verb}${h.id === r.focus ? ' on' : ''}`;
+            band.style.left = `${v.x}px`;
+            band.style.top = `${v.y}px`;
+            band.style.width = `${rect.caret ? Math.max(v.w, 24) : v.w}px`;
+            band.style.height = `${rect.caret ? 0 : v.h}px`;
+            band.title = `${h.name || `line ${h.startLine}`} — ${h.verb}`;
+            wrap.appendChild(band);
+        }
+        // THE CHIP IS FOR THE FOCUSED CHANGE ONLY. One per change turns a
+        // reviewed page into a wall of buttons — the same lesson the label
+        // overlay taught.
+        if (h.id === r.focus && !h.editedByYou) {
+            const rect = (h.rects || [])[0];
+            const wrap = rect && pagesEl().querySelector(`.page[data-page="${rect.page}"]`);
+            const v = rect && rectToViewport(rect.page, rect);
+            if (wrap && v) {
+                const chip = document.createElement('div');
+                chip.className = 'rchip';
+                chip.style.left = `${v.x}px`;
+                chip.style.top = `${Math.max(0, v.y - 26)}px`;
+                chip.innerHTML = `<button class="keep" data-keep="${h.id}">\u2713 Keep</button>` +
+                    `<button class="undo" data-undo="${h.id}">\u21ba Undo</button>`;
+                wrap.appendChild(chip);
+            }
+        }
+    }
+}
+
+const reviewAct = (action, extra) => vscode.postMessage({ type: 'reviewAction', action, ...extra });
+
+// EVERY OVERLAY THAT TAKES THE POINTER STOPS THE PRESS IN THE CAPTURE PHASE.
+// Without it the press reaches the page, `sendClick` resolves the word under
+// the button, and the selection the reader was about to act on is replaced by
+// that word — the rule the selection brackets, the label chips and the action
+// bar have each paid for.
+for (const evt of ['pointerdown', 'mousedown']) {
+    document.addEventListener(evt, (e) => {
+        if (e.target.closest && e.target.closest('.rchip, #reviewpanel, #reviewbar')) {
+            e.stopPropagation();
+        }
+    }, true);
+}
+document.addEventListener('click', (e) => {
+    const t = e.target;
+    if (!t || !t.closest) return;
+    const keep = t.closest('[data-keep]');
+    if (keep) { e.preventDefault(); e.stopPropagation(); reviewAct('keep', { id: keep.dataset.keep }); return; }
+    const undo = t.closest('[data-undo]');
+    if (undo) { e.preventDefault(); e.stopPropagation(); reviewAct('undo', { id: undo.dataset.undo }); return; }
+    const batch = t.closest('[data-batch]');
+    if (batch) { e.preventDefault(); e.stopPropagation(); reviewAct('keepBatch', { batch: batch.dataset.batch }); return; }
+    const row = t.closest('.rh');
+    if (row) { e.stopPropagation(); reviewAct('show', { id: row.dataset.hunk }); }
+}, true);
 
 function paintDiff() {
     for (const el of document.querySelectorAll('.dh')) el.remove();
@@ -2494,6 +2633,11 @@ el('full').addEventListener('click', () => {
 // what is on screen as an explicit choice — including "white paper in a dark
 // theme", which is what a reader checking how the paper will PRINT wants.
 el('compare').addEventListener('click', () => vscode.postMessage({ type: 'compare' }));
+for (const [id, action] of [['reviewprev', 'prev'], ['reviewnext', 'next'],
+    ['reviewkeepall', 'keepAll'], ['reviewundoall', 'undoAll'], ['reviewclose', 'close']]) {
+    const b = el(id);
+    if (b) b.addEventListener('click', (e) => { e.stopPropagation(); reviewAct(action, {}); });
+}
 el('diffprev').addEventListener('click', () => stepHunk(-1));
 el('diffnext').addEventListener('click', () => stepHunk(1));
 el('diffclose').addEventListener('click', () => {
@@ -2872,6 +3016,32 @@ window.addEventListener('message', async (ev) => {
             state.themeFromExtension = true;      // stop listening to the OS guess
             state.setting = msg.setting || 'auto';
             applyTheme(msg.dark, msg.pages);
+            break;
+        case 'review':
+            state.review = msg.session || null;
+            renderReview();
+            break;
+        case 'reviewOpen':
+            if (state.review) { document.body.classList.add('reviewing'); renderReview(); }
+            break;
+        case 'reviewFocus':
+            if (state.review) {
+                state.review.focus = msg.id;
+                renderReview();
+                if (msg.page) {
+                    renderAround(msg.page);
+                    await renderPage(msg.page);
+                    const wrap = pagesEl().querySelector(`.page[data-page="${msg.page}"]`);
+                    const main = document.querySelector('main');
+                    if (wrap && main) {
+                        const y = wrap.offsetTop + ((msg.rects && msg.rects[0])
+                            ? Math.max(0, (rectToViewport(msg.page, msg.rects[0]) || {}).y - main.clientHeight * 0.35)
+                            : -20);
+                        main.scrollTo({ top: y, behavior: 'smooth' });
+                    }
+                }
+                paintReview();
+            }
             break;
         case 'diff':
             state.diff = msg.session

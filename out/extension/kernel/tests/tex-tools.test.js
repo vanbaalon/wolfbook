@@ -123,7 +123,8 @@ function texStub(docs) {
 // left in the cache stays bound to whichever stub first loaded it. renderUi was
 // missing here and reported `createTextEditorDecorationType is not a function`
 // against a stub that plainly defines it.
-const UNDER_TEST = ['../../tools/tex-tools', '../../tex/index', '../../tex/renderUi', '../../tex/texViewer'];
+const UNDER_TEST = ['../../tools/tex-tools', '../../tex/index', '../../tex/renderUi',
+    '../../tex/texViewer', '../../tex/reviewUi'];
 function freshRequire(mod, stub) {
     for (const m of UNDER_TEST) { try { delete require.cache[require.resolve(m)]; } catch (_) {} }
     return withVscodeStub(() => require(mod), stub);
@@ -521,6 +522,9 @@ async function main() {
             createTextEditorDecorationType: () => ({ dispose() {} }),
             onDidChangeActiveTextEditor: () => ({ dispose() {} }),
             onDidChangeTextEditorSelection: () => ({ dispose() {} }),
+            // The review repaints its decorations when the editors change.
+            onDidChangeVisibleTextEditors: () => ({ dispose() {} }),
+            visibleTextEditors: [],
             showWarningMessage: async () => undefined,
             showInformationMessage: async () => undefined,
             showErrorMessage: async () => undefined,
@@ -539,8 +543,12 @@ async function main() {
         const api = M.registerTexSupport(ctx);
         assert.ok(api, 'returns its handles');
         assert.deepStrictEqual(registered.sort(),
-            ['codelens', 'definition', 'folding', 'hover', 'paste', 'references', 'symbols']);
+            // TWO lens providers: the outline's, and the review's Keep/Undo.
+            ['codelens', 'codelens', 'definition', 'folding', 'hover', 'paste', 'references', 'symbols']);
         assert.ok(cmds.includes('wolfbook.tex.showProjection'));
+        assert.ok(cmds.includes('wolfbook.tex.review'), 'the review is reachable');
+        assert.ok(cmds.includes('wolfbook.tex.reviewKeep') && cmds.includes('wolfbook.tex.reviewUndo'),
+            'and so are its two verdicts');
         assert.ok(ctx.subscriptions.length > 0, 'everything is disposable');
     });
 

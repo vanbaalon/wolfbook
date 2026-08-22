@@ -24,6 +24,7 @@ const {
 const { parseMmaBlocks, BLOCK_STATE } = require('../tex/mmaBlocks');
 const { findRoot, buildGraph } = require('../tex/texProject');
 const { checkWritable } = require('../tex/diskGuard');
+const { announceAgentEdit } = require('../tex/reviewBus');
 const fs = require('fs');
 
 const ok = (text) => new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(text)]);
@@ -555,6 +556,19 @@ class PaperApplyEditTool {
             if (!applied) return errPart('WorkspaceEdit was rejected by the editor');
 
             if (input.save) { try { await r.doc.save(); } catch (_) { /* dirty tab is not an error */ } }
+
+            // THE READER MUST BE ABLE TO SEE THIS. An edit made here goes
+            // through the open buffer, so the file watcher never fires and the
+            // review would never hear about the one tool the agent is told to
+            // use. `r.text` is the document as it was before the replacement,
+            // which is the baseline a review opens with.
+            try {
+                announceAgentEdit({
+                    file: r.fsPath, baseText: r.text,
+                    source: 'paper_applyEdit',
+                    note: obj.label ? `${obj.kind} ${obj.label}` : obj.kind,
+                });
+            } catch (_) { /* announcing is never worth failing an applied edit */ }
 
             const after = r.doc.getText();
             const nextScan = scanTex(after, { file: r.fsPath });

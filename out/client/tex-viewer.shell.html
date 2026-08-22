@@ -263,6 +263,69 @@
   #diffcount { font-variant-numeric: tabular-nums; opacity:.85; min-width:44px; text-align:center; }
   #diffcensus { opacity:.7; overflow:hidden; text-overflow:ellipsis; }
   #diffclose { margin-left:auto; }
+  /* --- the review drawer: what the agent changed, waiting for a verdict --- */
+  #reviewbar { display:none; align-items:center; gap:8px; padding:4px 10px;
+             background: var(--vscode-editorWidget-background, transparent);
+             border-bottom:1px solid var(--vscode-panel-border); flex:0 0 auto;
+             white-space:nowrap; overflow:hidden; }
+  body.reviewing #reviewbar { display:flex; }
+  #reviewbar .t { font-weight:600; }
+  #reviewbar .census { opacity:.7; overflow:hidden; text-overflow:ellipsis; }
+  #reviewbar .sp { flex:1; }
+  #reviewbar button { background:transparent; border:1px solid var(--vscode-panel-border);
+             color:inherit; cursor:pointer; border-radius:3px; height:22px; padding:0 8px; }
+  #reviewbar button:hover { background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,.18)); }
+  #reviewbar button.keep { color: var(--vscode-gitDecoration-addedResourceForeground, #4a8); }
+  #reviewbar button.undo { color: var(--vscode-gitDecoration-deletedResourceForeground, #c66); }
+  #reviewpanel { display:none; position:absolute; top:0; right:0; bottom:0; width:330px; z-index:28;
+             background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+             border-left:1px solid var(--vscode-panel-border); overflow:auto; text-align:left;
+             box-shadow:-6px 0 18px rgba(0,0,0,.18); }
+  body.reviewing #reviewpanel { display:block; }
+  #reviewpanel .grp { padding:7px 12px 4px; font-size:11px; opacity:.75; display:flex; gap:8px;
+             align-items:center; border-top:1px solid var(--vscode-panel-border); }
+  #reviewpanel .grp .sp { flex:1; }
+  #reviewpanel .grp button { background:transparent; border:1px solid var(--vscode-panel-border);
+             color:inherit; cursor:pointer; border-radius:3px; font-size:11px; padding:1px 6px; }
+  .rh { display:grid; grid-template-columns:14px 1fr auto; gap:8px; align-items:center;
+             padding:6px 12px; cursor:pointer; border-top:1px solid rgba(128,128,128,.14); }
+  .rh:hover { background: var(--vscode-list-hoverBackground, rgba(128,128,128,.12)); }
+  .rh.on { background: var(--vscode-list-activeSelectionBackground, rgba(90,140,220,.22)); }
+  .rh .v { font-weight:700; text-align:center; }
+  .rh .v.add { color: var(--vscode-gitDecoration-addedResourceForeground, #4a8); }
+  .rh .v.del { color: var(--vscode-gitDecoration-deletedResourceForeground, #c66); }
+  .rh .v.change { color: var(--vscode-gitDecoration-modifiedResourceForeground, #d90); }
+  .rh .what { min-width:0; }
+  .rh .name { font-family: var(--vscode-editor-font-family, monospace); font-size:11.5px;
+             overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .rh .meta { font-size:10.5px; opacity:.65; }
+  .rh .acts { display:flex; gap:4px; opacity:0; }
+  .rh:hover .acts, .rh.on .acts { opacity:1; }
+  .rh .acts button { background:transparent; border:1px solid var(--vscode-panel-border);
+             color:inherit; cursor:pointer; border-radius:3px; font-size:11px; padding:1px 6px; }
+  .rh .acts button.keep { color: var(--vscode-gitDecoration-addedResourceForeground, #4a8); }
+  .rh .acts button.undo { color: var(--vscode-gitDecoration-deletedResourceForeground, #c66); }
+  .rh .flag { font-size:10.5px; color: var(--vscode-editorWarning-foreground, #c90); white-space:nowrap; }
+  #reviewpanel .done { padding:6px 12px; font-size:10.5px; opacity:.6;
+             border-top:1px solid var(--vscode-panel-border); }
+  /* A change marked on the page: the same band as a selection, in its own hue. */
+  .rband { position:absolute; pointer-events:none; border-radius:2px;
+             background: var(--vscode-diffEditor-insertedTextBackground, rgba(80,180,120,.18));
+             box-shadow: inset 2px 0 0 var(--vscode-gitDecoration-modifiedResourceForeground, #d90); }
+  .rband.add { box-shadow: inset 2px 0 0 var(--vscode-gitDecoration-addedResourceForeground, #4a8); }
+  .rband.del { background:transparent; border-bottom:2px solid
+             var(--vscode-gitDecoration-deletedResourceForeground, #c66); }
+  .rband.on { outline:1.5px solid var(--vscode-focusBorder, #57a); outline-offset:1px; }
+  .rchip { position:absolute; z-index:29; display:flex; gap:4px; align-items:center;
+             background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+             border:1px solid var(--vscode-panel-border); border-radius:4px; padding:2px 6px;
+             font-size:11px; box-shadow:0 2px 8px rgba(0,0,0,.22); }
+  .rchip button { background:transparent; border:none; color:inherit; cursor:pointer;
+             border-radius:3px; padding:1px 5px; font-size:11px; }
+  .rchip button.keep { color: var(--vscode-gitDecoration-addedResourceForeground, #4a8); }
+  .rchip button.undo { color: var(--vscode-gitDecoration-deletedResourceForeground, #c66); }
+  .rchip button:hover { background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,.18)); }
+
   .ping { position:absolute; width:14px; height:14px; margin:-7px 0 0 -7px;
           border:2px solid rgba(60,140,220,.95); border-radius:50%;
           animation: ping .7s ease-out forwards; pointer-events:none; }
@@ -383,5 +446,16 @@
   <span id="diffcensus"></span>
   <button id="diffclose" title="Stop comparing">✕</button>
 </div>
+<div id="reviewbar">
+  <span class="t" id="reviewtitle">Review</span>
+  <span class="census" id="reviewcensus"></span>
+  <span class="sp"></span>
+  <button id="reviewprev" title="Previous change">‹</button>
+  <button id="reviewnext" title="Next change">›</button>
+  <button id="reviewkeepall" class="keep" title="Agree to every change">✓ Keep all</button>
+  <button id="reviewundoall" class="undo" title="Put every change back">↺ Undo all</button>
+  <button id="reviewclose" title="Leave the review; nothing is decided">✕</button>
+</div>
 <main><div id="pages" title="Click a word or symbol to find it in the source. Cmd/Ctrl-click selects more of what encloses it; add Shift to go back in. Double-click jumps to the editor. Right-click edits the paragraph or equation in place."></div></main>
+<div id="reviewpanel"></div>
 <footer><div id="status">starting…</div></footer>

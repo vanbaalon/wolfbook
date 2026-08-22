@@ -983,6 +983,65 @@ class TexViewer {
     /** Is the Page view actually on screen? Live rebuilds are for it alone. */
     isOpen() { return !!this.panel; }
 
+    // --- the review: what the agent changed, waiting for a verdict -----------
+    //
+    // The panel draws the list and posts the reader's answers; everything else
+    // — the session, the baseline, the decorations, the edits — belongs to
+    // tex/reviewUi.js. This class only carries messages, which is what keeps
+    // the list identical whether it is answered from the page, the editor's
+    // CodeLens, the command palette or the status bar.
+
+    attachReview(review) { this._review = review; }
+
+    /** Is the reader looking at the list right now? (the toast asks) */
+    get reviewVisible() { return !!(this.panel && this.panel.visible && this._reviewShown); }
+
+    /** One full-state message, the pattern the comparison already uses. */
+    showReview(payload) {
+        this._reviewShown = !!(payload && payload.pending);
+        this._post({ type: 'review', session: payload || null });
+    }
+
+    /** Bring the paper forward with the list open. */
+    async openReview() {
+        if (!this.panel) {
+            const doc = (vscode.workspace.textDocuments || [])
+                .find(d => d.uri && d.uri.fsPath === this.root) ||
+                (vscode.window.activeTextEditor && vscode.window.activeTextEditor.document);
+            if (doc) { try { await this.open(doc); } catch (_) { /* it may be mid-open */ } }
+        }
+        if (this.panel) { try { this.panel.reveal(undefined, true); } catch (_) { /* fine */ } }
+        this._post({ type: 'reviewOpen' });
+    }
+
+    /** Scroll the page to a change and mark it there. */
+    focusReviewHunk(h) {
+        if (!h) return;
+        this._post({ type: 'reviewFocus', id: h.id, page: h.page, rects: h.rects || [] });
+    }
+
+    /** A line in the panel's footer — the review speaks to the reader here. */
+    status(text, kind) { this._post({ type: 'status', text, kind: kind || '' }); }
+
+    async _onReviewAction(m) {
+        const r = this._review;
+        const file = this.root;
+        if (!r || !file) return;
+        switch (m && m.action) {
+            case 'keep': return r.keep(file, m.id);
+            case 'undo': return r.undo(file, m.id);
+            case 'keepAll': return r.keepAll(file);
+            case 'undoAll': return r.undoAll(file);
+            case 'keepBatch': return r.keepBatch(file, m.batch);
+            case 'show': return r.show(file, m.id);
+            case 'next': return r.step(file, +1);
+            case 'prev': return r.step(file, -1);
+            case 'close': return r.close(file);
+            default: return undefined;
+        }
+    }
+
+
     /** Forward sync: highlight the object under the cursor. */
     syncFromEditor(editor) {
         if (!this.panel || !this.followCursor || !editor) return;
@@ -1851,7 +1910,14 @@ class TexViewer {
 
     async _onMessage(m) {
         switch (m.type) {
-            case 'ready': this._postTheme(); await this.refresh({ force: true }); break;
+            case 'ready':
+                this._postTheme();
+                await this.refresh({ force: true });
+                // The list survives a panel reopen: the session is the truth,
+                // the panel is only its picture.
+                if (this._review) this._review.push(this.root);
+                break;
+            case 'reviewAction': await this._onReviewAction(m); break;
             case 'follow': this.followCursor = !!m.value; break;
             case 'recompile': await this.rebuild(); break;
             case 'click': await this._jumpToSource(m); break;

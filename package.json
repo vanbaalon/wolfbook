@@ -1075,7 +1075,11 @@
         },
         "wolfbook.tex.mapEngine": {
           "type": "string",
-          "enum": ["auto", "lualatex", "off"],
+          "enum": [
+            "auto",
+            "lualatex",
+            "off"
+          ],
           "default": "auto",
           "markdownDescription": "How WPaper builds its render map. `auto` (default): when `lualatex` is installed, the WPaper view is compiled with LuaLaTeX plus the wbmap hook, so every printed glyph is mapped to its exact box and source line (exact click-to-source and cursor highlight); a document LuaLaTeX cannot build falls back to `#wolfbook.tex.engine#` with an approximate (SyncTeX) map. `lualatex`: always. `off`: never — use `#wolfbook.tex.engine#` and SyncTeX only."
         },
@@ -1626,6 +1630,52 @@
         "category": "Wolfbook"
       },
       {
+        "command": "wolfbook.tex.review",
+        "title": "WPaper: Review What the Agent Changed",
+        "category": "Wolfbook",
+        "icon": "$(git-compare)"
+      },
+      {
+        "command": "wolfbook.tex.reviewNext",
+        "title": "WPaper: Next Change to Review",
+        "category": "Wolfbook"
+      },
+      {
+        "command": "wolfbook.tex.reviewPrev",
+        "title": "WPaper: Previous Change to Review",
+        "category": "Wolfbook"
+      },
+      {
+        "command": "wolfbook.tex.reviewKeep",
+        "title": "WPaper: Keep This Change",
+        "category": "Wolfbook"
+      },
+      {
+        "command": "wolfbook.tex.reviewUndo",
+        "title": "WPaper: Undo This Change",
+        "category": "Wolfbook"
+      },
+      {
+        "command": "wolfbook.tex.reviewKeepAll",
+        "title": "WPaper: Keep Every Change",
+        "category": "Wolfbook"
+      },
+      {
+        "command": "wolfbook.tex.reviewUndoAll",
+        "title": "WPaper: Undo Every Change",
+        "category": "Wolfbook"
+      },
+      {
+        "command": "wolfbook.tex.reviewShow",
+        "title": "WPaper: Show This Change on the Page",
+        "category": "Wolfbook"
+      },
+      {
+        "command": "wolfbook.tex.reviewClose",
+        "title": "WPaper: Leave the Review",
+        "category": "Wolfbook"
+      },
+      {
         "command": "wolfbook.tex.compareWithDisk",
         "title": "WPaper: Compare with the File on Disk",
         "category": "Wolfbook"
@@ -2141,6 +2191,16 @@
         "key": "ctrl+shift+r",
         "mac": "cmd+shift+r",
         "when": "(notebookEditorFocused || editorTextFocus) && notebookType == 'extended-wolfram-notebook'"
+      },
+      {
+        "command": "wolfbook.tex.reviewNext",
+        "key": "alt+]",
+        "when": "editorTextFocus && resourceExtname == .tex"
+      },
+      {
+        "command": "wolfbook.tex.reviewPrev",
+        "key": "alt+[",
+        "when": "editorTextFocus && resourceExtname == .tex"
       }
     ],
     "views": {

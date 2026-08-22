@@ -30,6 +30,7 @@ const {
 } = require('./renderUi');
 const { TexViewer, VIEW_TYPE: TEX_VIEW_TYPE } = require('./texViewer');
 const { DiskWatch, VERDICT } = require('./diskGuard');
+const { ReviewUi } = require('./reviewUi');
 const texVersions = require('./texVersions');
 const {
     PASTE_MIMES, imagePathFor, figureSnippet, insideFloat, hasGraphicx, findImageItem,
@@ -1067,6 +1068,25 @@ function registerTexSupport(context) {
 
     const viewer = new TexViewer(context, coord, projection);
 
+    // WHAT THE AGENT CHANGED, WAITING FOR A VERDICT (tex/reviewUi.js). The
+    // review owns the status bar item, the editor decorations, the CodeLens and
+    // the panel's list; every arrival — a write to disk, an edit through the
+    // MCP tool — is one batch in one session whose baseline only the reader
+    // moves.
+    const review = new ReviewUi({
+        coord, viewer, output,
+        mapView: (file) => {
+            const st = coord.roots.get(coord.rootFor({ uri: { fsPath: file } }) || file) ||
+                coord.roots.get(file);
+            return st ? viewer._compareMap(st, file) : {};
+        },
+    });
+    review.register(context);
+    viewer.attachReview(review);
+    context.subscriptions.push(
+        vscode.languages.registerCodeLensProvider(TEX_SELECTOR, review.lensProvider()),
+    );
+
     // WHAT LATEX ITSELF NUMBERED EACH LABEL AS, for the hovers. Cached on the
     // compile generation: the .aux only changes when a compile does, and a
     // hover must never be the thing that reads a file off disk on a keystroke.
@@ -1208,13 +1228,13 @@ async function offerReload(doc, diskText, output) {
                 // SHOW IT, DO NOT WAIT TO BE ASKED. A clean buffer is reloaded
                 // silently, so without this the only sign that a collaborator
                 // rewrote a paragraph is that the pages quietly changed.
-                if (verdict !== VERDICT.DELETED && before && diskText && before !== diskText
-                    && viewer.isOpen() && viewer.root === coord.rootFor(doc)) {
-                    await viewer.compareWith({
-                        text: before,
-                        label: 'the version you were looking at',
-                        invert: true,       // they wrote it; we are the newer side
-                    });
+                // A REVIEW, NOT A LOOK. The changes wait in a session until the
+                // reader keeps or undoes them; a second write joins the same
+                // list instead of replacing it. `before` is only used when the
+                // session is opened — that is what stops an arriving batch from
+                // agreeing to the one before it.
+                if (verdict !== VERDICT.DELETED && before && diskText && before !== diskText) {
+                    await review.noteAgentChange({ file: fsPath, baseText: before, source: 'disk' });
                 }
                 return;
             }
