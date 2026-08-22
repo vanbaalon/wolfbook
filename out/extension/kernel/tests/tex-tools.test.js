@@ -504,7 +504,15 @@ async function main() {
             registerDocumentSymbolProvider: (...a) => { registered.push('symbols'); return { dispose() {} }; },
             registerFoldingRangeProvider: (...a) => { registered.push('folding'); return { dispose() {} }; },
             registerCodeLensProvider: (...a) => { registered.push('codelens'); return { dispose() {} }; },
+            // Reference intelligence: what a \ref/\cite actually points at.
+            registerHoverProvider: (...a) => { registered.push('hover'); return { dispose() {} }; },
+            registerDefinitionProvider: (...a) => { registered.push('definition'); return { dispose() {} }; },
+            registerReferenceProvider: (...a) => { registered.push('references'); return { dispose() {} }; },
+            // Paste a picture, get a figure. Guarded on the host having the
+            // API at all, so the stub must offer both halves of that guard.
+            registerDocumentPasteEditProvider: (...a) => { registered.push('paste'); return { dispose() {} }; },
         };
+        stub.DocumentPasteEditKind = { Text: 'text' };
         stub.extensions = { getExtension: () => undefined };
         stub.window = {
             ...stub.window,
@@ -530,7 +538,8 @@ async function main() {
         const ctx = { subscriptions: [] };
         const api = M.registerTexSupport(ctx);
         assert.ok(api, 'returns its handles');
-        assert.deepStrictEqual(registered.sort(), ['codelens', 'folding', 'symbols']);
+        assert.deepStrictEqual(registered.sort(),
+            ['codelens', 'definition', 'folding', 'hover', 'paste', 'references', 'symbols']);
         assert.ok(cmds.includes('wolfbook.tex.showProjection'));
         assert.ok(ctx.subscriptions.length > 0, 'everything is disposable');
     });

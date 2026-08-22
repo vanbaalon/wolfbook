@@ -144,6 +144,114 @@
   .wb-dark-pages .dh-del    { background: rgba(240,80,80,.24); }
   .wb-dark-pages .dh-add    { background: rgba(80,200,120,.24); }
 
+  /* --- WHAT TO DO WITH THE SELECTION ---
+     A small bar pinned above the fragment: copy, cut, paste, delete. It is the
+     one overlay besides the brackets and the label chips that TAKES the
+     pointer, and it is deliberately quiet — the page is the thing being read,
+     so the bar sits at the weight of the panel's own chrome rather than
+     competing with the type under it. It brightens on hover, and only the
+     destructive action takes a colour. */
+  .selact { position:absolute; z-index:9; display:flex; gap:1px; padding:2px;
+         border-radius:6px; user-select:none;
+         background: var(--vscode-editorWidget-background, #252526);
+         border:1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border, #454545));
+         box-shadow: 0 2px 8px rgba(0,0,0,.28), 0 0 0 .5px rgba(0,0,0,.12);
+         opacity:.92; transition: opacity .12s ease; }
+  .selact:hover { opacity:1; }
+  .selact button { display:inline-flex; align-items:center; justify-content:center;
+         width:24px; height:22px; padding:0; border:none; border-radius:4px;
+         background:transparent; cursor:pointer;
+         color: var(--vscode-editorWidget-foreground, var(--vscode-foreground, #ccc));
+         -webkit-appearance:none; appearance:none; }
+  .selact button:hover { background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,.22)); }
+  .selact button:active { transform: translateY(.5px); }
+  .selact button:focus-visible { outline:1px solid var(--vscode-focusBorder, #4a9eff); outline-offset:-1px; }
+  /* Only the irreversible one is coloured, and only once the pointer is on it:
+     a red icon sitting on the page permanently reads as an error. */
+  .selact button.danger:hover { color: var(--vscode-errorForeground, #f48771);
+         background: color-mix(in srgb, var(--vscode-errorForeground, #f48771) 14%, transparent); }
+  .selact svg { display:block; pointer-events:none; }
+
+  /* --- WHERE A DRAGGED SELECTION WOULD LAND ---
+     A third meaning needs a third colour: amber is "where you are", red is
+     "what is selected", so the landing point is BLUE and nothing else is.
+     A block lands between lines and is drawn as a rule; a fragment lands at a
+     column and is drawn as a caret. */
+  .movecaret { position:absolute; pointer-events:none; z-index:8;
+         background: var(--vscode-focusBorder, #4a9eff);
+         box-shadow: 0 0 4px rgba(74,158,255,.9); }
+  .movecaret:not(.block) { width:2px; margin-left:-1px; }
+  .movecaret.block { height:2px; margin-top:-1px; border-radius:1px; }
+  /* The whole page says "carrying something" while the hand is down. */
+  body.moving-sel #pages, body.moving-sel .selfill { cursor: grabbing; }
+  body.moving-sel .selfill { opacity:.55; }
+
+  /* --- THE LABEL OVERLAY (hold Shift) ---
+     Every \label beside the thing it names, every \ref and \cite beside the
+     label it points at; click to copy the reference.
+
+     A THIRD overlay class, not a reuse of .hl or .dh: paintHighlight wipes
+     every .hl on each cursor move, and a reader holding Shift while the cursor
+     moves is the ordinary case.
+
+     These are the only overlay that TAKES THE POINTER — everything else here is
+     pointer-events:none. The plate behind the text is the editor's own
+     background at 78%, which is what keeps a chip legible over both white paper
+     and a darkened page: the chip is DOM, so the canvas invert filter that
+     darkens the page does not touch it. */
+  .lbc { position:absolute; z-index:7; pointer-events:auto; cursor:copy;
+         font: 500 9px/1.35 var(--vscode-font-family); white-space:nowrap;
+         padding:1px 4px; border-radius:3px; letter-spacing:.02em;
+         color: var(--vscode-textLink-foreground, #3794ff);
+         background: rgba(255,255,255,.78);
+         background: color-mix(in srgb, var(--vscode-editor-background, #fff) 78%, transparent);
+         border:1px solid rgba(55,148,255,.45);
+         border-color: color-mix(in srgb, var(--vscode-textLink-foreground, #3794ff) 45%, transparent);
+         box-shadow: 0 1px 2px rgba(0,0,0,.18); }
+  /* A 9px pill is a small target; the grip is bigger than the mark, exactly as
+     a selection bracket's is. */
+  .lbc::after { content:''; position:absolute; inset:-4px; }
+  .lbc:hover { background: var(--vscode-textLink-foreground, #3794ff);
+         color: var(--vscode-editor-background, #fff); }
+  /* Placed against the object rather than its own ink — say so rather than
+     imply a precision we do not have. */
+  .lbc-approx { border-style:dashed; opacity:.82; }
+  /* A LABEL AND A REFERENCE ARE OPPOSITE CLAIMS, so they are opposite badges.
+     A declaration names the thing it sits on, so it is SOLID — it belongs to
+     the block. A reference points somewhere else, so it is an OUTLINE with an
+     arrow: lighter, obviously secondary, and never mistakable for the thing's
+     own name. */
+  .lbc-decl { font-weight:600;
+         color: var(--vscode-editor-background, #fff);
+         background: var(--vscode-textLink-foreground, #3794ff);
+         border-color: transparent; }
+  .lbc-decl:hover { background: var(--vscode-textLink-activeForeground, #4daafc); }
+  .lbc-ref { font-weight:400; font-style:normal;
+         background: color-mix(in srgb, var(--vscode-editor-background, #fff) 86%, transparent); }
+  .lbc-cite { color: var(--vscode-charts-purple, #c586c0);
+         border-color: color-mix(in srgb, var(--vscode-charts-purple, #c586c0) 45%, transparent); }
+  .lbc-cite:hover { background: var(--vscode-charts-purple, #c586c0);
+         color: var(--vscode-editor-background, #fff); }
+
+  /* WHAT A BADGE POINTS AT, RENDERED. No source here: the editor's hover is
+     where the LaTeX belongs; on the page the reader wants the paper's own
+     answer. White always — it is a piece of the printed page, and a dark plate
+     under a white crop would frame it wrongly. */
+  .lbcprev { position:absolute; z-index:12; pointer-events:none;
+         padding:4px; border-radius:5px; background:#fff;
+         border:1px solid var(--vscode-editorWidget-border, rgba(0,0,0,.25));
+         box-shadow: 0 4px 14px rgba(0,0,0,.34); }
+  .lbcprev img { display:block; max-width:320px; height:auto; border-radius:2px; }
+  /* A \ref to a label that does not exist. The editor already says so with a
+     squiggle; the page should not quietly draw it as though it resolved. */
+  .lbc-broken { color: var(--vscode-errorForeground, #f48771);
+         border-color: color-mix(in srgb, var(--vscode-errorForeground, #f48771) 55%, transparent);
+         text-decoration: line-through; }
+  .lbc-copied { background: var(--vscode-charts-green, #89d185);
+         color: var(--vscode-editor-background, #fff); border-color:transparent; }
+  #labels[aria-pressed="true"] { background: var(--vscode-badge-background);
+         color: var(--vscode-badge-foreground); }
+
   #diffbar { display:none; align-items:center; gap:8px; padding:4px 10px;
              background: var(--vscode-editorWidget-background, transparent);
              border-bottom:1px solid var(--vscode-panel-border); flex:0 0 auto;
@@ -259,6 +367,7 @@
   </span>
   <button id="fit" title="Fit the page width (⌘0)">Fit</button>
   <button id="compare" title="Compare with another version of this paper">⇄</button>
+  <button id="labels" title="Show every label (or just hold Shift)" aria-pressed="false">🏷</button>
   <button id="pagetheme" title="Page appearance" aria-pressed="false">☀</button>
   <button id="full" title="Full screen (Esc to leave, double-click a word to go there and edit)">⛶</button>
   <label class="follow" title="Highlight in the page whatever the editor cursor is on"><input type="checkbox" id="follow" checked> follow</label>

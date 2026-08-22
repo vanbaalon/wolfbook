@@ -63,6 +63,7 @@ class RenderMap {
         this.doc = null;
         this.warnings = [];
         this._tagCache = new Map();
+        this._owners = null;           // baselines that already carry real ink
         this._editShift = new Map();   // file -> sorted [{fromLine, delta}]
 
         const p = this.generation && this.generation.synctexPath;
@@ -674,15 +675,96 @@ class RenderMap {
                     xs: r.xs.slice().sort((a, b2) => a - b2).map(spToBp),
                 };
             })
-            // A ROW WITH NO WIDTH IS NOT A ROW.
+            // A ROW WITH NO WIDTH IS NOT A ROW — UNLESS IT IS THE ONLY ONE.
             //
             // `\[` emits a zero-width record sitting on the PRECEDING line's
             // baseline. Painting an equation's lines therefore drew a band
             // across the prose paragraph above it, and locating a click
             // preferred that phantom over the real text. It marks where the
             // display begins; it is not ink, and nothing should point at it.
-            .filter(r => r.w > 0.5)
+            //
+            // BUT A ONE-WORD PARAGRAPH LOOKS EXACTLY THE SAME FROM HERE, and
+            // dropping it made every such line unselectable in the viewer.
+            // MEASURED on a fixture of one-word paragraphs: TeX emits a single
+            // dimensionless `char` record for the whole line —
+            //
+            //     hbox      line=7  v=158.7 h=133.8 W=343.7    <- the line box
+            //     void_hbox line=6  v=158.7 h=133.8 W=14.9
+            //     char      line=6  v=158.7 h=170.9 W=0        <- the WORD
+            //
+            // — so its row came out zero-wide, was filtered away, and the
+            // cursor answered "line 6 · unmapped".
+            //
+            // What separates the two is not the record, it is the BASELINE: the
+            // `\[` phantom shares its baseline with the prose line that really
+            // printed there, while a one-word paragraph is the only thing on
+            // its own. So a zero-width row survives when no other line owns
+            // that baseline with real ink, and takes its extent from the line
+            // box TeX wrapped around it.
+            .map((r) => {
+                if (r.w > 0.5) return r;
+                const owners = this._baselineOwners();
+                const key = `${r.page}|${Math.round(r.yBaselineBp * 100)}`;
+                if (owners.has(key)) return null;          // the \[ phantom
+                const box = this._lineBoxAt(r.page, r.yBaselineBp);
+                if (!box) return null;
+                return { ...r, x: box.x, w: box.w };
+            })
+            .filter(Boolean)
             .sort((a, b) => a.page - b.page || a.y - b.y);
+    }
+
+    /**
+     * Which baselines already carry a line's real ink.
+     *
+     * Built once per map: the question "is this zero-width record a phantom or
+     * a whole short line" cannot be answered from the line alone, and asking it
+     * per lookup would rescan every record on every keystroke.
+     */
+    _baselineOwners() {
+        if (this._owners) return this._owners;
+        const pageSp = this.pageSizeSp;
+        const groups = new Map();          // `${page}|${v}|${tag}|${line}` -> [xs]
+        for (const page of this.doc ? this.doc.pages.values() : []) {
+            for (const b of page.boxes) {
+                if (b.type !== 'char' && b.type !== 'math' && b.type !== 'kern') continue;
+                if (!saneBox(b, pageSp)) continue;
+                const k = `${b.page}|${b.v}|${this._boxTag(b)}|${this._boxLine(b)}`;
+                if (!groups.has(k)) groups.set(k, []);
+                const xs = groups.get(k);
+                xs.push(b.h);
+                if (b.W > 0) xs.push(b.h + b.W);
+            }
+        }
+        const owners = new Set();
+        for (const [k, xs] of groups) {
+            if (xs.length < 2) continue;
+            if (spToBp(Math.max(...xs) - Math.min(...xs)) <= 0.5) continue;
+            const [pg, v] = k.split('|');
+            owners.add(`${pg}|${Math.round(spToBp(Number(v)) * 100)}`);
+        }
+        this._owners = owners;
+        return owners;
+    }
+
+    /**
+     * The line box TeX wrapped around a baseline — the extent of what printed
+     * there, which is what a dimensionless record cannot tell us on its own.
+     */
+    _lineBoxAt(page, baselineBp) {
+        const pageSp = this.pageSizeSp;
+        let best = null;
+        for (const pg of this.doc ? this.doc.pages.values() : []) {
+            for (const b of pg.boxes) {
+                if (b.type !== 'hbox' || b.page !== page) continue;
+                if (!(b.W > 0) || !saneBox(b, pageSp)) continue;
+                if (Math.abs(spToBp(b.v) - baselineBp) > 0.5) continue;
+                const w = spToBp(b.W);
+                // The SMALLEST box on that baseline is the line, not the page.
+                if (!best || w < best.w) best = { x: spToBp(b.h), w };
+            }
+        }
+        return best;
     }
 
     /**

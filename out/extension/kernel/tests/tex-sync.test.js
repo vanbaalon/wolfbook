@@ -48,7 +48,9 @@ const origLoad = Module._load;
 Module._load = function (req, ...rest) {
     return req === 'vscode' ? stub : origLoad.call(this, req, ...rest);
 };
-const { TexViewer } = require('../../tex/texViewer.js');
+const {
+    TexViewer, clipToSpan, dropDetachedRows, dominantPage,
+} = require('../../tex/texViewer.js');
 const { scanTex } = require('../../tex/texScanner');
 const { buildModel } = require('../../tex/texModel');
 const { RenderMap, FLAG } = require('../../tex/renderMap');
@@ -2004,6 +2006,852 @@ test('a reopened document drops the stale ladder', async () => {
     stub.window.activeTextEditor = undefined;
     await v._onMessage({ type: 'opened', generation: 2 });
     assert.strictEqual(v._ladder, null, 'and a new generation clears it');
+});
+
+// --- THE LABEL OVERLAY, EXECUTED -------------------------------------------
+//
+// The pure placement rules live in tex-labels.test.js. What is executed HERE is
+// the handler: a webview message in, a payload or a clipboard write out. A
+// handler with no executing test is a handler that can ship broken — the whole
+// reason this file exists.
+
+// The main fixture deliberately carries no \label — the sync tests are about
+// words and glyphs — so the overlay gets a paper of its own, with the three
+// shapes that matter: a numbered equation, a heading label, and a \eqref site.
+const LSRC = [
+    '\\documentclass{article}',
+    '\\begin{document}',
+    '\\section{Introduction}\\label{sec:intro}',
+    '',
+    '\\begin{equation}',
+    '  E = mc^2',
+    '  \\label{eq:emc}',
+    '\\end{equation}',
+    '',
+    'As \\eqref{eq:emc} shows, and \\cite{smith2020} agrees.',
+    '\\end{document}',
+].join('\n');
+
+/**
+ * A viewer whose project HAS labels, with rows for every line.
+ *
+ * Built here rather than through makeViewer because that one is bound to the
+ * word/glyph fixture, and adding a label to it would move every column the
+ * other 80 tests assert on.
+ */
+function labelViewer() {
+    const model = buildModel(scanTex(LSRC, { file: FILE }), { file: FILE });
+    const shift = { value: 0 };
+    const st = {
+        files: [FILE],
+        generation: { generation: 1, pageCount: 1, outDir: null, root: FILE },
+        map: {
+            available: true,
+            _baseFlag: () => FLAG.FRESH,
+            // A narrow row flush RIGHT on the \begin line — the printed number,
+            // which is where an equation's chip belongs — and a content row.
+            lineRows: (f, line) => (line === 5
+                ? [{ page: 1, x: 515, y: 100 + shift.value, w: 80, h: 13 }]
+                : [{ page: 1, x: 120, y: 20 * line + shift.value, w: 300, h: 13 }]),
+            objectRenderBoxes: () => ({ rects: [{ page: 1, x: 90, y: 90, w: 320, h: 60 }], flag: FLAG.FRESH }),
+            sourceToRender: () => ({ page: 1, flag: FLAG.FRESH }),
+            objectAtLine: () => null,
+            lineAtPoint: () => null,
+        },
+    };
+    const ldoc = { ...doc, uri: { fsPath: FILE, scheme: 'file', path: FILE } };
+    const coord = { roots: new Map([[FILE, st]]), rootFor: () => FILE, stateFor: () => st };
+    const projection = { get: () => ({ model }), fromText: () => model };
+    const v = new TexViewer({ extensionUri: { fsPath: '/ext' } }, coord, projection);
+    v.root = FILE;
+    v.posted = [];
+    v.panel = { webview: { postMessage: (m) => v.posted.push(m) } };
+    // _modelFor2 looks the file up among the OPEN documents.
+    stub.workspace.textDocuments = [ldoc];
+    v._shiftRows = (dy) => { shift.value = dy; };
+    return v;
+}
+
+test('holding Shift asks once, and the answer names real labels', async () => {
+    const v = labelViewer();
+    await v._onMessage({ type: 'labelsWanted', value: true });
+    const msg = v.posted.find(p => p.type === 'labels');
+    assert.ok(msg, 'a labels payload was posted');
+    assert.strictEqual(msg.format, 'command', 'the copy format rides along');
+    assert.ok(Array.isArray(msg.items), 'with items');
+    for (const c of msg.items) {
+        assert.ok(Number.isFinite(c.at.x) && Number.isFinite(c.at.y),
+            `every chip has a finite anchor, got ${JSON.stringify(c.at)}`);
+        assert.ok(c.at.page >= 1, 'on a real page');
+        assert.ok(c.name, 'and a name');
+    }
+});
+
+test('clicking a chip writes the REFERENCE and says so', async () => {
+    const v = labelViewer();
+    const wrote = [];
+    stub.env.clipboard.writeText = async (t) => { wrote.push(t); };
+    await v._onMessage({
+        type: 'copyLabel', name: 'eq:emc', kind: 'equation', role: 'decl', cmd: 'eqref',
+    });
+    assert.deepStrictEqual(wrote, ['\\eqref{eq:emc}'], 'ready to paste');
+    const st = v.posted.find(p => p.type === 'status');
+    assert.ok(st && st.text.startsWith('Copied \\eqref{eq:emc}'),
+        `and the panel says what it copied, got ${st && JSON.stringify(st.text)}`);
+    assert.strictEqual(st.kind, 'ok');
+});
+
+test('Alt-click copies the bare name instead', async () => {
+    const v = labelViewer();
+    const wrote = [];
+    stub.env.clipboard.writeText = async (t) => { wrote.push(t); };
+    await v._onMessage({
+        type: 'copyLabel', name: 'eq:emc', kind: 'equation', role: 'decl',
+        cmd: 'eqref', alt: true,
+    });
+    assert.deepStrictEqual(wrote, ['eq:emc']);
+});
+
+test('A NEW GENERATION INVALIDATES THE CHIPS', async () => {
+    // Every anchor was measured against the render that has just been replaced,
+    // so a cached chip would name whatever now occupies that spot. Asserted by
+    // MOVING the rows between the two asks and requiring the answer to move.
+    const v = labelViewer();
+    await v._onMessage({ type: 'labelsWanted', value: true });
+    const before = v.posted.filter(p => p.type === 'labels').pop();
+    assert.ok(before.items.length, 'there is something to invalidate');
+    const y0 = before.items[0].at.y;
+
+    v._shiftRows(500);
+    stub.window.activeTextEditor = undefined;
+    await v._onMessage({ type: 'opened', generation: 2 });
+
+    const after = v.posted.filter(p => p.type === 'labels').pop();
+    assert.notStrictEqual(after, before, 'a fresh payload was pushed');
+    assert.strictEqual(after.items[0].at.y, y0 + 500,
+        'and it was rebuilt against the new render, not served from the cache');
+});
+
+test('nobody watching means nothing is pushed', async () => {
+    const v = labelViewer();
+    stub.window.activeTextEditor = undefined;
+    await v._onMessage({ type: 'opened', generation: 3 });
+    assert.ok(!v.posted.some(p => p.type === 'labels'),
+        'a live rebuild must not ship a payload no one is looking at');
+});
+
+test('the whole path survives a document with NO rows', async () => {
+    const v = labelViewer();
+    v.coord.roots.get(FILE).map.lineRows = () => [];   // nothing is mapped
+    await v._onMessage({ type: 'labelsWanted', value: true });
+    const msg = v.posted.find(p => p.type === 'labels');
+    assert.ok(msg, 'it still answers');
+    assert.ok(msg.items.every(c => c.at && Number.isFinite(c.at.x)),
+        'with nothing unplaceable in it');
+});
+
+// --- A SPAN'S INK CANNOT BE ON A PAGE IT DID NOT PRINT ON -------------------
+//
+// Reported as "selecting the entire equation selects some random text around".
+// The rows below are MEASURED, from the reference paper's display at lines
+// 106-114 — a synthetic corpus does not reproduce it, because the cause is an
+// equation that straddles a page break collecting strays filed under its own
+// \end line.
+
+const MEASURED_EQ_ROWS = [
+    { page: 2, y: 113.9, x: 100.9, w: 9.7, h: 13.5, line: 106 },   // the equation
+    { page: 1, y: 61.5, x: 0.0, w: 72.0, h: 13.5, line: 114 },     // page 1's MARGIN
+    { page: 1, y: 781.9, x: 294.9, w: 215.5, h: 13.5, line: 114 }, // prose, page 1
+    { page: 2, y: 133.8, x: 141.4, w: 375.8, h: 20.7, line: 114 }, // the equation
+    { page: 2, y: 141.0, x: 154.3, w: 127.7, h: 13.5, line: 114 },
+];
+
+test('THE MEASURED BUG: a selected equation does not paint on the previous page', () => {
+    const kept = clipToSpan(MEASURED_EQ_ROWS);
+    assert.deepStrictEqual([...new Set(kept.map(r => r.page))], [2],
+        `only the page it printed on, got pages ${kept.map(r => r.page).join(',')}`);
+    assert.ok(!kept.some(r => r.x === 0), 'and never the margin strip at x=0');
+    assert.strictEqual(kept.length, 3);
+});
+
+test('a genuinely page-spanning selection keeps both pages', () => {
+    // The clip must not "fix" a paragraph that really does cross a page break:
+    // its first line prints at the foot of one page and its last at the head of
+    // the next, so everything between them is legitimate.
+    const rows = [
+        { page: 1, y: 700, x: 100, w: 300, h: 12, line: 10 },
+        { page: 1, y: 714, x: 100, w: 300, h: 12, line: 11 },
+        { page: 2, y: 90, x: 100, w: 300, h: 12, line: 12 },
+    ];
+    assert.strictEqual(clipToSpan(rows).length, 3);
+});
+
+test('a single-line span, or one with no line numbers, is left alone', () => {
+    const one = [{ page: 1, y: 100, x: 10, w: 50, h: 12, line: 7 },
+        { page: 1, y: 100, x: 70, w: 50, h: 12, line: 7 }];
+    assert.strictEqual(clipToSpan(one).length, 2);
+    const bare = [{ page: 1, y: 100, x: 10, w: 50, h: 12 }];
+    assert.strictEqual(clipToSpan(bare).length, 1);
+});
+
+test('a clip that would empty the set is refused', () => {
+    // A misfiled ANCHOR must degrade to the old behaviour, never to nothing.
+    const rows = [
+        { page: 3, y: 100, x: 10, w: 50, h: 12, line: 5 },   // first line, filed LATE
+        { page: 1, y: 100, x: 10, w: 50, h: 12, line: 9 },
+    ];
+    assert.ok(clipToSpan(rows).length >= 1, 'something is still painted');
+});
+
+// --- DRAGGING A SELECTION MOVES IT -----------------------------------------
+
+/** A viewer over a document the move can actually rewrite. */
+function moveViewer(text) {
+    const file = '/paper/move.tex';
+    const d = new MutableDoc(text, file);
+    const model = buildModel(scanTex(text, { file }), { file });
+    const st = {
+        files: [file],
+        generation: { generation: 1, pageCount: 1, root: file },
+        map: {
+            available: true,
+            _baseFlag: () => FLAG.FRESH,
+            // A REAL COMPILE RECORDS NO INK FOR A BLANK LINE OR A BARE
+            // DELIMITER, and those are exactly the lines a drop boundary lands
+            // on — so a stub that gives every line a row hides the bug where
+            // the caret is built from the boundary LINE's rows.
+            lineRows: (f, line) => {
+                const t = (d.lineAt(line - 1) || {}).text || '';
+                if (!t.trim() || /^\s*\\(begin|end)\s*\{/.test(t)) return [];
+                return [{ page: 1, x: 100, y: 20 * line, w: 300, h: 12 }];
+            },
+            lineAtPoint: (p, x, y) => ({ file, line: Math.round(y / 20), dx: 0, dy: 0, lead: 12 }),
+            // Everything prints on page 1 — the drop boundaries ask the map
+            // which lines a page shows, and a stub without it offers none.
+            linesOnPage: () => Array.from({ length: d.lineCount }, (_, i) => i + 1),
+            renderToSource: () => ({ file, line: 1, flag: FLAG.FRESH }),
+            objectAtLine: () => null,
+            objectRenderBoxes: () => ({ rects: [], flag: FLAG.FRESH }),
+            sourceToRender: () => ({ page: 1, flag: FLAG.FRESH }),
+        },
+    };
+    const coord = { roots: new Map([[file, st]]), rootFor: () => file, stateFor: () => st };
+    const v = new TexViewer({ extensionUri: { fsPath: '/ext' } }, coord, { get: () => ({ model }) });
+    v.root = file;
+    v.posted = [];
+    v.panel = { webview: { postMessage: (m) => v.posted.push(m) } };
+    stub.workspace.openTextDocument = async () => d;
+    stub.workspace.textDocuments = [d];
+    // applyEdit against the mutable document, newest edit first so offsets hold.
+    stub.workspace.applyEdit = async (e) => {
+        const ops = e.ops.slice().sort((a, b) =>
+            d.offsetAt(b.range ? b.range.start : b.position) -
+            d.offsetAt(a.range ? a.range.start : a.position));
+        for (const op of ops) {
+            if (op.kind === 'delete' || op.kind === 'replace') {
+                const from = d.offsetAt(op.range.start);
+                d.applyChange(from, d.offsetAt(op.range.end) - from, op.text || '');
+            } else {
+                d.applyChange(d.offsetAt(op.position), 0, op.text);
+            }
+        }
+        return true;
+    };
+    return { v, doc: d, file };
+}
+
+// The WorkspaceEdit stub in this file only records replace(); the move uses
+// delete() and insert().
+stub.WorkspaceEdit = class {
+    constructor() { this.ops = []; }
+    replace(uri, range, text) { this.ops.push({ kind: 'replace', uri, range, text }); }
+    delete(uri, range) { this.ops.push({ kind: 'delete', uri, range }); }
+    insert(uri, position, text) { this.ops.push({ kind: 'insert', uri, position, text }); }
+};
+
+const MOVE_SRC = [
+    'First paragraph line.',      // 1
+    '',                           // 2
+    '\\begin{equation}',          // 3
+    '  E = mc^2',                 // 4
+    '\\end{equation}',            // 5
+    '',                           // 6
+    'Last paragraph line.',       // 7
+].join('\n');
+
+test('dragging a block of lines MOVES it, as one undo', async () => {
+    const { v, doc } = moveViewer(MOVE_SRC);
+    v._lastSelection = { file: '/paper/move.tex',
+        start: new Position(2, 0), end: new Position(4, 15) };   // the equation
+    // Drop on line 1 — above the first paragraph.
+    await v._onMessage({ type: 'moveCommit', page: 1, xBp: 100, yTopBp: 20 });
+    const lines = doc.getText().split('\n');
+    assert.strictEqual(lines[0], '\\begin{equation}',
+        `the equation moved to the top, got ${JSON.stringify(lines.slice(0, 3))}`);
+    assert.ok(doc.getText().includes('First paragraph line.'), 'and nothing was lost');
+    assert.strictEqual((doc.getText().match(/E = mc\^2/g) || []).length, 1,
+        'exactly one copy exists — a move, not a duplication');
+});
+
+test('A RUN-IN PARAGRAPH MOVES WITH ITS TITLE', async () => {
+    // Reported: dragging it "is not moving only the text after the title". The
+    // selection began after `\paragraph{…}`, so the command stayed behind and
+    // the fragment that moved was the orphaned remainder.
+    const SRC = [
+        'Opening line of prose here.',      // 1
+        '',                                 // 2
+        '\\paragraph{sdfsdf} sdfsdf',       // 3
+        '',                                 // 4
+        'Following prose line.',            // 5
+    ].join('\n');
+    const { v, doc } = moveViewer(SRC);
+    // Exactly the broken case: from inside the title's braces to the line end.
+    const line = '\\paragraph{sdfsdf} sdfsdf';
+    v._lastSelection = { file: '/paper/move.tex',
+        start: new Position(2, line.indexOf('sdfsdf')), end: new Position(2, line.length) };
+    await v._onMessage({ type: 'moveCommit', page: 1, xBp: 100, yTopBp: 12 });
+    const out = doc.getText();
+    assert.ok(out.indexOf('\\paragraph{sdfsdf} sdfsdf') >= 0,
+        `the command travelled with its argument: ${JSON.stringify(out)}`);
+    assert.strictEqual((out.match(/\\paragraph/g) || []).length, 1,
+        'exactly one of it — a move, not a duplication');
+    assert.ok(out.indexOf('\\paragraph') < out.indexOf('Opening line'),
+        'and it landed where it was dropped');
+});
+
+test('THE TEXT IS NOT DESTROYED BY A DROP INSIDE ITSELF', async () => {
+    const { v, doc } = moveViewer(MOVE_SRC);
+    const before = doc.getText();
+    v._lastSelection = { file: '/paper/move.tex',
+        start: new Position(2, 0), end: new Position(4, 15) };
+    await v._onMessage({ type: 'moveCommit', page: 1, xBp: 100, yTopBp: 80 });   // line 4
+    assert.strictEqual(doc.getText(), before, 'nothing changed');
+    const st = v.posted.filter(p => p.type === 'status').pop();
+    assert.ok(st && /already was/.test(st.text), `and it says why, got ${st && st.text}`);
+});
+
+test('a moved block is left SELECTED at its new home', async () => {
+    const { v } = moveViewer(MOVE_SRC);
+    v._lastSelection = { file: '/paper/move.tex',
+        start: new Position(2, 0), end: new Position(4, 15) };
+    await v._onMessage({ type: 'moveCommit', page: 1, xBp: 100, yTopBp: 20 });
+    assert.ok(v._lastSelection, 'a selection is still tracked');
+    assert.strictEqual(v._lastSelection.start.line, 0, 'over the text where it landed');
+    // ... and marked as ours, so the echo is not read as a fresh user selection.
+    assert.strictEqual(v._selfRange.kind, 'drag');
+});
+
+test('the preview posts a caret, and says where', async () => {
+    const { v } = moveViewer(MOVE_SRC);
+    v._lastSelection = { file: '/paper/move.tex',
+        start: new Position(2, 0), end: new Position(4, 15) };
+    await v._onMessage({ type: 'movePreview', page: 1, xBp: 100, yTopBp: 20 });
+    const c = v.posted.find(p => p.type === 'moveCaret');
+    assert.ok(c && c.rects.length, 'a caret was posted');
+    assert.strictEqual(c.block, true, 'a whole-line selection lands between lines');
+    assert.ok(/move here/.test(c.label || ''), c.label);
+});
+
+test('with nothing selected a drag posts no caret at all', async () => {
+    const { v } = moveViewer(MOVE_SRC);
+    v._lastSelection = null;
+    await v._onMessage({ type: 'movePreview', page: 1, xBp: 100, yTopBp: 20 });
+    assert.strictEqual(v.posted.filter(p => p.type === 'moveCaret').length, 0);
+});
+
+// --- WHAT THE OBJECT'S OWN INK IS, AND IS NOT ------------------------------
+
+test('MISFILED PROSE ABOVE AN EQUATION IS NOT PART OF IT', () => {
+    // MEASURED on eq:SoV-versus-pole-heights. A bare \begin{equation} line
+    // collects ink from the paragraph above, and it lands NARROW and on the
+    // LEFT — where dropStrayRows deliberately keeps things, because a wrapped
+    // line's tail continues at the left margin. Reported as "the render of the
+    // equation for the reference is not correct": the hover's crop began 28 bp
+    // too high and showed the previous paragraph.
+    const rows = [
+        { page: 3, x: 107.3, y: 149.6, w: 19.2, h: 13.5, line: 252 },   // the stray
+        { page: 3, x: 198.3, y: 177.6, w: 232.7, h: 13.5, line: 255 },  // the equation
+        { page: 3, x: 206.0, y: 184.8, w: 5.9, h: 13.5, line: 255 },
+        { page: 3, x: 198.3, y: 195.6, w: 14.1, h: 13.5, line: 257 },
+    ];
+    const kept = dropDetachedRows(rows);
+    assert.ok(!kept.some(r => Math.round(r.y) === 150),
+        'the detached sliver is gone');
+    assert.ok(kept.some(r => Math.round(r.w) === 233), 'the equation stays');
+    assert.ok(kept.some(r => Math.round(r.w) === 14),
+        'and so does a narrow row that TOUCHES the body — a wrapped tail is not a stray');
+});
+
+test('an object is on ONE page when one page holds its ink', () => {
+    // eq:full-Qplus-pole-grid prints at the top of page 3; its \begin line
+    // collected the last prose line of page 2. A crop is one rectangle on one
+    // page, so it showed the bottom of page 2 — the wrong thing entirely.
+    const rows = [
+        { page: 2, x: 295, y: 782, w: 215, h: 13.5 },
+        { page: 3, x: 190, y: 90, w: 226, h: 40 },
+    ];
+    const kept = dominantPage(rows);
+    assert.deepStrictEqual([...new Set(kept.map(r => r.page))], [3]);
+});
+
+test('a display that GENUINELY spans a page break keeps both halves', () => {
+    const rows = [
+        { page: 1, x: 150, y: 700, w: 300, h: 60 },
+        { page: 2, x: 150, y: 90, w: 300, h: 60 },
+    ];
+    assert.strictEqual(dominantPage(rows).length, 2);
+});
+
+test('THE CLIP IS BY PAGE, NEVER BY POSITION WITHIN ONE', () => {
+    // Inside a display, source order is not vertical order: the last line with
+    // any rows is \end{equation}, whose only row sits ABOVE the equation's own
+    // last line. A vertical ceiling taken from it cut the equation in half and
+    // the hover showed only its top.
+    const rows = [
+        { page: 3, x: 198, y: 177.6, w: 232, h: 13.5, line: 255 },
+        { page: 3, x: 198, y: 202.8, w: 14, h: 13.5, line: 257 },   // BELOW…
+        { page: 3, x: 212, y: 200.2, w: 184, h: 13.5, line: 258 },  // …a LATER line
+    ];
+    assert.strictEqual(clipToSpan(rows).length, 3,
+        'nothing on the right page is clipped away by position');
+});
+
+test('A BLANK LINE CONTRIBUTES NO INK TO A SELECTION', async () => {
+    // MEASURED on the reference paper. Line 340 is the empty line between
+    // `\end{figure}` and the paragraph after it, and SyncTeX files the
+    // paragraph-break records under it — on the PREVIOUS PAGE:
+    //
+    //     p2 y= 61.5  x=  0.0..72.0    <- the top margin of page 2
+    //     p2 y=781.9  x=294.9..510.5   <- prose at the foot of page 2
+    //
+    // while the paragraph prints on page 3. Selecting from that blank line
+    // painted bands across a page the selection never reaches: reported as
+    // "I select this, in viewer the whole section is selected".
+    const SRC = [
+        'Opening paragraph line here.',     // 1
+        '',                                 // 2  <- blank, and carrying strays
+        'The real paragraph starts here',   // 3
+        'and continues onto this line.',    // 4
+    ].join('\n');
+    const { v, doc } = moveViewer(SRC);
+    const st = v.coord.roots.get('/paper/move.tex');
+    const rows = st.map.lineRows;
+    // The blank line claims ink far away — on another page, as measured.
+    st.map.lineRows = (f, line) => (line === 2
+        ? [{ page: 9, x: 0, y: 61.5, w: 72, h: 13.5 }]
+        : rows(f, line));
+    v.posted.length = 0;
+    v._postSelection(st, doc, {
+        start: new Position(1, 0), end: new Position(3, 20),
+    });
+    const sel = v.posted.filter(p => p.type === 'selection' && p.span).pop();
+    assert.ok(sel, 'a span was posted');
+    const pages = [...new Set(sel.span.rows.map(r => r.page))];
+    assert.deepStrictEqual(pages, [1],
+        `only the pages the selection actually reaches, got ${pages.join(',')}`);
+});
+
+// --- THE SELECTION'S OWN ACTIONS -------------------------------------------
+//
+// Copy, cut, paste, delete, from the bar on the page. Each is an edit the
+// reader cannot see happening — it lands in a document they may not be looking
+// at — so each is executed here rather than trusted.
+
+const clipOf = () => {
+    const box = { text: '' };
+    stub.env.clipboard.writeText = async (t) => { box.text = t; };
+    stub.env.clipboard.readText = async () => box.text;
+    return box;
+};
+
+test('copy puts the selected LaTeX on the clipboard and changes nothing', async () => {
+    const { v, doc } = moveViewer(MOVE_SRC);
+    const clip = clipOf();
+    const before = doc.getText();
+    v._lastSelection = { file: '/paper/move.tex',
+        start: new Position(2, 0), end: new Position(4, 15) };
+    await v._onMessage({ type: 'selectionAction', action: 'copy' });
+    assert.ok(clip.text.includes('E = mc^2'), `the equation was copied: ${JSON.stringify(clip.text)}`);
+    assert.strictEqual(doc.getText(), before, 'and the document is untouched');
+});
+
+test('cut copies AND removes, as one undo', async () => {
+    const { v, doc } = moveViewer(MOVE_SRC);
+    const clip = clipOf();
+    v._lastSelection = { file: '/paper/move.tex',
+        start: new Position(2, 0), end: new Position(4, 15) };
+    await v._onMessage({ type: 'selectionAction', action: 'cut' });
+    assert.ok(clip.text.includes('E = mc^2'), 'it is on the clipboard');
+    assert.ok(!doc.getText().includes('E = mc^2'), 'and gone from the document');
+    assert.ok(doc.getText().includes('First paragraph line.'), 'nothing else went with it');
+});
+
+test('A CUT THAT CANNOT COPY DELETES NOTHING', async () => {
+    // The one way to lose text with nothing to paste back.
+    const { v, doc } = moveViewer(MOVE_SRC);
+    const before = doc.getText();
+    stub.env.clipboard.writeText = async () => { throw new Error('clipboard is busy'); };
+    v._lastSelection = { file: '/paper/move.tex',
+        start: new Position(2, 0), end: new Position(4, 15) };
+    await v._onMessage({ type: 'selectionAction', action: 'cut' });
+    assert.strictEqual(doc.getText(), before, 'the document still has it');
+    const st = v.posted.filter(p => p.type === 'status').pop();
+    assert.ok(st && /nothing was cut/.test(st.text), `and it says so: ${st && st.text}`);
+});
+
+test('delete removes it and takes the selection off the page', async () => {
+    const { v, doc } = moveViewer(MOVE_SRC);
+    clipOf();
+    v._lastSelection = { file: '/paper/move.tex',
+        start: new Position(2, 0), end: new Position(4, 15) };
+    await v._onMessage({ type: 'selectionAction', action: 'delete' });
+    assert.ok(!doc.getText().includes('E = mc^2'));
+    assert.strictEqual(v._lastSelection, null, 'nothing is selected any more');
+    assert.ok(v.posted.some(p => p.type === 'selection' && p.span === null),
+        'and the overlay was cleared');
+});
+
+test('paste replaces the selection and leaves the new text selected', async () => {
+    const { v, doc } = moveViewer(MOVE_SRC);
+    const clip = clipOf();
+    clip.text = '\\alpha^2';
+    stub.env.clipboard.readText = async () => clip.text;
+    v._lastSelection = { file: '/paper/move.tex',
+        start: new Position(3, 2), end: new Position(3, 10) };     // "E = mc^2"
+    await v._onMessage({ type: 'selectionAction', action: 'paste' });
+    assert.ok(doc.getText().includes('\\alpha^2'), `pasted: ${JSON.stringify(doc.getText())}`);
+    assert.ok(!doc.getText().includes('E = mc^2'), 'replacing what was there');
+    assert.ok(v._lastSelection, 'and the new text is selected');
+    assert.strictEqual(v._lastSelection.end.character - v._lastSelection.start.character,
+        '\\alpha^2'.length);
+});
+
+test('paste with an empty clipboard changes nothing and says why', async () => {
+    const { v, doc } = moveViewer(MOVE_SRC);
+    const before = doc.getText();
+    stub.env.clipboard.readText = async () => '';
+    v._lastSelection = { file: '/paper/move.tex',
+        start: new Position(3, 2), end: new Position(3, 10) };
+    await v._onMessage({ type: 'selectionAction', action: 'paste' });
+    assert.strictEqual(doc.getText(), before);
+    const st = v.posted.filter(p => p.type === 'status').pop();
+    assert.ok(st && /no text/.test(st.text), st && st.text);
+});
+
+test('an action with nothing selected is refused, not thrown', async () => {
+    const { v } = moveViewer(MOVE_SRC);
+    v._lastSelection = null;
+    for (const action of ['copy', 'cut', 'paste', 'delete']) {
+        await v._onMessage({ type: 'selectionAction', action });
+    }
+    assert.ok(v.posted.filter(p => p.type === 'status' && /nothing is selected/.test(p.text)).length === 4);
+});
+
+test('A DROP NEVER LANDS INSIDE A DISPLAY', async () => {
+    // Reported: dragging a paragraph to sit before an equation and "the
+    // insertion always lands inside the equation". It did: the pointer is over
+    // the equation's own rows, so the target line was one of ITS lines — and
+    // \begin{equation} … a paragraph … \end{equation} is not LaTeX.
+    const { v, doc } = moveViewer(MOVE_SRC);
+    const st = v.coord.roots.get('/paper/move.tex');
+    v._lastSelection = { file: '/paper/move.tex',
+        start: new Position(6, 0), end: new Position(6, 20) };   // the last paragraph
+    // Line 4 is `  E = mc^2`, inside \begin{equation}…\end{equation} (lines 3-5).
+    const t = v._moveTargetFor(st, { page: 1, xBp: 100, yTopBp: 20 * 4 + 1 }, doc, v._lastSelection);
+    assert.ok(t, 'a target was found');
+    assert.ok(t.line <= 3 || t.line >= 6,
+        `it must be outside the display (lines 3-5), got line ${t.line}`);
+});
+
+test('BEFORE OR AFTER IS DECIDED BY THE INK, NOT BY THE SOURCE LINE', async () => {
+    // MEASURED on eq:U-m-change: every one of its rows is filed under the
+    // `\end{equation}` line, so comparing the RESOLVED LINE against the
+    // object's middle line answered "after" everywhere on it. The reader could
+    // not drop before an equation by pointing at it at all — the only spot
+    // that worked was a 10 bp sliver in the gap above, which is what
+    // "I cannot put it after the subsection" meant.
+    const { v, doc } = moveViewer(MOVE_SRC);
+    const st = v.coord.roots.get('/paper/move.tex');
+    v._lastSelection = { file: '/paper/move.tex',
+        start: new Position(6, 0), end: new Position(6, 20) };
+    // The stub prints line n at y = 20n, so the equation (lines 3-5) covers
+    // y = 60..112; its middle is 86.
+    const top = v._moveTargetFor(st, { page: 1, xBp: 100, yTopBp: 66 }, doc, v._lastSelection);
+    const bottom = v._moveTargetFor(st, { page: 1, xBp: 100, yTopBp: 106 }, doc, v._lastSelection);
+    assert.ok(top && top.line <= 3, `the top half drops BEFORE it, got line ${top && top.line}`);
+    assert.ok(bottom && bottom.line >= 6, `the bottom half drops AFTER it, got line ${bottom && bottom.line}`);
+});
+
+test('A DROP NEVER SPLITS A MULTI-LINE HEADING', async () => {
+    // `\subsection{From the … to` / `$q\dot q$ bilinears}` is two source lines,
+    // and a drop between them cuts the title in half. MEASURED: every drop in
+    // the top 14 bp of that heading landed on its second line.
+    const HEAD_SRC = [
+        'Intro line.',                     // 1
+        '',                                // 2
+        '\\subsection{From the sum to',    // 3
+        'the bilinears}',                  // 4
+        '',                                // 5
+        'Body under the heading.',         // 6
+    ].join('\n');
+    const { v, doc } = moveViewer(HEAD_SRC);
+    const st = v.coord.roots.get('/paper/move.tex');
+    // A WHOLE line, or this is not a block selection and takes the
+    // column-insert branch instead — which is a different question.
+    v._lastSelection = { file: '/paper/move.tex',
+        start: new Position(5, 0), end: new Position(5, 'Body under the heading.'.length) };
+    for (let y = 56; y <= 96; y += 4) {
+        const t = v._moveTargetFor(st, { page: 1, xBp: 100, yTopBp: y }, doc, v._lastSelection);
+        assert.ok(t, `a target at y=${y}`);
+        assert.notStrictEqual(t.line, 4,
+            `y=${y} landed between the heading's two lines, splitting the title`);
+    }
+});
+
+// Two blocks with a gap between them — the shape of both reports.
+const GAP_SRC = [
+    'Opening prose line.',          // 1
+    '',                             // 2
+    '\\begin{equation}',            // 3
+    '  E = mc^2',                   // 4
+    '\\end{equation}',              // 5
+    '',                             // 6
+    '\\section{A section}',         // 7
+    '',                             // 8
+    '\\begin{equation}',            // 9
+    '  F = ma',                     // 10
+    '\\end{equation}',              // 11
+    '',                             // 12
+    'Closing prose line.',          // 13
+].join('\n');
+
+test('EVERY GAP BETWEEN BLOCKS IS A PLACE A DROP CAN LAND', async () => {
+    // Reported twice: "I cannot drag and insert text between two equations",
+    // and "also between equation and a section". Resolving a LINE and then
+    // repairing it cannot express "between these two things" — the pointer is
+    // in a gap, so the resolved line is whatever happens to be nearest, and
+    // every rule for patching that answer is a rule about the wrong question.
+    // The gaps between the blocks printed on a page ARE the legal insertion
+    // points, and the reader is aiming at one of them.
+    const { v, doc } = moveViewer(GAP_SRC);
+    const st = v.coord.roots.get('/paper/move.tex');
+    const bounds = v._dropBoundaries(st, doc, 1);
+    const lines = bounds.map(b => b.line);
+    for (const want of [3, 7, 9]) {
+        assert.ok(lines.includes(want),
+            `a boundary before line ${want} — got ${lines.join(', ')}`);
+    }
+    // In source order, each one further down the page than the last.
+    for (let i = 1; i < bounds.length; i++) {
+        assert.ok(bounds[i].y >= bounds[i - 1].y,
+            `boundaries run down the page: ${bounds.map(b => b.y.toFixed(0)).join(', ')}`);
+    }
+});
+
+test('EVERY DROP POSITION DRAWS ITS BLUE CARET', async () => {
+    // Reported: "the blue indicator for the dropping position does not show
+    // when I drop next to the equations". The caret was built by asking for the
+    // ROWS OF THE BOUNDARY LINE — and a boundary line is a blank line, or a
+    // `\begin{equation}` whose only record is a misfiled sliver, so there were
+    // none and nothing was drawn. The boundary knows its own position; it just
+    // had to keep it.
+    const { v, doc } = moveViewer(GAP_SRC);
+    const st = v.coord.roots.get('/paper/move.tex');
+    v._lastSelection = { file: '/paper/move.tex',
+        start: new Position(12, 0), end: new Position(12, 'Closing prose line.'.length) };
+    let drawn = 0;
+    let probes = 0;
+    for (let y = 40; y <= 260; y += 5) {
+        const t = v._moveTargetFor(st, { page: 1, xBp: 100, yTopBp: y }, doc, v._lastSelection);
+        if (!t) continue;
+        probes++;
+        assert.ok(t.rects && t.rects.length, `y=${y} offered line ${t.line} with no caret`);
+        const r = t.rects[0];
+        assert.ok(Number.isFinite(r.x) && r.w > 0 && Number.isFinite(r.y),
+            `y=${y}: a caret needs a real position, got ${JSON.stringify(r)}`);
+        drawn++;
+    }
+    assert.ok(probes > 10, 'the sweep actually probed something');
+    assert.strictEqual(drawn, probes, 'every offered position is shown');
+});
+
+test('a drop between two equations lands between them', async () => {
+    const { v, doc } = moveViewer(GAP_SRC);
+    const st = v.coord.roots.get('/paper/move.tex');
+    v._lastSelection = { file: '/paper/move.tex',
+        start: new Position(12, 0), end: new Position(12, 'Closing prose line.'.length) };
+    // The stub prints line n at y=20n, so the gap between the section (line 7)
+    // and the second equation (9-11) is around y=170.
+    const t = v._moveTargetFor(st, { page: 1, xBp: 100, yTopBp: 172 }, doc, v._lastSelection);
+    assert.ok(t, 'a target');
+    // After the section heading (line 7) and at or before the equation that
+    // follows (line 9) — the blank line between them is as correct as either
+    // edge, and insisting on one of the two would be testing the arithmetic
+    // rather than the behaviour.
+    assert.ok(t.line > 7 && t.line <= 9,
+        `between the section and the equation, got line ${t.line}`);
+});
+
+test('THE ANSWER MOVES DOWN THE PAGE AS THE POINTER DOES', async () => {
+    // The old behaviour was not merely wrong in places, it was NON-MONOTONIC:
+    // sweeping down gave before / between / AFTER EVERYTHING / between / after,
+    // which feels broken however good the individual answers are.
+    const { v, doc } = moveViewer(GAP_SRC);
+    const st = v.coord.roots.get('/paper/move.tex');
+    v._lastSelection = { file: '/paper/move.tex',
+        start: new Position(12, 0), end: new Position(12, 'Closing prose line.'.length) };
+    let last = -Infinity;
+    for (let y = 50; y <= 260; y += 5) {
+        const t = v._moveTargetFor(st, { page: 1, xBp: 100, yTopBp: y }, doc, v._lastSelection);
+        if (!t) continue;
+        assert.ok(t.line >= last,
+            `y=${y} went backwards: line ${t.line} after ${last}`);
+        last = t.line;
+    }
+});
+
+test('a drop in ordinary prose is left exactly where it was aimed', async () => {
+    const { v, doc } = moveViewer(MOVE_SRC);
+    const st = v.coord.roots.get('/paper/move.tex');
+    v._lastSelection = { file: '/paper/move.tex',
+        start: new Position(2, 0), end: new Position(4, 15) };
+    const t = v._moveTargetFor(st, { page: 1, xBp: 100, yTopBp: 20 * 1 + 1 }, doc, v._lastSelection);
+    assert.ok(t && t.line <= 2, `line ${t && t.line}`);
+});
+
+test('A RUN-IN HEADING SHIFTS THE OCCURRENCE COUNT', async () => {
+    // MEASURED: `\paragraph{The full two-variable pole grid.}` has NO rows of
+    // its own — its words print inside the following line's row — so the panel
+    // counts one more `the` on that row than the source line contains, and a
+    // cursor on "distinguish the separated" lit the `The` of the heading.
+    const v = makeViewer(null);
+    const st = v.coord.roots.get(FILE);
+    const rows = st.map.lineRows;
+    // The heading line has no rows; the prose line after it does.
+    const HEAD = 12;
+    const PROSE = 13;
+    st.map.lineRows = (f, line) => (line === HEAD ? [] : rows(f, line));
+    const orig = doc.lineAt;
+    doc.lineAt = (i) => (i === HEAD - 1
+        ? { text: '\\paragraph{The long heading.}' }
+        : orig(i));
+    try {
+        const shift = v._occurrenceShift(st, doc, PROSE, 'the');
+        assert.strictEqual(shift, 1,
+            'the heading printed one more "the" onto this row before the line began');
+        assert.strictEqual(v._occurrenceShift(st, doc, PROSE, 'zebra'), 0,
+            'and nothing for a word it does not contain');
+    } finally { doc.lineAt = orig; }
+});
+
+test('and the shift REACHES THE PANEL, not just the helper', async () => {
+    // The bug is only visible in what is POSTED: the panel counts occurrences
+    // across the printed row, so an unshifted count picks the heading's word.
+    const v = makeViewer(null);
+    const st = v.coord.roots.get(FILE);
+    const rows = st.map.lineRows;
+    const HEAD = 15;                     // made rowless, like a run-in heading
+    const PROSE = 16;                    // 'The kernel of the operator is the kernel…'
+    st.map.lineRows = (f, line) => (line === HEAD ? [] : rows(f, line));
+    const orig = doc.lineAt;
+    doc.lineAt = (i) => (i === HEAD - 1
+        ? { text: '\\paragraph{The kernel heading.}' }
+        : orig(i));
+    try {
+        const col = LINES[PROSE - 1].indexOf('kernel');
+        v.syncFromEditor(editorAt(PROSE, col));
+        const h = v.posted.filter(p => p.type === 'highlight').pop();
+        assert.ok(h, 'a highlight was posted');
+        assert.strictEqual(h.word, 'kernel');
+        assert.strictEqual(h.occurrence, 2,
+            `the heading printed a "kernel" onto this row first, so the line's ` +
+            `own first one is the SECOND on the row — got ${h.occurrence}`);
+    } finally { doc.lineAt = orig; }
+});
+
+test('a line whose neighbour HAS ink is not shifted', async () => {
+    // Only a rowless run-in heading shares a row invisibly. An ordinary
+    // previous line has ink, and `_searchRows` already bounds the region by it.
+    const v = makeViewer(null);
+    const st = v.coord.roots.get(FILE);
+    assert.strictEqual(v._occurrenceShift(st, doc, 13, 'the'), 0);
+});
+
+test('A CAPTION IS PROSE, NOT THE FIGURE IT SITS IN', async () => {
+    // Reported: a cursor in a figure's caption highlighted the whole figure.
+    // The float is a block and for a block the object IS the unit — right for
+    // the picture, wrong for the sentence underneath it.
+    const SRC = [
+        'Before the float.',                                   // 1
+        '\\begin{figure}',                                     // 2
+        '\\centering',                                         // 3
+        'A pretend picture goes here.',                        // 4
+        '\\caption{The two allowed half-towers, drawn at the', // 5
+        'representative value so the spacings are clear.}',    // 6
+        '\\label{fig:x}',                                      // 7
+        '\\end{figure}',                                       // 8
+    ].join('\n');
+    const { v, doc } = moveViewer(SRC);
+    const st = v.coord.roots.get('/paper/move.tex');
+    assert.strictEqual(v._inCaption(doc, 5, 20), true, 'inside the caption');
+    assert.strictEqual(v._inCaption(doc, 6, 10), true, 'and on its second line');
+    assert.strictEqual(v._inCaption(doc, 4, 5), false, 'the picture is not the caption');
+    assert.strictEqual(v._inCaption(doc, 1, 5), false, 'nor is the prose before the float');
+
+    v.posted.length = 0;
+    v.syncFromEditor({
+        document: doc,
+        selection: { active: new Position(4, 20) },   // in the caption text
+    });
+    const h = v.posted.filter(p => p.type === 'highlight').pop();
+    assert.ok(h, 'a highlight was posted');
+    assert.ok(h.word, `naming the word under the cursor, got ${JSON.stringify(h.word)}`);
+    // The figure's own box spans its whole height; the caption's line does not.
+    const tall = h.rects.some(r => r.h > 40);
+    assert.ok(!tall, `and it is a line, not the whole float: ${JSON.stringify(h.rects)}`);
+});
+
+// --- THE ROUND TRIP: a click must not light up its neighbour ----------------
+
+test('a NON-EMPTY selection is identified by its START, not its active end', async () => {
+    // MEASURED over 243 maths glyphs: 92 highlights landed exactly ONE GLYPH TO
+    // THE RIGHT, every one with dy=0. An inverse click SELECTS the token it
+    // resolved and VS Code puts `active` at the END of that selection; token
+    // containment is half-open, so the forward sync looked up the token AFTER
+    // the one that was clicked.
+    const v = makeViewer(null);
+    const col = LINES[6].indexOf('\\bx');
+    // A selection over `\bx`, exactly as an inverse click leaves it — including
+    // the stamp that marks it as OURS, which is what routes it to the cursor
+    // path rather than to the red range overlay.
+    const sel = new Selection(new Position(6, col), new Position(6, col + 3));
+    sel.active = sel.end;
+    v._selfRange = {
+        file: FILE, kind: 'click',
+        sl: 6, sc: col, el: 6, ec: col + 3, at: Date.now(),
+    };
+    v.syncFromEditor({ document: doc, selection: sel });
+    const h = v.posted.find(p => p.type === 'highlight');
+    assert.ok(h, 'a highlight was posted');
+    assert.strictEqual(h.word, 'x',
+        `the glyph \\bx prints, not the next token's — got ${JSON.stringify(h.word)}`);
+});
+
+test('A RUN-IN HEADING STILL HIGHLIGHTS: \\paragraph borrows its neighbour rows', async () => {
+    // MEASURED on the reference paper: all six \paragraph headings have EMPTY
+    // lineRows, because the heading is typeset into the following paragraph's
+    // printed row and SyncTeX files that row under the following line. The
+    // cursor answered "line 338 · unmapped" and nothing lit up at all.
+    const v = makeViewer(null);
+    const st = v.coord.roots.get(FILE);
+    const rows = st.map.lineRows;
+    const RUNIN = 13;                       // a prose line in the fixture
+    st.map.lineRows = (f, line) => (line === RUNIN ? [] : rows(f, line));
+    v.syncFromEditor(editorAt(RUNIN, 4));
+    const h = v.posted.filter(p => p.type === 'highlight').pop();
+    assert.ok(h, 'a highlight was posted');
+    assert.ok(h.rects.length > 0,
+        'with rects borrowed from the neighbouring line, not "unmapped"');
 });
 
 (async () => {

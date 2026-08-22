@@ -31,6 +31,12 @@ const {
 const { TexViewer, VIEW_TYPE: TEX_VIEW_TYPE } = require('./texViewer');
 const { DiskWatch, VERDICT } = require('./diskGuard');
 const texVersions = require('./texVersions');
+const {
+    PASTE_MIMES, imagePathFor, figureSnippet, insideFloat, hasGraphicx, findImageItem,
+} = require('./texPaste');
+const { refAt, resolveRef, hoverMarkdown } = require('./refIntel');
+const { readAuxLabels } = require('./auxLabels');
+const { readClipboardImage } = require('./texClipboard');
 
 const TEX_SELECTOR = [
     { language: 'latex', scheme: 'file' },
@@ -72,6 +78,25 @@ class Projection {
         const value = { version: doc.version, scan, model, mma, text, fsPath: key };
         this._models.set(key, value);
         return value;
+    }
+
+    /**
+     * A model for a file VS Code does NOT have open.
+     *
+     * `get` needs a TextDocument, and on a split paper only the root is
+     * normally open — yet a label declared in `sections/intro.tex` is still a
+     * label of this paper. Uncached on purpose: the callers that need this
+     * (the label overlay) do their own per-generation caching, and caching a
+     * model with no version to invalidate it against would go stale silently.
+     *
+     * @param {string} text
+     * @param {string} file  absolute path, so object ids match the open path
+     */
+    fromText(text, file) {
+        try {
+            const scan = scanTex(String(text || ''), { file });
+            return buildModel(scan, { file });
+        } catch (_) { return null; }
     }
 
     /** Debounced rebuild + notify, for the keystroke path. */
@@ -228,6 +253,73 @@ function makeFoldingProvider(projection) {
 
 // --- CodeLens ---------------------------------------------------------------
 
+/**
+ * Paste a picture into a .tex and get a figure.
+ *
+ * The bytes go to `img/<paper>/paste_<hash>.<ext>` — content-hashed, so pasting
+ * the same screenshot twice writes one file — and the caret gets a float with
+ * the caption and label as tabstops. Inside an existing figure it inserts a
+ * bare \includegraphics instead, because nesting floats is a LaTeX error.
+ *
+ * Everything decidable without a workspace lives in texPaste.js and is tested
+ * there; this is the thin vscode-shaped shell around it.
+ */
+function makePasteProvider(log = () => {}) {
+    return {
+        async provideDocumentPasteEdits(document, _ranges, dataTransfer, _ctx, token) {
+            const file = document.uri.fsPath;
+            if (!/\.tex$/i.test(file) || document.uri.scheme !== 'file') return;
+
+            const hit = findImageItem(dataTransfer);
+            if (!hit) { log('paste: nothing image-like in the clipboard'); return; }
+            let bytes = null;
+            try { bytes = await hit.file.data(); } catch (e) { bytes = null; }
+            if (!bytes || !bytes.length) { log('paste: the image had no bytes'); return; }
+            if (token && token.isCancellationRequested) return;
+
+            const where = imagePathFor(bytes, file, hit.mime);
+            log(`paste: ${bytes.length} bytes of ${hit.mime} -> ${where.rel}`);
+            try {
+                await vscode.workspace.fs.createDirectory(vscode.Uri.file(where.dir));
+                // Content-hashed, so an existing file with this name IS this
+                // picture. Writing it again would be correct but pointless.
+                let exists = false;
+                try {
+                    await vscode.workspace.fs.stat(vscode.Uri.file(where.abs));
+                    exists = true;
+                } catch (_) { exists = false; }
+                if (!exists) {
+                    await vscode.workspace.fs.writeFile(
+                        vscode.Uri.file(where.abs), new Uint8Array(bytes));
+                }
+            } catch (e) {
+                vscode.window.showWarningMessage(
+                    `Wolfbook: could not save the pasted image — ${e.message}`);
+                return;
+            }
+
+            const text = document.getText();
+            const offset = document.offsetAt(
+                (_ranges && _ranges[0] && _ranges[0].start) || new vscode.Position(0, 0));
+            const snippet = figureSnippet({
+                rel: where.rel,
+                inFigure: insideFloat(text, offset),
+            });
+
+            if (!hasGraphicx(text)) {
+                vscode.window.showWarningMessage(
+                    'Wolfbook: this paper does not load graphicx — add ' +
+                    '\\usepackage{graphicx} or the figure will not compile.');
+            }
+
+            const kind = vscode.DocumentPasteEditKind.Text;
+            const edit = new vscode.DocumentPasteEdit(
+                new vscode.SnippetString(snippet), 'Insert as a figure', kind);
+            return [edit];
+        },
+    };
+}
+
 function makeCodeLensProvider(projection, emitter) {
     return {
         onDidChangeCodeLenses: emitter.event,
@@ -323,6 +415,31 @@ function computeDiagnostics(doc, projection, opts) {
         }
     }
 
+    // A LABEL NOTHING REFERS TO is not an error — plenty of papers label every
+    // equation on principle — so this is an Information with the Unnecessary
+    // tag, which VS Code renders as a fade rather than a squiggle. It is worth
+    // saying because the commonest cause is a typo in the \ref, which shows up
+    // here as an orphaned label next to an unresolved reference.
+    const used = new Set();
+    for (const r of model.objects) {
+        if ((r.kind === 'ref' || r.kind === 'cite') && r.target) {
+            for (const t of String(r.target).split(',')) used.add(t.trim());
+        }
+    }
+    for (const l of labels) {
+        if (used.has(l.name)) continue;
+        const d = new vscode.Diagnostic(lineRange(l.sourceRange.startLine),
+            `\\label{${l.name}} is never referred to in this file.`,
+            vscode.DiagnosticSeverity.Information);
+        d.source = 'wolfbook-tex';
+        d.code = 'unused-label';
+        // Read defensively: the enum is absent in older hosts, and a decoration
+        // hint must never break the diagnostic it decorates.
+        const tag = vscode.DiagnosticTag && vscode.DiagnosticTag.Unnecessary;
+        if (tag != null) d.tags = [tag];
+        out.push(d);
+    }
+
     // Citations need the .bib, which is a project-level question. Only report
     // when we could actually read the databases, or every paper with an
     // external bibliography lights up red for no reason.
@@ -359,6 +476,310 @@ function computeDiagnostics(doc, projection, opts) {
 }
 
 /** Read every .bib the project references, so \cite can be adjudicated. */
+/**
+ * The raw BibTeX entry for one key, for the \cite hover.
+ *
+ * Reads the same databases `collectBibKeys` does — deliberately re-reading
+ * rather than caching the whole file: a hover is a rare, human-paced event, and
+ * a stale entry shown as fact is worse than a few milliseconds.
+ */
+function bibEntryFor(fsPath, key) {
+    const fs = require('fs');
+    if (!key) return null;
+    const deps = {
+        readFile: (p) => fs.readFileSync(p, 'utf8'),
+        exists: (p) => { try { return fs.existsSync(p); } catch (_) { return false; } },
+        listDir: (d) => { try { return fs.readdirSync(d); } catch (_) { return []; } },
+    };
+    let files;
+    try { files = buildGraph(findRoot(fsPath, deps).root, deps).files; }
+    catch (_) { files = [fsPath]; }
+
+    for (const f of files) {
+        let src;
+        try { src = fs.readFileSync(f, 'utf8'); } catch (_) { continue; }
+        const dir = path.dirname(f);
+        const names = [];
+        for (const re of [/\\bibliography\s*\{([^}]*)\}/g, /\\addbibresource\s*\{([^}]*)\}/g]) {
+            let m;
+            while ((m = re.exec(src)) !== null) {
+                for (const n of m[1].split(',').map(x => x.trim()).filter(Boolean)) names.push(n);
+            }
+        }
+        for (const n of names) {
+            const bp = path.isAbsolute(n) ? n : path.join(dir, /\.bib$/i.test(n) ? n : n + '.bib');
+            if (!deps.exists(bp)) continue;
+            let bib;
+            try { bib = fs.readFileSync(bp, 'utf8'); } catch (_) { continue; }
+            const at = bib.search(new RegExp(`@\\\\w+\\\\s*\\\\{\\\\s*${
+                key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\\\s*,`));
+            if (at < 0) continue;
+            // Brace-matched, so an entry containing braces comes back whole.
+            let depth = 0;
+            for (let i = bib.indexOf('{', at); i < bib.length; i++) {
+                if (bib[i] === '{') depth++;
+                else if (bib[i] === '}') {
+                    depth--;
+                    if (depth === 0) return bib.slice(at, i + 1);
+                }
+            }
+            return bib.slice(at, at + 800);
+        }
+    }
+    return null;
+}
+
+/**
+ * WHAT A CROSS-REFERENCE ACTUALLY POINTS AT — hover, F12, and Find References.
+ *
+ * `\eqref{eq:foo}` says nothing on its own; the number it resolves to lives in
+ * the `.aux`, the equation it names lives in the model, and the page lives in
+ * both. Joining them is the whole feature. The resolution itself is pure and
+ * lives in refIntel.js; these are the vscode-shaped shells.
+ *
+ * @param {(doc:vscode.TextDocument) => {printed:Map, cites:Map}} auxFor
+ */
+/**
+ * Put a cropped fragment somewhere a hover can load it from.
+ *
+ * Content-addressed, like every other image this extension writes, so hovering
+ * the same equation twice writes one file. It lives beside the compiled PDF —
+ * a per-document temp directory that is swept with the rest of the build — and
+ * never inside the reader's project, which is a Dropbox folder.
+ *
+ * @returns {{dir:string, name:string}|null}
+ */
+function writeFragmentPng(dataUrl, viewer) {
+    try {
+        const m = /^data:image\/png;base64,(.+)$/.exec(String(dataUrl || ''));
+        if (!m || !viewer || !viewer.root) return null;
+        const st = viewer.coord && viewer.coord.roots.get(viewer.root);
+        const outDir = st && st.generation && st.generation.outDir;
+        if (!outDir) return null;
+        const fs2 = require('fs');
+        const dir = path.join(outDir, '_wbfrag');
+        const bytes = Buffer.from(m[1], 'base64');
+        const name = `f_${require('crypto').createHash('sha1')
+            .update(bytes).digest('hex').slice(0, 12)}.png`;
+        const abs = path.join(dir, name);
+        if (!fs2.existsSync(abs)) {
+            fs2.mkdirSync(dir, { recursive: true });
+            fs2.writeFileSync(abs, bytes);
+        }
+        return { dir, name };
+    } catch (_) { return null; }
+}
+
+function makeRefProviders(projection, auxFor, viewer = null) {
+    const resolveAt = (doc, position) => {
+        const line = doc.lineAt(position.line).text;
+        const ref = refAt(line, position.character);
+        if (!ref || ref.kind === 'label') return null;
+        const { model } = projection.get(doc);
+        const aux = auxFor(doc);
+        const text = doc.getText();
+        return {
+            ref,
+            info: resolveRef({
+                ref,
+                objects: model.objects,
+                printedFor: (n) => aux.labels.get(n) || null,
+                citeFor: (n) => aux.cites.get(n) || null,
+                bibEntry: (k) => bibEntryFor(doc.uri.fsPath, k),
+                sourceOf: (obj) => {
+                    const r = obj.sourceRange;
+                    if (!r) return null;
+                    return text.slice(r.startOffset, r.endOffset);
+                },
+            }),
+        };
+    };
+
+    return {
+        hover: {
+            async provideHover(doc, position, token) {
+                const hit = resolveAt(doc, position);
+                if (!hit || !hit.info) return null;
+                let md = hoverMarkdown(hit.info);
+                if (!md) return null;
+                let base = null;
+
+                // THE EQUATION AS IT PRINTS, not only as it is written. The
+                // crop comes from the open panel — the same pixels the reader
+                // is looking at — and is skipped without a word when the panel
+                // is closed, when the object has no ink, or when it does not
+                // arrive quickly: a hover that hangs is worse than a hover
+                // without a picture.
+                const t = hit.info.target;
+                if (viewer && viewer.isOpen && viewer.isOpen() && t &&
+                    vscode.workspace.getConfiguration('wolfbook.tex')
+                        .get('hoverRender', true)) {
+                    try {
+                        const rects = viewer.objectRects(t.file || doc.uri.fsPath,
+                            t.startLine, t.endLine);
+                        if (rects.length && !(token && token.isCancellationRequested)) {
+                            const shot = await viewer.cropFragment(rects, {
+                                key: `${t.file}:${t.startLine}-${t.endLine}`,
+                            });
+                            if (shot && shot.dataUrl) {
+                                // A HOVER SHOWS AN IMAGE FROM A FILE, NOT FROM
+                                // A data: URI. `MarkdownString.baseUri` is the
+                                // documented way to let a hover load a local
+                                // picture; whether the sanitiser accepts a
+                                // base64 payload is not something to find out
+                                // in production. The PNG is written beside the
+                                // compiled PDF — a temp dir that is already
+                                // per-document and already swept.
+                                const rel = writeFragmentPng(shot.dataUrl, viewer);
+                                if (rel) {
+                                    // Sized in POINTS, so the fragment appears
+                                    // at the size it prints, capped so a
+                                    // full-width display does not fill the
+                                    // screen. `|width=` is VS Code's own
+                                    // markdown-image extension.
+                                    const w = Math.min(shot.w || 300, 460);
+                                    // THE PICTURE GOES FIRST. A hover is a
+                                    // small box and the source of a display can
+                                    // fill it, so a render appended below it is
+                                    // a render nobody sees without scrolling —
+                                    // and the whole point of it is to be the
+                                    // thing you take in at a glance.
+                                    md = `![](${rel.name}|width=${w})\n\n${md}`;
+                                    base = rel.dir;
+                                }
+                            }
+                        }
+                    } catch (_) { /* the code half of the hover still stands */ }
+                }
+
+                const m = new vscode.MarkdownString(md);
+                m.isTrusted = false;
+                m.supportHtml = false;
+                // Only set when a fragment was actually written: baseUri is
+                // what makes the relative image above resolvable at all.
+                if (base) { try { m.baseUri = vscode.Uri.file(base + path.sep); } catch (_) {} }
+                return new vscode.Hover(m, new vscode.Range(
+                    new vscode.Position(position.line, hit.ref.start),
+                    new vscode.Position(position.line, hit.ref.end)));
+            },
+        },
+        definition: {
+            provideDefinition(doc, position) {
+                const hit = resolveAt(doc, position);
+                const t = hit && hit.info && hit.info.target;
+                if (!t) return null;
+                const uri = t.file && t.file !== doc.uri.fsPath
+                    ? vscode.Uri.file(t.file) : doc.uri;
+                const at = new vscode.Position(Math.max(0, t.startLine - 1), 0);
+                return new vscode.Location(uri, new vscode.Range(at, at));
+            },
+        },
+        references: {
+            provideReferences(doc, position) {
+                const line = doc.lineAt(position.line).text;
+                // Works from EITHER end: on the \label itself, or on a \ref to
+                // it — "where else is this used" is the same question.
+                const here = refAt(line, position.character);
+                const name = here && here.name;
+                if (!name) return null;
+                const { model } = projection.get(doc);
+                const out = [];
+                for (const o of model.objects) {
+                    const isDecl = o.kind === 'label' && o.name === name;
+                    const isUse = (o.kind === 'ref' || o.kind === 'cite') &&
+                        String(o.target || '').split(',').map(t => t.trim()).includes(name);
+                    if (!isDecl && !isUse) continue;
+                    const at = new vscode.Position(Math.max(0, o.sourceRange.startLine - 1), 0);
+                    out.push(new vscode.Location(doc.uri, new vscode.Range(at, at)));
+                }
+                return out;
+            },
+        },
+    };
+}
+
+/**
+ * ⌘V IN A .tex: A PICTURE BECOMES A FIGURE, EVERYTHING ELSE PASTES NORMALLY.
+ *
+ * The supported route for this is a DocumentPasteEditProvider, which is
+ * registered above and stays registered. It was reported twice as doing
+ * nothing at all with a screenshot in the clipboard, and there is no second
+ * API — `env.clipboard` is text only — so the image is fetched from the
+ * operating system instead.
+ *
+ * THE ORDER MATTERS, and it is what keeps this from being intrusive:
+ * `readText` is in-process and instant, so an ordinary text paste never pays
+ * for a subprocess and never behaves differently. Only a clipboard with NO
+ * text at all — which is what a screenshot is — reaches the shell-out. And any
+ * doubt anywhere falls through to VS Code's own paste, so the worst case is
+ * the behaviour the reader had before.
+ */
+async function smartPaste(pasteLogger = () => {}) {
+    const fallback = async () => {
+        try { await vscode.commands.executeCommand('editor.action.clipboardPasteAction'); }
+        catch (e) { pasteLogger(`default paste failed: ${e && e.message}`); }
+    };
+    const ed = vscode.window.activeTextEditor;
+    if (!ed || !/\.tex$/i.test(ed.document.uri.fsPath)) return fallback();
+
+    try {
+        const text = await vscode.env.clipboard.readText();
+        if (text && text.length) return fallback();       // a text paste, untouched
+    } catch (_) { return fallback(); }
+
+    let bytes = null;
+    try {
+        const fs2 = require('fs');
+        const { spawnSync } = require('child_process');
+        bytes = readClipboardImage({
+            run: (cmd, args) => spawnSync(cmd, args, {
+                encoding: 'buffer', maxBuffer: 64 * 1024 * 1024, timeout: 5000,
+            }),
+            readFile: (f) => fs2.readFileSync(f),
+            exists: (f) => fs2.existsSync(f),
+            unlink: (f) => { try { fs2.unlinkSync(f); } catch (_) { /* fine */ } },
+        });
+    } catch (e) { pasteLogger(`clipboard probe failed: ${e && e.message}`); }
+
+    if (!bytes || !bytes.length) {
+        pasteLogger('smartPaste: no text and no image in the clipboard');
+        return fallback();
+    }
+    pasteLogger(`smartPaste: ${bytes.length} bytes of PNG from the clipboard`);
+    try {
+        await insertPastedImage(ed, bytes, 'image/png', pasteLogger);
+    } catch (e) {
+        pasteLogger(`smartPaste failed: ${e && e.message}`);
+        return fallback();
+    }
+    return undefined;
+}
+
+/** Write the picture beside the paper and put a figure at the caret. */
+async function insertPastedImage(editor, bytes, mime, pasteLogger = () => {}) {
+    const doc = editor.document;
+    const file = doc.uri.fsPath;
+    const where = imagePathFor(bytes, file, mime);
+    await vscode.workspace.fs.createDirectory(vscode.Uri.file(where.dir));
+    let exists = false;
+    try { await vscode.workspace.fs.stat(vscode.Uri.file(where.abs)); exists = true; }
+    catch (_) { exists = false; }
+    if (!exists) {
+        await vscode.workspace.fs.writeFile(vscode.Uri.file(where.abs), new Uint8Array(bytes));
+    }
+    pasteLogger(`wrote ${where.rel}${exists ? ' (already had it)' : ''}`);
+
+    const text = doc.getText();
+    const offset = doc.offsetAt(editor.selection.active);
+    const snippet = figureSnippet({ rel: where.rel, inFigure: insideFloat(text, offset) });
+    await editor.insertSnippet(new vscode.SnippetString(snippet));
+    if (!hasGraphicx(text)) {
+        vscode.window.showWarningMessage(
+            'WPaper: this paper does not load graphicx — add \\usepackage{graphicx} ' +
+            'or the figure will not compile.');
+    }
+}
+
 function collectBibKeys(fsPath) {
     const fs = require('fs');
     const deps = {
@@ -450,6 +871,27 @@ function makePaintRender({ viewer, coord, projection, status, pageMarkers, rende
 
 // --- activation -------------------------------------------------------------
 
+/**
+ * The paste provider's own trail.
+ *
+ * A paste that quietly does nothing is the hardest kind of bug to report — the
+ * reader sees no error, just an unchanged file — so every step says what it
+ * saw. Buffered until the output channel exists, because registration happens
+ * before it is created.
+ */
+const _pasteLines = [];
+let _pasteChannel = null;
+function pasteLog(msg) {
+    const line = `[paste] ${msg}`;
+    if (_pasteChannel) { try { _pasteChannel.appendLine(line); return; } catch (_) { /* gone */ } }
+    _pasteLines.push(line);
+    if (_pasteLines.length > 50) _pasteLines.shift();
+}
+function attachPasteLog(channel) {
+    _pasteChannel = channel;
+    for (const l of _pasteLines.splice(0)) { try { channel.appendLine(l); } catch (_) { /* gone */ } }
+}
+
 function registerTexSupport(context) {
     const cfg = () => vscode.workspace.getConfiguration('wolfbook.tex');
     if (!cfg().get('enable', true)) return null;
@@ -473,6 +915,28 @@ function registerTexSupport(context) {
         vscode.languages.registerFoldingRangeProvider(TEX_SELECTOR, makeFoldingProvider(projection)),
         vscode.languages.registerCodeLensProvider(TEX_SELECTOR, makeCodeLensProvider(projection, lensEmitter)),
     );
+
+    // PASTE A PICTURE, GET A FIGURE. Registered defensively: the paste API
+    // arrived in 1.97 and this extension supports older hosts, where the whole
+    // feature is simply absent rather than an activation failure.
+    if (vscode.languages.registerDocumentPasteEditProvider && vscode.DocumentPasteEditKind) {
+        try {
+            // The kind must be one VS Code will actually offer for a plain ⌘V.
+            // `Text` is the generic one the built-in providers use.
+            const kind = vscode.DocumentPasteEditKind.Text;
+            context.subscriptions.push(
+                vscode.languages.registerDocumentPasteEditProvider(
+                    TEX_SELECTOR, makePasteProvider((m) => pasteLog(m)), {
+                        providedPasteEditKinds: [kind],
+                        pasteMimeTypes: PASTE_MIMES,
+                    }));
+            pasteLog(`paste provider registered for ${PASTE_MIMES.join(', ')}`);
+        } catch (e) {
+            pasteLog(`paste provider NOT registered: ${e && e.message}`);
+        }
+    } else {
+        pasteLog('this VS Code has no document-paste API — paste-to-figure is off');
+    }
 
     const bibCache = new Map();   // fsPath -> Set|null
     const refresh = (doc) => {
@@ -506,6 +970,8 @@ function registerTexSupport(context) {
 
     // --- commands, all read-only or clipboard-only in Stage 1 ---------------
     const reg = (id, fn) => context.subscriptions.push(vscode.commands.registerCommand(id, fn));
+
+    reg('wolfbook.tex.smartPaste', () => smartPaste(pasteLog));
 
     reg('wolfbook.tex.copyKey', async (arg) => {
         const sel = arg?.selector;
@@ -586,7 +1052,8 @@ function registerTexSupport(context) {
     });
 
     // --- Stage 2: compile + render map ---------------------------------------
-    const output = vscode.window.createOutputChannel('Wolfbook TeX');
+    const output = vscode.window.createOutputChannel('WPaper');
+    attachPasteLog(output);
     context.subscriptions.push(output);
     const coord = new RenderCoordinator(projection, output);
     context.subscriptions.push({ dispose: () => coord.dispose() });
@@ -599,6 +1066,37 @@ function registerTexSupport(context) {
     context.subscriptions.push(status.item);
 
     const viewer = new TexViewer(context, coord, projection);
+
+    // WHAT LATEX ITSELF NUMBERED EACH LABEL AS, for the hovers. Cached on the
+    // compile generation: the .aux only changes when a compile does, and a
+    // hover must never be the thing that reads a file off disk on a keystroke.
+    const auxCache = new Map();          // root -> {generation, labels, cites}
+    const auxFor = (doc) => {
+        const empty = { labels: new Map(), cites: new Map() };
+        try {
+            const root = coord.rootFor(doc);
+            const st = coord.roots.get(root);
+            const gen = st && st.generation;
+            if (!gen || !gen.outDir) return empty;
+            const hit = auxCache.get(root);
+            if (hit && hit.generation === gen.generation) return hit;
+            const fs2 = require('fs');
+            const read = readAuxLabels(gen.outDir, gen.root || root, {
+                readFile: (f) => fs2.readFileSync(f, 'utf8'),
+                exists: (f) => fs2.existsSync(f),
+            });
+            const value = { generation: gen.generation, labels: read.labels, cites: read.cites };
+            auxCache.set(root, value);
+            return value;
+        } catch (_) { return empty; }
+    };
+
+    const refProviders = makeRefProviders(projection, auxFor, viewer);
+    context.subscriptions.push(
+        vscode.languages.registerHoverProvider(TEX_SELECTOR, refProviders.hover),
+        vscode.languages.registerDefinitionProvider(TEX_SELECTOR, refProviders.definition),
+        vscode.languages.registerReferenceProvider(TEX_SELECTOR, refProviders.references),
+    );
 
     const repaint = makePaintRender({
         viewer, coord, projection, status, pageMarkers, renderDiags,

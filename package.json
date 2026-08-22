@@ -263,7 +263,7 @@
             "full"
           ],
           "default": "full",
-          "markdownDescription": "Which tool families the MCP server advertises in tools/list. `notebook` hides the wolfslide_* family and agent extras (paper_* stays visible); `slides` hides most notebook tools and all paper_* tools; `paper` advertises only the Wolfbook TeX paper_* family; `full` advertises everything. Hidden tools still work when called by name. Requires reload.",
+          "markdownDescription": "Which tool families the MCP server advertises in tools/list. `notebook` hides the wolfslide_* family and agent extras (paper_* stays visible); `slides` hides most notebook tools and all paper_* tools; `paper` advertises only the WPaper paper_* family; `full` advertises everything. Hidden tools still work when called by name. Requires reload.",
           "order": 7
         },
         "wolfbook.mcp.exposeDeprecatedTools": {
@@ -1033,7 +1033,7 @@
           "scope": "window",
           "type": "boolean",
           "default": true,
-          "markdownDescription": "Enable Wolfbook TeX: outline, folding, CodeLens and deterministic diagnostics for `.tex` files, plus the `paper_*` agent tools. Wolfbook deliberately does **not** contribute a `latex` language or grammar, so it coexists with LaTeX Workshop rather than competing with it. Requires reload."
+          "markdownDescription": "Enable WPaper: outline, folding, CodeLens and deterministic diagnostics for `.tex` files, plus the `paper_*` agent tools. Wolfbook deliberately does **not** contribute a `latex` language or grammar, so it coexists with LaTeX Workshop rather than competing with it. Requires reload."
         },
         "wolfbook.tex.diagnostics": {
           "scope": "window",
@@ -1060,7 +1060,7 @@
             "off"
           ],
           "default": "onSave",
-          "markdownDescription": "When to build the render map. `onSave` compiles the paper out-of-tree after each save (typing is never blocked; a large paper takes ~15 s). `manual` compiles only via **Wolfbook: Compile Paper**. `off` disables compiling entirely — the structural outline and diagnostics still work."
+          "markdownDescription": "When to build the render map. `onSave` compiles the paper out-of-tree after each save (typing is never blocked; a large paper takes ~15 s). `manual` compiles only via **Wolfbook: Compile WPaper**. `off` disables compiling entirely — the structural outline and diagnostics still work."
         },
         "wolfbook.tex.engine": {
           "scope": "window",
@@ -1076,7 +1076,7 @@
         "wolfbook.tex.liveRender": {
           "type": "boolean",
           "default": true,
-          "description": "Recompile the paper from the unsaved editor buffer shortly after you stop typing, so the Page view keeps up without a save. The .tex file on disk is never written."
+          "description": "Recompile the paper from the unsaved editor buffer shortly after you stop typing, so the WPaper view keeps up without a save. The .tex file on disk is never written."
         },
         "wolfbook.tex.liveRenderDelayMs": {
           "type": "number",
@@ -1105,22 +1105,22 @@
             "zen"
           ],
           "enumDescriptions": [
-            "Maximise the Page view within the VS Code window.",
+            "Maximise the WPaper view within the VS Code window.",
             "Maximise it and put the window itself into full screen.",
             "Use Zen Mode, which also hides the status bar and tabs."
           ],
           "default": "maximize",
-          "description": "What the Page view’s full-screen button does. Esc always leaves, and whatever was toggled on is toggled back off."
+          "description": "What the WPaper view’s full-screen button does. Esc always leaves, and whatever was toggled on is toggled back off."
         },
         "wolfbook.tex.lockViewerGroup": {
           "type": "boolean",
           "default": true,
-          "description": "Lock the editor group the Page view opens in, so clicking a file or a search result does not open it on top of the paper."
+          "description": "Lock the editor group the WPaper view opens in, so clicking a file or a search result does not open it on top of the paper."
         },
         "wolfbook.tex.viewerFollowsTex": {
           "type": "boolean",
           "default": true,
-          "description": "Close the Page view when you switch to a file that is not a .tex, and bring it back — at the same place — when you return to one."
+          "description": "Close the WPaper view when you switch to a file that is not a .tex, and bring it back — at the same place — when you return to one."
         },
         "wolfbook.tex.pageTheme": {
           "type": "string",
@@ -1135,7 +1135,29 @@
             "Always darken the pages."
           ],
           "default": "auto",
-          "description": "How the compiled pages are shown in the Page view. Darkening inverts the rendered image, so figures and photographs invert with it; the toolbar's sun/moon button switches this without opening settings."
+          "description": "How the compiled pages are shown in the WPaper view. Darkening inverts the rendered image, so figures and photographs invert with it; the toolbar's sun/moon button switches this without opening settings."
+        },
+        "wolfbook.tex.hoverRender": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "When hovering a `\\ref`/`\\eqref`, also show the target **as it prints** — a fragment clipped from the compiled page — beneath its source. Needs the WPaper view to be open; the hover falls back to source only when it is not."
+        },
+        "wolfbook.tex.labelCopyFormat": {
+          "type": "string",
+          "enum": [
+            "command",
+            "bare",
+            "ref",
+            "eqref"
+          ],
+          "enumDescriptions": [
+            "The reference as it would normally be written: \\eqref{eq:foo} for an equation, \\ref{fig:bar} otherwise, \\cite{key} for a citation.",
+            "Just the name: eq:foo.",
+            "Always \\ref{...} (\\cite{...} for citations).",
+            "Always \\eqref{...} (\\cite{...} for citations)."
+          ],
+          "default": "command",
+          "markdownDescription": "What clicking a label chip in the WPaper view puts on the clipboard. Hold Shift over the page to reveal the labels; **Alt-click** a chip copies the other of bare/command, so the setting never has to be visited mid-flow."
         }
       }
     },
@@ -1192,6 +1214,10 @@
       {
         "command": "wolfbook.OpenNotebook",
         "title": "Open in System Editor"
+      },
+      {
+        "command": "wolfbook.copyCellReference",
+        "title": "Wolfbook: Copy Cell Reference"
       },
       {
         "command": "wolfbook.manageKernelBinding",
@@ -1550,57 +1576,62 @@
         "icon": "$(warning)"
       },
       {
+        "command": "wolfbook.tex.smartPaste",
+        "title": "Paste (image becomes a figure)",
+        "category": "Wolfbook"
+      },
+      {
         "command": "wolfbook.tex.showProjection",
-        "title": "Show Paper Projection (TeX)",
+        "title": "Show WPaper Projection",
         "category": "Wolfbook"
       },
       {
         "command": "wolfbook.tex.compile",
-        "title": "Compile Paper (TeX)",
+        "title": "Compile WPaper",
         "category": "Wolfbook"
       },
       {
         "command": "wolfbook.tex.showLog",
-        "title": "Show Compile Log (TeX)",
+        "title": "Show WPaper Compile Log",
         "category": "Wolfbook"
       },
       {
         "command": "wolfbook.tex.goToPage",
-        "title": "Go to Page (TeX)",
+        "title": "Go to Page in WPaper",
         "category": "Wolfbook"
       },
       {
         "command": "wolfbook.tex.whereAmI",
-        "title": "Where Am I in the Paper? (TeX)",
+        "title": "Where Am I in the WPaper?",
         "category": "Wolfbook"
       },
       {
         "command": "wolfbook.tex.openViewer",
-        "title": "Open Paper",
+        "title": "Open WPaper",
         "category": "Wolfbook",
         "icon": {
-          "light": "./icons/wolfbook-paper.png",
-          "dark": "./icons/wolfbook-paper.png"
+          "light": "./icons/wolfview.png",
+          "dark": "./icons/wolfview.png"
         }
       },
       {
         "command": "wolfbook.tex.showTimingLog",
-        "title": "Show Page-Mode Timings",
+        "title": "Show WPaper Timings",
         "category": "Wolfbook"
       },
       {
         "command": "wolfbook.tex.compareWithDisk",
-        "title": "Compare with the File on Disk (TeX)",
+        "title": "WPaper: Compare with the File on Disk",
         "category": "Wolfbook"
       },
       {
         "command": "wolfbook.tex.compareWithGit",
-        "title": "Compare with a Git Revision (TeX)",
+        "title": "WPaper: Compare with a Git Revision",
         "category": "Wolfbook"
       },
       {
         "command": "wolfbook.tex.compareWith",
-        "title": "Compare This Paper With… (TeX)",
+        "title": "WPaper: Compare This Paper With…",
         "category": "Wolfbook"
       }
     ],
@@ -1833,6 +1864,12 @@
       ]
     },
     "keybindings": [
+      {
+        "command": "wolfbook.tex.smartPaste",
+        "key": "ctrl+v",
+        "mac": "cmd+v",
+        "when": "editorTextFocus && !editorReadonly && resourceExtname == .tex && !editorHasMultipleSelections"
+      },
       {
         "command": "wolfbook.saveNbCopyAsWb",
         "key": "ctrl+s",
@@ -5257,7 +5294,7 @@
       },
       {
         "name": "paper_getOutline",
-        "displayName": "Paper: Outline",
+        "displayName": "WPaper: Outline",
         "toolReferenceName": "paperOutline",
         "modelDescription": "Structural outline of a LaTeX paper: nested sections, per-kind object counts, managed Mathematica block states, and parse warnings. Start here before any other paper_* call. Set include_project for the root file and the \\\\input/\\\\include graph. Read-only.",
         "canBeReferencedInPrompt": true,
@@ -5277,7 +5314,7 @@
       },
       {
         "name": "paper_getObject",
-        "displayName": "Paper: Get Object",
+        "displayName": "WPaper: Get Object",
         "toolReferenceName": "paperObject",
         "modelDescription": "Fetch one semantic object (equation, figure, table, paragraph, section, theorem) from a LaTeX paper with its source text, line range and sourceHash. Address it by \\\\label, stableKey, or objectId. The returned sourceHash is what you pass to paper_applyEdit as expected_source_hash. Read-only.",
         "canBeReferencedInPrompt": true,
@@ -5308,7 +5345,7 @@
       },
       {
         "name": "paper_getSection",
-        "displayName": "Paper: Get Section",
+        "displayName": "WPaper: Get Section",
         "toolReferenceName": "paperSection",
         "modelDescription": "Fetch a section of a LaTeX paper and every addressable object inside it. Selector matches a heading by \\\\label, stableKey, or a substring of its title; omit it for the first section. Read-only.",
         "canBeReferencedInPrompt": true,
@@ -5336,7 +5373,7 @@
       },
       {
         "name": "paper_findReferences",
-        "displayName": "Paper: Find References",
+        "displayName": "WPaper: Find References",
         "toolReferenceName": "paperRefs",
         "modelDescription": "Cross-reference health for a LaTeX paper. With `name`: where that label is declared, what object it names, and everything that \\\\ref or \\\\cite-s it. Without: all unresolved refs, duplicate labels and unused labels in the file. Read-only.",
         "canBeReferencedInPrompt": true,
@@ -5356,7 +5393,7 @@
       },
       {
         "name": "paper_search",
-        "displayName": "Paper: Search Objects",
+        "displayName": "WPaper: Search Objects",
         "toolReferenceName": "paperSearchObjects",
         "modelDescription": "Search the objects of the OPEN LaTeX paper by text, returning matching equations/paragraphs/figures with excerpts and their stableKeys. This searches the user's own document; for published literature use wolfbook_paperSearch instead. Read-only.",
         "canBeReferencedInPrompt": true,
@@ -5394,7 +5431,7 @@
       },
       {
         "name": "paper_mathematicaBlocks",
-        "displayName": "Paper: Managed Blocks",
+        "displayName": "WPaper: Managed Blocks",
         "toolReferenceName": "paperMmaBlocks",
         "modelDescription": "List the managed %Mathematica computation blocks in a .tex file and classify each as fresh, stale, modified-by-user, orphaned, malformed or no-output. Classification only: executing a block is not available yet. Read-only.",
         "canBeReferencedInPrompt": true,
@@ -5421,7 +5458,7 @@
       },
       {
         "name": "paper_previewEdit",
-        "displayName": "Paper: Preview Edit",
+        "displayName": "WPaper: Preview Edit",
         "toolReferenceName": "paperPreviewEdit",
         "modelDescription": "Show what replacing one object's source would do, WITHOUT writing anything: the before/after text, the line delta, and any parse warnings the change would introduce. Returns the sourceHash to pass to paper_applyEdit. Read-only.",
         "canBeReferencedInPrompt": true,
@@ -5465,7 +5502,7 @@
       },
       {
         "name": "paper_applyEdit",
-        "displayName": "Paper: Apply Edit",
+        "displayName": "WPaper: Apply Edit",
         "toolReferenceName": "paperApplyEdit",
         "modelDescription": "Replace one object's source in a .tex file via WorkspaceEdit, so the change is undoable with Cmd-Z. ALWAYS pass expected_source_hash from paper_getObject or paper_previewEdit: a stale edit is then rejected with a structured conflict naming the current hash, instead of overwriting a change you did not see. The file must be open in the editor.",
         "canBeReferencedInPrompt": true,

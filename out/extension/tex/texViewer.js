@@ -17,13 +17,16 @@ const fs = require('fs');
 const { FLAG } = require('./renderMap');
 const {
     wordAtColumn, findWordInLine, collectMacros, isInMath, mathRegions,
-    locateByContext,
+    locateByContext, visibleWords,
 } = require('./texWords');
 const { selectionLadder, paragraphSpan, CONTAINER_KINDS } = require('./texSelect');
 const { buildObjectMap, glyphAtPoint, tokenAt, groupAround, symbolicFonts } = require('./glyphAlign');
 const { buildComparison, describeSummary } = require('./texCompare');
 const { shipDecision } = require('./livePolicy');
+const { balanceRange, closeFor, commentMask } = require('./texBalance');
 const { sectionSpans } = require('./texModel');
+const { readAuxLabels } = require('./auxLabels');
+const { buildLabelChips, formatLabelCopy, altFormat } = require('./labelChips');
 
 /**
  * THE EQUATION NUMBER IS NOT PART OF THE EQUATION.
@@ -190,6 +193,131 @@ function mergeRows(rects) {
     return out.map(b => ({ page: b.page, x: b.x0, y: b.y0, w: b.x1 - b.x0, h: b.y1 - b.y0 }));
 }
 
+/**
+ * A SPAN'S INK CANNOT BEGIN BEFORE ITS FIRST LINE OR END AFTER ITS LAST.
+ *
+ * MEASURED on the reference paper. Selecting the whole of the display at lines
+ * 106-114 painted FOUR bands, two of them on the WRONG PAGE:
+ *
+ *     p2 y=113.9  x=100.9..110.6   (line 106) — the equation
+ *     p1 y=61.5   x=0.0..72.0      (line 114) — the top MARGIN of page 1
+ *     p1 y=781.9  x=294.9..510.5   (line 114) — prose at the foot of page 1
+ *     p2 y=133.8  x=141.4..517.2   (line 114) — the equation
+ *
+ * Reported as "selecting the entire equation selects some random text around",
+ * and that is exactly what it was: SyncTeX files strays under a delimiter line
+ * — here `\end{equation}` — and an equation that straddles a page break
+ * collects them from the page it did not print on. The same disease as the row
+ * repairs in §5e, one level up.
+ *
+ * The fix is a fact about reading order rather than about SyncTeX: a contiguous
+ * range of source runs forwards on the page, so its ink lies between the ink of
+ * its FIRST line and the ink of its LAST. Anything outside that interval was
+ * misfiled. Rows must carry `.line`; a clip that would empty the set is refused,
+ * because a misfiled anchor must degrade to the old behaviour and not to
+ * nothing.
+ */
+function clipToSpan(rows) {
+    const all = (rows || []).filter(r => r && Number.isFinite(r.line));
+    if (all.length < 2) return rows || [];
+    let minLine = Infinity;
+    let maxLine = -Infinity;
+    for (const r of all) {
+        if (r.line < minLine) minLine = r.line;
+        if (r.line > maxLine) maxLine = r.line;
+    }
+    if (minLine === maxLine) return rows;
+    // PAGES ONLY, AND THAT IS DELIBERATE.
+    //
+    // Clipping by position WITHIN a page looked like the same idea and broke a
+    // different thing: inside a display, source order is not vertical order.
+    // Measured on `eq:SoV-versus-pole-heights`, the last line with any rows is
+    // `\end{equation}`, whose only row is a sliver ABOVE the equation's own
+    // last line — so a vertical ceiling taken from it cut the equation in half
+    // and the hover showed only its top. Ink that is merely out of order on the
+    // right page is handled by dropStrayRows and dropDetachedRows, which reason
+    // about shape rather than about order.
+    let floorPage = Infinity;
+    let ceilPage = -Infinity;
+    for (const r of all) {
+        if (r.line === minLine) floorPage = Math.min(floorPage, r.page);
+        if (r.line === maxLine) ceilPage = Math.max(ceilPage, r.page);
+    }
+    if (!Number.isFinite(floorPage) || !Number.isFinite(ceilPage) || floorPage > ceilPage) return rows;
+    const kept = rows.filter(r => !Number.isFinite(r.line) ||
+        (r.page >= floorPage && r.page <= ceilPage));
+    return kept.length ? kept : rows;
+}
+
+/**
+ * A NARROW ROW STANDING APART FROM THE BODY IS NOT PART OF IT.
+ *
+ * `dropStrayRows` removes the equation NUMBER, which is narrow and flush RIGHT.
+ * It deliberately keeps narrow rows on the LEFT, because a wrapped line's short
+ * tail continues at the left margin (§5l). But a bare `\begin{equation}` line
+ * also collects ink from the paragraph ABOVE it, and that lands narrow and on
+ * the left:
+ *
+ *     L252 \begin{equation}   x=107.3..126.5  y=149.6..163.1   w=19.2
+ *     L255 …the equation…      x=198.3..431.0  y=177.6..191.1   w=232.7
+ *
+ * Reported as "the render of the equation for the reference is not correct":
+ * the hover's crop unions those rects, so it began 28 bp too high and 90 bp too
+ * far left, and showed the tail of the previous paragraph.
+ *
+ * What separates the two is not the side, it is whether the row TOUCHES the
+ * rest of the object. A wrapped tail sits directly under its own line; misfiled
+ * ink sits in a band of its own with clear space around it.
+ */
+function dropDetachedRows(rects) {
+    const rows = (rects || []).filter(r => r && Number.isFinite(r.x));
+    if (rows.length < 2) return rects || [];
+    const widest = Math.max(...rows.map(r => r.w));
+    return rows.filter((r) => {
+        if (r.w >= widest * 0.4) return true;              // body: always keep
+        const gap = Math.min(...rows.map((o) => {
+            if (o === r || o.page !== r.page) return Infinity;
+            if (o.y + o.h <= r.y) return r.y - (o.y + o.h);
+            if (r.y + r.h <= o.y) return o.y - (r.y + r.h);
+            return 0;                                       // they overlap
+        }));
+        return gap <= (r.h || 12) * 0.6;
+    });
+}
+
+/**
+ * ONE OBJECT, ONE PAGE — when the ink says so.
+ *
+ * MEASURED on `eq:full-Qplus-pole-grid`, which prints at the top of page 3:
+ *
+ *     p2  x=295..510  y=782..795     <- the last prose line of page 2
+ *     p3  x=190..416  y= 90..130     <- the equation
+ *
+ * The `\begin{equation}` line collected the tail of the paragraph before it,
+ * on the PREVIOUS page. A crop takes one rectangle on one page, so it showed
+ * the bottom of page 2 — the wrong thing entirely.
+ *
+ * A display that genuinely straddles a page break puts real ink on both; one
+ * stray row does not. So when a single page carries the great majority of the
+ * object's ink, that page IS the object.
+ */
+function dominantPage(rects) {
+    const rows = (rects || []).filter(r => r && Number.isFinite(r.x));
+    if (rows.length < 2) return rects || [];
+    const area = new Map();
+    let total = 0;
+    for (const r of rows) {
+        const a = Math.max(1, r.w) * Math.max(1, r.h);
+        area.set(r.page, (area.get(r.page) || 0) + a);
+        total += a;
+    }
+    if (area.size < 2) return rects;
+    let best = null;
+    for (const [page, a] of area) if (!best || a > best.a) best = { page, a };
+    if (!best || best.a < total * 0.7) return rects;      // genuinely spanning
+    return rows.filter(r => r.page === best.page);
+}
+
 /** Kinds whose whole box is a sensible highlight when nothing finer resolves. */
 const BLOCK_KINDS = ['display-equation', 'figure', 'table', 'tabular', 'theorem'];
 /** Kinds whose content is maths, and so is addressable glyph by glyph. */
@@ -322,6 +450,16 @@ class TexViewer {
         this._text = null;         // {generation, pages: Map<page, items>} from the webview
         this._objMaps = new Map(); // `${generation}|${stableKey}` -> the alignment
         this._docListener = null;
+        // The label overlay: built per generation, and only once somebody has
+        // actually held Shift. Pushing it on every live rebuild would ship a
+        // payload nobody is looking at, several times a minute.
+        this._moveTarget = null;   // where a dragged selection would land
+        this._crops = new Map();   // `${generation}|${key}` -> {dataUrl,w,h}
+        this._cropWaits = new Map();
+        this._cropSeq = 0;
+        this._chips = null;        // {key, items}
+        this._chipModels = null;   // file -> model, for the files of this root
+        this._labelsWanted = false;
         this._flash = new EditorFlash();
         this._disposables = [];
     }
@@ -347,7 +485,7 @@ class TexViewer {
             if (reveal) this.panel.reveal(vscode.ViewColumn.Beside, true);
         } else {
             this._wire(vscode.window.createWebviewPanel(
-                VIEW_TYPE, 'Paper',
+                VIEW_TYPE, 'WPaper',
                 { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true },
                 this._webviewOptions));
             // KEEP THE COLUMN FOR THE PAPER.
@@ -404,6 +542,12 @@ class TexViewer {
             this._docListener = null;
             this._text = null;
             this._diff = null;
+            this._chips = null;
+            this._chipModels = null;
+            this._labelsWanted = false;
+            this._crops.clear();
+            for (const done of this._cropWaits.values()) { try { done(null); } catch (_) {} }
+            this._cropWaits.clear();
             this._objMaps.clear();
             this._flash.dispose();
             for (const d of this._disposables.splice(0)) { try { d.dispose(); } catch (_) {} }
@@ -515,6 +659,12 @@ class TexViewer {
                 // triggered had we shipped.
                 try { this.syncFromEditor(vscode.window.activeTextEditor); } catch (_) { /* best effort */ }
                 this._postEditAnchor().catch(() => { /* no open card */ });
+                // The ink did not move, so the chips are still in the right
+                // PLACES — but the source did, so which line each \ref sits on
+                // may have changed. Drop the models, keep nothing else.
+                this._chipModels = null;
+                this._chips = null;
+                if (this._labelsWanted) this._postLabels().catch(() => { /* best effort */ });
             }
             return;
         }
@@ -524,7 +674,7 @@ class TexViewer {
         }
         const t0 = Date.now();
         this.shownGeneration = st.generation.generation;
-        this.panel.title = `Paper · ${path.basename(this.root)}`;
+        this.panel.title = `WPaper · ${path.basename(this.root)}`;
         const w = this.panel.webview;
 
         // THE PDF GOES ACROSS AS BYTES, NOT AS A URL.
@@ -657,6 +807,37 @@ class TexViewer {
     }
 
     /**
+     * Is the caret inside a `\caption{…}`?
+     *
+     * Scanned backwards a few lines and brace-matched forward, rather than
+     * asked of the model: a caption is not an object, and the float that
+     * contains it cannot say which of its lines are prose.
+     */
+    _inCaption(doc, line, column) {
+        try {
+            const from = Math.max(1, line - 30);
+            const starts = [];
+            let text = '';
+            for (let n = from; n <= Math.min(doc.lineCount, line + 30); n++) {
+                starts[n] = text.length;
+                text += doc.lineAt(n - 1).text + '\n';
+            }
+            if (starts[line] == null) return false;
+            const at = starts[line] + Math.max(0, column);
+            const mask = commentMask(text);
+            const re = /\\caption\s*(\[[^\]]*\])?\s*\{/g;
+            let m;
+            while ((m = re.exec(text))) {
+                const open = m.index + m[0].length - 1;
+                if (mask[open]) continue;
+                const close = closeFor(text, mask, open);
+                if (close < 0) continue;
+                if (at > open && at <= close) return true;
+            }
+        } catch (_) { /* a guess that throws is a guess of no */ }
+        return false;
+    }
+    /**
      * The macro table for a document, rebuilt only when the document changes.
      *
      * Without it the projection cannot see through \bx or \SoV, and a real
@@ -758,8 +939,25 @@ class TexViewer {
         }
         this._post({ type: 'selection', span: null });
 
-        const line = editor.selection.active.line + 1;
-        const column = editor.selection.active.character;
+        // A NON-EMPTY SELECTION IS IDENTIFIED BY ITS START, NOT BY ITS ACTIVE END.
+        //
+        // MEASURED, and it is the whole of the reported "clicking a symbol puts
+        // the cursor in the right place but highlights something else". An
+        // inverse click SELECTS the token it resolved, and VS Code puts
+        // `active` at the END of that selection. Token containment is half-open
+        // — a cursor between `(` and `\bx` belongs to the token that STARTS
+        // there, which is what makes clicking a boundary land on the right one
+        // — so the forward sync then looked up the token AFTER the one that was
+        // clicked and lit up its neighbour.
+        //
+        // The round-trip census over 243 maths glyphs: 131 landed back on the
+        // clicked glyph, 92 landed exactly ONE GLYPH TO THE RIGHT — every one
+        // of them with dy=0 and dx of a single character.
+        // `ranged` is the guard this function already computed, and it is
+        // defensive about a selection that carries only an active position.
+        const cur = ranged ? sel.start : editor.selection.active;
+        const line = cur.line + 1;
+        const column = cur.character;
         const { model } = this.projection.get(doc);
         const obj = model.objects
             .filter(o => o.sourceRange.startLine <= line && o.sourceRange.endLine >= line &&
@@ -776,7 +974,14 @@ class TexViewer {
         // cursor is. Prose therefore highlights the typeset ROWS of the
         // current line, and names the word under the cursor so the viewer can
         // narrow to it using the PDF's own text layer.
-        const objectIsTheUnit = obj && BLOCK_KINDS.includes(obj.kind);
+        // A CAPTION IS PROSE THAT HAPPENS TO LIVE IN A FLOAT.
+        //
+        // Reported: a cursor in a figure's caption highlighted the WHOLE
+        // figure. The float is a block, and for a block the object is the unit
+        // — right for the picture, wrong for the sentence underneath it, which
+        // is ordinary text a reader points at word by word.
+        const objectIsTheUnit = obj && BLOCK_KINDS.includes(obj.kind) &&
+            !this._inCaption(doc, line, column);
         const lineSrc = doc.lineAt(Math.max(0, line - 1)).text;
         // A display environment is an object; $E=mc^2$ is not. Both are maths,
         // and answering a cursor inside inline maths with the nearest PROSE
@@ -832,13 +1037,17 @@ class TexViewer {
             const rows = [];
             for (let n = obj.sourceRange.startLine; n <= obj.sourceRange.endLine; n++) {
                 for (const r of st.map.lineRows(doc.uri.fsPath, n)) {
-                    rows.push({ page: r.page, x: r.x, y: r.y, w: r.w, h: r.h });
+                    rows.push({ page: r.page, x: r.x, y: r.y, w: r.w, h: r.h, line: n });
                 }
             }
+            // The same strays that made a selected equation paint over the
+            // previous page would put this highlight there too.
+            rows.splice(0, rows.length, ...clipToSpan(rows));
             if (rows.length) {
                 // One band per printed LINE, not one per baseline — see mergeRows —
-                // and not the equation number, which is not part of the equation.
-                rects = mergeRows(dropStrayRows(rows));
+                // and neither the equation number nor the prose the \begin line
+                // collected from the paragraph above.
+                rects = mergeRows(dropDetachedRows(dropStrayRows(rows)));
             } else {
                 const r = st.map.objectRenderBoxes(obj);
                 rects = r.rects;
@@ -848,6 +1057,19 @@ class TexViewer {
             rects = mergeRows(st.map.lineRows(doc.uri.fsPath, line)
                 .map(r => ({ page: r.page, x: r.x, y: r.y, w: r.w, h: r.h })));
             word = wordAtColumn(lineSrc, column, { macros });
+            // A LINE'S INK IS NOT ALWAYS IN A ROW OF ITS OWN.
+            //
+            // `\paragraph{…}` is a RUN-IN heading: its text is typeset on the
+            // same printed row as the following paragraph's first words, and
+            // SyncTeX files that whole row under the FOLLOWING line. Measured
+            // on the reference paper, all six \paragraph headings have
+            // `lineRows` EMPTY, so the cursor answered "line 338 · unmapped"
+            // and nothing lit up at all.
+            //
+            // The borrow that _selectionAnchor already does is the answer here
+            // too: the neighbour's row is the region this line's ink is in, and
+            // the word name plus its occurrence is what picks it out of it.
+            if (!rects.length) rects = this._neighbourRows(st, doc, line);
         }
         if (!rects.length) {
             this._post({ type: 'highlight', rects: [], label: `line ${line} · unmapped` });
@@ -874,7 +1096,10 @@ class TexViewer {
             // to paint when nothing is found.
             searchRects: word ? this._searchRows(st, doc.uri.fsPath, line) : undefined,
             word: word ? word.word : undefined,
-            occurrence: word ? word.occurrence : undefined,
+            // Plus whatever a run-in heading printed onto this row before it.
+            occurrence: word
+                ? word.occurrence + (glyph ? 0 : this._occurrenceShift(st, doc, line, word.word))
+                : undefined,
             glyph,
             flag: flag === FLAG.FRESH ? 'fresh' : flag === FLAG.STALE ? 'stale' : 'approx',
             reveal: !fromClick,
@@ -929,6 +1154,29 @@ class TexViewer {
      * ink starts. Widening to those edges reaches the first and last word and
      * cannot reach into another line's.
      */
+    /**
+     * A BLANK LINE PRINTS NOTHING, so any row filed under it is misfiled.
+     *
+     * MEASURED on the reference paper. Line 340 is empty — it is the break
+     * between `\end{figure}` and the paragraph after it — and SyncTeX files the
+     * paragraph-break records under it:
+     *
+     *     p2 y= 61.5  x=  0.0..72.0    <- the top MARGIN of page 2
+     *     p2 y=781.9  x=294.9..510.5   <- prose at the foot of page 2
+     *
+     * while the paragraph itself prints on page 3. Selecting from that blank
+     * line therefore painted bands across a page the selection never reaches,
+     * and the fill between the marks swallowed everything between: reported as
+     * "I select this, in viewer the whole section is selected".
+     *
+     * No rule about shape can rescue those rows, and none is needed — the line
+     * is empty, so it has no ink, and that is the end of it.
+     */
+    _lineIsBlank(doc, line) {
+        if (line < 1 || line > doc.lineCount) return true;
+        try { return !doc.lineAt(line - 1).text.trim(); } catch (_) { return false; }
+    }
+
     _searchRows(st, file, line) {
         const own = mergeRows(dropStrayRows(st.map.lineRows(file, line)
             .map(r => ({ page: r.page, x: r.x, y: r.y, w: r.w, h: r.h }))));
@@ -951,6 +1199,46 @@ class TexViewer {
             }
             return { page: r.page, x: Math.min(x0, r.x), y: r.y, w: Math.max(x1, r.x + r.w) - Math.min(x0, r.x), h: r.h };
         });
+    }
+
+    /**
+     * HOW MANY OF THIS WORD PRINTED ON THIS ROW BEFORE THIS LINE'S OWN INK.
+     *
+     * MEASURED on the reference paper. `\paragraph{The full two-variable pole
+     * grid.}` is a RUN-IN heading: it has NO rows of its own (its characters
+     * are filed under the paragraph that follows), so its printed words live
+     * inside the next line's row. The panel counts occurrences across that row,
+     * the extension counted them within the source LINE, and the two disagree
+     * by exactly the words the heading contributed — so a cursor on the `the`
+     * of "distinguish the separated" lit up the `The` that opens the heading.
+     *
+     * `_searchRows` cannot help here: it bounds a row by where the PREVIOUS
+     * line's ink stops, and a line with no rows has no ink to stop at.
+     *
+     * So the words are counted instead, from the projection of the rowless
+     * lines that run into this one. Case-folded, because the panel's own key is
+     * — `The` and `the` are the same word to it, which is the whole trap.
+     */
+    _occurrenceShift(st, doc, line, word) {
+        if (!word) return 0;
+        const file = doc.uri.fsPath;
+        const want = String(word).toLocaleLowerCase();
+        let shift = 0;
+        for (let n = line - 1, guard = 0; n >= 1 && guard < 4; n--, guard++) {
+            const text = doc.lineAt(n - 1).text;
+            if (!text.trim()) break;                       // a paragraph break
+            if (/^\s*\\(begin|end)\s*\{/.test(text)) break;
+            let rows = [];
+            try { rows = st.map.lineRows(file, n) || []; } catch (_) { rows = []; }
+            if (rows.length) break;                        // it has ink of its own
+            let words = [];
+            try { words = visibleWords(text, { macros: this._macrosFor(doc) }) || []; }
+            catch (_) { words = []; }
+            for (const w of words) {
+                if (!w.inMath && String(w.word).toLocaleLowerCase() === want) shift++;
+            }
+        }
+        return shift;
     }
 
     /**
@@ -1008,7 +1296,12 @@ class TexViewer {
         // line — measured, the opening mark of a paragraph landed after its
         // first word every time. A line's worth of slack on each side is enough
         // to reach them and not enough to reach the next line's.
-        const rows = this._searchRows(st, file, line);
+        const rows = this._lineIsBlank(doc, line)
+            ? [] : this._searchRows(st, file, line);
+        // WHOSE INK IS THIS? A line with none of its own borrows a neighbour's
+        // row, and a borrowed row cannot be measured against this line's
+        // columns — see the end-mark rule in the panel.
+        let borrowed = !rows.length;
         // A DISPLAY'S OWN LINES USUALLY HAVE NO ROWS — 71% of them on the
         // reference paper — so an end of a selection inside one has nothing to
         // be placed against, and the whole span went unpainted. The object it
@@ -1025,10 +1318,11 @@ class TexViewer {
                 const all = [];
                 for (let n = obj.sourceRange.startLine; n <= obj.sourceRange.endLine; n++) {
                     for (const r of st.map.lineRows(file, n)) {
-                        all.push({ page: r.page, x: r.x, y: r.y, w: r.w, h: r.h });
+                        all.push({ page: r.page, x: r.x, y: r.y, w: r.w, h: r.h, line: n });
                     }
                 }
-                rows.push(...mergeRows(dropStrayRows(all)));
+                rows.push(...mergeRows(dropStrayRows(clipToSpan(all))));
+                borrowed = true;
             }
         }
         // STILL NOTHING? THE ROW THAT CARRIES THIS LINE'S INK BELONGS TO
@@ -1041,7 +1335,7 @@ class TexViewer {
         // it painted nothing, and a selection ENDING on it had no mark. The
         // neighbouring line's row is the region its ink is in — the word name
         // and occurrence are what pick the word out of it.
-        if (!rows.length) rows.push(...this._neighbourRows(st, doc, line));
+        if (!rows.length) { rows.push(...this._neighbourRows(st, doc, line)); borrowed = true; }
 
         const inMath = isInMath(text, column);
         const w = wordAtColumn(text, column, { macros, scope: inMath ? 'math' : 'prose', inMath })
@@ -1053,8 +1347,11 @@ class TexViewer {
         return {
             line,
             rects: rows,
+            own: !borrowed,
             word: w ? w.word : undefined,
-            occurrence: w ? w.occurrence : undefined,
+            occurrence: w
+                ? w.occurrence + (w.inMath || inMath ? 0 : this._occurrenceShift(st, doc, line, w.word))
+                : undefined,
             glyph: !!(w && w.inMath) || inMath,
             atLineStart: firstCol < 0 || column <= firstCol,
             atLineEnd: column >= text.replace(/\s+$/, '').length,
@@ -1150,13 +1447,18 @@ class TexViewer {
 
         // Every row the selection crosses, in reading order, with the line each
         // came from — the panel needs the first and last separately.
-        const rows = [];
+        let rows = [];
         for (let n = startLine; n <= endLine; n++) {
+            if (this._lineIsBlank(doc, n)) continue;      // it printed nothing
             for (const r of mergeRows(dropStrayRows(st.map.lineRows(file, n)
                 .map(x => ({ page: x.page, x: x.x, y: x.y, w: x.w, h: x.h }))))) {
                 rows.push({ ...r, line: n });
             }
         }
+        // A delimiter line collects strays from the page the object did not
+        // print on — see clipToSpan. Without this a selected equation painted
+        // over the margin and over prose on the previous page.
+        rows = clipToSpan(rows);
         const ends = [anchorAt(startLine, sel.start.character), anchorAt(endLine, sel.end.character)];
         if (!rows.length) {
             // Every line of it was typeset into somebody else's row — see
@@ -1227,14 +1529,28 @@ class TexViewer {
                 // were measured against the old compile, so both are dropped
                 // and the highlight is recomputed from where the cursor is now.
                 this._ladder = null;
+                // Every chip was placed against the OLD render, so a chip left
+                // in the panel would name whatever now occupies that spot.
+                this._chips = null;
+                this._chipModels = null;
+                this._crops.clear();
                 this.syncFromEditor(vscode.window.activeTextEditor);
                 // The mini-editor's block has new geometry too — move the card.
                 this._postEditAnchor().catch(() => {});
+                if (this._labelsWanted) this._postLabels().catch(() => {});
                 break;
             case 'textLayer': this._onTextLayer(m); break;
             case 'textLayerDone':
                 this._log(`text layer complete for generation ${m.generation}: ` +
                     `${m.pages} pages${m.ms != null ? ` in ${m.ms} ms` : ''}`);
+                // A \ref site is placed over its printed NUMBER, which needs the
+                // text layer — and the first Shift after a compile can easily
+                // beat the sweep. Rebuild now that the ink is known, so those
+                // chips stop being approximate.
+                if (this._labelsWanted) {
+                    this._chips = null;
+                    this._postLabels().catch(() => {});
+                }
                 break;
             case 'pageTheme': await this._setPageTheme(m.value); break;
             case 'diffFocus': await this._focusHunk(m.id); break;
@@ -1250,6 +1566,45 @@ class TexViewer {
                 await this._jumpToSource(m);
                 break;
             case 'selectAdjust': this._adjustSelection(m); break;
+            case 'labelsWanted':
+                // Somebody is holding Shift. From here on a new generation
+                // re-pushes; releasing Shift does NOT unsubscribe, because the
+                // chips are cached in the panel and the second press has to be
+                // instant.
+                this._labelsWanted = !!m.value;
+                if (m.value) await this._postLabels();
+                break;
+            case 'copyLabel': await this._copyLabel(m); break;
+            case 'cropped': this._onCropped(m); break;
+            case 'selectionClear':
+                // Esc on the page. The selection lives in the EDITOR, so
+                // clearing it there too is what keeps the two ends agreeing;
+                // it is collapsed to its start rather than moved, so the reader
+                // does not lose their place. Stamped as ours, or the collapse
+                // comes straight back as a fresh cursor sync.
+                this._pickAnchor = null;
+                this._moveTarget = null;
+                this._post({ type: 'selection', span: null });
+                if (this._lastSelection) {
+                    const at = this._lastSelection.start;
+                    const ed = (vscode.window.visibleTextEditors || [])
+                        .find(e => e.document.uri.fsPath === this._lastSelection.file);
+                    this._selfRange = {
+                        file: this._lastSelection.file, kind: 'drag',
+                        sl: at.line, sc: at.character, el: at.line, ec: at.character,
+                        at: Date.now(),
+                    };
+                    if (ed) { try { ed.selection = new vscode.Selection(at, at); } catch (_) {} }
+                    this._lastSelection = null;
+                }
+                break;
+            case 'selectionAction': await this._selectionAction(m); break;
+            case 'movePreview': await this._moveSelectionPreview(m); break;
+            case 'moveCommit': await this._moveSelectionCommit(m); break;
+            case 'moveCancel':
+                this._moveTarget = null;
+                this._post({ type: 'moveCaret', rects: [] });
+                break;
             case 'editStep': await this._stepEditSession(m); break;
             case 'editChange': await this._applyEditChange(m); break;
             case 'editClose': this._edit = null; break;
@@ -1479,6 +1834,570 @@ class TexViewer {
             : box;
     }
 
+    // --- A FRAGMENT OF THE PAPER, AS AN IMAGE -------------------------------
+    //
+    // The hover over a `\ref` shows the equation's SOURCE; this is what lets it
+    // also show the equation as it PRINTS. The panel owns the rasterised pages,
+    // so the crop is asked of it rather than of a PDF rasteriser that may not
+    // be installed on the reader's machine — and what comes back is the ink
+    // from the generation the reader is actually looking at.
+    //
+    // Answers null rather than waiting when the panel is closed or slow: a
+    // hover that hangs is worse than a hover without a picture.
+
+    /**
+     * @param {Array<{page,x,y,w,h}>} rects
+     * @returns {Promise<{dataUrl:string,w:number,h:number}|null>}
+     */
+    cropFragment(rects, { timeoutMs = 700, key = null, scale = 2 } = {}) {
+        if (!this.panel || !rects || !rects.length) return Promise.resolve(null);
+        const cacheKey = key && `${this.shownGeneration}|${key}`;
+        if (cacheKey && this._crops.has(cacheKey)) return Promise.resolve(this._crops.get(cacheKey));
+
+        const id = `c${++this._cropSeq}`;
+        return new Promise((resolve) => {
+            const done = (value) => {
+                if (!this._cropWaits.has(id)) return;
+                this._cropWaits.delete(id);
+                clearTimeout(timer);
+                if (cacheKey && value) this._crops.set(cacheKey, value);
+                resolve(value);
+            };
+            const timer = setTimeout(() => done(null), timeoutMs);
+            this._cropWaits.set(id, done);
+            this._post({ type: 'crop', id, rects, scale });
+        });
+    }
+
+    _onCropped(m) {
+        const done = this._cropWaits.get(m && m.id);
+        if (!done) return;
+        done(m.dataUrl ? { dataUrl: m.dataUrl, w: m.w, h: m.h } : null);
+    }
+
+    /**
+     * The rects of an object, as the highlight would paint them.
+     *
+     * Shared with the hover so a preview shows exactly what clicking the
+     * reference would light up — including the clip that keeps a page-spanning
+     * equation off the page it did not print on.
+     */
+    objectRects(file, startLine, endLine) {
+        const st = this.root && this.coord.roots.get(this.root);
+        if (!st || !st.map || !st.map.available) return [];
+        const rows = [];
+        for (let n = startLine; n <= endLine; n++) {
+            for (const r of st.map.lineRows(file, n)) {
+                rows.push({ page: r.page, x: r.x, y: r.y, w: r.w, h: r.h, line: n });
+            }
+        }
+        const kept = dominantPage(mergeRows(clipToSpan(dropDetachedRows(dropStrayRows(rows)))));
+        if (kept.length) return kept;
+        try {
+            const model = this._modelFor2(file);
+            const obj = model && model.objects.find(o => o.sourceRange &&
+                o.sourceRange.startLine === startLine && o.sourceRange.endLine === endLine);
+            const box = obj && st.map.objectRenderBoxes(obj);
+            return (box && box.rects) || [];
+        } catch (_) { return []; }
+    }
+
+    // --- WHAT TO DO WITH THE SELECTION --------------------------------------
+    //
+    // Copy, cut, paste, delete, from the bar pinned to the fragment on the
+    // page. Every one goes through a WorkspaceEdit, so every one is a single
+    // undo in the editor the reader would otherwise have gone back to.
+
+    /** The document and range the page's selection refers to, or null. */
+    async _selectionTarget() {
+        const sel = this._lastSelection;
+        if (!sel) return null;
+        try {
+            const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(sel.file));
+            return { doc, range: new vscode.Range(sel.start, sel.end), sel };
+        } catch (_) { return null; }
+    }
+
+    /** Leave the editor showing what just happened, without stealing focus. */
+    _afterSelectionEdit(file, start, end, kind) {
+        this._selfRange = {
+            file, kind: 'drag',
+            sl: start.line, sc: start.character, el: end.line, ec: end.character,
+            at: Date.now(),
+        };
+        const ed = (vscode.window.visibleTextEditors || [])
+            .find(e => e.document.uri.fsPath === file);
+        if (ed) {
+            try {
+                ed.selection = new vscode.Selection(start, end);
+                ed.revealRange(new vscode.Range(start, end),
+                    vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+            } catch (_) { /* the edit stands regardless */ }
+        }
+        if (kind === 'gone') {
+            this._lastSelection = null;
+            this._post({ type: 'selection', span: null });
+        } else {
+            this._lastSelection = { file, start, end };
+        }
+    }
+
+    async _selectionAction(m) {
+        const action = m && m.action;
+        const t = await this._selectionTarget();
+        if (!t) { this._post({ type: 'status', text: 'nothing is selected', kind: 'warn' }); return; }
+        const { doc, range, sel } = t;
+        const text = doc.getText(range);
+
+        if (action === 'copy') {
+            if (!text) { this._post({ type: 'status', text: 'nothing to copy', kind: 'warn' }); return; }
+            try { await vscode.env.clipboard.writeText(text); }
+            catch (e) { this._post({ type: 'status', text: `could not copy: ${e.message}`, kind: 'err' }); return; }
+            this._post({
+                type: 'status', kind: 'ok',
+                text: `copied ${text.length} character${text.length === 1 ? '' : 's'}`,
+            });
+            return;
+        }
+
+        if (action === 'cut' || action === 'delete') {
+            if (action === 'cut') {
+                try { await vscode.env.clipboard.writeText(text); }
+                catch (e) {
+                    // A cut that cannot copy must not delete: that is the one
+                    // way to lose the text with nothing to paste back.
+                    this._post({ type: 'status', text: `could not copy, so nothing was cut: ${e.message}`, kind: 'err' });
+                    return;
+                }
+            }
+            const edit = new vscode.WorkspaceEdit();
+            edit.delete(doc.uri, range);
+            let ok = false;
+            try { ok = await vscode.workspace.applyEdit(edit); } catch (e) { ok = false; }
+            if (!ok) { this._post({ type: 'status', text: `the ${action} could not be applied`, kind: 'err' }); return; }
+            this._afterSelectionEdit(sel.file, sel.start, sel.start, 'gone');
+            this._post({
+                type: 'status', kind: 'ok',
+                text: action === 'cut' ? `cut ${text.length} characters` : `deleted ${text.length} characters`,
+            });
+            return;
+        }
+
+        if (action === 'paste') {
+            let clip = '';
+            try { clip = await vscode.env.clipboard.readText(); } catch (_) { clip = ''; }
+            if (!clip) {
+                // An image in the clipboard is a figure, not a string — the
+                // same answer ⌘V gives in the editor.
+                this._post({ type: 'status', text: 'the clipboard holds no text', kind: 'warn' });
+                return;
+            }
+            const edit = new vscode.WorkspaceEdit();
+            edit.replace(doc.uri, range, clip);
+            let ok = false;
+            try { ok = await vscode.workspace.applyEdit(edit); } catch (e) { ok = false; }
+            if (!ok) { this._post({ type: 'status', text: 'the paste could not be applied', kind: 'err' }); return; }
+            // Select what was pasted, so it can be moved or replaced again.
+            const startOff = doc.offsetAt(sel.start);
+            const end = doc.positionAt(startOff + clip.length);
+            this._afterSelectionEdit(sel.file, sel.start, end, 'kept');
+            this._post({ type: 'status', text: `pasted ${clip.length} characters`, kind: 'ok' });
+            return;
+        }
+
+        this._post({ type: 'status', text: `unknown action ${JSON.stringify(action)}`, kind: 'warn' });
+    }
+
+    // --- MOVING A SELECTION BY DRAGGING IT ----------------------------------
+    //
+    // Drag the middle of a selection (not its brackets) and the LaTeX inside it
+    // MOVES to where you let go. While the hand is down a blue caret shows the
+    // landing point, on the page and in the editor, and the editor scrolls to
+    // it — so a block can be moved across pages without leaving the paper.
+    //
+    // WHOLE LINES MOVE AS WHOLE LINES. A displayed equation dropped into the
+    // middle of a word is not what anybody means: when the selection covers
+    // whole lines the landing point snaps to a line boundary, and only a
+    // fragment inside one line lands at an exact column.
+
+    /** Does this selection cover whole lines? */
+    _isBlockSelection(doc, sel) {
+        if (!sel) return false;
+        if (sel.start.line !== sel.end.line) return true;
+        const text = doc.lineAt(sel.start.line).text;
+        return sel.start.character === 0 && sel.end.character >= text.replace(/\s+$/, '').length;
+    }
+
+    /**
+     * Where a drop at this point would put the text.
+     *
+     * @returns {{file:string, offset:number, line:number, column:number,
+     *            block:boolean, rects:Array}|null}
+     */
+    _moveTargetFor(st, m, doc, sel) {
+        const hit = this._resolvePoint(st, m);
+        if (!hit || hit.flag === FLAG.UNMAPPED || !hit.file) return null;
+        if (hit.file !== doc.uri.fsPath) return null;      // one file at a time
+        const block = this._isBlockSelection(doc, sel);
+        const lineIdx = Math.max(0, Math.min(hit.line - 1, doc.lineCount - 1));
+
+        if (block) {
+            // THE NEAREST LEGAL BOUNDARY, when the page can offer one.
+            //
+            // This replaces "resolve a line, then repair it": the gaps between
+            // the blocks printed on this page ARE the places a block may land,
+            // and the reader is aiming at one of them. Falls through to the
+            // older line-based reasoning when the page has nothing to offer —
+            // an unmapped region, a page still rendering.
+            const bounds = this._dropBoundaries(st, doc, m.page);
+            if (bounds.length) {
+                let best = null;
+                for (const b of bounds) {
+                    const d = Math.abs(b.y - m.yTopBp);
+                    if (!best || d < best.d) best = { b, d };
+                }
+                if (best) {
+                    const at2 = Math.max(0, Math.min(doc.lineCount, best.b.line - 1));
+                    const b = best.b;
+                    const rects = Number.isFinite(b.x0) && b.x1 > b.x0
+                        ? [{ page: b.page, x: b.x0, y: b.y, w: b.x1 - b.x0, h: 0 }]
+                        : this._caretRects(st, doc, at2 + 1, true);
+                    return {
+                        file: doc.uri.fsPath, block: true,
+                        line: at2 + 1, column: 0,
+                        offset: doc.offsetAt(new vscode.Position(at2, 0)),
+                        rects,
+                    };
+                }
+            }
+        }
+        if (block) {
+            // BETWEEN lines: above the row the pointer is on, or below it once
+            // the pointer is past that row's middle — the same rule a file
+            // explorer uses, and the only one that can express "after the last
+            // line".
+            const rows = this._searchRows(st, doc.uri.fsPath, lineIdx + 1);
+            let after = false;
+            if (rows.length) {
+                const r = rows[0];
+                after = m.yTopBp > r.y + r.h * 0.5;
+            }
+            let at = Math.min(doc.lineCount, lineIdx + (after ? 1 : 0));
+            // A DROP MAY NOT LAND INSIDE A DISPLAY.
+            //
+            // Reported: dragging a paragraph to sit before an equation, and
+            // "the insertion always lands inside the equation". It did — the
+            // pointer is over the equation's rows, so the target line was one
+            // of ITS lines, and `\begin{equation}` … a paragraph …
+            // `\end{equation}` is not LaTeX. A drop over any part of a block
+            // therefore snaps to its edge: before it in the top half, after it
+            // in the bottom.
+            const container = this._containerAt(doc, at, block);
+            if (container) {
+                // BEFORE OR AFTER IS A QUESTION ABOUT THE PAGE, NOT THE SOURCE.
+                //
+                // MEASURED: every row of `eq:U-m-change` is filed under its
+                // `\end{equation}` line, so comparing the resolved LINE against
+                // the object's middle line answered "after" everywhere on it —
+                // the reader could not drop before an equation by pointing at
+                // it at all, and the only spot that worked was a 10 bp sliver
+                // in the gap above. The honest test is where the pointer is
+                // against the object's own INK: top half means before it.
+                const rects = this.objectRects(doc.uri.fsPath,
+                    container.startLine, container.endLine);
+                let before;
+                if (rects.length) {
+                    const y0 = Math.min(...rects.map(r => r.y));
+                    const y1 = Math.max(...rects.map(r => r.y + r.h));
+                    before = m.yTopBp < (y0 + y1) / 2;
+                } else {
+                    before = at <= (container.startLine + container.endLine) / 2;
+                }
+                at = before ? Math.max(0, container.startLine - 1)
+                    : Math.min(doc.lineCount, container.endLine);
+            }
+            return {
+                file: doc.uri.fsPath, block: true,
+                line: at + 1, column: 0,
+                offset: doc.offsetAt(new vscode.Position(at, 0)),
+                rects: this._caretRects(st, doc, at + 1, true),
+            };
+        }
+
+        const text = doc.lineAt(lineIdx).text;
+        const macros = this._macrosFor(doc);
+        const w = wordAtColumn(text, 0, { macros });
+        void w;
+        // The column is taken from the word the pointer is nearest, which is
+        // what the panel already reports for a click.
+        const col = Number.isFinite(m.column) ? Math.max(0, Math.min(m.column, text.length))
+            : text.length;
+        return {
+            file: doc.uri.fsPath, block: false,
+            line: lineIdx + 1, column: col,
+            offset: doc.offsetAt(new vscode.Position(lineIdx, col)),
+            rects: this._caretRects(st, doc, lineIdx + 1, false),
+        };
+    }
+
+    /**
+     * EVERY PLACE A BLOCK MAY LEGALLY LAND ON THIS PAGE, and where each one is.
+     *
+     * Resolving a line and then patching it cannot express "between these two
+     * things". Reported twice: between two equations, and between an equation
+     * and a section. The pointer is in a GAP, so the resolved line is whatever
+     * happens to be nearest — a blank line, a delimiter, the tail of something
+     * else — and every rule for repairing that answer is a rule about the wrong
+     * question.
+     *
+     * The right question is which BOUNDARY the pointer is nearest. The blocks
+     * printed on a page have gaps between them; those gaps ARE the legal
+     * insertion points, and each one has a position on the page. Picking the
+     * nearest is both simpler and exactly what the reader is aiming at.
+     *
+     * @returns {Array<{line:number, y:number, page:number, label:string}>}
+     *          `line` is 1-based and means "insert BEFORE this line".
+     */
+    _dropBoundaries(st, doc, page) {
+        const file = doc.uri.fsPath;
+        if (!st.map) return [];
+        let onPage = [];
+        try { onPage = st.map.linesOnPage(page, file) || []; } catch (_) { return []; }
+        if (!onPage.length) return [];
+
+        const inkOf = (a, b) => {
+            const rects = this.objectRects(file, a, b).filter(r => r.page === page);
+            if (!rects.length) return null;
+            return {
+                y0: Math.min(...rects.map(r => r.y)),
+                y1: Math.max(...rects.map(r => r.y + r.h)),
+                x0: Math.min(...rects.map(r => r.x)),
+                x1: Math.max(...rects.map(r => r.x + r.w)),
+            };
+        };
+
+        // Keyed by line, so a container's edge and a prose line's own boundary
+        // never appear twice; the HIGHEST position wins, which is where the
+        // caret belongs when several things claim the same seam.
+        const seen = new Map();
+        // THE BOUNDARY CARRIES ITS OWN GEOMETRY, because nothing else can
+        // recover it. The blue caret used to be built by asking for the rows of
+        // the boundary LINE — and a boundary line is a blank line, or a
+        // `\begin{equation}` whose only record is a misfiled sliver, so there
+        // were none and nothing was drawn. Reported as "the blue indicator does
+        // not show when I drop next to the equations". The position is already
+        // known here; it just has to be kept.
+        const add = (line, y, label, x0, x1) => {
+            const n = Math.max(1, Math.min(doc.lineCount + 1, line));
+            if (!Number.isFinite(y)) return;
+            const had = seen.get(n);
+            if (!had || y < had.y) seen.set(n, { line: n, y, page, label, x0, x1 });
+        };
+
+        const done = new Set();
+        for (const n of onPage) {
+            if (n < 1 || n > doc.lineCount) continue;
+            // Inside a block? Then the only legal seams are its own edges.
+            const c = this._containerAt(doc, n, true);
+            if (c) {
+                const key = `${c.startLine}-${c.endLine}`;
+                if (done.has(key)) continue;
+                done.add(key);
+                const ink = inkOf(c.startLine, c.endLine);
+                if (!ink) continue;
+                add(c.startLine, ink.y0 - 2, 'before a block', ink.x0, ink.x1);
+                add(c.endLine + 1, ink.y1 + 2, 'after a block', ink.x0, ink.x1);
+                continue;
+            }
+            // Ordinary prose: a seam above each printed line. This is what
+            // keeps the list DENSE — most of a paper is not a model object,
+            // and a boundary list made only of blocks cannot express "between
+            // these two paragraphs", nor even "above the only equation here".
+            let rows = [];
+            try { rows = (st.map.lineRows(file, n) || []).filter(r => r.page === page); }
+            catch (_) { rows = []; }
+            if (!rows.length) continue;
+            add(n, Math.min(...rows.map(r => r.y)) - 1, 'line',
+                Math.min(...rows.map(r => r.x)),
+                Math.max(...rows.map(r => r.x + r.w)));
+        }
+        return [...seen.values()].sort((a, b) => a.y - b.y || a.line - b.line);
+    }
+
+    /**
+     * The block a line sits inside, if dropping there would break it.
+     *
+     * Only the kinds whose interior has a grammar — a display, a float, a
+     * table, a theorem. Dropping inside a paragraph is ordinary editing and is
+     * left alone.
+     */
+    _containerAt(doc, line, blockOnly = true) {
+        if (!blockOnly) return null;
+        const model = this._modelFor(doc);
+        if (!model) return null;
+        // A HEADING IS A CONTAINER TOO. `\subsection{From the … to` /
+        // `$q\dot q$ bilinears}` is two source lines, and a drop between them
+        // splits the title down the middle. MEASURED: a drop anywhere in the
+        // top 14 bp of that heading landed on its second line.
+        const KINDS = ['display-equation', 'figure', 'table', 'tabular', 'theorem',
+            'align', 'environment', 'list', 'itemize', 'enumerate', 'verbatim',
+            'section-heading'];
+        return (model.objects || [])
+            .filter(o => o.sourceRange && KINDS.includes(o.kind) &&
+                o.sourceRange.startLine <= line && o.sourceRange.endLine >= line)
+            .sort((a, b) => (a.sourceRange.endLine - a.sourceRange.startLine) -
+                (b.sourceRange.endLine - b.sourceRange.startLine))
+            .map(o => ({ startLine: o.sourceRange.startLine, endLine: o.sourceRange.endLine }))[0] || null;
+    }
+
+    /** The bar the panel draws: a rule between lines, or a caret on one. */
+    _caretRects(st, doc, line, block) {
+        const rows = this._searchRows(st, doc.uri.fsPath, Math.min(line, doc.lineCount));
+        if (!rows.length) return [];
+        const r = rows[0];
+        return block
+            ? [{ page: r.page, x: r.x, y: r.y, w: r.w, h: 0 }]
+            : [{ page: r.page, x: r.x, y: r.y, w: 0, h: r.h }];
+    }
+
+    /** Live feedback while the hand is down. */
+    async _moveSelectionPreview(m) {
+        const st = this.root && this.coord.roots.get(this.root);
+        const sel = this._lastSelection;
+        if (!st || !st.map || !st.map.available || !sel) return;
+        let doc;
+        try { doc = await vscode.workspace.openTextDocument(vscode.Uri.file(sel.file)); }
+        catch (_) { return; }
+        const t = this._moveTargetFor(st, m, doc, sel);
+        if (!t) { this._post({ type: 'moveCaret', rects: [] }); return; }
+        this._moveTarget = t;
+        this._post({
+            type: 'moveCaret',
+            rects: t.rects,
+            block: t.block,
+            label: `move here · line ${t.line}`,
+        });
+        // The editor shows the landing point too, and scrolls to it — that is
+        // half of what makes this usable for a move across pages.
+        const editor = (vscode.window.visibleTextEditors || [])
+            .find(e => e.document.uri.fsPath === sel.file);
+        if (editor) {
+            const at = new vscode.Position(Math.max(0, t.line - 1), t.column);
+            editor.revealRange(new vscode.Range(at, at),
+                vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+        }
+    }
+
+    /**
+     * Let go: the text moves.
+     *
+     * One WorkspaceEdit holds both halves, so it is ONE undo. A drop inside the
+     * selection itself is a no-op rather than a self-destructive edit, and the
+     * moved text is selected at its new home so the reader can see where it
+     * went — and move it again.
+     */
+    async _moveSelectionCommit(m) {
+        const st = this.root && this.coord.roots.get(this.root);
+        // Reassignable: the fragment may be widened to something whole before
+        // it is cut — see balanceRange below.
+        let sel = this._lastSelection;
+        this._post({ type: 'moveCaret', rects: [] });
+        if (!st || !sel) return;
+        let doc;
+        try { doc = await vscode.workspace.openTextDocument(vscode.Uri.file(sel.file)); }
+        catch (_) { return; }
+        // BEFORE ANYTHING ELSE: what is actually being moved.
+        //
+        // A cut inside a construct leaves two broken halves — reported as
+        // dragging a run-in paragraph and moving "only the text after the
+        // title", because the selection began after `\paragraph{…}` and the
+        // command stayed behind. And it must happen HERE, before the target is
+        // chosen: whether a fragment covers whole lines decides whether it
+        // lands between lines or at a column, and widening it can change that
+        // answer.
+        const whole = balanceRange(doc.getText(),
+            doc.offsetAt(sel.start), doc.offsetAt(sel.end));
+        if (whole.widened) {
+            sel = {
+                file: sel.file,
+                start: doc.positionAt(whole.from),
+                end: doc.positionAt(whole.to),
+            };
+            this._post({
+                type: 'status', kind: '',
+                text: `moving the whole construct — ${whole.reason}`,
+            });
+        }
+
+        const t = (m && m.page) ? this._moveTargetFor(st, m, doc, sel) : this._moveTarget;
+        this._moveTarget = null;
+        if (!t) { this._post({ type: 'status', text: 'no place to move it to', kind: 'warn' }); return; }
+
+        const from = doc.offsetAt(sel.start);
+        const to = doc.offsetAt(sel.end);
+        if (t.offset >= from && t.offset <= to) {
+            this._post({ type: 'status', text: 'dropped where it already was', kind: '' });
+            return;
+        }
+        let text = doc.getText(new vscode.Range(sel.start, sel.end));
+        if (!text.trim()) return;
+
+        // A BLOCK MOVES AS LINES, so it needs the newline the old place had.
+        const block = t.block;
+        let cut = { start: sel.start, end: sel.end };
+        if (block) {
+            const sLine = sel.start.line;
+            const eLine = sel.end.line;
+            const endsFile = eLine + 1 >= doc.lineCount;
+            cut = {
+                start: new vscode.Position(sLine, 0),
+                end: endsFile ? new vscode.Position(eLine, doc.lineAt(eLine).text.length)
+                    : new vscode.Position(eLine + 1, 0),
+            };
+            text = doc.getText(new vscode.Range(cut.start, cut.end));
+            if (!/\n$/.test(text)) text += '\n';
+        }
+        const cutFrom = doc.offsetAt(cut.start);
+        const cutTo = doc.offsetAt(cut.end);
+        if (t.offset > cutFrom && t.offset < cutTo) {
+            this._post({ type: 'status', text: 'dropped where it already was', kind: '' });
+            return;
+        }
+
+        const edit = new vscode.WorkspaceEdit();
+        const uri = doc.uri;
+        edit.delete(uri, new vscode.Range(cut.start, cut.end));
+        edit.insert(uri, doc.positionAt(t.offset), text);
+        let ok = false;
+        try { ok = await vscode.workspace.applyEdit(edit); }
+        catch (e) { this._post({ type: 'status', text: `move failed: ${e.message}`, kind: 'err' }); return; }
+        if (!ok) { this._post({ type: 'status', text: 'the move could not be applied', kind: 'err' }); return; }
+
+        // Where it ended up: everything before the target shifts by the length
+        // of what was removed, and only when the cut was BEFORE it.
+        const landed = t.offset > cutTo ? t.offset - (cutTo - cutFrom) : t.offset;
+        const start = doc.positionAt(landed);
+        const end = doc.positionAt(landed + text.length);
+        this._lastSelection = { file: sel.file, start, end };
+        this._selfRange = {
+            file: sel.file, kind: 'drag',
+            sl: start.line, sc: start.character, el: end.line, ec: end.character,
+            at: Date.now(),
+        };
+        const editor = (vscode.window.visibleTextEditors || [])
+            .find(e => e.document.uri.fsPath === sel.file);
+        if (editor) {
+            editor.selection = new vscode.Selection(start, end);
+            editor.revealRange(new vscode.Range(start, end),
+                vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+        }
+        this._post({
+            type: 'status',
+            text: `moved ${block ? `${sel.end.line - sel.start.line + 1} line(s)` : 'the fragment'} to line ${t.line}`,
+            kind: 'ok',
+        });
+    }
+
     /** INVERSE SYNC — the thing that makes this Page mode. */
     async _jumpToSource(m) {
         const st = this.root && this.coord.roots.get(this.root);
@@ -1650,8 +2569,19 @@ class TexViewer {
         // PROSE ONLY. In maths the alignment already answers by position, which
         // is stronger than context there: single glyphs repeat constantly and
         // their neighbours are mostly other single glyphs.
-        if (m.word && m.wordContext && !(w && w.inMath) &&
-            !(aligned && aligned.inMath)) {
+        //
+        // THE GUARD ASKS WHETHER THE CLICK IS IN MATHS, NOT WHETHER THE WINNING
+        // READING CAME FROM A MATH-SCOPED SEARCH. The glyph reading is ALWAYS
+        // tagged inMath — it is produced by searching in maths scope — so
+        // testing `w.inMath` switched this rescue off every time the glyph
+        // reading won, which is exactly when it is needed. Measured
+        // (check-occurrence): clicking `single-valued` resolved to the letter
+        // `l` of "allowed" on the line ABOVE, because the word is not on the
+        // line SyncTeX named, the glyph `l` is, and the context that knew
+        // better was never consulted.
+        const clickInMaths = !!(aligned && aligned.inMath) ||
+            !!(hit.object && !hit.object.approximate && MATH_KINDS.includes(hit.object.kind));
+        if (m.word && m.wordContext && !clickInMaths) {
             const found = locateByContext(doc.getText().split(/\r?\n/), hit.line,
                 m.word, m.wordContext.before, m.wordContext.after, { macros });
             if (found) {
@@ -1976,6 +2906,158 @@ class TexViewer {
                 return r ? { page: r.page, exact: r.exact, matchedLine: r.matchedLine } : null;
             },
         };
+    }
+
+    // --- the label overlay ---------------------------------------------------
+    //
+    // Hold Shift and the paper shows its own skeleton: every \label beside the
+    // thing it names, every \ref and \cite beside the label it points at. It
+    // answers the question a writer asks a dozen times an hour — "what is this
+    // equation called?" — without leaving the page, and a click puts the
+    // reference on the clipboard ready to paste.
+    //
+    // Built LAZILY and cached per generation. The webview asks the first time
+    // Shift goes down; after that a new compile re-pushes only while somebody
+    // is still watching.
+
+    /**
+     * The model for every file of this root — not only the open ones.
+     *
+     * `_modelFor2` can see a document only if VS Code has it open, which is the
+     * root and nothing else on a split paper. A label declared in `sections/
+     * intro.tex` is still a label of this paper, so the files are read from
+     * disk when they are not open.
+     */
+    _projectModels(st) {
+        const files = (st && st.files && st.files.length) ? st.files : [this.root];
+        const key = files.join('|');
+        if (this._chipModels && this._chipModels.key === key) return this._chipModels.models;
+        const models = new Map();
+        for (const f of files.slice(0, 64)) {
+            let model = this._modelFor2(f);
+            if (!model) {
+                try {
+                    const text = fs.readFileSync(f, 'utf8');
+                    model = this.projection.fromText(text, f);
+                } catch (_) { model = null; }
+            }
+            if (model) models.set(f, model);
+        }
+        this._chipModels = { key, models };
+        return models;
+    }
+
+    /** Every chip for the paper on screen, memoised on the shown generation. */
+    _labelChips(st) {
+        if (!st || !st.map || !st.map.available) return [];
+        const files = (st && st.files && st.files.length) ? st.files : [this.root];
+        const key = `${this.shownGeneration}|${files.join('|')}`;
+        if (this._chips && this._chips.key === key) return this._chips.items;
+
+        const models = this._projectModels(st);
+        const objects = [];
+        for (const model of models.values()) objects.push(...(model.objects || []));
+
+        // What LaTeX itself numbered each label as. A capped single-pass live
+        // build may not have converged, and a stale number is worse than none —
+        // it would be read as fact.
+        let aux = { labels: new Map(), cites: new Map() };
+        const gen = st.generation;
+        if (gen && gen.outDir && !gen.passesLimited) {
+            try {
+                aux = readAuxLabels(gen.outDir, gen.root || this.root, {
+                    readFile: (f) => fs.readFileSync(f, 'utf8'),
+                    exists: (f) => fs.existsSync(f),
+                });
+            } catch (_) { /* chips simply lose their numbers */ }
+        }
+
+        // Which names exist, so a \ref to nothing can be shown as broken rather
+        // than silently placed.
+        const declared = new Set();
+        for (const o of objects) {
+            if (o.kind === 'label' && o.name) declared.add(o.name);
+            else if (o.label) declared.add(o.label);
+        }
+
+        let items = [];
+        try {
+            items = buildLabelChips({
+                objects,
+                file: this.root,
+                rowsFor: (f, line) => st.map.lineRows(f, line),
+                boxFor: (o) => st.map.objectRenderBoxes(o),
+                printedFor: (n) => aux.labels.get(n) || null,
+                citeFor: (n) => aux.cites.get(n) || null,
+                inkFor: (page) => (this._textReady() ? this._text.pages.get(page) : null),
+                declared,
+                // A number is recognised by sitting in the RIGHT MARGIN, which
+                // is a question about the page, not about the equation.
+                pageWidth: (gen && gen.pageSize && gen.pageSize.widthBp) || 595.276,
+            });
+        } catch (e) {
+            this._log(`label chips failed: ${e.message}`);
+            items = [];
+        }
+        // WHAT EACH BADGE POINTS AT, so hovering one can show the thing itself
+        // rendered. A declaration points at its own object; a reference points
+        // at the object its label names. Computed once per generation with the
+        // rest of the chips — a hover must not start a model walk.
+        const byLabel = new Map();
+        for (const o of objects) {
+            const n = o.kind === 'label' ? o.name : o.label;
+            if (n && o.kind !== 'label' && !byLabel.has(n)) byLabel.set(n, o);
+        }
+        const targets = new Map();
+        for (const c of items) {
+            if (c.role === 'cite') continue;          // a bibliography entry is not an object
+            const owner = byLabel.get(c.name);
+            if (!owner || !owner.sourceRange) continue;
+            const key2 = owner.stableKey || `${owner.sourceRange.startLine}`;
+            if (!targets.has(key2)) {
+                targets.set(key2, this.objectRects(
+                    owner.sourceRange.file || this.root,
+                    owner.sourceRange.startLine, owner.sourceRange.endLine));
+            }
+            const rects = targets.get(key2);
+            if (rects && rects.length) c.target = rects;
+        }
+
+        this._chips = { key, items };
+        return items;
+    }
+
+    _copyFormat() {
+        return vscode.workspace.getConfiguration('wolfbook.tex')
+            .get('labelCopyFormat', 'command');
+    }
+
+    async _postLabels() {
+        if (!this.panel || !this.root) return;
+        const st = this.coord.roots.get(this.root);
+        if (!st) return;
+        const items = this._labelChips(st);
+        this._post({
+            type: 'labels',
+            generation: this.shownGeneration,
+            items,
+            format: this._copyFormat(),
+        });
+    }
+
+    /** Clicking a chip: the reference, on the clipboard. */
+    async _copyLabel(m) {
+        const format = m && m.alt ? altFormat(this._copyFormat()) : this._copyFormat();
+        const text = formatLabelCopy(m && m.name, {
+            kind: m && m.kind, role: m && m.role, cmd: m && m.cmd, format,
+        });
+        if (!text) return;
+        try {
+            await vscode.env.clipboard.writeText(text);
+            this._post({ type: 'status', text: `Copied ${text}`, kind: 'ok' });
+        } catch (e) {
+            this._post({ type: 'status', text: `could not copy: ${e.message}`, kind: 'err' });
+        }
     }
 
     _modelFor2(file) {
@@ -2576,4 +3658,7 @@ const shortLabel = (o) =>
         : o.kind === 'section-heading' ? `§ ${o.title || ''}`.trim()
             : o.label ? `${o.kind} ${o.label}` : o.kind;
 
-module.exports = { TexViewer, VIEW_TYPE };
+module.exports = {
+    TexViewer, VIEW_TYPE, mergeRows, dropStrayRows, dropEquationTags,
+    clipToSpan, dropDetachedRows, dominantPage,
+};

@@ -42,6 +42,9 @@ E(p) = \\sqrt{1 + 16 g^2 \\sin^2 \\tfrac{p}{2}}
 \\end{equation}
 More prose after the first equation, again long enough to be a real paragraph.
 
+Solitary
+
+
 The kernel of the operator is the kernel we started from, and a reader who
 has read the kernel section will recognise the kernel again immediately, so
 kernel counting is the only thing that this paragraph is really about here.
@@ -436,6 +439,46 @@ async function main() {
             const movedEq = diff.moved.find(m => m.label === 'eq:one' || m.label === 'eq:two');
             assert.ok(movedEq, 'an equation is named among the movements');
             assert.ok(movedEq.to > movedEq.from, `${movedEq.label}: p${movedEq.from} -> p${movedEq.to}`);
+        });
+
+        await test('A ONE-WORD PARAGRAPH HAS A ROW OF ITS OWN', () => {
+            // REPORTED: "single word lines are not individually selectable in
+            // the viewer". MEASURED on a fixture of one-word paragraphs: TeX
+            // emits a single DIMENSIONLESS char record for the whole line —
+            //
+            //     hbox      line=7  v=158.7 h=133.8 W=343.7   <- the line box
+            //     char      line=6  v=158.7 h=170.9 W=0       <- the word
+            //
+            // — so the row came out zero-wide and was filtered away by the rule
+            // that drops the `\[` phantom, and the cursor answered
+            // "line N · unmapped": nothing highlighted, nothing selectable.
+            //
+            // The two cases are told apart by the BASELINE, not by the record:
+            // the phantom shares its baseline with the prose line that really
+            // printed there, while a one-word paragraph is the only thing on
+            // its own.
+            const line = PAPER.split('\n').findIndex(l => l === 'Solitary') + 1;
+            assert.ok(line > 1, 'the fixture has a one-word paragraph');
+            const rows = rm.lineRows(root, line);
+            assert.ok(rows.length,
+                `it must have a row of its own, or it cannot be clicked or ` +
+                `highlighted at all (got ${rows.length})`);
+            assert.ok(rows[0].w > 0.5, `and a real width: ${rows[0].w}`);
+
+            // And the phantom is still dropped: the line that opens a display
+            // must not claim a row on the paragraph above it.
+            const eqLine = PAPER.split('\n')
+                .findIndex(l => l.startsWith('\\begin{equation}')) + 1;
+            const proseAbove = PAPER.split('\n')
+                .findIndex(l => l.startsWith('page so that the render map')) + 1;
+            const eqRows = rm.lineRows(root, eqLine);
+            const proseRows = rm.lineRows(root, proseAbove);
+            for (const e of eqRows) {
+                for (const pr of proseRows) {
+                    assert.ok(!(e.page === pr.page && Math.abs(e.y - pr.y) < 1),
+                        'the display\'s own line must not claim the prose row above it');
+                }
+            }
         });
 
         await test('compare() needs two real generations and says so otherwise', () => {

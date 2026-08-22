@@ -39,6 +39,10 @@ const state = {
     pinHighlight: false,
     fullscreen: false,
     generation: null,
+    labels: null,             // {generation, items} — the label overlay, cached
+    labelsOn: false,          // Shift is down
+    labelsPinned: false,      // the toolbar toggle
+    labelsAsked: null,        // the generation we have already asked for
 };
 
 const el = (id) => document.getElementById(id);
@@ -234,6 +238,11 @@ async function openDocument(msg) {
         // the extension answers from the cursor's CURRENT position.
         state.highlight = null;
         for (const box of document.querySelectorAll('.hl')) box.remove();
+        // Same argument for the label chips: every anchor was measured against
+        // the render that has just been replaced.
+        state.labels = null;
+        state.labelsAsked = null;
+        for (const c of document.querySelectorAll('.lbc')) c.remove();
         el('where').textContent = '';
 
         if (samePagination) {
@@ -249,6 +258,7 @@ async function openDocument(msg) {
             omark('offscreen');
             if (state.highlight) paintHighlight();
             if (state.selection) paintSelection(state.selection);
+        else if (state.selShape) paintSelectionActions();
         } else {
             // A RECOMPILE MUST NOT SEND THE READER BACK TO PAGE ONE.
             //
@@ -418,6 +428,8 @@ async function renderPage(n) {
         if (state.highlight && state.highlight.page === n) paintHighlight();
         if (state.selection) paintSelection(state.selection);
         if (state.diff) paintDiff();
+        if (state.labels && labelsVisible()) paintLabels().catch(() => {});
+        if (state.moveCaret) paintMoveCaret(state.moveCaret);
         if (state.edit) paintEditCard();
     })().finally(() => state.pending.delete(n));
     state.pending.set(n, job);
@@ -940,6 +952,278 @@ function paintDiff() {
     }
 }
 
+// --- THE LABEL OVERLAY -------------------------------------------------------
+//
+// Hold Shift: every \label appears beside the thing it names, every \ref and
+// \cite beside the label it points at. Click one and the reference is on the
+// clipboard.
+//
+// A SEPARATE CLASS FROM BOTH `.hl` AND `.dh`, for the reason `.dh` exists:
+// `paintHighlight` removes every `.hl` on each cursor move, so chips sharing it
+// would be wiped by the next keystroke — and a reader holding Shift while the
+// cursor moves is the ordinary case, not an edge one.
+//
+// The chips are the one overlay that TAKES THE POINTER. Everything else here is
+// `pointer-events:none`; a chip has to be clickable, and because Shift-click on
+// the page already means "pick the end of a selection", the click must be
+// stopped in the CAPTURE phase or it starts a selection on the way past.
+
+function labelsVisible() { return !!(state.labelsOn || state.labelsPinned); }
+
+/**
+ * WHERE A REFERENCE'S BADGE BELONGS: on the number it printed.
+ *
+ * Reported: "next to (6) should be the badge — but it is miles away". A
+ * reference prints its number inside the prose, and the extension's own copy of
+ * the text layer is a generation behind whenever the page sweep has not
+ * finished, so it fell back to the end of the line. The PANEL always has the
+ * real text layer, so the search happens here.
+ */
+async function inkMatching(find, page) {
+    if (!find || !find.text) return null;
+    const want = String(find.text).replace(/[()[\]\s]/g, '');
+    if (!want) return null;
+    let items = [];
+    try { items = await textItems(page); } catch (_) { return null; }
+    if (!items.length) return null;
+    const rects = (find.rects || []).filter(r => r.page === page)
+        .map(r => rectToViewport(page, r)).filter(Boolean);
+    if (!rects.length) return null;
+    const inside = (it) => rects.some(v =>
+        it.y + it.h > v.y - 2 && it.y < v.y + v.h + 2 &&
+        it.x + it.w > v.x - 40 && it.x < v.x + v.w + 40);
+
+    // A BARE NUMBER MATCHES ANY STRAY DIGIT ON THE LINE.
+    //
+    // The `.aux` records `\ref` numbers without their parentheses — `2`, not
+    // `(2)` — and a line of physics is full of loose 2s. Reported: the badge
+    // for `\eqref{eq:arrow-switch}` landed in the middle of a sentence, on a
+    // digit inside the maths, while its own `(2)` sat at the end of the line.
+    //
+    // What an `\eqref` actually prints is the number IN PARENTHESES, so a
+    // candidate flanked by them is the one — and pdf.js may report `(2)` as one
+    // item or as three, so both shapes are scored rather than one being
+    // assumed.
+    const cands = [];
+    for (const it of items) {
+        if (!it.str) continue;
+        const t = String(it.str).replace(/[()[\]\s]/g, '');
+        if (t !== want) continue;
+        if (!inside(it)) continue;
+        let score = 0;
+        if (/^[([]/.test(String(it.str)) && /[)\]]$/.test(String(it.str))) score += 3;
+        else {
+            const near = (other, side) => items.some(o => o !== it &&
+                Math.abs(o.y - it.y) < 3 &&
+                (side === 'left'
+                    ? Math.abs((o.x + o.w) - it.x) < 4
+                    : Math.abs(o.x - (it.x + it.w)) < 4) &&
+                other.test(String(o.str)));
+            if (near(/[([]\s*$/, 'left')) score += 2;
+            if (near(/^\s*[)\]]/, 'right')) score += 1;
+        }
+        cands.push({ it, score });
+    }
+    if (!cands.length) return null;
+    if (find.parens) {
+        const best = cands.reduce((a, b) => (b.score > a.score ? b : a));
+        // A reference is printed in parentheses; a candidate with none is very
+        // likely a digit that happens to be the same number.
+        if (best.score > 0) return best.it;
+        return null;
+    }
+    return cands[0].it;
+}
+
+async function paintLabels() {
+    for (const el of document.querySelectorAll('.lbc')) el.remove();
+    hideChipPreview();
+    if (!labelsVisible() || !state.labels || !state.labels.items) return;
+
+    const byPage = new Map();
+    for (const c of state.labels.items) {
+        const p = c.at && c.at.page;
+        if (!p) continue;
+        if (!byPage.has(p)) byPage.set(p, []);
+        byPage.get(p).push(c);
+    }
+    const pending = [];
+    for (const [page, chips] of byPage) {
+        const wrap = pagesEl().querySelector(`.page[data-page="${page}"]`);
+        if (!wrap || !state.rendered.has(page)) continue;
+        const made = [];
+        for (const c of chips) {
+            const v = rectToViewport(page, { ...c.at, w: c.at.w || 1, h: c.at.h || 8 });
+            if (!v) continue;
+            const el = document.createElement('div');
+            el.className = `lbc lbc-${c.role}${c.approx ? ' lbc-approx' : ''}` +
+                (c.broken ? ' lbc-broken' : '');
+            // A DECLARATION AND A REFERENCE ARE DIFFERENT CLAIMS, so they read
+            // differently: a label states what a thing is CALLED, a reference
+            // points AT one. Same information, opposite direction, and telling
+            // them apart at a glance is the whole reason for the overlay.
+            el.textContent = c.role === 'decl'
+                ? (c.printed ? `${c.name} ${c.printed}` : c.name)
+                : `→ ${c.name}`;
+            el.title = c.broken
+                ? `${c.name} — no \\label with that name`
+                : 'Click to copy the reference · Alt-click for the bare name';
+            el.dataset.name = c.name;
+            el.dataset.role = c.role;
+            el.dataset.kind = c.kind;
+            if (c.cmd) el.dataset.cmd = c.cmd;
+            el.style.left = `${v.x}px`;
+            el.style.top = `${v.y}px`;
+            // A chip anchored in the LEFT margin grows leftwards, or it covers
+            // the heading it belongs to — and a chip anchored ABOVE a block
+            // must sit ON TOP of that point rather than hang down from it.
+            // Without the Y half, a label placed 10 bp above an equation still
+            // covered its first row: the anchor is where the chip's BOTTOM
+            // belongs, not its top. Reported as labels sitting inside the
+            // equations they name.
+            const dx = c.side === 'left' ? '-100%' : '0';
+            const dy = c.role === 'decl' && c.kind !== 'section' ? '-100%' : '0';
+            if (dx !== '0' || dy !== '0') el.style.transform = `translate(${dx}, ${dy})`;
+            wrap.appendChild(el);
+            made.push(el);
+            if (c.find) pending.push({ el, chip: c, page });
+            if (c.target && c.target.length) {
+                el.addEventListener('mouseenter', () => showChipPreview(c, el));
+                el.addEventListener('mouseleave', hideChipPreview);
+            }
+        }
+        deoverlap(made);
+    }
+
+    // The references, moved onto the numbers they printed. Done after the
+    // first paint so the badges appear at once and then settle, rather than
+    // waiting on a text-layer sweep before anything is shown at all.
+    for (const { el, chip, page } of pending) {
+        // eslint-disable-next-line no-await-in-loop
+        const hit = await inkMatching(chip.find, page);
+        if (!hit || !el.isConnected) continue;
+        el.style.left = `${hit.x}px`;
+        el.style.top = `${Math.max(0, hit.y - el.offsetHeight - 1)}px`;
+        el.style.transform = '';
+        el.classList.remove('lbc-approx');
+    }
+}
+
+/**
+ * Nudge chips off each other, and DROP the ones that still collide.
+ *
+ * A methods page can carry thirty of these. Pushing one down until it fits
+ * would eventually place it beside something it does not belong to, which is
+ * worse than not drawing it: a label is an assertion about what a thing is
+ * called, and a misplaced one is a wrong answer rather than a missing one.
+ */
+function deoverlap(els) {
+    const placed = [];
+    const boxOf = (e) => ({
+        x: e.offsetLeft, y: e.offsetTop,
+        w: e.offsetWidth, h: e.offsetHeight, el: e,
+    });
+    const hits = (a, b) => a.x < b.x + b.w && b.x < a.x + a.w &&
+        a.y < b.y + b.h && b.y < a.y + a.h;
+    const sorted = els.slice().sort((a, b) => a.offsetTop - b.offsetTop || a.offsetLeft - b.offsetLeft);
+    for (const el of sorted) {
+        let box = boxOf(el);
+        let steps = 0;
+        while (steps < 3 && placed.some(p => hits(box, p))) {
+            const clash = placed.find(p => hits(box, p));
+            const dy = clash.y + clash.h + 1 - box.y;
+            el.style.top = `${el.offsetTop + dy}px`;
+            box = boxOf(el);
+            steps++;
+        }
+        if (placed.some(p => hits(box, p))) { el.remove(); continue; }
+        placed.push(box);
+    }
+}
+
+function showLabels() {
+    if (state.labelsOn) return;
+    state.labelsOn = true;
+    hintLabels();
+    // Ask once per generation; after that the panel already holds them and the
+    // press is instant.
+    if (!state.labels || state.labels.generation !== state.generation) {
+        if (state.labelsAsked !== state.generation) {
+            state.labelsAsked = state.generation;
+            vscode.postMessage({ type: 'labelsWanted', value: true });
+        }
+    }
+    paintLabels().catch(() => {});
+}
+
+function hideLabels() {
+    if (!state.labelsOn) return;
+    state.labelsOn = false;
+    paintLabels().catch(() => {});
+    if (state.labelHinted) { el('where').textContent = state.labelHinted.was || ''; state.labelHinted = null; }
+}
+
+/**
+ * Say what the chips are for, in the bar the reader is already looking at.
+ *
+ * A gesture nobody is told about is a gesture nobody uses, and the copy formats
+ * are the whole point of it. The previous contents of the readout are restored
+ * when the chips go away, so this borrows the space rather than taking it.
+ */
+function hintLabels() {
+    const w = el('where');
+    if (!w) return;
+    if (!state.labelHinted) state.labelHinted = { was: w.textContent };
+    const n = state.labels && state.labels.items ? state.labels.items.length : 0;
+    w.textContent = n
+        ? `${n} label${n === 1 ? '' : 's'} · click to copy \\eqref{…} · ⌥-click for the name`
+        : 'labels…';
+}
+
+/**
+ * WHAT A BADGE POINTS AT, AS IT PRINTS.
+ *
+ * Hovering a label or a reference shows the thing itself — the equation, the
+ * figure — clipped from the compiled page. Deliberately NO source: the editor's
+ * hover is where the LaTeX belongs; on the page the reader is looking at the
+ * paper and wants the paper's own answer.
+ */
+let previewSeq = 0;
+async function showChipPreview(chip, anchor) {
+    const my = ++previewSeq;
+    hideChipPreview();
+    if (!chip || !chip.target || !chip.target.length) return;
+    const page = chip.target[0].page;
+    let shot = null;
+    try { shot = await cropFragment({ id: 'hover', rects: chip.target, scale: 2, pad: 4 }); }
+    catch (_) { shot = null; }
+    if (!shot || !shot.dataUrl || my !== previewSeq) return;
+    const wrap = pagesEl().querySelector(`.page[data-page="${page}"]`);
+    if (!wrap || !anchor.isConnected) return;
+
+    const card = document.createElement('div');
+    card.className = 'lbcprev';
+    const img = document.createElement('img');
+    img.src = shot.dataUrl;
+    // Shown at the size it PRINTS, capped so a full-width display does not
+    // cover the page it was called from.
+    img.style.width = `${Math.min(shot.w || 200, 320)}px`;
+    card.appendChild(img);
+    const host = anchor.closest('.page') || wrap;
+    host.appendChild(card);
+
+    // Beside the badge, flipped when there is no room — never over it.
+    const top = anchor.offsetTop + anchor.offsetHeight + 4;
+    card.style.left = `${Math.max(2, Math.min(anchor.offsetLeft,
+        host.clientWidth - card.offsetWidth - 2))}px`;
+    card.style.top = `${top + card.offsetHeight > host.clientHeight
+        ? Math.max(2, anchor.offsetTop - card.offsetHeight - 4) : top}px`;
+}
+
+function hideChipPreview() {
+    for (const el of document.querySelectorAll('.lbcprev')) el.remove();
+}
+
 /** Scroll a hunk into view, minimally, and mark it as the current one. */
 function focusHunk(id) {
     const d = state.diff;
@@ -990,6 +1274,32 @@ function updateDiffChrome() {
     el('diffwhat').textContent = `vs ${d.label}`;
     el('diffcount').textContent = at;
     el('diffcensus').textContent = d.census || '';
+}
+
+/**
+ * WHERE A DRAGGED SELECTION WOULD LAND — a blue caret.
+ *
+ * Blue, because amber is "where you are" and red is "what is selected"; a third
+ * meaning needs a third colour or it reads as one of the other two. A block
+ * lands BETWEEN lines and is drawn as a rule across the row it would push down;
+ * a fragment lands at a column and is drawn as a caret.
+ */
+function paintMoveCaret(msg) {
+    for (const el of document.querySelectorAll('.movecaret')) el.remove();
+    if (!msg || !msg.rects || !msg.rects.length) return;
+    for (const rect of msg.rects) {
+        const wrap = pagesEl().querySelector(`.page[data-page="${rect.page}"]`);
+        if (!wrap || !state.rendered.has(rect.page)) continue;
+        const v = rectToViewport(rect.page, { ...rect, w: rect.w || 1, h: rect.h || 1 });
+        if (!v) continue;
+        const el = document.createElement('div');
+        el.className = 'movecaret' + (msg.block ? ' block' : '');
+        el.style.left = `${v.x}px`;
+        el.style.top = `${v.y}px`;
+        if (msg.block) el.style.width = `${Math.max(20, v.w)}px`;
+        else el.style.height = `${Math.max(8, v.h)}px`;
+        wrap.appendChild(el);
+    }
 }
 
 function paintHighlight() {
@@ -1074,7 +1384,7 @@ function inkRows(items) {
 }
 
 async function paintSelection(span) {
-    for (const el of document.querySelectorAll('.selfill, .selbrk')) el.remove();
+    for (const el of document.querySelectorAll('.selfill, .selbrk, .selact')) el.remove();
     state.selection = span || null;
     // A PENDING START HAS NO ROWS BY DEFINITION — it is one end of a selection
     // that does not exist yet — so the emptiness test must not swallow it.
@@ -1094,6 +1404,21 @@ async function paintSelection(span) {
         // WORD: a heading's printed number sits to the left of its title and is
         // part of the line that was selected.
         if (side === 'start' && anchor.atLineStart) return rowEdge();
+        // AND NOTHING OF A LINE IS SELECTED WHEN THE RANGE ENDS AT ITS COLUMN 0.
+        //
+        // The closing mark then belongs at the row's LEFT edge. Without this the
+        // anchor's word is the line's FIRST word — `From` of a `\subsection` —
+        // and the mark went to its right edge, so the band covered a word the
+        // editor had not selected. Reported exactly that way.
+        //
+        // Only for a line with ink of its OWN: a blank line borrows a
+        // neighbour's row, and that row's left edge is somewhere else entirely
+        // — there the previous line's end is the honest answer, which is what
+        // rowEdge already gives.
+        if (side === 'end' && anchor.atLineStart && anchor.own) {
+            const r = anchor.rects[0];
+            return { page: r.page, x: r.x, y: r.y, h: r.h, word: false };
+        }
         let hit = null;
         if (anchor.word) {
             try { hit = await wordInRows(anchor.rects, anchor.word, anchor.occurrence, !!anchor.glyph); }
@@ -1242,6 +1567,11 @@ async function paintSelection(span) {
         wrap.appendChild(el);
     }
 
+    // The shape is remembered so the action bar can be re-placed after a zoom
+    // or a re-render without recomputing the whole selection.
+    state.selShape = parts.slice();
+    paintSelectionActions();
+
     if (span.reveal !== false && from) {
         state.highlight = null;
         const wrap = pagesEl().querySelector(`.page[data-page="${from.page}"]`);
@@ -1255,6 +1585,89 @@ async function paintSelection(span) {
             }
         }
     }
+}
+
+/**
+ * WHAT TO DO WITH THE THING YOU JUST SELECTED.
+ *
+ * A small bar of four actions — copy, cut, paste, delete — pinned to the
+ * selection. It exists because the selection is now a first-class object on the
+ * page: you can drag it to move it, so the other four things one does with a
+ * fragment should not require going back to the editor either.
+ *
+ * TWO THINGS MAKE IT WORK RATHER THAN GET IN THE WAY:
+ *
+ * - It is placed ABOVE the selection's first band, and flips below when there
+ *   is no room — never over the text it acts on.
+ * - It TAKES THE POINTER, in the capture phase. A press inside a selection now
+ *   picks the selection up to move it, so a press on a button that leaked
+ *   through would start dragging the very fragment being copied.
+ */
+const ACTION_ICONS = {
+    // Simple, evenly-weighted 16x16 paths on currentColor — a set that reads as
+    // one family at 13 px, which emoji do not.
+    copy: 'M6 2h6a2 2 0 0 1 2 2v6h-1.5V4a.5.5 0 0 0-.5-.5H6zM3.5 5h6A1.5 1.5 0 0 1 11 6.5v6A1.5 1.5 0 0 1 9.5 14h-6A1.5 1.5 0 0 1 2 12.5v-6A1.5 1.5 0 0 1 3.5 5m0 1.5v6h6v-6z',
+    cut: 'M4.5 2 8 7.2 11.5 2h1.7L9 8.4l1 1.5a2.6 2.6 0 1 1-1.2.8L8 9.6l-.8 1.1a2.6 2.6 0 1 1-1.2-.8l1-1.5L2.8 2zM4.6 11.4a1.3 1.3 0 1 0 0 2.6 1.3 1.3 0 0 0 0-2.6m6.8 0a1.3 1.3 0 1 0 0 2.6 1.3 1.3 0 0 0 0-2.6',
+    paste: 'M6.5 1.5h3a1 1 0 0 1 1 1V3h1.5A1.5 1.5 0 0 1 13.5 4.5v9A1.5 1.5 0 0 1 12 15H4a1.5 1.5 0 0 1-1.5-1.5v-9A1.5 1.5 0 0 1 4 3h1.5v-.5a1 1 0 0 1 1-1M4 4.5v9h8v-9h-1.5v1h-5v-1zm3-1.5v1h2v-1z',
+    delete: 'M6.5 1.5h3a1 1 0 0 1 1 1V3H13v1.5h-1V13a1.5 1.5 0 0 1-1.5 1.5h-5A1.5 1.5 0 0 1 4 13V4.5H3V3h2.5v-.5a1 1 0 0 1 1-1M5.5 4.5V13h5V4.5zM7 6h1.2v5.5H7zm2 0h1.2v5.5H9z',
+};
+const ACTIONS = [
+    { id: 'copy', title: 'Copy the LaTeX (⌘C)' },
+    { id: 'cut', title: 'Cut the LaTeX (⌘X)' },
+    { id: 'paste', title: 'Replace it with the clipboard (⌘V)' },
+    { id: 'delete', title: 'Delete it (⌫)' },
+];
+
+function paintSelectionActions() {
+    for (const el of document.querySelectorAll('.selact')) el.remove();
+    const parts = state.selShape;
+    if (!parts || !parts.length || !state.selection) return;
+    // A half-made selection is not a fragment yet: offering to cut it would be
+    // offering to cut nothing.
+    if (state.selection.pendingStart) return;
+    // While the hand is carrying the selection, the bar would follow it around
+    // under the pointer.
+    if (dragMove || dragSel) return;
+
+    const first = parts[0];
+    const wrap = pagesEl().querySelector(`.page[data-page="${first.page}"]`);
+    if (!wrap || !state.rendered.has(first.page)) return;
+
+    const bar = document.createElement('div');
+    bar.className = 'selact';
+    for (const a of ACTIONS) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.dataset.action = a.id;
+        b.title = a.title;
+        b.setAttribute('aria-label', a.title);
+        const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        svg.setAttribute('viewBox', '0 0 16 16');
+        svg.setAttribute('width', '13');
+        svg.setAttribute('height', '13');
+        svg.setAttribute('aria-hidden', 'true');
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        path.setAttribute('d', ACTION_ICONS[a.id]);
+        path.setAttribute('fill', 'currentColor');
+        svg.appendChild(path);
+        b.appendChild(svg);
+        if (a.id === 'delete') b.classList.add('danger');
+        bar.appendChild(b);
+    }
+    wrap.appendChild(bar);
+
+    // Placed after appending, because its size is not known until it is in the
+    // document — the same lesson the mini-editor's placement taught.
+    const h = bar.offsetHeight || 24;
+    const w = bar.offsetWidth || 108;
+    let top = first.y - h - 6;
+    if (top < 2) {                              // no room above: go below
+        const last = parts[parts.length - 1];
+        top = (last.page === first.page ? last.y + last.h : first.y + first.h) + 6;
+    }
+    const maxLeft = Math.max(2, wrap.clientWidth - w - 2);
+    bar.style.left = `${Math.min(Math.max(2, first.x), maxLeft)}px`;
+    bar.style.top = `${Math.max(2, top)}px`;
 }
 
 function goToPage(n, rects) {
@@ -1352,6 +1765,61 @@ pagesEl().addEventListener('click', (ev) => {
 // same drag with the opposite end as its anchor.
 let dragSel = null;
 
+// THE ACTION BAR TAKES THE POINTER FIRST OF ALL.
+//
+// MEASURED by removing this handler: the press falls through to the page,
+// `sendClick` resolves whatever word sits under the bar, and the selection the
+// button was about to act on is REPLACED by that word — so pressing Copy
+// copies something else. And where the bar overlaps the fill (a selection at
+// the top of a page, where the bar flips below into the text) the press picks
+// the selection up to drag it instead. Capture stops both before any of the
+// page's own handlers see it.
+pagesEl().addEventListener('mousedown', (ev) => {
+    if (ev.target.closest && ev.target.closest('.selact')) {
+        ev.preventDefault();
+        ev.stopPropagation();
+    }
+}, true);
+
+pagesEl().addEventListener('click', (ev) => {
+    const b = ev.target.closest ? ev.target.closest('.selact button') : null;
+    if (!b) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    vscode.postMessage({ type: 'selectionAction', action: b.dataset.action });
+}, true);
+
+// A CHIP TAKES THE POINTER, IN THE CAPTURE PHASE.
+//
+// Shift-click on the page means "pick the end of a selection", and a chip is
+// only ever visible while Shift is down — so a click that leaked past would
+// start a selection at whatever glyph sits under the chip. Capture stops it
+// before any of the page's own handlers see it: the bracket drag below, the
+// plain-drag selection, and sendClick.
+pagesEl().addEventListener('mousedown', (ev) => {
+    const chip = ev.target.closest ? ev.target.closest('.lbc') : null;
+    if (!chip || ev.button !== 0) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+}, true);
+
+pagesEl().addEventListener('click', (ev) => {
+    const chip = ev.target.closest ? ev.target.closest('.lbc') : null;
+    if (!chip) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    vscode.postMessage({
+        type: 'copyLabel',
+        name: chip.dataset.name,
+        role: chip.dataset.role,
+        kind: chip.dataset.kind,
+        cmd: chip.dataset.cmd,
+        alt: !!ev.altKey,
+    });
+    chip.classList.add('lbc-copied');
+    setTimeout(() => chip.classList.remove('lbc-copied'), 700);
+}, true);
+
 /** Start a drag from a bracket: the other end stays put. */
 pagesEl().addEventListener('mousedown', (ev) => {
     const brk = ev.target.closest ? ev.target.closest('.selbrk') : null;
@@ -1362,8 +1830,30 @@ pagesEl().addEventListener('mousedown', (ev) => {
     vscode.postMessage({ type: 'selectAdjust', end: brk.classList.contains('end') ? 'end' : 'start' });
 }, true);
 
+/**
+ * A PRESS INSIDE THE SELECTION PICKS IT UP.
+ *
+ * Dragging selected text to move it is what every editor does, and it is the
+ * one gesture the page was missing: a block of LaTeX can now be carried across
+ * pages without leaving the paper. The fill stays `pointer-events:none` on
+ * purpose — making it grabbable would stop a click inside your own selection
+ * from resolving the word under it — so the press is hit-tested against the
+ * painted bands instead, and a press that never moves still falls through to
+ * the click handler.
+ */
+function inPaintedSelection(ev) {
+    for (const band of document.querySelectorAll('.selfill')) {
+        const r = band.getBoundingClientRect();
+        if (ev.clientX >= r.left && ev.clientX <= r.right &&
+            ev.clientY >= r.top && ev.clientY <= r.bottom) return true;
+    }
+    return false;
+}
+
+let dragMove = null;
+
 pagesEl().addEventListener('mousedown', (ev) => {
-    if (dragSel) return;                                   // a bracket already has it
+    if (dragSel || dragMove) return;                       // a bracket already has it
     if (ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.altKey) return;
     const wrap = ev.target.closest('.page');
     if (!wrap) return;
@@ -1373,11 +1863,37 @@ pagesEl().addEventListener('mousedown', (ev) => {
     const pt = fromViewport(n, ev.clientX - r.left, ev.clientY - r.top);
     if (!pt) return;
     ev.preventDefault();
+    if (state.selection && inPaintedSelection(ev)) {
+        dragMove = { moved: false, last: 0 };
+        document.body.classList.add('moving-sel');
+        // The bar is about the selection standing still. While it is being
+        // carried it would sit under the pointer, over the page the reader is
+        // aiming at — and its buttons would be the thing they dropped onto.
+        for (const el of document.querySelectorAll('.selact')) el.remove();
+        hideChipPreview();
+        return;
+    }
     dragSel = { moved: false, last: 0 };
     sendClick(n, pt, ev.clientX - r.left, ev.clientY - r.top, { pick: true });
 });
 
 window.addEventListener('mousemove', (ev) => {
+    if (dragMove) {
+        const now = performance.now();
+        if (now - dragMove.last < 60) return;      // one round trip per frame or two
+        const page = document.elementFromPoint(ev.clientX, ev.clientY);
+        const wrap = page && page.closest ? page.closest('.page') : null;
+        if (!wrap) return;
+        const n = Number(wrap.dataset.page);
+        if (!state.rendered.has(n)) return;
+        const r = wrap.getBoundingClientRect();
+        const pt = fromViewport(n, ev.clientX - r.left, ev.clientY - r.top);
+        if (!pt) return;
+        dragMove.last = now;
+        dragMove.moved = true;
+        vscode.postMessage({ type: 'movePreview', page: n, xBp: pt.xBp, yTopBp: pt.yTopBp });
+        return;
+    }
     if (!dragSel) return;
     const now = performance.now();
     if (now - dragSel.last < 60) return;          // one repaint per frame or two
@@ -1395,6 +1911,27 @@ window.addEventListener('mousemove', (ev) => {
 });
 
 window.addEventListener('mouseup', (ev) => {
+    if (dragMove) {
+        const moved = dragMove.moved;
+        dragMove = null;
+        document.body.classList.remove('moving-sel');
+        paintMoveCaret(null);
+        // Back when the hand lets go — where the selection now IS, which the
+        // extension re-posts, so this only covers the press that never moved.
+        if (!moved) paintSelectionActions();
+        if (!moved) return;             // a press that did not move is a click
+        const page = (ev.target.closest ? ev.target.closest('.page') : null) ||
+            pagesEl().querySelector('.page');
+        const n = page ? Number(page.dataset.page) : 0;
+        if (!page || !state.rendered.has(n)) { vscode.postMessage({ type: 'moveCancel' }); return; }
+        const r = page.getBoundingClientRect();
+        const pt = fromViewport(n, ev.clientX - r.left, ev.clientY - r.top);
+        if (!pt) { vscode.postMessage({ type: 'moveCancel' }); return; }
+        state.swallowClick = true;
+        setTimeout(() => { state.swallowClick = false; }, 250);
+        vscode.postMessage({ type: 'moveCommit', page: n, xBp: pt.xBp, yTopBp: pt.yTopBp });
+        return;
+    }
     if (!dragSel) return;
     const moved = dragSel.moved;
     const adjusting = dragSel.adjusting;
@@ -1937,6 +2474,19 @@ el('diffclose').addEventListener('click', () => {
     vscode.postMessage({ type: 'diffClose' });
 });
 
+// The toolbar toggle exists for two reasons: nobody discovers a hold-Shift
+// gesture on their own, and a reader who wants to click several chips in a row
+// should not have to hold a key while doing it.
+el('labels').addEventListener('click', () => {
+    state.labelsPinned = !state.labelsPinned;
+    el('labels').setAttribute('aria-pressed', String(state.labelsPinned));
+    if (state.labelsPinned && (!state.labels || state.labels.generation !== state.generation)) {
+        state.labelsAsked = state.generation;
+        vscode.postMessage({ type: 'labelsWanted', value: true });
+    }
+    paintLabels().catch(() => {});
+});
+
 el('pagetheme').addEventListener('click', () => {
     const next = state.pageTheme === 'dark' ? 'light' : 'dark';
     state.setting = next;
@@ -1952,13 +2502,84 @@ try {
     const onMq = () => { if (!state.themeFromExtension) applyTheme(guessDark(), guessDark() ? 'dark' : 'light'); };
     if (mq.addEventListener) mq.addEventListener('change', onMq);
 } catch (_) { /* no matchMedia: the extension's message is the only source */ }
-// Esc is the one key everyone already tries.
+// ESC IS THE ONE KEY EVERYONE ALREADY TRIES, so it undoes the innermost thing
+// first and only then the outermost: a half-made drag, then the selection, then
+// full screen. Taking full screen away while a selection is still on the page
+// would answer a question the reader did not ask, and a second press is cheap.
 window.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && state.fullscreen) {
+    if (e.key !== 'Escape') return;
+    if (e.target && e.target.tagName === 'TEXTAREA') return;   // the card owns it
+
+    if (dragMove) {
+        dragMove = null;
+        document.body.classList.remove('moving-sel');
+        paintMoveCaret(null);
+        vscode.postMessage({ type: 'moveCancel' });
+        e.preventDefault();
+        return;
+    }
+    if (dragSel) { dragSel = null; e.preventDefault(); return; }
+    // A selection on the page — `pendingStart` means it is half-made and still
+    // waiting for its other end, which Esc must abandon just the same.
+    if (state.selection) {
+        clearSelectionOverlay();
+        vscode.postMessage({ type: 'selectionClear' });
+        e.preventDefault();
+        return;
+    }
+    if (state.fullscreen) {
         e.preventDefault();
         vscode.postMessage({ type: 'fullscreen', value: false });
     }
 });
+
+/** Take the selection off the page, marks and all. */
+function clearSelectionOverlay() {
+    state.selection = null;
+    for (const el of document.querySelectorAll('.selfill, .selbrk, .selact')) el.remove();
+    el('where').textContent = '';
+}
+
+// HOLD SHIFT TO SEE THE PAPER'S LABELS.
+//
+// Shift alone was free: the page's own Shift meaning is on the CLICK (picking
+// the ends of a selection), not on the key. Typing in the mini-editor is
+// excluded the same way the zoom keys are — a capital letter in an equation is
+// not a request to see the cross-references.
+//
+// Releasing is three events, not one: keyup covers the ordinary case, `blur`
+// covers Cmd-Tab away with Shift still down (no keyup ever arrives), and
+// visibilitychange covers the panel being hidden. Without those the chips stay
+// on the page and the reader has to press Shift twice to clear them.
+window.addEventListener('keydown', (e) => {
+    if (e.target && e.target.tagName === 'TEXTAREA') return;
+    if (e.key !== 'Shift' || e.repeat || state.labelsOn) return;
+    showLabels();
+});
+window.addEventListener('keyup', (e) => { if (e.key === 'Shift') hideLabels(); });
+window.addEventListener('blur', hideLabels);
+document.addEventListener('visibilitychange', () => { if (document.hidden) hideLabels(); });
+
+// A KEY EVENT NEEDS FOCUS; A MOUSE EVENT DOES NOT.
+//
+// Reported: "shift only works when the top panel is in focus, not inside the
+// viewer itself". The page area holds nothing focusable, and the drag-selection
+// handler calls preventDefault on mousedown — which is exactly what suppresses
+// the default focus — so the webview's document often never has the keyboard at
+// all and no keydown ever arrives. Focusing it on hover would be worse: it
+// would steal the keyboard from the editor the reader is typing in.
+//
+// Every mouse event carries the modifier state, so the reveal is driven from
+// the pointer whenever it is over the pages. Moving the mouse with Shift down
+// shows them; letting go — or leaving — puts them away.
+const trackShift = (ev) => {
+    if (ev.shiftKey && !state.labelsOn) showLabels();
+    else if (!ev.shiftKey && state.labelsOn) hideLabels();
+};
+for (const type of ['pointermove', 'pointerdown', 'pointerenter']) {
+    document.querySelector('main').addEventListener(type, trackShift, { passive: true });
+}
+document.querySelector('main').addEventListener('pointerleave', () => hideLabels(), { passive: true });
 
 function setScale(s, anchor, keepFit) {
     if (!keepFit && state.fitMode) {
@@ -2032,6 +2653,67 @@ function fitWidth() {
     });
 }
 
+// --- CLIPPING A FRAGMENT OUT OF THE PAPER ------------------------------------
+//
+// A hover over `\eqref{eq:foo}` wants to show the equation as it PRINTS, not
+// only as it is written. The panel is the one place that already has the pages
+// rasterised, so the extension asks it for a crop rather than shelling out to a
+// PDF rasteriser that may not be installed — and what comes back is the exact
+// ink the reader is looking at, from the same generation.
+//
+// Spike C measured the mechanism: rendering a clipped region through
+// `viewport.clone({offsetX, offsetY})` is pixel-identical to rendering the whole
+// page and cutting it out, at a fraction of the memory.
+
+async function cropFragment(msg) {
+    const rects = (msg.rects || []).filter(r => r && Number.isFinite(r.x));
+    if (!rects.length || !state.doc) return { id: msg.id, error: 'nothing to crop' };
+    const page = rects[0].page;
+    // One box around everything on that page, with a little air so the type is
+    // not shaved by a rounding error.
+    const pad = Number.isFinite(msg.pad) ? msg.pad : 3;
+    let x0 = Infinity; let y0 = Infinity; let x1 = -Infinity; let y1 = -Infinity;
+    for (const r of rects) {
+        if (r.page !== page) continue;
+        x0 = Math.min(x0, r.x); y0 = Math.min(y0, r.y);
+        x1 = Math.max(x1, r.x + r.w); y1 = Math.max(y1, r.y + r.h);
+    }
+    if (!(x1 > x0 && y1 > y0)) return { id: msg.id, error: 'empty box' };
+    x0 -= pad; y0 -= pad; x1 += pad; y1 += pad;
+
+    const p = await state.doc.getPage(page);
+    const base = p.getViewport({ scale: 1 });
+    // bp -> viewport at scale 1 is where the extension's frame and pdf.js's
+    // agree (measured in-browser: the transform is [1,0,0,-1,-x0,y1]).
+    const scale = Math.min(msg.scale || 2, 4);
+    const vp = p.getViewport({ scale });
+    const sx = x0 * scale;
+    const sy = y0 * scale;
+    const w = Math.max(1, Math.round((x1 - x0) * scale));
+    const h = Math.max(1, Math.round((y1 - y0) * scale));
+    if (w > 4000 || h > 4000) return { id: msg.id, error: 'too large' };
+
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d', { alpha: false });
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, w, h);
+    const clipped = vp.clone({ offsetX: -sx, offsetY: -sy });
+    await p.render({ canvasContext: ctx, viewport: clipped, canvas }).promise;
+    void base;
+    return {
+        id: msg.id,
+        dataUrl: canvas.toDataURL('image/png'),
+        // The size the fragment should be SHOWN at: its own bp size, so an
+        // equation appears the size it prints rather than the size we happened
+        // to rasterise it.
+        w: Math.round(x1 - x0),
+        h: Math.round(y1 - y0),
+        page,
+    };
+}
+
 // --- messages from the extension ---------------------------------------------
 
 window.addEventListener('message', async (ev) => {
@@ -2088,6 +2770,23 @@ window.addEventListener('message', async (ev) => {
             await paintSelection(msg.span ? { ...msg.span, reveal: msg.reveal } : null);
             if (msg.label) el('where').textContent = msg.label;
             break;
+        case 'labels':
+            state.labels = { generation: msg.generation, items: msg.items || [] };
+            state.labelFormat = msg.format || 'command';
+            if (labelsVisible()) { paintLabels().catch(() => {}); if (state.labelsOn) hintLabels(); }
+            break;
+        case 'moveCaret':
+            state.moveCaret = msg.rects && msg.rects.length ? msg : null;
+            paintMoveCaret(state.moveCaret);
+            if (msg.label) el('where').textContent = msg.label;
+            break;
+        case 'crop': {
+            let out;
+            try { out = await cropFragment(msg); }
+            catch (e) { out = { id: msg.id, error: String((e && e.message) || e) }; }
+            vscode.postMessage({ type: 'cropped', ...out });
+            break;
+        }
         case 'status': status(msg.text, msg.kind || ''); break;
         case 'setFollow': state.followCursor = !!msg.value; el('follow').checked = state.followCursor; break;
         case 'editOpen': {
@@ -2164,4 +2863,4 @@ vscode.postMessage({ type: 'ready' });
 
 // A measurement hook, not an API: the headless check scores snapToInk against
 // the rendered ink. Nothing in the extension reads this.
-window.__wbTexViewerTest = { snapToInk, itemWords, prefixWidths, textItems, wordKey, foldGlyphs, wordAtPoint, highlightLatex };
+window.__wbTexViewerTest = { snapToInk, itemWords, prefixWidths, textItems, wordKey, foldGlyphs, wordAtPoint, highlightLatex, fromViewport, rectToViewport };

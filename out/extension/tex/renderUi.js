@@ -317,7 +317,7 @@ class RenderCoordinator {
             const ready = new Promise(r => { progressDone = r; });
             vscode.window.withProgress({
                 location: vscode.ProgressLocation.Notification,
-                title: `Wolfbook: compiling ${path.basename(root)}`,
+                title: `WPaper: compiling ${path.basename(root)}`,
                 cancellable: true,
             }, (p, token) => {
                 progress = p;
@@ -478,7 +478,7 @@ function makeStatusItem(coord, projection) {
         const st = coord.stateFor(ed.document);
         if (st && st.compiling && !st.liveCompiling) {
             item.text = '$(sync~spin) compiling…';
-            item.tooltip = 'Wolfbook TeX is compiling this paper';
+            item.tooltip = 'WPaper is compiling this paper';
             item.show();
             return;
         }

@@ -477,6 +477,79 @@ test('a glyph nothing printed answers with the construct around it', () => {
     assert.ok(src.slice(g.startCol, g.endCol).length <= src.length, 'inside the object');
 });
 
+// --- EQUATION (10): FOUR FRACTIONS ON ONE LINE -----------------------------
+//
+// Reported from the paper: "I click on the first m and it selects the last
+// one." The equation is
+//
+//     u=U+\frac{\ii m}{2}, \qquad \dot u=U-\frac{\ii m}{2},
+//     \qquad U=\frac{u+\dot u}{2}, \qquad m=\frac{u-\dot u}{\ii}\in\mathbb Z .
+//
+// In DISPLAY style `\frac` sets its halves in textstyle — the same size as the
+// body — so a line of fractions puts full-size, wide ink on three baselines.
+// Each was promoted to a row of its own and ordered separately, and the
+// rendered sequence came out as ALL the numerators, then all the bodies, then
+// all the denominators, while the source is interleaved per fraction. A
+// monotone alignment cannot absorb that: it matched 19 of 35 at confidence
+// 0.54, and every repeated letter resolved to the wrong one of its kind.
+//
+// THE GEOMETRY BELOW IS MEASURED, from the real compile of that equation:
+//
+//     baseline 118.0  h=10.9  w=254 : i m i m u + ˙ u u − u ˙
+//     baseline 125.5  h=10.9  w=323 : u = U + , u ˙ = U − , U = , m = ∈ Z .
+//     baseline 132.5  h=10.9  w=239 : 2 2 2 i
+//
+// The gaps are 7.5 and 7.0 bp while the glyphs are 10.9 tall: the bands
+// OVERLAP, and overlapping bands are one printed line. Successive real lines
+// TILE. A browser is not needed to check that, so this runs in the gate.
+test('FOUR FRACTIONS ON ONE LINE ARE ONE LINE, NOT THREE', () => {
+    const glyph = (ch, x, baseline) => ({
+        str: ch, page: 1, x, y: baseline - 10.9, w: 5.5, h: 10.9, baseline,
+    });
+    // The three measured bands, handed over in the order pdf.js reports them.
+    const items = [
+        // numerators
+        ...['i', 'm'].map((c, k) => glyph(c, 180 + k * 6, 118.0)),
+        ...['i', 'm'].map((c, k) => glyph(c, 265 + k * 6, 118.0)),
+        ...['u', '+', 'u'].map((c, k) => glyph(c, 329 + k * 10, 118.0)),
+        ...['u', '-', 'u'].map((c, k) => glyph(c, 408 + k * 10, 118.0)),
+        // the body
+        ...['u', '=', 'U', '+'].map((c, k) => glyph(c, 136 + k * 11, 125.5)),
+        ...[',', 'u', '=', 'U', '-'].map((c, k) => glyph(c, 194 + k * 11, 125.5)),
+        ...[',', 'U', '='].map((c, k) => glyph(c, 278 + k * 13, 125.5)),
+        ...[',', 'm', '=', '∈', 'Z', '.'].map((c, k) => glyph(c, 356 + k * 18, 125.5)),
+        // denominators
+        ...['2', '2', '2', 'i'].map((c, k) => glyph(c, 184 + k * 80, 132.5)),
+    ];
+    const gs = renderedGlyphs(items);
+    const order = gs.map(g => g.ch).join('');
+    // The numerators must NOT all come first: the first fraction's `2` has to
+    // appear before the third fraction's numerator `u`.
+    const firstDen = order.indexOf('2');
+    const lastNum = order.lastIndexOf('u');
+    assert.ok(firstDen >= 0, `the denominators are present: ${order}`);
+    assert.ok(firstDen < lastNum,
+        `a denominator must come before the last numerator — the bands are one ` +
+        `line, not three. Got ${JSON.stringify(order)}`);
+    // And every glyph survives the reordering; a dropped glyph cannot be clicked.
+    assert.strictEqual(gs.length, items.length,
+        `every glyph is kept: ${gs.length} of ${items.length}`);
+});
+
+test('two lines a LEADING apart stay two lines', () => {
+    // The other side of the same rule: successive printed lines tile, they do
+    // not overlap, and merging them would scramble a two-line align.
+    const glyph = (ch, x, baseline) => ({
+        str: ch, page: 1, x, y: baseline - 10.9, w: 5.5, h: 10.9, baseline,
+    });
+    const items = [
+        ...['a', '=', 'b'].map((c, k) => glyph(c, 140 + k * 12, 118.0)),
+        ...['c', '=', 'd'].map((c, k) => glyph(c, 140 + k * 12, 131.6)),   // +13.6
+    ];
+    const order = renderedGlyphs(items).map(g => g.ch).join('');
+    assert.strictEqual(order, 'a=bc=d', `reading order, line by line: ${order}`);
+});
+
 console.log('source token <-> rendered glyph alignment\n');
 results.forEach(r => console.log(r));
 console.log(`\n${pass} passed, ${fail} failed`);

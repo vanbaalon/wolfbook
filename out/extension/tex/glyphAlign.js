@@ -328,13 +328,69 @@ function renderedGlyphs(items, bandBp = 4, symbolFonts = null) {
         const widest = Math.max(...bands.map(b => b.x1 - b.x0));
         // A ROW is a baseline carrying full-size ink across a good part of the
         // line. A script band is neither; a numerator is full size but narrow.
-        const rows = bands.filter(b => (b.x1 - b.x0) >= widest * 0.3 &&
-            b.items.some(g => (g.h || 0) >= hMax * 0.85));
-        if (!rows.length) { out.push(...orderLine(pageGlyphs)); continue; }
+        // A ROW HAS TO CONTAIN SOMETHING NAMEABLE. A `pmatrix`'s stretched
+        // delimiters get a baseline of their own, halfway up the matrix, and
+        // they are wide and full-size — so they qualified as a row and then
+        // merged with the matrix's first line, which reordered it. Extensible
+        // delimiters reach pdf.js as control codes with no character at all;
+        // they belong to whatever line they enclose, never to one of their own.
+        const rowBands = bands.filter(b => (b.x1 - b.x0) >= widest * 0.3 &&
+            b.items.some(g => (g.h || 0) >= hMax * 0.85) &&
+            b.items.some(g => !isUnnameable(String(g.ch || '').codePointAt(0) || 0)));
+        if (!rowBands.length) { out.push(...orderLine(pageGlyphs)); continue; }
+
+        // A DISPLAY FRACTION'S HALVES ARE FULL-SIZE AND WIDE, SO THEY LOOK
+        // EXACTLY LIKE ROWS OF THEIR OWN.
+        //
+        // In display style `\frac` sets its numerator and denominator in
+        // TEXTSTYLE — the same size as the body — so a line carrying several
+        // fractions puts full-size, wide ink on three baselines. Each was
+        // promoted to a row, each was ordered separately, and the sequence came
+        // out as ALL the numerators, then all the bodies, then all the
+        // denominators. `orderLine`, which exists to pair a numerator with its
+        // denominator, never saw them together.
+        //
+        // MEASURED on equation (10) of the reference paper — four fractions on
+        // one line, reported as "I click on the first m and it selects the last
+        // one":
+        //
+        //     baseline 118.0  h=10.9  w=254 : i m i m u + ˙ u u − u ˙
+        //     baseline 125.5  h=10.9  w=323 : u = U + , u ˙ = U − , U = , m = ∈ Z .
+        //     baseline 132.5  h=10.9  w=239 : 2 2 2 i
+        //
+        // The gaps are 7.5 and 7.0 bp while the glyphs are 10.9 tall and the
+        // leading is 13.6: the bands OVERLAP, and overlapping bands are one
+        // printed line. Successive real lines TILE — they touch without
+        // overlapping — which is the same distinction `mergeRows` draws in
+        // texViewer, one level up. Source and render were in different orders,
+        // so the alignment matched 19 of 35 at confidence 0.54 and every
+        // repeated letter resolved to the wrong one of its kind.
+        const hs = pageGlyphs.map(g => g.h || 0).filter(h => h > 0).sort((a, b) => a - b);
+        const bodyH = hs.length ? hs[Math.min(hs.length - 1, Math.floor(hs.length * 0.6))] : hMax;
+        const rowSet = new Set(rowBands);
+        const rows = [];
+        for (const r of rowBands.slice().sort((a, b) => a.baseline - b.baseline)) {
+            const last = rows[rows.length - 1];
+            if (last && r.baseline - last.baseline < bodyH) {
+                last.items.push(...r.items);
+                // The line's own baseline is the one carrying the most ink —
+                // the body, not whichever half happened to come first.
+                if ((r.x1 - r.x0) > (last.x1 - last.x0)) last.baseline = r.baseline;
+                last.x0 = Math.min(last.x0, r.x0);
+                last.x1 = Math.max(last.x1, r.x1);
+                continue;
+            }
+            rows.push({ baseline: r.baseline, x0: r.x0, x1: r.x1, items: [...r.items] });
+        }
 
         const buckets = rows.map(r => ({ baseline: r.baseline, items: [...r.items] }));
         for (const b of bands) {
-            if (rows.includes(b)) continue;
+            if (rowSet.has(b)) continue;
+            // Delimiters keep their own place in the sequence: they have no
+            // source token of their own, and folding them into a text row lets
+            // them take a pairing that belongs to a real glyph.
+            const allDelims = b.items.every(g => isUnnameable(String(g.ch || '').codePointAt(0) || 0));
+            if (allDelims) { buckets.push({ baseline: b.baseline, items: [...b.items] }); continue; }
             let best = 0;
             for (let i = 1; i < buckets.length; i++) {
                 if (Math.abs(b.baseline - buckets[i].baseline) <
