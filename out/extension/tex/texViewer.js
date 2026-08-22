@@ -1569,7 +1569,7 @@ class TexViewer {
             flag: flag === FLAG.FRESH ? 'fresh' : flag === FLAG.STALE ? 'stale' : 'approx',
             reveal: Date.now() - this._invertedAt >= 1500,
             title,
-            label: `${what} · p.${g.page} · ${flag}`,
+            label: `${what} · p.${g.page} · ${flag}${amap.exact ? ' · exact' : ''}`,
         });
         return true;
     }

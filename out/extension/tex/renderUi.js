@@ -282,7 +282,24 @@ class RenderCoordinator {
         const snapshot = snapshotSources(st.files, overlay);
         // An explicit Compile is never a capped build.
         const wantFull = authoritative || force;
-        if (!force && this.isCurrent(st, snapshot, { authoritative: wantFull }) && st.map) return st;
+        // THE ENGINE EMITS THE MAP (tex/glyphMap.js). `mapEngine` auto means:
+        // build the WPaper view with lualatex + the wbmap hook when lualatex is
+        // installed, so the render map is read off the engine rather than
+        // inferred from SyncTeX. Decided up front, because a map that is NOT
+        // exact while one is wanted — the cached generation of a pdflatex
+        // compile from before the upgrade, or the reused record of a warm open —
+        // must not count as current: it would keep answering with the old,
+        // approximate geometry until the source happened to change.
+        const cfg0 = vscode.workspace.getConfiguration('wolfbook.tex');
+        const mapEngine = cfg0.get('mapEngine', 'auto');
+        let wantGlyphMap = false;
+        if (mapEngine === 'lualatex') wantGlyphMap = true;
+        else if (mapEngine === 'auto') {
+            if (this._luaOk == null) this._luaOk = await probeLualatex();
+            wantGlyphMap = !!this._luaOk && !st.glyphMapRefused;
+        }
+        const mapIsStale = wantGlyphMap && st.map && !st.map.exact;
+        if (!force && !mapIsStale && this.isCurrent(st, snapshot, { authoritative: wantFull }) && st.map) return st;
 
         // A COMPILE ALREADY DONE IS NOT WORTH DOING AGAIN.
         //
@@ -292,7 +309,9 @@ class RenderCoordinator {
         // record makes a warm open instant instead.
         if (!force && !st.generation) {
             const cached = loadGeneration(root, { sourceFiles: st.files, overlay });
-            if (cached) {
+            // A cached generation without the glyph map is not the one we want
+            // when the engine can emit one: compile instead of reviving it.
+            if (cached && !(wantGlyphMap && !cached.glyphMapPath)) {
                 st.generation = cached;
                 st.map = makeMap({
                     generation: cached,
@@ -368,13 +387,6 @@ class RenderCoordinator {
             // lualatex is installed, so the render map is read off the engine
             // rather than inferred from SyncTeX. A document lualatex cannot
             // build falls back to the configured engine below, flagged.
-            const mapEngine = cfg.get('mapEngine', 'auto');
-            let wantGlyphMap = false;
-            if (mapEngine === 'lualatex') wantGlyphMap = true;
-            else if (mapEngine === 'auto') {
-                if (this._luaOk == null) this._luaOk = await probeLualatex();
-                wantGlyphMap = !!this._luaOk && !st.glyphMapRefused;
-            }
             const primaryOpts = wantGlyphMap
                 ? { ...compileOpts, engine: 'lualatex', glyphMap: true }
                 : compileOpts;
@@ -399,6 +411,13 @@ class RenderCoordinator {
                 gen = await compile({ ...compileOpts, maxPasses: null });
             }
             if (ac.signal.aborted) { this.log('  cancelled'); return st; }
+            // lualatex built the document but the hook emitted no map: remember
+            // it for this document, or the "not exact → rebuild" rule above
+            // would recompile on every pause.
+            if (wantGlyphMap && gen.ok && gen.engine === 'lualatex' && !gen.glyphMapPath) {
+                st.glyphMapRefused = true;
+                this.log('  the wbmap hook produced no glyph map — staying on the SyncTeX map for this document');
+            }
             const prevGen = st.generation;
             // prevMap and map may now SHARE one parsed SyncTeX doc. That is
             // safe because the doc is never mutated after construction — the
