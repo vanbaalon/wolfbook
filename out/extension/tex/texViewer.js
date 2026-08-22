@@ -2762,6 +2762,22 @@ class TexViewer {
         let unsourced = false;
         if (amap) {
             const g = glyphAtPoint(amap, m.page, m.xBp, m.yTopBp);
+            // A CLICK IN BLANK SPACE STILL NAMES A LINE — THE RIGHT ONE. With an
+            // exact map the fallback below is "the whole line", and the line
+            // it used was where the glyphs are FILED. For a run-in `\paragraph`
+            // heading that is the text line after it, so a drag that started a
+            // hair before "Why" selected from the paragraph and left the
+            // heading behind (reported). The nearest token's own line is the
+            // honest line; the word rung stays unclaimed, so a plain click in
+            // blank space still answers with the line, not a word.
+            if (exactHit && g.index >= 0 && g.distance >= 12) {
+                const ti0 = amap.renToSrc[g.index];
+                if (ti0 >= 0 && amap.tokens[ti0].line !== hit.line) {
+                    hit.line = amap.tokens[ti0].line;
+                    lineIdx = Math.max(0, Math.min(hit.line - 1, doc.lineCount - 1));
+                    lineSrc = doc.lineAt(lineIdx).text;
+                }
+            }
             if (process.env.WB_JUMP_DEBUG) {
                 const near = amap.glyphs.map((q, i) => ({ i, ch: q.ch, x: +q.x.toFixed(1), y: +q.y.toFixed(1), w: +q.w.toFixed(1), h: +q.h.toFixed(1), iy: q.inkY != null ? +q.inkY.toFixed(1) : null, ih: q.inkH != null ? +q.inkH.toFixed(1) : null }))
                     .filter(q => q.x - 6 < m.xBp && q.x + q.w + 6 > m.xBp && Math.abs(q.y + q.h / 2 - m.yTopBp) < 14);
@@ -3149,8 +3165,17 @@ class TexViewer {
             const a = anchor.position;
             const b = range.end;
             const forwards = a.line < b.line || (a.line === b.line && a.character <= b.character);
-            const from = forwards ? a : b;
-            const to = forwards ? b : a;
+            let from = forwards ? a : b;
+            let to = forwards ? b : a;
+            // A SELECTION IS WIDENED UNTIL WHOLE, like a moved fragment is: a
+            // range that starts inside `\paragraph{…}` and ends in the paragraph
+            // after it takes the command along — "impossible to select the
+            // paragraph with its title from the viewer" was exactly this, the
+            // heading's braces cut by a start on its first word.
+            try {
+                const whole = balanceRange(doc.getText(), doc.offsetAt(from), doc.offsetAt(to));
+                if (whole.widened) { from = doc.positionAt(whole.from); to = doc.positionAt(whole.to); }
+            } catch (_) { /* the raw range stands */ }
             const picked = new vscode.Selection(from, to);
             // A DRAG IN PROGRESS SHOWS THE RANGE AT BOTH ENDS. The page repaints
             // it on every move and the editor selects it as it goes, so the two
