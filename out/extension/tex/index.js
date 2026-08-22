@@ -1212,6 +1212,11 @@ async function offerReload(doc, diskText, output) {
             let diskText = null;
             try { diskText = fs.readFileSync(fsPath, 'utf8'); } catch (_) { diskText = null; }
             if (!doc) { diskWatch.accept(fsPath, diskText); coord.invalidate(fsPath); return; }
+            // OUR OWN REBASE IS NOT SOMEBODY ELSE'S EDIT. Merging a disk change
+            // into a dirty buffer reloads that buffer, and the events from it
+            // would otherwise arrive here as a fresh external change and start
+            // the whole thing again.
+            if (review.isMerging && review.isMerging(fsPath)) return;
 
             const { verdict, repeat } = diskWatch.classify(fsPath, {
                 diskText, docText: doc.getText(), isDirty: doc.isDirty,
@@ -1239,14 +1244,75 @@ async function offerReload(doc, diskText, output) {
                 return;
             }
             if (repeat) return;                 // one prompt per external change
+
+            // A CONFLICT IS A MERGE NOBODY PERFORMED.
+            //
+            // Reported: editing at the same time as an agent produces VS Code's
+            // own "the content of the file is newer" dialog, and the review
+            // never engages — so the tools built for exactly this moment cannot
+            // be used at that moment. Nearly always the two were working in
+            // different parts of the paper, and then there is nothing to
+            // choose between: the agent's changes go into the reader's buffer
+            // and become an ordinary review, with Keep and Undo per change.
+            // Only when the two really did touch the same lines is there a
+            // question, and then it is asked about those lines alone.
+            const merged = before
+                ? await review.mergeExternalChange({
+                    file: fsPath, doc, base: before, ours: doc.getText(),
+                    theirs: diskText, source: 'disk',
+                })
+                : null;
+            if (merged) {
+                // Disk now holds the agent's version and the buffer holds the
+                // merge: the next external change is against what is on disk.
+                rememberText(fsPath, diskText);
+                diskWatch.accept(fsPath, diskText);
+                paintRender();
+                return;
+            }
             await offerReload(doc, diskText, output);
         };
+        const onGone = (uri) => { diskWatch.forget(uri.fsPath); coord.invalidate(uri.fsPath); };
+        const wire = (w) => {
+            context.subscriptions.push(w, w.onDidChange(onExternal), w.onDidCreate(onExternal),
+                w.onDidDelete(onGone));
+            return w;
+        };
+        wire(watcher);
+        context.subscriptions.push({ dispose: () => diskWatch.dispose() });
+
+        // A PAPER IS USUALLY NOT IN THE WORKSPACE FOLDER.
+        //
+        // `createFileSystemWatcher('**/*.tex')` resolves its pattern against
+        // the workspace folders and nothing else, so for a paper opened from
+        // anywhere else — which is the normal case here; the workspace is the
+        // extension, the papers live in Dropbox — NO event ever arrived. An
+        // agent could rewrite the file and the first sign of it was VS Code
+        // refusing to save. That is the other half of the reported bug, and no
+        // amount of merging helps if the write is never noticed.
+        //
+        // A RelativePattern over a Uri watches a real directory, workspace or
+        // not. One per directory, created as papers are opened.
+        const watchedDirs = new Set();
+        const inWorkspace = (dir) => (vscode.workspace.workspaceFolders || [])
+            .some(f => dir === f.uri.fsPath || dir.startsWith(f.uri.fsPath + path.sep));
+        const ensureWatched = (fsPath) => {
+            if (!fsPath) return;
+            const dir = path.dirname(fsPath);
+            if (!dir || watchedDirs.has(dir) || inWorkspace(dir)) return;
+            watchedDirs.add(dir);
+            try {
+                if (typeof vscode.RelativePattern !== 'function') return;
+                wire(vscode.workspace.createFileSystemWatcher(
+                    new vscode.RelativePattern(vscode.Uri.file(dir), '*.{tex,bib}')));
+                output.appendLine(`watching ${dir} for changes (outside the workspace)`);
+            } catch (e) {
+                output.appendLine(`could not watch ${dir}: ${e.message}`);
+            }
+        };
+        for (const d of vscode.workspace.textDocuments) if (isTex(d)) ensureWatched(d.uri.fsPath);
         context.subscriptions.push(
-            watcher,
-            watcher.onDidChange(onExternal),
-            watcher.onDidCreate(onExternal),
-            watcher.onDidDelete((uri) => { diskWatch.forget(uri.fsPath); coord.invalidate(uri.fsPath); }),
-            { dispose: () => diskWatch.dispose() },
+            vscode.workspace.onDidOpenTextDocument((d) => { if (isTex(d)) ensureWatched(d.uri.fsPath); }),
         );
     }
 
@@ -1520,6 +1586,37 @@ async function offerReload(doc, diskText, output) {
         }
         const ed = vscode.window.activeTextEditor;
         if (ed) viewer.syncFromEditor(ed);
+    });
+
+    reg('wolfbook.tex.mergeFromDisk', async () => {
+        // THE ESCAPE HATCH for a buffer that is already stale — the reader is
+        // looking at "the content of the file is newer" right now. The watcher
+        // normally gets there first, but it cannot if the write happened while
+        // the window was away, or on a share where change events do not
+        // arrive. This does the same three-way merge on demand.
+        const doc = vscode.window.activeTextEditor?.document;
+        if (!isTex(doc)) { vscode.window.showWarningMessage('Open the .tex file first.'); return; }
+        const fsPath = doc.uri.fsPath;
+        let diskText = null;
+        try { diskText = fs.readFileSync(fsPath, 'utf8'); } catch (e) {
+            vscode.window.showWarningMessage(`Could not read ${path.basename(fsPath)}: ${e.message}`);
+            return;
+        }
+        if (diskText === doc.getText()) {
+            vscode.window.showInformationMessage(`${path.basename(fsPath)} is already what is on disk.`);
+            return;
+        }
+        const before = lastSeen.get(fsPath);
+        const merged = before ? await review.mergeExternalChange({
+            file: fsPath, doc, base: before, ours: doc.getText(), theirs: diskText, source: 'disk',
+        }) : null;
+        if (!merged) { await offerReload(doc, diskText, output); return; }
+        rememberText(fsPath, diskText);
+        diskWatch.accept(fsPath, diskText);
+        paintRender();
+        vscode.window.showInformationMessage(
+            `Merged ${merged.applied} change${merged.applied === 1 ? '' : 's'} from disk into your edits` +
+            (merged.conflicts.length ? `; ${merged.conflicts.length} could not be merged.` : '.'));
     });
 
     reg('wolfbook.tex.tour', async () => {

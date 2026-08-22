@@ -25,6 +25,8 @@ const changeHandlers = [];
 const commands = new Map();
 let infoPick = null;
 const infoCalls = [];
+let warnPick = null;
+const warnCalls = [];
 
 class Position { constructor(line, character) { this.line = line; this.character = character; } }
 class Range {
@@ -97,7 +99,7 @@ const stub = {
         createTextEditorDecorationType: () => ({ id: ++decorSeq, dispose() {} }),
         showTextDocument: async () => editor,
         showInformationMessage: async (...a) => { infoCalls.push(a); return infoPick; },
-        showWarningMessage: async () => undefined,
+        showWarningMessage: async (...a) => { warnCalls.push(a); return warnPick; },
         onDidChangeVisibleTextEditors: () => ({ dispose() {} }),
         get visibleTextEditors() { return [editor]; },
         activeTextEditor: editor,
@@ -366,6 +368,122 @@ test('describeHunk says what happened in words', () => {
     assert.strictEqual(
         describeHunk({ verb: 'change', changedWords: 3, ourRange: { startLine: 3, endLine: 4 }, theirRange: { startLine: 3, endLine: 4 } }, s),
         '3 words changed');
+});
+
+// --- EDITING AT THE SAME TIME AS THE AGENT -----------------------------------
+//
+// Reported with a screenshot of VS Code's own refusal: "Failed to save … the
+// content of the file is newer", and then "this does not trigger the internal
+// review — I cannot review with our tools". The buffer is dirty, the file has
+// moved, and there is no single text to diff. These drive the merge that makes
+// one, through the real ReviewUi.
+
+/** VS Code's revert: the buffer becomes the file, and is clean again. */
+const armRevert = () => {
+    let reverts = 0;
+    commands.set('workbench.action.files.revert', () => {
+        reverts++;
+        DOC._setText(fs.readFileSync(FILE, 'utf8'));
+        DOC.isDirty = false;
+        return undefined;
+    });
+    return () => reverts;
+};
+
+// The reader is polishing the second paragraph; the agent rewrites the first.
+const READER = BASE.replace('A second paragraph nobody is arguing about.',
+    'A second paragraph the reader is in the middle of rewriting.');
+
+test('A DIRTY BUFFER AND A CHANGED FILE BECOME ONE TEXT AND ONE REVIEW', async () => {
+    const { ui, posted } = makeUi({ docText: READER, dirty: true, diskText: AGENT });
+    const reverts = armRevert();
+    warnCalls.length = 0;
+
+    const r = await ui.mergeExternalChange({
+        file: FILE, doc: DOC, base: BASE, ours: READER, theirs: AGENT, source: 'disk',
+    });
+    assert.ok(r, 'the merge was handled here, not handed to a modal');
+    assert.strictEqual(r.applied, 1);
+    assert.strictEqual(r.conflicts.length, 0);
+    assert.strictEqual(reverts(), 1, 'the buffer was reloaded — that is what clears the stale save');
+
+    // BOTH edits are in the buffer.
+    assert.ok(DOC.getText().includes('in the strip.'), "the agent's change is in the buffer");
+    assert.ok(DOC.getText().includes('in the middle of rewriting.'), "and so are the reader's own words");
+    assert.ok(DOC.isDirty, 'the reader still has unsaved edits, exactly as before');
+
+    // And it is a REVIEW: the agent's change is pending, the reader's is not.
+    const s = ui.sessionFor(FILE);
+    assert.ok(s, 'a session was opened');
+    assert.strictEqual(s.pendingCount, 1, 'one thing to decide');
+    assert.strictEqual(s.baseText, READER, "the baseline is the reader's own text");
+    const last = posted[posted.length - 1];
+    assert.strictEqual(last.pending, 1);
+    assert.ok(/strip/.test(JSON.stringify(last.groups[0].hunks[0])), 'and it is the agent\'s change');
+    assert.strictEqual(warnCalls.length, 0, 'nothing to warn about');
+});
+
+test('and UNDO on that change gives the reader back exactly their text', async () => {
+    const { ui } = makeUi({ docText: READER, dirty: true, diskText: AGENT });
+    armRevert();
+    await ui.mergeExternalChange({ file: FILE, doc: DOC, base: BASE, ours: READER, theirs: AGENT });
+    const s = ui.sessionFor(FILE);
+    await ui.undo(FILE, s.hunks[0].id);
+    assert.strictEqual(DOC.getText(), READER,
+        'undoing the merged-in change restores the reader\'s buffer byte for byte');
+});
+
+test('WHAT BOTH SIDES TOUCHED IS NOT GUESSED AT, AND THE READER IS TOLD', async () => {
+    const line = 'The SoV pairing contains both allowed sectors here.';
+    const mine = BASE.replace(line, 'The SoV pairing contains both allowed sectors, plainly.');
+    const { ui } = makeUi({ docText: mine, dirty: true, diskText: AGENT });
+    armRevert();
+    warnCalls.length = 0; warnPick = null;
+
+    const r = await ui.mergeExternalChange({
+        file: FILE, doc: DOC, base: BASE, ours: mine, theirs: AGENT,
+    });
+    assert.ok(r, 'still handled here');
+    assert.strictEqual(r.applied, 0);
+    assert.strictEqual(r.conflicts.length, 1);
+    assert.strictEqual(DOC.getText(), mine, 'the reader\'s words are what the buffer holds');
+    assert.ok(warnCalls.length === 1, 'and they are told, once');
+    assert.ok(/touched lines you were editing/.test(warnCalls[0][0]), warnCalls[0][0]);
+    assert.ok(warnCalls[0].includes('Compare…'), 'with a way to see what was left out');
+});
+
+test('the merge declines when it has nothing to work from', async () => {
+    const { ui } = makeUi({ docText: READER, dirty: true, diskText: AGENT });
+    armRevert();
+    // No base: the caller must fall back to asking the reader.
+    assert.strictEqual(await ui.mergeExternalChange({ file: FILE, doc: DOC, ours: READER, theirs: AGENT }), null);
+    // Nothing of theirs to bring in.
+    assert.strictEqual(await ui.mergeExternalChange({
+        file: FILE, doc: DOC, base: BASE, ours: READER, theirs: BASE }), null);
+    assert.strictEqual(await ui.mergeExternalChange({}), null);
+});
+
+test('A SECOND WRITE WHILE STILL DIRTY JOINS THE SAME LIST', async () => {
+    // The invariant the whole review exists for, through the merge path: an
+    // arriving change must never quietly approve the one before it.
+    const { ui } = makeUi({ docText: READER, dirty: true, diskText: AGENT });
+    armRevert();
+    await ui.mergeExternalChange({ file: FILE, doc: DOC, base: BASE, ours: READER, theirs: AGENT });
+    assert.strictEqual(ui.sessionFor(FILE).pendingCount, 1);
+
+    // The reader types on, and the agent writes again — now against AGENT.
+    const ours2 = DOC.getText().replace('rewriting.', 'rewriting, still.');
+    DOC._setText(ours2); DOC.isDirty = true;
+    const agent2 = AGENT.replace('A second paragraph nobody is arguing about.',
+        'A second paragraph nobody is arguing about. Except this new sentence.');
+    fs.writeFileSync(FILE, agent2);
+    const r = await ui.mergeExternalChange({
+        file: FILE, doc: DOC, base: AGENT, ours: ours2, theirs: agent2,
+    });
+    assert.ok(r);
+    const s = ui.sessionFor(FILE);
+    assert.strictEqual(s.pendingCount, 2, 'both the first change and the second are waiting');
+    assert.strictEqual(s.batches.length, 2, 'in two arrivals');
 });
 
 (async () => {

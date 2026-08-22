@@ -546,6 +546,9 @@ async function main() {
             // TWO lens providers: the outline's, and the review's Keep/Undo.
             ['codelens', 'codelens', 'definition', 'folding', 'hover', 'paste', 'references', 'symbols']);
         assert.ok(cmds.includes('wolfbook.tex.showProjection'));
+        assert.ok(cmds.includes('wolfbook.tex.mergeFromDisk'),
+            'the on-demand merge is reachable when the watcher missed the write');
+        assert.ok(cmds.includes('wolfbook.tex.tour'), 'and so is the tour');
         assert.ok(cmds.includes('wolfbook.tex.review'), 'the review is reachable');
         assert.ok(cmds.includes('wolfbook.tex.reviewKeep') && cmds.includes('wolfbook.tex.reviewUndo'),
             'and so are its two verdicts');
@@ -559,6 +562,71 @@ async function main() {
         const ctx = { subscriptions: [] };
         assert.strictEqual(M.registerTexSupport(ctx), null);
         assert.strictEqual(ctx.subscriptions.length, 0);
+    });
+
+    await test('A PAPER OUTSIDE THE WORKSPACE IS WATCHED TOO — or nothing is ever noticed', async () => {
+        // Reported as "editing at the same time as the AI does not trigger the
+        // internal review; VS Code flags it instead". The papers here live in
+        // Dropbox while the workspace folder is the extension, and
+        // createFileSystemWatcher('**/*.tex') resolves its pattern against the
+        // WORKSPACE FOLDERS ONLY — so for those papers no change event ever
+        // arrived and the first sign of an agent's write was VS Code refusing
+        // to save. Watching the paper's own directory is the fix; this asserts
+        // it happens, and that a paper already inside the workspace does not
+        // get a second watcher for nothing.
+        const outside = makeTextDoc('/elsewhere/Nikolay/SoVMain.tex', PAPER);
+        const inside = makeTextDoc('/proj/p.tex', PAPER);
+        const stub = texStub([outside, inside]);
+        const patterns = [];
+        stub.workspace.createFileSystemWatcher = (pattern) => {
+            patterns.push(pattern);
+            return { onDidChange: () => ({ dispose() {} }), onDidCreate: () => ({ dispose() {} }),
+                onDidDelete: () => ({ dispose() {} }), dispose() {} };
+        };
+        stub.RelativePattern = class { constructor(base, pat) { this.baseUri = base; this.pattern = pat; } };
+        stub.languages = {
+            createDiagnosticCollection: () => ({ set() {}, delete() {}, dispose() {} }),
+            registerDocumentSymbolProvider: () => ({ dispose() {} }),
+            registerFoldingRangeProvider: () => ({ dispose() {} }),
+            registerCodeLensProvider: () => ({ dispose() {} }),
+            registerHoverProvider: () => ({ dispose() {} }),
+            registerDefinitionProvider: () => ({ dispose() {} }),
+            registerReferenceProvider: () => ({ dispose() {} }),
+            registerDocumentPasteEditProvider: () => ({ dispose() {} }),
+        };
+        stub.DocumentPasteEditKind = { Text: 'text' };
+        stub.extensions = { getExtension: () => undefined };
+        stub.window = {
+            ...stub.window,
+            createOutputChannel: () => ({ appendLine() {}, show() {}, dispose() {} }),
+            createStatusBarItem: () => ({ show() {}, hide() {}, dispose() {}, text: '', tooltip: '', command: '' }),
+            createTextEditorDecorationType: () => ({ dispose() {} }),
+            onDidChangeActiveTextEditor: () => ({ dispose() {} }),
+            onDidChangeTextEditorSelection: () => ({ dispose() {} }),
+            onDidChangeVisibleTextEditors: () => ({ dispose() {} }),
+            visibleTextEditors: [],
+            showWarningMessage: async () => undefined,
+            showInformationMessage: async () => undefined,
+            showErrorMessage: async () => undefined,
+            setStatusBarMessage: () => ({ dispose() {} }),
+            showInputBox: async () => undefined,
+            activeTextEditor: undefined,
+        };
+        stub.commands = { registerCommand: () => ({ dispose() {} }), executeCommand: async () => {} };
+        stub.EventEmitter = class { constructor() { this.event = () => ({ dispose() {} }); } fire() {} dispose() {} };
+        stub.SymbolKind = new Proxy({}, { get: () => 1 });
+        stub.DiagnosticSeverity = { Warning: 1, Information: 2 };
+
+        const M = freshRequire('../../tex/index', stub);
+        M.registerTexSupport({ subscriptions: [] });
+
+        const dirs = patterns.filter(p => p && p.baseUri).map(p => p.baseUri.fsPath);
+        assert.ok(dirs.includes('/elsewhere/Nikolay'),
+            `the paper's own directory is watched (got ${JSON.stringify(dirs)})`);
+        assert.ok(!dirs.includes('/proj'),
+            'and a paper already inside the workspace is not watched twice');
+        const own = patterns.find(p => p && p.baseUri && p.baseUri.fsPath === '/elsewhere/Nikolay');
+        assert.ok(/tex/.test(own.pattern), `for .tex files: ${own.pattern}`);
     });
 
     // ---- package.json contract -------------------------------------------

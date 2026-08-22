@@ -1616,6 +1616,11 @@
         "category": "Wolfbook"
       },
       {
+        "command": "wolfbook.tex.mergeFromDisk",
+        "title": "WPaper: Merge Changes From Disk Into My Edits",
+        "category": "Wolfbook"
+      },
+      {
         "command": "wolfbook.tex.tour",
         "title": "WPaper: Show Me Around",
         "category": "Wolfbook"

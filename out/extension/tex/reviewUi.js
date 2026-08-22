@@ -17,9 +17,12 @@
 
 const vscode = require('vscode');
 const path = require('path');
+const fs = require('fs');
+const os = require('os');
 
 const { ReviewSession } = require('./reviewSession');
-const { refineHunk, splitLines } = require('./texDiff');
+const { refineHunk, splitLines, diffLines } = require('./texDiff');
+const { mergeThreeWay } = require('./threeWay');
 const bus = require('./reviewBus');
 
 const CMD = {
@@ -118,6 +121,7 @@ class ReviewUi {
         this._lensEmitter = new vscode.EventEmitter();
         this._toasting = new Set();
         this._agentWriting = new Map();   // file -> when the tool started writing
+        this._merging = new Set();        // files whose buffer we are rebasing right now
 
         // A SURFACE MUST NEVER BE ABLE TO BREAK WHAT IT REPORTS ON. Hosts
         // differ in what they expose (a test stub has no status bar at all),
@@ -164,6 +168,156 @@ class ReviewUi {
         this.output.appendLine(`review: ${o.source || 'disk'} changed ${path.basename(file)} — ` +
             `${s.pendingCount} change${s.pendingCount === 1 ? '' : 's'} waiting`);
         return s;
+    }
+
+    /** True while this file's buffer is being rebased — the watcher must wait. */
+    isMerging(file) { return this._merging.has(file); }
+
+    /**
+     * THE READER WAS TYPING WHEN THE AGENT WROTE THE FILE.
+     *
+     * VS Code cannot reload a dirty buffer, so it keeps the two apart and
+     * refuses the next save — "the content of the file is newer" — and the
+     * reader is left with a modal offering to discard one side or the other.
+     * Reported exactly that way: *this does not trigger the internal review,
+     * and then I cannot review with our tools*.
+     *
+     * There is no single text to review because there are three, so this makes
+     * one: the agent's changes are merged into the reader's buffer wherever the
+     * two do not overlap (tex/threeWay.js), and the result becomes the
+     * document. The review then does what it always does — diff the reader's
+     * text against the buffer — and every merged-in change is a pending hunk
+     * with Keep and Undo, which is the point of the exercise.
+     *
+     * WHY THE BUFFER IS REVERTED FIRST. VS Code's refusal is about staleness,
+     * not content: it compares the file's mtime against the one it read, so a
+     * buffer that has been open across an external write can never be saved,
+     * whatever it contains. Reloading is the only thing that gives it a current
+     * mtime — so the buffer is reloaded from disk (which is the agent's text)
+     * and the reader's own edits are then applied back on top as ONE
+     * WorkspaceEdit. The reader keeps unsaved edits, exactly as before; the
+     * save that used to be refused now just works.
+     *
+     * The cost, stated plainly: the buffer's fine-grained undo history is
+     * replaced by one step. Nothing else is lost — conflicting hunks are not
+     * applied, and their text is kept in the result for the caller to show.
+     *
+     * @returns {null | {applied:number, conflicts:object[]}}  null when this
+     *   could not be handled, and the caller should fall back to asking.
+     */
+    async mergeExternalChange(o = {}) {
+        const { file, doc } = o;
+        if (!file || !doc) return null;
+        if (typeof o.base !== 'string' || typeof o.ours !== 'string' || typeof o.theirs !== 'string') return null;
+        const merge = mergeThreeWay({ base: o.base, ours: o.ours, theirs: o.theirs });
+        if (merge.failed) return null;
+        // Nothing of theirs to bring in and nothing contested: the reader's
+        // buffer already says everything the file does.
+        if (!merge.applied.length && !merge.conflicts.length) return null;
+
+        this._merging.add(file);
+        this._agentWriting.set(file, Date.now());   // a rebase is not typing
+        try {
+            // The baseline is the reader's text as it stood — that is what they
+            // agreed to, and diffing it against the merge is precisely the set
+            // of changes the agent is asking for.
+            if (!this.sessions.has(file)) {
+                this.sessions.set(file, new ReviewSession({ file, baseText: o.ours }));
+            }
+            this.sessions.get(file).noteBatch({
+                source: o.source || 'disk',
+                note: merge.conflicts.length ? 'merged with your unsaved edits' : '',
+            });
+
+            const ok = await this._rebaseBuffer(doc, merge.text);
+            if (!ok) {
+                // Leave nothing half-done: without the buffer we have no review.
+                if (this.sessions.get(file) && this.sessions.get(file).isEmpty) this.sessions.delete(file);
+                return null;
+            }
+            await this.refresh(file, { announce: true });
+            this.output.appendLine(
+                `review: ${path.basename(file)} changed on disk while you had unsaved edits — ` +
+                `merged ${merge.applied.length} change${merge.applied.length === 1 ? '' : 's'} in` +
+                (merge.conflicts.length ? `, ${merge.conflicts.length} could not be merged` : ''));
+            if (merge.conflicts.length) this._offerConflicts(file, doc, o.theirs, merge.conflicts);
+            return { applied: merge.applied.length, conflicts: merge.conflicts };
+        } catch (e) {
+            this.output.appendLine(`review: could not merge ${path.basename(file)}: ${e.message}`);
+            return null;
+        } finally {
+            this._merging.delete(file);
+            this._agentWriting.delete(file);
+        }
+    }
+
+    /**
+     * Reload the buffer from disk and put `text` back into it as one edit.
+     *
+     * Reverting is what clears VS Code's "this buffer is older than the file"
+     * state; the edit that follows is the reader's own work going back on top.
+     */
+    async _rebaseBuffer(doc, text) {
+        const file = doc.uri.fsPath;
+        try {
+            await vscode.window.showTextDocument(doc, { preview: false });
+            await vscode.commands.executeCommand('workbench.action.files.revert');
+        } catch (e) {
+            this.output.appendLine(`review: could not reload ${path.basename(file)}: ${e.message}`);
+            return false;
+        }
+        const now = doc.getText();
+        if (now === text) return true;          // the reader's edits were all merged away
+        // Only the lines that differ, so the edit is the reader's work and not
+        // a whole-file replacement that would throw away every folded region.
+        const edits = [];
+        try {
+            for (const h of diffLines(splitLines(text), splitLines(now))) {
+                edits.push({
+                    startLine: h.bStart,
+                    endLine: h.bEnd,
+                    lines: splitLines(text).slice(h.aStart - 1, h.aEnd - 1),
+                });
+            }
+        } catch (e) {
+            this.output.appendLine(`review: could not rebase ${path.basename(file)}: ${e.message}`);
+            return false;
+        }
+        if (!edits.length) return true;
+        return this.applyEdits(file, edits);
+    }
+
+    /**
+     * The changes that could not be merged, parked where they can be looked at.
+     *
+     * They are NOT in the buffer: the reader's own words are what stands there.
+     * The agent's version of those lines would otherwise exist only in the file
+     * the reload just overwrote, so it is written to a temp copy and offered as
+     * an ordinary diff — the one thing VS Code does well here.
+     */
+    _offerConflicts(file, doc, theirs, conflicts) {
+        const name = path.basename(file);
+        const n = conflicts.length;
+        const where = conflicts.slice(0, 3)
+            .map(c => `line ${c.baseRange[0]}`).join(', ');
+        vscode.window.showWarningMessage(
+            `${n} change${n === 1 ? '' : 's'} to ${name} touched lines you were editing (${where}) ` +
+            'and were left out. Yours are what the file holds.',
+            'Compare…',
+        ).then(async (pick) => {
+            if (pick !== 'Compare…') return;
+            try {
+                const tmpDir = path.join(os.tmpdir(), 'wolfbook-tex', 'ondisk');
+                fs.mkdirSync(tmpDir, { recursive: true });
+                const tmp = path.join(tmpDir, `${Date.now()}-${name}`);
+                fs.writeFileSync(tmp, theirs, 'utf8');
+                await vscode.commands.executeCommand('vscode.diff',
+                    vscode.Uri.file(tmp), doc.uri,
+                    `${name} (what the agent wrote) ↔ ${name} (yours)`);
+            } catch (e) {
+                vscode.window.showErrorMessage(`Could not show the comparison: ${e.message}`);
+            }
+        }, () => { /* dismissed */ });
     }
 
     /** Re-diff and repaint every surface. Never throws. */
