@@ -3112,6 +3112,128 @@ test('NO MAP, NO ANSWER: a failed rebuild clears the page instead of leaving the
     assert.ok(hl && hl.rects.length === 0, 'and so is the old marker');
 });
 
+// --- FOLDING A SECTION AWAY -------------------------------------------------
+//
+// The gesture edits the reader's paper, so what is asserted here is the whole
+// round trip through the real viewer: the controls it offers, the edit it
+// applies, and that undoing it by folding back gives the file it started with.
+
+const FOLD_SRC = [
+    '\\documentclass{article}',                 // 1
+    '\\begin{document}',                        // 2
+    '',                                         // 3
+    '\\section{The pairing}',                   // 4
+    'First prose line of the section.',         // 5
+    '% the author\'s own comment',              // 6
+    '',                                         // 7
+    '\\subsection{The upper tower}',            // 8
+    'Subsection prose.',                        // 9
+    '',                                         // 10
+    '\\section{The measure}',                   // 11
+    'The last section, running to the end.',    // 12
+    '',                                         // 13
+    '\\end{document}',                          // 14
+].join('\n');
+
+const foldItems = async (v) => {
+    v.posted.length = 0;
+    await v._postSections();
+    const msg = v.posted.filter(p => p.type === 'sections').pop();
+    return (msg && msg.items) || [];
+};
+
+test('THE PAPER OFFERS ONE FOLD CONTROL PER SECTIONING UNIT', async () => {
+    const { v } = moveViewer(FOLD_SRC);
+    const items = await foldItems(v);
+    assert.deepStrictEqual(items.map(i => i.title),
+        ['The pairing', 'The upper tower', 'The measure']);
+    assert.deepStrictEqual(items.map(i => i.collapsed), [false, false, false]);
+    // Levels are the scanner's own: part 0, chapter 1, section 2, subsection 3.
+    assert.strictEqual(items[0].level, 2, '\\section');
+    assert.strictEqual(items[1].level, 3, 'a subsection is its own unit, one deeper');
+    // The span each control governs, which is what will be commented out.
+    assert.strictEqual(items[0].spanEnd, 10, 'a section runs to the next one of its level');
+    assert.strictEqual(items[2].spanEnd, 13, 'and the last stops above \\end{document}');
+    assert.ok(items[0].page, 'and it knows where the heading prints');
+});
+
+test('FOLDING COMMENTS THE BODY OUT AND LEAVES THE HEADING STANDING', async () => {
+    const { v, doc } = moveViewer(FOLD_SRC);
+    const items = await foldItems(v);
+    await v._onMessage({ type: 'sectionFold', key: items[0].key, collapse: true });
+
+    const lines = doc.getText().split('\n');
+    assert.strictEqual(lines[3], '\\section{The pairing}', 'the heading is untouched');
+    assert.ok(/^%WPaper\[Collapsed\]/.test(lines[4]), 'the marker is under it: ' + lines[4]);
+    assert.ok(/6 lines/.test(lines[4]), 'saying how much is hidden');
+    for (let i = 5; i <= 10; i++) {
+        assert.ok(lines[i].startsWith('%WP%'), `line ${i + 1} is commented: ${lines[i]}`);
+    }
+    assert.ok(doc.getText().includes('%WP%\\subsection{The upper tower}'),
+        'a subsection inside it goes with it');
+    assert.strictEqual(lines[lines.length - 1], '\\end{document}', 'and the document still ends');
+    const said = v.posted.filter(p => p.type === 'status').pop();
+    assert.ok(/folded away 6 lines/.test(said.text), said.text);
+    assert.ok(/⌘Z/.test(said.text), 'and says how to take it back');
+});
+
+test('AND UNFOLDING GIVES BACK THE FILE, BYTE FOR BYTE', async () => {
+    const { v, doc } = moveViewer(FOLD_SRC);
+    let items = await foldItems(v);
+    await v._onMessage({ type: 'sectionFold', key: items[0].key, collapse: true });
+    assert.notStrictEqual(doc.getText(), FOLD_SRC);
+
+    items = await foldItems(v);
+    const folded = items.find(i => i.collapsed);
+    assert.ok(folded, 'the control now reads as folded');
+    assert.strictEqual(folded.hidden, 6, 'and says how many lines are hidden');
+    await v._onMessage({ type: 'sectionFold', key: folded.key, collapse: false });
+    assert.strictEqual(doc.getText(), FOLD_SRC,
+        'the author\'s own comment line included');
+});
+
+test('THE LAST SECTION NEVER COMMENTS OUT \\end{document}', async () => {
+    // Its span runs to the end of the file. This is the one mistake that would
+    // turn "make the paper shorter" into "the paper no longer compiles".
+    const { v, doc } = moveViewer(FOLD_SRC);
+    const items = await foldItems(v);
+    await v._onMessage({ type: 'sectionFold', key: items[2].key, collapse: true });
+    const lines = doc.getText().split('\n');
+    assert.strictEqual(lines[lines.length - 1], '\\end{document}');
+    assert.ok(!lines.some(l => l.startsWith('%WP%') && /end\{document\}/.test(l)));
+});
+
+test('a folded section is announced whether or not the file is touched again', async () => {
+    const { v } = moveViewer(FOLD_SRC);
+    const items = await foldItems(v);
+    await v._onMessage({ type: 'sectionFold', key: items[1].key, collapse: true });
+    const again = await foldItems(v);
+    const sub = again.find(i => i.title === 'The upper tower');
+    assert.strictEqual(sub.collapsed, true, 'the state is read back OUT OF THE FILE');
+    assert.strictEqual(sub.hidden, 2);
+    // The sections inside it are gone from the model entirely — commented text
+    // is not a section, which is exactly what LaTeX thinks too.
+    assert.strictEqual(again.length, 3, 'the heading itself still stands');
+});
+
+test('folding what is already folded, or a key that is gone, says so and stops', async () => {
+    const { v, doc } = moveViewer(FOLD_SRC);
+    const items = await foldItems(v);
+    await v._onMessage({ type: 'sectionFold', key: items[0].key, collapse: true });
+    const after = doc.getText();
+
+    v.posted.length = 0;
+    const stale = await foldItems(v);
+    await v._onMessage({ type: 'sectionFold', key: stale[0].key, collapse: true });
+    assert.strictEqual(doc.getText(), after, 'nothing happened twice');
+    assert.ok(v.posted.some(p => p.type === 'status' && /already collapsed/.test(p.text)));
+
+    v.posted.length = 0;
+    await v._onMessage({ type: 'sectionFold', key: 'no-such-section', collapse: true });
+    assert.strictEqual(doc.getText(), after);
+    assert.ok(v.posted.some(p => p.type === 'status' && /no longer there/.test(p.text)));
+});
+
 // --- the tour ---------------------------------------------------------------
 //
 // The card is drawn by the panel, but WHAT COUNTS AS HAVING DONE A STEP is

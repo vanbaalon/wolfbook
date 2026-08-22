@@ -205,6 +205,25 @@
      badges sat ON printed words. Now: one column per side, the size tied to
      --lbc-scale (the page's own zoom), and the width capped to the margin with
      the rest of the name elided until hover. */
+  /* A SECTION FOLDED OUT OF THE PAPER.
+     The fold control appears with the label overlay; the "n lines hidden" pill
+     is always there, because a section missing from the paper with nothing to
+     say so is worse than one that is simply long. It reads as a control, not
+     as type — nobody should mistake it for something the paper prints. */
+  .secfold { position:absolute; z-index:7; transform:translateY(-1px);
+             font-family: var(--vscode-font-family); font-size:9.5px; line-height:1.5;
+             padding:0 6px; border-radius:9px; cursor:pointer; white-space:nowrap;
+             overflow:hidden; text-overflow:ellipsis;
+             border:1px solid var(--vscode-panel-border, rgba(128,128,128,.5));
+             background: var(--vscode-editorWidget-background, #252526);
+             color: var(--vscode-descriptionForeground, #999); opacity:.55; }
+  .secfold:hover { opacity:1; }
+  .secfold.on { opacity:1; font-weight:600;
+             color: var(--vscode-editorWarning-foreground, #c90);
+             border-color: var(--vscode-editorWarning-foreground, #c90);
+             border-style:dashed;
+             background: color-mix(in srgb, var(--vscode-editorWarning-foreground, #c90) 12%,
+                         var(--vscode-editorWidget-background, #252526)); }
   .lbc { position:absolute; z-index:7; pointer-events:auto; cursor:copy;
          font: 500 calc(7.4px * var(--lbc-scale, 1))/1.3 var(--vscode-font-family);
          white-space:nowrap; overflow:hidden; text-overflow:ellipsis;

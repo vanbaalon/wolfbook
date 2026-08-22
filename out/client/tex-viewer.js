@@ -46,6 +46,7 @@ const state = {
     generation: null,
     labels: null,             // {generation, items} — the label overlay, cached
     labelsOn: false,          // Shift is down
+    sections: null,           // {generation, items, pageWidth} — the fold controls
     labelsPinned: false,      // the toolbar toggle
     labelsAsked: null,        // the generation we have already asked for
     review: null,             // {pending, groups, census, focus} — the agent's changes
@@ -494,6 +495,7 @@ async function renderPage(n) {
         if (state.selection) paintSelection(state.selection);
         if (state.diff) paintDiff();
         if (state.labels && labelsVisible()) paintLabels().catch(() => {});
+        if (state.sections) paintSections();
         if (state.moveCaret) paintMoveCaret(state.moveCaret);
         if (state.edit) paintEditCard();
     })().finally(() => state.pending.delete(n));
@@ -1135,6 +1137,7 @@ function renderReview() {
     // same either way — only the headings and what "keep the group" means
     // change — so this is a rendering decision and nothing else.
     const groups = state.reviewGroup === 'arrival' ? r.groups : sectionGroups(r);
+    const shallowest = groups.reduce((m, g) => (g.kind === 'section' && g.level ? Math.min(m, g.level) : m), 99);
 
     const parts = [];
     for (const g of groups) {
@@ -1143,8 +1146,12 @@ function renderReview() {
         // number of writes is worth saying when it was more than one.
         if (g.kind === 'section') {
             // The indent carries the level, so a subsection reads as inside the
-            // section above it rather than as a sibling of it.
-            const pad = Math.min(3, Math.max(0, (g.level || 1) - 1)) * 12;
+            // section above it rather than as a sibling of it. RELATIVE to the
+            // shallowest heading in the list: the scanner numbers \section 2
+            // (part is 0, chapter 1), so an absolute indent would push every
+            // ordinary paper's top-level sections in by a level that is not
+            // there.
+            const pad = Math.min(3, Math.max(0, (g.level || 0) - shallowest)) * 12;
             parts.push(`<div class="grp sec" style="padding-left:${8 + pad}px">` +
                 `<span class="secname" title="${esc(g.title)}">${esc(g.title)}</span>` +
                 `<span class="secn">${g.count} change${g.count === 1 ? '' : 's'}</span>` +
@@ -1461,6 +1468,61 @@ async function inkMatching(find, page) {
     return cands[0].it;
 }
 
+// --- FOLDING A SECTION AWAY --------------------------------------------------
+//
+// Hold Shift and every heading offers to fold; a folded one says so whether
+// Shift is held or not, because a section that is simply missing from the paper
+// with nothing to explain it is the worst thing this feature could do. The
+// state lives in the .tex — the panel draws what the extension read there and
+// asks for the change; it never decides anything itself.
+
+function paintSections() {
+    for (const e of document.querySelectorAll('.secfold')) e.remove();
+    const S = state.sections;
+    if (!S || !S.items) return;
+    const shift = labelsVisible();
+    for (const it of S.items) {
+        if (!it.page || !state.rendered.has(it.page)) continue;
+        // A folded section is always announced; the fold control is Shift-only.
+        if (!it.collapsed && !shift) continue;
+        const wrap = pagesEl().querySelector('.page[data-page="' + it.page + '"]');
+        if (!wrap) continue;
+        const v = rectToViewport(it.page, { page: it.page, x: it.x + it.w + 6, y: it.y, w: 1, h: it.h || 9 });
+        if (!v) continue;
+        const b = document.createElement('button');
+        b.className = 'secfold' + (it.collapsed ? ' on' : '');
+        b.dataset.key = it.key;
+        b.dataset.collapse = it.collapsed ? '0' : '1';
+        b.textContent = it.collapsed
+            ? '\u25b8 ' + it.hidden + ' line' + (it.hidden === 1 ? '' : 's') + ' hidden'
+            : '\u25be fold';
+        b.title = it.collapsed
+            ? 'Bring this section back into the paper'
+            : 'Comment this section out of the paper — the heading stays, and the state is written into the .tex';
+        b.style.left = v.x + 'px';
+        b.style.top = v.y + 'px';
+        // Never off the sheet: a heading that runs the full measure puts its
+        // control back inside the text rather than into the margin.
+        const maxW = Math.max(40, ((S.pageWidth || 595) - (it.x + it.w + 8)) * state.scale);
+        b.style.maxWidth = maxW + 'px';
+        wrap.appendChild(b);
+    }
+}
+
+document.addEventListener('click', (e) => {
+    const b = e.target && e.target.closest ? e.target.closest('.secfold') : null;
+    if (!b) return;
+    e.preventDefault();
+    e.stopPropagation();
+    vscode.postMessage({ type: 'sectionFold', key: b.dataset.key, collapse: b.dataset.collapse === '1' });
+}, true);
+// The press must not also reach the page underneath and resolve a word there.
+for (const evt of ['pointerdown', 'mousedown']) {
+    document.addEventListener(evt, (e) => {
+        if (e.target.closest && e.target.closest('.secfold')) e.stopPropagation();
+    }, true);
+}
+
 async function paintLabels() {
     for (const el of document.querySelectorAll('.lbc, .lbcink')) el.remove();
     hideChipPreview();
@@ -1594,12 +1656,14 @@ function showLabels() {
         }
     }
     paintLabels().catch(() => {});
+    paintSections();          // the fold controls appear with the badges
 }
 
 function hideLabels() {
     if (!state.labelsOn) return;
     state.labelsOn = false;
     paintLabels().catch(() => {});
+    paintSections();          // …and go with them, except where one is folded
     if (state.labelHinted) { el('where').textContent = state.labelHinted.was || ''; state.labelHinted = null; }
 }
 
@@ -2974,6 +3038,7 @@ el('labels').addEventListener('click', () => {
         vscode.postMessage({ type: 'labelsWanted', value: true });
     }
     paintLabels().catch(() => {});
+    paintSections();
 });
 
 el('pagetheme').addEventListener('click', () => {
@@ -3268,6 +3333,10 @@ window.addEventListener('message', async (ev) => {
             }
             await paintSelection(msg.span ? { ...msg.span, reveal: msg.reveal } : null);
             if (msg.label) el('where').textContent = msg.label;
+            break;
+        case 'sections':
+            state.sections = { generation: msg.generation, items: msg.items || [], pageWidth: msg.pageWidth };
+            paintSections();
             break;
         case 'labels':
             state.labels = { generation: msg.generation, items: msg.items || [] };

@@ -25,6 +25,7 @@ const { buildComparison, describeSummary } = require('./texCompare');
 const { shipDecision } = require('./livePolicy');
 const { balanceRange, closeFor, commentMask } = require('./texBalance');
 const { sectionSpans } = require('./texModel');
+const collapse = require('./collapse');
 const { MATH_ENVS } = require('./texScanner');
 const { readAuxLabels } = require('./auxLabels');
 const { buildLabelChips, formatLabelCopy, altFormat } = require('./labelChips');
@@ -691,6 +692,7 @@ class TexViewer {
                 this._chipModels = null;
                 this._chips = null;
                 if (this._labelsWanted) this._postLabels().catch(() => { /* best effort */ });
+                this._postSections().catch(() => { /* best effort */ });
             }
             return;
         }
@@ -739,6 +741,10 @@ class TexViewer {
         // What the webview now holds — the key the next refresh compares.
         this.shownPdfHash = st.generation.pdfHash || null;
         this._post({ type: 'setFollow', value: this.followCursor });
+        // WHICH SECTIONS ARE FOLDED AWAY. Not gated on Shift: a section that is
+        // simply missing from the paper, with nothing saying so, is the worst
+        // thing this feature could do to a reader.
+        this._postSections().catch(() => { /* best effort */ });
         this._log(`sent generation ${st.generation.generation} ` +
             `(${(data.length / 1398101).toFixed(2)} MB of PDF) in ${Date.now() - t0} ms ` +
             `· read ${readMs} ms`);
@@ -2106,6 +2112,7 @@ class TexViewer {
                 // The mini-editor's block has new geometry too — move the card.
                 this._postEditAnchor().catch(() => {});
                 if (this._labelsWanted) this._postLabels().catch(() => {});
+                this._postSections().catch(() => {});
                 break;
             case 'textLayer': this._onTextLayer(m); break;
             case 'textLayerDone':
@@ -2143,6 +2150,7 @@ class TexViewer {
                 if (m.value) await this._postLabels();
                 break;
             case 'copyLabel': await this._copyLabel(m); break;
+            case 'sectionFold': await this._onSectionFold(m); break;
             case 'cropped': this._onCropped(m); break;
             case 'selectionClear':
                 // Esc on the page. The selection lives in the EDITOR, so
@@ -3739,6 +3747,133 @@ class TexViewer {
     _copyFormat() {
         return vscode.workspace.getConfiguration('wolfbook.tex')
             .get('labelCopyFormat', 'command');
+    }
+
+    // --- folding a section away ---------------------------------------------
+    //
+    // Hold Shift and every heading offers to collapse; a collapsed one says so
+    // on the page whether Shift is held or not, because a section that is
+    // simply MISSING from the paper with no explanation is the worst outcome
+    // this feature could have. The state lives in the .tex itself
+    // (tex/collapse.js) — the panel only draws what the file says.
+
+    /** The text of one of the project's files, buffer first. */
+    _textOf(file) {
+        const doc = (vscode.workspace.textDocuments || []).find(d => d.uri.fsPath === file && !d.isClosed);
+        if (doc) return doc.getText();
+        try { return fs.readFileSync(file, 'utf8'); } catch (_) { return null; }
+    }
+
+    /** Every sectioning unit of the paper, with where it prints and whether it is folded. */
+    _sectionControls(st) {
+        if (!st || !st.map || !st.map.available) return [];
+        const out = [];
+        const models = this._projectModels(st);
+        for (const [file, model] of models) {
+            const text = this._textOf(file);
+            if (text == null) continue;
+            const lines = text.split('\n');
+            const heads = (model.objects || []).filter(o => o.kind === 'section-heading');
+            if (!heads.length) continue;
+            let spans = [];
+            try { spans = sectionSpans(model.objects, lines.length, collapse.bodyEndLine(lines)); }
+            catch (_) { spans = []; }
+            for (const h of heads) {
+                const span = spans.find(sp => sp.startLine === h.sourceRange.startLine);
+                const state = collapse.collapseStateAt(lines, h.sourceRange.endLine);
+                // WHERE IT PRINTS. The heading's LAST row: a title that wraps
+                // gets its control after the end of the title, not floating
+                // beside the middle of it.
+                let rows = [];
+                try { rows = st.map.lineRows(file, h.sourceRange.endLine) || []; } catch (_) { rows = []; }
+                if (!rows.length && h.sourceRange.endLine !== h.sourceRange.startLine) {
+                    try { rows = st.map.lineRows(file, h.sourceRange.startLine) || []; } catch (_) { rows = []; }
+                }
+                const row = rows.length ? rows[rows.length - 1] : null;
+                out.push({
+                    key: h.stableKey || `${file}:${h.sourceRange.startLine}`,
+                    file,
+                    title: h.title || '',
+                    level: h.level || 0,
+                    headStart: h.sourceRange.startLine,
+                    headEnd: h.sourceRange.endLine,
+                    spanEnd: span ? span.endLine : h.sourceRange.endLine,
+                    collapsed: state.collapsed,
+                    hidden: state.hidden,
+                    page: row ? row.page : null,
+                    x: row ? row.x : 0,
+                    y: row ? row.y : 0,
+                    w: row ? row.w : 0,
+                    h: row ? row.h : 0,
+                });
+            }
+        }
+        return out;
+    }
+
+    async _postSections() {
+        if (!this.panel || !this.root) return;
+        const st = this.coord.roots.get(this.root);
+        if (!st) return;
+        let items = [];
+        try { items = this._sectionControls(st); }
+        catch (e) { this._log(`section controls failed: ${e.message}`); items = []; }
+        const gen = st.generation;
+        this._post({
+            type: 'sections',
+            generation: this.shownGeneration,
+            items,
+            pageWidth: (gen && gen.pageSize && gen.pageSize.widthBp) || 595.276,
+        });
+    }
+
+    /**
+     * Fold a section away, or bring it back.
+     *
+     * ONE WorkspaceEdit, so it is ONE undo — a fold the reader did not mean is
+     * ⌘Z away, which is what makes the gesture safe to try. The recompile is
+     * the ordinary one: the file changed, so the paper does.
+     */
+    async _onSectionFold(m) {
+        const st = this.coord.roots.get(this.root);
+        const items = st ? this._sectionControls(st) : [];
+        const it = items.find(x => x.key === (m && m.key));
+        if (!it) { this._post({ type: 'status', text: 'that section is no longer there', kind: 'warn' }); return; }
+        const text = this._textOf(it.file);
+        if (text == null) { this._post({ type: 'status', text: `could not read ${path.basename(it.file)}`, kind: 'err' }); return; }
+        const lines = text.split('\n');
+        const r = m.collapse
+            ? collapse.collapseSection({ lines, headEnd: it.headEnd, spanEnd: it.spanEnd, title: it.title })
+            : collapse.expandSection({ lines, headEnd: it.headEnd });
+        if (!r.ok) { this._post({ type: 'status', text: r.reason, kind: 'warn' }); return; }
+
+        let doc;
+        try { doc = await vscode.workspace.openTextDocument(vscode.Uri.file(it.file)); }
+        catch (e) { this._post({ type: 'status', text: `could not open ${path.basename(it.file)}: ${e.message}`, kind: 'err' }); return; }
+        const e0 = r.edit;
+        const startLine = Math.max(0, Math.min(e0.startLine - 1, doc.lineCount));
+        const endLine = Math.max(startLine, Math.min(e0.endLine - 1, doc.lineCount));
+        const atEof = endLine >= doc.lineCount;
+        const start = new vscode.Position(startLine, 0);
+        const end = atEof
+            ? new vscode.Position(doc.lineCount - 1, doc.lineAt(doc.lineCount - 1).text.length)
+            : new vscode.Position(endLine, 0);
+        let body = e0.lines.join('\n');
+        if (body && !atEof) body += '\n';
+        const we = new vscode.WorkspaceEdit();
+        we.replace(doc.uri, new vscode.Range(start, end), body);
+        let ok = false;
+        try { ok = await vscode.workspace.applyEdit(we); } catch (_) { ok = false; }
+        if (!ok) { this._post({ type: 'status', text: 'the fold could not be applied', kind: 'err' }); return; }
+        this._post({
+            type: 'status', kind: 'ok',
+            text: m.collapse
+                ? `folded away ${r.hidden} line${r.hidden === 1 ? '' : 's'} of "${it.title}" — ⌘Z puts it back`
+                : `brought back ${r.shown} line${r.shown === 1 ? '' : 's'} of "${it.title}"`,
+        });
+        // The controls are read from the file, so they are stale the moment it
+        // changes; the recompile that follows re-posts them with the geometry.
+        await this._postSections();
     }
 
     async _postLabels() {
