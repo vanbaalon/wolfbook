@@ -1616,6 +1616,11 @@
         "category": "Wolfbook"
       },
       {
+        "command": "wolfbook.tex.tour",
+        "title": "WPaper: Show Me Around",
+        "category": "Wolfbook"
+      },
+      {
         "command": "wolfbook.tex.openViewer",
         "title": "Open WPaper",
         "category": "Wolfbook",

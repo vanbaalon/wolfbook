@@ -22,7 +22,7 @@ VsCodeRenderNth; VsCodeRenderLast; VsCodeEvalWrapper;
    string, and the Watch panel reports "Evaluation returned no result." *)
 VsCodeRenderExpr;
 VsCodeSyntaxCheck; VsCodeSplitCode; VsCodeOpenAsText; VsCodeDynExportValue;
-VsCodeManipUpdate;
+VsCodeManipUpdate; VsCodeManipRevive;
 VsCodeSetImgDir; VsCodeCleanupImgDir; VsCodeSymbolMarkdown;
 $setKernelConfig;   (* called from lifecycle.js + controller.js after init.wl loads *)
 ClearGlobals;

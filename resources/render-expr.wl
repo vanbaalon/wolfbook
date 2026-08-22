@@ -138,7 +138,7 @@ VsCodeRenderExpr[expr_, format_String, scale_?NumericQ, searchPat_String:""] :=
        back to the kernel; it returns $Failed for any control we do not model,
        in which case we fall through to the old behaviour. *)
     If[Head[expr] === Manipulate,
-       manipHtml = Quiet[Check[wbManipIntercept[expr, scale], $Failed]];
+       manipHtml = Quiet[Check[wbManipIntercept[expr, scale, format], $Failed]];
        If[StringQ[manipHtml], Return[manipHtml]]];
 
     fmt = If[format === "Auto",

@@ -3112,6 +3112,111 @@ test('NO MAP, NO ANSWER: a failed rebuild clears the page instead of leaving the
     assert.ok(hl && hl.rects.length === 0, 'and so is the old marker');
 });
 
+// --- the tour ---------------------------------------------------------------
+//
+// The card is drawn by the panel, but WHAT COUNTS AS HAVING DONE A STEP is
+// decided here, from the messages the panel already posts. These assertions
+// are about that: a step advances on the reader's real gesture, the place they
+// reached outlives the panel, and a tour that has been closed stays closed.
+
+/** A viewer whose tour progress is remembered, the way globalState does. */
+function tourViewer(mem) {
+    const v = makeViewer(null, null);
+    v.context = {
+        extensionUri: { fsPath: '/ext' },
+        globalState: {
+            get: (k) => mem[k],
+            update: (k, val) => { mem[k] = val; },
+        },
+        workspaceState: { update: () => {} },
+    };
+    v.posted.length = 0;
+    return v;
+}
+const lastTour = (v) => v.posted.filter(p => p.type === 'tour').pop();
+const wait = (ms) => new Promise(r => setTimeout(r, ms));
+
+test('THE TOUR OPENS ITSELF ONCE, AND NEVER AGAIN', async () => {
+    const mem = {};
+    const v = tourViewer(mem);
+    await v._onMessage({ type: 'ready' });
+    await wait(1400);
+    const opened = lastTour(v);
+    assert.ok(opened && opened.step, 'the first paper opens the tour');
+    assert.strictEqual(opened.step.index, 0);
+
+    // The reader closes it. A later panel must not start it over.
+    v._tourAction({ action: 'close' });
+    assert.strictEqual(lastTour(v).step, null, 'closing takes the card away');
+
+    const v2 = tourViewer(mem);
+    await v2._onMessage({ type: 'ready' });
+    await wait(1400);
+    const again = lastTour(v2);
+    assert.ok(!again || !again.step, 'a tour that was closed stays closed');
+
+    // Asking for it is a different matter: it starts from the top.
+    v2.posted.length = 0;
+    v2.startTour(true);
+    const asked = lastTour(v2);
+    assert.ok(asked && asked.step && asked.step.index === 0,
+        '"Show Me Around" replays it from the beginning');
+});
+
+test('A STEP ADVANCES ON THE READER\'S OWN GESTURE, NOT ON A BUTTON', async () => {
+    const mem = {};
+    const v = tourViewer(mem);
+    v.startTour(true);
+    const first = lastTour(v).step;
+    assert.strictEqual(first.id, 'click');
+
+    // Something that is not the gesture leaves the step where it is.
+    v._tourObserve({ type: 'editHere' });
+    await wait(700);
+    assert.strictEqual(lastTour(v).step.id, 'click', 'a different gesture is not this step');
+
+    // The gesture itself moves it on — and the place is remembered.
+    v._tourObserve({ type: 'click' });
+    await wait(700);
+    assert.strictEqual(lastTour(v).step.id, 'widen', 'doing it moves the tour on');
+    assert.strictEqual(mem['wolfbook.tex.tour'].at, 1, 'and the place is written down');
+
+    // A NEW panel resumes where the reader got to, not at the beginning.
+    const v2 = tourViewer(mem);
+    await v2._onMessage({ type: 'ready' });
+    await wait(1400);
+    assert.strictEqual(lastTour(v2).step.id, 'widen', 'a half-finished tour resumes');
+});
+
+test('the tour watches the panel\'s real messages, and skipping still works', async () => {
+    const mem = {};
+    const v = tourViewer(mem);
+    v.startTour(true);
+    // Through _onMessage, the way a real click arrives: the observer is wired
+    // into the dispatch itself, so the tour cannot see a gesture the panel did
+    // not actually report.
+    await v._onMessage({ type: 'click', page: 1, xBp: 100, yTopBp: 500 });
+    await wait(700);
+    assert.strictEqual(lastTour(v).step.id, 'widen');
+
+    v._tourAction({ action: 'skip' });
+    assert.strictEqual(lastTour(v).step.id, 'cursor', 'a step can be passed over');
+
+    // Walking off the end finishes the tour rather than showing an empty card.
+    for (let i = 0; i < 12; i++) v._tourAction({ action: 'skip' });
+    assert.strictEqual(lastTour(v).step, null);
+    assert.strictEqual(mem['wolfbook.tex.tour'].done, true);
+});
+
+test('a viewer with nowhere to remember the tour still works', async () => {
+    const v = makeViewer(null, null);       // context has no globalState
+    v.posted.length = 0;
+    assert.doesNotThrow(() => v.startTour(true));
+    assert.ok(lastTour(v).step, 'the card is still shown');
+    assert.doesNotThrow(() => v._tourObserve({ type: 'click' }));
+    assert.doesNotThrow(() => v._tourAction({ action: 'close' }));
+});
+
 (async () => {
     for (const [name, fn] of tests) {
         try { await fn(); pass++; results.push('  ok   ' + name); }

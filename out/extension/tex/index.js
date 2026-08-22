@@ -1522,6 +1522,21 @@ async function offerReload(doc, diskText, output) {
         if (ed) viewer.syncFromEditor(ed);
     });
 
+    reg('wolfbook.tex.tour', async () => {
+        // ASKED FOR = START OVER. A reader who runs "Show Me Around" after the
+        // tour finished wants to see it, not to be told it is already done.
+        const doc = vscode.window.activeTextEditor?.document;
+        if (isTex(doc) && !viewer.panel) {
+            await vscode.commands.executeCommand('wolfbook.tex.openViewer');
+        }
+        if (!viewer.panel) {
+            vscode.window.showWarningMessage('Open a .tex file, then run this again — the tour happens on your own paper.');
+            return;
+        }
+        viewer.panel.reveal(viewer.panel.viewColumn, true);
+        viewer.startTour(true);
+    });
+
     reg('wolfbook.tex.goToPage', async () => {
         const ed = vscode.window.activeTextEditor;
         if (!isTex(ed?.document)) return;

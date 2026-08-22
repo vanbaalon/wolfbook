@@ -279,6 +279,43 @@
   #diffcensus { opacity:.7; overflow:hidden; text-overflow:ellipsis; }
   #diffclose { margin-left:auto; }
   /* --- the review drawer: what the agent changed, waiting for a verdict --- */
+  /* --- the tour: a card in the corner, never a modal ------------------------
+     It sits over the page's own margin, small enough to leave the paper
+     readable, because every step asks the reader to DO something on that very
+     page. A modal would cover the thing it is talking about. */
+  #tour { position:fixed; left:14px; bottom:34px; width:262px; z-index:60;
+          background: var(--vscode-editorWidget-background, #252526);
+          color: var(--vscode-editorWidget-foreground, inherit);
+          border:1px solid var(--vscode-focusBorder, #0a84ff);
+          border-radius:7px; padding:10px 11px 11px; font-size:12px; line-height:1.45;
+          box-shadow:0 6px 22px rgba(0,0,0,.34); }
+  #tour[hidden] { display:none; }
+  #tour .th { display:flex; align-items:center; gap:6px; margin-bottom:5px;
+          font-size:10px; letter-spacing:.06em; text-transform:uppercase; opacity:.62; }
+  #tour .th .sp { flex:1; }
+  #tour .th button { background:transparent; border:0; color:inherit; opacity:.75;
+          cursor:pointer; font-size:12px; line-height:1; padding:2px 4px; border-radius:3px; }
+  #tour .th button:hover { opacity:1; background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,.2)); }
+  #tour .tt { font-weight:600; font-size:12.5px; margin-bottom:3px; }
+  #tour .ts { opacity:.82; }
+  #tour .td { margin-top:8px; padding:5px 7px; border-radius:4px;
+          background: var(--vscode-textBlockQuote-background, rgba(128,128,128,.13));
+          border-left:2px solid var(--vscode-focusBorder, #0a84ff); }
+  #tour .td:empty { display:none; }
+  #tour .tdone { margin-top:9px; }
+  #tour .tdone button { background: var(--vscode-button-background, #0a63c9);
+          color: var(--vscode-button-foreground, #fff); border:0; border-radius:3px;
+          height:22px; padding:0 12px; cursor:pointer; font-size:11.5px; }
+  #tour .bar { display:block; margin-top:9px; height:2px; border-radius:2px;
+          background: var(--vscode-panel-border, rgba(128,128,128,.35)); overflow:hidden; }
+  #tour .bar i { display:block; height:100%; background: var(--vscode-focusBorder, #0a84ff);
+          transition: width .25s ease; }
+  /* The ring points at a control the step names; it never intercepts a press. */
+  #tourring { position:fixed; z-index:59; pointer-events:none; border-radius:6px;
+          border:2px solid var(--vscode-focusBorder, #0a84ff); animation: tourpulse 1.6s ease-in-out infinite; }
+  #tourring[hidden] { display:none; }
+  @keyframes tourpulse { 0%,100% { opacity:.95; } 50% { opacity:.35; } }
+  @media (prefers-reduced-motion: reduce) { #tourring { animation:none; } #tour .bar i { transition:none; } }
   #reviewbar { display:none; align-items:center; gap:8px; padding:4px 10px;
              background: var(--vscode-editorWidget-background, transparent);
              border-bottom:1px solid var(--vscode-panel-border); flex:0 0 auto;
@@ -509,3 +546,14 @@
 <main><div id="pages" title="Click a word or symbol to find it in the source. Cmd/Ctrl-click selects more of what encloses it; add Shift to go back in. Double-click jumps to the editor. Right-click edits the paragraph or equation in place."></div></main>
 <div id="reviewpanel"><div id="reviewlist"></div><div id="reviewdiff"></div></div>
 <footer><div id="status">starting…</div></footer>
+<div id="tour" hidden>
+  <div class="th"><span id="tourstep"></span><span class="sp"></span>
+    <button id="tourskip" title="Skip this one">→</button>
+    <button id="tourclose" title="Stop the tour">✕</button></div>
+  <div class="tt" id="tourtitle"></div>
+  <div class="ts" id="toursay"></div>
+  <div class="td" id="tourdo"></div>
+  <div class="tdone" id="tourdonewrap" hidden><button id="tourdone">Done</button></div>
+  <span class="bar"><i id="tourfill" style="width:0%"></i></span>
+</div>
+<div id="tourring" hidden></div>

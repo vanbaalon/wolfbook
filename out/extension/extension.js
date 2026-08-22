@@ -205,6 +205,9 @@ async function activate(context) {
     // ── Evaluate Selection ─────────────────────────────────────────────────
     const evalSel = require('./editor/evaluateSelection');
     evalSel.register(context, () => _controllerResolver(), _watchPanel);
+    // The client id is assigned further down in activate(); pass a getter so the
+    // copied reference can name the window the MCP tools route on.
+    require('./editor/cell-reference').register(context, () => _clientId);
     require('./execution/global-symbols').register(context);
 
     // ── WL Code Formatter ──────────────────────────────────────────────────

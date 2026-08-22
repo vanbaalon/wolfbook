@@ -51,6 +51,7 @@ const state = {
     review: null,             // {pending, groups, census, focus} — the agent's changes
     hints: { left: { pages: 3, chip: 3 }, dwellMs: HINT_DWELL_DEFAULT },
     hintText: '',             // the page hint, kept when the attribute is taken away
+    tour: null,               // {index,total,id,title,say,doIt,done,point} — the tour card
 };
 
 const el = (id) => document.getElementById(id);
@@ -994,6 +995,64 @@ function snapToInk(hit) {
 // pending. Every button posts a verdict and waits to be told the new state —
 // nothing here decides anything locally, because the session in the extension
 // is the only thing that knows what "kept" means for the text.
+
+// --- the tour ---------------------------------------------------------------
+//
+// The card only DRAWS. What counts as having done a step, and what comes next,
+// is decided in the extension from the messages this panel already posts — so
+// the tour cannot claim a gesture the rest of the panel did not actually see.
+
+function renderTour() {
+    const card = el('tour');
+    const ring = el('tourring');
+    if (!card) return;
+    const t = state.tour;
+    if (!t) {
+        card.hidden = true;
+        if (ring) ring.hidden = true;
+        return;
+    }
+    card.hidden = false;
+    el('tourstep').textContent = `${t.index + 1} of ${t.total}`;
+    el('tourtitle').textContent = t.title || '';
+    el('toursay').textContent = t.say || '';
+    // The platform's own word for the key, so the instruction is followable.
+    const isMac = /Mac|iP(hone|ad)/.test(navigator.platform || navigator.userAgent || '');
+    el('tourdo').textContent = isMac ? (t.doIt || '')
+        : String(t.doIt || '').replace(/Cmd-click \(Ctrl on Windows\)/, 'Ctrl-click');
+    const wrap = el('tourdonewrap');
+    if (wrap) {
+        wrap.hidden = !t.done;
+        if (t.done) el('tourdone').textContent = t.done;
+    }
+    const fill = el('tourfill');
+    if (fill) fill.style.width = `${Math.round((t.index / Math.max(1, t.total)) * 100)}%`;
+    placeTourRing(t.point);
+}
+
+/** Point at the control a step names, without ever swallowing a press. */
+function placeTourRing(selector) {
+    const ring = el('tourring');
+    if (!ring) return;
+    const target = selector ? document.querySelector(selector) : null;
+    const r = target && target.getBoundingClientRect();
+    if (!r || !r.width || !r.height || target.hidden ||
+        getComputedStyle(target).display === 'none') { ring.hidden = true; return; }
+    ring.hidden = false;
+    ring.style.left = `${r.left - 3}px`;
+    ring.style.top = `${r.top - 3}px`;
+    ring.style.width = `${r.width + 6}px`;
+    ring.style.height = `${r.height + 6}px`;
+}
+
+function tourAct(action) { vscode.postMessage({ type: 'tourAction', action }); }
+
+function wireTour() {
+    const skip = el('tourskip'); if (skip) skip.onclick = () => tourAct('skip');
+    const close = el('tourclose'); if (close) close.onclick = () => tourAct('close');
+    const done = el('tourdone'); if (done) done.onclick = () => tourAct('next');
+    window.addEventListener('resize', () => { if (state.tour) placeTourRing(state.tour.point); });
+}
 
 function reviewHunks() {
     const r = state.review;
@@ -2783,6 +2842,7 @@ for (const [id, action] of [['reviewprev', 'prev'], ['reviewnext', 'next'],
     const b = el(id);
     if (b) b.addEventListener('click', (e) => { e.stopPropagation(); reviewAct(action, {}); });
 }
+wireTour();
 el('diffprev').addEventListener('click', () => stepHunk(-1));
 el('diffnext').addEventListener('click', () => stepHunk(1));
 el('diffclose').addEventListener('click', () => {
@@ -3180,6 +3240,11 @@ window.addEventListener('message', async (ev) => {
         case 'review':
             state.review = msg.session || null;
             renderReview();
+            if (state.tour) placeTourRing(state.tour.point);
+            break;
+        case 'tour':
+            state.tour = msg.step || null;
+            renderTour();
             break;
         case 'reviewOpen':
             if (state.review) { document.body.classList.add('reviewing'); renderReview(); }

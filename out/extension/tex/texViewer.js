@@ -28,6 +28,7 @@ const { sectionSpans } = require('./texModel');
 const { MATH_ENVS } = require('./texScanner');
 const { readAuxLabels } = require('./auxLabels');
 const { buildLabelChips, formatLabelCopy, altFormat } = require('./labelChips');
+const { stepAt, satisfies } = require('./tourSteps');
 
 /**
  * THE EQUATION NUMBER IS NOT PART OF THE EQUATION.
@@ -58,6 +59,7 @@ const { buildLabelChips, formatLabelCopy, altFormat } = require('./labelChips');
  * a hint budget is not worth a setting, and "after each restart" is exactly
  * what the reader asked for.
  */
+const TOUR_KEY = 'wolfbook.tex.tour';
 const HINT_BUDGET = { pages: 3, chip: 3 };
 const hintsLeft = { ...HINT_BUDGET };
 
@@ -1008,6 +1010,82 @@ class TexViewer {
     // the list identical whether it is answered from the page, the editor's
     // CodeLens, the command palette or the status bar.
 
+    // --- the tour: learned by doing, on the reader's own paper ---------------
+    //
+    // Opened once, the first time a paper is shown, and never again unless it
+    // is asked for. Each step advances when the READER PERFORMS THE GESTURE —
+    // the panel already reports every one of them — so a reader who abandons
+    // the tour halfway has still done the half they saw.
+
+    get _tourState() {
+        const g = this.context && this.context.globalState;
+        const v = (g && g.get(TOUR_KEY)) || {};
+        return { at: Number(v.at) || 0, done: !!v.done, started: !!v.started };
+    }
+
+    _tourSave(next) {
+        const g = this.context && this.context.globalState;
+        if (!g) return;
+        try { g.update(TOUR_KEY, { ...this._tourState, ...next }); } catch (_) { /* not fatal */ }
+    }
+
+    /** What this paper can actually demonstrate right now. */
+    _tourContext() {
+        const st = this.root && this.coord.roots.get(this.root);
+        let hasLabels = false;
+        try {
+            const model = st && this._modelFor2(this.root);
+            hasLabels = !!(model && model.objects.some(o => o.label || (o.kind === 'label' && o.name)));
+        } catch (_) { hasLabels = false; }
+        return { hasLabels, hasReview: !!(this._review && this._review.sessionFor(this.root)) };
+    }
+
+    /** Begin (or resume) the tour. `restart` starts it from the top again. */
+    startTour(restart = false) {
+        if (restart) this._tourSave({ at: 0, done: false, started: true });
+        else this._tourSave({ started: true });
+        this._tourPost();
+    }
+
+    _tourPost() {
+        if (!this.panel) return;
+        const step = stepAt(this._tourState, this._tourContext());
+        this._post({ type: 'tour', step });
+        if (!step) this._tourSave({ done: true });
+    }
+
+    /**
+     * A message came in: if it is what the current step asked for, move on.
+     * Called for the panel's own messages and for `{type:'cursor'}`, which the
+     * forward sync raises — the editor half of the gesture set has no webview
+     * message of its own.
+     */
+    _tourObserve(ev) {
+        const state = this._tourState;
+        if (!state.started || state.done || !this.panel) return;
+        const step = stepAt(state, this._tourContext());
+        if (!step || !satisfies(step, ev)) return;
+        this._tourSave({ at: state.at + 1 });
+        // A beat, so the reader sees the thing they just did happen before the
+        // card moves on to the next one.
+        clearTimeout(this._tourTimer);
+        this._tourTimer = setTimeout(() => this._tourPost(), 550);
+    }
+
+    _tourAction(m) {
+        const state = this._tourState;
+        if (m.action === 'close') {
+            this._tourSave({ done: true });
+            this._post({ type: 'tour', step: null });
+            this._post({ type: 'status', text: 'the tour is in the palette: "WPaper: Show Me Around"', kind: '' });
+            return;
+        }
+        if (m.action === 'skip' || m.action === 'next') {
+            this._tourSave({ at: state.at + 1 });
+            this._tourPost();
+        }
+    }
+
     attachReview(review) { this._review = review; }
 
     /** Is the reader looking at the list right now? (the toast asks) */
@@ -1098,6 +1176,12 @@ class TexViewer {
         // A selection that has MOVED retires whatever the page last made; one
         // that has not keeps its identity however often we are re-asked.
         this._noteSelection(doc, sel);
+        // A caret the READER moved (not one an inverse click just placed) is
+        // the forward-sync gesture, and the only one with no panel message.
+        const ownNow = sel && sel.start && sel.end && this._isOwnSelection(doc, sel);
+        if (!ownNow) {
+            try { this._tourObserve({ type: 'cursor' }); } catch (_) { /* never fatal */ }
+        }
         if (ranged) {
             const own = this._isOwnSelection(doc, sel);
             // A RANGE WE ARE PAINTING RIGHT NOW NEEDS NOTHING FURTHER: the drag
@@ -1941,13 +2025,24 @@ class TexViewer {
     }
 
     async _onMessage(m) {
+        // The tour watches the SAME messages the panel already sends, so what
+        // it teaches and what the reader does are the same event.
+        try { this._tourObserve(m); } catch (_) { /* the tour never breaks the panel */ }
         switch (m.type) {
+            case 'tourAction': this._tourAction(m); return;
             case 'hintShown':
                 if (hintsLeft[m.id] > 0) hintsLeft[m.id] -= 1;
                 break;
             case 'ready':
                 this._postTheme();
                 this._post({ type: 'hints', left: { ...hintsLeft } });
+                // FIRST RUN: the tour opens itself once, after the first page
+                // is on screen — a card over a blank panel teaches nothing.
+                setTimeout(() => {
+                    const t = this._tourState;
+                    if (!t.done && !t.started) this.startTour();
+                    else if (!t.done && t.started) this._tourPost();
+                }, 1200);
                 await this.refresh({ force: true });
                 // The list survives a panel reopen: the session is the truth,
                 // the panel is only its picture.

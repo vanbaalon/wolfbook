@@ -229,6 +229,35 @@ export function activate(context) {
             viewer.render();
         } catch (_) {}
     };
+    // Manipulate results have no stable output id: their inner result is
+    // replaced in place as the slider moves.  Key the camera by Manipulate id
+    // so a defensive rebuild can still restore the reader's rotated viewpoint.
+    const _wl3dManipCamStash = Object.create(null);
+    const _stashManipCamera = (root, manipId) => {
+        if (!_wl3dMod || !manipId) return;
+        try {
+            const entry = _wl3dMod.findViewerIn(root);
+            if (!entry || !entry.viewer) return;
+            const v = entry.viewer;
+            _wl3dManipCamStash[manipId] = {
+                pos: v.camera.position.toArray(),
+                up: v.camera.up.toArray(),
+                target: v.controls.target.toArray(),
+            };
+        } catch (_) {}
+    };
+    const _restoreManipCamera = (viewer, manipId) => {
+        const s = manipId && _wl3dManipCamStash[manipId];
+        if (!s) return;
+        delete _wl3dManipCamStash[manipId];
+        try {
+            viewer.camera.position.fromArray(s.pos);
+            viewer.camera.up.fromArray(s.up);
+            viewer.controls.target.fromArray(s.target);
+            viewer.controls.update();
+            viewer.render();
+        } catch (_) {}
+    };
     const _attachResize = (box, img, root) => {
         import('./wl-img-resize.js')
             .then(m => {
@@ -279,12 +308,48 @@ export function activate(context) {
         t.innerHTML = msg.html || '';
     }
 
+    // The kernel has no registry entry for these sliders and could not rebuild
+    // one. Say so BESIDE the picture, never in place of it: replacing the result
+    // region would throw away whatever the reader is looking at — including a
+    // live 3D viewer and the camera angle they set.
+    function _showManipDead(manipId) {
+        document.querySelectorAll('.wl-manip[data-manip-id="' + manipId + '"]')
+            .forEach(wrap => {
+                if (wrap.querySelector(':scope > .wl-manip-dead')) return;
+                const note = document.createElement('div');
+                note.className = 'wl-manip-dead';
+                note.style.cssText = 'display:flex;align-items:center;gap:8px;margin:2px 0 6px 0;' +
+                    'font-size:12px;opacity:0.85;';
+                const txt = document.createElement('span');
+                txt.textContent = 'Sliders are not connected to the kernel — it restarted.';
+                const btn = document.createElement('button');
+                btn.textContent = 'Re-evaluate cell';
+                btn.style.cssText = 'font-size:11px;padding:1px 8px;cursor:pointer;' +
+                    'color:var(--vscode-button-foreground);' +
+                    'background:var(--vscode-button-background);border:none;border-radius:3px;';
+                btn.addEventListener('click', () => {
+                    btn.disabled = true;
+                    btn.textContent = 'Re-evaluating…';
+                    try { context.postMessage({ type: 'manipulate-reeval', manipId }); } catch (_) {}
+                });
+                note.appendChild(txt); note.appendChild(btn);
+                wrap.insertBefore(note, wrap.firstChild);
+            });
+    }
+    const _clearManipDead = (manipId) => {
+        document.querySelectorAll(
+            '.wl-manip[data-manip-id="' + manipId + '"] > .wl-manip-dead')
+            .forEach(n => n.remove());
+    };
+
     // Patch a Manipulate result region in place and re-wire anything inside it
     // (3D meshes, KaTeX) that would normally be wired by renderOutputItem.
     function _applyManipResult(msg) {
         const targets = document.querySelectorAll(
             '.wl-manip-result[data-manip-id="' + msg.manipId + '"]');
         if (!targets.length) return;
+        if (msg.dead) { _showManipDead(msg.manipId); return; }
+        _clearManipDead(msg.manipId);
         targets.forEach(t => {
             // If this result is already showing a LIVE 3D view and the new frame
             // also has a mesh, swap the geometry inside the existing viewer.
@@ -292,6 +357,7 @@ export function activate(context) {
             // camera back to the default angle — i.e. the plot would appear to
             // jump back to the static image on every slider move.
             const liveEntry = _wl3dMod && _wl3dMod.findViewerIn(t);
+            const keepLive3D = !!liveEntry || msg.format === 'WL3D';
             if (liveEntry) {
                 const nextSrc = _meshSrcIn(msg.html || '');
                 if (nextSrc) {
@@ -312,6 +378,9 @@ export function activate(context) {
                     return;                 // camera, zoom and angle all preserved
                 }
             }
+            // A format change or a failed mesh fetch requires a DOM rebuild.
+            // Save the camera first so it remains visually continuous.
+            if (keepLive3D) _stashManipCamera(t, msg.manipId);
             _replaceManip(t, msg);
             _attachPlotTooltips(t);
             // Give the new frame its own resize grip, and restore whatever width
@@ -330,7 +399,19 @@ export function activate(context) {
             if (meshImgs.length) {
                 const _dark = !(document.body && document.body.classList.contains('vscode-light'));
                 import('./wl3d-viewer.js')
-                    .then(m => { _wl3dMod = m; meshImgs.forEach(i => m.attachLazy3D(i, { dark: _dark })); })
+                    .then(m => {
+                        _wl3dMod = m;
+                        meshImgs.forEach(i => {
+                            const opts = {
+                                dark: _dark,
+                                onReady: viewer => _restoreManipCamera(viewer, msg.manipId),
+                            };
+                            // Selecting 3D must remain sticky as the slider
+                            // changes, rather than reverting to a static poster.
+                            if (keepLive3D) m.mountViewer(i, opts);
+                            else m.attachLazy3D(i, opts);
+                        });
+                    })
                     .catch(() => {});
             }
             const texDivs = t.querySelectorAll('div.vscode-wolfram-tex-output[data-tex-src]');
@@ -1439,6 +1520,34 @@ export function activate(context) {
                 if (sliders.length) {
                     const blk0 = element.querySelector('.wl-output-header[data-output-id]');
                     const outId = blk0 ? blk0.getAttribute('data-output-id') : null;
+                    // Read the format at send time, not at wiring time: the
+                    // header attribute is rewritten in place when the reader
+                    // picks a different output format.
+                    let lastFormat = blk0 ? (blk0.getAttribute('data-output-format') || 'Auto') : 'Auto';
+                    const readFormat = (manipId) => {
+                        const hdr = element.querySelector('.wl-output-header[data-output-id]');
+                        if (hdr) lastFormat = hdr.getAttribute('data-output-format') || lastFormat;
+                        // A kernel restart removes the header row (it is tagged
+                        // with the old session epoch), which would otherwise
+                        // drop a reader's 3D view back to a flat picture on the
+                        // next slider move. What is on screen is the better
+                        // witness: a live viewer or a mesh means WL3D.
+                        const res = element.querySelector(
+                            '.wl-manip-result[data-manip-id="' + manipId + '"]');
+                        if (res && (res.querySelector('img[data-wl-mesh-src]')
+                                    || res.querySelector('canvas'))) return 'WL3D';
+                        return lastFormat;
+                    };
+                    // The Manipulate's own source, base64'd by the kernel onto
+                    // the wrapper. A restarted kernel — or a notebook reopened
+                    // from disk — has no registry entry for these sliders, and
+                    // this is what lets the extension re-register them instead
+                    // of leaving the reader with dead controls.
+                    const readSrc = (manipId) => {
+                        const wrap = element.querySelector(
+                            '.wl-manip[data-manip-id="' + manipId + '"][data-manip-src]');
+                        return wrap ? wrap.getAttribute('data-manip-src') : null;
+                    };
                     const timers = {};
                     const readAll = (manipId) => {
                         const sets = {};
@@ -1459,7 +1568,8 @@ export function activate(context) {
                                 if (context && context.postMessage) {
                                     try {
                                         context.postMessage({ type: 'manipulate-set',
-                                            manipId, sets: readAll(manipId), outputId: outId });
+                                            manipId, sets: readAll(manipId), outputId: outId,
+                                            format: readFormat(manipId), manipSrc: readSrc(manipId) });
                                     } catch (_) {}
                                 }
                             }, 80);
@@ -1644,4 +1754,3 @@ export function activate(context) {
         }
     };
 }
-

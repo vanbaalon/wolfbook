@@ -202,6 +202,31 @@ class WolframNotebookKernel {
         this._id                 = kernelOptions.controllerId || "wolfram-notebook-kernel";
         this._label              = kernelOptions.controllerLabel || "Wolfram Kernel";
         this._claimNotebook      = kernelOptions.claimNotebook || (() => true);
+        // Renderer messages arrive on a channel shared by every kernel, so a
+        // handler that talks to `this.session` must first check that this kernel
+        // is the one bound to the notebook the message came from.
+        this._ownsNotebook = (nb) => {
+            if (!nb) return false;
+            try { return !!this._claimNotebook(nb); } catch (_) { return false; }
+        };
+        // The cell whose stored output carries this Manipulate. A kernel restart
+        // strips the output header (it is tagged with the old session epoch), so
+        // the outputId is gone by the time the sliders need help — the manip id
+        // in the saved HTML is the only handle left.
+        this._findCellByManipId = (nb, manipId) => {
+            if (!nb) return null;
+            const needle = 'data-manip-id="' + manipId + '"';
+            const dec = new TextDecoder();
+            for (let i = 0; i < nb.cellCount; i++) {
+                const cell = nb.cellAt(i);
+                const hit = cell.outputs.some(o => (o.items || []).some(it => {
+                    try { return dec.decode(it.data).includes(needle); }
+                    catch (_) { return false; }
+                }));
+                if (hit) return { cell, index: i };
+            }
+            return null;
+        };
         this._autoQuitWhenUnselected = kernelOptions.autoQuitWhenUnselected !== false;
         this._autoSelectActive = kernelOptions.autoSelectActive !== false;
         this._supportedLanguages = ["wolfram"];
@@ -974,17 +999,64 @@ class WolframNotebookKernel {
                 // hand the new HTML back to the renderer, which patches ONLY the
                 // result region — replacing the whole output would destroy the
                 // slider the user is still dragging.
-                const { manipId, sets, outputId } = message;
+                //
+                // createRendererMessaging() is a channel per RENDERER, not per
+                // controller, so with more than one kernel alive EVERY controller
+                // receives this message. Only the one bound to the sending
+                // notebook holds the Manipulate in its registry; the others would
+                // each answer "no longer live" and post it back, which is what
+                // made the notice flicker between good frames. Ignore the message
+                // unless this kernel owns the notebook it came from.
+                if (!this._ownsNotebook(event.editor?.notebook)) return;
+                const { manipId, sets, outputId, format, manipSrc } = message;
                 if (!/^m[a-z0-9]+$/i.test(manipId)) return;
-                const pairs = Object.entries(sets || {})
+                // The base64 Manipulate source is interpolated into a WL string,
+                // so accept only the base64 alphabet and a sane length.
+                let _manipSrc = (typeof manipSrc === 'string'
+                    && manipSrc.length <= 400000
+                    && /^[A-Za-z0-9+/=]+$/.test(manipSrc)) ? manipSrc : null;
+                // Remember it: the source only has to reach us once, and an
+                // output rendered before this attribute existed can still be
+                // revived after any later render of the same Manipulate.
+                this._manipSrcCache = this._manipSrcCache || new Map();
+                if (_manipSrc) this._manipSrcCache.set(manipId, _manipSrc);
+                else _manipSrc = this._manipSrcCache.get(manipId) || null;
+                if (!_manipSrc) {
+                    // No source on the HTML: this output was rendered before the
+                    // attribute existed. The cell that produced it is still in the
+                    // notebook, so send its code instead — the kernel parses it
+                    // WITHOUT evaluating and lifts the Manipulate out. That is what
+                    // lets an already-saved notebook reconnect its sliders with no
+                    // re-evaluation at all.
+                    const _owner = this._findCellByManipId(event.editor?.notebook, manipId);
+                    if (_owner) {
+                        try {
+                            _manipSrc = Buffer.from(_owner.cell.document.getText(), 'utf8')
+                                .toString('base64');
+                            this._manipSrcCache.set(manipId, _manipSrc);
+                        } catch (_) { /* falls through to the badge */ }
+                    }
+                }
+                // A format name is interpolated into a WL string below.  Accept
+                // only renderer formats rather than trusting webview input.
+                const _manipFormats = new Set([
+                    'Auto', 'InputForm', 'SVG', 'SVGT', 'SVGSrc', 'WL3D',
+                    'WLLatex', 'WLLatex2', 'WLLatexSrc', 'MathML', 'TeX', 'TeXSrc'
+                ]);
+                const _format = _manipFormats.has(format) ? format : 'Auto';
+                const valuePairs = Object.entries(sets || {})
                     .filter(([k, v]) => /^[A-Za-z$][A-Za-z0-9$]*$/.test(k) && Number.isFinite(Number(v)))
                     .map(([k, v]) => `"${k}"->${Number(v)}`);
-                if (!pairs.length) return;
+                if (!valuePairs.length) return;
+                // Keep the kernel call at three arguments for hot-deploy
+                // compatibility. Earlier kernels ignore this reserved value,
+                // while the current one uses it to retain the selected format.
+                const pairs = [...valuePairs, `"__wolfbook_manip_format"->"${_format}"`];
 
                 // Latest-wins: a fast scrub must not queue one kernel call per pixel.
                 this._manipPending = this._manipPending || new Map();
                 this._manipInFlight = this._manipInFlight || new Set();
-                this._manipPending.set(manipId, { pairs, outputId });
+                this._manipPending.set(manipId, { pairs, outputId, format: _format, src: _manipSrc });
                 if (this._manipInFlight.has(manipId)) return;
                 this._manipInFlight.add(manipId);
 
@@ -993,19 +1065,47 @@ class WolframNotebookKernel {
                     while (this._manipPending.has(manipId)) {
                         const job = this._manipPending.get(manipId);
                         this._manipPending.delete(manipId);
-                        const _expr = `VsCodeManipUpdate["${manipId}", <|${job.pairs.join(',')}|>, ${_scale}]`;
+                        const _args = `<|${job.pairs.join(',')}|>, ${_scale}`;
+                        const _run = async (expr) => Promise.race([
+                            this.session.subAuto(expr),
+                            new Promise((_, rej) => setTimeout(
+                                () => rej(new Error('manipulate timeout (30s)')), 30000)),
+                        ]);
                         let raw;
                         try {
-                            raw = await Promise.race([
-                                this.session.subAuto(_expr),
-                                new Promise((_, rej) => setTimeout(
-                                    () => rej(new Error('manipulate timeout (30s)')), 30000)),
-                            ]);
+                            raw = await _run(`VsCodeManipUpdate["${manipId}", ${_args}]`);
+                            // A restarted kernel — or a notebook reopened from
+                            // disk — has no registry entry for these sliders.
+                            // The HTML carries the Manipulate's own source, so
+                            // re-register it under the SAME id rather than
+                            // leaving the reader with dead controls. The body
+                            // may still reference symbols the fresh kernel does
+                            // not have; that surfaces as an ordinary body
+                            // failure, not as a silent success.
+                            if (job.src && raw?.type === 'string'
+                                && String(raw.value).includes('data-wb-manip-dead')) {
+                                if (DEV_MODE) this.outputPanel.print(
+                                    `[Manipulate] ${manipId} not in registry — reviving from source`);
+                                const revived = await _run(
+                                    `VsCodeManipRevive["${manipId}", "${job.src}", ${_args}]`);
+                                if (revived?.type === 'string' && revived.value) raw = revived;
+                            }
                         } catch (e) {
                             if (DEV_MODE) this.outputPanel.print(`[Manipulate] ${e.message}`);
                             break;
                         }
                         if (!raw || raw.type !== 'string' || !raw.value) break;
+                        // Still dead: revive was impossible (no source yet) or it
+                        // failed. Say so WITHOUT sending HTML — posting the notice
+                        // as a result would replace the result region, throwing
+                        // away the picture the reader is looking at (and, with it,
+                        // a live 3D viewer and its camera). The renderer shows this
+                        // as a badge beside the sliders instead.
+                        if (String(raw.value).includes('data-wb-manip-dead')) {
+                            this._rendererMessaging.postMessage(
+                                { type: 'manipulate-result', manipId, dead: true }, event.editor);
+                            break;
+                        }
                         // Same post-processing the normal output path applies, so
                         // images get dimensions and LaTeX boxes become KaTeX.
                         let _html = this._fixImageUris(raw.value);
@@ -1015,11 +1115,27 @@ class WolframNotebookKernel {
                                 undefined, _info?.cell?.notebook?.uri);
                         } catch (_) {}
                         this._rendererMessaging.postMessage(
-                            { type: 'manipulate-result', manipId, html: _html }, event.editor);
+                            { type: 'manipulate-result', manipId, html: _html, format: job.format }, event.editor);
                     }
                 } finally {
                     this._manipInFlight.delete(manipId);
                 }
+
+            } else if (message.type === 'manipulate-reeval' && message.manipId) {
+                if (!this._ownsNotebook(event.editor?.notebook)) return;
+                // The badge's "Re-evaluate" action. After a kernel restart the
+                // output header (and with it the outputId) has been stripped as
+                // stale, so the owning cell is found by looking for the manip id
+                // in the stored output HTML instead.
+                const _mid = String(message.manipId);
+                if (!/^m[a-z0-9]+$/i.test(_mid)) return;
+                const _nb = event.editor?.notebook;
+                const _owner = this._findCellByManipId(_nb, _mid);
+                if (!_owner) return;
+                vscode.commands.executeCommand('notebook.cell.execute', {
+                    ranges: [{ start: _owner.index, end: _owner.index + 1 }],
+                    uri: _nb.uri,
+                }).then(undefined, () => {});
 
             } else if (message.type === 'resize-output' && message.outputId) {
                 // Reader dragged a plot's corner. Persist the new display size by
