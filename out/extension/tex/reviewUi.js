@@ -160,6 +160,8 @@ class ReviewUi {
         }
         s.noteBatch({ source: o.source || 'disk', note: o.note || '' });
         await this.refresh(file, { announce: true });
+        this.output.appendLine(`review: ${o.source || 'disk'} changed ${path.basename(file)} — ` +
+            `${s.pendingCount} change${s.pendingCount === 1 ? '' : 's'} waiting`);
         return s;
     }
 
@@ -167,17 +169,33 @@ class ReviewUi {
     async refresh(file, opts = {}) {
         const s = this.sessions.get(file);
         if (!s) { this.paint(file); this.updateStatus(); this.push(file); return; }
+        // WHICH TEXT IS "NOW" — AND THE RACE THAT MADE THE WHOLE FEATURE
+        // INVISIBLE.
+        //
+        // A write to an open, CLEAN file is noticed by the watcher before VS
+        // Code has finished reloading the buffer, so `doc.getText()` at that
+        // moment is still the text from BEFORE the write. Diffing the baseline
+        // against it found nothing, the empty session was thrown away, and the
+        // pages then quietly changed under the reader with nothing to review —
+        // reported exactly that way. A clean buffer is a copy of the file, so
+        // the file is what to read; only a dirty buffer is ahead of it.
         let text = null;
         const doc = (vscode.workspace.textDocuments || []).find(d => d.uri.fsPath === file);
-        if (doc) text = doc.getText();
-        else {
+        if (doc && doc.isDirty) text = doc.getText();
+        if (text == null) {
             try { text = require('fs').readFileSync(file, 'utf8'); } catch (_) { text = null; }
         }
+        if (text == null && doc) text = doc.getText();
         if (text == null) return;
         try { s.update({ currentText: text, map: this.mapView(file) }); }
         catch (e) { this.output.appendLine(`review: ${e.message}`); }
 
-        if (s.isEmpty) this.sessions.delete(file);
+        // A SESSION IS CLOSED BY BEING FINISHED, NOT BY BEING EARLY. It goes
+        // when it once had changes and now has none — everything was decided.
+        // A session that has never shown one is simply waiting for the buffer
+        // to catch up, and throwing it away is what lost the change.
+        if (s.hunks.length) s._everHad = true;
+        if (s.isEmpty && s._everHad) this.sessions.delete(file);
         this.paint(file);
         this.updateStatus();
         this.push(file);
@@ -479,7 +497,12 @@ class ReviewUi {
             const file = e.document.uri.fsPath;
             const s = this.sessions.get(file);
             if (!s || !e.contentChanges.length) return;
-            if (!this._applying) {
+            // A RELOAD IS NOT THE READER TYPING. When an agent writes the file
+            // and VS Code refreshes a clean buffer, this event describes the
+            // agent's change — mirroring it into the baseline would agree to it
+            // on the reader's behalf and the change would never be seen. Typing
+            // leaves the buffer DIRTY; a reload leaves it clean.
+            if (!this._applying && e.document.isDirty) {
                 for (const c of e.contentChanges) {
                     try { s.noteReaderEdit({ offset: c.rangeOffset, length: c.rangeLength, text: c.text }); }
                     catch (_) { /* an unmirrorable edit is not fatal */ }

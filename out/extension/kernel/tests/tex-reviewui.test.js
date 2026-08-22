@@ -14,11 +14,14 @@
 //   · a CodeLens offers Undo only where undoing is honest
 
 const assert = require('assert');
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const Module = require('module');
 
 // --- the smallest vscode that reviewUi needs --------------------------------
 const decorations = [];
+const changeHandlers = [];
 const commands = new Map();
 let infoPick = null;
 const infoCalls = [];
@@ -44,6 +47,10 @@ function makeDoc(fsPath, text) {
     let lines = text.split('\n');
     return {
         uri: { fsPath, scheme: 'file', path: fsPath },
+        // A CLEAN BUFFER IS A COPY OF THE FILE; only a dirty one is ahead of
+        // it. The review reads the file when the buffer is clean, which is what
+        // makes a change visible before VS Code has finished reloading it.
+        isDirty: false,
         get lineCount() { return lines.length; },
         getText() { return lines.join('\n'); },
         lineAt(i) { return { text: lines[i], range: new Range(i, 0, i, lines[i].length) }; },
@@ -63,7 +70,7 @@ let decorSeq = 0;
 const stub = {
     workspace: {
         getConfiguration: () => ({ get: (k, d) => d }),
-        onDidChangeTextDocument: () => ({ dispose() {} }),
+        onDidChangeTextDocument: (fn) => { changeHandlers.push(fn); return { dispose() {} }; },
         get textDocuments() { return [DOC]; },
         openTextDocument: async () => DOC,
         applyEdit: async (we) => {
@@ -77,6 +84,7 @@ const stub = {
                 lines.splice(from, Math.max(0, to - from), ...insert);
             }
             DOC._setText(lines.join('\n'));
+            DOC.isDirty = true;          // an applied edit is unsaved, as in VS Code
             editsApplied.push(we.parts.length);
             return true;
         },
@@ -126,7 +134,8 @@ const busMod = require('../../tex/reviewBus');
 Module._load = origLoad;
 
 // --- the paper ---------------------------------------------------------------
-const FILE = path.join('/proj', 'p.tex');
+const DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'wb-review-'));
+const FILE = path.join(DIR, 'p.tex');
 const BASE = [
     '\\documentclass{article}',
     '\\begin{document}',
@@ -142,8 +151,11 @@ let pass = 0; let fail = 0;
 const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
 
-function makeUi() {
-    DOC = makeDoc(FILE, AGENT);
+function makeUi(o = {}) {
+    DOC = makeDoc(FILE, o.docText || AGENT);
+    DOC.isDirty = !!o.dirty;
+    fs.writeFileSync(FILE, o.diskText || o.docText || AGENT);
+    changeHandlers.length = 0;
     decorations.length = 0; editsApplied.length = 0; infoCalls.length = 0;
     const posted = [];
     const viewer = {
@@ -178,15 +190,17 @@ test('ONE TOAST PER BATCH THAT CHANGED SOMETHING, and none while the list is on 
     assert.strictEqual(infoCalls.length, 1, 'an empty batch is not worth a toast');
 
     // A second real write joins the same list, and is announced.
-    DOC._setText(AGENT.replace('A second paragraph nobody is arguing about.',
-        'A second paragraph the agent rewrote as well.'));
+    const second = AGENT.replace('A second paragraph nobody is arguing about.',
+        'A second paragraph the agent rewrote as well.');
+    DOC._setText(second); fs.writeFileSync(FILE, second);
     await ui.noteAgentChange({ file: FILE, baseText: BASE });
     assert.strictEqual(infoCalls.length, 2, 'the second write is announced');
     assert.strictEqual(ui.sessionFor(FILE).pendingCount, 2,
         'and BOTH changes are pending — the first was not approved by the second arriving');
 
     viewer.reviewVisible = true;
-    DOC._setText(DOC.getText().replace('\\end{document}', 'One more line.\n\\end{document}'));
+    const third = DOC.getText().replace('\\end{document}', 'One more line.\n\\end{document}');
+    DOC._setText(third); fs.writeFileSync(FILE, third);
     await ui.noteAgentChange({ file: FILE, baseText: BASE });
     assert.strictEqual(infoCalls.length, 2, 'not while the reader is already looking at the list');
 });
@@ -271,6 +285,38 @@ test('the commands are registered and act on the file in front', async () => {
     await stub.commands.executeCommand('wolfbook.tex.reviewUndoAll');
     assert.strictEqual(DOC.getText(), BASE, 'Undo all put the paper back');
     void ui;
+});
+
+test('THE BUFFER HAS NOT CAUGHT UP YET — the change is still found', async () => {
+    // The reported failure: an agent writes the open, clean file; the watcher
+    // notices before VS Code has reloaded the buffer, so the document still
+    // holds the OLD text. Reading the buffer found no difference, the empty
+    // session was thrown away, and the pages changed with nothing to review.
+    const { ui } = makeUi({ docText: BASE, diskText: AGENT });
+    await ui.noteAgentChange({ file: FILE, baseText: BASE, source: 'disk' });
+    const s = ui.sessionFor(FILE);
+    assert.ok(s, 'the session survived');
+    assert.strictEqual(s.pendingCount, 1, 'and the change is in it, read from the file');
+    assert.ok(ui.status.shown, 'the status bar says so');
+});
+
+test('A RELOAD IS NOT THE READER TYPING — it must not move the baseline', async () => {
+    const { ui } = makeUi({ docText: BASE, diskText: BASE });
+    await ui.noteAgentChange({ file: FILE, baseText: BASE, source: 'disk' });
+    // Nothing has changed yet, so nothing is pending; the session waits.
+    assert.strictEqual(ui.sessionFor(FILE).pendingCount, 0);
+
+    // Now the agent's write lands and VS Code refreshes the CLEAN buffer: the
+    // change event describes the agent's edit, not the reader's.
+    fs.writeFileSync(FILE, AGENT);
+    DOC._setText(AGENT);
+    DOC.isDirty = false;
+    for (const fn of changeHandlers) {
+        fn({ document: DOC, contentChanges: [{ rangeOffset: 0, rangeLength: BASE.length, text: AGENT }] });
+    }
+    await ui.refresh(FILE);
+    assert.strictEqual(ui.sessionFor(FILE).pendingCount, 1,
+        'the agent\'s change is pending — the reload did not agree to it');
 });
 
 test('describeHunk says what happened in words', () => {
