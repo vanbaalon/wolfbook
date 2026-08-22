@@ -25,6 +25,7 @@ const { buildComparison, describeSummary } = require('./texCompare');
 const { shipDecision } = require('./livePolicy');
 const { balanceRange, closeFor, commentMask } = require('./texBalance');
 const { sectionSpans } = require('./texModel');
+const { MATH_ENVS } = require('./texScanner');
 const { readAuxLabels } = require('./auxLabels');
 const { buildLabelChips, formatLabelCopy, altFormat } = require('./labelChips');
 
@@ -813,12 +814,72 @@ class TexViewer {
      * asked of the model: a caption is not an object, and the float that
      * contains it cannot say which of its lines are prose.
      */
-    _inCaption(doc, line, column) {
+    /**
+     * THE BRACED RUN OF PROSE A POSITION IS INSIDE, if it is inside one.
+     *
+     * A caption, a section title and the paper's title are all the same shape:
+     * prose written inside `{...}`, possibly over several source lines, which
+     * TeX then typesets as one block and files under a SINGLE line of it. Which
+     * line is not predictable — figure 2's eleven-line caption is filed
+     * entirely under its LAST line, the one holding the closing brace — so
+     * every one of the other lines has no ink of its own and answers "unmapped".
+     *
+     * MEASURED (check-paper.mjs, page 2 of the reference paper): 38 of the 59
+     * failing words posted a highlight with NO RECTANGLES AT ALL. Nothing lit
+     * up, which is the reported "caption of figures does not work"; the same
+     * fact one step earlier is what made a click select the whole float.
+     *
+     * So the unit for these is the BLOCK, not the source line: its rows are the
+     * region to search, and the word's occurrence is counted across it.
+     *
+     * @returns {{startLine:number, endLine:number}|null} 1-based, inclusive
+     */
+    _proseBlock(doc, line, column) {
         try {
-            const from = Math.max(1, line - 30);
+            const from = Math.max(1, line - 40);
             const starts = [];
             let text = '';
-            for (let n = from; n <= Math.min(doc.lineCount, line + 30); n++) {
+            for (let n = from; n <= Math.min(doc.lineCount, line + 40); n++) {
+                starts[n] = text.length;
+                text += doc.lineAt(n - 1).text + '\n';
+            }
+            if (starts[line] == null) return null;
+            const at = starts[line] + Math.max(0, column);
+            const mask = commentMask(text);
+            const lineOf = (off) => {
+                let n = from;
+                for (let k = from; k <= Math.min(doc.lineCount, line + 40); k++) {
+                    if (starts[k] == null || starts[k] > off) break;
+                    n = k;
+                }
+                return n;
+            };
+            const re = /\\(caption|title|part|chapter|section|subsection|subsubsection|paragraph|subparagraph)\*?\s*(\[[^\]]*\])?\s*\{/g;
+            let m;
+            let best = null;
+            while ((m = re.exec(text))) {
+                const open = m.index + m[0].length - 1;
+                if (mask[open]) continue;
+                const close = closeFor(text, mask, open);
+                if (close < 0) continue;
+                if (at <= open || at > close) continue;
+                // The TIGHTEST enclosing one, so a \caption inside a figure
+                // beats nothing and a nested group beats its parent.
+                if (!best || open > best.open) best = { open, close };
+            }
+            if (!best) return null;
+            return { startLine: lineOf(best.open), endLine: lineOf(best.close) };
+        } catch (_) { /* a guess that throws is a guess of no */ }
+        return null;
+    }
+
+    /** Is this position inside a float's caption? Captions are prose. */
+    _inCaption(doc, line, column) {
+        try {
+            const from = Math.max(1, line - 40);
+            const starts = [];
+            let text = '';
+            for (let n = from; n <= Math.min(doc.lineCount, line + 40); n++) {
                 starts[n] = text.length;
                 text += doc.lineAt(n - 1).text + '\n';
             }
@@ -836,6 +897,17 @@ class TexViewer {
             }
         } catch (_) { /* a guess that throws is a guess of no */ }
         return false;
+    }
+
+    /** Every row printed by the lines of a block, as one search region. */
+    _blockRows(st, file, block) {
+        const rows = [];
+        for (let n = block.startLine; n <= block.endLine; n++) {
+            let rs = [];
+            try { rs = st.map.lineRows(file, n) || []; } catch (_) { rs = []; }
+            for (const r of rs) rows.push({ page: r.page, x: r.x, y: r.y, w: r.w, h: r.h, line: n });
+        }
+        return mergeRows(dropStrayRows(clipToSpan(rows)));
     }
     /**
      * The macro table for a document, rebuilt only when the document changes.
@@ -1080,6 +1152,14 @@ class TexViewer {
             // too: the neighbour's row is the region this line's ink is in, and
             // the word name plus its occurrence is what picks it out of it.
             if (!rects.length) rects = this._neighbourRows(st, doc, line);
+            // A CAPTION, A HEADING OR THE TITLE IS FILED UNDER ONE OF ITS OWN
+            // LINES, AND NOT NECESSARILY THIS ONE — see _proseBlock. The block's
+            // rows are where this word's ink is; the word and its occurrence
+            // pick it out of them.
+            if (!rects.length) {
+                const block = this._proseBlock(doc, line, column);
+                if (block) rects = this._blockRows(st, doc.uri.fsPath, block);
+            }
         }
         if (!rects.length) {
             this._post({ type: 'highlight', rects: [], label: `line ${line} · unmapped` });
@@ -1108,7 +1188,9 @@ class TexViewer {
             word: word ? word.word : undefined,
             // Plus whatever a run-in heading printed onto this row before it.
             occurrence: word
-                ? word.occurrence + (glyph ? 0 : this._occurrenceShift(st, doc, line, word.word))
+                ? word.occurrence + (glyph ? 0
+                    : this._occurrenceShift(st, doc, line, word.word,
+                        this._proseBlock(doc, line, column)))
                 : undefined,
             glyph,
             flag: flag === FLAG.FRESH ? 'fresh' : flag === FLAG.STALE ? 'stale' : 'approx',
@@ -1267,11 +1349,28 @@ class TexViewer {
      * lines that run into this one. Case-folded, because the panel's own key is
      * — `The` and `the` are the same word to it, which is the whole trap.
      */
-    _occurrenceShift(st, doc, line, word) {
+    _occurrenceShift(st, doc, line, word, block) {
         if (!word) return 0;
         const file = doc.uri.fsPath;
         const want = String(word).toLocaleLowerCase();
         let shift = 0;
+        // INSIDE A BLOCK, THE WHOLE BLOCK IS COUNTED.
+        //
+        // The region the panel searches is the block's rows, so the occurrence
+        // must be the n-th in the BLOCK — and a caption is longer than the four
+        // lines the general walk-back allows, and its rows may be filed under a
+        // line the walk-back would stop at.
+        if (block && block.startLine < line) {
+            for (let n = block.startLine; n < line; n++) {
+                let words = [];
+                try { words = visibleWords(doc.lineAt(n - 1).text, { macros: this._macrosFor(doc) }) || []; }
+                catch (_) { words = []; }
+                for (const w of words) {
+                    if (!w.inMath && String(w.word).toLocaleLowerCase() === want) shift++;
+                }
+            }
+            return shift;
+        }
         for (let n = line - 1, guard = 0; n >= 1 && guard < 4; n--, guard++) {
             const text = doc.lineAt(n - 1).text;
             if (!text.trim()) break;                       // a paragraph break
@@ -1344,12 +1443,17 @@ class TexViewer {
         // line — measured, the opening mark of a paragraph landed after its
         // first word every time. A line's worth of slack on each side is enough
         // to reach them and not enough to reach the next line's.
+        const block = this._proseBlock(doc, line, column);
         const rows = this._lineIsBlank(doc, line)
             ? [] : this._searchRows(st, file, line);
         // WHOSE INK IS THIS? A line with none of its own borrows a neighbour's
         // row, and a borrowed row cannot be measured against this line's
-        // columns — see the end-mark rule in the panel.
+        // columns — see the end-mark rule in the panel. Block rows are borrowed
+        // too: they belong to the caption or heading, not to this line.
         let borrowed = !rows.length;
+        // A caption's or heading's own line usually has no rows; the block it
+        // belongs to does, and that is the region this word's ink is in.
+        if (!rows.length && block) rows.push(...this._blockRows(st, file, block));
         // A DISPLAY'S OWN LINES USUALLY HAVE NO ROWS — 71% of them on the
         // reference paper — so an end of a selection inside one has nothing to
         // be placed against, and the whole span went unpainted. The object it
@@ -1398,7 +1502,8 @@ class TexViewer {
             own: !borrowed,
             word: w ? w.word : undefined,
             occurrence: w
-                ? w.occurrence + (w.inMath || inMath ? 0 : this._occurrenceShift(st, doc, line, w.word))
+                ? w.occurrence + (w.inMath || inMath ? 0
+                    : this._occurrenceShift(st, doc, line, w.word, block))
                 : undefined,
             glyph: !!(w && w.inMath) || inMath,
             atLineStart: firstCol < 0 || column <= firstCol,
@@ -1773,9 +1878,31 @@ class TexViewer {
     }
 
     /** The object containing a line, in the shape `_objectMap` expects. */
+    /**
+     * The object whose GLYPH ALIGNMENT may answer for this line — maths only.
+     *
+     * The alignment pairs source tokens with printed glyphs and answers with
+     * ONE GLYPH. That is the right unit in a formula, where `x` is a thing a
+     * reader points at, and the wrong one in prose, where the unit is the word.
+     *
+     * This used to accept any object containing the line, and every prose line
+     * is contained in something — its section at the very least. So the
+     * alignment was built for sections and floats, and a click on a prose word
+     * came back as a marker one character wide sitting on its first letter.
+     * MEASURED in the panel that draws it (check-paper.mjs phase C): "essential"
+     * at x=232.7..286.0 was painted at x=232.8..238.7, 5.9 px of a 53 px word.
+     *
+     * `\begin{align}` is a maths environment whose kind is the generic
+     * `environment`, so the kind alone cannot decide it and the environment's
+     * NAME is consulted too.
+     */
     _objectForLine(st, doc, line) {
         const o = st.map.objectAtLine(doc.uri.fsPath, line);
-        return (o && !o.approximate) ? o : null;
+        if (!o || o.approximate) return null;
+        const maths = MATH_KINDS.includes(o.kind) ||
+            (o.envName && MATH_ENVS.has(String(o.envName).replace(/\*$/, ''))) ||
+            (o.envName && MATH_ENVS.has(String(o.envName)));
+        return maths ? o : null;
     }
 
     /**

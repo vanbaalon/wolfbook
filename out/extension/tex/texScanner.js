@@ -677,6 +677,7 @@ function summarise(objects) {
 
 module.exports = {
     scanTex,
+    MATH_ENVS,
     preambleSpan,
     classifyEnv,
     discoverVerbatimEnvs,
