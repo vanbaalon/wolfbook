@@ -2630,8 +2630,34 @@ class TexViewer {
         const clickInMaths = !!(aligned && aligned.inMath) ||
             !!(hit.object && !hit.object.approximate && MATH_KINDS.includes(hit.object.kind));
         if (m.word && m.wordContext && !clickInMaths) {
+            // HOW FAR TO LOOK: AS FAR AS THE THING THE CLICK IS INSIDE.
+            //
+            // The default window is two lines either side, which is the right
+            // size for prose — a paragraph's words are filed within a line or
+            // two of where they print. A CAPTION is not filed that way. TeX
+            // hands the whole of it to ONE source line, and that line is the
+            // LAST one, the one holding the closing brace.
+            //
+            // MEASURED on the reference paper (check-paper.mjs, page 2): the
+            // nine printed rows of figure 2's caption are all filed under line
+            // 220, `for arbitrary $0<s_\alpha<1$.}`, while the word "Adjacent"
+            // that was clicked lives on line 216. Four lines away, so the
+            // window could not reach it, no word resolved, and the click fell
+            // back to the enclosing object — selecting the entire float, lines
+            // 159 to 222. Fifty of that page's sixty-three failures were this.
+            //
+            // So the window becomes the object's own extent whenever the click
+            // is inside one: a caption cannot be filed further away than the
+            // float it belongs to. Display equations keep the narrow window —
+            // they are read glyph by glyph by the alignment, not by context.
+            const encl = hit.object;
+            const reach = (encl && !encl.approximate && !MATH_KINDS.includes(encl.kind) &&
+                Number.isFinite(encl.startLine) && Number.isFinite(encl.endLine))
+                ? Math.max(hit.line - encl.startLine, encl.endLine - hit.line)
+                : 0;
+            const span = Math.min(80, Math.max(2, reach));
             const found = locateByContext(doc.getText().split(/\r?\n/), hit.line,
-                m.word, m.wordContext.before, m.wordContext.after, { macros });
+                m.word, m.wordContext.before, m.wordContext.after, { macros, span });
             if (found) {
                 if (found.line !== hit.line) {
                     hit.line = found.line;

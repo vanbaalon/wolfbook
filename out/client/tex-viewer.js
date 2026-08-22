@@ -1873,9 +1873,28 @@ pagesEl().addEventListener('mousedown', (ev) => {
         hideChipPreview();
         return;
     }
-    dragSel = { moved: false, last: 0 };
-    sendClick(n, pt, ev.clientX - r.left, ev.clientY - r.top, { pick: true });
+    // A PRESS IS NOT YET A DRAG.
+    //
+    // This used to arm the selection here, on the button going down, and the
+    // extension answers an arming pick with `pendingStart` — so the opening red
+    // bracket appeared the instant the button touched the page, before the hand
+    // had moved at all. Reported: "the left red bracket appears on click before
+    // I drag any considerable amount".
+    //
+    // So the press is only REMEMBERED. The anchor is sent by the first move
+    // that travels further than a hand holds still, and it is sent for the
+    // point the press started at — the anchor belongs where the gesture began,
+    // not where it was noticed.
+    dragSel = {
+        moved: false, last: 0, armed: false,
+        downX: ev.clientX, downY: ev.clientY,
+        page: n, pt, ox: ev.clientX - r.left, oy: ev.clientY - r.top,
+    };
 });
+
+// Far enough that no press meant to be a click will cross it, near enough that
+// a deliberate drag arms almost at once. In CSS pixels, squared.
+const DRAG_ARM_PX2 = 5 * 5;
 
 window.addEventListener('mousemove', (ev) => {
     if (dragMove) {
@@ -1895,6 +1914,16 @@ window.addEventListener('mousemove', (ev) => {
         return;
     }
     if (!dragSel) return;
+    // The gesture becomes a selection only once it has actually travelled. The
+    // bracket-adjust drag has no press point of its own — it starts from a
+    // bracket that is already on the page — and arms immediately, as it should.
+    if (!dragSel.armed && dragSel.pt) {
+        const dx = ev.clientX - dragSel.downX;
+        const dy = ev.clientY - dragSel.downY;
+        if (dx * dx + dy * dy < DRAG_ARM_PX2) return;
+        dragSel.armed = true;
+        sendClick(dragSel.page, dragSel.pt, dragSel.ox, dragSel.oy, { pick: true });
+    }
     const now = performance.now();
     if (now - dragSel.last < 60) return;          // one repaint per frame or two
     const wrap = document.elementFromPoint(ev.clientX, ev.clientY);
