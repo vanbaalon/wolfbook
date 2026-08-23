@@ -3112,6 +3112,47 @@ test('NO MAP, NO ANSWER: a failed rebuild clears the page instead of leaving the
     assert.ok(hl && hl.rects.length === 0, 'and so is the old marker');
 });
 
+// --- A RESTORE IS NOT A GESTURE ---------------------------------------------
+
+test('A RESTORING SYNC ASKS FOR AN INSTANT JUMP, A CURSOR MOVE DOES NOT', () => {
+    // Reported: switching between tabs animates the scroll every time. The
+    // paper re-renders and lands where the reader was — they should find it
+    // THERE when they look, not watch it slide into place. Only a caret the
+    // reader actually moved deserves the animation.
+    const v = makeViewer({ file: FILE, line: 5, flag: FLAG.FRESH, object: null },
+        { file: FILE, line: 5, dx: 0, dy: 0, lead: 12 });
+
+    // Only what can actually MOVE the page needs the flag: a post that clears
+    // the last answer paints nothing and scrolls nowhere.
+    const moving = (v) => v.posted.filter(p =>
+        (p.type === 'highlight' && (p.rects || []).length) || (p.type === 'selection' && p.span));
+
+    v.posted.length = 0;
+    v.syncFromEditor(editorAt(5, 3), { instant: true });
+    const restored = moving(v);
+    assert.ok(restored.length, 'something was posted');
+    assert.ok(restored.every(p => p.instant === true),
+        'and every one of them says: do not animate — got ' +
+        JSON.stringify(restored.map(p => ({ type: p.type, instant: p.instant }))));
+
+    v.posted.length = 0;
+    v.syncFromEditor(editorAt(6, 3));
+    const moved = moving(v);
+    assert.ok(moved.length);
+    assert.ok(moved.every(p => !p.instant), 'a plain cursor move animates, as before');
+});
+
+test('a gesture on the page clears a stale restore flag', async () => {
+    // The flag lives on the viewer between syncs, so a click arriving after a
+    // restore must not inherit it and snap the page under the hand.
+    const v = makeViewer({ file: FILE, line: 5, flag: FLAG.FRESH, object: null },
+        { file: FILE, line: 5, dx: 0, dy: 0, lead: 12 });
+    v.syncFromEditor(editorAt(5, 3), { instant: true });
+    assert.strictEqual(v._syncInstant, true);
+    await v._onMessage({ type: 'hintShown', id: 'pages' });
+    assert.strictEqual(v._syncInstant, false, 'any message from the panel is a gesture');
+});
+
 // --- FOLDING A SECTION AWAY -------------------------------------------------
 
 const { foldForCompile } = require('../../tex/collapse');

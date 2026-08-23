@@ -1621,7 +1621,9 @@ async function offerReload(doc, diskText, output) {
             output.appendLine(`  build for Page mode took ${Date.now() - t1} ms`);
         }
         const ed = vscode.window.activeTextEditor;
-        if (ed) viewer.syncFromEditor(ed);
+        // The first sync into a panel that has just opened: land where the
+        // reader is, do not slide there.
+        if (ed) viewer.syncFromEditor(ed, { instant: true });
     });
 
     reg('wolfbook.tex.mergeFromDisk', async () => {

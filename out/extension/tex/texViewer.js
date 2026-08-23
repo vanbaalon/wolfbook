@@ -639,7 +639,7 @@ class TexViewer {
             const st = this.coord.stateFor(doc);
             if (!st || !st.generation) await this.coord.build(doc);
             await this.refresh({ force: true });
-            this.syncFromEditor(vscode.window.activeTextEditor);
+            this.syncFromEditor(vscode.window.activeTextEditor, { instant: true });
         } catch (e) {
             this._post({ type: 'status', text: `could not restore the paper: ${e.message}`, kind: 'err' });
         }
@@ -684,7 +684,7 @@ class TexViewer {
                 // without disturbing the document the webview already holds —
                 // this is the round trip the 'opened' handshake would have
                 // triggered had we shipped.
-                try { this.syncFromEditor(vscode.window.activeTextEditor); } catch (_) { /* best effort */ }
+                try { this.syncFromEditor(vscode.window.activeTextEditor, { instant: true }); } catch (_) { /* best effort */ }
                 this._postEditAnchor().catch(() => { /* no open card */ });
                 // The ink did not move, so the chips are still in the right
                 // PLACES — but the source did, so which line each \ref sits on
@@ -1167,7 +1167,16 @@ class TexViewer {
 
 
     /** Forward sync: highlight the object under the cursor. */
-    syncFromEditor(editor) {
+    /**
+     * @param {object} editor
+     * @param {{instant?: boolean}} [opts]  `instant` when this sync is a
+     *   RESTORE — the panel re-rendering, a reload, a tab coming back — rather
+     *   than an answer to the reader moving the caret. A restore lands where
+     *   the reader was and should be THERE when they look, not slide into
+     *   place; only a gesture deserves the animation.
+     */
+    syncFromEditor(editor, opts = {}) {
+        this._syncInstant = !!opts.instant;
         if (!this.panel || !this.followCursor || !editor) return;
         const doc = editor.document;
         if (!/\.tex$/i.test(doc.uri.fsPath)) return;
@@ -1408,6 +1417,7 @@ class TexViewer {
             glyph,
             flag: flag === FLAG.FRESH ? 'fresh' : flag === FLAG.STALE ? 'stale' : 'approx',
             reveal: !fromClick,
+            instant: !!this._syncInstant,
             title: obj ? obj.stableKey : `line ${line}`,
             label: `${where} · p.${rects[0].page} · ${flag}`,
         });
@@ -1797,6 +1807,7 @@ class TexViewer {
             exact: !!amap.exact,
             flag: flag === FLAG.FRESH ? 'fresh' : flag === FLAG.STALE ? 'stale' : 'approx',
             reveal: Date.now() - this._invertedAt >= 1500,
+            instant: !!this._syncInstant,
             title,
             label: `${what} · p.${g.page} · ${flag}${amap.exact ? ' · exact' : ''}`,
         });
@@ -1969,6 +1980,7 @@ class TexViewer {
             glyph: a.glyph,
             flag: flag === FLAG.FRESH ? 'fresh' : flag === FLAG.STALE ? 'stale' : 'approx',
             reveal: Date.now() - this._invertedAt >= 1500,
+            instant: !!this._syncInstant,
             title: `line ${line}`,
             label: `"${a.word}" · p.${rects[0].page} · ${flag}`,
         });
@@ -2044,6 +2056,7 @@ class TexViewer {
                 lines: endLine - startLine + 1,
             },
             reveal: Date.now() - this._invertedAt >= 1500,
+            instant: !!this._syncInstant,
             // THE LABEL IS THE DIAGNOSTIC. A span that lands on the wrong block
             // is reported as a picture, and the only way to tell a wrong
             // ANSWER from a displaced MAP is to say which lines were asked
@@ -2057,6 +2070,10 @@ class TexViewer {
         // The tour watches the SAME messages the panel already sends, so what
         // it teaches and what the reader does are the same event.
         try { this._tourObserve(m); } catch (_) { /* the tour never breaks the panel */ }
+        // A MESSAGE FROM THE PANEL IS A GESTURE, so whatever follows it is an
+        // answer and animates. Without this a sync could inherit the "instant"
+        // of the restore before it and a click's scroll would snap.
+        this._syncInstant = false;
         switch (m.type) {
             case 'tourAction': this._tourAction(m); return;
             case 'reviewGroup':
@@ -2121,7 +2138,7 @@ class TexViewer {
                 this._chips = null;
                 this._chipModels = null;
                 this._crops.clear();
-                this.syncFromEditor(vscode.window.activeTextEditor);
+                this.syncFromEditor(vscode.window.activeTextEditor, { instant: true });
                 // The mini-editor's block has new geometry too — move the card.
                 this._postEditAnchor().catch(() => {});
                 if (this._labelsWanted) this._postLabels().catch(() => {});

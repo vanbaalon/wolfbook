@@ -341,7 +341,12 @@ async function openDocument(msg) {
                 renderAround(keep.page);
                 restoreAnchor(keep);
             } else if (msg.revealPage) {
-                goToPage(msg.revealPage, msg.revealRects);
+                // A RENDER IS NOT A GESTURE. This runs when the paper is
+                // (re)opened — a tab coming back, a reload, a rebuild — and the
+                // reader is looking at a page that should already BE where they
+                // left it, not slide into place while they wait. Reported:
+                // "switching between tabs animates every time".
+                goToPage(msg.revealPage, msg.revealRects, { smooth: false });
             } else {
                 renderAround(1);
             }
@@ -2112,7 +2117,10 @@ async function paintSelection(span) {
             const top = wrap.offsetTop + (v ? v.y : 0);
             const margin = Math.min(120, main.clientHeight * 0.15);
             if (top < main.scrollTop + margin || top > main.scrollTop + main.clientHeight - margin) {
-                main.scrollTo({ top: Math.max(0, top - main.clientHeight * 0.35), behavior: 'smooth' });
+                main.scrollTo({
+                    top: Math.max(0, top - main.clientHeight * 0.35),
+                    behavior: span.instant ? 'auto' : 'smooth',
+                });
             }
         }
     }
@@ -2201,11 +2209,11 @@ function paintSelectionActions() {
     bar.style.top = `${Math.max(2, top)}px`;
 }
 
-function goToPage(n, rects) {
+function goToPage(n, rects, { smooth = true } = {}) {
     const wrap = pagesEl().querySelector(`.page[data-page="${n}"]`);
     if (!wrap) return;
     renderAround(n);
-    wrap.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    wrap.scrollIntoView({ block: 'start', behavior: smooth ? 'smooth' : 'auto' });
     if (rects) { state.highlight = { page: n, rects, flag: 'target' }; paintHighlight(); }
 }
 
@@ -2220,7 +2228,7 @@ function goToPage(n, rects) {
  * So: paint first, and scroll only when the highlight is actually outside the
  * comfortable middle band of the viewport — then put it there.
  */
-function revealHighlight() {
+function revealHighlight({ smooth = true } = {}) {
     paintHighlight();
     const h = state.highlight;
     const main = document.querySelector('main');
@@ -2243,7 +2251,7 @@ function revealHighlight() {
 
     main.scrollTo({
         top: Math.max(0, top - main.clientHeight * 0.35),
-        behavior: 'smooth',
+        behavior: smooth ? 'smooth' : 'auto',
     });
 }
 
@@ -3346,7 +3354,7 @@ window.addEventListener('message', async (ev) => {
             state.highlight = rects.length
                 ? { page: rects[0].page, rects, flag: msg.flag, title: msg.title }
                 : null;
-            if (state.highlight && msg.reveal) revealHighlight();
+            if (state.highlight && msg.reveal) revealHighlight({ smooth: !msg.instant });
             else paintHighlight();
             if (msg.label) el('where').textContent = msg.label;
             break;
@@ -3358,7 +3366,7 @@ window.addEventListener('message', async (ev) => {
                 for (const box of document.querySelectorAll('.hl')) box.remove();
                 state.highlight = null;
             }
-            await paintSelection(msg.span ? { ...msg.span, reveal: msg.reveal } : null);
+            await paintSelection(msg.span ? { ...msg.span, reveal: msg.reveal, instant: msg.instant } : null);
             if (msg.label) el('where').textContent = msg.label;
             break;
         case 'sections':
