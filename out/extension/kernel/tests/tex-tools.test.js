@@ -424,7 +424,7 @@ async function main() {
         assert.ok(t.includes('/proj/one/paper.tex') && t.includes('/proj/two/paper.tex'));
     });
 
-    await test('paper_mathematicaBlocks classifies without executing', async () => {
+    await test('paper_mathematicaBlocks reports blocks, their cells, and how to run them', async () => {
         const { sha256 } = require('../../tex/texModel');
         const code = 'Plot[x, {x, 0, 1}]';
         const body = '\\begin{figure}\\rule{1cm}{1cm}\\end{figure}';
@@ -442,8 +442,17 @@ async function main() {
         assert.strictEqual(r.total, 2);
         assert.strictEqual(r.byState.fresh, 1);
         assert.strictEqual(r.byState['no-output'], 1);
-        assert.ok(/Stage 4/.test(r.note), 'the tool says execution is not available');
+        assert.ok(/WPaper/.test(r.note), 'the tool says where a block can be run');
         assert.strictEqual(r.blocks[0].code, undefined, 'code is opt-in');
+        // A block is an ordered list of cells; the block-level state is their
+        // roll-up. An agent that can only see the roll-up cannot tell which
+        // half of a two-cell computation went stale.
+        assert.strictEqual(r.blocks[0].cells.length, 1);
+        assert.strictEqual(r.blocks[0].cells[0].kind, 'wolfram');
+        assert.strictEqual(r.blocks[0].cells[0].include, true);
+        assert.strictEqual(r.blocks[0].cells[0].hasOutput, true);
+        assert.strictEqual(r.blocks[0].cells[0].code, undefined, 'cell code is opt-in too');
+        assert.strictEqual(r.blocks[1].cells[0].hasOutput, false);
     });
 
     // ---- diagnostics ------------------------------------------------------

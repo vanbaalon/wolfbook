@@ -2020,7 +2020,14 @@ async function activate(context) {
     // tools read. Never fatal: a .tex feature failing must not stop the
     // notebook extension from activating.
     try {
-        require('./tex/index').registerTexSupport(context);
+        // The kernel goes in so that a managed %Mathematica computation in a
+        // paper can actually run. _resolveController carries .manager, which is
+        // what binds a kernel to a .tex path — the same mechanism, and the same
+        // persistence, a notebook uses.
+        require('./tex/index').registerTexSupport(context, {
+            resolveController: _resolveController,
+            kernelManager,
+        });
     } catch (texErr) {
         console.error('[wolfbook] TeX support failed to register:', texErr && texErr.message);
     }

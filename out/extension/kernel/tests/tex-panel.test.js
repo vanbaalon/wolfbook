@@ -136,13 +136,64 @@ test('THE MINI-EDITOR SELECTION IS NOT OPAQUE — an opaque one erases the code'
     assert.ok(/box-shadow:\s*inset|outline:/.test(sel[1]), 'it draws an outline');
 });
 
+test('every message the client posts has a handler in the extension', () => {
+    // The two halves talk over postMessage, so a typo on either side fails
+    // SILENTLY — the click simply does nothing, and there is no error anywhere
+    // to notice. The wire is small enough to check exhaustively, so it is.
+    const js = fs.readFileSync(CLIENT_JS, 'utf8');
+    const viewer = fs.readFileSync(
+        path.join(__dirname, '../../tex/texViewer.js'), 'utf8');
+
+    const sent = new Set();
+    for (const m of js.matchAll(/postMessage\(\{\s*type:\s*'([a-zA-Z]+)'/g)) sent.add(m[1]);
+    // sendClick takes its type as a parameter, with 'click' as the default.
+    for (const m of js.matchAll(/sendClick\([^;]*?,\s*'([a-zA-Z]+)'\s*\)/g)) sent.add(m[1]);
+    sent.add('click');
+
+    const handled = new Set();
+    for (const m of viewer.matchAll(/case '([a-zA-Z]+)':/g)) handled.add(m[1]);
+
+    const orphans = [...sent].filter(t => !handled.has(t));
+    assert.deepStrictEqual(orphans, [],
+        'the client posts these and nothing answers them: ' + orphans.join(', '));
+    assert.ok(sent.has('insertCommit') && sent.has('mmaRun'),
+        'the computation gesture is really in the client (the check would pass vacuously otherwise)');
+});
+
+test('the client really parses as an ES module', () => {
+    // `node --check` does NOT catch duplicate lexical declarations in an ES
+    // module. That gap already cost this project a whole feature once: a
+    // `const meta` / `let meta` clash passed the syntax check and made the 3D
+    // viewer fail to import, silently, everywhere (CLAUDE.md, "Traps that cost
+    // real time here"). A module parse catches it; the browser harness catches
+    // it too, but only on a machine with Chrome, and this gate runs everywhere.
+    //
+    // Spawned with the flag rather than relying on this process having it:
+    // run-all.js spawns each suite as a plain `node file.js`, so a check that
+    // needed the flag would silently skip — and a test that always passes is
+    // worse than no test at all.
+    const { spawnSync } = require('child_process');
+    const res = spawnSync(process.execPath, ['--experimental-vm-modules', '-e', `
+        const vm = require('vm'); const fs = require('fs');
+        new vm.SourceTextModule(fs.readFileSync(process.argv[1], 'utf8'));
+    `, CLIENT_JS], { encoding: 'utf8' });
+    assert.strictEqual(res.status, 0,
+        'out/client/tex-viewer.js does not parse as a module:\n' +
+        String(res.stderr || '').split('\n').slice(0, 6).join('\n'));
+});
+
 test('the mini-editor card is draggable by its title, and steps between blocks', () => {
     const js = fs.readFileSync(CLIENT_JS, 'utf8');
     const shell = fs.readFileSync(SHELL, 'utf8');
     assert.ok(/function makeDraggable\(/.test(js), 'the drag handler exists');
-    assert.ok(/makeDraggable\(card, head\)/.test(js), 'and is wired to the HEADER, not the card');
-    assert.ok(/state\.edit\.pos = \{ fx:/.test(js),
+    assert.ok(/makeDraggable\(card, head[,)]/.test(js), 'and is wired to the HEADER, not the card');
+    // The position is a FRACTION of the page, so zoom cannot strand it. Both
+    // cards share one drag handler, so the fraction is now stored on whichever
+    // session that handler was given rather than on state.edit by name.
+    assert.ok(/e\.pos = \{ fx: left \/ W, fy: top \/ H \}/.test(js),
         'the position is remembered as a fraction of the page, so zoom cannot strand it');
+    assert.ok(/get: \(\) => state\.edit/.test(js) && /get: \(\) => state\.mma/.test(js),
+        'and both cards supply their own session to the shared handler');
     assert.ok(/\.ec-head\s*\{[^}]*user-select:none/.test(shell),
         'dragging the header must not select its text');
     assert.ok(/type: 'editStep'/.test(js), 'the card posts block steps');

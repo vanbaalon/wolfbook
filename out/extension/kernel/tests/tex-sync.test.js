@@ -3426,6 +3426,20 @@ test('EVERY EQUATION AND HEADING CARRIES A TAG THAT NAMES ITS PLACE', async () =
     const head = items.find(i => i.kind === 'section');
     assert.ok(head.foldable, 'a heading can be folded');
     assert.strictEqual(head.line, head.headStart);
+
+    // AN EQUATION'S TAG IS PLACED, NOT MEASURED PAST ITS ROW.
+    //
+    // The panel puts a cluster at `x + w + 6`, which for a heading is the empty
+    // rest of its line and for a display equation is the MIDDLE OF THE FORMULA
+    // — reported with a screenshot of tags sitting on the maths. The extension
+    // therefore sends a final x in the label badges' own margin column.
+    assert.ok(Number.isFinite(eq.anchorX),
+        'the equation carries a placed x, not just its row');
+    assert.ok(eq.anchorX > eq.x + eq.w,
+        `and it is past the formula (${eq.anchorX} vs ink ending ${eq.x + eq.w})`);
+    // A heading keeps the old rule, which was never wrong for it.
+    assert.strictEqual(head.anchorX, undefined,
+        'a heading is still placed just past its title');
 });
 
 test('THE TAG COPIES path:line — THE POINT OF THE WHOLE THING', async () => {

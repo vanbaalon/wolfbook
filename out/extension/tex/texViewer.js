@@ -28,8 +28,14 @@ const { sectionSpans } = require('./texModel');
 const collapse = require('./collapse');
 const { MATH_ENVS } = require('./texScanner');
 const { readAuxLabels } = require('./auxLabels');
-const { buildLabelChips, formatLabelCopy, altFormat } = require('./labelChips');
+const { buildLabelChips, formatLabelCopy, altFormat,
+    blockOf, inColumn, tagRows, rowsOver, CHIP_H } = require('./labelChips');
 const { stepAt, satisfies } = require('./tourSteps');
+const mmaBlocks = require('./mmaBlocks');
+const mmaWrite = require('./mmaWrite');
+const { announceAgentEdit } = require('./reviewBus');
+const { checkWritable } = require('./diskGuard');
+const { TexComputeService } = require('./texCompute');
 
 /**
  * THE EQUATION NUMBER IS NOT PART OF THE EQUATION.
@@ -462,10 +468,17 @@ class TexViewer {
      * @param {import('./renderUi').RenderCoordinator} coord
      * @param {import('./index').Projection} projection
      */
-    constructor(context, coord, projection) {
+    constructor(context, coord, projection, deps = {}) {
         this.context = context;
         this.coord = coord;
         this.projection = projection;
+        // Managed computations. Constructed even when this window has no kernel
+        // resolver: a paper viewer that cannot compute must still open, fold,
+        // search and edit, so the absence is reported when Run is pressed
+        // rather than by refusing to load.
+        this.compute = new TexComputeService(deps);
+        this._mma = null;          // the open computation card's session
+        this._runs = null;         // cellId -> the last result, session-only
         this.panel = null;
         this.root = null;          // the root .tex this panel is showing
         // The generation whose BYTES the webview holds — not simply the newest
@@ -473,7 +486,12 @@ class TexViewer {
         // advance when a document actually crossed into the panel.
         this.shownGeneration = null;
         this.shownPdfHash = null;
-        this.followCursor = true;
+        // FOLLOW IS TWO THINGS, and conflating them cost the reader a choice
+        // they wanted: 'mark' shows where the caret is WITHOUT moving the
+        // page, which is what you want while editing prose beside the paper;
+        // 'scroll' also brings that place into view; 'off' ignores the editor.
+        // The old boolean could only say off-or-both.
+        this.followMode = 'scroll';   // 'off' | 'mark' | 'scroll'
         this.shownAnything = false;
         this._ladder = null;       // {page, xBp, yBp, items, index, file}
         this._invertedAt = 0;      // when the reader last clicked IN the PDF
@@ -491,6 +509,8 @@ class TexViewer {
         // actually held Shift. Pushing it on every live rebuild would ship a
         // payload nobody is looking at, several times a minute.
         this._moveTarget = null;   // where a dragged selection would land
+        this._editStack = [];      // recent edit places, newest first
+        this._editStackAt = 0;     // which one the footer is parked on
         this._crops = new Map();   // `${generation}|${key}` -> {dataUrl,w,h}
         this._cropWaits = new Map();
         this._cropSeq = 0;
@@ -502,6 +522,12 @@ class TexViewer {
     }
 
     get visible() { return !!this.panel; }
+
+    /** Does the caret still get a mark on the page? */
+    get followCursor() { return this.followMode !== 'off'; }
+
+    /** May the page move itself to show it? */
+    _mayScroll() { return this.followMode === 'scroll'; }
 
     get _webviewOptions() {
         return {
@@ -574,6 +600,16 @@ class TexViewer {
             }
             this.panel = null;
             this.shownGeneration = null;
+            // Results that were never inserted are SESSION-ONLY by design: the
+            // .tex is the single source of truth for what this paper contains,
+            // and an exploratory result that outlived the panel showing it
+            // would be a second, invisible one.
+            this._mma = null;
+            this._runs = null;
+            clearTimeout(this._mmaRefresh);
+            this._editStack = [];
+            this._editStackAt = 0;
+            clearTimeout(this._editStackPost);
             // A future panel is a different webview holding nothing.
             this.shownPdfHash = null;
             this.shownAnything = false;
@@ -593,6 +629,14 @@ class TexViewer {
             for (const d of this._disposables.splice(0)) { try { d.dispose(); } catch (_) {} }
         });
         panel.webview.onDidReceiveMessage((m) => this._onMessage(m));
+        // EVERY change to a .tex, not just the one an open card is tracking:
+        // the footer's worklist is about where the reader has been working,
+        // which is most of the time nowhere near a card. Disposed with the
+        // panel, so a closed viewer costs nothing.
+        this._disposables.push(vscode.workspace.onDidChangeTextDocument((e) => {
+            if (!e || !e.contentChanges || !e.contentChanges.length) return;
+            try { this._noteEdit(e.document, e.contentChanges); } catch (_) { /* never fail a keystroke */ }
+        }));
         // THE THEME COMES FROM VS CODE, NOT FROM THE WEBVIEW'S GUESS.
         //
         // A webview can read `prefers-color-scheme`, but that is the
@@ -791,7 +835,8 @@ class TexViewer {
         this.shownAnything = true;
         // What the webview now holds — the key the next refresh compares.
         this.shownPdfHash = st.generation.pdfHash || null;
-        this._post({ type: 'setFollow', value: this.followCursor });
+        this._post({ type: 'setFollow', mode: this.followMode });
+        this._postEditStack();
         // SAY WHEN THE PAGE IS ONE PASS BEHIND ITSELF.
         //
         // A new \label prints `??` until the .aux this run wrote has been read
@@ -1478,7 +1523,7 @@ class TexViewer {
                 : undefined,
             glyph,
             flag: flag === FLAG.FRESH ? 'fresh' : flag === FLAG.STALE ? 'stale' : 'approx',
-            reveal: !fromClick,
+            reveal: !fromClick && this._mayScroll(),
             instant: !!this._syncInstant,
             title: obj ? obj.stableKey : `line ${line}`,
             label: `${where} · p.${rects[0].page} · ${flag}`,
@@ -1868,7 +1913,7 @@ class TexViewer {
             word, occurrence,
             exact: !!amap.exact,
             flag: flag === FLAG.FRESH ? 'fresh' : flag === FLAG.STALE ? 'stale' : 'approx',
-            reveal: Date.now() - this._invertedAt >= 1500,
+            reveal: this._mayScroll() && Date.now() - this._invertedAt >= 1500,
             instant: !!this._syncInstant,
             title,
             label: `${what} · p.${g.page} · ${flag}${amap.exact ? ' · exact' : ''}`,
@@ -2041,7 +2086,7 @@ class TexViewer {
             occurrence: a.occurrence,
             glyph: a.glyph,
             flag: flag === FLAG.FRESH ? 'fresh' : flag === FLAG.STALE ? 'stale' : 'approx',
-            reveal: Date.now() - this._invertedAt >= 1500,
+            reveal: this._mayScroll() && Date.now() - this._invertedAt >= 1500,
             instant: !!this._syncInstant,
             title: `line ${line}`,
             label: `"${a.word}" · p.${rects[0].page} · ${flag}`,
@@ -2117,7 +2162,7 @@ class TexViewer {
                 rows,
                 lines: endLine - startLine + 1,
             },
-            reveal: Date.now() - this._invertedAt >= 1500,
+            reveal: this._mayScroll() && Date.now() - this._invertedAt >= 1500,
             instant: !!this._syncInstant,
             // THE LABEL IS THE DIAGNOSTIC. A span that lands on the wrong block
             // is reported as a picture, and the only way to tell a wrong
@@ -2164,7 +2209,10 @@ class TexViewer {
                 if (this._review) this._review.push(this.root);
                 break;
             case 'reviewAction': await this._onReviewAction(m); break;
-            case 'follow': this.followCursor = !!m.value; break;
+            case 'follow':
+                this.followMode = ['off', 'mark', 'scroll'].includes(m.mode) ? m.mode
+                    : (m.value ? 'scroll' : 'off');
+                break;
             case 'recompile': await this.rebuild(); break;
             case 'click': await this._jumpToSource(m); break;
             case 'fullscreen': await this.setFullScreen(m.value); break;
@@ -2279,6 +2327,28 @@ class TexViewer {
             case 'editClose': this._edit = null; break;
             case 'editSave': await this._saveEditDoc(); break;
             case 'editReveal': await this._revealEditRange(); break;
+            case 'editNav': await this._onEditNav(m); break;
+            case 'insertPreview': await this._insertPreview(m); break;
+            case 'insertCommit': await this._insertCommit(m); break;
+            case 'insertCancel':
+                this._insertTarget = null;
+                this._post({ type: 'moveCaret', rects: [] });
+                break;
+            case 'mmaOpenBlock':
+                if (m && m.file && m.blockId) {
+                    await this._openMmaSession(m.file, m.blockId, this.root && this.coord.roots.get(this.root), null);
+                }
+                break;
+            case 'mmaKernels': await this._postKernels(); break;
+            case 'mmaBindKernel': await this._bindKernel(m); break;
+            case 'mmaRun': await this._runMmaCell(m); break;
+            case 'mmaInsertOutput': await this._insertOutput(m); break;
+            case 'mmaChange': await this._applyMmaChange(m); break;
+            case 'mmaSetInclude': await this._setInclude(m); break;
+            case 'mmaClose':
+                this._mma = null;
+                if (this._edit && this._edit.blockId) this._edit = null;
+                break;
             default: break;
         }
     }
@@ -2720,6 +2790,42 @@ class TexViewer {
     }
 
     /**
+     * The nearest legal seam to a point — where whole lines would land.
+     *
+     * THE GAPS ARE THE ANSWER. This replaces "resolve a line, then repair it":
+     * the gaps between the blocks printed on this page ARE the places a block
+     * may land, and the reader is aiming at one of them. Returns null when the
+     * page has nothing to offer — an unmapped region, a page still rendering —
+     * and the caller falls back to line-based reasoning.
+     *
+     * Shared by two gestures: dropping a moved selection, and dropping a new
+     * Mathematica computation. They must agree about where a drop lands, so
+     * they ask the same function rather than each having an opinion.
+     */
+    _blockDropTarget(st, m, doc) {
+        const bounds = this._dropBoundaries(st, doc, m.page);
+        if (!bounds.length) return null;
+        let best = null;
+        for (const b of bounds) {
+            const d = Math.abs(b.y - m.yTopBp);
+            if (!best || d < best.d) best = { b, d };
+        }
+        if (!best) return null;
+        const at = Math.max(0, Math.min(doc.lineCount, best.b.line - 1));
+        const b = best.b;
+        const rects = Number.isFinite(b.x0) && b.x1 > b.x0
+            ? [{ page: b.page, x: b.x0, y: b.y, w: b.x1 - b.x0, h: 0 }]
+            : this._caretRects(st, doc, at + 1, true);
+        return {
+            file: doc.uri.fsPath, block: true,
+            line: at + 1, column: 0,
+            offset: doc.offsetAt(new vscode.Position(at, 0)),
+            label: b.label,
+            rects,
+        };
+    }
+
+    /**
      * Where a drop at this point would put the text.
      *
      * @returns {{file:string, offset:number, line:number, column:number,
@@ -2733,34 +2839,8 @@ class TexViewer {
         const lineIdx = Math.max(0, Math.min(hit.line - 1, doc.lineCount - 1));
 
         if (block) {
-            // THE NEAREST LEGAL BOUNDARY, when the page can offer one.
-            //
-            // This replaces "resolve a line, then repair it": the gaps between
-            // the blocks printed on this page ARE the places a block may land,
-            // and the reader is aiming at one of them. Falls through to the
-            // older line-based reasoning when the page has nothing to offer —
-            // an unmapped region, a page still rendering.
-            const bounds = this._dropBoundaries(st, doc, m.page);
-            if (bounds.length) {
-                let best = null;
-                for (const b of bounds) {
-                    const d = Math.abs(b.y - m.yTopBp);
-                    if (!best || d < best.d) best = { b, d };
-                }
-                if (best) {
-                    const at2 = Math.max(0, Math.min(doc.lineCount, best.b.line - 1));
-                    const b = best.b;
-                    const rects = Number.isFinite(b.x0) && b.x1 > b.x0
-                        ? [{ page: b.page, x: b.x0, y: b.y, w: b.x1 - b.x0, h: 0 }]
-                        : this._caretRects(st, doc, at2 + 1, true);
-                    return {
-                        file: doc.uri.fsPath, block: true,
-                        line: at2 + 1, column: 0,
-                        offset: doc.offsetAt(new vscode.Position(at2, 0)),
-                        rects,
-                    };
-                }
-            }
+            const seam = this._blockDropTarget(st, m, doc);
+            if (seam) return seam;
         }
         if (block) {
             // BETWEEN lines: above the row the pointer is on, or below it once
@@ -3837,6 +3917,142 @@ class TexViewer {
         return items;
     }
 
+    /**
+     * A badge on every managed computation, shown with the label overlay.
+     *
+     * WITHOUT THIS THERE IS NO WAY TO TELL. A managed block is a comment, so it
+     * prints nothing; what appears on the page is its OUTPUT — an ordinary
+     * figure or equation, indistinguishable from one somebody typed. A reader
+     * looking at a plot they generated last week has no way to know it is live,
+     * let alone how to get back to the code. So the badge sits on the OUTPUT,
+     * which is the thing that is actually visible, and clicking it opens the
+     * computation that made it (vision §13: "click figure → generating code").
+     *
+     * A block whose cells are all ephemeral prints nothing at all. It still
+     * gets a badge, anchored to the first printed line after it — otherwise a
+     * computation you are using as a scratchpad becomes invisible the moment
+     * you close its card.
+     */
+    _mmaChips(st) {
+        if (!st || !st.map || !st.map.available) return [];
+        const out = [];
+        const files = (st && st.files && st.files.length) ? st.files : [this.root];
+        for (const file of files) {
+            let doc = null;
+            try { doc = vscode.workspace.textDocuments.find(d => d.uri.fsPath === file) || null; }
+            catch (_) { doc = null; }
+            let text = null;
+            if (doc) text = doc.getText();
+            else { try { text = fs.readFileSync(file, 'utf8'); } catch (_) { continue; } }
+
+            let parsed;
+            try { parsed = mmaBlocks.parseMmaBlocks(text, { file }); }
+            catch (_) { continue; }
+
+            for (const b of parsed.blocks || []) {
+                if (!b.blockId) continue;
+                const at = this._mmaAnchor(st, file, b, text);
+                if (!at) continue;
+                const runnable = b.cells.filter(c => c.kind === 'wolfram').length;
+                out.push({
+                    role: 'mma',
+                    kind: 'mathematica-block',
+                    name: b.blockId,
+                    blockId: b.blockId,
+                    file,
+                    state: b.state,
+                    // What the badge says, and what hovering it explains.
+                    text: '∑' + (runnable > 1 ? ` ${runnable}` : ''),
+                    title: `Mathematica computation · ${b.state} — ${b.stateReason}`
+                        + '\nClick to open it',
+                    at,
+                    side: 'left',
+                });
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Where a computation's badge goes: on its output's ink when it has one,
+     * else beside the first thing printed after it.
+     */
+    _mmaAnchor(st, file, block, text) {
+        const inkOf = (a, b2) => {
+            const rects = this.objectRects(file, a, b2);
+            if (!rects.length) return null;
+            const page = rects[0].page;
+            const same = rects.filter(r => r.page === page);
+            if (!same.length) return null;
+            return {
+                page,
+                x: Math.min(...same.map(r => r.x)),
+                y: Math.min(...same.map(r => r.y)),
+                w: 1,
+                h: Math.max(...same.map(r => r.y + r.h)) - Math.min(...same.map(r => r.y)),
+            };
+        };
+
+        let ink = null;
+        for (const f of block.outputs || []) {
+            ink = inkOf(f.startLine, f.endLine);
+            if (ink) break;
+        }
+        if (!ink) {
+            // Nothing printed by this block. Walk forward to the next line that
+            // IS printed, so the badge lands where the block sits in the paper
+            // rather than nowhere.
+            const total = String(text).split('\n').length;
+            for (let n = block.endLine + 1; n <= Math.min(total, block.endLine + 40); n++) {
+                ink = inkOf(n, n);
+                if (ink) break;
+            }
+        }
+        if (!ink) return null;
+        return {
+            page: ink.page,
+            // Just outside the ink, growing leftwards into the margin — the
+            // same column discipline the label chips keep, so the two overlays
+            // do not fight for the same strip of paper.
+            x: Math.max(6, ink.x - 4),
+            y: ink.y,
+            w: 1,
+            h: Math.min(ink.h, 14),
+            maxW: Math.max(20, ink.x - 10),
+            anchor: 'left',
+        };
+    }
+
+    /**
+     * Where an equation's `≡` tag belongs: the label badges' own column.
+     *
+     * Level with the PRINTED NUMBER when the equation has one — that is where
+     * a reader's eye already goes to identify an equation, and it is where the
+     * badge is — and one chip-height below it, so the two never overlap.
+     */
+    _equationAnchor(st, file, q, fallbackRow) {
+        try {
+            const gen = st.generation;
+            const pageWidth = (gen && gen.pageSize && gen.pageSize.widthBp) || 595.276;
+            const rows = rowsOver((f, line) => st.map.lineRows(f, line),
+                file, q.sourceRange.startLine, q.sourceRange.endLine);
+            if (!rows.length) return null;
+            // The printed number's row when there is one, else the first row.
+            const tags = tagRows(rows, pageWidth);
+            const row = (tags && tags.length) ? tags[0] : rows[0];
+            if (!row) return null;
+            const block = blockOf(
+                (page) => (this._textReady() ? this._text.pages.get(page) : null),
+                row.page, pageWidth);
+            const at = inColumn(row, 'right', block);
+            if (!at) return null;
+            // Below the badge when one is there; level with the number when
+            // the equation is unlabelled and no badge will be drawn.
+            if (q.label) at.y += CHIP_H + 1;
+            return at;
+        } catch (_) { return null; }
+    }
+
     _copyFormat() {
         return vscode.workspace.getConfiguration('wolfbook.tex')
             .get('labelCopyFormat', 'command');
@@ -3927,6 +4143,22 @@ class TexViewer {
                     try { rows = st.map.lineRows(file, q.sourceRange.startLine + 1) || []; } catch (_) { rows = []; }
                 }
                 const row = rows.length ? rows[0] : null;
+                // THE TAG GOES WHERE THE BADGES GO, NOT ON THE EQUATION.
+                //
+                // The panel places a cluster just past the row it is given —
+                // `x + w + 6`. For a heading that is the empty rest of its
+                // line; for a DISPLAY EQUATION the first row is a line of
+                // maths, so "just past it" is the middle of the formula, and
+                // the tag sat on top of the equation it names. Reported with a
+                // screenshot of exactly that.
+                //
+                // The label badges already solved this problem: one column in
+                // the right margin, level with the printed number. The tag now
+                // uses the SAME column — computed by the same two functions,
+                // so the two overlays cannot drift apart — and sits one chip
+                // below the badge, which is where there is room precisely
+                // because the badge is above it.
+                const anchor = this._equationAnchor(st, file, q, row);
                 out.push({
                     key: q.stableKey || `${file}:${q.sourceRange.startLine}`,
                     kind: 'equation',
@@ -3940,11 +4172,15 @@ class TexViewer {
                     spanEnd: q.sourceRange.endLine,
                     collapsed: false,
                     hidden: 0,
-                    page: row ? row.page : null,
+                    page: anchor ? anchor.page : (row ? row.page : null),
                     x: row ? row.x : 0,
-                    y: row ? row.y : 0,
+                    y: anchor ? anchor.y : (row ? row.y : 0),
                     w: row ? row.w : 0,
                     h: row ? row.h : 0,
+                    // Final x, already in the margin column: the panel uses
+                    // this instead of measuring past the row.
+                    anchorX: anchor ? anchor.x : undefined,
+                    anchorMaxW: anchor ? anchor.maxW : undefined,
                 });
             }
         }
@@ -4058,7 +4294,7 @@ class TexViewer {
         if (!this.panel || !this.root) return;
         const st = this.coord.roots.get(this.root);
         if (!st) return;
-        const items = this._labelChips(st);
+        const items = this._labelChips(st).concat(this._mmaChips(st));
         this._post({
             type: 'labels',
             generation: this.shownGeneration,
@@ -4502,6 +4738,15 @@ class TexViewer {
         const text = doc.getText(new vscode.Range(a, b));
         if (text === s.lastText) return;
         s.lastText = text;
+        if (this._mma === s) {
+            // The computation card holds CELLS, not raw text, so it is told
+            // what the block now parses as rather than being handed the source.
+            // Debounced: a keystroke in the .tex fires this on every character
+            // and re-parsing per character would be work nobody sees.
+            clearTimeout(this._mmaRefresh);
+            this._mmaRefresh = setTimeout(() => this._refreshMma().catch(() => {}), 200);
+            return;
+        }
         this._post({
             type: 'editUpdate', editId: s.id, text,
             startLine: a.line + 1, endLine: b.line + 1,
@@ -4539,6 +4784,16 @@ class TexViewer {
         if (!s || !st || !st.map || !st.map.available) return;
         try {
             const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(s.file));
+            // A COMPUTATION CARD RE-ANCHORS DIFFERENTLY, because its block has
+            // no rows of its own — after a recompile it follows its output,
+            // which may well have moved to another page.
+            if (this._mma === s) {
+                const block = this._findBlock(doc, s.blockId);
+                if (!block) return;
+                const rects = this._mmaRects(st, s.file, block, doc, null);
+                if (rects.length) this._post({ type: 'mmaAnchor', blockId: s.blockId, rects });
+                return;
+            }
             const a = doc.positionAt(s.startOffset);
             const b = doc.positionAt(s.endOffset);
             const rects = this._editRects(st, s.file, a.line + 1, b.line + 1);
@@ -4568,6 +4823,792 @@ class TexViewer {
         });
         editor.selection = new vscode.Selection(range.start, range.end);
         editor.revealRange(range, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+    }
+
+    // =======================================================================
+    // MANAGED MATHEMATICA COMPUTATIONS
+    // =======================================================================
+    //
+    // Press the toolbar's ∑+, then click where the computation belongs. The
+    // same blue caret that shows where a moved block would land shows where
+    // this one will, because it IS the same caret and the same seam-finder —
+    // a reader who has learned one gesture has learned both.
+    //
+    // What lands is a comment: `%Mathematica … %EndMathematica`. The paper
+    // still compiles the instant it is inserted, so there is never a moment
+    // where the document is half-valid. Only pressing "insert output" puts
+    // real LaTeX on the page, and only for the cells that asked for it.
+
+    /**
+     * Open a computation from outside the panel — the CodeLens in the .tex.
+     *
+     * The paper has to be on screen for a card to be pinned to it, so this
+     * shows the panel first and says so plainly if it cannot.
+     */
+    async openComputation(file, blockId) {
+        if (!this.panel) {
+            await vscode.commands.executeCommand('wolfbook.tex.openViewer');
+        }
+        if (!this.panel) throw new Error('the paper viewer is not open');
+        const st = this.root && this.coord.roots.get(this.root);
+        await this._openMmaSession(file, blockId, st, null);
+        this.panel.reveal(undefined, true);
+    }
+
+    // =======================================================================
+    // WHERE YOU WERE LAST WORKING
+    // =======================================================================
+    //
+    // The page used to jump to the caret on every keystroke, which is right
+    // when you are reading along and wrong when you are writing — you cannot
+    // keep an eye on a figure three pages away while typing about it. With
+    // `follow` set to `mark` the page stops moving, and this is what replaces
+    // it: a short stack of the places you last edited, walkable from the
+    // footer, so getting back to one is a click rather than a hunt.
+    //
+    // RESOLVING one drops it from the stack and parks on the one before it.
+    // That is what makes the stack a WORKLIST rather than a history: the
+    // things still on it are the things you have not finished with.
+
+    /** How near in space and time two edits have to be to count as one. */
+    static get EDIT_MERGE_LINES() { return 3; }
+    static get EDIT_MERGE_MS() { return 8000; }
+    static get EDIT_STACK_MAX() { return 20; }
+
+    /**
+     * Record a change to a .tex as one entry on the stack.
+     *
+     * Typing is thousands of changes and a reader means ONE place, so a change
+     * near the top entry and soon after it UPDATES that entry instead of
+     * pushing a new one. Without the merge the stack would hold twenty entries
+     * all inside the same sentence and would be useless for going anywhere.
+     */
+    _noteEdit(doc, changes) {
+        if (!doc || !/\.tex$/i.test(doc.uri.fsPath)) return;
+        if (!this.panel) return;
+        const file = doc.uri.fsPath;
+        // Our own writes are edits too — an inserted computation is exactly the
+        // kind of place you want to get back to.
+        let line = 0;
+        for (const c of changes || []) {
+            try { line = Math.max(line, doc.positionAt(c.rangeOffset).line + 1); } catch (_) {}
+        }
+        if (!line) return;
+        const now = Date.now();
+        const top = this._editStack[0];
+        if (top && top.file === file
+            && Math.abs(top.line - line) <= TexViewer.EDIT_MERGE_LINES
+            && now - top.at < TexViewer.EDIT_MERGE_MS) {
+            top.line = line;
+            top.at = now;
+            top.label = this._editLabel(doc, line);
+        } else {
+            this._editStack.unshift({
+                id: ++this._editSeq, file, line, at: now, label: this._editLabel(doc, line),
+            });
+            this._editStack.length = Math.min(this._editStack.length, TexViewer.EDIT_STACK_MAX);
+            // A new edit is the newest thing there is, so that is where the
+            // footer parks — anything else would leave it pointing at history
+            // while you work.
+            this._editStackAt = 0;
+        }
+        clearTimeout(this._editStackPost);
+        this._editStackPost = setTimeout(() => this._postEditStack(), 250);
+    }
+
+    /** What to call an edit's place: the thing it is inside. */
+    _editLabel(doc, line) {
+        const model = this._modelFor(doc);
+        const inside = (model && model.objects || []).filter(o => o.sourceRange
+            && o.sourceRange.startLine <= line && o.sourceRange.endLine >= line);
+        if (inside.length) {
+            inside.sort((a, b) => (a.sourceRange.endLine - a.sourceRange.startLine)
+                - (b.sourceRange.endLine - b.sourceRange.startLine));
+            const l = shortLabel(inside[0]);
+            if (l) return l;
+        }
+        return `line ${line}`;
+    }
+
+    _postEditStack() {
+        if (!this.panel) return;
+        this._post({
+            type: 'editStack',
+            index: this._editStackAt,
+            items: this._editStack.map(e => ({
+                id: e.id,
+                file: path.basename(e.file),
+                line: e.line,
+                label: e.label,
+                at: e.at,
+            })),
+        });
+    }
+
+    /** ◀ ▶ ✓ from the footer. */
+    async _onEditNav(m) {
+        const act = m && m.action;
+        if (act === 'resolve') {
+            const gone = this._editStack.splice(this._editStackAt, 1)[0];
+            if (!gone) return;
+            // Park on the one BEFORE it — the next-most-recent — which is where
+            // the reader was working before the thing they have just finished.
+            this._editStackAt = Math.min(this._editStackAt, Math.max(0, this._editStack.length - 1));
+            this._postEditStack();
+            if (this._editStack.length) await this._gotoEdit(this._editStack[this._editStackAt]);
+            return;
+        }
+        if (act === 'clear') {
+            this._editStack = [];
+            this._editStackAt = 0;
+            this._postEditStack();
+            return;
+        }
+        if (!this._editStack.length) return;
+        if (act === 'prev' || act === 'next') {
+            // ▶ walks towards the NEWEST (index 0), ◀ towards the oldest, which
+            // is the direction the labels read in.
+            const step = act === 'next' ? -1 : +1;
+            this._editStackAt = Math.max(0,
+                Math.min(this._editStack.length - 1, this._editStackAt + step));
+        } else if (act === 'go') {
+            const i = this._editStack.findIndex(e => e.id === m.id);
+            if (i < 0) return;
+            this._editStackAt = i;
+        }
+        this._postEditStack();
+        await this._gotoEdit(this._editStack[this._editStackAt]);
+    }
+
+    /** Show an edit's place on the page, scrolling to it whatever `follow` says. */
+    async _gotoEdit(entry) {
+        if (!entry) return;
+        const st = this.root && this.coord.roots.get(this.root);
+        if (!st || !st.map || !st.map.available) {
+            this._post({ type: 'status', text: 'no render map yet', kind: 'warn' });
+            return;
+        }
+        const rects = this._editRects(st, entry.file, entry.line, entry.line);
+        if (!rects.length) {
+            this._post({ type: 'status', text: `${entry.label} is not on the page`, kind: 'warn' });
+            return;
+        }
+        // ASKED FOR EXPLICITLY, so it scrolls even in `mark` — the reader
+        // pressed a button meaning "take me there". `follow` governs what
+        // happens on its own, not what happens when you ask.
+        this._post({
+            type: 'highlight',
+            rects,
+            flag: 'approx',
+            reveal: true,
+            label: `${entry.label} · p.${rects[0].page}`,
+        });
+    }
+
+    /** Live feedback while the insert gesture is armed. */
+    async _insertPreview(m) {
+        const st = this.root && this.coord.roots.get(this.root);
+        if (!st || !st.map || !st.map.available) return;
+        const hit = this._resolvePoint(st, m);
+        if (!hit || hit.flag === FLAG.UNMAPPED || !hit.file) {
+            this._insertTarget = null;
+            this._post({ type: 'moveCaret', rects: [] });
+            return;
+        }
+        let doc;
+        try { doc = await vscode.workspace.openTextDocument(vscode.Uri.file(hit.file)); }
+        catch (_) { return; }
+        const t = this._blockDropTarget(st, m, doc);
+        this._insertTarget = t;
+        if (!t) { this._post({ type: 'moveCaret', rects: [] }); return; }
+        this._post({
+            type: 'moveCaret', rects: t.rects, block: true,
+            label: `computation here · line ${t.line}`,
+        });
+    }
+
+    /**
+     * Drop a new computation at the seam under the pointer.
+     *
+     * ONE WorkspaceEdit, so one press of undo takes the whole thing back out.
+     */
+    async _insertCommit(m) {
+        const st = this.root && this.coord.roots.get(this.root);
+        this._post({ type: 'moveCaret', rects: [] });
+        if (!st) return;
+        let t = this._insertTarget;
+        this._insertTarget = null;
+        let doc = null;
+        if (m && m.page) {
+            const hit = this._resolvePoint(st, m);
+            if (hit && hit.flag !== FLAG.UNMAPPED && hit.file) {
+                try {
+                    doc = await vscode.workspace.openTextDocument(vscode.Uri.file(hit.file));
+                    t = this._blockDropTarget(st, m, doc) || t;
+                } catch (_) { /* fall back to the preview's answer */ }
+            }
+        }
+        if (!t) {
+            this._post({ type: 'status', text: 'nothing there to attach a computation to', kind: 'warn' });
+            return;
+        }
+        if (!doc || doc.uri.fsPath !== t.file) {
+            try { doc = await vscode.workspace.openTextDocument(vscode.Uri.file(t.file)); }
+            catch (_) { return; }
+        }
+
+        const before = doc.getText();
+        const blockId = this._freshBlockId(before);
+        // The dropped cell materialises by default: you put it there to put
+        // something on the page. Cells added later in the editor do not — they
+        // are working, and working does not belong in a paper.
+        const snippet = mmaWrite.buildBlockText({
+            blockId,
+            cells: [{ kind: 'wolfram', code: '', include: true }],
+        }) + '\n';
+
+        if (!(await this._guardedWrite(doc, 'wpaper.insertComputation',
+            'new Mathematica computation', (we) => {
+                we.insert(doc.uri, doc.positionAt(t.offset), snippet);
+            }))) return;
+
+        this._post({ type: 'status', text: `computation added at line ${t.line}`, kind: 'ok' });
+        await this._openMmaSession(doc.uri.fsPath, blockId, st, m);
+    }
+
+    /**
+     * An id no other block in this file is using.
+     *
+     * Two bytes is four hex characters — the shape the design documents use,
+     * short enough to read in a fence header. Collisions are checked rather
+     * than assumed away, because a duplicate id would silently pair one cell
+     * with another cell's output.
+     */
+    _freshBlockId(text) {
+        const crypto = require('crypto');
+        for (let i = 0; i < 64; i++) {
+            const id = crypto.randomBytes(2).toString('hex');
+            if (!new RegExp(`\\b(?:Block|Cell)ID:\\s*${id}\\b`).test(text)) return id;
+        }
+        return crypto.randomBytes(6).toString('hex');
+    }
+
+    /**
+     * Every write from the viewer goes through here.
+     *
+     * Two guards, and neither is optional:
+     *
+     *  - checkWritable against the bytes ON DISK, because a Dropbox-synced or
+     *    collaborator-edited file can have moved under an open buffer, and
+     *    writing through the buffer would silently discard their change.
+     *  - announceAgentEdit around the edit, because this write goes through the
+     *    open buffer and therefore looks exactly like the reader typing. The
+     *    review mirrors the reader's typing into its own baseline — so without
+     *    the announcement it would agree to this change on their behalf and
+     *    leave nothing to review.
+     */
+    async _guardedWrite(doc, source, note, build) {
+        const baseText = doc.getText();
+        try {
+            const diskText = fs.existsSync(doc.uri.fsPath)
+                ? fs.readFileSync(doc.uri.fsPath, 'utf8') : baseText;
+            const verdict = checkWritable({
+                diskText, baseText, isDirty: doc.isDirty, willSave: false,
+            });
+            if (!verdict.ok) {
+                this._post({
+                    type: 'status', kind: 'err',
+                    text: `not written — ${verdict.reason}`,
+                });
+                return false;
+            }
+        } catch (_) { /* an unreadable file is the editor's problem, not ours */ }
+
+        try { announceAgentEdit({ file: doc.uri.fsPath, baseText, phase: 'begin', source }); }
+        catch (_) { /* announcing is never worth failing an edit */ }
+
+        const we = new vscode.WorkspaceEdit();
+        build(we);
+        let ok = false;
+        try { ok = await vscode.workspace.applyEdit(we); }
+        catch (e) {
+            this._post({ type: 'status', text: `edit failed: ${e.message}`, kind: 'err' });
+        }
+
+        try { announceAgentEdit({ file: doc.uri.fsPath, baseText, phase: 'end', source, note }); }
+        catch (_) { /* likewise */ }
+
+        if (!ok) this._post({ type: 'status', text: 'the edit could not be applied', kind: 'err' });
+        return ok;
+    }
+
+    /** The parsed block with this id, re-read from the document every time. */
+    _findBlock(doc, blockId) {
+        const parsed = mmaBlocks.parseMmaBlocks(doc.getText(), { file: doc.uri.fsPath });
+        return (parsed.blocks || []).find(b => b.blockId === blockId) || null;
+    }
+
+    /** Open the computation card on a block. */
+    async _openMmaSession(file, blockId, st, m) {
+        let doc;
+        try { doc = await vscode.workspace.openTextDocument(vscode.Uri.file(file)); }
+        catch (_) { return; }
+        const block = this._findBlock(doc, blockId);
+        if (!block) return;
+        st = st || (this.root && this.coord.roots.get(this.root));
+
+        const startPos = new vscode.Position(block.startLine - 1, 0);
+        const lines = doc.getText().split(/\r?\n/);
+        const endPos = new vscode.Position(block.endLine - 1, (lines[block.endLine - 1] || '').length);
+        const s = {
+            id: ++this._editSeq,
+            file,
+            blockId,
+            startOffset: doc.offsetAt(startPos),
+            endOffset: doc.offsetAt(endPos),
+            lastText: doc.getText(new vscode.Range(startPos, endPos)),
+        };
+        // The computation card reuses the text card's session slot on purpose:
+        // one tracked range, one offset adjuster. Two independent trackers over
+        // the same document would drift apart and neither would say so.
+        this._edit = s;
+        this._mma = s;
+        this._ensureDocListener();
+
+        const rects = this._mmaRects(st, file, block, doc, m);
+        this._post({
+            type: 'mmaOpen',
+            editId: s.id,
+            blockId,
+            file: path.basename(file),
+            startLine: block.startLine,
+            endLine: block.endLine,
+            cells: block.cells.map(c => this._cellForPanel(c)),
+            state: block.state,
+            stateReason: block.stateReason,
+            rects,
+        });
+        await this._postKernels();
+    }
+
+    /**
+     * Where the computation card is pinned.
+     *
+     * A MANAGED BLOCK PRINTS NOTHING. It is a run of TeX comments, so asking
+     * the render map for its rows returns none — which is why the card first
+     * opened at the top of page 1 whatever the reader had clicked. The block's
+     * own lines are therefore the LAST thing to try, not the first:
+     *
+     *   1. the point that was clicked, when there was one. Nothing is more
+     *      accurate right after a drop, because the map still describes the
+     *      document as it was before the block was inserted;
+     *   2. the block's OUTPUT, which is the part of it that really is on the
+     *      page — the same anchor its badge uses, so the card opens next to
+     *      the figure the badge is attached to;
+     *   3. the first printed line after the block, for one that has no output;
+     *   4. its own lines, in case a future grammar ever prints something.
+     */
+    _mmaRects(st, file, block, doc, m) {
+        if (m && m.page) return [{ page: m.page, x: m.xBp - 2, y: m.yTopBp - 2, w: 4, h: 4 }];
+        if (!st || !st.map || !st.map.available) return [];
+        let text = '';
+        try { text = doc ? doc.getText() : fs.readFileSync(file, 'utf8'); } catch (_) { text = ''; }
+        const at = this._mmaAnchor(st, file, block, text);
+        if (at) return [{ page: at.page, x: at.x, y: at.y, w: 4, h: at.h || 4 }];
+        return this._editRects(st, file, block.startLine, block.endLine);
+    }
+
+    /** One cell, as the panel needs to show it. */
+    _cellForPanel(c) {
+        return {
+            cellId: c.cellId || null,
+            kind: c.kind,
+            code: c.code,
+            include: c.include !== false,
+            state: c.state,
+            stateReason: c.stateReason,
+            hasOutput: c.outputIndex != null,
+        };
+    }
+
+    /** The kernels this paper could run on. */
+    async _postKernels() {
+        const svc = this.compute;
+        if (!svc || !svc.available()) {
+            this._post({ type: 'mmaKernelList', kernels: [], boundId: null, reason: svc ? svc.unavailableReason() : null });
+            return;
+        }
+        const file = this._mma ? this._mma.file : this.root;
+        this._post({ type: 'mmaKernelList', ...svc.kernelsFor(file) });
+    }
+
+    async _bindKernel(m) {
+        const svc = this.compute;
+        if (!svc || !svc.available() || !m || !m.kernelId) return;
+        const file = this._mma ? this._mma.file : this.root;
+        try {
+            await svc.bindKernel(file, m.kernelId);
+            this._post({ type: 'status', text: 'kernel chosen for this paper', kind: 'ok' });
+        } catch (e) {
+            this._post({ type: 'status', text: `could not choose that kernel: ${e.message}`, kind: 'err' });
+        }
+        await this._postKernels();
+    }
+
+    /**
+     * How wide the LaTeX for this paper may be.
+     *
+     * Measured from the printed page when it can be: the modal width of the
+     * prose rows is the text block, which is exactly the number \textwidth
+     * would give. Falls back to a one-column article inside widthFor().
+     */
+    _pageWidthEm(st, file) {
+        let inkWidthBp = 0;
+        try {
+            const widths = [];
+            for (let page = 1; page <= 3; page++) {
+                const onPage = st && st.map ? (st.map.linesOnPage(page, file) || []) : [];
+                for (const n of onPage) {
+                    const rows = (st.map.lineRows(file, n) || []).filter(r => r.page === page);
+                    if (!rows.length) continue;
+                    const w = Math.max(...rows.map(r => r.x + r.w)) - Math.min(...rows.map(r => r.x));
+                    if (w > 0) widths.push(w);
+                }
+                if (widths.length > 40) break;
+            }
+            if (widths.length >= 5) {
+                // The WIDEST prose rows are the full-measure ones; a median
+                // would be dragged down by every short last-line of a
+                // paragraph and would under-report the text block.
+                widths.sort((a, b) => b - a);
+                inkWidthBp = widths[Math.floor(widths.length * 0.1)];
+            }
+        } catch (_) { inkWidthBp = 0; }
+        return this.compute.widthFor({ inkWidthBp }).em;
+    }
+
+    /** Run one cell and send the result back to the card. */
+    async _runMmaCell(m) {
+        const svc = this.compute;
+        const reply = (extra) => this._post({ type: 'mmaResult', runId: m && m.runId, ...extra });
+        if (!svc || !svc.available()) { reply({ error: svc ? svc.unavailableReason() : 'no kernel' }); return; }
+        const s = this._mma;
+        if (!s || !m || typeof m.code !== 'string') { reply({ error: 'nothing to run' }); return; }
+
+        const st = this.root && this.coord.roots.get(this.root);
+        const pageWidthEm = this._pageWidthEm(st, s.file);
+        this._post({ type: 'status', text: 'running…', kind: '' });
+
+        const out = await svc.run(s.file, m.code, {
+            pageWidthEm,
+            prefer: m.prefer === 'figure' ? 'figure' : 'auto',
+            timeoutSeconds: Number(m.timeoutSeconds) || 60,
+            katex: true,
+        });
+
+        if (out.busy) {
+            const op = out.busy.operation_id ? ` (${out.busy.operation_id})` : '';
+            reply({ busy: true, error: `The kernel is busy${op}. Nothing was interrupted — try again when it is free.` });
+            this._post({ type: 'status', text: 'kernel busy', kind: 'warn' });
+            return;
+        }
+        if (out.error) {
+            reply({ error: out.error });
+            this._post({ type: 'status', text: out.error, kind: 'err' });
+            return;
+        }
+
+        const res = out.result;
+        // Held against the CELL SOURCE that produced it. An insert later on
+        // compares this hash with the cell as it stands then, so a result can
+        // never be filed under code that has moved on since.
+        this._runs = this._runs || new Map();
+        const key = m.cellId || '#0';
+        this._runs.set(key, { result: res, sourceHash: mmaBlocks.sha256(m.code), pageWidthEm });
+
+        reply({
+            kind: res.kind,
+            html: res.html,
+            latex: res.latex,
+            text: res.text,
+            svg: res.svg,
+            base64: res.base64,
+            // A figure goes into the paper as a PDF, which a webview cannot
+            // draw; the SVG that came back with it is the preview. When even
+            // that is missing, say so rather than showing an empty box.
+            note: res.note || (res.kind === 'figure' && !res.svg
+                ? 'a PDF figure — no preview available, but it will typeset'
+                : undefined),
+            error: res.kind === 'error' ? res.error : undefined,
+            ms: res.ms,
+            pageWidthEm,
+        });
+        this._post({
+            type: 'status', kind: res.kind === 'error' ? 'err' : 'ok',
+            text: res.kind === 'error' ? res.error : `ran in ${res.ms} ms · broken to ${pageWidthEm} em`,
+        });
+    }
+
+    /**
+     * Put a cell's last result into the paper as managed output.
+     *
+     * Everything that could make this the wrong thing to do is checked first,
+     * and each refusal says what to do instead:
+     *   - the document has moved on since the run;
+     *   - the existing output was edited by hand.
+     */
+    async _insertOutput(m) {
+        const s = this._mma;
+        if (!s || !m) return;
+        const run = this._runs && this._runs.get(m.cellId || '#0');
+        if (!run) {
+            this._post({ type: 'status', text: 'run the cell first', kind: 'warn' });
+            return;
+        }
+        let doc;
+        try { doc = await vscode.workspace.openTextDocument(vscode.Uri.file(s.file)); }
+        catch (_) { return; }
+
+        // ALWAYS RE-PARSE. The card is holding line numbers that may be several
+        // edits old, and writing to a remembered range is how a feature like
+        // this corrupts a document.
+        const block = this._findBlock(doc, s.blockId);
+        if (!block) {
+            this._post({ type: 'status', text: 'that computation is no longer in the file', kind: 'err' });
+            return;
+        }
+        const cell = block.cells.find(c => c.cellId && c.cellId === m.cellId)
+            || (block.cells.length === 1 ? block.cells[0] : null);
+        if (!cell) {
+            this._post({ type: 'status', text: 'that cell is no longer in the file', kind: 'err' });
+            return;
+        }
+        if (cell.sourceHash !== run.sourceHash) {
+            this._post({
+                type: 'status', kind: 'warn',
+                text: 'the code changed since this ran — run it again before inserting',
+            });
+            return;
+        }
+        if (cell.state === mmaBlocks.BLOCK_STATE.MODIFIED_BY_USER) {
+            const choice = await vscode.window.showWarningMessage(
+                'This output was edited by hand since it was generated. Replace it?',
+                { modal: true, detail: 'Your edits to the output will be lost.' },
+                'Replace', 'Keep mine');
+            if (choice !== 'Replace') {
+                this._post({ type: 'status', text: 'kept your version', kind: '' });
+                return;
+            }
+        }
+
+        // A figure needs a file on disk before it has a body to insert.
+        const opts = {
+            label: cell.options && cell.options.label,
+            caption: cell.options && cell.options.caption,
+            name: (cell.options && cell.options.name) || (block.options && block.options.name),
+            inFloat: false,
+        };
+        let built = mmaWrite.bodyForResult(run.result, opts);
+        if (built.needsAsset) {
+            try {
+                const asset = this.compute.writeAsset(s.file, built.needsAsset);
+                built = mmaWrite.bodyForResult(run.result, { ...opts, assetRel: asset.rel });
+            } catch (e) {
+                this._post({ type: 'status', text: `could not write the figure: ${e.message}`, kind: 'err' });
+                return;
+            }
+        }
+        if (built.error) {
+            this._post({ type: 'status', text: built.error, kind: 'err' });
+            return;
+        }
+
+        // A cell that is going to be referred to needs an id, and it needs the
+        // SAME id every time — that is what makes re-inserting a replacement
+        // rather than a second copy.
+        let cellId = cell.cellId;
+        const text = doc.getText();
+        let blockEdit = null;
+        if (!cellId) {
+            cellId = this._freshCellId(text);
+            const dcell = { ...cell, cellId };
+            const doc2 = mmaWrite.toDoc(block);
+            doc2.cells[cell.index] = {
+                kind: dcell.kind, cellId, include: dcell.include !== false,
+                code: dcell.code, options: mmaWrite.trimOptions(dcell.options, new Set(['CellID', 'cellId', 'out', 'Out'])),
+            };
+            blockEdit = mmaWrite.planBlockText(text, block, doc2);
+        }
+
+        const plan = mmaWrite.planInsert(text, block, cell.cellId, built.body, {
+            blockId: block.blockId,
+            // Found by the id it HAS (none, the first time); written with the
+            // id it is being given in the very same edit.
+            writeCellId: cellId,
+        });
+        if (plan.error) {
+            this._post({ type: 'status', text: plan.error, kind: 'err' });
+            return;
+        }
+
+        const ok = await this._guardedWrite(doc, 'wpaper.mathematica',
+            `managed output for ${cellId}`, (we) => {
+                // The fence is written FIRST because it sits below the block:
+                // rewriting the block first would move the offsets the fence
+                // plan was computed against. A WorkspaceEdit applies its edits
+                // against the original document, but keeping them disjoint and
+                // ordered is what makes that safe to rely on.
+                we.replace(doc.uri,
+                    new vscode.Range(doc.positionAt(plan.startOffset), doc.positionAt(plan.endOffset)),
+                    plan.newText);
+                if (blockEdit) {
+                    we.replace(doc.uri,
+                        new vscode.Range(doc.positionAt(blockEdit.startOffset), doc.positionAt(blockEdit.endOffset)),
+                        blockEdit.newText);
+                }
+            });
+        if (!ok) return;
+
+        this._post({
+            type: 'status', kind: 'ok',
+            text: plan.replaced ? 'output updated in the paper' : 'output inserted into the paper',
+        });
+        await this._refreshMma();
+    }
+
+    /**
+     * The reader typed in a cell — write it back into the block.
+     *
+     * The .tex remains the single source of truth: the card holds no state the
+     * document does not, so the block is rewritten from the parse plus this one
+     * changed cell, and everything else about it — the fences below, the other
+     * cells, the header — is reproduced exactly as it was read.
+     */
+    async _applyMmaChange(m) {
+        const s = this._mma;
+        if (!s || !m || typeof m.code !== 'string') return;
+        let doc;
+        try { doc = await vscode.workspace.openTextDocument(vscode.Uri.file(s.file)); }
+        catch (_) { return; }
+        const block = this._findBlock(doc, s.blockId);
+        if (!block) return;
+        const idx = this._cellIndex(block, m.cellId);
+        if (idx < 0) return;
+        if (block.cells[idx].code === m.code) return;      // our own echo
+
+        const text = doc.getText();
+        const bdoc = mmaWrite.toDoc(block);
+        bdoc.cells[idx].code = m.code;
+        const plan = mmaWrite.planBlockText(text, block, bdoc);
+        // Set BEFORE applying: the change event this fires must read as our own
+        // echo, not as an update to push back into the card.
+        s.lastText = plan.newText.replace(/\n$/, '');
+        await this._guardedWrite(doc, 'wpaper.mathematica', 'edited computation', (we) => {
+            we.replace(doc.uri,
+                new vscode.Range(doc.positionAt(plan.startOffset), doc.positionAt(plan.endOffset)),
+                plan.newText);
+        });
+    }
+
+    /**
+     * Turn a cell's output on or off in the paper.
+     *
+     * Turning it OFF deletes the fence in the same edit that records the choice
+     * — so the file never carries an output the reader has just deselected. The
+     * result stays on screen: it is still true, it is simply not in the paper.
+     */
+    async _setInclude(m) {
+        const s = this._mma;
+        if (!s || !m) return;
+        let doc;
+        try { doc = await vscode.workspace.openTextDocument(vscode.Uri.file(s.file)); }
+        catch (_) { return; }
+        const block = this._findBlock(doc, s.blockId);
+        if (!block) return;
+        const idx = this._cellIndex(block, m.cellId);
+        if (idx < 0) return;
+        const cell = block.cells[idx];
+        const include = !!m.include;
+        if ((cell.include !== false) === include) return;
+
+        if (!include && cell.outputIndex != null &&
+            cell.state === mmaBlocks.BLOCK_STATE.MODIFIED_BY_USER) {
+            const choice = await vscode.window.showWarningMessage(
+                'This output was edited by hand. Remove it from the paper?',
+                { modal: true, detail: 'Your edits to the output will be lost.' },
+                'Remove', 'Keep it');
+            if (choice !== 'Remove') { await this._refreshMma(); return; }
+        }
+
+        const text = doc.getText();
+        const bdoc = mmaWrite.toDoc(block);
+        // A cell that is going to be named in a fence needs an id, and a cell
+        // whose flag is no longer the default needs a directive to carry it.
+        if (!bdoc.cells[idx].cellId) bdoc.cells[idx].cellId = this._freshCellId(text);
+        bdoc.cells[idx].include = include;
+        const blockPlan = mmaWrite.planBlockText(text, block, bdoc);
+        const removal = include ? null : mmaWrite.planRemoveOutput(text, block, cell.cellId);
+
+        await this._guardedWrite(doc, 'wpaper.mathematica',
+            include ? 'cell will be materialised' : 'cell no longer materialised', (we) => {
+                // The fence sits BELOW the block, so removing it first keeps
+                // both edits addressing the document they were computed
+                // against — they are disjoint, and ordered lowest-last.
+                if (removal) {
+                    we.replace(doc.uri,
+                        new vscode.Range(doc.positionAt(removal.startOffset), doc.positionAt(removal.endOffset)),
+                        removal.newText);
+                }
+                we.replace(doc.uri,
+                    new vscode.Range(doc.positionAt(blockPlan.startOffset), doc.positionAt(blockPlan.endOffset)),
+                    blockPlan.newText);
+            });
+        await this._refreshMma();
+    }
+
+    /** Which cell a message is about. A one-cell block needs no id. */
+    _cellIndex(block, cellId) {
+        if (cellId) {
+            const i = block.cells.findIndex(c => c.cellId === cellId);
+            if (i >= 0) return i;
+        }
+        return block.cells.length === 1 ? 0 : -1;
+    }
+
+    /** An id no cell in this file is using. */
+    _freshCellId(text) {
+        const crypto = require('crypto');
+        for (let i = 0; i < 64; i++) {
+            const id = crypto.randomBytes(2).toString('hex');
+            if (!new RegExp(`\\b(?:Block|Cell)ID:\\s*${id}\\b`).test(text)) return id;
+        }
+        return crypto.randomBytes(6).toString('hex');
+    }
+
+    /** Re-read the open block and tell the card what changed. */
+    async _refreshMma() {
+        const s = this._mma;
+        if (!s) return;
+        let doc;
+        try { doc = await vscode.workspace.openTextDocument(vscode.Uri.file(s.file)); }
+        catch (_) { return; }
+        const block = this._findBlock(doc, s.blockId);
+        if (!block) { this._post({ type: 'mmaClosed' }); this._mma = null; return; }
+        const startPos = new vscode.Position(block.startLine - 1, 0);
+        const lines = doc.getText().split(/\r?\n/);
+        const endPos = new vscode.Position(block.endLine - 1, (lines[block.endLine - 1] || '').length);
+        s.startOffset = doc.offsetAt(startPos);
+        s.endOffset = doc.offsetAt(endPos);
+        s.lastText = doc.getText(new vscode.Range(startPos, endPos));
+        this._post({
+            type: 'mmaUpdate',
+            blockId: s.blockId,
+            startLine: block.startLine,
+            endLine: block.endLine,
+            cells: block.cells.map(c => this._cellForPanel(c)),
+            state: block.state,
+            stateReason: block.stateReason,
+        });
     }
 
     /** Paint a source line range back onto the pages, within reason. */

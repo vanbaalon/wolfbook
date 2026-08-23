@@ -355,11 +355,20 @@ function makeCodeLensProvider(projection, emitter) {
                 const pos = new vscode.Position(b.startLine - 1, 0);
                 const icon = b.state === BLOCK_STATE.FRESH ? '$(pass)'
                     : b.state === BLOCK_STATE.STALE ? '$(warning)'
-                        : b.state === BLOCK_STATE.MODIFIED_BY_USER ? '$(edit)' : '$(error)';
+                        : b.state === BLOCK_STATE.MODIFIED_BY_USER ? '$(edit)'
+                            : b.state === BLOCK_STATE.NO_OUTPUT ? '$(circle-outline)' : '$(error)';
+                const ephemeral = b.state === BLOCK_STATE.EPHEMERAL;
                 lenses.push(new vscode.CodeLens(new vscode.Range(pos, pos), {
-                    title: `${icon} ${b.state}${b.cellId ? ' · ' + b.cellId : ''}`,
+                    // An ephemeral block is not a problem to be reported, so it
+                    // is offered as an action instead of flagged as a state.
+                    title: ephemeral
+                        ? '$(beaker) open in WPaper'
+                        : `${icon} ${b.state}${b.cellId ? ' · ' + b.cellId : ''}`,
                     command: 'wolfbook.tex.explainBlockState',
-                    arguments: [{ state: b.state, reason: b.stateReason, cellId: b.cellId }],
+                    arguments: [{
+                        state: b.state, reason: b.stateReason, cellId: b.cellId,
+                        blockId: b.blockId, file: doc.uri.fsPath, line: b.startLine,
+                    }],
                 }));
             }
             return lenses;
@@ -893,7 +902,14 @@ function attachPasteLog(channel) {
     for (const l of _pasteLines.splice(0)) { try { channel.appendLine(l); } catch (_) { /* gone */ } }
 }
 
-function registerTexSupport(context) {
+/**
+ * @param {vscode.ExtensionContext} context
+ * @param {{resolveController?: Function, kernelManager?: object}} [deps]
+ *   The kernel, for managed Mathematica computations. Optional: the headless
+ *   tests construct this with no kernel at all, and a paper viewer without one
+ *   is still a paper viewer.
+ */
+function registerTexSupport(context, deps = {}) {
     const cfg = () => vscode.workspace.getConfiguration('wolfbook.tex');
     if (!cfg().get('enable', true)) return null;
 
@@ -1004,10 +1020,20 @@ function registerTexSupport(context) {
         vscode.window.activeTextEditor.selection = new vscode.Selection(pos, pos);
     });
 
-    reg('wolfbook.tex.explainBlockState', (arg) => {
+    reg('wolfbook.tex.explainBlockState', async (arg) => {
+        // Opening the computation IS the explanation: the card shows the code,
+        // the state and the kernel, and offers the thing you would want next.
+        // Falls back to saying what it knows when the paper is not on screen.
+        if (arg && arg.blockId && arg.file) {
+            try {
+                await viewer.openComputation(arg.file, arg.blockId);
+                return;
+            } catch (_) { /* fall through to the description */ }
+        }
+        const label = arg?.cellId ? `"${arg.cellId}" ` : '';
         vscode.window.showInformationMessage(
-            `Managed block ${arg?.cellId ? `"${arg.cellId}" ` : ''}is ${arg?.state}: ${arg?.reason}. ` +
-            'Running managed blocks is not available yet.');
+            `Managed block ${label}is ${arg?.state}: ${arg?.reason}.` +
+            (arg?.blockId ? ' Open the paper in WPaper to run it.' : ''));
     });
 
     reg('wolfbook.tex.askAboutObject', async (arg) => {
@@ -1066,7 +1092,7 @@ function registerTexSupport(context) {
     const status = makeStatusItem(coord, projection);
     context.subscriptions.push(status.item);
 
-    const viewer = new TexViewer(context, coord, projection);
+    const viewer = new TexViewer(context, coord, projection, deps);
 
     // WHAT THE AGENT CHANGED, WAITING FOR A VERDICT (tex/reviewUi.js). The
     // review owns the status bar item, the editor decorations, the CodeLens and

@@ -1,22 +1,38 @@
 // mmaBlocks.js — the managed-computation grammar inside an ordinary .tex.
 //
-// Pure: no vscode, no fs, no kernel, never throws.
-//
-// STAGE 1 PARSES AND CLASSIFIES ONLY. Nothing here executes anything; running
-// these blocks is Stage 4. The point of doing it now is that the state machine
-// is the contract Stage 4 has to honour, and it is far cheaper to get the
-// grammar and the vocabulary right before anything depends on them.
+// Pure: no vscode, no fs, no kernel, never throws. READS ONLY — the canonical
+// writer is tex/mmaWrite.js, deliberately a separate module so that the thing
+// which decides what a block MEANS and the thing which decides how a block is
+// SPELLED cannot drift apart inside one file.
 //
 // The grammar (vision §63), all inside TeX comments so the .tex still compiles
 // on a plain latexmk with no Wolfbook anywhere:
 //
-//   %Mathematica[figure, name -> "branch", format -> PDF]
+//   %Mathematica[notebook, BlockID: 4f2a, name -> "branch"]
+//   %%Markdown[out -> insert, CellID: m1]
+//   % The branch points solve $\operatorname{disc}(g)=0$.
+//   %%Wolfram[CellID: c1, out -> insert, kind -> figure]
 //   %  branchPoints[g_] := NSolve[disc[g] == 0, u];
 //   %  ListPlot[branchPoints /@ gGrid, Joined -> True]
+//   %%Wolfram[out -> none]
+//   %  (* scratch, never reaches the paper *)
 //   %EndMathematica
-//   %WolfbookOutputBegin[CellID: 4f2a, SourceHash: a91c…, OutputHash: 7de1…]
+//   %WolfbookOutputBegin[CellID: c1, BlockID: 4f2a, SourceHash: a91c…, OutputHash: 7de1…]
 //   \begin{figure}[t] … \end{figure}
 //   %WolfbookOutputEnd
+//
+// A block with no %% directive at all is ONE implicit Wolfram cell, which is
+// exactly the Stage-1 shape — every .tex written before multi-cell existed
+// parses identically, and its fence keeps adjudicating, because the implicit
+// cell's source hash is the hash of the whole undecorated region.
+//
+// Why `%%` and not `%Cell[...]`: code lines are decorated as '% ' + line, so a
+// real Wolfram line starting with `%` is written `% %foo` and can never yield
+// `%%` at column 0. A single-% directive would be ambiguous — `%Cell[…]`
+// undecorates to `Cell[…]`, which is a legitimate Wolfram expression.
+//
+// Fences are paired to cells by CellID, never by position, so reordering cells
+// in the editor cannot mispair a cell with someone else's output.
 //
 // States use the vocabulary already in tools/cell-state.js rather than a
 // parallel one, so a reader who knows how notebook cells go stale does not
@@ -38,6 +54,7 @@ const BLOCK_STATE = {
     ORPHANED: 'orphaned',                 // an output fence with no block above it
     MALFORMED: 'malformed',               // unbalanced or unparseable fences
     NO_OUTPUT: 'no-output',               // a block that has never been run
+    EPHEMERAL: 'ephemeral',               // deliberately not stored in the paper
 };
 
 const BLOCK_STATE_REASON = {
@@ -47,12 +64,31 @@ const BLOCK_STATE_REASON = {
     [BLOCK_STATE.ORPHANED]: 'managed output with no generating block',
     [BLOCK_STATE.MALFORMED]: 'fences are unbalanced or the header cannot be parsed',
     [BLOCK_STATE.NO_OUTPUT]: 'block has never produced managed output',
+    [BLOCK_STATE.EPHEMERAL]: 'output is not materialised in the paper by choice',
 };
+
+// Worst-first. A block reports the worst state among its cells, so a roadmap of
+// green blocks cannot hide one stale cell inside a block.
+const STATE_SEVERITY = [
+    BLOCK_STATE.MALFORMED,
+    BLOCK_STATE.ORPHANED,
+    BLOCK_STATE.STALE,
+    BLOCK_STATE.MODIFIED_BY_USER,
+    BLOCK_STATE.NO_OUTPUT,
+    BLOCK_STATE.FRESH,
+    BLOCK_STATE.EPHEMERAL,
+];
 
 const RE_BEGIN = /^[ \t]*%Mathematica(\[[^\]\n]*\])?[ \t]*$/;
 const RE_END = /^[ \t]*%EndMathematica[ \t]*$/;
 const RE_OUT_BEGIN = /^[ \t]*%WolfbookOutputBegin(\[[^\]\n]*\])?[ \t]*$/;
-const RE_OUT_END = /^[ \t]*%WolfbookOutputEnd[ \t]*$/;
+// The vision document writes the closer as %WolfbookOutputEnd[CellID=…]; the
+// writer emits the bare form, but both must be read or a hand-copied example
+// from the docs would classify as malformed.
+const RE_OUT_END = /^[ \t]*%WolfbookOutputEnd(\[[^\]\n]*\])?[ \t]*$/;
+// A cell directive. The keyword is required: without it `%%` inside a block of
+// hand-written TeX would silently split someone's code in half.
+const RE_CELL = /^[ \t]*%%(Wolfram|Markdown|Text)(\[[^\]\n]*\])?[ \t]*$/i;
 
 /**
  * Parse a bracketed header into a plain object.
@@ -111,6 +147,82 @@ function undecorate(lines) {
 }
 
 /**
+ * Does this cell's output belong in the paper?
+ *
+ * Wolfram cells default to yes and Markdown cells default to no, which is the
+ * reading that needs the fewest explicit flags in the common case: a dropped
+ * computation is there to put something on the page, and prose written beside
+ * it is usually a note about the computation rather than paper text. The writer
+ * always spells out the non-default, so a round trip never depends on this.
+ */
+function readInclude(opts, kind) {
+    const raw = String(opts.out ?? opts.Out ?? '').trim().toLowerCase();
+    if (raw === 'none' || raw === 'false') return false;
+    if (raw === 'insert' || raw === 'true') return true;
+    return kind === 'wolfram';
+}
+
+/**
+ * Split a block's decorated body into cells.
+ *
+ * @param {string[]} rawLines   the lines between %Mathematica and %EndMathematica
+ * @param {number}   firstLineNo 1-based line number of rawLines[0]
+ *
+ * A body with no directive is one implicit Wolfram cell spanning everything —
+ * that is what keeps every pre-multi-cell .tex parsing exactly as it did.
+ */
+function parseCells(rawLines, firstLineNo) {
+    const cells = [];
+    let cur = null;
+    const close = () => {
+        if (!cur) return;
+        cur.code = undecorate(cur._lines);
+        cur.sourceHash = sha256(cur.code);
+        delete cur._lines;
+        cells.push(cur);
+    };
+    for (let n = 0; n < rawLines.length; n++) {
+        const m = RE_CELL.exec(rawLines[n]);
+        if (m) {
+            close();
+            const opts = parseHeader(m[2]);
+            const word = m[1].toLowerCase();
+            const kind = word === 'wolfram' ? 'wolfram' : 'markdown';
+            cur = {
+                kind,
+                cellId: opts.CellID || opts.cellId || null,
+                include: readInclude(opts, kind),
+                options: opts,
+                directiveLine: firstLineNo + n,
+                startLine: firstLineNo + n + 1,
+                endLine: firstLineNo + n,
+                _lines: [],
+            };
+            continue;
+        }
+        if (!cur) {
+            cur = {
+                kind: 'wolfram', cellId: null, include: true, options: {},
+                implicit: true, directiveLine: null,
+                startLine: firstLineNo + n, endLine: firstLineNo + n, _lines: [],
+            };
+        }
+        cur._lines.push(rawLines[n]);
+        cur.endLine = firstLineNo + n;
+    }
+    close();
+    if (!cells.length) {
+        // An empty block still has one cell to type into.
+        cells.push({
+            kind: 'wolfram', cellId: null, include: true, options: {}, implicit: true,
+            directiveLine: null, startLine: firstLineNo, endLine: firstLineNo - 1,
+            code: '', sourceHash: sha256(''),
+        });
+    }
+    return cells;
+}
+
+/**
  * @param {string} src
  * @param {{file?: string}} opts
  * @returns {{blocks: object[], outputs: object[], warnings: string[]}}
@@ -149,19 +261,21 @@ function parseMmaBlocks(src, opts = {}) {
                 warnings.push(`${file}:${startLine}: %Mathematica block never closed with %EndMathematica`);
                 blocks.push(makeBlock({
                     file, header, startLine, endLine: Math.min(j, lines.length),
-                    code: undecorate(codeLines), state: BLOCK_STATE.MALFORMED,
+                    codeLines, bodyFirstLine: startLine + 1, state: BLOCK_STATE.MALFORMED,
                 }));
                 i = j;
                 continue;
             }
             const endLine = j + 1;
-            const code = undecorate(codeLines);
 
-            // An output region may follow, after blank/comment lines.
-            let k = j + 1;
-            while (k < lines.length && /^[ \t]*$/.test(lines[k])) k++;
-            let output = null;
-            if (k < lines.length && RE_OUT_BEGIN.test(lines[k])) {
+            // A RUN of output fences may follow, one per materialised cell,
+            // separated by blank lines.
+            const fences = [];
+            let cursor = j + 1;
+            for (;;) {
+                let k = cursor;
+                while (k < lines.length && /^[ \t]*$/.test(lines[k])) k++;
+                if (!(k < lines.length && RE_OUT_BEGIN.test(lines[k]))) break;
                 const outHeader = parseHeader(RE_OUT_BEGIN.exec(lines[k])[1]);
                 const bodyLines = [];
                 let m = k + 1;
@@ -175,19 +289,23 @@ function parseMmaBlocks(src, opts = {}) {
                 if (!outClosed) {
                     warnings.push(`${file}:${k + 1}: %WolfbookOutputBegin never closed with %WolfbookOutputEnd`);
                 }
-                output = {
+                fences.push({
                     header: outHeader,
+                    cellId: outHeader.CellID || outHeader.cellId || null,
                     startLine: k + 1,
                     endLine: outClosed ? m + 1 : Math.min(m, lines.length),
                     body: bodyLines.join('\n'),
                     closed: outClosed,
-                };
-                i = (outClosed ? m + 1 : m);
-            } else {
-                i = j + 1;
+                });
+                cursor = outClosed ? m + 1 : m;
+                if (!outClosed) break;
             }
+            i = fences.length ? cursor : j + 1;
 
-            blocks.push(makeBlock({ file, header, startLine, endLine, code, output }));
+            blocks.push(makeBlock({
+                file, header, startLine, endLine,
+                codeLines, bodyFirstLine: startLine + 1, fences,
+            }));
             continue;
         }
 
@@ -240,8 +358,13 @@ function parseMmaBlocks(src, opts = {}) {
  * legibility (`a91c…`) and demanding the full 64 chars would make every
  * hand-written example fail.
  */
-function makeBlock({ file, header, startLine, endLine, code, output, state }) {
+function makeBlock({ file, header, startLine, endLine, codeLines, bodyFirstLine, fences, state }) {
+    const code = undecorate(codeLines || []);
     const codeHash = sha256(code);
+    const cells = parseCells(codeLines || [], bodyFirstLine || startLine + 1);
+    const allFences = fences || [];
+    const output = allFences[0] || null;
+
     // The CellID lives in the OUTPUT fence, not the %Mathematica header — see
     // the grammar at the top of this file. A block may also declare one, and
     // that wins, but in the shape the vision document specifies only the fence
@@ -256,48 +379,122 @@ function makeBlock({ file, header, startLine, endLine, code, output, state }) {
         startLine, endLine,
         code,
         codeHash,
-        output: output || null,
+        cells,
+        output,
+        outputs: allFences,
     };
+    b.blockId = header.BlockID || header.blockId || b.cellId
+        || (output && (output.header.BlockID || output.header.blockId)) || null;
 
     if (state) {
         b.state = state;
         b.stateReason = BLOCK_STATE_REASON[state] || '';
-        return b;
-    }
-    if (!output) {
-        b.state = BLOCK_STATE.NO_OUTPUT;
-        b.stateReason = BLOCK_STATE_REASON[BLOCK_STATE.NO_OUTPUT];
-        return b;
-    }
-    if (!output.closed) {
-        b.state = BLOCK_STATE.MALFORMED;
-        b.stateReason = BLOCK_STATE_REASON[BLOCK_STATE.MALFORMED];
+        for (const c of cells) { c.state = state; c.stateReason = b.stateReason; }
         return b;
     }
 
-    const declaredSource = output.header.SourceHash || output.header.sourceHash;
-    const declaredOutput = output.header.OutputHash || output.header.outputHash;
-    const bodyHash = sha256(output.body);
+    pairFences(cells, allFences);
+    b.orphanedFences = allFences.filter(f => !f._cell);
 
-    b.outputHash = bodyHash;
-    b.declaredSourceHash = declaredSource || null;
-    b.declaredOutputHash = declaredOutput || null;
+    for (const c of cells) classifyCell(c, c._fence || null);
+    // The whole-block ellipsis of the per-cell verdicts. Orphaned fences are
+    // part of the block's story too: a fence whose cell was deleted is the
+    // block's problem to show, not something to leave silently on the floor.
+    const states = cells.map(c => c.state);
+    if (b.orphanedFences.length) {
+        states.push(b.orphanedFences.some(f => !f.closed)
+            ? BLOCK_STATE.MALFORMED : BLOCK_STATE.ORPHANED);
+    }
+    b.state = worstState(states);
+    b.stateReason = pickReason(b.state, cells);
 
-    if (declaredSource && !hashMatches(declaredSource, codeHash)) {
-        b.state = BLOCK_STATE.STALE;
-    } else if (declaredOutput && !hashMatches(declaredOutput, bodyHash)) {
-        b.state = BLOCK_STATE.MODIFIED_BY_USER;
-    } else if (!declaredSource && !declaredOutput) {
+    // Single-cell blocks keep reporting their provenance at block level, which
+    // is what every Stage-1 consumer reads.
+    if (cells.length === 1 && cells[0]._fence) {
+        const f = cells[0]._fence;
+        b.outputHash = sha256(f.body);
+        b.declaredSourceHash = f.header.SourceHash || f.header.sourceHash || null;
+        b.declaredOutputHash = f.header.OutputHash || f.header.outputHash || null;
+    }
+    // Record the pairing as INDICES and drop the object references. The
+    // pairing is what the writer needs in order to replace the right fence,
+    // but these blocks are handed to MCP callers as JSON, and a cell pointing
+    // at a fence pointing back at the cell cannot be serialised.
+    cells.forEach((c, ci) => {
+        const fi = allFences.indexOf(c._fence);
+        c.index = ci;
+        c.outputIndex = fi >= 0 ? fi : null;
+        delete c._fence;
+    });
+    allFences.forEach((f) => {
+        const ci = cells.indexOf(f._cell);
+        f.cellIndex = ci >= 0 ? ci : null;
+        delete f._cell;
+    });
+    return b;
+}
+
+/**
+ * Attach fences to cells.
+ *
+ * By CellID, so that reordering cells cannot mispair them. The one exception is
+ * the legacy shape — one implicit cell and one fence — where the fence names an
+ * id the cell has never heard of because pre-multi-cell blocks kept the id only
+ * in the fence. There, the single pairing is unambiguous and the cell adopts it.
+ */
+function pairFences(cells, fences) {
+    if (cells.length === 1 && fences.length === 1) {
+        cells[0]._fence = fences[0];
+        fences[0]._cell = cells[0];
+        if (!cells[0].cellId) cells[0].cellId = fences[0].cellId;
+        return;
+    }
+    for (const f of fences) {
+        if (!f.cellId) continue;
+        const c = cells.find(c => c.cellId && c.cellId === f.cellId && !c._fence);
+        if (c) { c._fence = f; f._cell = c; }
+    }
+}
+
+/** Classify one cell against its fence (or its absence). */
+function classifyCell(cell, fence) {
+    const set = (s, reason) => {
+        cell.state = s;
+        cell.stateReason = reason || BLOCK_STATE_REASON[s] || '';
+        return cell;
+    };
+    if (!fence) {
+        // Not having an output is only a gap if one was ever wanted.
+        return set(cell.include ? BLOCK_STATE.NO_OUTPUT : BLOCK_STATE.EPHEMERAL);
+    }
+    if (!fence.closed) return set(BLOCK_STATE.MALFORMED);
+
+    const declaredSource = fence.header.SourceHash || fence.header.sourceHash;
+    const declaredOutput = fence.header.OutputHash || fence.header.outputHash;
+    const bodyHash = sha256(fence.body);
+    cell.outputHash = bodyHash;
+    cell.declaredSourceHash = declaredSource || null;
+    cell.declaredOutputHash = declaredOutput || null;
+
+    if (!declaredSource && !declaredOutput) {
         // A fence with no provenance at all cannot be adjudicated. Saying
         // "fresh" would be a guess dressed as a fact.
-        b.state = BLOCK_STATE.MALFORMED;
-        b.stateReason = 'output fence carries neither SourceHash nor OutputHash';
-        return b;
-    } else {
-        b.state = BLOCK_STATE.FRESH;
+        return set(BLOCK_STATE.MALFORMED, 'output fence carries neither SourceHash nor OutputHash');
     }
-    b.stateReason = BLOCK_STATE_REASON[b.state];
-    return b;
+    if (declaredSource && !hashMatches(declaredSource, cell.sourceHash)) return set(BLOCK_STATE.STALE);
+    if (declaredOutput && !hashMatches(declaredOutput, bodyHash)) return set(BLOCK_STATE.MODIFIED_BY_USER);
+    return set(BLOCK_STATE.FRESH);
+}
+
+function worstState(states) {
+    for (const s of STATE_SEVERITY) if (states.includes(s)) return s;
+    return BLOCK_STATE.NO_OUTPUT;
+}
+
+/** The reason belonging to whichever cell earned the block its state. */
+function pickReason(state, cells) {
+    const c = cells.find(c => c.state === state);
+    return (c && c.stateReason) || BLOCK_STATE_REASON[state] || '';
 }
 
 /** Prefix comparison, tolerant of the trailing ellipsis the fences use. */
@@ -307,18 +504,31 @@ function hashMatches(declared, actual) {
     return actual.toLowerCase().startsWith(d);
 }
 
-/** Render a fence header for writing (Stage 4 will need this; kept beside the parser). */
-function formatOutputFence(cellId, sourceHash, outputHash, { short = 8 } = {}) {
+/** Render a fence header for writing. The writer half lives in mmaWrite.js. */
+function formatOutputFence(cellId, sourceHash, outputHash, { short = 8, blockId } = {}) {
     const s = String(sourceHash).slice(0, short);
     const o = String(outputHash).slice(0, short);
-    return `%WolfbookOutputBegin[CellID: ${cellId}, SourceHash: ${s}, OutputHash: ${o}]`;
+    const parts = [`CellID: ${cellId}`];
+    if (blockId) parts.push(`BlockID: ${blockId}`);
+    parts.push(`SourceHash: ${s}`, `OutputHash: ${o}`);
+    return `%WolfbookOutputBegin[${parts.join(', ')}]`;
 }
 
 module.exports = {
     parseMmaBlocks,
     parseHeader,
+    parseCells,
+    readInclude,
+    undecorate,
     formatOutputFence,
     hashMatches,
+    sha256,
     BLOCK_STATE,
     BLOCK_STATE_REASON,
+    STATE_SEVERITY,
+    RE_BEGIN,
+    RE_END,
+    RE_CELL,
+    RE_OUT_BEGIN,
+    RE_OUT_END,
 };

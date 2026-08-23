@@ -11,10 +11,6 @@ const {
     resolveNotebookEditor, resolveNotebookDocument, checkMarkdownKaTeX,
     acquireKernelForAgent, releaseKernelForAgent, trackedKernelEvaluate,
 } = require('./shared');
-// decodeWstpText is used by _parseEvalResult (SVG/BOXES branches). Without this
-// require, any non-graphics eval (even `1+1`, which returns a BOXES: result)
-// threw "decodeWstpText is not defined" — see Day2 wslide feedback §H.
-const { decodeWstpText } = require('../utils/encoding');
 const { readCommittedOutputs } = require('./cell-pipeline');
 
 // =============================================================================
@@ -2478,111 +2474,24 @@ class WolfslideBulkInsertTool {
 
 // ── Eval block tools ──────────────────────────────────────────────────────
 
-// Shared kernel expression builder for eval blocks:
-// Graphics → SVG (with font→curves attempt); Non-graphics → boxes (BTL → LaTeX); fallback → PNG
-// Fixes:
-//  1. Syntax errors: ToExpression[..., Hold] detects parse failures before TimeConstrained
-//  2. MakeBoxes HoldAllComplete: With[{val=res}, MakeBoxes[val,...]] injects the value
-//  3. Timeout sentinel: $wbTO$ is a Block-local symbol, can never collide with a real result
+// Eval-block evaluation now lives in execution/eval-fragment.js, which the
+// managed-computation path in a .tex shares. These two wrappers keep the
+// .wslide behaviour byte-for-byte what it was — including the crude
+// `imageWidthPx / 10` page width and the KaTeX pre-render, both of which are
+// right for a slide rendered in a webview and wrong for a paper.
+const _evalFragment = require('../execution/eval-fragment');
+
 function _buildEvalExpr(escaped, timeout, imgW) {
-    return `Block[{$wbRes$, $wbSvg$, $wbImg$, $wbBoxes$, $wbGfx$, $wbParsed$, $wbTO$},
-  (* Step 1: parse without evaluating — catches syntax errors before timeout wrapping *)
-  $wbParsed$ = Quiet[ToExpression["${escaped}", InputForm, Hold]];
-  If[!MatchQ[$wbParsed$, Hold[_]],
-    "ERROR:Syntax error in expression",
-    (* Step 2: evaluate with timeout; $wbTO$ is Block-local so it can never equal a real result *)
-    $wbRes$ = TimeConstrained[ReleaseHold[$wbParsed$], ${timeout}, $wbTO$];
-    If[$wbRes$ === $wbTO$,
-      "ERROR:Evaluation timed out after ${timeout}s",
-      $wbGfx$ = !FreeQ[$wbRes$, _Graphics | _Graphics3D | _Graph | _GeoGraphics | _Legended | _Image | _Image3D];
-      If[$wbGfx$,
-        (* Graphics: try SVG with text-to-outlines first, fall back to plain SVG, then PNG *)
-        $wbSvg$ = Quiet[ExportString[$wbRes$, "SVG", ImageSize -> ${imgW}, Background -> None, "ConvertTextToOutlines" -> True]];
-        If[!StringQ[$wbSvg$] || !StringContainsQ[$wbSvg$, "<svg"],
-          $wbSvg$ = Quiet[ExportString[$wbRes$, "SVG", ImageSize -> ${imgW}, Background -> None]]];
-        If[StringQ[$wbSvg$] && StringContainsQ[$wbSvg$, "<svg"],
-          "SVG:" <> $wbSvg$,
-          $wbImg$ = Quiet[ExportString[Rasterize[$wbRes$, ImageSize -> ${imgW}, Background -> None], {"Base64", "PNG"}]];
-          If[StringQ[$wbImg$], "IMAGE:" <> $wbImg$, "TEXT:" <> ToString[$wbRes$, InputForm]]
-        ],
-        (* Non-graphics: With[] injects the value past MakeBoxes HoldAllComplete *)
-        $wbBoxes$ = Quiet[Check[With[{$wbVal$ = $wbRes$}, ToString[MakeBoxes[$wbVal$, TraditionalForm], InputForm]], $Failed]];
-        If[StringQ[$wbBoxes$] && StringLength[$wbBoxes$] > 0,
-          "BOXES:" <> $wbBoxes$,
-          $wbImg$ = Quiet[ExportString[Rasterize[$wbRes$, ImageSize -> ${imgW}, Background -> None], {"Base64", "PNG"}]];
-          If[StringQ[$wbImg$], "IMAGE:" <> $wbImg$, "TEXT:" <> ToString[$wbRes$, InputForm]]
-        ]
-      ]
-    ]
-  ]
-]`;
+    return _evalFragment.buildEvalExpr(escaped, {
+        timeoutSeconds: timeout, imageWidthPx: imgW, escaped: true,
+    });
 }
 
-// Shared result parser — converts kernel result string to output object
 function _parseEvalResult(resultStr, imgW) {
-    const now = new Date().toLocaleTimeString();
-    if (resultStr.startsWith('SVG:')) {
-        // Decode WSTP octal escapes + un-double backslashes (same as checkout.js)
-        let svg = decodeWstpText(resultStr.slice(4));
-        // Clip to <svg…</svg> boundaries
-        const svgStart = svg.indexOf('<svg');
-        if (svgStart > 0) svg = svg.slice(svgStart);
-        const svgEnd = svg.toLowerCase().lastIndexOf('</svg>');
-        if (svgEnd >= 0) svg = svg.slice(0, svgEnd + 6);
-        svg = svg.replace(/[\n\r]/g, '');
-        svg = svg.replace(/<font[\s\S]*?<\/font>/gi, '');
-        svg = svg.replace(/<font-face[\s\S]*?\/>/gi, '');
-        svg = svg.replace(/MathematicaMono-Regular/g, '"Courier New", Courier, monospace');
-        svg = svg.replace(/MathematicaSans-Regular/g, 'Arial, Helvetica, sans-serif');
-        svg = svg.replace(/Mathematica1-Bold/g, 'serif');
-        svg = svg.replace(/Mathematica1/g, 'serif');
-        return { type: 'svg', data: svg, evaluatedAt: now };
-    } else if (resultStr.startsWith('BOXES:')) {
-        // BTL → LaTeX → KaTeX pre-render
-        // Decode WSTP octal escapes + un-double backslashes, then encode to base64 in JS
-        // (matches checkout.js; avoids Wolfram ExportString encoding mismatch)
-        const cleanBoxes = decodeWstpText(resultStr.slice(6));
-        const b64boxes = Buffer.from(cleanBoxes).toString('base64');
-        try {
-            const _btlDir = require('path').join(__dirname, '../../wllatex-addon');
-            const _prebuilt = require('path').join(_btlDir, 'prebuilt',
-                `wolfbook_btl-${process.platform}-${process.arch}.node`);
-            const _fallback = require('path').join(_btlDir, 'wolfbook_btl.node');
-            const _fs = require('fs');
-            const _addonPath = _fs.existsSync(_prebuilt) ? _prebuilt : _fallback;
-            const _addon = require(_addonPath);
-            const _prerender = require(require('path').join(_btlDir, 'katexPrerender.js')).prerenderLatex;
-            const _namedchars = require('../namedchars').wlUTFtoNames;
-
-            let boxStr = Buffer.from(b64boxes, 'base64').toString('utf8');
-            boxStr = _namedchars(boxStr);
-            const btlOpts = { trigOmitParens: true, trigPowerForm: true };
-            const result = _addon.boxToLatex(boxStr, btlOpts);
-            let latex = (result && typeof result === 'object') ? result.latex : String(result);
-            const pageWidthEm = Math.max(0, Math.round(imgW / 10));
-            if (pageWidthEm > 5 && _addon.lineBreakLatex) {
-                try { latex = _addon.lineBreakLatex(latex, { pageWidth: pageWidthEm }); } catch (_) {}
-            }
-            const html = _prerender(latex, true);
-            return { type: 'latex', html, latex, evaluatedAt: now };
-        } catch (e) {
-            // BTL not available — decode boxes as text
-            try {
-                const boxStr = Buffer.from(b64boxes, 'base64').toString('utf8');
-                return { type: 'text', text: boxStr, evaluatedAt: now };
-            } catch (_) {
-                return { type: 'text', text: resultStr, evaluatedAt: now };
-            }
-        }
-    } else if (resultStr.startsWith('IMAGE:')) {
-        return { type: 'image', data: 'data:image/png;base64,' + resultStr.slice(6), evaluatedAt: now };
-    } else if (resultStr.startsWith('TEXT:')) {
-        return { type: 'text', text: resultStr.slice(5), evaluatedAt: now };
-    } else if (resultStr.startsWith('ERROR:')) {
-        return { type: 'error', error: resultStr.slice(6), evaluatedAt: now };
-    } else {
-        return { type: 'text', text: resultStr, evaluatedAt: now };
-    }
+    return _evalFragment.toSlideOutput(_evalFragment.parseEvalResult(resultStr, {
+        pageWidthEm: Math.max(0, Math.round(imgW / 10)),
+        katex: true,
+    }));
 }
 
 class WolfslideInsertEvalBlockTool {

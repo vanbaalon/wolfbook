@@ -55,7 +55,7 @@
      overlays are stale — they are placed in the pixels of the viewport the
      page was drawn at, so they would drift away from what they name. One rule
      rather than a list of classes, so a new overlay cannot be forgotten. */
-  body.zooming #pages > .page > *:not(canvas):not(.pagenum) { display: none !important; }
+  body.zooming #pages > .page > *:not(canvas):not(.pagenum):not(.mmacard):not(.editcard) { display: none !important; }
   body.zooming #pages > .page > canvas { image-rendering: auto; }
   .page { position:relative; background:#fff; border-radius:2px;
           box-shadow: 0 1px 3px rgba(0,0,0,.22), 0 4px 16px rgba(0,0,0,.22); }
@@ -188,6 +188,99 @@
          box-shadow: 0 0 4px rgba(74,158,255,.9); }
   .movecaret:not(.block) { width:2px; margin-left:-1px; }
   .movecaret.block { height:2px; margin-top:-1px; border-radius:1px; }
+
+  /* A computation badge in the label overlay. It marks the OUTPUT — the only
+     visible sign that a figure or an equation has live code behind it, since
+     the block itself is a comment and prints nothing. Coloured by state, so a
+     stale one is visible at a glance across a page. */
+  .lbc-mma { cursor: pointer; font-weight: 600;
+             background: var(--vscode-charts-purple, #b180d7); color: #fff; }
+  .lbc-mma-stale            { background: var(--vscode-charts-yellow, #d7a418); color: #1e1e1e; }
+  .lbc-mma-modified-by-user { background: var(--vscode-charts-orange, #d18616); color: #1e1e1e; }
+  .lbc-mma-malformed, .lbc-mma-orphaned { background: var(--vscode-charts-red, #d95f5f); color: #fff; }
+  .lbc-mma-ephemeral        { background: var(--vscode-descriptionForeground, #999); color: #1e1e1e; }
+  .lbc-mma:hover { outline: 1px solid var(--vscode-focusBorder, #007fd4); }
+
+  /* ---- inserting a Mathematica computation ------------------------------ */
+  /* Armed: the whole page is a target, so the cursor says so everywhere. */
+  body.arming-insert #pages, body.arming-insert #pages * { cursor: crosshair !important; }
+  body.arming-insert #addmma { background: var(--vscode-button-background, #0e639c);
+                               color: var(--vscode-button-foreground, #fff); }
+
+  .mmacard { position:absolute; z-index:12; display:flex; flex-direction:column;
+             border-radius:6px; overflow:hidden;
+             background: var(--vscode-editor-background, #1e1e1e);
+             color: var(--vscode-editor-foreground, #ddd);
+             border:1px solid var(--vscode-widget-border, rgba(128,128,128,.35));
+             box-shadow: 0 6px 22px rgba(0,0,0,.35); }
+  .mc-head { display:flex; align-items:center; gap:6px; padding:4px 6px;
+             background: var(--vscode-editorWidget-background, #252526);
+             border-bottom:1px solid var(--vscode-widget-border, rgba(128,128,128,.3));
+             font-size:11px; }
+  .mc-title { font-weight:600; }
+  .mc-where { color: var(--vscode-descriptionForeground, #999); }
+  .mc-spacer { flex:1; }
+  .mc-head select { font-size:11px; max-width:150px;
+                    background: var(--vscode-dropdown-background, #3c3c3c);
+                    color: var(--vscode-dropdown-foreground, #ddd);
+                    border:1px solid var(--vscode-dropdown-border, #3c3c3c); border-radius:3px; }
+  /* The state badge is the block's own verdict, in the vocabulary the CodeLens
+     and the diagnostics already use, so all three agree on the page. */
+  .mc-state { font-size:10px; padding:1px 5px; border-radius:8px;
+              background: rgba(128,128,128,.18); }
+  .mc-state.fresh    { background: rgba(70,160,90,.25); }
+  .mc-state.stale    { background: rgba(200,150,40,.28); }
+  .mc-state.modified-by-user { background: rgba(200,110,40,.28); }
+  .mc-state.malformed, .mc-state.orphaned { background: rgba(200,70,70,.28); }
+
+  .mc-cell { display:flex; flex-direction:column; border-bottom:1px solid
+             var(--vscode-widget-border, rgba(128,128,128,.18)); }
+  .mc-editor { position:relative; font-family: var(--vscode-editor-font-family, monospace);
+               font-size: 12px; line-height:1.45; }
+  /* The highlight layer and the textarea hold the SAME characters; the layer
+     is the size-driver and the textarea lies transparently on top of it, so
+     the caret comes from the textarea and the colour from behind it. */
+  .mc-hl, .mc-editor textarea {
+      margin:0; padding:6px 8px; border:0; white-space:pre-wrap; word-break:break-word;
+      font:inherit; letter-spacing:normal; tab-size:4; }
+  .mc-hl { min-height:1.45em; pointer-events:none; }
+  .mc-editor textarea { position:absolute; inset:0; width:100%; height:100%;
+      resize:none; overflow:hidden; background:transparent; color:transparent;
+      caret-color: var(--vscode-editorCursor-foreground, #ddd); outline:none; }
+  .mc-editor textarea::selection { background: var(--vscode-editor-selectionBackground, #264f78); }
+
+  .mc-bar { display:flex; align-items:center; gap:6px; padding:3px 6px; font-size:11px;
+            background: var(--vscode-editorWidget-background, #252526); }
+  .mc-bar label { display:flex; align-items:center; gap:4px;
+                  color: var(--vscode-descriptionForeground, #999); }
+  .mc-out { padding:6px 8px; font-size:12px; max-height:280px; overflow:auto;
+            border-top:1px dashed var(--vscode-widget-border, rgba(128,128,128,.25)); }
+  .mc-out.err { color: var(--vscode-errorForeground, #f48771); white-space:pre-wrap; }
+  .mc-out img, .mc-out svg { max-width:100%; height:auto; }
+  .mc-note { font-size:10px; color: var(--vscode-descriptionForeground, #999); }
+  .mc-hint { padding:3px 6px; font-size:10px;
+             color: var(--vscode-descriptionForeground, #999);
+             background: var(--vscode-editorWidget-background, #252526); }
+
+  /* The tokeniser's colours. The notebook renderer defines these in WL_CSS,
+     but this panel does not load WL_CSS — it is a standalone shell — so the
+     full set lives here. Palette follows VS Code Dark+, which is what the
+     notebook editor shows, so Wolfram code looks the same in both places.
+     The distinction that carries the weight is sym (a builtin, e.g. Table)
+     against usr (this paper's own symbols); everything else is detail. */
+  .wl-hl-str  { color: #ce9178; }
+  .wl-hl-cmt  { color: #6a9955; font-style: italic; }
+  .wl-hl-num  { color: #b5cea8; }
+  .wl-hl-sym  { color: #569cd6; }
+  .wl-hl-usr  { color: var(--vscode-editor-foreground, #d4d4d4); }
+  .wl-hl-ctx  { color: #b392f0; opacity:.85; }
+  .wl-hl-pat  { color: #4ec9b0; font-style: italic; }
+  .wl-hl-slot { color: #4ec9b0; font-weight:600; }
+  .wl-hl-op   { color: #d16969; }
+  .wl-hl-esc  { color: #61afef; font-weight:600; }
+  .wl-hl-cmd  { color: #569cd6; }
+  .wl-hl-math { color: #d16969; }
+  .wl-hl-brk  { color: #808080; }
   /* The whole page says "carrying something" while the hand is down. */
   body.moving-sel #pages, body.moving-sel .selfill { cursor: grabbing; }
   body.moving-sel .selfill { opacity:.55; }
@@ -236,14 +329,21 @@
   /* A TAG, and it looks like one: this is a place in the source, not something
      the paper prints. Clicking copies `path:line` — how a reader points an
      agent at a spot without describing it. */
+  /* A PAPER TAG. The shape is already a tab — square on the spine, rounded on
+     the outer edge — and the colour now matches: manila, the way an index tab
+     clipped to a printed page looks. It reads as something ATTACHED to the
+     paper rather than as another piece of editor chrome, which is what these
+     are: a place you can point at, not a control that does something. Amber
+     also stays legible on both a white page and a dark-themed one, which grey
+     at 50% opacity did not. */
   .wpatag { font-family: var(--vscode-editor-font-family, monospace); font-size:9px;
              line-height:1.5; padding:0 5px 0 4px; cursor:pointer; white-space:nowrap;
              flex:0 0 auto; border-radius:2px 7px 7px 2px;
-             border:1px solid var(--vscode-panel-border, rgba(128,128,128,.5));
-             background: var(--vscode-editorWidget-background, #252526);
-             color: var(--vscode-descriptionForeground, #999); opacity:.5; }
-  .wpatag:hover { opacity:1; border-color: var(--vscode-focusBorder, #0a84ff);
-             color: var(--vscode-foreground, #ccc); }
+             border:1px solid #a8791f;
+             background: #d8a93a;
+             color: #40300c; opacity:.72; }
+  .wpatag:hover { opacity:1; border-color: #6b4a0d; background: #e8bd52;
+             color: #2a1f06; }
   .wpatag-equation { font-style:normal; }
   .lbc { position:absolute; z-index:7; pointer-events:auto; cursor:copy;
          font: 500 calc(7.4px * var(--lbc-scale, 1))/1.3 var(--vscode-font-family);
@@ -579,20 +679,69 @@
   #status.warn::before { background: var(--vscode-editorWarning-foreground, #cca700); }
   #status.err { color: var(--vscode-errorForeground); }
   #status.warn { color: var(--vscode-editorWarning-foreground); }
-  footer { display:flex; }
+  footer { display:flex; align-items:center; }
+  #status { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  /* The worklist sits at the RIGHT of the footer, where it is out of the way of
+     the running status but always on screen — the point of it is that getting
+     back to where you were working is one click from anywhere in the paper. */
+  #editnav { display:flex; align-items:center; gap:4px; padding:0 6px; flex:none; }
+  #editnav[hidden] { display:none; }
+  #editnav button { font-size:11px; padding:0 5px; }
+  #ednwhere { font-size:11px; max-width:26ch; overflow:hidden; text-overflow:ellipsis;
+              white-space:nowrap; color: var(--vscode-descriptionForeground, #999); }
+  #editnav.review #ednwhere { color: var(--vscode-charts-orange, #d18616); }
+  /* THE BAR HAS TO SURVIVE A NARROW PANEL.
+     WPaper is usually docked beside an editor, so half a window is its normal
+     width, not an edge case. The bar is `nowrap; overflow:hidden`, which means
+     that whatever does not fit is simply CUT OFF — and what sits at the end is
+     the status text and the page count, so a narrow panel silently lost the
+     two things that were telling the reader where they are.
+     Three rules, in the order they give ground:
+       1. the status text absorbs the slack and ellipsises, so the BUTTONS keep
+          their size instead of being sheared off;
+       2. `narrow` drops the words from the controls that have an icon or a
+          value to speak for them — "⟳ Compile" is still a compile button, and
+          "follow: scroll" still says scroll;
+       3. `tight` drops the page count and the zoom readout, which are the only
+          things here a reader can do without. */
+  #where { flex:1 1 0; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  header .pp { flex:0 0 auto; }
+  /* A control that loses its word must still SAY something, so the ones whose
+     name was doing the work carry a glyph to fall back to. The pair is
+     exclusive — never both, or a narrow bar would be wider than a wide one. */
+  header .ticon { display:none; font-size:13px; line-height:1; }
+  header.narrow .ticon { display:inline; }
+  header.narrow .tlbl { display:none; }
+  /* PIN IS A CHECKBOX, AND A CHECKBOX WITH ITS WORD TAKEN AWAY IS NOTHING —
+     an unlabelled 13px box next to a row of glyphs does not read as a control
+     at all. Reported as "pin does not show". On a narrow bar the box itself
+     stands down and the pin glyph takes over; the whole thing is still a
+     <label>, so clicking anywhere on it toggles exactly as before, and the
+     glyph brightens when it is on because that is the only state left to see. */
+  header.narrow #pin { display:none; }
+  .pinwrap { display:inline-flex; align-items:center; gap:3px; cursor:pointer; }
+  .pinwrap .ticon { opacity:.45; }
+  #pin:checked ~ .ticon { opacity:1; color: var(--vscode-charts-orange, #d18616); }
+  header.tight  .pp   { display:none; }
+  header.tight  #zoom { display:none; }
+  button.follow[data-mode="off"]    { opacity:.6; }
+  button.follow[data-mode="mark"]   { color: var(--vscode-charts-blue, #4e94ce); }
+  button.follow[data-mode="scroll"] { color: var(--vscode-charts-green, #6cab5b); }
 </style>
 <header>
-  <button id="recompile" title="Recompile the paper">⟳ Compile</button>
+  <button id="recompile" title="Recompile the paper">⟳<span class="tlbl"> Compile</span></button>
   <span class="zoomgroup">
     <button id="zoomout" title="Zoom out (⌘−)">−</button><span id="zoom">125%</span><button id="zoomin" title="Zoom in (⌘+)">+</button>
   </span>
-  <button id="fit" title="Fit the page width (⌘0)">Fit</button>
+  <button id="fit" title="Fit the page width (⌘0)"><span class="ticon">↔</span><span class="tlbl">Fit</span></button>
   <button id="compare" title="Compare with another version of this paper">⇄</button>
   <button id="labels" title="Show every label (or just hold Shift)" aria-pressed="false">🏷</button>
+  <button id="addmma" title="Insert a Mathematica computation — then click where it goes" aria-pressed="false">∑+</button>
   <button id="pagetheme" title="Page appearance" aria-pressed="false">☀</button>
   <button id="full" title="Full screen (Esc to leave, double-click a word to go there and edit)">⛶</button>
-  <label class="follow" title="Highlight in the page whatever the editor cursor is on"><input type="checkbox" id="follow" checked> follow</label>
-  <label class="follow" title="Keep the highlight instead of letting it fade"><input type="checkbox" id="pin"> pin</label>
+  <button id="follow" class="follow" data-mode="scroll"
+          title="What the page does about the editor cursor — click to cycle"><span class="ticon">⇕</span><span class="tlbl">follow: scroll</span></button>
+  <label class="follow pinwrap" title="Keep the highlight instead of letting it fade"><input type="checkbox" id="pin"><span class="ticon">📌</span><span class="tlbl"> pin</span></label>
   <span id="where"></span>
   <span class="pp">/ <span id="pagecount">?</span> pp</span>
 </header>
@@ -617,7 +766,16 @@
 </div>
 <main><div id="pages" title="Click a word or symbol to find it in the source. Cmd/Ctrl-click selects more of what encloses it; add Shift to go back in. Double-click jumps to the editor. Right-click edits the paragraph or equation in place."></div></main>
 <div id="reviewpanel"><div id="reviewlist"></div><div id="reviewdiff"></div></div>
-<footer><div id="status">starting…</div></footer>
+<footer><div id="status">starting…</div>
+  <div id="editnav" hidden>
+    <button id="ednprev" title="Older">◀</button>
+    <span id="ednwhere"></span>
+    <button id="ednkeep" hidden title="Keep this change">✓ keep</button>
+    <button id="ednundo" hidden title="Put this change back">↺ undo</button>
+    <button id="edndone" hidden title="Done with this one — drop it and go to the one before">✓ done</button>
+    <button id="ednnext" title="Newer">▶</button>
+  </div>
+</footer>
 <div id="tour" hidden>
   <div class="th"><span id="tourstep"></span><span class="sp"></span>
     <button id="tourskip" title="Skip this one">→</button>

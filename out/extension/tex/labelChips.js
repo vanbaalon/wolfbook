@@ -166,10 +166,24 @@ function blockOf(inkFor, page, pageWidth) {
         if (it.x < x0) x0 = it.x;
         if (it.x + it.w > x1) x1 = it.x + it.w;
     }
-    // No text layer yet (the first Shift after a compile can beat the sweep):
-    // a printed page's measure is close enough to be a column, and the badges
-    // are re-placed on the next paint anyway.
-    if (!(x1 > x0)) { x0 = W * 0.133; x1 = W * 0.867; }
+    // NOT EVERY SOURCE OF "INK" SEES ALL OF IT, and a column computed from a
+    // partial view lands in the middle of the page — on the reader's words,
+    // which is the one thing this file exists to prevent.
+    //
+    // The census (h-glyphmap/check-chips.mjs) feeds this the GLYPH MAP: every
+    // printed glyph, and it measures 0/119 badges over ink. The live panel
+    // feeds it PDF.JS'S TEXT LAYER instead, which is a different and lossier
+    // thing — it can miss maths entirely, and a page whose widest extracted
+    // item is a short line reports a text block far narrower than the one TeX
+    // actually set. The badge column then sits inside the type block.
+    //
+    // A page's text block is most of its width. Anything much narrower is a
+    // partial view of one, not a narrow paper, so the printed measure is the
+    // better guess — and it is the same fallback used when there is no text
+    // layer at all. A badge slightly too far out is invisible; a badge on a
+    // word is the reported bug.
+    const MIN_BLOCK = 0.55;
+    if (!(x1 > x0) || (x1 - x0) < W * MIN_BLOCK) { x0 = W * 0.133; x1 = W * 0.867; }
     return { x0, x1, W };
 }
 
@@ -594,5 +608,5 @@ function altFormat(format) {
 
 module.exports = {
     buildLabelChips, splitStrayRows, formatLabelCopy, altFormat,
-    findPrintedInk, rowsOver, isTagRow, tagRows,
+    findPrintedInk, rowsOver, isTagRow, tagRows, blockOf, inColumn, CHIP_H, GAP,
 };

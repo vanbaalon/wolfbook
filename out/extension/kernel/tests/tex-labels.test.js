@@ -17,7 +17,7 @@ const test = (name, fn) => tests.push([name, fn]);
 
 const { parseAux, readAuxLabels, cleanPrinted } = require('../../tex/auxLabels');
 const {
-    buildLabelChips, splitStrayRows, formatLabelCopy, altFormat,
+    buildLabelChips, splitStrayRows, formatLabelCopy, altFormat, blockOf,
 } = require('../../tex/labelChips');
 const { scanTex } = require('../../tex/texScanner');
 const { buildModel } = require('../../tex/texModel');
@@ -463,6 +463,30 @@ test('every format, including the bare one Alt-click gives', () => {
     assert.strictEqual(formatLabelCopy('', {}), '', 'nothing in, nothing out');
 });
 
+test('a partial view of the ink cannot put a badge column on the text', () => {
+    // The badge columns are derived from whatever `inkFor` reports. The census
+    // (h-glyphmap/check-chips.mjs) feeds that the GLYPH MAP — every printed
+    // glyph — and measures 0/119 badges over ink. The live panel feeds it
+    // PDF.JS'S TEXT LAYER instead, which is lossier and can miss maths, so a
+    // maths-heavy page may report a text block far narrower than the one TeX
+    // set. A column computed from that lands INSIDE the type block, which is
+    // the one thing this module exists to prevent.
+    const W = 595.276;
+    const full = blockOf(() => [{ x: 79, w: 437 }], 1, W);
+    assert.ok(Math.abs(full.x0 - 79) < 1 && Math.abs(full.x1 - 516) < 1,
+        'a complete view is used as measured');
+
+    // Half a page wide is not a narrow paper — it is half a measurement.
+    const partial = blockOf(() => [{ x: 200, w: 120 }], 1, W);
+    assert.ok(partial.x1 > W * 0.8,
+        `a partial view falls back to the printed measure (got ${partial.x1.toFixed(0)})`);
+    assert.ok(partial.x0 < W * 0.2, 'on both sides');
+
+    // No text layer at all behaves exactly as it always did.
+    const none = blockOf(() => null, 1, W);
+    assert.ok(Math.abs(none.x1 - W * 0.867) < 1);
+});
+
 (async () => {
     for (const [name, fn] of tests) {
         try { await fn(); pass++; results.push('  ok   ' + name); }
@@ -474,6 +498,6 @@ test('every format, including the bare one Alt-click gives', () => {
     }
     console.log('the label overlay: .aux, rows, placement, copy\n');
     results.forEach(r => console.log(r));
-    console.log(`\n${pass} passed, ${fail} failed`);
+console.log(`\n${pass} passed, ${fail} failed`);
     process.exit(fail ? 1 : 0);
 })();

@@ -410,16 +410,31 @@ class PaperMathematicaBlocksTool {
             const blocks = mma.blocks
                 .filter(b => !wanted || wanted.has(b.state))
                 .map(b => ({
+                    blockId: b.blockId,
                     cellId: b.cellId, kind: b.kind, state: b.state, stateReason: b.stateReason,
                     startLine: b.startLine, endLine: b.endLine,
                     codeHash: b.codeHash.slice(0, 12),
                     code: input.include_code ? b.code : undefined,
+                    // A block holds an ordered list of cells, each with its own
+                    // state and its own answer to "does this reach the paper".
+                    // The block-level fields above are the roll-up.
+                    cells: b.cells.map(c => ({
+                        cellId: c.cellId, kind: c.kind, state: c.state,
+                        include: c.include !== false,
+                        startLine: c.startLine, endLine: c.endLine,
+                        sourceHash: c.sourceHash.slice(0, 12),
+                        code: input.include_code ? c.code : undefined,
+                        hasOutput: c.outputIndex != null,
+                    })),
                     output: b.output ? {
                         startLine: b.output.startLine, endLine: b.output.endLine,
                         closed: b.output.closed,
                         declaredSourceHash: b.declaredSourceHash,
                         declaredOutputHash: b.declaredOutputHash,
                     } : null,
+                    outputs: b.outputs.map(o => ({
+                        cellId: o.cellId, startLine: o.startLine, endLine: o.endLine, closed: o.closed,
+                    })),
                 }));
             return jsonPart({
                 file: r.fsPath,
@@ -428,7 +443,8 @@ class PaperMathematicaBlocksTool {
                 orphanedOutputs: mma.outputs.map(o => ({ cellId: o.cellId, startLine: o.startLine, state: o.state })),
                 blocks,
                 warnings: mma.warnings,
-                note: 'Stage 1 classifies only. Executing a block is Stage 4.',
+                note: 'Open the paper in WPaper to run a block: its ∑+ button drops a new one, '
+                    + 'and the CodeLens above an existing block opens it.',
             });
         });
     }

@@ -41,6 +41,8 @@ const state = {
     pending: new Map(),
     highlight: null,          // {page, rects:[{x,y,w,h}], flag}
     followCursor: true,
+    followMode: 'scroll',     // 'off' | 'mark' | 'scroll'
+    editStack: null,          // {items, index} — the footer's worklist
     pinHighlight: false,
     fullscreen: false,
     generation: null,
@@ -56,6 +58,7 @@ const state = {
     hints: { left: { pages: 3, chip: 3 }, dwellMs: HINT_DWELL_DEFAULT },
     hintText: '',             // the page hint, kept when the attribute is taken away
     tour: null,               // {index,total,id,title,say,doIt,done,point} — the tour card
+    mma: null,                // the open computation card: {blockId, cells, rects, pos}
 };
 
 const el = (id) => document.getElementById(id);
@@ -515,6 +518,7 @@ async function renderPage(n) {
         if (state.sections) paintSections();
         if (state.moveCaret) paintMoveCaret(state.moveCaret);
         if (state.edit) paintEditCard();
+        if (state.mma) paintMmaCard();
     })().finally(() => state.pending.delete(n));
     state.pending.set(n, job);
     return job;
@@ -1504,7 +1508,13 @@ function paintSections() {
         if (!it.collapsed && !shift) continue;
         const wrap = pagesEl().querySelector('.page[data-page="' + it.page + '"]');
         if (!wrap) continue;
-        const v = rectToViewport(it.page, { page: it.page, x: it.x + it.w + 6, y: it.y, w: 1, h: it.h || 9 });
+        // AN ALREADY-PLACED x WINS. "Just past the row" is right for a heading,
+        // whose row ends where its title does, and wrong for a display
+        // equation, whose first row is a line of maths — the tag landed in the
+        // middle of the formula. The extension sends `anchorX` for those,
+        // already in the label badges' margin column.
+        const ax = Number.isFinite(it.anchorX) ? it.anchorX : it.x + it.w + 6;
+        const v = rectToViewport(it.page, { page: it.page, x: ax, y: it.y, w: 1, h: it.h || 9 });
         if (!v) continue;
 
         // ONE CLUSTER PER ANCHOR, so the fold and the tag stack side by side
@@ -1514,7 +1524,9 @@ function paintSections() {
         box.className = 'wpa';
         box.style.left = v.x + 'px';
         box.style.top = v.y + 'px';
-        const maxW = Math.max(40, ((S.pageWidth || 595) - (it.x + it.w + 8)) * state.scale);
+        const maxW = Math.max(40,
+            (Number.isFinite(it.anchorMaxW) ? it.anchorMaxW : (S.pageWidth || 595) - (it.x + it.w + 8))
+            * state.scale);
         box.style.maxWidth = maxW + 'px';
 
         if (it.foldable && (shift || it.collapsed)) {
@@ -1537,6 +1549,12 @@ function paintSections() {
             const t = document.createElement('button');
             t.className = 'wpatag wpatag-' + (it.kind || 'section');
             t.dataset.anchor = it.key;
+            // THE LINE, AND ONLY THE LINE. A tag is an ADDRESS — it exists so a
+            // spot in the paper can be handed to an agent as `path:line`, and
+            // the number is that address. Putting the equation's \label in the
+            // tag as well was tried and taken back out: it made the tag a
+            // second, longer name for something that already has one in the
+            // margin, and neither the tag nor what it copies is the place for it.
             t.textContent = (it.kind === 'equation' ? '\u2261 ' : '\u00a7 ') + it.line;
             t.title = 'Copy ' + (it.kind === 'equation' ? 'this equation' : 'this heading') +
                 ' as path:line, to point an agent at it · Alt-click to add its name';
@@ -1594,12 +1612,30 @@ async function paintLabels() {
             // differently: a label states what a thing is CALLED, a reference
             // points AT one. Same information, opposite direction, and telling
             // them apart at a glance is the whole reason for the overlay.
-            el.textContent = c.role === 'decl'
-                ? (c.printed ? `${c.name} ${c.printed}` : c.name)
-                : `→ ${c.name}`;
+            // A COMPUTATION BADGE IS A DIFFERENT CLAIM AGAIN. A label says what
+            // a thing is called; this says the thing was GENERATED, and is the
+            // only visible sign that a figure has code behind it — the block
+            // itself is a comment and prints nothing.
+            el.textContent = c.role === 'mma'
+                ? (c.text || '∑')
+                : c.role === 'decl'
+                    ? (c.printed ? `${c.name} ${c.printed}` : c.name)
+                    : `→ ${c.name}`;
+            if (c.role === 'mma') {
+                el.classList.add(`lbc-mma-${c.state || 'unknown'}`);
+                el.title = c.title || 'Mathematica computation';
+                el.dataset.blockId = c.blockId || '';
+                el.dataset.file = c.file || '';
+            }
             // A broken reference is INFORMATION, not a hint: it says what is
             // wrong and never runs out.
-            if (c.broken) el.title = `${c.name} — no \\label with that name`;
+            // A computation badge's title is INFORMATION — which state it is in
+            // and why — so it is set outright and never expires. armHint is for
+            // teaching a gesture, and it both overwrites the title and takes it
+            // away once its budget runs out. Same reasoning as a broken
+            // reference, just below.
+            if (c.role === 'mma') { /* title set above, deliberately not a hint */ }
+            else if (c.broken) el.title = `${c.name} — no \\label with that name`;
             else armHint(el, 'chip', 'Click to copy the reference · Alt-click for the bare name');
             el.dataset.name = c.name;
             el.dataset.role = c.role;
@@ -2240,18 +2276,33 @@ function goToPage(n, rects, { smooth = true } = {}) {
  * So: paint first, and scroll only when the highlight is actually outside the
  * comfortable middle band of the viewport — then put it there.
  */
-function revealHighlight({ smooth = true } = {}) {
+async function revealHighlight({ smooth = true } = {}) {
     paintHighlight();
-    const h = state.highlight;
+    let h = state.highlight;
     const main = document.querySelector('main');
     if (!h || !main || !h.rects || !h.rects.length) return;
     const page = h.rects[0].page;
     renderAround(page);
+
+    // WAIT FOR THE PAGE BEFORE AIMING AT IT.
+    //
+    // An unrendered page has no viewport mapping, so `rectToViewport` returns
+    // null and the aim falls back to the page's own top. Reported as "clicking
+    // a change sends me to the top of the document, and only the second click
+    // reveals the actual position" — the second click worked because the first
+    // one's renderAround had finished by then. Rendering is idempotent and
+    // returns at once for a page already done, so this costs nothing in the
+    // common case.
+    if (!state.rendered.has(page)) {
+        try { await renderPage(page); } catch (_) { /* aim at the page, as before */ }
+        // Awaiting gave the reader time to ask for something else.
+        h = state.highlight;
+        if (!h || !h.rects || !h.rects.length || h.rects[0].page !== page) return;
+        paintHighlight();
+    }
     const wrap = pagesEl().querySelector(`.page[data-page="${page}"]`);
     if (!wrap) return;
 
-    // Where the highlight sits in the scroller. Until the page is rendered
-    // there is no viewport mapping, so aim at the page itself.
     const v = state.rendered.has(page) ? rectToViewport(page, h.rects[0]) : null;
     const top = wrap.offsetTop + (v ? v.y : 0);
     const height = v ? Math.max(v.h, 8) : Math.min(wrap.offsetHeight, 200);
@@ -2278,6 +2329,15 @@ pagesEl().addEventListener('click', (ev) => {
     const r = wrap.getBoundingClientRect();
     const pt = fromViewport(n, ev.clientX - r.left, ev.clientY - r.top);
     if (!pt) return;
+    // ARMED: this click places a computation and means nothing else. It must
+    // not also be read as "jump to source", which is what the rest of this
+    // handler is for.
+    if (armInsert) {
+        ev.stopPropagation();
+        vscode.postMessage({ type: 'insertCommit', page: n, xBp: pt.xBp, yTopBp: pt.yTopBp });
+        setArmInsert(false);
+        return;
+    }
     // A ring where the click landed, so it is obvious what was asked about
     // even when the jump lands somewhere surprising.
     const ping = document.createElement('div');
@@ -2359,6 +2419,16 @@ pagesEl().addEventListener('click', (ev) => {
     if (!chip) return;
     ev.preventDefault();
     ev.stopPropagation();
+    // A computation badge is not a reference to copy — it is the way back to
+    // the code that generated what you are looking at.
+    if (chip.dataset.role === 'mma') {
+        vscode.postMessage({
+            type: 'mmaOpenBlock',
+            file: chip.dataset.file,
+            blockId: chip.dataset.blockId,
+        });
+        return;
+    }
     vscode.postMessage({
         type: 'copyLabel',
         name: chip.dataset.name,
@@ -2447,7 +2517,49 @@ pagesEl().addEventListener('mousedown', (ev) => {
 // a deliberate drag arms almost at once. In CSS pixels, squared.
 const DRAG_ARM_PX2 = 5 * 5;
 
+/**
+ * INSERTING A MATHEMATICA COMPUTATION.
+ *
+ * Press ∑+, then click where it belongs. While armed the pointer shows the
+ * SAME blue caret the move gesture uses, at the same seams, because it is the
+ * same seam-finder in the extension — a reader who has learned where a dragged
+ * block lands already knows where a computation will.
+ */
+let armInsert = false;
+let lastInsertPreview = 0;
+
+function setArmInsert(on) {
+    armInsert = !!on;
+    document.body.classList.toggle('arming-insert', armInsert);
+    const b = el('addmma');
+    if (b) b.setAttribute('aria-pressed', armInsert ? 'true' : 'false');
+    if (!armInsert) {
+        paintMoveCaret(null);
+        vscode.postMessage({ type: 'insertCancel' });
+    } else {
+        status('click where the computation belongs · Esc to cancel');
+    }
+}
+
 window.addEventListener('mousemove', (ev) => {
+    // Armed and not already dragging something: every move asks the extension
+    // where this point would land. Throttled by the same budget as the move
+    // preview — one round trip per frame or two.
+    if (armInsert && !dragMove && !dragSel) {
+        const now = performance.now();
+        if (now - lastInsertPreview < 60) return;   // one round trip per frame or two
+        const target = document.elementFromPoint(ev.clientX, ev.clientY);
+        const wrap = target && target.closest ? target.closest('.page') : null;
+        if (!wrap) return;
+        const n = Number(wrap.dataset.page);
+        if (!state.rendered.has(n)) return;
+        lastInsertPreview = now;
+        const r = wrap.getBoundingClientRect();
+        const pt = fromViewport(n, ev.clientX - r.left, ev.clientY - r.top);
+        if (!pt) return;
+        vscode.postMessage({ type: 'insertPreview', page: n, xBp: pt.xBp, yTopBp: pt.yTopBp });
+        return;
+    }
     if (dragMove) {
         const now = performance.now();
         if (now - dragMove.last < 60) return;      // one round trip per frame or two
@@ -2698,7 +2810,11 @@ function syncHighlight(card) {
  * all of them; pixels put a moved card somewhere arbitrary after the first
  * zoom. Double-click the header to give it back to the automatic placement.
  */
-function makeDraggable(card, handle) {
+function makeDraggable(card, handle, session) {
+    // `session` is the state slot whose remembered position this card uses, and
+    // the repaint that puts it back. Defaults to the text card, which is the
+    // only caller that predates the computation card.
+    const sess = session || { get: () => state.edit, repaint: () => paintEditCard() };
     handle.style.cursor = 'move';
     handle.addEventListener('pointerdown', (ev) => {
         if (ev.button !== 0) return;
@@ -2727,7 +2843,8 @@ function makeDraggable(card, handle) {
             const top = Math.max(0, Math.min(top0 + dy, Math.max(0, H - 24)));
             card.style.left = `${left}px`;
             card.style.top = `${top}px`;
-            if (state.edit) state.edit.pos = { fx: left / W, fy: top / H };
+            const e = sess.get();
+            if (e) e.pos = { fx: left / W, fy: top / H };
         };
         const up = () => {
             handle.removeEventListener('pointermove', move);
@@ -2742,8 +2859,9 @@ function makeDraggable(card, handle) {
     // Back to the automatic placement under the block.
     handle.addEventListener('dblclick', (ev) => {
         if (ev.target.closest('button')) return;
-        if (state.edit) state.edit.pos = null;
-        paintEditCard();
+        const e = sess.get();
+        if (e) e.pos = null;
+        sess.repaint();
     });
 }
 
@@ -2833,6 +2951,342 @@ function buildEditCard(e) {
 
     card.append(head, box, hint);
     return card;
+}
+
+// ===========================================================================
+// THE COMPUTATION CARD
+// ===========================================================================
+//
+// One managed %Mathematica block, opened in place. Stage A shows a single
+// Wolfram cell; the multi-cell notebook surface borrowed from the Chrome
+// extension replaces the body of this card in Stage C, which is why the
+// message wire below already speaks in CELLS rather than in text.
+//
+// The card is a child of .page, so it scrolls with the paper and stays beside
+// the thing it computes.
+
+let mmaHl = null;          // the vendored Wolfram tokeniser, loaded on demand
+let mmaRunSeq = 0;
+const mmaPending = new Map();
+
+/**
+ * Load the tokeniser the first time a card opens.
+ *
+ * Lazy because a reader who never inserts a computation should not pay for the
+ * builtin-symbol table (69 KB of it), and because a failure to load must leave
+ * a WORKING card with plain text in it rather than no card at all.
+ */
+async function ensureWolframHighlighter() {
+    if (mmaHl !== null) return mmaHl;
+    try {
+        const mod = await import('./wb/wl-highlight.js');
+        mmaHl = mod.highlightWolfram || false;
+    } catch (_) { mmaHl = false; }
+    return mmaHl;
+}
+
+const escHtml = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+/**
+ * Repaint one cell's highlight layer.
+ *
+ * THE TWO LAYERS MUST HOLD IDENTICAL CHARACTERS. The <pre> is the size-driver
+ * and the transparent textarea lies exactly over it; if the highlighter ever
+ * dropped or added a character the caret would sit at the wrong place on the
+ * line. The trailing newline is the classic case — a <pre> collapses it, so it
+ * is padded with a space that occupies the same cell the caret does.
+ */
+function syncMmaHighlight(cellEl) {
+    const ta = cellEl.querySelector('textarea');
+    const pre = cellEl.querySelector('.mc-hl');
+    if (!ta || !pre) return;
+    const src = ta.value;
+    const padded = /\n$/.test(src) ? src + ' ' : src;
+    pre.innerHTML = mmaHl ? mmaHl(padded) : escHtml(padded);
+    ta.style.height = `${pre.offsetHeight}px`;
+}
+
+function closeMmaCard() {
+    state.mma = null;
+    for (const c of document.querySelectorAll('.mmacard')) c.remove();
+    vscode.postMessage({ type: 'mmaClose' });
+}
+
+/** The kernel picker: which kernel this paper's computations run on. */
+function buildKernelPicker() {
+    const sel = document.createElement('select');
+    sel.className = 'mc-kernel';
+    sel.title = 'Which Wolfram kernel this paper computes on';
+    sel.addEventListener('mousedown', () => vscode.postMessage({ type: 'mmaKernels' }));
+    sel.addEventListener('change', () => {
+        if (sel.value) vscode.postMessage({ type: 'mmaBindKernel', kernelId: sel.value });
+    });
+    return sel;
+}
+
+function fillKernelPicker(msg) {
+    const sel = document.querySelector('.mc-kernel');
+    if (!sel) return;
+    sel.textContent = '';
+    if (!msg.kernels || !msg.kernels.length) {
+        const o = document.createElement('option');
+        o.textContent = msg.reason ? 'no kernel' : 'no kernel running';
+        o.value = '';
+        sel.append(o);
+        sel.disabled = true;
+        return;
+    }
+    sel.disabled = false;
+    for (const k of msg.kernels) {
+        const o = document.createElement('option');
+        o.value = k.id;
+        // What a reader needs in order to choose: which one it is, whether it
+        // is the default, and whether it is in the middle of something.
+        o.textContent = k.label + (k.isDefault ? ' · default' : '') + (k.busy ? ' · busy' : '');
+        if (k.id === msg.boundId) o.selected = true;
+        sel.append(o);
+    }
+}
+
+/** Show a result under its cell. */
+function paintMmaResult(cellEl, r) {
+    const out = cellEl.querySelector('.mc-out');
+    if (!out) return;
+    out.textContent = '';
+    out.className = 'mc-out';
+    if (!r) return;
+    if (r.error) {
+        out.classList.add('err');
+        out.textContent = r.error;
+        return;
+    }
+    if (r.html) {
+        // Pre-rendered KaTeX of the SAME LaTeX that would be inserted, so the
+        // preview and the paper cannot disagree about what this is.
+        out.innerHTML = r.html;
+    } else if (r.svg) {
+        out.innerHTML = r.svg;
+    } else if (r.base64) {
+        const img = document.createElement('img');
+        img.src = `data:image/png;base64,${r.base64}`;
+        out.append(img);
+    } else if (r.latex) {
+        const pre = document.createElement('pre');
+        pre.textContent = r.latex;
+        out.append(pre);
+    } else if (r.text) {
+        const pre = document.createElement('pre');
+        pre.textContent = r.text;
+        out.append(pre);
+    }
+    if (r.note) {
+        const n = document.createElement('div');
+        n.className = 'mc-note';
+        n.textContent = r.note;
+        out.append(n);
+    }
+}
+
+function buildMmaCard(e) {
+    const card = document.createElement('div');
+    card.className = 'mmacard';
+    card.dataset.mma = String(e.blockId);
+    for (const t of ['click', 'dblclick', 'mousedown', 'contextmenu']) {
+        card.addEventListener(t, (ev) => ev.stopPropagation());
+    }
+
+    const head = document.createElement('div');
+    head.className = 'mc-head';
+    head.title = 'Drag to move · double-click to re-pin under the block';
+    const title = document.createElement('span');
+    title.className = 'mc-title';
+    title.textContent = '∑ computation';
+    const where = document.createElement('span');
+    where.className = 'mc-where';
+    where.textContent = `${e.file || ''} · ${e.startLine === e.endLine
+        ? 'line ' + e.startLine : 'lines ' + e.startLine + '–' + e.endLine}`;
+    const badge = document.createElement('span');
+    badge.className = `mc-state ${e.state || ''}`;
+    badge.textContent = e.state || '';
+    badge.title = e.stateReason || '';
+    const spacer = document.createElement('span');
+    spacer.className = 'mc-spacer';
+    const btn = (label, tip, fn) => {
+        const b = document.createElement('button');
+        b.textContent = label; b.title = tip;
+        b.addEventListener('click', fn);
+        return b;
+    };
+    head.append(title, where, badge, spacer, buildKernelPicker(),
+        btn('↗', 'Open this block in the editor', () =>
+            vscode.postMessage({ type: 'editReveal', editId: e.editId })),
+        btn('✕', 'Close (Esc)', () => closeMmaCard()));
+    makeDraggable(card, head, { get: () => state.mma, repaint: () => paintMmaCard() });
+
+    const body = document.createElement('div');
+    body.className = 'mc-body';
+    card.append(head, body);
+
+    for (const cell of e.cells || []) body.append(buildMmaCell(cell, e));
+
+    const hint = document.createElement('div');
+    hint.className = 'mc-hint';
+    hint.textContent = 'Shift-Enter runs · “insert output” puts the result in the paper · Esc closes';
+    card.append(hint);
+    return card;
+}
+
+function buildMmaCell(cell, e) {
+    const wrap = document.createElement('div');
+    wrap.className = 'mc-cell';
+    wrap.dataset.cell = cell.cellId || '#0';
+
+    const box = document.createElement('div');
+    box.className = 'mc-editor';
+    const pre = document.createElement('pre');
+    pre.className = 'mc-hl';
+    pre.setAttribute('aria-hidden', 'true');
+    const ta = document.createElement('textarea');
+    ta.spellcheck = false;
+    ta.value = cell.code || '';
+    ta.placeholder = 'Wolfram code — Shift-Enter to run';
+    box.append(pre, ta);
+
+    const bar = document.createElement('div');
+    bar.className = 'mc-bar';
+    const run = document.createElement('button');
+    run.textContent = '▶ Run';
+    run.title = 'Evaluate this cell (Shift-Enter)';
+    const insert = document.createElement('button');
+    insert.textContent = '⤓ insert output';
+    insert.title = 'Put the result into the paper as managed output';
+    insert.disabled = true;
+    const inc = document.createElement('label');
+    const incBox = document.createElement('input');
+    incBox.type = 'checkbox';
+    incBox.checked = cell.include !== false;
+    inc.append(incBox, document.createTextNode('in the paper'));
+    const spacer = document.createElement('span');
+    spacer.className = 'mc-spacer';
+    const timing = document.createElement('span');
+    timing.className = 'mc-note';
+    bar.append(run, insert, inc, spacer, timing);
+
+    const out = document.createElement('div');
+    out.className = 'mc-out';
+    wrap.append(box, bar, out);
+
+    // --- editing ----------------------------------------------------------
+    let debounce = null;
+    const flush = () => {
+        clearTimeout(debounce);
+        vscode.postMessage({
+            type: 'mmaChange', blockId: e.blockId,
+            cellId: cell.cellId || null, code: ta.value,
+        });
+    };
+    ta.addEventListener('input', () => {
+        syncMmaHighlight(wrap);
+        // A result belongs to the code that produced it. The moment the code
+        // changes, the result on screen is about something else — so the
+        // insert button goes away rather than quietly offering to file a stale
+        // result under new code.
+        insert.disabled = true;
+        clearTimeout(debounce);
+        debounce = setTimeout(flush, 250);
+    });
+
+    const doRun = () => {
+        flush();
+        const runId = ++mmaRunSeq;
+        mmaPending.set(runId, wrap);
+        run.disabled = true;
+        timing.textContent = 'running…';
+        vscode.postMessage({
+            type: 'mmaRun', runId, blockId: e.blockId,
+            cellId: cell.cellId || null, code: ta.value,
+        });
+    };
+    run.addEventListener('click', doRun);
+    insert.addEventListener('click', () => vscode.postMessage({
+        type: 'mmaInsertOutput', blockId: e.blockId, cellId: cell.cellId || null,
+    }));
+    incBox.addEventListener('change', () => vscode.postMessage({
+        type: 'mmaSetInclude', blockId: e.blockId,
+        cellId: cell.cellId || null, include: incBox.checked,
+    }));
+
+    ta.addEventListener('keydown', (ev) => {
+        ev.stopPropagation();                      // Esc here must not exit full screen
+        if (ev.key === 'Enter' && ev.shiftKey) { ev.preventDefault(); doRun(); return; }
+        if (ev.key === 'Escape') { ev.preventDefault(); closeMmaCard(); return; }
+        if ((ev.metaKey || ev.ctrlKey) && ev.key === 's') { ev.preventDefault(); flush(); }
+    });
+
+    return wrap;
+}
+
+/** Place (or re-place) the computation card under its block. */
+function paintMmaCard(focus = false) {
+    const e = state.mma;
+    for (const c of document.querySelectorAll('.mmacard')) {
+        if (!e || c.dataset.mma !== String(e.blockId)) c.remove();
+    }
+    if (!e) return;
+    const rects = e.rects && e.rects.length ? e.rects : null;
+    const page = rects ? rects[rects.length - 1].page : e.page;
+    const wrap = pagesEl().querySelector(`.page[data-page="${page}"]`);
+    if (!wrap || !state.rendered.has(page)) return;
+
+    let bottom = 24; let left = null;
+    if (rects) {
+        for (const r0 of rects) {
+            if (r0.page !== page) continue;
+            const v = rectToViewport(page, r0);
+            if (!v) continue;
+            bottom = Math.max(bottom, v.y + v.h);
+            left = left == null ? v.x : Math.min(left, v.x);
+        }
+    }
+    let card = wrap.querySelector('.mmacard');
+    const fresh = !card;
+    if (!card) {
+        card = buildMmaCard(e);
+        wrap.appendChild(card);
+        for (const cellEl of card.querySelectorAll('.mc-cell')) syncMmaHighlight(cellEl);
+    }
+
+    // Sized against the VISIBLE band rather than the page, for the reason
+    // paintEditCard records: a page is routinely wider than the panel showing
+    // it, so a card sized from the page hangs off both edges of the window.
+    const main = document.querySelector('main');
+    const W = wrap.clientWidth || 600;
+    const wr = wrap.getBoundingClientRect();
+    const mr = main ? main.getBoundingClientRect() : wr;
+    const visLeft = Math.max(0, mr.left - wr.left);
+    const visRight = Math.min(W, mr.right - wr.left);
+    const cw = Math.max(240, Math.min(W - 24, (visRight - visLeft) - 28, 660));
+    const lo = Math.max(0, visLeft + 14);
+    const hi = Math.max(lo, Math.min(W - cw, visRight - cw - 14));
+    const x = Math.max(lo, Math.min(left == null ? 32 : left, hi));
+    card.style.width = `${cw}px`;
+    if (e.pos) {
+        const H = wrap.clientHeight || 800;
+        card.style.left = `${Math.max(-cw * 0.5, Math.min(e.pos.fx * W, W - cw * 0.5))}px`;
+        card.style.top = `${Math.max(0, Math.min(e.pos.fy * H, Math.max(0, H - 24)))}px`;
+    } else {
+        card.style.left = `${x}px`;
+        card.style.top = `${bottom + 8}px`;
+    }
+
+    if (fresh) {
+        for (const cellEl of card.querySelectorAll('.mc-cell')) syncMmaHighlight(cellEl);
+        if (focus) {
+            const ta = card.querySelector('textarea');
+            if (ta) { try { ta.focus({ preventScroll: true }); } catch (_) { ta.focus(); } }
+            revealEditCard(card);
+        }
+    }
 }
 
 /** Place (or re-place) the card under its block's rendered rows. */
@@ -2990,11 +3444,164 @@ function sendClick(n, pt, cx, cy, extra, type = 'click') {
 el('zoomin').addEventListener('click', () => setScale(state.scale * 1.25));
 el('zoomout').addEventListener('click', () => setScale(state.scale / 1.25));
 el('fit').addEventListener('click', () => fitWidth());
-el('follow').addEventListener('change', (e) => {
-    state.followCursor = e.target.checked;
-    vscode.postMessage({ type: 'follow', value: state.followCursor });
+// ===========================================================================
+// THE FOOTER WORKLIST
+// ===========================================================================
+//
+// One control, two sources, because they are the same question asked twice:
+// "what still needs my attention, and where is it?"
+//
+//   A review is open  -> the changes still to be decided. ✓ keep / ↺ undo
+//                        resolve one and move to the next, which is what the
+//                        review panel's own buttons do — this is the same
+//                        machinery, reachable without the panel taking up
+//                        half the paper.
+//   Otherwise         -> the places you last edited, newest first. ✓ done
+//                        drops one and parks on the one before it.
+//
+// It lives in the footer because it is a place you look BETWEEN actions, not
+// during one: a toolbar button is for doing something to the page, and this is
+// for finding your way back to something.
+
+function reviewFocusIndex() {
+    const hunks = reviewHunks();
+    if (!hunks.length) return -1;
+    const r = state.review;
+    const i = hunks.findIndex(h => String(h.id) === String(r && r.focus));
+    return i >= 0 ? i : 0;
+}
+
+function renderEditNav() {
+    const wrap = el('editnav');
+    if (!wrap) return;
+    const where = el('ednwhere');
+    const keep = el('ednkeep');
+    const undo = el('ednundo');
+    const done = el('edndone');
+
+    const reviewing = !!(state.review && state.review.pending);
+    wrap.classList.toggle('review', reviewing);
+
+    if (reviewing) {
+        const hunks = reviewHunks();
+        const i = reviewFocusIndex();
+        const h = i >= 0 ? hunks[i] : null;
+        wrap.hidden = false;
+        keep.hidden = false; undo.hidden = false; done.hidden = true;
+        // The same name the review list gives it — `h.where` is a placement
+        // code ('rows' | 'gap' | 'none'), not something to show a reader.
+        const name = h ? (h.name || `line ${h.startLine}`) : '';
+        where.textContent = `change ${i + 1}/${hunks.length}` + (name ? ` · ${name}` : '');
+        where.title = h && h.page
+            ? `Changes still to be decided — this one is on p.${h.page}`
+            : 'Changes still to be decided';
+        return;
+    }
+
+    const st = state.editStack;
+    const items = (st && st.items) || [];
+    if (!items.length) { wrap.hidden = true; return; }
+    const i = Math.max(0, Math.min(items.length - 1, (st && st.index) || 0));
+    const e = items[i];
+    wrap.hidden = false;
+    keep.hidden = true; undo.hidden = true; done.hidden = false;
+    // Counted from the NEWEST, which is how the reader thinks of it: 1 is
+    // "where I just was", and the numbers grow into the past.
+    where.textContent = `edit ${i + 1}/${items.length} · ${e.label}`;
+    where.title = `${e.file}:${e.line} — click ◀ ▶ to walk the places you last edited`;
+}
+
+function editNav(action) { vscode.postMessage({ type: 'editNav', action }); }
+
+el('ednprev').addEventListener('click', () => {
+    if (state.review && state.review.pending) vscode.postMessage({ type: 'reviewAction', action: 'prev' });
+    else editNav('prev');
+});
+el('ednnext').addEventListener('click', () => {
+    if (state.review && state.review.pending) vscode.postMessage({ type: 'reviewAction', action: 'next' });
+    else editNav('next');
+});
+el('edndone').addEventListener('click', () => editNav('resolve'));
+el('ednkeep').addEventListener('click', () => {
+    const h = reviewHunks()[reviewFocusIndex()];
+    if (h) vscode.postMessage({ type: 'reviewAction', action: 'keep', id: h.id });
+});
+el('ednundo').addEventListener('click', () => {
+    const h = reviewHunks()[reviewFocusIndex()];
+    if (h) vscode.postMessage({ type: 'reviewAction', action: 'undo', id: h.id });
+});
+
+// FOLLOW IS THREE THINGS, not two.
+//
+//   off    — the page ignores the editor entirely
+//   mark   — it shows where the caret is, and never moves itself
+//   scroll — it also brings that place into view
+//
+// `mark` is the one that was missing. Writing prose beside the paper means
+// wanting to see where you are without the page yanking itself there on every
+// keystroke, and the old checkbox could only offer off-or-both.
+/**
+ * Give ground in a fixed order as the panel narrows.
+ *
+ * Driven from JS rather than a media query because the thing that has to be
+ * measured is the BAR, not the window — and because a rule that is applied by
+ * a function can be tested by calling it, which a media query cannot.
+ *
+ * @param {number} [width] force a width; omitted, the bar measures itself.
+ */
+function fitToolbar(width) {
+    const head = document.querySelector('header');
+    if (!head) return;
+    const w = Number.isFinite(width) ? width : head.clientWidth;
+    if (!(w > 0)) return;
+    head.classList.toggle('narrow', w < 760);
+    head.classList.toggle('tight', w < 620);
+}
+
+const FOLLOW_MODES = ['off', 'mark', 'scroll'];
+
+function setFollowMode(mode, tell = true) {
+    state.followMode = FOLLOW_MODES.includes(mode) ? mode : 'scroll';
+    state.followCursor = state.followMode !== 'off';
+    const b = el('follow');
+    if (b) {
+        b.dataset.mode = state.followMode;
+        // On a narrow bar the words go and a glyph speaks instead: barred for
+        // off, a ringed dot for a mark that stays put, up-down arrows for a
+        // page that moves itself. The title says it in words either way.
+        const GLYPH = { off: '⊘', mark: '◎', scroll: '⇕' };
+        b.textContent = '';
+        const icon = document.createElement('span');
+        icon.className = 'ticon';
+        icon.textContent = GLYPH[state.followMode] || '⇕';
+        const lbl = document.createElement('span');
+        lbl.className = 'tlbl';
+        lbl.textContent = `follow: ${state.followMode}`;
+        b.append(icon, lbl);
+        b.title = state.followMode === 'off'
+            ? 'The page ignores the editor cursor — click to cycle'
+            : state.followMode === 'mark'
+                ? 'The page marks where the cursor is, but never scrolls itself — click to cycle'
+                : 'The page marks where the cursor is and scrolls to it — click to cycle';
+    }
+    if (tell) vscode.postMessage({ type: 'follow', mode: state.followMode });
+}
+
+try {
+    new ResizeObserver(() => fitToolbar()).observe(document.querySelector('header'));
+} catch (_) { window.addEventListener('resize', () => fitToolbar()); }
+// Build the follow control through the SAME function that later updates it,
+// rather than leaving the markup's own text standing until the first click.
+// Two spellings of one control drift, and the narrow-bar rules only know about
+// the one this function makes.
+setFollowMode(state.followMode, false);
+fitToolbar();
+
+el('follow').addEventListener('click', () => {
+    setFollowMode(FOLLOW_MODES[(FOLLOW_MODES.indexOf(state.followMode) + 1) % FOLLOW_MODES.length]);
 });
 el('recompile').addEventListener('click', () => vscode.postMessage({ type: 'recompile' }));
+el('addmma').addEventListener('click', () => setArmInsert(!armInsert));
 el('pin').addEventListener('change', (e) => {
     state.pinHighlight = e.target.checked;
     paintHighlight();
@@ -3034,6 +3641,7 @@ el('pin').addEventListener('change', (e) => {
 let _resizeT = null;
 window.addEventListener('resize', () => {
     if (state.edit) paintEditCard();
+    if (state.mma) paintMmaCard();
     // Fit is a mode: a panel that changes width re-fits to it.
     if (state.fitMode) {
         clearTimeout(_resizeT);
@@ -3118,6 +3726,13 @@ window.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
     if (e.target && e.target.tagName === 'TEXTAREA') return;   // the card owns it
 
+    // Arming is the newest thing the reader turned on, so it is the first
+    // thing Esc turns off — and it must not also clear their selection.
+    if (armInsert) {
+        setArmInsert(false);
+        e.preventDefault();
+        return;
+    }
     if (dragMove) {
         dragMove = null;
         document.body.classList.remove('moving-sel');
@@ -3437,7 +4052,7 @@ window.addEventListener('message', async (ev) => {
             state.highlight = rects.length
                 ? { page: rects[0].page, rects, flag: msg.flag, title: msg.title }
                 : null;
-            if (state.highlight && msg.reveal) revealHighlight({ smooth: !msg.instant });
+            if (state.highlight && msg.reveal) revealHighlight({ smooth: !msg.instant }).catch(() => {});
             else paintHighlight();
             if (msg.label) el('where').textContent = msg.label;
             break;
@@ -3474,7 +4089,7 @@ window.addEventListener('message', async (ev) => {
             break;
         }
         case 'status': status(msg.text, msg.kind || ''); break;
-        case 'setFollow': state.followCursor = !!msg.value; el('follow').checked = state.followCursor; break;
+        case 'setFollow': setFollowMode(msg.mode || (msg.value ? 'scroll' : 'off'), false); break;
         case 'editOpen': {
             // A card the reader has MOVED keeps its place while they step from
             // block to block — the whole point of moving it was to choose where
@@ -3517,6 +4132,95 @@ window.addEventListener('message', async (ev) => {
             }
             break;
         }
+        case 'mmaOpen': {
+            closeEditCard(false);                  // one card at a time
+            for (const c of document.querySelectorAll('.mmacard')) c.remove();
+            state.mma = {
+                editId: msg.editId, blockId: msg.blockId, file: msg.file,
+                startLine: msg.startLine, endLine: msg.endLine,
+                cells: msg.cells || [], state: msg.state, stateReason: msg.stateReason,
+                rects: msg.rects || [],
+                page: (msg.rects && msg.rects[0] && msg.rects[0].page) || 1,
+                pos: null,
+            };
+            // The tokeniser is loaded BEFORE the card is painted, so the first
+            // paint is already coloured — a card that starts plain and then
+            // repaints reads as a glitch.
+            await ensureWolframHighlighter();
+            const page = state.mma.rects.length
+                ? state.mma.rects[state.mma.rects.length - 1].page : state.mma.page;
+            await renderPage(page);
+            paintMmaCard(true);
+            break;
+        }
+        case 'mmaUpdate': {
+            const e = state.mma;
+            if (!e || e.blockId !== msg.blockId) break;
+            e.startLine = msg.startLine; e.endLine = msg.endLine;
+            e.state = msg.state; e.stateReason = msg.stateReason;
+            const card = document.querySelector('.mmacard');
+            if (!card) break;
+            const badge = card.querySelector('.mc-state');
+            if (badge) {
+                badge.className = `mc-state ${msg.state || ''}`;
+                badge.textContent = msg.state || '';
+                badge.title = msg.stateReason || '';
+            }
+            const where = card.querySelector('.mc-where');
+            if (where) {
+                where.textContent = `${e.file || ''} · ${e.startLine === e.endLine
+                    ? 'line ' + e.startLine : 'lines ' + e.startLine + '–' + e.endLine}`;
+            }
+            // The CODE is only pushed back into a cell whose editor is not
+            // focused. Replacing the text under a reader's caret to tell them
+            // what they just typed is how an editor loses a keystroke.
+            for (const c of msg.cells || []) {
+                const cellEl = card.querySelector(`.mc-cell[data-cell="${c.cellId || '#0'}"]`);
+                if (!cellEl) continue;
+                const ta = cellEl.querySelector('textarea');
+                if (ta && document.activeElement !== ta && ta.value !== c.code) {
+                    ta.value = c.code;
+                    syncMmaHighlight(cellEl);
+                }
+            }
+            e.cells = msg.cells || e.cells;
+            break;
+        }
+        case 'editStack':
+            state.editStack = { items: msg.items || [], index: msg.index || 0 };
+            renderEditNav();
+            break;
+        case 'mmaAnchor':
+            if (state.mma && state.mma.blockId === msg.blockId) {
+                state.mma.rects = msg.rects || state.mma.rects;
+                state.mma.page = (msg.rects && msg.rects[0] && msg.rects[0].page) || state.mma.page;
+                paintMmaCard();
+            }
+            break;
+        case 'mmaClosed':
+            state.mma = null;
+            for (const c of document.querySelectorAll('.mmacard')) c.remove();
+            break;
+        case 'mmaKernelList':
+            fillKernelPicker(msg);
+            break;
+        case 'mmaResult': {
+            const cellEl = mmaPending.get(msg.runId);
+            mmaPending.delete(msg.runId);
+            if (!cellEl || !cellEl.isConnected) break;
+            const run = cellEl.querySelector('.mc-bar button');
+            const insert = cellEl.querySelectorAll('.mc-bar button')[1];
+            const timing = cellEl.querySelector('.mc-note');
+            if (run) run.disabled = false;
+            if (timing) {
+                timing.textContent = msg.error ? ''
+                    : `${msg.ms} ms · ${msg.pageWidthEm} em`;
+            }
+            paintMmaResult(cellEl, msg);
+            // Only a result that could actually go into the paper offers to.
+            if (insert) insert.disabled = !!msg.error;
+            break;
+        }
         case 'editAnchor':
             if (state.edit && state.edit.id === msg.editId) {
                 state.edit.rects = msg.rects || state.edit.rects;
@@ -3545,6 +4249,7 @@ window.addEventListener('message', async (ev) => {
         case 'review':
             state.review = msg.session || null;
             renderReview();
+            renderEditNav();
             if (state.tour) placeTourRing(state.tour.point);
             break;
         case 'tour':
@@ -3607,4 +4312,4 @@ function forgetPagesForTest() {
     textCache.clear();
 }
 
-window.__wbTexViewerTest = { snapToInk, itemWords, prefixWidths, textItems, wordKey, foldGlyphs, wordAtPoint, highlightLatex, fromViewport, rectToViewport, forgetPagesForTest };
+window.__wbTexViewerTest = { fitToolbar, snapToInk, itemWords, prefixWidths, textItems, wordKey, foldGlyphs, wordAtPoint, highlightLatex, fromViewport, rectToViewport, forgetPagesForTest };
