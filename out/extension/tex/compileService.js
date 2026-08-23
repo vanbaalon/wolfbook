@@ -43,7 +43,7 @@ const zlib = require('zlib');
 const path = require('path');
 const crypto = require('crypto');
 
-const { parseLog } = require('./texLog');
+const { parseLog, needsRerun } = require('./texLog');
 const { readPassLimit } = require('./livePolicy');
 
 const sha256 = (b) => crypto.createHash('sha256').update(b).digest('hex');
@@ -380,8 +380,17 @@ async function _compileLocked(o, ctx) {
     // PDF, wrong when the MAP is missing or older than that PDF (an earlier
     // build without the hook, or a deleted out file): then the engine must run
     // once more, so `-g` forces it.
-    let forceRun = false;
-    if (glyphMap) {
+    //
+    // THE OTHER REASON TO FORCE IT, and the one that made a new \label print
+    // `??` for ever: after a CAPPED build the sources have not changed, so the
+    // follow-up build that exists to converge the cross-references is told
+    // "Nothing to do — all targets are up-to-date" and does nothing at all.
+    // Measured on a two-line paper: capped run leaves the unresolved
+    // reference, the uncapped run that follows it is a no-op, and the page
+    // stays wrong until the reader happens to type something. A caller that
+    // knows it is correcting an unconverged build passes `force`.
+    let forceRun = !!o.force;
+    if (glyphMap && !forceRun) {
         try {
             const mapP = path.join(outDir, glyphMapName);
             const pdfP = path.join(outDir, job + '.pdf');
@@ -476,6 +485,15 @@ async function _compileLocked(o, ctx) {
         stdout: run.stdout, stderr: run.stderr, maxPasses,
     });
 
+    // DID LATEX ITSELF ASK FOR ANOTHER PASS? A capped build is one way to be
+    // one pass behind; the other is a build that ran to completion and still
+    // wrote a .aux nobody has read yet — a brand new \label, which prints as
+    // `??` until the next run. Reported exactly that way. Without this the
+    // only trigger for the background convergence was latexmk's own cap
+    // message, so a new label could sit unresolved for as long as the paper
+    // stayed open.
+    const rerunWanted = needsRerun(logText);
+
     return {
         ok: hasPdf && !run.cancelled,
         runner: 'latexmk',
@@ -511,6 +529,7 @@ async function _compileLocked(o, ctx) {
         passes,
         maxPasses,
         passesLimited,
+        rerunWanted,
         rcUnsupported,
         ms: Date.now() - t0,
         queuedMs: t0 - queuedAt,
@@ -626,10 +645,12 @@ function probeInitCode(code, { timeoutMs = 5000 } = {}) {
 
 function saveGeneration(gen) {
     if (!gen || !gen.outDir || !gen.ok) return false;
-    // A CAPPED BUILD IS NOT A BASELINE. Its ink is current but its
-    // cross-references may be one pass behind, and a record restored on the
-    // next window open would present that as a finished compile.
-    if (gen.passesLimited) return false;
+    // A CAPPED OR UNCONVERGED BUILD IS NOT A BASELINE. Its ink is current but
+    // its cross-references may be one pass behind, and a record restored on the
+    // next window open would present that as a finished compile — with the
+    // background convergence never scheduled, because the record says there is
+    // nothing to converge.
+    if (gen.passesLimited || gen.rerunWanted) return false;
     try {
         fs.writeFileSync(generationPath(gen.outDir), JSON.stringify(gen), 'utf8');
         return true;

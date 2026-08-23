@@ -210,10 +210,13 @@
      is always there, because a section missing from the paper with nothing to
      say so is worse than one that is simply long. It reads as a control, not
      as type — nobody should mistake it for something the paper prints. */
-  .secfold { position:absolute; z-index:7; transform:translateY(-1px);
-             font-family: var(--vscode-font-family); font-size:9.5px; line-height:1.5;
+  /* One cluster per anchor: the fold and the copy tag sit side by side rather
+     than on the same spot, and the left margin stays the \ref badges'. */
+  .wpa { position:absolute; z-index:7; display:flex; gap:4px; align-items:center;
+             transform:translateY(-1px); overflow:hidden; }
+  .secfold { font-family: var(--vscode-font-family); font-size:9.5px; line-height:1.5;
              padding:0 6px; border-radius:9px; cursor:pointer; white-space:nowrap;
-             overflow:hidden; text-overflow:ellipsis;
+             overflow:hidden; text-overflow:ellipsis; flex:0 1 auto;
              border:1px solid var(--vscode-panel-border, rgba(128,128,128,.5));
              background: var(--vscode-editorWidget-background, #252526);
              color: var(--vscode-descriptionForeground, #999); opacity:.55; }
@@ -224,6 +227,18 @@
              border-style:dashed;
              background: color-mix(in srgb, var(--vscode-editorWarning-foreground, #c90) 12%,
                          var(--vscode-editorWidget-background, #252526)); }
+  /* A TAG, and it looks like one: this is a place in the source, not something
+     the paper prints. Clicking copies `path:line` — how a reader points an
+     agent at a spot without describing it. */
+  .wpatag { font-family: var(--vscode-editor-font-family, monospace); font-size:9px;
+             line-height:1.5; padding:0 5px 0 4px; cursor:pointer; white-space:nowrap;
+             flex:0 0 auto; border-radius:2px 7px 7px 2px;
+             border:1px solid var(--vscode-panel-border, rgba(128,128,128,.5));
+             background: var(--vscode-editorWidget-background, #252526);
+             color: var(--vscode-descriptionForeground, #999); opacity:.5; }
+  .wpatag:hover { opacity:1; border-color: var(--vscode-focusBorder, #0a84ff);
+             color: var(--vscode-foreground, #ccc); }
+  .wpatag-equation { font-style:normal; }
   .lbc { position:absolute; z-index:7; pointer-events:auto; cursor:copy;
          font: 500 calc(7.4px * var(--lbc-scale, 1))/1.3 var(--vscode-font-family);
          white-space:nowrap; overflow:hidden; text-overflow:ellipsis;

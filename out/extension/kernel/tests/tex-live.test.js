@@ -17,6 +17,7 @@ const {
     nextLiveDelayMs, blendLiveMs, shipDecision, synctexUnchanged,
     readPassLimit, generationSatisfies, authoritativeDelayMs,
 } = require('../../tex/livePolicy');
+const { needsRerun } = require('../../tex/texLog');
 
 async function main() {
     // --- the debounce ------------------------------------------------------
@@ -172,6 +173,42 @@ Latexmk: All targets (paper.pdf) are up-to-date
     });
 
     // --- authoritative-vs-live --------------------------------------------
+
+    await test('A BUILD LATEX ITSELF WANTS RERUN IS NOT A FINISHED BUILD', () => {
+        // Reported: a NEW equation label renders as (?) and stays that way.
+        // The cap is only one of the two ways to be one pass behind — the
+        // other is a build that ran to completion and wrote a .aux nobody has
+        // read yet, which is exactly what a new \label does. Only the cap was
+        // checked, so nothing ever went back to fix it.
+        const stale = { passesLimited: false, rerunWanted: true };
+        assert.strictEqual(generationSatisfies(stale, { authoritative: false }), true,
+            'the ink is current, so the live loop is content');
+        assert.strictEqual(generationSatisfies(stale, { authoritative: true }), false,
+            'but it must converge before it counts as finished');
+    });
+
+    await test('LATEX ASKING FOR A PASS IS RECOGNISED, IN ITS OWN WORDS', () => {
+        assert.ok(needsRerun('LaTeX Warning: Label(s) may have changed. Rerun to get cross-references right.'));
+        assert.ok(needsRerun('Package rerunfilecheck Warning: File `p.out\' has changed.\n(rerunfilecheck)  Rerun to get outlines right'));
+        assert.ok(needsRerun('LaTeX Warning: Please rerun LaTeX.'));
+        assert.ok(!needsRerun('LaTeX Warning: There were undefined references.'),
+            'an undefined REFERENCE is reported by LaTeX separately; the rerun request is the signal');
+        assert.ok(!needsRerun(''));
+        assert.ok(!needsRerun(null));
+    });
+
+    await test('AN UNDEFINED CITATION MUST NOT ARM THE REBUILD FOR EVER', () => {
+        // It used to be in this predicate. A \cite to a key that is not in the
+        // .bib warns on EVERY pass, so treating it as "wants a rerun" would
+        // start the background build again the moment it finished, for as long
+        // as the paper stayed open. latexmk owns the bibtex loop; all we need
+        // to know is whether the last build left the paper unconverged.
+        const log = 'LaTeX Warning: Citation `Gromov:2013pga\' on page 3 undefined on input line 91.\n' +
+            'LaTeX Warning: There were undefined citations.';
+        assert.strictEqual(needsRerun(log), false);
+        assert.strictEqual(generationSatisfies({ rerunWanted: needsRerun(log) }, { authoritative: true }), true,
+            'so a paper with a missing bib entry still counts as finished');
+    });
 
     await test('A ONE-PASS GENERATION DOES NOT SATISFY A SAVE', () => {
         const limited = { passesLimited: true };

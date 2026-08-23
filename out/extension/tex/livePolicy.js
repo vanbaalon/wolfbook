@@ -128,7 +128,10 @@ function readPassLimit({ stdout = '', stderr = '', maxPasses = null } = {}) {
 function generationSatisfies(gen, { authoritative = false } = {}) {
     if (!gen) return false;
     if (!authoritative) return true;
-    return !gen.passesLimited;
+    // TWO WAYS TO BE ONE PASS BEHIND. The cap biting is one; the other is a
+    // build that ran to completion and still wrote a .aux nobody has read —
+    // which is what a brand new \label does, and it prints `??` until then.
+    return !gen.passesLimited && !gen.rerunWanted;
 }
 
 /**

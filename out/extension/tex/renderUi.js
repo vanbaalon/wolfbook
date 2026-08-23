@@ -181,9 +181,22 @@ class RenderCoordinator {
         this._idleTimers.set(root, setTimeout(() => {
             this._idleTimers.delete(root);
             const st = this.roots.get(root);
-            // Nothing to converge unless a build actually stopped short.
-            if (!st || !st.generation || !st.generation.passesLimited) return;
+            // NOTHING TO CONVERGE UNLESS THE LAST BUILD LEFT SOMETHING BEHIND,
+            // and there are two ways for that to happen: the pass cap bit
+            // (`passesLimited`), or LaTeX itself asked for another pass
+            // (`rerunWanted`) — which is what a brand new \label does. Only
+            // the first was checked here, so a new label printed `??` and
+            // nothing ever went back to fix it. Reported exactly that way.
+            const g = st && st.generation;
+            if (!g || !(g.passesLimited || g.rerunWanted)) return;
             if (st.compiling) { this._armAuthoritative(root, liveDelayMs); return; }
+            // A PAPER THAT ALWAYS ASKS IS NOT A REASON TO COMPILE FOR EVER.
+            // Convergence normally takes one extra build; two is generous. The
+            // count is per source snapshot, so the next edit starts it over.
+            const tries = (st._convergeAt === g.sourceSnapshotHash ? st._convergeTries || 0 : 0);
+            if (tries >= 2) return;
+            st._convergeAt = g.sourceSnapshotHash;
+            st._convergeTries = tries + 1;
             this.buildAuthoritative(root).catch(() => { /* reported via state */ });
         }, wait));
     }
@@ -370,6 +383,11 @@ class RenderCoordinator {
                 root,
                 sourceFiles: st.files,
                 sourceSnapshotHash: snapshot,
+                // AN AUTHORITATIVE BUILD MUST ACTUALLY RUN. The sources have
+                // not changed since the capped build it is correcting, so
+                // latexmk would say "nothing to do" and leave the unresolved
+                // references exactly where they were.
+                force: !!force || wantFull,
                 overlay,
                 signal: ac.signal,
                 // The skeleton only has to be walked when it might have changed.
@@ -447,13 +465,16 @@ class RenderCoordinator {
             if (live && gen.ok && !gen.cancelled) st.liveMsEwma = blendLiveMs(st.liveMsEwma, gen.ms);
             this.log(`  ${gen.ok ? 'ok' : 'FAILED'} · ${gen.pageCount ?? '?'} pages · ` +
                 `${gen.errors} error(s) · ${gen.warnings} warning(s) · ` +
-                `${gen.passes ?? '?'} pass(es)${gen.passesLimited ? ' (capped)' : ''} · ` +
+                `${gen.passes ?? '?'} pass(es)${gen.passesLimited ? ' (capped)' : ''}` +
+                `${gen.rerunWanted ? ' (cross-references one pass behind)' : ''} · ` +
                 `${gen.ms} ms${gen.queuedMs ? ` (+${gen.queuedMs} ms queued)` : ''} · ` +
                 `${Date.now() - t0} ms total`);
             if (!gen.ok && gen.stopReason) this.log(`  stopped: ${gen.stopReason}`);
-            // A build that stopped short schedules its own correction, even if
-            // the reader types nothing more.
-            if (gen.passesLimited) {
+            // A BUILD THAT LEFT SOMETHING BEHIND SCHEDULES ITS OWN CORRECTION,
+            // even if the reader types nothing more — which is the case that
+            // matters for a new \label: it is typed once and then the reader
+            // just LOOKS at the `??` on the page waiting for it to resolve.
+            if (gen.passesLimited || gen.rerunWanted) {
                 this._armAuthoritative(root, nextLiveDelayMs({
                     lastMs: st.liveMsEwma,
                     ceilingMs: Math.max(200, cfg.get('liveRenderDelayMs', 900)),

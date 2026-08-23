@@ -260,9 +260,24 @@ function classifyWarning(m) {
     return 'warning';
 }
 
-/** Does the engine want another pass? Mirrors latexmk's own rule. */
+/**
+ * Did LaTeX ITSELF ask for another pass?
+ *
+ * This is the signal that the PDF on screen is one pass behind its own
+ * cross-references: a new \\label, a moved equation, a changed section number
+ * all print `??` (or `(?)`) until the .aux written by this run is read by the
+ * next one. It is what schedules the quiet background convergence in
+ * renderUi._armAuthoritative.
+ *
+ * AN UNDEFINED CITATION IS DELIBERATELY NOT HERE. It used to be, and it is the
+ * one case that never converges: a \\cite to a key that is not in the .bib
+ * warns on every pass for ever, so treating it as "wants a rerun" would arm the
+ * background build again the moment it finished, for as long as the paper was
+ * open. latexmk owns the bibtex loop; what we need to know is only whether the
+ * LAST build left the paper unconverged.
+ */
 function needsRerun(logText) {
-    return /Rerun to get|Please rerun|Label\(s\) may have changed|Citation \S+ undefined/.test(String(logText || ''));
+    return /Rerun to get|Please rerun|Rerun LaTeX|Label\(s\) may have changed/.test(String(logText || ''));
 }
 
 module.exports = { parseLog, needsRerun, unwrap, detectWrapWidth, SEVERITY };

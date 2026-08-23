@@ -3113,6 +3113,20 @@ test('NO MAP, NO ANSWER: a failed rebuild clears the page instead of leaving the
 });
 
 // --- FOLDING A SECTION AWAY -------------------------------------------------
+
+/**
+ * What the last clipboard write put there.
+ *
+ * Armed per test, NOT once at load: earlier tests in this file replace
+ * `writeText` with their own collector when they run, so a handler installed
+ * here at module scope is long gone by the time these execute.
+ */
+let copied = null;
+const watchClipboard = () => {
+    copied = null;
+    stub.env.clipboard.writeText = async (t) => { copied = t; };
+};
+
 //
 // The gesture edits the reader's paper, so what is asserted here is the whole
 // round trip through the real viewer: the controls it offers, the edit it
@@ -3231,6 +3245,63 @@ test('folding what is already folded, or a key that is gone, says so and stops',
     v.posted.length = 0;
     await v._onMessage({ type: 'sectionFold', key: 'no-such-section', collapse: true });
     assert.strictEqual(doc.getText(), after);
+    assert.ok(v.posted.some(p => p.type === 'status' && /no longer there/.test(p.text)));
+});
+
+test('EVERY EQUATION AND HEADING CARRIES A TAG THAT NAMES ITS PLACE', async () => {
+    // Asked for: a tag on each section/subsection/equation that copies the
+    // path and line, "to direct AI to a particular place".
+    const src = FOLD_SRC.replace('Subsection prose.',
+        'Subsection prose.\n\\begin{equation}\\label{eq:tower}\n  E = mc^2\n\\end{equation}');
+    const { v } = moveViewer(src);
+    const items = await foldItems(v);
+    const eq = items.find(i => i.kind === 'equation');
+    assert.ok(eq, 'the equation is an anchor too');
+    assert.strictEqual(eq.foldable, false, 'but it cannot be folded on its own');
+    assert.strictEqual(eq.line, 10, 'and it knows which line it starts on');
+    const head = items.find(i => i.kind === 'section');
+    assert.ok(head.foldable, 'a heading can be folded');
+    assert.strictEqual(head.line, head.headStart);
+});
+
+test('THE TAG COPIES path:line — THE POINT OF THE WHOLE THING', async () => {
+    const { v } = moveViewer(FOLD_SRC);
+    const items = await foldItems(v);
+    const it = items.find(i => i.title === 'The upper tower');
+    watchClipboard();
+    await v._onMessage({ type: 'copyAnchor', key: it.key });
+    assert.strictEqual(copied, '/paper/move.tex:8',
+        'the path and the line, ready to paste at an agent');
+    const said = v.posted.filter(p => p.type === 'status').pop();
+    assert.ok(/Copied \/paper\/move\.tex:8/.test(said.text), said.text);
+
+    // Alt-click adds what it IS, for a human reading the same message.
+    watchClipboard();
+    await v._onMessage({ type: 'copyAnchor', key: it.key, alt: true });
+    assert.strictEqual(copied, '/paper/move.tex:8 (The upper tower)');
+});
+
+test('a path INSIDE the workspace is copied relative to it', async () => {
+    // An agent resolves a relative path against the workspace folder — and the
+    // papers here usually live outside it, which is why the absolute form is
+    // the default rather than the exception.
+    const { v } = moveViewer(FOLD_SRC);
+    const items = await foldItems(v);
+    const it = items.find(i => i.kind === 'section');
+    const had = stub.workspace.workspaceFolders;
+    stub.workspace.workspaceFolders = [{ uri: { fsPath: '/paper' } }];
+    try {
+        watchClipboard();
+        await v._onMessage({ type: 'copyAnchor', key: it.key });
+        assert.strictEqual(copied, 'move.tex:4');
+    } finally { stub.workspace.workspaceFolders = had; }
+});
+
+test('copying a place that has gone says so instead of copying nonsense', async () => {
+    const { v } = moveViewer(FOLD_SRC);
+    watchClipboard();
+    await v._onMessage({ type: 'copyAnchor', key: 'no-such-anchor' });
+    assert.strictEqual(copied, null);
     assert.ok(v.posted.some(p => p.type === 'status' && /no longer there/.test(p.text)));
 });
 

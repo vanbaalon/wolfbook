@@ -741,6 +741,19 @@ class TexViewer {
         // What the webview now holds — the key the next refresh compares.
         this.shownPdfHash = st.generation.pdfHash || null;
         this._post({ type: 'setFollow', value: this.followCursor });
+        // SAY WHEN THE PAGE IS ONE PASS BEHIND ITSELF.
+        //
+        // A new \label prints `??` until the .aux this run wrote has been read
+        // by the next one. The background convergence is already scheduled
+        // (renderUi._armAuthoritative), but a reader looking at `??` with
+        // nothing said cannot tell a lagging reference from a broken one —
+        // which is the whole difficulty of the reported bug.
+        if (st.generation.rerunWanted || st.generation.passesLimited) {
+            this._post({
+                type: 'status', kind: '',
+                text: 'cross-references are one pass behind — refreshing in the background',
+            });
+        }
         // WHICH SECTIONS ARE FOLDED AWAY. Not gated on Shift: a section that is
         // simply missing from the paper, with nothing saying so, is the worst
         // thing this feature could do to a reader.
@@ -2151,6 +2164,7 @@ class TexViewer {
                 break;
             case 'copyLabel': await this._copyLabel(m); break;
             case 'sectionFold': await this._onSectionFold(m); break;
+            case 'copyAnchor': await this._onCopyAnchor(m); break;
             case 'cropped': this._onCropped(m); break;
             case 'selectionClear':
                 // Esc on the page. The selection lives in the EDITOR, so
@@ -3764,7 +3778,16 @@ class TexViewer {
         try { return fs.readFileSync(file, 'utf8'); } catch (_) { return null; }
     }
 
-    /** Every sectioning unit of the paper, with where it prints and whether it is folded. */
+    /**
+     * Every ANCHOR on the page: each sectioning unit and each display equation,
+     * with where it prints, whether it can be folded, and where it lives in the
+     * source.
+     *
+     * The headings carry the fold; everything here carries a tag that copies
+     * `path:line`, which is how a reader hands an agent a place in the paper
+     * ("rewrite the equation at SoVMain.tex:412") without describing it in
+     * prose or pasting it.
+     */
     _sectionControls(st) {
         if (!st || !st.map || !st.map.available) return [];
         const out = [];
@@ -3774,7 +3797,8 @@ class TexViewer {
             if (text == null) continue;
             const lines = text.split('\n');
             const heads = (model.objects || []).filter(o => o.kind === 'section-heading');
-            if (!heads.length) continue;
+            const equations = (model.objects || []).filter(o => o.kind === 'display-equation');
+            if (!heads.length && !equations.length) continue;
             let spans = [];
             try { spans = sectionSpans(model.objects, lines.length, collapse.bodyEndLine(lines)); }
             catch (_) { spans = []; }
@@ -3792,6 +3816,9 @@ class TexViewer {
                 const row = rows.length ? rows[rows.length - 1] : null;
                 out.push({
                     key: h.stableKey || `${file}:${h.sourceRange.startLine}`,
+                    kind: 'section',
+                    foldable: true,
+                    line: h.sourceRange.startLine,
                     file,
                     title: h.title || '',
                     level: h.level || 0,
@@ -3807,8 +3834,80 @@ class TexViewer {
                     h: row ? row.h : 0,
                 });
             }
+            // AN EQUATION IS THE THING A READER MOST OFTEN WANTS TO POINT AT,
+            // and it usually has no heading anywhere near it. It cannot be
+            // folded on its own — the fold is a section-sized gesture — so it
+            // carries the tag alone.
+            for (const q of equations) {
+                let rows = [];
+                try { rows = st.map.lineRows(file, q.sourceRange.startLine) || []; } catch (_) { rows = []; }
+                if (!rows.length) {
+                    try { rows = st.map.lineRows(file, q.sourceRange.startLine + 1) || []; } catch (_) { rows = []; }
+                }
+                const row = rows.length ? rows[0] : null;
+                out.push({
+                    key: q.stableKey || `${file}:${q.sourceRange.startLine}`,
+                    kind: 'equation',
+                    foldable: false,
+                    line: q.sourceRange.startLine,
+                    file,
+                    title: q.label || '',
+                    level: 0,
+                    headStart: q.sourceRange.startLine,
+                    headEnd: q.sourceRange.endLine,
+                    spanEnd: q.sourceRange.endLine,
+                    collapsed: false,
+                    hidden: 0,
+                    page: row ? row.page : null,
+                    x: row ? row.x : 0,
+                    y: row ? row.y : 0,
+                    w: row ? row.w : 0,
+                    h: row ? row.h : 0,
+                });
+            }
         }
         return out;
+    }
+
+    /**
+     * A place in the paper, on the clipboard — the point of the tags.
+     *
+     * WORKSPACE-RELATIVE WHEN IT CAN BE, ABSOLUTE WHEN IT CANNOT. An agent
+     * resolves a relative path against the workspace folder, and the papers
+     * here usually live outside it (the file watcher learned that the hard
+     * way), so a relative path would name a file that does not exist.
+     */
+    _anchorRef(it, { alt = false } = {}) {
+        let p = it.file;
+        try {
+            const folders = vscode.workspace.workspaceFolders || [];
+            for (const f of folders) {
+                const base = f.uri.fsPath;
+                if (p === base || p.startsWith(base + path.sep)) {
+                    p = path.relative(base, p);
+                    break;
+                }
+            }
+        } catch (_) { /* absolute, then */ }
+        const ref = `${p}:${it.line}`;
+        if (!alt) return ref;
+        const what = it.kind === 'section' ? (it.title || 'section')
+            : (it.title ? `\\label{${it.title}}` : 'equation');
+        return `${ref} (${what})`;
+    }
+
+    async _onCopyAnchor(m) {
+        const st = this.coord.roots.get(this.root);
+        const items = st ? this._sectionControls(st) : [];
+        const it = items.find(x => x.key === (m && m.key));
+        if (!it) { this._post({ type: 'status', text: 'that place is no longer there', kind: 'warn' }); return; }
+        const text = this._anchorRef(it, { alt: !!(m && m.alt) });
+        try {
+            await vscode.env.clipboard.writeText(text);
+            this._post({ type: 'status', text: `Copied ${text}`, kind: 'ok' });
+        } catch (e) {
+            this._post({ type: 'status', text: `could not copy: ${e.message}`, kind: 'err' });
+        }
     }
 
     async _postSections() {

@@ -1477,39 +1477,66 @@ async function inkMatching(find, page) {
 // asks for the change; it never decides anything itself.
 
 function paintSections() {
-    for (const e of document.querySelectorAll('.secfold')) e.remove();
+    for (const e of document.querySelectorAll('.wpa')) e.remove();
     const S = state.sections;
     if (!S || !S.items) return;
     const shift = labelsVisible();
     for (const it of S.items) {
         if (!it.page || !state.rendered.has(it.page)) continue;
-        // A folded section is always announced; the fold control is Shift-only.
+        // A folded section is always announced; everything else is Shift-only.
         if (!it.collapsed && !shift) continue;
         const wrap = pagesEl().querySelector('.page[data-page="' + it.page + '"]');
         if (!wrap) continue;
         const v = rectToViewport(it.page, { page: it.page, x: it.x + it.w + 6, y: it.y, w: 1, h: it.h || 9 });
         if (!v) continue;
-        const b = document.createElement('button');
-        b.className = 'secfold' + (it.collapsed ? ' on' : '');
-        b.dataset.key = it.key;
-        b.dataset.collapse = it.collapsed ? '0' : '1';
-        b.textContent = it.collapsed
-            ? '\u25b8 ' + it.hidden + ' line' + (it.hidden === 1 ? '' : 's') + ' hidden'
-            : '\u25be fold';
-        b.title = it.collapsed
-            ? 'Bring this section back into the paper'
-            : 'Comment this section out of the paper — the heading stays, and the state is written into the .tex';
-        b.style.left = v.x + 'px';
-        b.style.top = v.y + 'px';
-        // Never off the sheet: a heading that runs the full measure puts its
-        // control back inside the text rather than into the margin.
+
+        // ONE CLUSTER PER ANCHOR, so the fold and the tag stack side by side
+        // instead of being placed on top of each other — and so the left
+        // margin stays entirely the \ref badges', which were there first.
+        const box = document.createElement('div');
+        box.className = 'wpa';
+        box.style.left = v.x + 'px';
+        box.style.top = v.y + 'px';
         const maxW = Math.max(40, ((S.pageWidth || 595) - (it.x + it.w + 8)) * state.scale);
-        b.style.maxWidth = maxW + 'px';
-        wrap.appendChild(b);
+        box.style.maxWidth = maxW + 'px';
+
+        if (it.foldable && (shift || it.collapsed)) {
+            const b = document.createElement('button');
+            b.className = 'secfold' + (it.collapsed ? ' on' : '');
+            b.dataset.key = it.key;
+            b.dataset.collapse = it.collapsed ? '0' : '1';
+            b.textContent = it.collapsed
+                ? '\u25b8 ' + it.hidden + ' line' + (it.hidden === 1 ? '' : 's') + ' hidden'
+                : '\u25be fold';
+            b.title = it.collapsed
+                ? 'Bring this section back into the paper'
+                : 'Comment this section out of the paper — the heading stays, and the state is written into the .tex';
+            box.appendChild(b);
+        }
+        // THE PLACE ITSELF, ON THE CLIPBOARD. This is how a reader hands an
+        // agent a spot in the paper — "rewrite the equation at p.tex:412" —
+        // without describing it in prose or hunting for it in the editor.
+        if (shift) {
+            const t = document.createElement('button');
+            t.className = 'wpatag wpatag-' + (it.kind || 'section');
+            t.dataset.anchor = it.key;
+            t.textContent = (it.kind === 'equation' ? '\u2261 ' : '\u00a7 ') + it.line;
+            t.title = 'Copy ' + (it.kind === 'equation' ? 'this equation' : 'this heading') +
+                ' as path:line, to point an agent at it · Alt-click to add its name';
+            box.appendChild(t);
+        }
+        if (box.childNodes.length) wrap.appendChild(box);
     }
 }
 
 document.addEventListener('click', (e) => {
+    const t = e.target && e.target.closest ? e.target.closest('.wpatag') : null;
+    if (t) {
+        e.preventDefault();
+        e.stopPropagation();
+        vscode.postMessage({ type: 'copyAnchor', key: t.dataset.anchor, alt: !!e.altKey });
+        return;
+    }
     const b = e.target && e.target.closest ? e.target.closest('.secfold') : null;
     if (!b) return;
     e.preventDefault();
@@ -1519,7 +1546,7 @@ document.addEventListener('click', (e) => {
 // The press must not also reach the page underneath and resolve a word there.
 for (const evt of ['pointerdown', 'mousedown']) {
     document.addEventListener(evt, (e) => {
-        if (e.target.closest && e.target.closest('.secfold')) e.stopPropagation();
+        if (e.target.closest && e.target.closest('.wpa')) e.stopPropagation();
     }, true);
 }
 

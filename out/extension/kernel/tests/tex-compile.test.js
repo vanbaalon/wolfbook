@@ -264,6 +264,51 @@ async function main() {
             return JSON.stringify(out);
         };
 
+        await test('A NEW LABEL LEAVES THE BUILD ONE PASS BEHIND, AND SAYS SO', async () => {
+            // Reported: a new equation label renders as (?) and stays that way.
+            // The signal is LaTeX's own — it wrote a .aux this run that nobody
+            // has read — and it is what schedules the background convergence.
+            // Compiled for real, because the exact wording of that warning is
+            // the whole mechanism and a stubbed log would prove nothing.
+            const { dir, root } = mkProject('label.tex',
+                '\\documentclass{article}\n\\usepackage{amsmath}\n\\begin{document}\n' +
+                '\\begin{equation}\\label{eq:new} E=mc^2 \\end{equation}\n' +
+                'See \\eqref{eq:new}.\n\\end{document}\n');
+            // ONE PASS ONLY, which is what the live loop does while typing.
+            const first = await compile({ root, sourceFiles: [root], maxPasses: 1, timeoutMs: 120000 });
+            assert.strictEqual(first.ok, true, 'it compiled');
+            assert.strictEqual(first.rerunWanted, true,
+                'the engine asked for another pass, so the page is one behind');
+            assert.strictEqual(saveGeneration(first), false,
+                'and a build in that state is never remembered as a finished one');
+
+            // AND THE CORRECTING BUILD MUST BE FORCED TO RUN AT ALL.
+            //
+            // This is the half that made the reported bug permanent. The
+            // sources have not changed since the capped build, so latexmk says
+            // "Nothing to do — all targets are up-to-date" and the unresolved
+            // reference stays on the page until the reader happens to type
+            // something. Measured here rather than argued: the unforced build
+            // leaves it exactly as it was.
+            const unforced = await compile({ root, sourceFiles: [root], timeoutMs: 120000 });
+            assert.strictEqual(unforced.pdfHash, first.pdfHash,
+                'an unforced rebuild is a no-op — the page is still one pass behind');
+            assert.strictEqual(unforced.rerunWanted, true, 'and still says so');
+
+            // The convergence: the same sources, uncapped, forced.
+            const second = await compile({ root, sourceFiles: [root], force: true, timeoutMs: 120000 });
+            assert.strictEqual(second.ok, true);
+            assert.strictEqual(second.errors, 0,
+                'the fixture itself compiles cleanly — a paper with an ERROR never ' +
+                'converges, and would prove nothing about the rerun signal');
+            assert.strictEqual(second.rerunWanted, false,
+                'once converged it stops asking — so the rebuild is not armed for ever');
+            assert.notStrictEqual(second.pdfHash, first.pdfHash,
+                'and the page really did change: (?) became the number');
+            fs.rmSync(dir, { recursive: true, force: true });
+            fs.rmSync(first.outDir, { recursive: true, force: true });
+        });
+
         await test('a real compile leaves the project byte-identical', async () => {
             const { dir, root } = mkProject('ok.tex',
                 '\\documentclass{article}\\begin{document}\n\\section{S}\nHello world.\n\\end{document}\n');
