@@ -61,9 +61,24 @@ function makeMap(o) {
     return new RenderMap(o);
 }
 
-/** A source file's text, or null — a file we cannot read simply is not folded. */
+/**
+ * A source file's text, or null — a file we cannot read simply is not folded.
+ *
+ * CACHED ON (mtime, size), because this runs for every source file on every
+ * rebuild — that is once per typing pause — and a project is many files. The
+ * cache is only ever a shortcut past a read whose answer cannot have changed.
+ */
+const _textCache = new Map();          // file -> {key, text}
 function readFileOrNull(f) {
-    try { return fs.readFileSync(f, 'utf8'); } catch (_) { return null; }
+    let key = null;
+    try { const st = fs.statSync(f); key = `${st.mtimeMs}:${st.size}`; } catch (_) { return null; }
+    const hit = _textCache.get(f);
+    if (hit && hit.key === key) return hit.text;
+    let text = null;
+    try { text = fs.readFileSync(f, 'utf8'); } catch (_) { return null; }
+    if (_textCache.size > 400) _textCache.clear();
+    _textCache.set(f, { key, text });
+    return text;
 }
 
 class RootState {
@@ -77,6 +92,7 @@ class RootState {
         this.lastError = null;
         this.compiling = false;
         this.liveCompiling = false;
+        this.liveQueued = false;   // somebody typed while a live build was running
         // How long this paper's live rebuilds actually take, smoothed. Null
         // until the first one finishes, and null means "use the ceiling".
         this.liveMsEwma = null;
@@ -381,7 +397,30 @@ class RenderCoordinator {
             }
         }
 
-        if (st.running) st.running.abort();
+        // A LIVE BUILD DOES NOT KILL ANOTHER LIVE BUILD.
+        //
+        // Every new build used to abort the one in flight. On a paper whose
+        // rebuild takes longer than the pause that triggers it — measured at
+        // 1.4 s against a 900 ms debounce on the real one — that means a reader
+        // typing in ordinary bursts can throw away build after build and see
+        // the page update rarely or never. The work was being done and then
+        // discarded a moment before it finished, and it gets worse as the
+        // paper grows, which is exactly how "the live render is getting slow"
+        // feels from the outside.
+        //
+        // So a live rebuild arriving while another live one is running just
+        // asks for another round when that one lands. Only ONE is ever
+        // pending — the newest text wins — and a deliberate build (a save, the
+        // Compile button, the convergence pass) still takes precedence and
+        // aborts, because the reader asked for it now.
+        if (st.running) {
+            if (live && st.liveCompiling) {
+                st.liveQueued = true;
+                this.log(`live rebuild of ${path.basename(root)} queued behind the one already running`);
+                return st;
+            }
+            st.running.abort();
+        }
         const ac = new AbortController();
         st.running = ac;
         st.compiling = true;
@@ -535,6 +574,13 @@ class RenderCoordinator {
             st.liveCompiling = false;
             if (st.running === ac) st.running = null;
             this._emitter.fire(st);
+        }
+        // Somebody typed while this was running. Go round again through the
+        // ORDINARY debounce rather than immediately: the text may have settled
+        // by now, and if it has not, the next pause is the right moment.
+        if (st.liveQueued) {
+            st.liveQueued = false;
+            try { this.scheduleLive(doc); } catch (_) { /* the next keystroke will */ }
         }
         return st;
     }

@@ -47,6 +47,8 @@ const state = {
     labels: null,             // {generation, items} — the label overlay, cached
     labelsOn: false,          // Shift is down
     sections: null,           // {generation, items, pageWidth} — the fold controls
+    zoomBase: null,           // page size when the current zoom gesture began
+    zoomTimer: null,          // the crisp re-render that follows it
     labelsPinned: false,      // the toolbar toggle
     labelsAsked: null,        // the generation we have already asked for
     review: null,             // {pending, groups, census, focus} — the agent's changes
@@ -3175,16 +3177,80 @@ function syncChipScale() {
     catch (_) { /* the badges just keep their last size */ }
 }
 
-function setScale(s, anchor, keepFit) {
+/**
+ * Zoom.
+ *
+ * `live` means A GESTURE IS IN PROGRESS — a pinch, or a held ⌘+. Re-rendering
+ * every page on every wheel event is what made zooming BLINK: each event threw
+ * the canvases away and painted new ones a few frames later, so the paper
+ * strobed white all the way through the gesture. A picture can simply be
+ * SCALED, so during the gesture the existing bitmaps are stretched by CSS —
+ * which the compositor does on the GPU, at whatever frame rate the trackpad
+ * reports — and the crisp re-render happens once, when the hand stops.
+ *
+ * The overlays are hidden while that lasts. They are positioned in the pixels
+ * of the OLD viewport, so scaling the canvas under them would leave every
+ * badge and highlight drifting away from the thing it names; the re-render at
+ * the end puts them back where they belong.
+ */
+/**
+ * The gesture itself: stretch what is already drawn, and remember the size the
+ * pages had when it started so many small steps cannot drift.
+ */
+function zoomPreview(anchor, wasScale) {
+    const pages = [...pagesEl().children];
+    if (!pages.length) return;
+    if (!state.zoomBase) {
+        const first = pages[0];
+        state.zoomBase = {
+            scale: wasScale,
+            w: parseFloat(first.style.width) || first.offsetWidth,
+            h: parseFloat(first.style.height) || first.offsetHeight,
+        };
+    }
+    const b = state.zoomBase;
+    const k = b.scale ? state.scale / b.scale : 1;
+    const w = Math.floor(b.w * k);
+    const h = Math.floor(b.h * k);
+    document.body.classList.add('zooming');
+    for (const p of pages) {
+        p.style.width = `${w}px`;
+        p.style.height = `${h}px`;
+        const cv = p.querySelector('canvas');
+        if (cv) { cv.style.width = `${w}px`; cv.style.height = `${h}px`; }
+    }
+    if (anchor) restoreAnchor(anchor);
+
+    // ONE crisp render, when the hand stops. Re-armed by every step, so a long
+    // pinch costs exactly one re-render however many events it sends.
+    clearTimeout(state.zoomTimer);
+    state.zoomTimer = setTimeout(() => {
+        const a = scrollAnchor();
+        setScale(state.scale, a, true);
+    }, 180);
+}
+
+/** Leaving the gesture: the overlays come back and the base is forgotten. */
+function zoomSettled() {
+    clearTimeout(state.zoomTimer);
+    state.zoomTimer = null;
+    state.zoomBase = null;
+    document.body.classList.remove('zooming');
+}
+
+function setScale(s, anchor, keepFit, { live = false } = {}) {
     if (!keepFit && state.fitMode) {
         state.fitMode = false;
         document.body.classList.remove('fitted');
     }
+    const was = state.scale;
     state.scale = Math.max(0.25, Math.min(6, s));
     // The label badges are DOM, not canvas: without this they keep the size
     // they had at the old zoom and swamp a page that has just been zoomed out.
     syncChipScale();
     el('zoom').textContent = `${Math.round(state.scale * 100)}%`;
+    if (live) { zoomPreview(anchor, was); return; }
+    zoomSettled();
     for (const w of pagesEl().children) w.innerHTML = '<div class="pagenum">' + w.dataset.page + '</div>';
     state.rendered.clear();
     state.pending.clear();
@@ -3211,14 +3277,14 @@ document.querySelector('main').addEventListener('wheel', (ev) => {
     ev.preventDefault();
     const a = scrollAnchor();
     const k = Math.exp(-ev.deltaY * 0.0022);
-    setScale(state.scale * Math.max(0.8, Math.min(1.25, k)), a);
+    setScale(state.scale * Math.max(0.8, Math.min(1.25, k)), a, false, { live: true });
 }, { passive: false });
 
 window.addEventListener('keydown', (e) => {
     if (e.target && e.target.tagName === 'TEXTAREA') return;
     if (!(e.metaKey || e.ctrlKey)) return;
-    if (e.key === '=' || e.key === '+') { e.preventDefault(); setScale(state.scale * 1.25, scrollAnchor()); }
-    else if (e.key === '-') { e.preventDefault(); setScale(state.scale / 1.25, scrollAnchor()); }
+    if (e.key === '=' || e.key === '+') { e.preventDefault(); setScale(state.scale * 1.25, scrollAnchor(), false, { live: true }); }
+    else if (e.key === '-') { e.preventDefault(); setScale(state.scale / 1.25, scrollAnchor(), false, { live: true }); }
     else if (e.key === '0') { e.preventDefault(); fitWidth(); }
 });
 

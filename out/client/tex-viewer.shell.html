@@ -51,6 +51,12 @@
   body.fitted .page { border-radius:0; }
   body.fitted .page canvas { border-radius:0; }
   #pages { display:flex; flex-direction:column; align-items:center; gap:18px; }
+  /* WHILE A ZOOM GESTURE IS RUNNING the canvases are stretched by CSS and the
+     overlays are stale — they are placed in the pixels of the viewport the
+     page was drawn at, so they would drift away from what they name. One rule
+     rather than a list of classes, so a new overlay cannot be forgotten. */
+  body.zooming #pages > .page > *:not(canvas):not(.pagenum) { display: none !important; }
+  body.zooming #pages > .page > canvas { image-rendering: auto; }
   .page { position:relative; background:#fff; border-radius:2px;
           box-shadow: 0 1px 3px rgba(0,0,0,.22), 0 4px 16px rgba(0,0,0,.22); }
   .page canvas { display:block; border-radius:2px; }

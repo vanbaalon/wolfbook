@@ -1,4 +1,4 @@
-// tex-overlay.test.js — what the compiler is actually handed.
+// tex-overlay.test.js — what the compiler is handed, and when it is spared.
 //
 //   node out/extension/kernel/tests/tex-overlay.test.js
 //
@@ -12,6 +12,11 @@
 // A fold that never reached the overlay would be a control that does nothing,
 // and the fold module's own suite would still be green — it tests a text
 // transform, not whether anybody calls it.
+//
+// The last section covers the OTHER half of a rebuild: whether it is allowed
+// to finish. A live build that is killed a moment before it lands is work paid
+// for and thrown away, and on a paper whose compile outlasts the pause that
+// triggers it that is most of them.
 
 const assert = require('assert');
 const fs = require('fs');
@@ -172,6 +177,25 @@ test('an unsaved buffer with no folds is shadowed exactly as before', () => {
     assert.strictEqual(coord([ROOT]).liveOverlay(ROOT).get(ROOT), typed);
 });
 
+test('THE READ CACHE NEVER SERVES A STALE FILE', () => {
+    // The overlay reads every source file on every rebuild — once per typing
+    // pause — so the reads are cached on (mtime, size). A cache that missed an
+    // edit would compile yesterday's paper, which is worse than any saving it
+    // could buy, so the invalidation is asserted for the hardest case: a file
+    // whose LENGTH does not change.
+    write(ROOT, FOLDED);
+    docs.length = 0;
+    const first = coord([ROOT]).liveOverlay(ROOT).get(ROOT);
+    assert.ok(first.includes(PREFIX + 'First prose line.'));
+
+    const sameLength = FOLDED.replace('First prose line.', 'First prose LINE!');
+    assert.strictEqual(sameLength.length, FOLDED.length, 'the fixture really is the same size');
+    write(ROOT, sameLength);
+    const second = coord([ROOT]).liveOverlay(ROOT).get(ROOT);
+    assert.ok(second.includes(PREFIX + 'First prose LINE!'),
+        'the edit is picked up, not served from the cache');
+});
+
 test('a source file that has gone missing does not break the build', () => {
     write(ROOT, PLAIN);
     docs.length = 0;
@@ -179,8 +203,86 @@ test('a source file that has gone missing does not break the build', () => {
     assert.strictEqual(m, null, 'nothing to shadow, and nothing thrown');
 });
 
+// --- AND WHETHER A REBUILD IS ALLOWED TO FINISH ------------------------------
+
+/** A document stub good enough for build() to resolve a root from. */
+const docFor = (f) => ({ uri: { fsPath: f, scheme: 'file', path: f }, isDirty: false, isClosed: false,
+    getText: () => fs.readFileSync(f, 'utf8'), version: 1, lineCount: 1 });
+
+function coordForBuild() {
+    // mapEngine anything but auto/lualatex, so build() does not probe for one.
+    stub.workspace.getConfiguration = () => ({ get: (k, d) => (k === 'mapEngine' ? 'pdflatex' : d) });
+    const c = new RenderCoordinator({ get: () => ({ model: { objects: [] } }) }, { appendLine() {} });
+    const st = c.roots.get(ROOT) || { root: ROOT, files: [ROOT] };
+    c.roots.set(ROOT, Object.assign(st, {
+        root: ROOT, files: [ROOT],
+        // A generation that does NOT match the sources, so build() gets past
+        // "nothing changed" and reaches the decision under test.
+        generation: { sourceSnapshotHash: 'stale', ok: true, pageCount: 1 },
+        map: null, compiling: false, liveCompiling: false, liveQueued: false, running: null,
+    }));
+    c.rootOf.set(ROOT, ROOT);
+    return c;
+}
+
+test('A LIVE REBUILD DOES NOT KILL THE LIVE REBUILD ALREADY RUNNING', async () => {
+    // Measured on the real paper: a rebuild takes ~1.4 s and the pause that
+    // triggers it is 900 ms, so a reader typing in ordinary bursts used to
+    // abort build after build a moment before each one landed — the page
+    // updating rarely, or never, and worse as the paper grows.
+    write(ROOT, PLAIN);
+    docs.length = 0;
+    const c = coordForBuild();
+    const st = c.roots.get(ROOT);
+    let aborted = 0;
+    st.running = { abort: () => { aborted++; } };
+    st.compiling = true;
+    st.liveCompiling = true;
+
+    let scheduled = 0;
+    c.scheduleLive = () => { scheduled++; };
+
+    await c.build(docFor(ROOT), { live: true });
+    assert.strictEqual(aborted, 0, 'the build in flight was left to finish');
+    assert.strictEqual(st.liveQueued, true, 'and another round is asked for instead');
+    assert.strictEqual(scheduled, 0, 'not started yet — the one running has not landed');
+});
+
+test('but a SAVE still takes precedence and aborts it', async () => {
+    // A deliberate build is the reader asking for it NOW. Only the automatic
+    // per-keystroke rebuild waits its turn.
+    write(ROOT, PLAIN);
+    docs.length = 0;
+    const c = coordForBuild();
+    const st = c.roots.get(ROOT);
+    let aborted = 0;
+    st.running = { abort: () => { aborted++; throw new Error('stop here'); } };
+    st.compiling = true;
+    st.liveCompiling = true;
+
+    try { await c.build(docFor(ROOT), { authoritative: true }); } catch (_) { /* the stub stops it */ }
+    assert.strictEqual(aborted, 1, 'the live build was aborted for it');
+    assert.strictEqual(st.liveQueued, false, 'and nothing was queued');
+});
+
+test('a live rebuild with NOTHING running is not queued behind a ghost', async () => {
+    write(ROOT, PLAIN);
+    docs.length = 0;
+    const c = coordForBuild();
+    const st = c.roots.get(ROOT);
+    st.running = null;
+    st.liveCompiling = false;
+    // It will try to compile for real, so stop it at the first thing after the
+    // decision: a compile that cannot spawn still proves we got past the guard.
+    c.log = () => {};
+    const p = c.build(docFor(ROOT), { live: true });
+    assert.strictEqual(st.liveQueued, false, 'nothing was queued');
+    if (st.running) st.running.abort();
+    try { await p; } catch (_) { /* aborted on purpose */ }
+});
+
 (async () => {
-    console.log('what the compiler is handed, executed\n');
+    console.log('what the compiler is handed, and when, executed\n');
     for (const [name, fn] of tests) {
         try { await fn(); pass++; console.log('  ok   ' + name); }
         catch (e) {
