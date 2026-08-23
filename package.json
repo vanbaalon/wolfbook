@@ -2468,7 +2468,7 @@
         "displayName": "Wolfbook: Open or Create Notebook",
         "toolReferenceName": "wolfbookNewNotebook",
         "canBeReferencedInPrompt": true,
-        "modelDescription": "Open or create a Wolfbook .wb/.evsnb/.vsnb notebook, make it the current MCP target, and ensure it has an explicit kernel binding plus a confirmed VS Code controller association. Initial cells are NOT evaluated unless evaluate:true is passed. ESCAPING HAS THREE LAYERS (JavaScript → Wolfbook → WL/Markdown): JavaScript may consume \\v, \\b, or \\f before Wolfbook sees them. Prefer String.raw or content_encoding:'base64' for exact source; content_encoding:'raw' disables Wolfbook's compatibility unescaping. Corrupt C0 controls are rejected before the file is written.",
+        "modelDescription": "Open or create a Wolfbook .wb/.evsnb/.vsnb notebook, make it the current MCP target, and ensure it has an explicit kernel binding plus a confirmed VS Code controller association. Initial cells are NOT evaluated unless evaluate:true is passed. Send readable cell source directly: backslashes, Unicode, and literal escape-looking sequences are preserved verbatim by default. Corrupt C0 controls are rejected before the file is written.",
         "inputSchema": {
           "type": "object",
           "required": [],
@@ -2520,7 +2520,7 @@
                       "raw",
                       "base64"
                     ],
-                    "description": "auto (default) applies legacy escape repair; raw preserves the supplied string; base64 decodes once and bypasses normalizers."
+                    "description": "Optional legacy compatibility mode. Omit for exact verbatim content (same as raw); auto repairs an already double-escaped payload; base64 is accepted for backward compatibility."
                   }
                 },
                 "required": [
@@ -2740,7 +2740,7 @@
         "name": "wolfbook_insertCells",
         "displayName": "Wolfbook: Insert Cells",
         "toolReferenceName": "wolfbookInsertCells",
-        "modelDescription": "Insert one or more cells into the notebook. All inserted code cells are evaluated by default; pass evaluate:false to insert without running. ESCAPING HAS THREE LAYERS (JavaScript → Wolfbook → WL/Markdown): JavaScript may consume \\v, \\b, or \\f. Prefer String.raw or content_encoding:'base64' for exact source; raw disables Wolfbook compatibility unescaping. Corrupt C0 controls reject the entire insertion before any cells are modified.",
+        "modelDescription": "Insert one or more cells into the notebook. All inserted code cells are evaluated by default; pass evaluate:false to insert without running. Send readable cell source directly: backslashes, Unicode, and literal escape-looking sequences are preserved verbatim by default. Corrupt C0 controls reject the entire insertion before any cells are modified.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
@@ -2764,7 +2764,7 @@
                 "raw",
                 "base64"
               ],
-              "description": "Default encoding for top-level content and items that do not override it."
+              "description": "Optional legacy compatibility mode. Omit for exact verbatim content (same as raw); auto repairs an already double-escaped payload; base64 remains accepted for backward compatibility."
             },
             "cells": {
               "type": "array",
@@ -2791,7 +2791,7 @@
                       "raw",
                       "base64"
                     ],
-                    "description": "Decode mode for this item; overrides top-level content_encoding."
+                    "description": "Optional per-item legacy compatibility mode; overrides top-level content_encoding. Omit for exact verbatim content."
                   }
                 },
                 "required": [
@@ -2857,7 +2857,7 @@
         "name": "wolfbook_editCell",
         "displayName": "Wolfbook: Edit Cell",
         "toolReferenceName": "wolfbookEdit",
-        "modelDescription": "Replace the source of one or more cells. ESCAPING HAS THREE LAYERS (JavaScript → Wolfbook → WL/Markdown): JavaScript may consume \\v, \\b, or \\f. Prefer String.raw or content_encoding:'base64' for exact source; raw disables Wolfbook compatibility unescaping. Corrupt C0 controls reject a single edit before WorkspaceEdit; in batch mode that item is skipped and siblings continue. expected_source_prefix is always compared verbatim and is never decoded.",
+        "modelDescription": "Replace the source of one or more cells. Send readable cell source directly: backslashes, Unicode, and literal escape-looking sequences are preserved verbatim by default. Corrupt C0 controls reject a single edit before WorkspaceEdit; in batch mode that item is skipped and siblings continue. expected_source_prefix is always compared verbatim and is never decoded.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
@@ -2881,7 +2881,7 @@
                 "raw",
                 "base64"
               ],
-              "description": "Default decode mode for single content and batch items without an override."
+              "description": "Optional legacy compatibility mode. Omit for exact verbatim content (same as raw); auto repairs an already double-escaped payload; base64 remains accepted for backward compatibility."
             },
             "cells": {
               "type": "array",
@@ -2908,7 +2908,7 @@
                       "raw",
                       "base64"
                     ],
-                    "description": "Decode mode for this item; overrides top-level content_encoding."
+                    "description": "Optional per-item legacy compatibility mode; overrides top-level content_encoding. Omit for exact verbatim content."
                   },
                   "evaluate": {
                     "type": "boolean",

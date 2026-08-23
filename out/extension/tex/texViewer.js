@@ -367,6 +367,16 @@ const PLAIN_CLICK_KINDS = new Set([
 const VIEW_TYPE = 'wolfbook.texViewer';
 /** Where the shown paper's root is kept, so a window reload can restore it. */
 const ROOT_KEY = 'wolfbook.tex.viewerRoot';
+/**
+ * Where the reader was in each paper: {file: {page, frac}}.
+ *
+ * Switching to a tab that is not a .tex CLOSES the panel — VS Code has no way
+ * to hide a webview — so "keep my place" cannot rely on the DOM surviving. It
+ * is kept here, per paper, and it outlives a window reload because it is in
+ * workspace state rather than in the panel.
+ */
+const VIEW_KEY = 'wolfbook.tex.viewerPlace';
+const VIEW_MAX = 24;               // papers remembered; the oldest simply drops
 
 /**
  * WHERE THE CLICK LANDED, IN THE EDITOR — an outline, not a wash.
@@ -525,6 +535,9 @@ class TexViewer {
             // thing you have to keep tidying up.
             this._lockGroup().catch(() => { /* older builds simply do not */ });
         }
+        // A DIFFERENT PAPER HAS A DIFFERENT PLACE. Carrying the last one's
+        // scroll position into it would open the new paper somewhere arbitrary.
+        if (this.root !== root) this._viewState = this._viewFor(root);
         this.root = root;
         this._rememberRoot(root);
         this._postTheme();
@@ -594,6 +607,34 @@ class TexViewer {
         );
     }
 
+    /** Where the reader was in `root`, or null. */
+    _viewFor(root) {
+        if (!root) return null;
+        try {
+            const all = this.context.workspaceState.get(VIEW_KEY) || {};
+            const v = all[root];
+            return v && Number.isFinite(v.page) ? { page: v.page, frac: Number(v.frac) || 0 } : null;
+        } catch (_) { return null; }
+    }
+
+    /** Note where the reader is, for when this paper is opened again. */
+    _rememberView(root, page, frac) {
+        if (!root || !Number.isFinite(page)) return;
+        this._viewState = { page, frac: Number(frac) || 0 };
+        try {
+            const all = { ...(this.context.workspaceState.get(VIEW_KEY) || {}) };
+            all[root] = { page, frac: Number(frac) || 0, at: Date.now() };
+            // Oldest out first, so a workspace with many papers cannot grow the
+            // stored object without limit.
+            const keys = Object.keys(all);
+            if (keys.length > VIEW_MAX) {
+                keys.sort((a, b) => (all[a].at || 0) - (all[b].at || 0));
+                for (const k of keys.slice(0, keys.length - VIEW_MAX)) delete all[k];
+            }
+            this.context.workspaceState.update(VIEW_KEY, all);
+        } catch (_) { /* no workspace state: the place lives for this session only */ }
+    }
+
     /** Remember which paper this panel is showing, across a window reload. */
     _rememberRoot(root) {
         try { this.context.workspaceState.update(ROOT_KEY, root || undefined); }
@@ -622,9 +663,10 @@ class TexViewer {
         this._autoHidden = null;
         let root = (state && state.root) || null;
         try { root = root || this.context.workspaceState.get(ROOT_KEY) || null; } catch (_) { /* none */ }
-        if (state && Number.isFinite(state.page)) {
-            this._viewState = { page: state.page, frac: state.frac };
-        }
+        // The webview may hand back its own state; workspace state is the
+        // authority, because it survives the webview being dropped entirely.
+        this._viewState = this._viewFor(root) ||
+            (state && Number.isFinite(state.page) ? { page: state.page, frac: Number(state.frac) || 0 } : null);
         if (!root || !fs.existsSync(root)) {
             this._post({ type: 'status', text: 'reopen the paper from a .tex file', kind: 'warn' });
             return;
@@ -701,6 +743,9 @@ class TexViewer {
             return;
         }
         const t0 = Date.now();
+        // In memory if this panel has been showing the paper; from workspace
+        // state if it is being opened again, or after a reload.
+        const place = this._viewState || this._viewFor(this.root);
         this.shownGeneration = st.generation.generation;
         this.panel.title = `WPaper · ${path.basename(this.root)}`;
         const w = this.panel.webview;
@@ -730,8 +775,14 @@ class TexViewer {
             pdfBase64: data,
             generation: st.generation.generation,
             pages: st.generation.pageCount,
-            // Restoring after an auto-hide should land where the reader was.
-            revealPage: this._viewState && this._viewState.page,
+            // WHERE THE READER WAS — the page AND how far down it.
+            //
+            // Only the page number used to travel, so coming back from another
+            // tab, or from a window reload, landed at the TOP of the right page
+            // rather than at the paragraph being worked on. Reported as the
+            // scroll position not persisting.
+            revealPage: place && place.page,
+            revealFrac: place && place.frac,
             // A live rebuild replaces the pages under a reader who did not ask
             // for it, so the viewer keeps their scroll position and swaps each
             // canvas only once its replacement is drawn.
@@ -2107,7 +2158,7 @@ class TexViewer {
             case 'click': await this._jumpToSource(m); break;
             case 'fullscreen': await this.setFullScreen(m.value); break;
             case 'viewstate':
-                this._viewState = { page: m.page, frac: m.frac };
+                this._rememberView(this.root, m.page, m.frac);
                 break;
             case 'timing': {
                 // The webview is the one place the extension cannot time from

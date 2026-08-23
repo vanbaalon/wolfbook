@@ -77,14 +77,11 @@ Before writing, editing, or evaluating any code, call `wolfbook_getNotebookConte
 - After context compaction or reconnect, call `wolfbook_evaluationJournal action:"digest"` for a ~20-line session summary.
 - Filter the journal with `tool`, `state`, `caption_contains`, or `notebook`; filtering happens before `limit`. Use `wolfbook_exportSessionReport` for a portable Markdown record.
 
-## Escaping — the three layers
+## Content fidelity
 
-Content passes through JavaScript/JSON, Wolfbook, then Wolfram Language or LaTeX. JavaScript may consume sequences such as `\v`, `\b`, and `\f` before Wolfbook receives them.
-
-- Prefer `String.raw` when constructing tool arguments in JavaScript.
-- Use `content_encoding:"base64"` for byte-exact content. Wolfbook decodes it exactly once and skips compatibility normalizers.
-- Use `content_encoding:"raw"` to preserve the received string verbatim; `"auto"` keeps legacy repair behavior.
-- Wolfbook rejects corrupt C0 controls before modifying notebook cells and reports the exact code point and location. LaTeX save preserves them with a warning because form-feed can be legal there.
+- Send ordinary readable cell source directly. Wolfbook preserves the parsed tool string verbatim by default, including LaTeX/WL sequences such as `\varrho`, `\bar`, `\frac`, and literal `\n` inside Wolfram strings. Do not encode content just to protect backslashes.
+- `content_encoding:"auto"` is an explicit legacy repair mode for already double-escaped payloads; normal tool calls should omit `content_encoding`.
+- Wolfbook rejects actual corrupt C0 control characters before modifying notebook cells and reports the exact code point and location.
 
 ## Cancelling work
 

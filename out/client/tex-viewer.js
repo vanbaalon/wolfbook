@@ -343,12 +343,22 @@ async function openDocument(msg) {
                 renderAround(keep.page);
                 restoreAnchor(keep);
             } else if (msg.revealPage) {
-                // A RENDER IS NOT A GESTURE. This runs when the paper is
-                // (re)opened — a tab coming back, a reload, a rebuild — and the
-                // reader is looking at a page that should already BE where they
-                // left it, not slide into place while they wait. Reported:
-                // "switching between tabs animates every time".
-                goToPage(msg.revealPage, msg.revealRects, { smooth: false });
+                // WHERE THE READER WAS, to the fraction of the page.
+                //
+                // A RENDER IS NOT A GESTURE either: this runs when the paper is
+                // (re)opened — a tab coming back, a window reloaded — and the
+                // page should already BE where they left it, not slide into
+                // place while they wait.
+                renderAround(msg.revealPage);
+                if (Number.isFinite(msg.revealFrac)) {
+                    restoreAnchor({ page: msg.revealPage, frac: msg.revealFrac });
+                    if (msg.revealRects) {
+                        state.highlight = { page: msg.revealPage, rects: msg.revealRects, flag: 'target' };
+                        paintHighlight();
+                    }
+                } else {
+                    goToPage(msg.revealPage, msg.revealRects, { smooth: false });
+                }
             } else {
                 renderAround(1);
             }
@@ -3007,7 +3017,14 @@ el('pin').addEventListener('change', (e) => {
             clearTimeout(t);
             t = setTimeout(() => {
                 const a = scrollAnchor();
-                if (a) vscode.postMessage({ type: 'viewstate', page: a.page, frac: a.frac });
+                if (a) {
+                    vscode.postMessage({ type: 'viewstate', page: a.page, frac: a.frac });
+                    // VS Code hands this back to a panel it restores after a
+                    // reload. The extension's own copy is the authority — this
+                    // is what makes the place survive even when the extension
+                    // is the thing that was restarted.
+                    try { vscode.setState({ page: a.page, frac: a.frac }); } catch (_) { /* older host */ }
+                }
             }, 300);
         }, { passive: true });
     }
@@ -3577,4 +3594,17 @@ vscode.postMessage({ type: 'ready' });
 
 // A measurement hook, not an API: the headless check scores snapToInk against
 // the rendered ink. Nothing in the extension reads this.
-window.__wbTexViewerTest = { snapToInk, itemWords, prefixWidths, textItems, wordKey, foldGlyphs, wordAtPoint, highlightLatex, fromViewport, rectToViewport };
+// A FRESH PANEL cannot be reached by any message — it is what a webview is
+// before the first `open` — so the one test that needs it says so explicitly
+// rather than half-simulating it by emptying the DOM.
+function forgetPagesForTest() {
+    // The DOCUMENT is deliberately left alone: the open handler destroys the
+    // previous one itself, and orphaning it here wedges the pdf.js worker.
+    pagesEl().innerHTML = '';
+    state.pageCount = 0;
+    state.rendered.clear();
+    state.pending.clear();
+    textCache.clear();
+}
+
+window.__wbTexViewerTest = { snapToInk, itemWords, prefixWidths, textItems, wordKey, foldGlyphs, wordAtPoint, highlightLatex, fromViewport, rectToViewport, forgetPagesForTest };

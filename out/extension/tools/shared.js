@@ -223,7 +223,12 @@ function findControlChar(text) {
 }
 
 function decodeToolContent(raw, encoding) {
-    const mode = encoding == null || encoding === '' ? 'auto' : String(encoding);
+    // MCP/LM tool arguments have already been decoded from JSON when they reach
+    // this function.  The resulting JavaScript string is the source of truth:
+    // applying the old compatibility normalizer by default can corrupt valid WL
+    // strings such as "std\\nall entries" and valid LaTeX such as \\frac.
+    // Keep `auto` as an explicit legacy opt-in, but preserve omitted content.
+    const mode = encoding == null || encoding === '' ? 'raw' : String(encoding);
     const value = String(raw ?? '');
     if (mode === 'raw') return value;
     if (mode === 'auto') return normalizeToolContent(value);
@@ -246,14 +251,14 @@ function prepareCellContent({ content, kind, encoding }) {
         const code = `U+${bad.code.toString(16).toUpperCase().padStart(4, '0')}`;
         throw new Error(
             `Rejected control character ${code} at ${bad.line}:${bad.col} near ${JSON.stringify(bad.context)}. ` +
-            'No cells were modified. Send the content with content_encoding:"base64", or use String.raw at the JavaScript layer so backslash escapes are not consumed.'
+            'No cells were modified. The supplied value contains an actual C0 control character; resend it as the intended printable text or literal backslash sequence.'
         );
     }
     if (String(kind).toLowerCase() === 'markdown') {
         const normalized = normalizeMarkdownMath(text);
-        return { text: normalized.text, converted: normalized.converted, encoding: encoding || 'auto' };
+        return { text: normalized.text, converted: normalized.converted, encoding: encoding || 'raw' };
     }
-    return { text, converted: false, encoding: encoding || 'auto' };
+    return { text, converted: false, encoding: encoding || 'raw' };
 }
 
 /**

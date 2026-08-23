@@ -145,8 +145,8 @@ Avoid leaving a sequence of code cells with no explanatory markdown between them
 - Add a short `caption` to long tasks. A loop may expose a global `progress_symbol` for bounded, optional progress monitoring.
 - Cancel a specific queued/running operation with `wolfbook_cancelOperation(operation_id, mode:"abort")`; use `mode:"discard-result"` to abandon only its result without touching the kernel. Reserve `kernelControl abort` for the evaluation currently dispatched to the kernel.
 
-## Escaping and structured reads
-- Tool content crosses JavaScript/JSON → Wolfbook → WL/Markdown/LaTeX. JavaScript can consume `\v`, `\b`, and `\f`; prefer `String.raw` or `content_encoding:"base64"` for exact source. `raw` disables Wolfbook's compatibility unescaping; corrupt C0 controls are rejected before notebook edits.
+## Content fidelity and structured reads
+- Send readable WL/Markdown/LaTeX source directly and omit `content_encoding`; Wolfbook preserves the parsed tool string verbatim, including `\varrho`, `\bar`, `\frac`, and literal `\n`. `content_encoding:"auto"` is only for repairing legacy double-escaped payloads. Actual corrupt C0 controls are rejected before notebook edits.
 - For large structured output, evaluate with `outputForm:"json"`, then call `wolfbook_getResult(path:[])` for a manifest and extend the path with keys/indexes.
 
 ## Research discipline

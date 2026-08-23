@@ -3112,6 +3112,105 @@ test('NO MAP, NO ANSWER: a failed rebuild clears the page instead of leaving the
     assert.ok(hl && hl.rects.length === 0, 'and so is the old marker');
 });
 
+// --- KEEPING THE READER'S PLACE ---------------------------------------------
+//
+// Switching to a tab that is not a .tex CLOSES the panel — VS Code cannot hide
+// a webview — so the place cannot ride on the DOM surviving. It is remembered
+// per paper, in workspace state, which is also what carries it across a window
+// reload.
+
+function placeViewer(mem) {
+    const v = makeViewer(null, null);
+    v.context = {
+        extensionUri: { fsPath: '/ext' },
+        globalState: { get: () => undefined, update: () => {} },
+        workspaceState: {
+            get: (k) => mem[k],
+            update: (k, val) => { mem[k] = val; },
+        },
+    };
+    v.posted.length = 0;
+    return v;
+}
+
+test('THE PLACE IS REMEMBERED PER PAPER, AND SURVIVES THE PANEL', async () => {
+    const mem = {};
+    const v = placeViewer(mem);
+    await v._onMessage({ type: 'viewstate', page: 7, frac: 0.42 });
+    assert.deepStrictEqual(v._viewFor(FILE), { page: 7, frac: 0.42 });
+    assert.ok(mem['wolfbook.tex.viewerPlace'], 'and it is in workspace state, not just memory');
+
+    // A NEW panel — the reader switched tabs, so the old one was disposed.
+    const v2 = placeViewer(mem);
+    assert.deepStrictEqual(v2._viewFor(FILE), { page: 7, frac: 0.42 },
+        'a fresh panel knows where the reader was');
+    assert.strictEqual(v2._viewFor('/some/other.tex'), null, 'and only for that paper');
+});
+
+test('THE FRACTION TRAVELS, NOT JUST THE PAGE', async () => {
+    // Only the page number used to be sent, so coming back landed at the TOP
+    // of the right page rather than at the paragraph being worked on.
+    const mem = {};
+    const v = placeViewer(mem);
+    await v._onMessage({ type: 'viewstate', page: 3, frac: 0.75 });
+
+    // A real (tiny) PDF on disk, because refresh() ships the bytes and will
+    // not post anything without them.
+    const os = require('os');
+    const fsx = require('fs');
+    const pth = require('path');
+    const dir = fsx.mkdtempSync(pth.join(os.tmpdir(), 'wb-place-'));
+    const pdf = pth.join(dir, 'p.pdf');
+    fsx.writeFileSync(pdf, '%PDF-1.4\n%%EOF\n');
+
+    const v2 = placeViewer(mem);
+    // The panel's webview resolves asset URIs; the stub only has to answer.
+    v2.panel = { webview: {
+        postMessage: (msg) => v2.posted.push(msg),
+        asWebviewUri: (u) => ({ toString: () => 'vscode-resource://' + (u && u.fsPath ? u.fsPath : 'x') }),
+    }, title: '' };
+    v2.root = FILE;
+    v2._viewState = null;
+    const st2 = v2.coord.roots.get(FILE);
+    st2.generation = { generation: 2, pageCount: 4, pdfPath: pdf, pdfHash: 'h2', pageSize: { widthBp: 595, heightBp: 842 } };
+    await v2.refresh({ force: true });
+    fsx.rmSync(dir, { recursive: true, force: true });
+    const open = v2.posted.filter(p => p.type === 'open').pop();
+    assert.ok(open, 'the paper was pushed to the panel');
+    assert.strictEqual(open.revealPage, 3);
+    assert.strictEqual(open.revealFrac, 0.75, 'with how far down the page, too');
+});
+
+test('a different paper does not inherit the last one\'s place', async () => {
+    const mem = {};
+    const v = placeViewer(mem);
+    await v._onMessage({ type: 'viewstate', page: 9, frac: 0.5 });
+    assert.deepStrictEqual(v._viewState, { page: 9, frac: 0.5 });
+
+    // open() switches papers; the in-memory place must go with the old one.
+    v.root = '/paper/another.tex';
+    v._viewState = v._viewFor('/paper/another.tex');
+    assert.strictEqual(v._viewState, null, 'the new paper starts wherever it was left, or at the top');
+});
+
+test('the store cannot grow without limit', async () => {
+    const mem = {};
+    const v = placeViewer(mem);
+    for (let i = 0; i < 40; i++) v._rememberView(`/p/${i}.tex`, i + 1, 0.1);
+    const kept = Object.keys(mem['wolfbook.tex.viewerPlace']).length;
+    assert.ok(kept <= 24, `at most 24 papers are remembered (got ${kept})`);
+    assert.ok(v._viewFor('/p/39.tex'), 'the most recent is one of them');
+    assert.strictEqual(v._viewFor('/p/0.tex'), null, 'the oldest dropped out');
+});
+
+test('a host with no workspace state still works, it just forgets', async () => {
+    const v = makeViewer(null, null);       // context has no workspaceState
+    v.posted.length = 0;
+    assert.doesNotThrow(() => v._rememberView(FILE, 4, 0.2));
+    assert.deepStrictEqual(v._viewState, { page: 4, frac: 0.2 }, 'this session still knows');
+    assert.doesNotThrow(() => v._viewFor(FILE));
+});
+
 // --- A RESTORE IS NOT A GESTURE ---------------------------------------------
 
 test('A RESTORING SYNC ASKS FOR AN INSTANT JUMP, A CURSOR MOVE DOES NOT', () => {
