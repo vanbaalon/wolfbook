@@ -1104,11 +1104,22 @@ class TexViewer {
     _tourContext() {
         const st = this.root && this.coord.roots.get(this.root);
         let hasLabels = false;
+        let hasSections = false;
+        let hasAnchors = false;
         try {
             const model = st && this._modelFor2(this.root);
-            hasLabels = !!(model && model.objects.some(o => o.label || (o.kind === 'label' && o.name)));
-        } catch (_) { hasLabels = false; }
-        return { hasLabels, hasReview: !!(this._review && this._review.sessionFor(this.root)) };
+            const objs = (model && model.objects) || [];
+            hasLabels = objs.some(o => o.label || (o.kind === 'label' && o.name));
+            hasSections = objs.some(o => o.kind === 'section-heading');
+            // A tag hangs on any anchor, and an equation is the commonest one:
+            // a paper with no sectioning at all can still have somewhere worth
+            // pointing an agent at.
+            hasAnchors = hasSections || objs.some(o => o.kind === 'display-equation');
+        } catch (_) { /* a paper we cannot model teaches only the gestures */ }
+        return {
+            hasLabels, hasSections, hasAnchors,
+            hasReview: !!(this._review && this._review.sessionFor(this.root)),
+        };
     }
 
     /** Begin (or resume) the tour. `restart` starts it from the top again. */

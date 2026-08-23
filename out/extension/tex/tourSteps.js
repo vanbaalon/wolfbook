@@ -39,12 +39,28 @@ const STEPS = [
     },
     {
         id: 'labels',
-        title: 'Every name on the page',
-        say: 'Hold Shift and each \\label appears beside the thing it names, each \\ref beside what it points at. Click one to copy the reference.',
+        title: 'Hold Shift: the paper\'s own skeleton',
+        say: 'Every \\label appears beside the thing it names and every \\ref beside what it points at — and every heading and equation grows a tag and a fold control.',
         doIt: 'Hold Shift.',
         point: '#labels',
-        when: (ctx) => !!ctx.hasLabels,
+        when: (ctx) => !!(ctx.hasLabels || ctx.hasAnchors),
         satisfy: (e) => e.type === 'labelsWanted' || e.type === 'copyLabel',
+    },
+    {
+        id: 'tag',
+        title: 'Point an agent at a place',
+        say: 'The tag beside a heading or an equation copies its file and line — paste that at an agent and it can open the paper exactly there. Alt-click adds the page and the name, for a person.',
+        doIt: 'With Shift held, click a § or ≡ tag.',
+        when: (ctx) => !!ctx.hasAnchors,
+        satisfy: (e) => e.type === 'copyAnchor',
+    },
+    {
+        id: 'fold',
+        title: 'Put a section away while you work',
+        say: 'Fold a section and WPaper stops typesetting it, so the paper on screen is the part you are working on. Your .tex keeps every word — two comment lines record the fold, and a colleague on Overleaf still sees the whole paper.',
+        doIt: 'With Shift held, press ▾ fold beside a heading.',
+        when: (ctx) => !!ctx.hasSections,
+        satisfy: (e) => e.type === 'sectionFold' && !!e.collapse,
     },
     {
         id: 'edit',
@@ -63,7 +79,7 @@ const STEPS = [
     {
         id: 'review',
         title: 'When an agent edits the paper',
-        say: 'Its changes wait in the review below until you Keep or Undo them, one at a time. Nothing is ever approved by arriving.',
+        say: 'Its changes wait below, grouped by the section they are in, until you Keep or Undo them — one, a whole section, or all of them. Nothing is ever approved by arriving, and a change that lands while you are typing is merged with your unsaved edits rather than fighting them.',
         // No gesture: a reader with no pending changes cannot perform one, and
         // asking them to would be a dead end. The card's own button ends it.
         done: 'Done',

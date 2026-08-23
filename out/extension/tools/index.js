@@ -1859,8 +1859,8 @@ class EditCellTool {
         if (conflict) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(JSON.stringify(conflict, null, 2))]);
         const cellId     = getCellToolId(cell);
 
-        // Normalise content: fix double-encoded escape sequences (\n, \", \\)
-        // that the LLM sometimes emits instead of the real characters.
+        // Preserve parsed tool content verbatim by default. Explicit "auto"
+        // remains available for old clients that send double-escaped payloads.
         // Accept 'newContent' as an alias for 'content' (common model mistake).
         let newContent;
         try {

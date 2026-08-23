@@ -3562,6 +3562,32 @@ test('A STEP ADVANCES ON THE READER\'S OWN GESTURE, NOT ON A BUTTON', async () =
     assert.strictEqual(lastTour(v2).step.id, 'widen', 'a half-finished tour resumes');
 });
 
+test('THE TOUR ADVANCES ON THE TWO GESTURES THE GUIDE GAINED', async () => {
+    // The pure suite proves the script; this proves the WIRING — that a fold
+    // and a copied tag reach the tour through the panel's own dispatch, the
+    // same way a click does.
+    const mem = {};
+    const v = tourViewer(mem);
+    // A paper with sections and equations, so every step applies.
+    v._tourContext = () => ({ hasLabels: true, hasSections: true, hasAnchors: true, hasReview: false });
+    v.startTour(true);
+    v._tourSave({ at: 4 });                       // the tag step
+    v._tourPost();
+    assert.strictEqual(lastTour(v).step.id, 'tag');
+
+    await v._onMessage({ type: 'copyAnchor', key: 'eq:1' });
+    await wait(700);
+    assert.strictEqual(lastTour(v).step.id, 'fold', 'copying a place moves the tour on');
+
+    await v._onMessage({ type: 'sectionFold', key: 's1', collapse: false });
+    await wait(700);
+    assert.strictEqual(lastTour(v).step.id, 'fold', 'UNfolding is not the thing being taught');
+
+    await v._onMessage({ type: 'sectionFold', key: 's1', collapse: true });
+    await wait(700);
+    assert.strictEqual(lastTour(v).step.id, 'edit', 'folding one is');
+});
+
 test('the tour watches the panel\'s real messages, and skipping still works', async () => {
     const mem = {};
     const v = tourViewer(mem);

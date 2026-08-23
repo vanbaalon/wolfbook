@@ -2948,7 +2948,8 @@ class SaveLatexTool {
                 'Error: both content and path are required. Example: { content: "\\\\documentclass{article}...", path: "/abs/path/to/file.tex" }'
             )]);
         }
-        // Unescape double-encoded escape sequences (\n, \", \\)
+        // Preserve parsed tool content verbatim unless a legacy decode mode was
+        // explicitly requested.
         try { content = decodeToolContent(content, options.input?.content_encoding); }
         catch (err) { return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(err.message)]); }
         const control = findControlChar(content);

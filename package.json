@@ -4835,7 +4835,7 @@
                 "raw",
                 "base64"
               ],
-              "description": "Decode mode for content. Control characters are preserved with a warning for TeX compatibility."
+              "description": "Optional legacy compatibility mode. Omit for exact verbatim content (same as raw); auto repairs an already double-escaped payload; base64 remains accepted for backward compatibility. Control characters are preserved with a warning for TeX compatibility."
             },
             "engine": {
               "type": "string",
