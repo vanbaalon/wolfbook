@@ -26,6 +26,7 @@ const { findRoot, buildGraph } = require('./texProject');
 const {
     nextLiveDelayMs, blendLiveMs, synctexUnchanged, generationSatisfies, authoritativeDelayMs,
 } = require('./livePolicy');
+const { foldForCompile, MARK: COLLAPSE_MARK } = require('./collapse');
 
 const FLAG_ICON = {
     [FLAG.FRESH]: '$(pass-filled)',
@@ -58,6 +59,11 @@ function makeMap(o) {
     const gen = o && o.generation;
     if (gen && (gen.glyphMapPath || o.glyphDoc)) return new GlyphMap(o);
     return new RenderMap(o);
+}
+
+/** A source file's text, or null — a file we cannot read simply is not folded. */
+function readFileOrNull(f) {
+    try { return fs.readFileSync(f, 'utf8'); } catch (_) { return null; }
 }
 
 class RootState {
@@ -117,6 +123,23 @@ class RenderCoordinator {
             const f = d.uri.fsPath;
             if (!files.has(f) && f !== root) continue;
             m.set(f, d.getText());
+        }
+
+        // FOLDED SECTIONS ARE LEFT OUT OF THE COPY WE COMPILE, AND ONLY THERE.
+        //
+        // The .tex itself keeps every word — it is shared, on Overleaf and over
+        // git, and a colleague must see the whole paper. What is written into
+        // the file is two comment lines saying a section is folded; the
+        // commenting-out happens here, in the same overlay the live render
+        // already uses to compile unsaved buffers.
+        //
+        // Line for line with the original (tex/collapse.js), so the render map
+        // still points at the right source lines.
+        for (const f of [...files, root]) {
+            const base = m.has(f) ? m.get(f) : readFileOrNull(f);
+            if (base == null || base.indexOf(COLLAPSE_MARK) < 0) continue;
+            const folded = foldForCompile(base);
+            if (folded !== base) m.set(f, folded);
         }
         return m.size ? m : null;
     }
@@ -191,18 +214,26 @@ class RenderCoordinator {
             if (!g || !(g.passesLimited || g.rerunWanted)) return;
             if (st.compiling) { this._armAuthoritative(root, liveDelayMs); return; }
             // A PAPER THAT ALWAYS ASKS IS NOT A REASON TO COMPILE FOR EVER.
-            // Convergence normally takes one extra build; two is generous. The
-            // count is per source snapshot, so the next edit starts it over.
+            //
+            // The rule is EMPIRICAL, because no rule about the log can cover
+            // every package: once a correcting build has run and demonstrably
+            // fixed nothing — it still wants a rerun and produced byte for byte
+            // the same PDF — this text is not going to converge, and we stop
+            // asking until the reader changes something. (LaTeX does not
+            // request a rerun for a \ref whose label does not exist; that is
+            // reported as "undefined", never as "rerun", so a broken reference
+            // never gets us here at all. Measured, not assumed.)
+            if (st._noConverge === g.sourceSnapshotHash) return;
             const tries = (st._convergeAt === g.sourceSnapshotHash ? st._convergeTries || 0 : 0);
             if (tries >= 2) return;
             st._convergeAt = g.sourceSnapshotHash;
             st._convergeTries = tries + 1;
-            this.buildAuthoritative(root).catch(() => { /* reported via state */ });
+            this.buildAuthoritative(root, { was: g }).catch(() => { /* reported via state */ });
         }, wait));
     }
 
     /** The background full rebuild. Quiet by construction: no progress toast. */
-    async buildAuthoritative(root) {
+    async buildAuthoritative(root, { was = null } = {}) {
         const st = this.roots.get(root);
         if (!st || st.compiling) return;
         let doc;
@@ -212,6 +243,17 @@ class RenderCoordinator {
         this._emitter.fire(st);
         try { await this.build(doc, { authoritative: true, quiet: true }); }
         finally { st.authoritativeRunning = false; this._emitter.fire(st); }
+
+        // DID IT ACTUALLY FIX ANYTHING? If the correcting build still wants a
+        // rerun and produced exactly the PDF it was correcting, then whatever
+        // is unresolved in this paper is not resolvable by compiling it again.
+        // Remember that against the TEXT, so the next edit is free to try.
+        const now = st.generation;
+        if (was && now && now.rerunWanted && now.pdfHash && now.pdfHash === was.pdfHash) {
+            st._noConverge = now.sourceSnapshotHash;
+            this.log('  the rebuild changed nothing and it still wants a rerun — ' +
+                'leaving it alone until the paper changes');
+        }
     }
 
     rootFor(doc) {

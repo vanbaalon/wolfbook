@@ -3768,8 +3768,11 @@ class TexViewer {
     // Hold Shift and every heading offers to collapse; a collapsed one says so
     // on the page whether Shift is held or not, because a section that is
     // simply MISSING from the paper with no explanation is the worst outcome
-    // this feature could have. The state lives in the .tex itself
-    // (tex/collapse.js) — the panel only draws what the file says.
+    // this feature could have.
+    //
+    // The .tex records only THAT a section is folded, as two comment lines —
+    // the content is left out of the temporary copy WPaper compiles, and
+    // nowhere else, so the shared paper stays whole (tex/collapse.js).
 
     /** The text of one of the project's files, buffer first. */
     _textOf(file) {
@@ -3872,28 +3875,24 @@ class TexViewer {
     /**
      * A place in the paper, on the clipboard — the point of the tags.
      *
-     * WORKSPACE-RELATIVE WHEN IT CAN BE, ABSOLUTE WHEN IT CANNOT. An agent
-     * resolves a relative path against the workspace folder, and the papers
-     * here usually live outside it (the file watcher learned that the hard
-     * way), so a relative path would name a file that does not exist.
+     * ALWAYS THE FULL PATH. A relative one is shorter but it is resolved
+     * against whatever directory the reader of it happens to be in, and an
+     * agent's is rarely the paper's — these papers usually live outside the
+     * workspace folder entirely. An absolute path cannot be resolved wrong,
+     * and being unambiguous is the whole job of this string.
+     *
+     * The LINE is what a model can act on; the PAGE is what a person says out
+     * loud. So the plain form is `path:line` — paste it at an agent and it can
+     * open the file there — and Alt-click adds the page and the name for a
+     * human reading the same message.
      */
     _anchorRef(it, { alt = false } = {}) {
-        let p = it.file;
-        try {
-            const folders = vscode.workspace.workspaceFolders || [];
-            for (const f of folders) {
-                const base = f.uri.fsPath;
-                if (p === base || p.startsWith(base + path.sep)) {
-                    p = path.relative(base, p);
-                    break;
-                }
-            }
-        } catch (_) { /* absolute, then */ }
-        const ref = `${p}:${it.line}`;
+        const ref = `${it.file}:${it.line}`;
         if (!alt) return ref;
         const what = it.kind === 'section' ? (it.title || 'section')
             : (it.title ? `\\label{${it.title}}` : 'equation');
-        return `${ref} (${what})`;
+        const where = it.page ? `p. ${it.page} · ` : '';
+        return `${ref} (${where}${what})`;
     }
 
     async _onCopyAnchor(m) {
@@ -3967,7 +3966,8 @@ class TexViewer {
         this._post({
             type: 'status', kind: 'ok',
             text: m.collapse
-                ? `folded away ${r.hidden} line${r.hidden === 1 ? '' : 's'} of "${it.title}" — ⌘Z puts it back`
+                ? `folded away ${r.hidden} line${r.hidden === 1 ? '' : 's'} of "${it.title}" — ` +
+                  'the .tex keeps every word; only WPaper\'s copy leaves it out'
                 : `brought back ${r.shown} line${r.shown === 1 ? '' : 's'} of "${it.title}"`,
         });
         // The controls are read from the file, so they are stale the moment it

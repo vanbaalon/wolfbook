@@ -264,6 +264,28 @@ async function main() {
             return JSON.stringify(out);
         };
 
+        await test('A BROKEN REFERENCE NEVER ASKS FOR A RECOMPILE', async () => {
+            // The worry, and it is the right one: do not recompile for ever
+            // because a \ref points at a label that is not there. Measured
+            // against a real engine rather than reasoned about — LaTeX reports
+            // that as "undefined", and asks for a rerun only when the .aux it
+            // just wrote differs from the one it read.
+            const { dir, root } = mkProject('broken.tex',
+                '\\documentclass{article}\n\\begin{document}\n' +
+                'See \\ref{nope} and \\ref{alsonope}.\n\\end{document}\n');
+            const r = await compile({ root, sourceFiles: [root], timeoutMs: 120000 });
+            assert.strictEqual(r.ok, true, 'it still compiles');
+            assert.ok(r.warnings >= 1, 'and the undefined references are reported');
+            assert.strictEqual(r.rerunWanted, false,
+                'but nothing asks for another pass, so nothing is scheduled');
+
+            // Even capped, which is how the live loop builds while typing.
+            const capped = await compile({ root, sourceFiles: [root], maxPasses: 1, force: true, timeoutMs: 120000 });
+            assert.strictEqual(capped.rerunWanted, false);
+            fs.rmSync(dir, { recursive: true, force: true });
+            fs.rmSync(r.outDir, { recursive: true, force: true });
+        });
+
         await test('A NEW LABEL LEAVES THE BUILD ONE PASS BEHIND, AND SAYS SO', async () => {
             // Reported: a new equation label renders as (?) and stays that way.
             // The signal is LaTeX's own — it wrote a .aux this run that nobody

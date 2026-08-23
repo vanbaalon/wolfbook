@@ -3114,6 +3114,8 @@ test('NO MAP, NO ANSWER: a failed rebuild clears the page instead of leaving the
 
 // --- FOLDING A SECTION AWAY -------------------------------------------------
 
+const { foldForCompile } = require('../../tex/collapse');
+
 /**
  * What the last clipboard write put there.
  *
@@ -3171,7 +3173,11 @@ test('THE PAPER OFFERS ONE FOLD CONTROL PER SECTIONING UNIT', async () => {
     assert.ok(items[0].page, 'and it knows where the heading prints');
 });
 
-test('FOLDING COMMENTS THE BODY OUT AND LEAVES THE HEADING STANDING', async () => {
+test('FOLDING MARKS THE FILE AND CHANGES NOTHING ELSE IN IT', async () => {
+    // The .tex is shared — on Overleaf, over git, with collaborators — so a
+    // fold must not remove one word of it. Two comment lines record the state;
+    // the content is left out of the temporary copy WPaper compiles, and
+    // nowhere else.
     const { v, doc } = moveViewer(FOLD_SRC);
     const items = await foldItems(v);
     await v._onMessage({ type: 'sectionFold', key: items[0].key, collapse: true });
@@ -3179,16 +3185,34 @@ test('FOLDING COMMENTS THE BODY OUT AND LEAVES THE HEADING STANDING', async () =
     const lines = doc.getText().split('\n');
     assert.strictEqual(lines[3], '\\section{The pairing}', 'the heading is untouched');
     assert.ok(/^%WPaper\[Collapsed\]/.test(lines[4]), 'the marker is under it: ' + lines[4]);
-    assert.ok(/6 lines/.test(lines[4]), 'saying how much is hidden');
-    for (let i = 5; i <= 10; i++) {
-        assert.ok(lines[i].startsWith('%WP%'), `line ${i + 1} is commented: ${lines[i]}`);
-    }
-    assert.ok(doc.getText().includes('%WP%\\subsection{The upper tower}'),
-        'a subsection inside it goes with it');
-    assert.strictEqual(lines[lines.length - 1], '\\end{document}', 'and the document still ends');
+    assert.ok(lines.some(l => /^%WPaper\[\/Collapsed\]/.test(l)), 'and a closing one below');
+    assert.ok(!lines.some(l => l.startsWith('%WP%')),
+        'NOTHING in the file itself is commented out');
+    assert.strictEqual(lines.length, FOLD_SRC.split('\n').length + 2, 'exactly two lines added');
+    // Every original line survives, in order.
+    const kept = lines.filter(l => !/^%WPaper\[/.test(l));
+    assert.deepStrictEqual(kept, FOLD_SRC.split('\n'), 'the body is word for word what it was');
+
     const said = v.posted.filter(p => p.type === 'status').pop();
     assert.ok(/folded away 6 lines/.test(said.text), said.text);
-    assert.ok(/⌘Z/.test(said.text), 'and says how to take it back');
+    assert.ok(/keeps every word/.test(said.text), 'and says the file is intact: ' + said.text);
+});
+
+test('AND THE COMPILED COPY IS WHERE THE SECTION ACTUALLY GOES', async () => {
+    // The other half of the same claim, on the text the compiler is handed.
+    const { v, doc } = moveViewer(FOLD_SRC);
+    const items = await foldItems(v);
+    await v._onMessage({ type: 'sectionFold', key: items[0].key, collapse: true });
+
+    const onDisk = doc.getText();
+    const compiled = foldForCompile(onDisk);
+    assert.ok(/^%WP%First prose line of the section\.$/m.test(compiled),
+        'the body is commented in the copy');
+    assert.ok(/^\\section\{The pairing\}$/m.test(compiled), 'the heading still typesets');
+    assert.ok(/^\\section\{The measure\}$/m.test(compiled), 'and the next section is untouched');
+    assert.strictEqual(compiled.split('\n').length, onDisk.split('\n').length,
+        'LINE FOR LINE with the file, or every click below the fold lands wrong');
+    assert.ok(/^\\end\{document\}$/m.test(compiled), 'and the document still ends');
 });
 
 test('AND UNFOLDING GIVES BACK THE FILE, BYTE FOR BYTE', async () => {
@@ -3278,23 +3302,40 @@ test('THE TAG COPIES path:line — THE POINT OF THE WHOLE THING', async () => {
     // Alt-click adds what it IS, for a human reading the same message.
     watchClipboard();
     await v._onMessage({ type: 'copyAnchor', key: it.key, alt: true });
-    assert.strictEqual(copied, '/paper/move.tex:8 (The upper tower)');
+    assert.strictEqual(copied, '/paper/move.tex:8 (p. 1 · The upper tower)');
 });
 
-test('a path INSIDE the workspace is copied relative to it', async () => {
-    // An agent resolves a relative path against the workspace folder — and the
-    // papers here usually live outside it, which is why the absolute form is
-    // the default rather than the exception.
+test('THE PATH IS ALWAYS ABSOLUTE, so it cannot be resolved against the wrong folder', () => {
+    // A relative path is shorter and is resolved against whatever directory
+    // its reader happens to be in — and an agent's is rarely the paper's;
+    // these papers usually live outside the workspace folder entirely. Being
+    // unambiguous is the whole job of this string.
     const { v } = moveViewer(FOLD_SRC);
-    const items = await foldItems(v);
-    const it = items.find(i => i.kind === 'section');
+    const it = { file: '/paper/move.tex', line: 8, kind: 'section', title: 'The upper tower', page: 3 };
+    assert.strictEqual(v._anchorRef(it), '/paper/move.tex:8');
+
     const had = stub.workspace.workspaceFolders;
     stub.workspace.workspaceFolders = [{ uri: { fsPath: '/paper' } }];
     try {
-        watchClipboard();
-        await v._onMessage({ type: 'copyAnchor', key: it.key });
-        assert.strictEqual(copied, 'move.tex:4');
+        assert.strictEqual(v._anchorRef(it), '/paper/move.tex:8',
+            'even for a file INSIDE the workspace');
     } finally { stub.workspace.workspaceFolders = had; }
+});
+
+test('ALT-CLICK ADDS WHAT A PERSON SAYS OUT LOUD: the page and the name', () => {
+    // The LINE is what a model can act on — it opens the file there. The PAGE
+    // is for the human reading the same message, so it goes in the longer form
+    // rather than diluting the one meant to be pasted at an agent.
+    const { v } = moveViewer(FOLD_SRC);
+    assert.strictEqual(
+        v._anchorRef({ file: '/p.tex', line: 8, kind: 'section', title: 'The upper tower', page: 3 }, { alt: true }),
+        '/p.tex:8 (p. 3 · The upper tower)');
+    assert.strictEqual(
+        v._anchorRef({ file: '/p.tex', line: 412, kind: 'equation', title: 'eq:sov', page: 12 }, { alt: true }),
+        '/p.tex:412 (p. 12 · \\label{eq:sov})');
+    assert.strictEqual(
+        v._anchorRef({ file: '/p.tex', line: 5, kind: 'equation', title: '', page: null }, { alt: true }),
+        '/p.tex:5 (equation)', 'and says only what it knows');
 });
 
 test('copying a place that has gone says so instead of copying nonsense', async () => {
