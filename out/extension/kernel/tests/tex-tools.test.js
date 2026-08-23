@@ -672,6 +672,13 @@ async function main() {
             'the extension would never wake for a .tex without this');
     });
 
+    await test('activation starts MCP even when a folder has no Wolfbook files', () => {
+        const pkg = require('../../../../package.json');
+        const ae = pkg.activationEvents || [];
+        assert.ok(ae.includes('onStartupFinished'),
+            'a new folder cannot start or join the MCP server until a .wb/.tex file is opened');
+    });
+
     await test('we do NOT contribute a latex language (LaTeX Workshop owns it)', () => {
         const pkg = require('../../../../package.json');
         const ids = (pkg.contributes.languages || []).map(l => l.id);

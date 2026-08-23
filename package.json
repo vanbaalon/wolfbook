@@ -8,6 +8,7 @@
     "vscode": "^1.95.0"
   },
   "activationEvents": [
+    "onStartupFinished",
     "onUri",
     "onLanguage:latex",
     "onLanguage:tex",
