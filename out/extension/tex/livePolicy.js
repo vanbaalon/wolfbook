@@ -37,6 +37,30 @@ function nextLiveDelayMs({ lastMs, ceilingMs, floorMs = FLOOR_MS, k = 1 } = {}) 
 }
 
 /**
+ * How long to wait before the build that a build was queued BEHIND.
+ *
+ * The ordinary debounce is a ceiling on purpose: an 89-page paper should not
+ * make the reader wait 17 s after they stop typing. But that same cap means a
+ * paper which takes LONGER than the debounce spends most of its wall-clock
+ * compiling — fire at 900 ms, run for 1.4 s, someone typed meanwhile, go round
+ * again — and a latexmk running two thirds of the time is felt as the whole
+ * machine being slow, which is how it was reported.
+ *
+ * So the FIRST pause after typing keeps the ceiling and stays responsive, and
+ * only the round-again case backs off: wait at least as long as the last build
+ * took, so the loop can never use more than about half the time. Capped,
+ * because a paper that takes a minute must still come back eventually.
+ *
+ * @param {{lastMs?: number, ceilingMs?: number, maxMs?: number}} o
+ */
+function cooldownDelayMs({ lastMs, ceilingMs, maxMs = 5000 } = {}) {
+    const ceiling = Number(ceilingMs) > 0 ? Number(ceilingMs) : 900;
+    const last = Number(lastMs) > 0 ? Number(lastMs) : 0;
+    if (!last) return ceiling;
+    return Math.min(Math.max(maxMs, ceiling), Math.max(ceiling, Math.round(last)));
+}
+
+/**
  * Blend one compile time into the running estimate.
  *
  * A single slow build (a figure recompiled, a package loaded for the first
@@ -150,6 +174,7 @@ function authoritativeDelayMs({ configuredMs = 4000, liveDelayMs = 900 } = {}) {
 module.exports = {
     FLOOR_MS,
     nextLiveDelayMs,
+    cooldownDelayMs,
     blendLiveMs,
     shipDecision,
     synctexUnchanged,

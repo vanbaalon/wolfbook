@@ -14,7 +14,7 @@ const test = (name, fn) => Promise.resolve().then(fn)
     .catch((e) => { fail++; results.push('  FAIL ' + name + '\n         ' + String(e && e.message || e).replace(/\n/g, '\n         ')); });
 
 const {
-    nextLiveDelayMs, blendLiveMs, shipDecision, synctexUnchanged,
+    nextLiveDelayMs, cooldownDelayMs, blendLiveMs, shipDecision, synctexUnchanged,
     readPassLimit, generationSatisfies, authoritativeDelayMs,
 } = require('../../tex/livePolicy');
 const { needsRerun } = require('../../tex/texLog');
@@ -36,6 +36,28 @@ async function main() {
 
     await test('a slow paper is held at the ceiling', () => {
         assert.strictEqual(nextLiveDelayMs({ lastMs: 17000, ceilingMs: 900 }), 900);
+    });
+
+    await test('THE COOLDOWN BACKS OFF WHERE THE DEBOUNCE MAY NOT', () => {
+        // The debounce is a ceiling on purpose: nobody should wait 17 s after
+        // they stop typing. But that cap means a paper taking LONGER than the
+        // ceiling fires again almost as soon as it lands, and spends most of
+        // its wall-clock compiling — reported as the editor lagging behind "a
+        // long queue of compilations". The queue is only ever one deep; a
+        // latexmk running two thirds of the time is what it feels like.
+        //
+        // Only the go-round-again path uses this. The first pause after typing
+        // keeps the ceiling and stays responsive.
+        assert.strictEqual(nextLiveDelayMs({ lastMs: 1400, ceilingMs: 900 }), 900,
+            'the first pause is unchanged');
+        assert.strictEqual(cooldownDelayMs({ lastMs: 1400, ceilingMs: 900 }), 1400,
+            'but going round again waits out the build it just did');
+        assert.strictEqual(cooldownDelayMs({ lastMs: 400, ceilingMs: 900 }), 900,
+            'a paper faster than the ceiling is never made slower');
+        assert.strictEqual(cooldownDelayMs({ lastMs: 17000, ceilingMs: 900 }), 5000,
+            'and a very slow one still comes back');
+        assert.strictEqual(cooldownDelayMs({ ceilingMs: 900 }), 900,
+            'with nothing measured yet it is just the ceiling');
     });
 
     await test('a very fast paper still waits for the floor', () => {

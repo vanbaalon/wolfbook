@@ -690,6 +690,13 @@
   #ednwhere { font-size:11px; max-width:26ch; overflow:hidden; text-overflow:ellipsis;
               white-space:nowrap; color: var(--vscode-descriptionForeground, #999); }
   #editnav.review #ednwhere { color: var(--vscode-charts-orange, #d18616); }
+  /* The number the paper prints beside the heading. Tabular figures so a
+     column of them lines up, and dimmed so the title still reads first. */
+  .secnum { font-variant-numeric: tabular-nums; opacity:.65;
+            color: var(--vscode-descriptionForeground, #999); }
+  .secname.goto { cursor:pointer; }
+  .secname.goto:hover { text-decoration:underline;
+            color: var(--vscode-textLink-activeForeground, #4daafc); }
   /* THE BAR HAS TO SURVIVE A NARROW PANEL.
      WPaper is usually docked beside an editor, so half a window is its normal
      width, not an edge case. The bar is `nowrap; overflow:hidden`, which means

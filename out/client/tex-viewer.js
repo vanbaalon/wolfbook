@@ -481,7 +481,17 @@ function observeVisible() {
 }
 
 async function renderPage(n) {
-    if (state.rendered.has(n) || state.pending.has(n)) return;
+    if (state.rendered.has(n)) return;
+    // AN IN-FLIGHT RENDER IS SOMETHING TO WAIT FOR, NOT TO WALK PAST.
+    //
+    // This used to return immediately for a page already being rendered, so
+    // `await renderPage(n)` was a no-op in exactly the case a caller awaits it
+    // for — and the commonest one: revealHighlight calls renderAround first,
+    // which puts the page in `pending`, so the await resolved at once, the
+    // page still had no viewport mapping, and the scroll aimed at the page's
+    // top. That is the "it goes to the beginning and only the second click
+    // works" report; the second click worked because the render had landed.
+    if (state.pending.has(n)) return state.pending.get(n);
     const wrap = pagesEl().querySelector(`.page[data-page="${n}"]`);
     if (!wrap) return;
     const job = (async () => {
@@ -1105,6 +1115,10 @@ function sectionGroups(r) {
             by.set(key, {
                 kind: 'section', id: key,
                 title: sec && sec.title ? sec.title : 'before the first section',
+                // What the paper calls it — "3.2" — so the list reads the way
+                // the printed page does rather than by title alone.
+                number: (sec && sec.number) || null,
+                file: (sec && sec.file) || null,
                 level: sec ? sec.level : 0,
                 at: sec ? sec.startLine : 0,
                 hunks: [], ids: [],
@@ -1173,8 +1187,15 @@ function renderReview() {
             // ordinary paper's top-level sections in by a level that is not
             // there.
             const pad = Math.min(3, Math.max(0, (g.level || 0) - shallowest)) * 12;
+            const num = g.number ? `<span class="secnum">${esc(g.number)}</span> ` : '';
+            // The heading is a WAY THERE, not just a caption: reviewing a list
+            // of changes means wanting to see where they are.
+            const goable = g.at > 0 ? ` data-secline="${g.at}" data-secfile="${esc(g.file || '')}"` : '';
             parts.push(`<div class="grp sec" style="padding-left:${8 + pad}px">` +
-                `<span class="secname" title="${esc(g.title)}">${esc(g.title)}</span>` +
+                `<span class="secname${goable ? ' goto' : ''}"${goable} ` +
+                `title="${esc(g.number ? g.number + ' ' + g.title : g.title)}` +
+                `${goable ? ' — click to go to it' : ''}">` +
+                `${num}${esc(g.title)}</span>` +
                 `<span class="secn">${g.count} change${g.count === 1 ? '' : 's'}</span>` +
                 `<span class="sp"></span>` +
                 `<button data-keepmany="${esc(g.ids.join(','))}" ` +
@@ -1358,6 +1379,19 @@ document.addEventListener('click', (e) => {
     if (keep) { e.preventDefault(); e.stopPropagation(); reviewAct('keep', { id: keep.dataset.keep }); return; }
     const undo = t.closest('[data-undo]');
     if (undo) { e.preventDefault(); e.stopPropagation(); reviewAct('undo', { id: undo.dataset.undo }); return; }
+    // THE HEADING IS A WAY THERE. Checked BEFORE the keep-many button that
+    // shares its row, so clicking the name goes to the section and only the
+    // button agrees to its changes.
+    const goto = t.closest('[data-secline]');
+    if (goto) {
+        e.preventDefault(); e.stopPropagation();
+        vscode.postMessage({
+            type: 'revealSection',
+            line: Number(goto.dataset.secline) || 0,
+            file: goto.dataset.secfile || null,
+        });
+        return;
+    }
     // A GROUP THE READER POINTED AT AS ONE — a whole section, most often.
     const many = t.closest('[data-keepmany]');
     if (many) {
@@ -2276,7 +2310,7 @@ function goToPage(n, rects, { smooth = true } = {}) {
  * So: paint first, and scroll only when the highlight is actually outside the
  * comfortable middle band of the viewport — then put it there.
  */
-async function revealHighlight({ smooth = true } = {}) {
+async function revealHighlight({ smooth = true, tries = 2 } = {}) {
     paintHighlight();
     let h = state.highlight;
     const main = document.querySelector('main');
@@ -2303,7 +2337,18 @@ async function revealHighlight({ smooth = true } = {}) {
     const wrap = pagesEl().querySelector(`.page[data-page="${page}"]`);
     if (!wrap) return;
 
-    const v = state.rendered.has(page) ? rectToViewport(page, h.rects[0]) : null;
+    let v = state.rendered.has(page) ? rectToViewport(page, h.rects[0]) : null;
+    // STILL NO POSITION? TRY AGAIN RATHER THAN GO TO THE TOP.
+    //
+    // The reader's own diagnosis of the remaining case: "if it first fails to
+    // find the position, do not go to the beginning as a default — try again,
+    // like making my second click." Falling back to the page's top is a WORSE
+    // answer than waiting one more frame, because it moves the paper somewhere
+    // nobody asked for and loses the place they were reading.
+    if (!v && tries > 0) {
+        await new Promise((r) => requestAnimationFrame(() => r()));
+        return revealHighlight({ smooth, tries: tries - 1 });
+    }
     const top = wrap.offsetTop + (v ? v.y : 0);
     const height = v ? Math.max(v.h, 8) : Math.min(wrap.offsetHeight, 200);
 
@@ -4302,6 +4347,18 @@ vscode.postMessage({ type: 'ready' });
 // A FRESH PANEL cannot be reached by any message — it is what a webview is
 // before the first `open` — so the one test that needs it says so explicitly
 // rather than half-simulating it by emptying the DOM.
+/**
+ * Un-render ONE page without touching the DOM.
+ *
+ * forgetPagesForTest wipes the pages entirely, which stages a FRESH PANEL —
+ * a different situation. What a click on a change is always racing is a page
+ * that EXISTS but has not been drawn yet, and that is what this stages.
+ */
+function dropRenderedForTest(n) {
+    state.rendered.delete(Number(n));
+    state.pending.delete(Number(n));
+}
+
 function forgetPagesForTest() {
     // The DOCUMENT is deliberately left alone: the open handler destroys the
     // previous one itself, and orphaning it here wedges the pdf.js worker.
@@ -4312,4 +4369,4 @@ function forgetPagesForTest() {
     textCache.clear();
 }
 
-window.__wbTexViewerTest = { fitToolbar, snapToInk, itemWords, prefixWidths, textItems, wordKey, foldGlyphs, wordAtPoint, highlightLatex, fromViewport, rectToViewport, forgetPagesForTest };
+window.__wbTexViewerTest = { fitToolbar, dropRenderedForTest, snapToInk, itemWords, prefixWidths, textItems, wordKey, foldGlyphs, wordAtPoint, highlightLatex, fromViewport, rectToViewport, forgetPagesForTest };

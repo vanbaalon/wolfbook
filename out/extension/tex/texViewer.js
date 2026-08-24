@@ -2328,6 +2328,19 @@ class TexViewer {
             case 'editSave': await this._saveEditDoc(); break;
             case 'editReveal': await this._revealEditRange(); break;
             case 'editNav': await this._onEditNav(m); break;
+            case 'revealSection':
+                // Reviewing a list of changes means wanting to see where they
+                // are. Same path the worklist uses, so both scroll the same way
+                // — and it scrolls whatever `follow` says, because it was asked
+                // for outright.
+                if (m && m.line > 0) {
+                    await this._gotoEdit({
+                        file: m.file || this.root,
+                        line: Number(m.line),
+                        label: 'section',
+                    });
+                }
+                break;
             case 'insertPreview': await this._insertPreview(m); break;
             case 'insertCommit': await this._insertCommit(m); break;
             case 'insertCancel':
@@ -4901,10 +4914,10 @@ class TexViewer {
             && now - top.at < TexViewer.EDIT_MERGE_MS) {
             top.line = line;
             top.at = now;
-            top.label = this._editLabel(doc, line);
+            top.label = null;              // recomputed off this path — see below
         } else {
             this._editStack.unshift({
-                id: ++this._editSeq, file, line, at: now, label: this._editLabel(doc, line),
+                id: ++this._editSeq, file, line, at: now, label: null,
             });
             this._editStack.length = Math.min(this._editStack.length, TexViewer.EDIT_STACK_MAX);
             // A new edit is the newest thing there is, so that is where the
@@ -4930,6 +4943,22 @@ class TexViewer {
         return `line ${line}`;
     }
 
+    /**
+     * NAMING AN EDIT IS NOT KEYSTROKE WORK.
+     *
+     * `_editLabel` builds the document model to find what the edit is inside,
+     * which is ~2.5 ms on an 1,500-line paper. Doing that per change event put
+     * it on the typing path for a label the reader may never look at. It is
+     * done here instead — inside the 250 ms debounce, once per entry, and the
+     * answer is kept on the entry.
+     */
+    _labelFor(entry) {
+        if (entry.label != null) return entry.label;
+        const doc = vscode.workspace.textDocuments.find(d => d.uri.fsPath === entry.file);
+        entry.label = doc ? this._editLabel(doc, entry.line) : `line ${entry.line}`;
+        return entry.label;
+    }
+
     _postEditStack() {
         if (!this.panel) return;
         this._post({
@@ -4939,7 +4968,7 @@ class TexViewer {
                 id: e.id,
                 file: path.basename(e.file),
                 line: e.line,
-                label: e.label,
+                label: this._labelFor(e),
                 at: e.at,
             })),
         });

@@ -236,6 +236,45 @@ test('FOCUSING A CHANGE NEVER TOUCHES THE SELECTION', async () => {
     assert.ok(posted.some(p => p && p.focus === id), 'and the page was told which change');
 });
 
+test('DECIDING ONE CHANGE MOVES TO THE NEXT', async () => {
+    // Reviewing is a WORKLIST. Deciding a change and then having to point at
+    // the next one is a click nobody needs, and it is the click that makes a
+    // long review feel long.
+    const TWO = AGENT.replace('A second paragraph nobody is arguing about.',
+        'A second paragraph somebody is arguing about.');
+    const { ui, posted } = makeUi({ docText: TWO });
+    await ui.noteAgentChange({ file: FILE, baseText: BASE });
+    const s = ui.sessionFor(FILE);
+    assert.strictEqual(s.hunks.length, 2, 'the fixture really has two changes');
+
+    const [first, second] = s.hunks.map(h => h.id);
+    await ui.show(FILE, first);
+    assert.strictEqual(ui.focused.get(FILE), first, 'the first is the one in hand');
+
+    posted.length = 0;
+    await ui.keep(FILE, first);
+    assert.strictEqual(ui.focused.get(FILE), second,
+        'keeping it moves to the one after it, with no second click');
+    assert.ok(posted.some(p => p && p.focus === second),
+        'and the page is told which change is now in hand');
+});
+
+test('DECIDING THE LAST CHANGE DOES NOT LEAVE THE FOCUS NOWHERE', async () => {
+    const TWO = AGENT.replace('A second paragraph nobody is arguing about.',
+        'A second paragraph somebody is arguing about.');
+    const { ui } = makeUi({ docText: TWO });
+    await ui.noteAgentChange({ file: FILE, baseText: BASE });
+    const s = ui.sessionFor(FILE);
+    const [first, second] = s.hunks.map(h => h.id);
+
+    await ui.keep(FILE, second);          // the LAST one first
+    assert.strictEqual(ui.focused.get(FILE), first,
+        'the list closed up, so the one before it is what is left');
+
+    await ui.keep(FILE, first);
+    assert.strictEqual(ui.sessionFor(FILE), null, 'and deciding the last one ends the review');
+});
+
 test('KEEP removes exactly that change and leaves the document alone', async () => {
     const { ui } = makeUi();
     await ui.noteAgentChange({ file: FILE, baseText: BASE });

@@ -173,6 +173,11 @@ class ReviewSession {
                 const f = (o.map || {}).sectionAt;
                 const s = typeof f === 'function' ? f(line) : null;
                 return s && s.key ? { key: String(s.key), title: String(s.title || ''),
+                    // The number LaTeX printed, when the last compile knew one.
+                    number: s.number ? String(s.number) : null,
+                    // Which file it is in, so clicking the heading in the list
+                    // works for a section inside an \input as well as the root.
+                    file: s.file ? String(s.file) : null,
                     level: Number(s.level) || 0, startLine: Number(s.startLine) || line } : null;
             } catch (_) { return null; }
         };

@@ -19,6 +19,9 @@ const { parseAux, readAuxLabels, cleanPrinted } = require('../../tex/auxLabels')
 const {
     buildLabelChips, splitStrayRows, formatLabelCopy, altFormat, blockOf,
 } = require('../../tex/labelChips');
+const {
+    parseToc, readTocNumbers, normalizeTocTitle, sectionTitleSource,
+} = require('../../tex/auxLabels');
 const { scanTex } = require('../../tex/texScanner');
 const { buildModel } = require('../../tex/texModel');
 
@@ -485,6 +488,70 @@ test('a partial view of the ink cannot put a badge column on the text', () => {
     // No text layer at all behaves exactly as it always did.
     const none = blockOf(() => null, 1, W);
     assert.ok(Math.abs(none.x1 - W * 0.867) < 1);
+});
+
+test('the printed section numbers come out of the .aux TOC lines', () => {
+    // Shapes taken verbatim from the reference paper's .aux.
+    const aux = [
+        '\\relax',
+        '\\@writefile{toc}{\\contentsline {section}{\\numberline {1}From the coordinate wavefunction}{1}{section.1}\\protected@file@percent }',
+        '\\@writefile{toc}{\\contentsline {subsection}{\\numberline {1.1}Where may $x$ and $\\dot  x$ lie?}{2}{subsection.1.1}\\protected@file@percent }',
+        '\\@writefile{lof}{\\contentsline {figure}{\\numberline {1}{\\ignorespaces A caption}}{2}{figure.1}\\protected@file@percent }',
+        '\\@writefile{toc}{\\contentsline {paragraph}{The full grid.}{2}{section*.1}\\protected@file@percent }',
+    ].join('\n');
+    const toc = parseToc(aux);
+
+    assert.strictEqual(toc.length, 3, 'the figure list is not a table of contents');
+    assert.ok(!toc.some(e => /caption/.test(e.title)),
+        'a figure caption read as a section title would be worse than no number');
+
+    assert.strictEqual(toc[0].number, '1');
+    assert.strictEqual(toc[0].level, 'section');
+    assert.strictEqual(toc[1].number, '1.1');
+    assert.strictEqual(toc[2].number, null, 'a paragraph is unnumbered, and says so');
+    assert.strictEqual(toc[2].title, 'the full grid.', 'but it is still read');
+});
+
+test('a heading is matched by its SOURCE, through texorpdfstring', () => {
+    // MEASURED on the reference paper: 7 of 21 headings matched before
+    // \texorpdfstring was expanded and 13 after, and every one of the misses
+    // was a heading with maths in it. The .aux keeps the FIRST argument.
+    const auxTitle = 'Where may $x$ and $\\dot  x$ lie?';
+    const source = 'Where may \\texorpdfstring{$x$ and $\\dot x$}{x and x-dot} lie?';
+    assert.strictEqual(normalizeTocTitle(source), normalizeTocTitle(auxTitle),
+        'the two spellings of one heading compare equal');
+
+    // The model's own title is a flattened rendering and does NOT compare —
+    // which is why the source is used instead.
+    assert.notStrictEqual(normalizeTocTitle('Where may x and xx and x-dot lie?'),
+        normalizeTocTitle(auxTitle));
+
+    assert.strictEqual(sectionTitleSource('\\subsection{A first example}'), 'A first example');
+    assert.strictEqual(sectionTitleSource('\\section*{Unnumbered}'), 'Unnumbered');
+    assert.strictEqual(sectionTitleSource('\\subsection{Nested {braces} kept}'), 'Nested {braces} kept');
+    assert.strictEqual(sectionTitleSource('no command here'), '');
+});
+
+test('two sections with the same title are left unnumbered, not guessed at', () => {
+    const aux = [
+        '\\@writefile{toc}{\\contentsline {subsection}{\\numberline {2.1}Setup}{3}{subsection.2.1}}',
+        '\\@writefile{toc}{\\contentsline {subsection}{\\numberline {5.1}Setup}{9}{subsection.5.1}}',
+        '\\@writefile{toc}{\\contentsline {section}{\\numberline {3}Unique}{4}{section.3}}',
+    ].join('\n');
+    let read = null;
+    const deps = { readFile: () => aux, exists: () => true };
+    read = readTocNumbers('/out', '/p/paper.tex', deps);
+    assert.strictEqual(read.byTitle.get('unique'), '3');
+    assert.strictEqual(read.byTitle.has('setup'), false,
+        'a wrong number beside a change is worse than none');
+});
+
+test('no .aux, or an unreadable one, is simply no numbers', () => {
+    assert.strictEqual(readTocNumbers('/out', '/p/paper.tex', { readFile: () => { throw new Error('nope'); }, exists: () => true }).byTitle.size, 0);
+    assert.strictEqual(readTocNumbers('/out', '/p/paper.tex', { readFile: () => '', exists: () => false }).byTitle.size, 0);
+    assert.strictEqual(readTocNumbers(null, null, null).byTitle.size, 0);
+    assert.deepStrictEqual(parseToc(''), []);
+    assert.deepStrictEqual(parseToc(null), []);
 });
 
 (async () => {

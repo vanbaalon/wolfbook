@@ -36,7 +36,7 @@ const {
     PASTE_MIMES, imagePathFor, figureSnippet, insideFloat, hasGraphicx, findImageItem,
 } = require('./texPaste');
 const { refAt, resolveRef, hoverMarkdown } = require('./refIntel');
-const { readAuxLabels } = require('./auxLabels');
+const { readAuxLabels, readTocNumbers, normalizeTocTitle, sectionTitleSource} = require('./auxLabels');
 const { readClipboardImage } = require('./texClipboard');
 
 const TEX_SELECTOR = [
@@ -1118,6 +1118,53 @@ function registerTexSupport(context, deps = {}) {
         sectionCache.set(file, { version: doc.version, spans });
         return spans;
     };
+    /**
+     * The number LaTeX printed beside each heading, from the last compile.
+     *
+     * Taken from the .aux's TOC lines and matched to the model by the
+     * heading's OWN SOURCE — the model's title is a flattened rendering
+     * (`$x$ and $\dot x$` arrives as "x and xx and x-dot") and cannot be
+     * compared with what LaTeX wrote. Measured on the reference paper: 7 of 21
+     * headings matched before `\texorpdfstring` was expanded, 13 after, and
+     * the 8 that still do not are the `\paragraph`s LaTeX does not number
+     * plus one heading added since the last compile.
+     *
+     * Cached per generation. Nothing here is load-bearing: a heading with no
+     * number simply shows none, which is also what happens before the first
+     * compile of a session.
+     */
+    const numberCache = new Map();
+    const sectionNumbers = (file) => {
+        const st = coord.roots.get(coord.rootFor({ uri: { fsPath: file } }) || file) ||
+            coord.roots.get(file);
+        const gen = st && st.generation;
+        const stamp = gen ? `${gen.generation}` : '';
+        const hit = numberCache.get(file);
+        if (hit && hit.stamp === stamp) return hit.byKey;
+        const byKey = new Map();
+        try {
+            if (gen && gen.outDir) {
+                const nodefs = require('fs');
+                const { byTitle } = readTocNumbers(gen.outDir, gen.root || file, {
+                    readFile: (f) => nodefs.readFileSync(f, 'utf8'),
+                    exists: (f) => { try { return nodefs.existsSync(f); } catch (_) { return false; } },
+                });
+                if (byTitle.size) {
+                    const doc = vscode.workspace.textDocuments.find(d => d.uri.fsPath === file);
+                    const model = doc ? projection.get(doc).model : null;
+                    for (const o of (model && model.objects) || []) {
+                        if (o.kind !== 'section-heading') continue;
+                        const n = byTitle.get(normalizeTocTitle(sectionTitleSource(o.text)));
+                        if (!n) continue;
+                        byKey.set(o.stableKey || `s${o.sourceRange.startLine}`, n);
+                    }
+                }
+            }
+        } catch (_) { /* a number is a nicety; never fail the review for one */ }
+        numberCache.set(file, { stamp, byKey });
+        return byKey;
+    };
+
     /** The INNERMOST sectioning unit a line is in — \subsection over \section. */
     const sectionAt = (file, line) => {
         let best = null;
@@ -1126,9 +1173,12 @@ function registerTexSupport(context, deps = {}) {
             if (!best || sp.level > best.level || sp.startLine > best.startLine) best = sp;
         }
         if (!best) return null;
+        const key = best.stableKey || `s${best.startLine}`;
         return {
-            key: best.stableKey || `s${best.startLine}`,
+            key,
+            file,
             title: best.title,
+            number: sectionNumbers(file).get(key) || null,
             level: best.level,
             startLine: best.startLine,
         };

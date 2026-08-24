@@ -3412,6 +3412,37 @@ test('folding what is already folded, or a key that is gone, says so and stops',
     assert.ok(v.posted.some(p => p.type === 'status' && /no longer there/.test(p.text)));
 });
 
+test('A KEYSTROKE DOES NOT BUILD THE DOCUMENT MODEL', async () => {
+    // The footer worklist names each edit by what it is inside, and finding
+    // that out means building the model — ~2.5 ms on a 1,500-line paper. Doing
+    // it per change event put that on the typing path, for a label the reader
+    // may never look at. It belongs in the debounced post instead.
+    const { v, doc: d } = moveViewer(FOLD_SRC);
+    v.posted = v.posted || [];
+    v.panel = v.panel || { webview: { postMessage: (m) => v.posted.push(m) } };
+    let built = 0;
+    const realLabel = v._editLabel.bind(v);
+    v._editLabel = (doc, line) => { built++; return realLabel(doc, line); };
+
+    // Twenty keystrokes in one place, as typing a word is.
+    for (let i = 0; i < 20; i++) {
+        v._noteEdit(d, [{ rangeOffset: 40, rangeLength: 0, text: 'x' }]);
+    }
+    assert.strictEqual(built, 0, 'naming the place is not done per keystroke');
+    assert.ok(v._editStack.length >= 1, 'but the place was still recorded');
+    assert.strictEqual(v._editStack.length, 1,
+        'and twenty keystrokes in one spot are ONE place, not twenty');
+
+    // The debounced post is where the name is worked out, once.
+    v._postEditStack();
+    assert.strictEqual(built, 1, 'the name is worked out once, off the typing path');
+    v._postEditStack();
+    assert.strictEqual(built, 1, 'and kept, so repeating the post is free');
+
+    const posted = v.posted.filter(p => p.type === 'editStack').pop();
+    assert.ok(posted && posted.items[0].label, 'the panel still gets a name');
+});
+
 test('EVERY EQUATION AND HEADING CARRIES A TAG THAT NAMES ITS PLACE', async () => {
     // Asked for: a tag on each section/subsection/equation that copies the
     // path and line, "to direct AI to a particular place".

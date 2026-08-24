@@ -501,12 +501,50 @@ class ReviewUi {
 
     // ------------------------------------------------------------ verdicts --
 
+    /**
+     * The change that FOLLOWS the one just decided.
+     *
+     * Worked out BEFORE the verdict is applied, because afterwards the decided
+     * change is gone from the list and "the next one" no longer has anything to
+     * be next to. Falls back to the change now occupying that position — the
+     * list closed up over the one that left — and then to the last one, so
+     * deciding the final change leaves the focus somewhere real.
+     */
+    _afterDeciding(file, id) {
+        const s = this.sessions.get(file);
+        if (!s) return null;
+        const ids = s.hunks.map(h => h.id);
+        const at = ids.indexOf(id);
+        if (at < 0) return null;
+        return { at, ids };
+    }
+
+    /**
+     * Move to the next undecided change.
+     *
+     * Reviewing is a WORKLIST: deciding one and then having to point at the
+     * next is a click nobody needs, and it is the click that makes a long
+     * review feel long. Asked for exactly that way.
+     */
+    async _advanceAfter(file, plan) {
+        if (!plan) return;
+        const s = this.sessions.get(file);
+        if (!s || s.isEmpty) return;
+        const left = s.hunks.map(h => h.id);
+        if (!left.length) return;
+        // The one that took its place, else the one before it.
+        const next = left[Math.min(plan.at, left.length - 1)];
+        if (next) await this.show(file, next);
+    }
+
     async keep(file, id) {
         const s = this.sessions.get(file);
         if (!s) return;
+        const plan = this._afterDeciding(file, id);
         const r = s.keep(id);
         if (!r.ok) { this.say(r.reason, 'warn'); return; }
         await this.refresh(file);
+        await this._advanceAfter(file, plan);
     }
 
     async keepAll(file) {
@@ -539,10 +577,11 @@ class ReviewUi {
     async undo(file, id) {
         const s = this.sessions.get(file);
         if (!s) return;
+        const plan = this._afterDeciding(file, id);
         const r = s.undo(id);
         if (!r.ok) { this.say(r.reason, 'warn'); return; }
         const applied = await this.applyEdits(file, r.edits);
-        if (applied) { s.noteUndone(id); await this.refresh(file); }
+        if (applied) { s.noteUndone(id); await this.refresh(file); await this._advanceAfter(file, plan); }
     }
 
     async undoAll(file) {

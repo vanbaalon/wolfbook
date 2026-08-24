@@ -24,7 +24,8 @@ const { RenderMap, FLAG } = require('./renderMap');
 const { GlyphMap } = require('./glyphMap');
 const { findRoot, buildGraph } = require('./texProject');
 const {
-    nextLiveDelayMs, blendLiveMs, synctexUnchanged, generationSatisfies, authoritativeDelayMs,
+    nextLiveDelayMs, cooldownDelayMs, blendLiveMs, synctexUnchanged,
+    generationSatisfies, authoritativeDelayMs,
 } = require('./livePolicy');
 const { foldForCompile, MARK: COLLAPSE_MARK } = require('./collapse');
 
@@ -575,12 +576,24 @@ class RenderCoordinator {
             if (st.running === ac) st.running = null;
             this._emitter.fire(st);
         }
-        // Somebody typed while this was running. Go round again through the
-        // ORDINARY debounce rather than immediately: the text may have settled
-        // by now, and if it has not, the next pause is the right moment.
+        // Somebody typed while this was running. Go round again — but on the
+        // COOLDOWN, not the ordinary debounce.
+        //
+        // The ordinary one is a ceiling by design, so a paper that takes longer
+        // to build than that ceiling would fire again almost as soon as it
+        // landed and spend most of its wall-clock compiling. Reported as the
+        // editor lagging with "a long queue of compilations" behind it: the
+        // queue is only ever one deep, but a latexmk running two thirds of the
+        // time feels exactly like a queue. The first pause after typing keeps
+        // the ceiling and stays responsive; only this path backs off.
         if (st.liveQueued) {
             st.liveQueued = false;
-            try { this.scheduleLive(doc); } catch (_) { /* the next keystroke will */ }
+            const cfg = vscode.workspace.getConfiguration('wolfbook.tex');
+            const wait = cooldownDelayMs({
+                lastMs: st.liveMsEwma,
+                ceilingMs: Math.max(200, cfg.get('liveRenderDelayMs', 900)),
+            });
+            try { this.scheduleLive(doc, wait); } catch (_) { /* the next keystroke will */ }
         }
         return st;
     }
