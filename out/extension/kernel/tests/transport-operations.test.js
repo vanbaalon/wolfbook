@@ -67,19 +67,21 @@ Module._load = originalLoad;
     // Client discovery normalizes duplicate paths, and a new registration
     // generation atomically replaces stale details for the same client ID.
     const clients = new WolframMCPServer(new Map(), []);
-    clients.setOwnClientInfo('primary', ['/Tmp/A.wb', '/tmp/a.wb/', '/tmp/B.wb']);
+    clients.setOwnClientInfo('primary', ['/Tmp/A.wb', '/tmp/a.wb/', '/tmp/B.wb'], 'Primary workspace');
     // registeredAt must be fresh: _buildClientList now prunes workers whose
     // heartbeat is stale (dead windows used to stay listed forever).
     const regAt = Date.now();
     clients._workers.set('worker', {
         port: 31001, pid: process.pid, notebooks: ['C:\\Work\\N.wb', 'c:/work/n.wb'],
-        generation: 'new-host', registeredAt: regAt
+        generation: 'new-host', registeredAt: regAt, workspace: 'Worker workspace'
     });
     const listed = clients._buildClientList();
     assert.deepStrictEqual(listed[0].notebooks, ['/Tmp/A.wb', '/tmp/B.wb']);
     assert.deepStrictEqual(listed[1].notebooks, ['C:\\Work\\N.wb']);
     assert.strictEqual(listed[1].generation, 'new-host');
     assert.strictEqual(listed[1].registeredAt, regAt);
+    assert.strictEqual(listed[0].workspace, 'Primary workspace');
+    assert.strictEqual(listed[1].workspace, 'Worker workspace');
 
     // A worker with a stale heartbeat is pruned from the client list.
     clients._workers.set('ghost', {
@@ -93,9 +95,23 @@ Module._load = originalLoad;
     clients.setKernelProvider(() => [{
         kernel_id: 'k-one', kernel_label: 'K1', lifecycle: 'idle', notebooks: ['/tmp/B.wb']
     }]);
+    const targetEvents = [];
+    clients._activity = { record: event => targetEvents.push(event) };
+    clients._sessionClientNames.set('kernel-session', 'codex-mcp-client');
     const targetReply = clients._handleSetTarget({ client_id: 'primary', notebook: 'B.wb' }, 'kernel-session');
     assert(targetReply.content[0].text.includes('k-one'));
     assert.strictEqual(clients._sessionTargets.get('kernel-session').kernelId, 'k-one');
+    assert.strictEqual(targetEvents[0].type, 'agent.target.changed');
+    assert.strictEqual(targetEvents[0].workspace, 'Primary workspace');
+    assert.strictEqual(targetEvents[0].payload.targetClientId, 'primary');
+    assert.strictEqual(targetEvents[0].payload.targetWorkspace, 'Primary workspace');
+    clients._sessions.set('kernel-session', {});
+    clients._sessionConnectedAt.set('kernel-session', 12345);
+    const liveSession = clients._buildSessionList()[0];
+    assert.strictEqual(liveSession.agentName, 'codex-mcp-client');
+    assert.strictEqual(liveSession.hostWorkspace, 'Primary workspace');
+    assert.strictEqual(liveSession.targetClientId, 'primary');
+    assert.strictEqual(liveSession.notebook, 'B.wb');
     clients.setKernelProvider(() => [{
         kernel_id: 'k-two', kernel_label: 'K2', lifecycle: 'idle', notebooks: ['/tmp/B.wb']
     }]);

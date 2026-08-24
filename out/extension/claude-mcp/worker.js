@@ -313,6 +313,7 @@ class WorkerServer {
                 kernelBindings: this._getKernelBindings?.() || [],
                 generation: this._registrationGeneration,
                 registeredAt: Date.now(),
+                workspace: (this._clientId.match(/\[([^\]]+)\]/) || [])[1] || '',
             });
             const req = http.request({
                 hostname: '127.0.0.1',

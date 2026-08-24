@@ -56,12 +56,14 @@ class WolframMCPServer {
         this._tools   = toolMap;
         this._schemas = mcpSchemas;
         this._sessions = new Map();   // sessionId → http.ServerResponse (SSE)
+        this._sessionConnectedAt = new Map();
         this._server  = null;
         this._port    = 0;
         this._secondary = false;  // true = another window owns the server; we just reuse its port
         // Multi-window routing
         this._workers      = new Map();  // clientId → { port, pid, notebooks }
         this._ownClientId  = null;       // set by extension.js after election/start
+        this._ownWorkspace = null;
         this._ownNotebooks = [];         // updated by extension.js on notebook open/close
         this._ownRegistrationGeneration = `${Date.now()}-${crypto.randomUUID()}`;
         this._getOwnKernels = null;
@@ -183,11 +185,15 @@ class WolframMCPServer {
     // ── Multi-window identity & routing ─────────────────────────────────────
 
     /** Called from extension.js once the client ID and initial notebook list are known. */
-    setOwnClientInfo(clientId, notebooks) {
+    setOwnClientInfo(clientId, notebooks, workspace) {
         this._ownClientId  = clientId;
         this._ownNotebooks = notebooks || [];
-        this._activity?.setClientInfo(clientId);
-        this._activity?.setTopologyProvider(() => this._buildClientList());
+        this._ownWorkspace = workspace || this._workspaceFromClientId(clientId);
+        this._activity?.setClientInfo(clientId, this._ownWorkspace);
+        this._activity?.setTopologyProvider(() => ({
+            clients: this._buildClientList(),
+            sessions: this._buildSessionList(),
+        }));
     }
 
     /** Called from extension.js when open notebooks change. */
@@ -196,6 +202,44 @@ class WolframMCPServer {
     }
 
     setKernelProvider(provider) { this._getOwnKernels = provider; }
+
+    _workspaceFromClientId(clientId) {
+        return (String(clientId || '').match(/\[([^\]]+)\]/) || [])[1] || null;
+    }
+
+    _workspaceForClient(clientId) {
+        if (!clientId) return null;
+        if (clientId === this._ownClientId) return this._ownWorkspace || this._workspaceFromClientId(clientId);
+        return this._workers.get(clientId)?.workspace || this._workspaceFromClientId(clientId);
+    }
+
+    _hostActivityPayload(extra = {}) {
+        return {
+            hostClientId: this._ownClientId,
+            hostWorkspace: this._workspaceForClient(this._ownClientId),
+            ...extra,
+        };
+    }
+
+    _recordSessionTarget(sessionId, target, reason) {
+        const clientId = target?.clientId || null;
+        const workspace = this._workspaceForClient(clientId);
+        this._activity?.record({
+            type: target ? 'agent.target.changed' : 'agent.target.cleared',
+            source: 'mcp', agentSessionId: sessionId,
+            agentName: this._sessionClientNames.get(sessionId) || null,
+            clientId: clientId || this._ownClientId,
+            workspace: workspace || this._workspaceForClient(this._ownClientId),
+            notebook: target?.notebook || null,
+            kernelId: target?.kernelId || null,
+            state: 'observed',
+            payload: this._hostActivityPayload({
+                targetClientId: clientId,
+                targetWorkspace: workspace,
+                reason: reason || null,
+            }),
+        });
+    }
 
     /**
      * Start directly on PRIMARY_PORT without probing first.
@@ -286,6 +330,7 @@ class WolframMCPServer {
                         kernels:   info.kernels || [],
                         generation: info.generation || null,
                         registeredAt: Number(info.registeredAt || Date.now()),
+                        workspace: info.workspace || this._workspaceFromClientId(info.clientId),
                     });
                 }
             } catch {}
@@ -303,14 +348,16 @@ class WolframMCPServer {
         });
         res.flushHeaders?.();
         this._sessions.set(sessionId, res);
+        this._sessionConnectedAt.set(sessionId, Date.now());
         this._activity?.record({ type: 'agent.connected', source: 'mcp', agentSessionId: sessionId,
-            state: 'running', payload: { transport: 'sse' } });
+            state: 'running', payload: this._hostActivityPayload({ transport: 'sse' }) });
         // MCP SSE transport: first event tells the client where to POST messages
         res.write(`event: endpoint\ndata: /message?sessionId=${sessionId}\n\n`);
         req.on('close', () => {
             this._activity?.record({ type: 'agent.disconnected', source: 'mcp', agentSessionId: sessionId,
                 agentName: this._sessionClientNames.get(sessionId) || null, state: 'completed', payload: { transport: 'sse' } });
             this._sessions.delete(sessionId);
+            this._sessionConnectedAt.delete(sessionId);
             this._sessionTargets.delete(sessionId);  // release any target claim
             this._sessionClientNames.delete(sessionId);
         });
@@ -366,7 +413,7 @@ class WolframMCPServer {
                 const clientName = params?.clientInfo?.name;
                 if (clientName) this._sessionClientNames.set(sessionId, String(clientName));
                 this._activity?.record({ type: 'agent.initialized', source: 'mcp', agentSessionId: sessionId,
-                    agentName: clientName || null, state: 'running', payload: { clientInfo: params?.clientInfo || null, protocolVersion: params?.protocolVersion || null } });
+                    agentName: clientName || null, state: 'running', payload: this._hostActivityPayload({ clientInfo: params?.clientInfo || null, protocolVersion: params?.protocolVersion || null }) });
                 return {
                     protocolVersion: '2024-11-05',
                     capabilities:    { tools: {} },
@@ -509,7 +556,12 @@ class WolframMCPServer {
                         err.code = -32602;
                         throw err;
                     }
-                    if (args._activityContext) args._activityContext.clientId = targetClientId;
+                    if (args._activityContext) {
+                        args._activityContext.clientId = targetClientId;
+                        args._activityContext.workspace = this._workspaceForClient(targetClientId);
+                        args._activityContext.notebook = args.notebook || args._activityContext.notebook || null;
+                        args._activityContext.kernelId = args.kernel_id || args._activityContext.kernelId || null;
+                    }
                     const result = await this._invokeWorker(worker.port, name, args);
                     const newTarget = this._maybeTargetNewNotebook(name, args, sessionId, targetClientId, result);
                     return this._appendTargetFooter(result,
@@ -553,6 +605,7 @@ class WolframMCPServer {
                         if (worker) {
                             if (args._activityContext) {
                                 args._activityContext.clientId = stClientId;
+                                args._activityContext.workspace = this._workspaceForClient(stClientId);
                                 args._activityContext.notebook = args.notebook || stNotebook || null;
                                 args._activityContext.kernelId = args.kernel_id || stKernelId || null;
                             }
@@ -568,7 +621,12 @@ class WolframMCPServer {
                 if (!targetClientId && !sessionTarget) {
                     const workerEntry = this._findWorkerByNotebook(args);
                     if (workerEntry) {
-                        if (args._activityContext) args._activityContext.clientId = workerEntry.clientId || null;
+                        if (args._activityContext) {
+                            args._activityContext.clientId = workerEntry.clientId || null;
+                            args._activityContext.workspace = this._workspaceForClient(workerEntry.clientId);
+                            args._activityContext.notebook = args.notebook || args._activityContext.notebook || null;
+                            args._activityContext.kernelId = args.kernel_id || args._activityContext.kernelId || null;
+                        }
                         const result = await this._invokeWorker(workerEntry.port, name, args);
                         return this._appendTargetFooter(result, {
                             clientId: workerEntry.clientId || null,
@@ -613,6 +671,7 @@ class WolframMCPServer {
                 try {
                     if (args._activityContext) {
                         args._activityContext.clientId = this._ownClientId;
+                        args._activityContext.workspace = this._workspaceForClient(this._ownClientId);
                         args._activityContext.notebook = args.notebook || args._activityContext.notebook || null;
                         args._activityContext.kernelId = args.kernel_id || args._activityContext.kernelId || null;
                     }
@@ -675,10 +734,16 @@ class WolframMCPServer {
         }
         const operationId = crypto.randomUUID();
         const agentName = this._sessionClientNames.get(sessionId) || null;
+        const declaredTarget = params?.arguments?.client_id
+            ? { clientId: params.arguments.client_id }
+            : (this._sessionTargets.get(sessionId) || null);
+        const initialClientId = declaredTarget?.clientId || null;
         const activityContext = {
             traceId: operationId, operationId, agentSessionId: sessionId,
-            agentName, source: 'mcp', notebook: params?.arguments?.notebook || null,
-            kernelId: params?.arguments?.kernel_id || null,
+            agentName, source: 'mcp', notebook: params?.arguments?.notebook || declaredTarget?.notebook || null,
+            kernelId: params?.arguments?.kernel_id || declaredTarget?.kernelId || null,
+            clientId: initialClientId,
+            workspace: this._workspaceForClient(initialClientId),
         };
         // Use one UUID at both transport and execution layers. This means the
         // handle returned at the five-minute boundary remains discoverable in
@@ -708,8 +773,10 @@ class WolframMCPServer {
         const isBackground = dispatchedParams.arguments?.wait_mode === 'async';
         this._activity?.record({ type: 'tool.started', source: 'mcp', traceId: operationId,
             operationId, agentSessionId: sessionId, agentName, notebook: activityContext.notebook,
-            kernelId: activityContext.kernelId, state: isBackground ? 'running-background' : 'running',
-            background: isBackground, payload: { tool: operation.name, input: params?.arguments || {} } });
+            kernelId: activityContext.kernelId, clientId: activityContext.clientId || this._ownClientId,
+            workspace: activityContext.workspace || this._workspaceForClient(this._ownClientId),
+            state: isBackground ? 'running-background' : 'running', background: isBackground,
+            payload: this._hostActivityPayload({ tool: operation.name, input: params?.arguments || {}, targetResolved: !!activityContext.clientId }) });
 
         operation.promise = this._dispatch('tools/call', dispatchedParams, sessionId).then(
             result => {
@@ -720,8 +787,10 @@ class WolframMCPServer {
                 this._activity?.record({ type: terminalType, source: 'mcp',
                     traceId: operationId, operationId, agentSessionId: sessionId, agentName,
                     notebook: activityContext.notebook, kernelId: operation.kernelId || activityContext.kernelId,
+                    clientId: activityContext.clientId || this._ownClientId,
+                    workspace: activityContext.workspace || this._workspaceForClient(this._ownClientId),
                     state: terminalState, background: isBackground,
-                    payload: { tool: operation.name, durationMs: Date.now() - operation.startedAt, output: result } });
+                    payload: this._hostActivityPayload({ tool: operation.name, durationMs: Date.now() - operation.startedAt, output: result, targetResolved: !!activityContext.clientId }) });
                 return result;
             },
             error => {
@@ -729,7 +798,9 @@ class WolframMCPServer {
                 this._activity?.record({ type: 'tool.failed', source: 'mcp', traceId: operationId,
                     operationId, agentSessionId: sessionId, agentName, notebook: activityContext.notebook,
                     kernelId: operation.kernelId || activityContext.kernelId, state: 'failed', background: isBackground,
-                    payload: { tool: operation.name, durationMs: Date.now() - operation.startedAt, error: error?.message || String(error) } });
+                    clientId: activityContext.clientId || this._ownClientId,
+                    workspace: activityContext.workspace || this._workspaceForClient(this._ownClientId),
+                    payload: this._hostActivityPayload({ tool: operation.name, durationMs: Date.now() - operation.startedAt, error: error?.message || String(error), targetResolved: !!activityContext.clientId }) });
                 throw error;
             }
         );
@@ -964,6 +1035,7 @@ class WolframMCPServer {
         this._sessionTargets.set(sessionId, target);
         const clientName = this._sessionClientNames.get(sessionId);
         if (clientName) this._lastTargetByClient.set(clientName, { target, ts: Date.now() });
+        this._recordSessionTarget(sessionId, target, 'new-notebook');
         return target;
     }
 
@@ -978,6 +1050,7 @@ class WolframMCPServer {
         // Omit both → clear this session's target
         if (!targetCid && !targetNb) {
             this._sessionTargets.delete(sessionId);
+            this._recordSessionTarget(sessionId, null, 'cleared');
             return { content: [{ type: 'text', text: 'Session target cleared.' }], isError: false };
         }
 
@@ -1022,7 +1095,8 @@ class WolframMCPServer {
             for (const sid of evicted) this._sessionTargets.delete(sid);
         }
 
-        const binding = this._resolveNotebookKernel(targetCid, targetNb);
+        const resolvedClientId = targetCid || this._ownClientId;
+        const binding = this._resolveNotebookKernel(resolvedClientId, targetNb);
         if (assertedKernel && binding?.kernel_id !== assertedKernel) {
             return { content: [{ type: 'text', text: JSON.stringify({
                 error: 'kernel-target-mismatch', client_id: targetCid, notebook: targetNb,
@@ -1030,19 +1104,20 @@ class WolframMCPServer {
             }, null, 2) }], isError: false };
         }
         const kernelId = binding?.kernel_id || null;
-        const targetRecord = { clientId: targetCid, notebook: targetNb, kernelId, ts: Date.now() };
+        const targetRecord = { clientId: resolvedClientId, notebook: targetNb, kernelId, ts: Date.now() };
         this._sessionTargets.set(sessionId, targetRecord);
         const clientName = this._sessionClientNames.get(sessionId);
         if (clientName) this._lastTargetByClient.set(clientName, { target: targetRecord, ts: Date.now() });
+        this._recordSessionTarget(sessionId, targetRecord, 'explicit');
 
         const parts = [];
         if (targetNb)  parts.push(`notebook: **${targetNb}**`);
-        if (targetCid) parts.push(`client: **${targetCid}**`);
+        if (resolvedClientId) parts.push(`client: **${resolvedClientId}**`);
         if (kernelId) parts.push(`kernel: **${binding.kernel_label} · ${kernelId}**`);
         return {
             content: [{ type: 'text', text:
                 `Session target set — ${parts.join(', ')}. All subsequent tool calls will auto-route there.\n\n` +
-                JSON.stringify({ client_id: targetCid, notebook: targetNb, kernel_id: kernelId }, null, 2)
+                JSON.stringify({ client_id: resolvedClientId, notebook: targetNb, kernel_id: kernelId }, null, 2)
             }],
             isError: false,
         };
@@ -1189,6 +1264,7 @@ class WolframMCPServer {
         if (this._ownClientId) {
             list.push({
                 clientId:  this._ownClientId,
+                workspace: this._ownWorkspace || this._workspaceFromClientId(this._ownClientId),
                 role:      'primary',
                 notebooks: dedupe(this._ownNotebooks),
                 kernels: this._getOwnKernels?.() || [],
@@ -1200,6 +1276,7 @@ class WolframMCPServer {
         for (const [clientId, info] of this._workers) {
             list.push({
                 clientId,
+                workspace: info.workspace || this._workspaceFromClientId(clientId),
                 role:      'worker',
                 notebooks: dedupe(info.notebooks),
                 kernels: info.kernels || [],
@@ -1209,6 +1286,25 @@ class WolframMCPServer {
             });
         }
         return list;
+    }
+
+    /** Current MCP transports, kept separate from the durable event ledger so
+     * interrupted extension hosts cannot leave ghost agents marked active. */
+    _buildSessionList() {
+        return [...this._sessions.keys()].map(sessionId => {
+            const target = this._sessionTargets.get(sessionId) || null;
+            return {
+                sessionId,
+                agentName: this._sessionClientNames.get(sessionId) || null,
+                connectedAt: this._sessionConnectedAt.get(sessionId) || null,
+                hostClientId: this._ownClientId,
+                hostWorkspace: this._workspaceForClient(this._ownClientId),
+                targetClientId: target?.clientId || null,
+                targetWorkspace: this._workspaceForClient(target?.clientId),
+                notebook: target?.notebook || null,
+                kernelId: target?.kernelId || null,
+            };
+        });
     }
 
     /** Format the client list as human-readable text for wolfbook_list_clients. */

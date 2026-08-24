@@ -1532,7 +1532,7 @@ async function activate(context) {
             try {
                 const newPrimary = new WolframMCPServer(_toolMap, _mcpSchema, _mcpExposureOptions);
                 await newPrimary.startAsPrimary();
-                newPrimary.setOwnClientInfo(_clientId, _getOpenNbPaths());
+                newPrimary.setOwnClientInfo(_clientId, _getOpenNbPaths(), _wsName);
                 newPrimary.setKernelProvider(() => kernelManager.list(_getOpenNbPaths()).filter(kernel => !kernel.remote));
                 _activeMCPServer = newPrimary;
                 _mcpServer = newPrimary;
@@ -1567,7 +1567,7 @@ async function activate(context) {
             return;
         }
         // ── We are the primary ──────────────────────────────────────────────
-        _mcpServer.setOwnClientInfo(_clientId, _getOpenNbPaths());
+        _mcpServer.setOwnClientInfo(_clientId, _getOpenNbPaths(), _wsName);
         _mcpServer.setKernelProvider(() => kernelManager.list(_getOpenNbPaths()).filter(kernel => !kernel.remote));
         // Every window owns a worker endpoint, including the MCP primary. This
         // endpoint is also the cross-window kernel broker used by the UI picker.

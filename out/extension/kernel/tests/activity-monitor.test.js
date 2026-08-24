@@ -62,10 +62,21 @@ function request(port, pathname, options = {}) {
     const dashboard = await request(monitor.port, '/monitor/', { headers: { Cookie: cookie } });
     assert.strictEqual(dashboard.status, 200);
     assert.match(dashboard.body, /Wolfbook MCP Control Room/);
+    assert.match(dashboard.body, /Connected via/);
+    assert.match(dashboard.body, /No VS Code target selected yet/);
+    assert.doesNotMatch(dashboard.body, /@keyframes|animation:/, 'control room must not contain continuous animation');
+    assert.doesNotMatch(dashboard.body, /class="progress"/, 'live cards must not use decorative progress bars');
     assert.match(dashboard.headers['content-security-policy'], /default-src 'self'/);
     const events = await request(monitor.port, '/monitor/api/events?since=0', { headers: { Cookie: cookie } });
     assert.strictEqual(events.status, 200);
     assert.strictEqual(JSON.parse(events.body).events[0].operationId, 'op-1');
+    monitor.setTopologyProvider(() => ({
+        clients: [{ clientId: 'VSCode[Test]', workspace: 'Test workspace' }],
+        sessions: [{ sessionId: 'live-session', hostClientId: 'VSCode[Test]', hostWorkspace: 'Test workspace' }],
+    }));
+    const topology = await request(monitor.port, '/monitor/api/topology', { headers: { Cookie: cookie } });
+    assert.strictEqual(JSON.parse(topology.body).clients[0].workspace, 'Test workspace');
+    assert.strictEqual(JSON.parse(topology.body).sessions[0].sessionId, 'live-session');
     const reused = await request(monitor.port, launchPath);
     assert.strictEqual(reused.status, 403, 'launch nonce must be one-time');
 

@@ -261,8 +261,11 @@ class ActivityMonitor {
             return this._reply(res, 200, { now: Date.now(), events: this.events.filter(e => e.timestamp >= since).slice(-limit) });
         }
         if (req.method === 'GET' && pathname === '/monitor/api/topology') {
-            let clients = []; try { clients = this.topologyProvider() || []; } catch (_) {}
-            return this._reply(res, 200, { now: Date.now(), port: this.port, clients: sanitize(clients) });
+            let topology = []; try { topology = this.topologyProvider() || []; } catch (_) {}
+            const clients = Array.isArray(topology) ? topology : (topology.clients || []);
+            const sessions = Array.isArray(topology) ? [] : (topology.sessions || []);
+            return this._reply(res, 200, { now: Date.now(), port: this.port,
+                clients: sanitize(clients), sessions: sanitize(sessions) });
         }
         if (req.method === 'GET' && pathname === '/monitor/api/live') {
             res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive' });
