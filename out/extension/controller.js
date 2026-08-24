@@ -536,14 +536,11 @@ class WolframNotebookKernel {
         this._cellDirty        = new Set();
         this._evalModeOverride = this.notebookConfig.get("evalMode", "auto") || "auto";
 
-        // Status bar item shows the active eval mode; click cycles to next.
-        this._evalModeStatusBar = vscode.window.createStatusBarItem(
-            "wolfram-eval-mode", vscode.StatusBarAlignment.Right, 99
-        );
-        this._evalModeStatusBar.name = "Wolfram Eval Mode";
-        this._evalModeStatusBar.show();
+        // Evaluation mode remains configurable, but it no longer consumes a
+        // permanent status-bar slot. The old "WL: Auto" item duplicated a
+        // largely automatic implementation detail in every kernel controller.
+        this._evalModeStatusBar = null;
         vscode.commands.executeCommand("setContext", "wolframEvalMode", this._evalModeOverride);
-        this._updateEvalModeStatusBar();
 
         this.logFile = this.notebookConfig.get("advanced.notebook.logDirectory", "Off");
         if (this.logFile !== "Off") {

@@ -8,7 +8,7 @@ All notable changes to **Wolfbook** are documented here.
 
 ### Added
 
-- **Wolfbook Activity Monitor.** A polished, authenticated localhost dashboard
+- **Wolfbook MCP Control Room.** A polished, authenticated localhost dashboard
   shows MCP agent sessions, running and background operations, kernel/window
   topology, notebook files and exact cell changes across all VS Code windows.
   Activity is streamed live, retained in a bounded seven-day JSONL ledger, and

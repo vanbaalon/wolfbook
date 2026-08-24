@@ -246,7 +246,7 @@ class ActivityMonitor {
             this.sessions.set(session, Date.now() + 12 * 60 * 60 * 1000);
             res.writeHead(302, { Location: '/monitor/', 'Set-Cookie': `wolfbook_monitor=${session}; HttpOnly; SameSite=Strict; Path=/monitor; Max-Age=43200`, 'Cache-Control': 'no-store' }); res.end(); return;
         }
-        if (!this._authorized(req)) return this._text(res, 403, 'Wolfbook Activity Monitor is locked. Open it from the Wolfbook command palette.');
+        if (!this._authorized(req)) return this._text(res, 403, 'Wolfbook MCP Control Room is locked. Open it from the Wolfbook command palette.');
         this._securityHeaders(res);
         if (req.method === 'GET' && (pathname === '/monitor' || pathname === '/monitor/')) {
             res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(renderDashboard()); return;

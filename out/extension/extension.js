@@ -1354,7 +1354,7 @@ async function activate(context) {
                 catch (_) { await vscode.env.openExternal(vscode.Uri.parse(url)); }
             }
         } catch (e) {
-            vscode.window.showErrorMessage(`Wolfbook Activity Monitor could not open: ${e.message}`);
+            vscode.window.showErrorMessage(`Wolfbook MCP Control Room could not open: ${e.message}`);
         }
     };
     context.subscriptions.push(
@@ -1364,10 +1364,37 @@ async function activate(context) {
             try {
                 const url = await _activityMonitor.createLaunchUrl();
                 await vscode.env.clipboard.writeText(url);
-                vscode.window.showInformationMessage('Wolfbook Activity Monitor launch link copied. It expires in 60 seconds.');
+                vscode.window.showInformationMessage('Wolfbook MCP Control Room launch link copied. It expires in 60 seconds.');
             } catch (e) { vscode.window.showErrorMessage(`Could not create monitor link: ${e.message}`); }
         })
     );
+
+    // Primary entry point for the global localhost monitor. This intentionally
+    // occupies the status-bar slot formerly used by the internal "WL: Auto"
+    // indicator and the verbose notebook-name/cell duplicate.
+    const _mcpControlRoomItem = vscode.window.createStatusBarItem(
+        'wolfbook-mcp-control-room', vscode.StatusBarAlignment.Right, 99
+    );
+    _mcpControlRoomItem.name = 'Wolfbook MCP Control Room';
+    _mcpControlRoomItem.text = '$(loading~spin) MCP Control Room';
+    _mcpControlRoomItem.command = 'wolfbook.openActivityMonitor';
+    _mcpControlRoomItem.tooltip = 'Starting the Wolfbook MCP Control Room…';
+    _mcpControlRoomItem.accessibilityInformation = {
+        label: 'Open Wolfbook MCP Control Room', role: 'button'
+    };
+    if (!_mcpDisabled && !_mcpUnavailable) _mcpControlRoomItem.show();
+    context.subscriptions.push(_mcpControlRoomItem);
+    const _setMcpControlRoomReady = (port, secondary) => {
+        _mcpControlRoomItem.text = '$(pulse) MCP Control Room';
+        _mcpControlRoomItem.tooltip = new vscode.MarkdownString(
+            `**Wolfbook MCP Control Room**  \n` +
+            `Live agents, kernels, background work and notebook changes.  \n` +
+            `Local endpoint: \`127.0.0.1:${port}\`  \n` +
+            `${secondary ? 'Connected through the primary VS Code window.' : 'Hosted by this VS Code window.'}  \n\n` +
+            `Click to open.`
+        );
+        _mcpControlRoomItem.show();
+    };
 
     // Worker server (started after primary/secondary decision below)
     let _workerServer = null;
@@ -1510,6 +1537,7 @@ async function activate(context) {
                 _activeMCPServer = newPrimary;
                 _mcpServer = newPrimary;
                 await newPrimary.notifyWorkers();
+                _setMcpControlRoomReady(newPrimary.port, false);
                 devLog(LOG_CHANNELS.EXTENSION, '[Wolfbook MCP] Now primary after election');
             } catch (e) {
                 console.warn('[Wolfbook MCP] Promotion failed:', e.message);
@@ -1534,6 +1562,7 @@ async function activate(context) {
         if (_mcpServer.isSecondary) {
             devLog(LOG_CHANNELS.EXTENSION, `[Wolfbook MCP] Secondary window — starting worker for ${_clientId}`);
             _workerServer = _startWorker();
+            _setMcpControlRoomReady(port, true);
             try { _watchPanel.setMcpInfo(getMcpInfoPayload(_bridgePath, _nodeBin, port, true, false)); } catch(e) {}
             return;
         }
@@ -1543,6 +1572,7 @@ async function activate(context) {
         // Every window owns a worker endpoint, including the MCP primary. This
         // endpoint is also the cross-window kernel broker used by the UI picker.
         _workerServer = _startWorker();
+        _setMcpControlRoomReady(port, false);
         // Auto-set session target when Copilot resolves a notebook in this window,
         // so MCP agents inherit the target without needing an explicit wolfbook_setTarget call.
         _tools.setNotebookResolvedCallback((notebook) => {
@@ -1575,6 +1605,9 @@ async function activate(context) {
         try { _watchPanel.setMcpInfo(getMcpInfoPayload(_bridgePath, _nodeBin, port, false, false)); } catch(e) {}
     }).catch(e => {
         console.warn('[Wolfbook MCP] Server failed to start:', e.message);
+        _mcpControlRoomItem.text = '$(warning) MCP Control Room';
+        _mcpControlRoomItem.tooltip = `Wolfbook MCP server failed to start: ${e.message}`;
+        _mcpControlRoomItem.show();
     });
 
     } // end if (!_mcpDisabled)

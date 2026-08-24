@@ -1256,16 +1256,16 @@
       },
       {
         "command": "wolfbook.openActivityMonitor",
-        "title": "Wolfbook: Open Activity Monitor",
+        "title": "Wolfbook: Open MCP Control Room",
         "icon": "$(pulse)"
       },
       {
         "command": "wolfbook.openActivityMonitorExternal",
-        "title": "Wolfbook: Open Activity Monitor in Browser"
+        "title": "Wolfbook: Open MCP Control Room in Browser"
       },
       {
         "command": "wolfbook.copyActivityMonitorUrl",
-        "title": "Wolfbook: Copy Activity Monitor Link"
+        "title": "Wolfbook: Copy MCP Control Room Link"
       },
       {
         "command": "wolfbook.configureAntigravity",

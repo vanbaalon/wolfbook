@@ -61,7 +61,7 @@ function request(port, pathname, options = {}) {
     const cookie = launched.headers['set-cookie'][0].split(';')[0];
     const dashboard = await request(monitor.port, '/monitor/', { headers: { Cookie: cookie } });
     assert.strictEqual(dashboard.status, 200);
-    assert.match(dashboard.body, /Wolfbook Activity Monitor/);
+    assert.match(dashboard.body, /Wolfbook MCP Control Room/);
     assert.match(dashboard.headers['content-security-policy'], /default-src 'self'/);
     const events = await request(monitor.port, '/monitor/api/events?since=0', { headers: { Cookie: cookie } });
     assert.strictEqual(events.status, 200);

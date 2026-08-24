@@ -52,6 +52,7 @@ function setEvalMode(self, mode) {
 
 // Update the status bar text/tooltip/command for the current override mode.
 function updateEvalModeStatusBar(self) {
+    if (!self._evalModeStatusBar) return;
     const m = self._evalModeOverride;
     if (m === 'refine') {
         self._evalModeStatusBar.text    = '$(sync) WL: Refine';

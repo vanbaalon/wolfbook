@@ -73,49 +73,10 @@ async function _copyCellReference(cellUri) {
         `Copied ${_formatReference(found.index, found.cell)}`, 2500);
 }
 
-function _lineForCell(cell) {
-    const editor = vscode.window.activeTextEditor;
-    if (!editor || editor.document.uri.toString() !== cell.document.uri.toString()) return '';
-    return ` · line ${editor.selection.active.line + 1}`;
-}
-
 function register(context, clientIdSource) {
     _clientIdSource = typeof clientIdSource === 'function' ? clientIdSource : null;
     const cellStatusChanged = new vscode.EventEmitter();
-    const status = vscode.window.createStatusBarItem(
-        'wolfbook-cell-reference', vscode.StatusBarAlignment.Right, 98
-    );
-    context.subscriptions.push(cellStatusChanged, status);
-
-    const refreshStatus = (notebookEditor = vscode.window.activeNotebookEditor) => {
-        if (!notebookEditor || notebookEditor.notebook?.notebookType !== NOTEBOOK_TYPE) {
-            status.hide();
-            return;
-        }
-        const selection = notebookEditor.selections?.[0] || notebookEditor.selection;
-        const index = selection?.start;
-        if (!Number.isInteger(index) || index < 0 || index >= notebookEditor.notebook.cellCount) {
-            status.hide();
-            return;
-        }
-        const cell = notebookEditor.notebook.cellAt(index);
-        if (cell.kind !== vscode.NotebookCellKind.Code) {
-            status.hide();
-            return;
-        }
-        const name = _notebookName(notebookEditor.notebook);
-        // This bar is window-global: with several notebooks open, "Cell 4" alone
-        // does not say which one it means. The in-cell item below is already
-        // inside its notebook and stays short.
-        status.text = `$(notebook) ${name ? name + ' · ' : ''}Cell ${index + 1}${_lineForCell(cell)}`;
-        status.tooltip = `${_formatAddressableReference(
-            index, cell, notebookEditor.notebook, _getClientId())
-            }\nClick to copy this MCP cell reference.`;
-        // Unlike cell status-bar items, a window status-bar command receives no
-        // implicit cell context. Refresh its explicit URI with the active cell.
-        status.command = { command: COPY_COMMAND, arguments: [cell.document.uri.toString()] };
-        status.show();
-    };
+    context.subscriptions.push(cellStatusChanged);
 
     const cellStatusProvider = {
         onDidChangeCellStatusBarItems: cellStatusChanged.event,
@@ -146,17 +107,8 @@ function register(context, clientIdSource) {
         vscode.workspace.onDidChangeNotebookDocument(event => {
             if (event.notebook.notebookType !== NOTEBOOK_TYPE) return;
             cellStatusChanged.fire();
-            refreshStatus();
         }),
-        vscode.window.onDidChangeNotebookEditorSelection(event => refreshStatus(event.notebookEditor)),
-        vscode.window.onDidChangeActiveNotebookEditor(editor => refreshStatus(editor)),
-        vscode.window.onDidChangeActiveTextEditor(() => refreshStatus()),
-        // Cell selection identifies the notebook cell; text-editor selection
-        // supplies the source line within that cell.
-        vscode.window.onDidChangeTextEditorSelection(() => refreshStatus())
     );
-
-    refreshStatus();
 }
 
 module.exports = { register, COPY_COMMAND, _formatReference, _formatAddressableReference };
