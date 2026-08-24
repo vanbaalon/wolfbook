@@ -18,6 +18,7 @@ const path   = require('path');
 const fs     = require('fs');
 const { setMcpCallActive } = require('../tools/shared');
 const { McpResultStore } = require('./result-store');
+const { runWithActivityContext } = require('../monitor/activity');
 
 const DEFAULT_PORT  = 27182;
 const PORT_RANGE    = 20;  // try DEFAULT_PORT … DEFAULT_PORT+PORT_RANGE if busy
@@ -81,6 +82,7 @@ class WolframMCPServer {
         this._boundedResults = !!operationOptions.boundedResults;
         this._resultThreshold = Math.max(4096, Number(operationOptions.resultThreshold) || 24000);
         this._resultStore = new McpResultStore(operationOptions.resultStoreOptions);
+        this._activity = operationOptions.activityMonitor || null;
         // Tool surface exposure (Phase 0.2): tags on package.json languageModelTools
         // entries drive tools/list visibility. `mcp:hidden` → never listed;
         // `mcp:deprecated` → listed only when exposeDeprecatedTools, with a
@@ -134,6 +136,8 @@ class WolframMCPServer {
             if (existingPort) {
                 this._port = existingPort;
                 this._secondary = true;
+                this._activity?.setPort(existingPort);
+                this._activity?.setPrimary(false);
                 console.log(`[Wolfbook MCP] Secondary window — reusing existing server on port ${existingPort}`);
                 return existingPort;
             }
@@ -151,6 +155,9 @@ class WolframMCPServer {
             this._server = srv;
             srv.listen(port, '127.0.0.1', () => {
                 this._port = srv.address().port;
+                this._activity?.setPort(this._port);
+                this._activity?.setPrimary(true);
+                this._activity?.record({ type: 'system.monitor.started', state: 'completed', payload: { port: this._port } });
                 console.log(`[Wolfbook MCP] Listening on http://127.0.0.1:${this._port}/sse`);
                 // A primary can restart quickly enough that workers never hit
                 // their health-failure threshold. Re-discover the durable
@@ -179,6 +186,8 @@ class WolframMCPServer {
     setOwnClientInfo(clientId, notebooks) {
         this._ownClientId  = clientId;
         this._ownNotebooks = notebooks || [];
+        this._activity?.setClientInfo(clientId);
+        this._activity?.setTopologyProvider(() => this._buildClientList());
     }
 
     /** Called from extension.js when open notebooks change. */
@@ -231,13 +240,16 @@ class WolframMCPServer {
 
     // ── HTTP handler ────────────────────────────────────────────────────────
     _handle(req, res) {
+        const url = new URL(req.url, `http://127.0.0.1:${this._port}`);
+        if (this._activity?.handles(url.pathname)) {
+            this._activity.handle(req, res, url);
+            return;
+        }
         // CORS — Claude Desktop may send preflight requests
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
         res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
         if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
-
-        const url = new URL(req.url, `http://127.0.0.1:${this._port}`);
 
         if (req.method === 'GET' && url.pathname === '/sse') {
             this._handleSSE(req, res);
@@ -291,9 +303,13 @@ class WolframMCPServer {
         });
         res.flushHeaders?.();
         this._sessions.set(sessionId, res);
+        this._activity?.record({ type: 'agent.connected', source: 'mcp', agentSessionId: sessionId,
+            state: 'running', payload: { transport: 'sse' } });
         // MCP SSE transport: first event tells the client where to POST messages
         res.write(`event: endpoint\ndata: /message?sessionId=${sessionId}\n\n`);
         req.on('close', () => {
+            this._activity?.record({ type: 'agent.disconnected', source: 'mcp', agentSessionId: sessionId,
+                agentName: this._sessionClientNames.get(sessionId) || null, state: 'completed', payload: { transport: 'sse' } });
             this._sessions.delete(sessionId);
             this._sessionTargets.delete(sessionId);  // release any target claim
             this._sessionClientNames.delete(sessionId);
@@ -349,6 +365,8 @@ class WolframMCPServer {
             case 'initialize': {
                 const clientName = params?.clientInfo?.name;
                 if (clientName) this._sessionClientNames.set(sessionId, String(clientName));
+                this._activity?.record({ type: 'agent.initialized', source: 'mcp', agentSessionId: sessionId,
+                    agentName: clientName || null, state: 'running', payload: { clientInfo: params?.clientInfo || null, protocolVersion: params?.protocolVersion || null } });
                 return {
                     protocolVersion: '2024-11-05',
                     capabilities:    { tools: {} },
@@ -491,6 +509,7 @@ class WolframMCPServer {
                         err.code = -32602;
                         throw err;
                     }
+                    if (args._activityContext) args._activityContext.clientId = targetClientId;
                     const result = await this._invokeWorker(worker.port, name, args);
                     const newTarget = this._maybeTargetNewNotebook(name, args, sessionId, targetClientId, result);
                     return this._appendTargetFooter(result,
@@ -532,6 +551,11 @@ class WolframMCPServer {
                     if (stClientId && stClientId !== this._ownClientId) {
                         const worker = this._workers.get(stClientId);
                         if (worker) {
+                            if (args._activityContext) {
+                                args._activityContext.clientId = stClientId;
+                                args._activityContext.notebook = args.notebook || stNotebook || null;
+                                args._activityContext.kernelId = args.kernel_id || stKernelId || null;
+                            }
                             const result = await this._invokeWorker(worker.port, name, args);
                             const newTarget = this._maybeTargetNewNotebook(name, args, sessionId, stClientId, result);
                             return this._appendTargetFooter(result, newTarget || sessionTarget,
@@ -544,6 +568,7 @@ class WolframMCPServer {
                 if (!targetClientId && !sessionTarget) {
                     const workerEntry = this._findWorkerByNotebook(args);
                     if (workerEntry) {
+                        if (args._activityContext) args._activityContext.clientId = workerEntry.clientId || null;
                         const result = await this._invokeWorker(workerEntry.port, name, args);
                         return this._appendTargetFooter(result, {
                             clientId: workerEntry.clientId || null,
@@ -586,7 +611,13 @@ class WolframMCPServer {
                 let toolResult;
                 setMcpCallActive(true);
                 try {
-                    toolResult = await tool.invoke(options, token);
+                    if (args._activityContext) {
+                        args._activityContext.clientId = this._ownClientId;
+                        args._activityContext.notebook = args.notebook || args._activityContext.notebook || null;
+                        args._activityContext.kernelId = args.kernel_id || args._activityContext.kernelId || null;
+                    }
+                    toolResult = await runWithActivityContext(args._activityContext,
+                        () => tool.invoke(options, token));
                 } catch (e) {
                     // Tool threw — return as MCP error content (isError:true)
                     return {
@@ -643,6 +674,12 @@ class WolframMCPServer {
             return { content: [{ type: 'text', text: slice ? JSON.stringify(slice, null, 2) : 'Unknown or expired result handle.' }], isError: !slice || !!slice.error };
         }
         const operationId = crypto.randomUUID();
+        const agentName = this._sessionClientNames.get(sessionId) || null;
+        const activityContext = {
+            traceId: operationId, operationId, agentSessionId: sessionId,
+            agentName, source: 'mcp', notebook: params?.arguments?.notebook || null,
+            kernelId: params?.arguments?.kernel_id || null,
+        };
         // Use one UUID at both transport and execution layers. This means the
         // handle returned at the five-minute boundary remains discoverable in
         // the per-window registry even after this transport waiter is gone.
@@ -650,6 +687,7 @@ class WolframMCPServer {
             ...params,
             arguments: {
                 ...(params?.arguments || {}), _operationId: operationId,
+                _activityContext: activityContext,
                 ...(this._canonicalProjection && params?.name === 'wolfbook_getNotebookContext'
                     ? { _mcpProjection: true, _mcpCache: this._renderCache } : {}),
             },
@@ -663,12 +701,37 @@ class WolframMCPServer {
             result: null,
             error: null,
             leaseTimer: null,
+            startedAt: Date.now(),
             kernelId: dispatchedParams.arguments?.kernel_id || this._sessionTargets.get(sessionId)?.kernelId || null,
         };
 
+        const isBackground = dispatchedParams.arguments?.wait_mode === 'async';
+        this._activity?.record({ type: 'tool.started', source: 'mcp', traceId: operationId,
+            operationId, agentSessionId: sessionId, agentName, notebook: activityContext.notebook,
+            kernelId: activityContext.kernelId, state: isBackground ? 'running-background' : 'running',
+            background: isBackground, payload: { tool: operation.name, input: params?.arguments || {} } });
+
         operation.promise = this._dispatch('tools/call', dispatchedParams, sessionId).then(
-            result => { operation.status = 'fulfilled'; operation.result = result; return result; },
-            error => { operation.status = 'rejected'; operation.error = error; throw error; }
+            result => {
+                operation.status = 'fulfilled'; operation.result = result;
+                const isError = !!result?.isError;
+                const terminalType = isError ? 'tool.failed' : (isBackground ? 'tool.accepted' : 'tool.completed');
+                const terminalState = isError ? 'failed' : (isBackground ? 'running-background' : 'completed');
+                this._activity?.record({ type: terminalType, source: 'mcp',
+                    traceId: operationId, operationId, agentSessionId: sessionId, agentName,
+                    notebook: activityContext.notebook, kernelId: operation.kernelId || activityContext.kernelId,
+                    state: terminalState, background: isBackground,
+                    payload: { tool: operation.name, durationMs: Date.now() - operation.startedAt, output: result } });
+                return result;
+            },
+            error => {
+                operation.status = 'rejected'; operation.error = error;
+                this._activity?.record({ type: 'tool.failed', source: 'mcp', traceId: operationId,
+                    operationId, agentSessionId: sessionId, agentName, notebook: activityContext.notebook,
+                    kernelId: operation.kernelId || activityContext.kernelId, state: 'failed', background: isBackground,
+                    payload: { tool: operation.name, durationMs: Date.now() - operation.startedAt, error: error?.message || String(error) } });
+                throw error;
+            }
         );
         // This promise may outlive the JSON-RPC request that created it.
         operation.promise.catch(() => {});

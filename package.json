@@ -1255,6 +1255,19 @@
         "title": "Wolfbook: Configure Claude Desktop MCP"
       },
       {
+        "command": "wolfbook.openActivityMonitor",
+        "title": "Wolfbook: Open Activity Monitor",
+        "icon": "$(pulse)"
+      },
+      {
+        "command": "wolfbook.openActivityMonitorExternal",
+        "title": "Wolfbook: Open Activity Monitor in Browser"
+      },
+      {
+        "command": "wolfbook.copyActivityMonitorUrl",
+        "title": "Wolfbook: Copy Activity Monitor Link"
+      },
+      {
         "command": "wolfbook.configureAntigravity",
         "title": "Wolfbook: Configure Antigravity MCP"
       },

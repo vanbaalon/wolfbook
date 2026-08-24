@@ -2,6 +2,20 @@
 
 const crypto = require('crypto');
 const { sanitizeCaption } = require('./arbiter');
+const eventBus = require('../remote/eventBus');
+
+function emitOperation(action, operation, extra = {}) {
+    if (!operation || eventBus.listenerCount('operation') === 0) return;
+    eventBus.emit('operation', { action, ts: Date.now(), operation: {
+        id: operation.id, tool: operation.tool, notebook: operation.notebook,
+        cellId: operation.cellId, cellNumber: operation.cellNumber,
+        kernelId: operation.kernelId, kernelLabel: operation.kernelLabel,
+        caption: operation.caption, owner: operation.owner,
+        state: operation.state, phase: operation.phase, startedAt: operation.startedAt,
+        endedAt: operation.endedAt, resultPreview: operation.resultPreview,
+        error: operation.error, background: operation.background || false,
+    }, ...extra });
+}
 
 class OperationRegistry {
     constructor(options = {}) {
@@ -19,10 +33,11 @@ class OperationRegistry {
         const op = {
             id, tool: spec.tool || 'unknown', argsSummary: String(spec.argsSummary || '').slice(0, 500),
             notebook: spec.notebook || null, cellId: spec.cellId || null,
-            kernelId: spec.kernelId || null,
+            kernelId: spec.kernelId || null, kernelLabel: spec.kernelLabel || null,
             cellNumber: spec.cellNumber || null,
             caption: sanitizeCaption(spec.caption, spec.tool || 'Wolfram operation'),
             owner: spec.owner || 'agent', state: spec.state || 'pending',
+            background: !!spec.background,
             phase: spec.phase || 'queued', startedAt: spec.startedAt || Date.now(), endedAt: null,
             retrievalExpiry: spec.retrievalExpiry || null,
             result: null, resultPreview: null, error: null, cancellation: null,
@@ -35,6 +50,7 @@ class OperationRegistry {
         this._items.set(id, op);
         this._order.push(id);
         this._trim();
+        emitOperation('created', op);
         return op;
     }
 
@@ -43,7 +59,7 @@ class OperationRegistry {
 
     start(id, phase = 'evaluating') {
         const op = this.get(id); if (!op) return null;
-        op.state = 'running'; op.phase = phase; return op;
+        op.state = 'running'; op.phase = phase; emitOperation('started', op); return op;
     }
 
     complete(id, result, preview) { return this._settle(id, 'completed', { result, resultPreview: preview ?? _preview(result) }); }
@@ -60,6 +76,7 @@ class OperationRegistry {
             const removed = op.progress.shift();
             op.progressBytes -= Buffer.byteLength(JSON.stringify(removed));
         }
+        emitOperation('progress', op, { progress: item });
         return item;
     }
 
@@ -103,7 +120,7 @@ class OperationRegistry {
         const op = this.get(id); if (!op) return null;
         const result = {
             operation_id: op.id, tool: op.tool, caption: op.caption, owner: op.owner,
-            kernel_id: op.kernelId,
+            kernel_id: op.kernelId, kernel_label: op.kernelLabel,
             state: op.state, phase: op.phase, notebook: op.notebook, cell_id: op.cellId,
             cell_number: op.cellNumber, started_at: new Date(op.startedAt).toISOString(),
             ended_at: op.endedAt ? new Date(op.endedAt).toISOString() : null,
@@ -153,6 +170,7 @@ class OperationRegistry {
             retrievalExpiry: endedAt + this.retrievalTtlMs });
         op._resolveDone(op);
         this._trim();
+        emitOperation('settled', op);
         return op;
     }
 

@@ -471,6 +471,8 @@
             '  <span style="color:' + statusColor + '; font-weight:600;">' + statusDot + ' ' + esc(statusText) + '</span>',
             '</div>',
 
+            disabled ? '' : '<a href="#" data-cmd="wolfbook.openActivityMonitor" style="display:block; margin:6px 0 10px; padding:7px 9px; border:1px solid var(--vscode-button-border,transparent); border-radius:4px; color:var(--vscode-button-foreground,#fff); background:var(--vscode-button-background,#0e639c); text-align:center; text-decoration:none; font-weight:600;">Open Activity Monitor</a>',
+
             '<table style="border-collapse:collapse; width:100%; margin-bottom:8px;">',
             '  <tr><td style="padding-right:6px; white-space:nowrap; opacity:0.7;">Node</td>',
             '      <td style="opacity:0.6; word-break:break-all;">' + esc(node || '(not found)') + '</td></tr>',

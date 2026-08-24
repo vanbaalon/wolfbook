@@ -1263,6 +1263,13 @@ async function activate(context) {
     }
     const _pkgJson   = path.join(context.extensionPath, 'package.json');
     const _mcpSchema = loadMCPSchemas(_pkgJson);
+    const { ActivityMonitor } = require('./monitor/activity');
+    const { registerNotebookAudit } = require('./monitor/notebook-audit');
+    const _activityMonitor = new ActivityMonitor({
+        storageDir: context.globalStorageUri.fsPath,
+        logoPath: path.join(context.extensionPath, 'images', 'wolfbook_logo_transparent.png'),
+    });
+    context.subscriptions.push({ dispose: () => _activityMonitor.dispose() });
     const _mcpExposureOptions = {
         canonicalProjection: config.get('mcp.canonicalOutputProjection', false),
         renderCache: config.get('mcp.renderCache', false),
@@ -1270,6 +1277,7 @@ async function activate(context) {
         resultThreshold: config.get('mcp.resultHandleThreshold', 24000),
         exposeDeprecatedTools: config.get('mcp.exposeDeprecatedTools', false),
         profile: config.get('mcp.profile', 'full'),
+        activityMonitor: _activityMonitor,
     };
     let   _mcpServer = new WolframMCPServer(_toolMap, _mcpSchema, _mcpExposureOptions);
 
@@ -1278,6 +1286,7 @@ async function activate(context) {
     const _wsName   = vscode.workspace.name ||
         path.basename(vscode.workspace.workspaceFolders?.[0]?.uri?.fsPath || 'untitled');
     const _clientId = assignClientId(_appName, _wsName);
+    _activityMonitor.setClientInfo(_clientId, _wsName);
     devLog(LOG_CHANNELS.EXTENSION, `[Wolfbook MCP] Client ID: ${_clientId}`);
 
     // Helper: ALL open wolfbook notebook paths — loaded documents AND unloaded background tabs.
@@ -1305,6 +1314,60 @@ async function activate(context) {
         } catch {}
         return [...seen];
     };
+
+    // Global activity collector. The primary MCP window persists events; all
+    // other windows forward to it over the authenticated localhost channel.
+    try {
+        registerNotebookAudit(vscode, context, _activityMonitor, { clientId: _clientId, workspace: _wsName });
+        const _activityBus = require('./remote/eventBus');
+        const offTool = _activityBus.on('toolUsage', ev => {
+            const ac = ev?.args?._activityContext;
+            if (ac?.source === 'mcp') return; // primary MCP transport already recorded this call
+            _activityMonitor.record({
+                type: ev.ok === false ? 'tool.failed' : 'tool.completed',
+                source: ac?.source || 'copilot', traceId: ac?.traceId,
+                operationId: ac?.operationId || ev?.args?._operationId,
+                agentSessionId: ac?.agentSessionId, agentName: ac?.agentName,
+                notebook: ev?.args?.notebook || ac?.notebook,
+                kernelId: ev?.args?.kernel_id || ac?.kernelId,
+                state: ev.ok === false ? 'failed' : 'completed', background: !!ev.background,
+                payload: { tool: ev.tool, input: ev.args, output: ev.result, durationMs: ev.durationMs },
+            });
+        });
+        const offOperation = _activityBus.on('operation', ev => {
+            const op = ev.operation || {};
+            _activityMonitor.record({ type: `kernel.operation.${ev.action}`, operationId: op.id,
+                notebook: op.notebook, kernelId: op.kernelId, kernelLabel: op.kernelLabel, state: op.state,
+                background: !!op.background, payload: { ...op, progress: ev.progress || null } });
+        });
+        context.subscriptions.push({ dispose: offTool }, { dispose: offOperation });
+    } catch (e) {
+        console.warn('[Wolfbook Monitor] Collector setup failed:', e.message);
+    }
+
+    const _openActivityMonitor = async (external = false) => {
+        try {
+            const url = await _activityMonitor.createLaunchUrl();
+            if (external) await vscode.env.openExternal(vscode.Uri.parse(url));
+            else {
+                try { await vscode.commands.executeCommand('simpleBrowser.show', url); }
+                catch (_) { await vscode.env.openExternal(vscode.Uri.parse(url)); }
+            }
+        } catch (e) {
+            vscode.window.showErrorMessage(`Wolfbook Activity Monitor could not open: ${e.message}`);
+        }
+    };
+    context.subscriptions.push(
+        vscode.commands.registerCommand('wolfbook.openActivityMonitor', () => _openActivityMonitor(false)),
+        vscode.commands.registerCommand('wolfbook.openActivityMonitorExternal', () => _openActivityMonitor(true)),
+        vscode.commands.registerCommand('wolfbook.copyActivityMonitorUrl', async () => {
+            try {
+                const url = await _activityMonitor.createLaunchUrl();
+                await vscode.env.clipboard.writeText(url);
+                vscode.window.showInformationMessage('Wolfbook Activity Monitor launch link copied. It expires in 60 seconds.');
+            } catch (e) { vscode.window.showErrorMessage(`Could not create monitor link: ${e.message}`); }
+        })
+    );
 
     // Worker server (started after primary/secondary decision below)
     let _workerServer = null;
@@ -1525,6 +1588,13 @@ async function activate(context) {
         const paths = _getOpenNbPaths();
         _mcpServer.updateOwnNotebooks?.(paths);
         _workerServer?.updateNotebooks(paths);
+        try {
+            _activityMonitor.record({ type: 'kernel.topology', state: 'observed',
+                payload: { notebooks: paths, kernels: kernelManager.list(paths).map(kernel => ({
+                    kernelId: kernel.kernel_id, label: kernel.label, lifecycle: kernel.lifecycle,
+                    busy: kernel.busy, notebooks: kernel.notebooks, remote: !!kernel.remote,
+                })) } });
+        } catch (_) {}
     };
     context.subscriptions.push(
         kernelManager.onDidChange(_syncNotebooks),

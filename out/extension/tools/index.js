@@ -4995,8 +4995,10 @@ function registerTools(context, getController, debugCtrl, getAskPanel) {
                         argsSummary: (() => { try { return JSON.stringify(options?.input || {}); } catch (_) { return ''; } })(),
                         notebook: options?.input?.notebook,
                         kernelId: controller.kernelIdentity?.kernel_id || null,
+                        kernelLabel: controller.kernelIdentity?.label || null,
                         cellId: options?.input?.cellId,
                         cellNumber: options?.input?.cellNumber,
+                        background: options?.input?.wait_mode === 'async',
                     });
                     controller.operations.start(operation.id);
                     options = { ...options, input: { ...(options?.input || {}), _operationId: operation.id } };

@@ -8,6 +8,15 @@ All notable changes to **Wolfbook** are documented here.
 
 ### Added
 
+- **Wolfbook Activity Monitor.** A polished, authenticated localhost dashboard
+  shows MCP agent sessions, running and background operations, kernel/window
+  topology, notebook files and exact cell changes across all VS Code windows.
+  Activity is streamed live, retained in a bounded seven-day JSONL ledger, and
+  defaults to a clear last-24-hours view with deeper input/output, routing,
+  progress and raw-event inspection. Open it from the Command Palette or the
+  MCP section of the Wolfbook sidebar; one-time launch links prevent unrelated
+  localhost pages from reading the monitor. Secrets, binary/base64 payloads and
+  oversized values are redacted before persistence.
 - **Long MCP evaluations can be continued instead of being disconnected.** If
   a tool is still running after five minutes, Wolfbook returns an operation ID
   and lets the model choose `wolfbook_waitEvaluation` to wait another five

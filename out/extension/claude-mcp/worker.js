@@ -12,6 +12,7 @@
 //  • Expose  GET  /notebooks — current open notebook paths
 
 const { setMcpCallActive } = require('../tools/shared');
+const { runWithActivityContext } = require('../monitor/activity');
 //  • Poll the primary's /health; on 3 consecutive failures → run election
 //
 // Election:
@@ -262,7 +263,8 @@ class WorkerServer {
             let toolResult;
             setMcpCallActive(true);
             try {
-                toolResult = await tool.invoke({ input: args || {} }, token);
+                toolResult = await runWithActivityContext(args?._activityContext,
+                    () => tool.invoke({ input: args || {} }, token));
             } catch (e) {
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ error: e.message || String(e), isError: true }));
