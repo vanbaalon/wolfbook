@@ -19,6 +19,7 @@ const test = (name, fn) => {
 };
 
 const { buildComparison, placeHunk, describeSummary, WHERE } = require('../../tex/texCompare');
+const { diffLines, splitLines } = require('../../tex/texDiff');
 
 /** A render map where lines 1-6 printed and 7-9 (an equation) did not. */
 const makeMap = (over = {}) => ({
@@ -195,6 +196,61 @@ test('nothing throws on a broken or absent map', () => {
     assert.doesNotThrow(() => buildComparison({}));
     assert.deepStrictEqual(buildComparison({}).hunks, []);
     assert.doesNotThrow(() => placeHunk(null, { aStart: 1, aEnd: 2 }));
+});
+
+test('ONE THING CHANGED IS ONE ITEM TO APPROVE', () => {
+    // diffLines splits at every identical line, which is right for a diff and
+    // wrong for a worklist: an equation edited on two of its lines arrived as
+    // TWO items, both called "display-equation eq:x", both on the same page,
+    // each needing its own verdict. Reported as "many small items which are in
+    // the same place".
+    // The line BETWEEN the two edits has to be distinctive enough that the
+    // aligner pairs it — a short common line like "+2" is cheaper to skip, and
+    // the diff merges the two runs on its own. That is why the first version
+    // of this test passed without any coalescing at all.
+    const mid = '  \\sum_k \\alpha_k \\beta_k \\gamma_k';
+    const ours = ['a', 'b', 'c', 'd', 'e', 'f',
+        '\\begin{equation}', '  E=1', mid, '  Z=3', '\\end{equation}'].join('\n');
+    const theirs = ['a', 'b', 'c', 'd', 'e', 'f',
+        '\\begin{equation}', '  E=9', mid, '  Z=7', '\\end{equation}'].join('\n');
+    assert.strictEqual(diffLines(splitLines(ours), splitLines(theirs)).length, 2,
+        'the raw diff really does split this into two');
+    const map = makeMap({
+        objectAtLine: (n) => ((n >= 7 && n <= 11)
+            ? { kind: 'display-equation', label: 'eq:x', stableKey: 's/eq/1', startLine: 7, endLine: 11 }
+            : null),
+    });
+    const { hunks } = buildComparison({ ourText: ours, theirText: theirs, map });
+    assert.strictEqual(hunks.length, 1,
+        `two edits inside one equation are one item (got ${hunks.length})`);
+    // And the merged item still carries what it takes to keep or undo it: the
+    // lines between were identical, so both slices carry them unchanged.
+    assert.ok(hunks[0].ourText.includes('E=1') && hunks[0].ourText.includes('Z=3'));
+    assert.ok(hunks[0].theirText.includes('E=9') && hunks[0].theirText.includes('Z=7'));
+    assert.ok(hunks[0].ourText.includes('\\sum_k'), 'including the unchanged line between them');
+    assert.strictEqual(hunks[0].kind, 'change');
+});
+
+test('but two edits in DIFFERENT places stay two', () => {
+    // The point is to merge what is in one place, not to merge everything.
+    const ours = ['a', 'b', 'c', 'd', 'e', 'f', '\\begin{equation}', '  E=1', '\\end{equation}'].join('\n');
+    const theirs = ['A', 'b', 'c', 'd', 'e', 'F', '\\begin{equation}', '  E=1', '\\end{equation}'].join('\n');
+    const { hunks } = buildComparison({ ourText: ours, theirText: theirs, map: makeMap() });
+    assert.strictEqual(hunks.length, 2, `first line and sixth are separate (got ${hunks.length})`);
+});
+
+test('A PAPER REWRITTEN EVERY OTHER LINE DOES NOT BECOME ONE ITEM', () => {
+    // The gap is ZERO on purpose. At one, a hunk with a single paired line
+    // between it and the next merges — and a document edited on alternating
+    // lines collapses into a single item covering the whole paper, which is a
+    // worse answer than the many-small-items this was meant to fix.
+    const a = []; const b = [];
+    for (let i = 1; i <= 20; i++) { a.push(`line ${i}`); b.push(i % 2 ? `LINE ${i}` : `line ${i}`); }
+    const { hunks } = buildComparison({
+        ourText: a.join('\n'), theirText: b.join('\n'),
+        map: makeMap({ objectAtLine: () => null }),
+    });
+    assert.ok(hunks.length >= 8, `they stay separate (got ${hunks.length})`);
 });
 
 console.log('placing hunks on the rendered pages\n');

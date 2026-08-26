@@ -1184,6 +1184,14 @@ function registerTexSupport(context, deps = {}) {
         };
     };
 
+    // THE NUMBERS THE PAPER PRINTS, for the panel as well as the review.
+    //
+    // The contents panel had none: this lookup was wired into sectionAt (which
+    // the review uses) and nowhere else, so every row read as a bare title and
+    // a subsection was indistinguishable from a section. Handed to the viewer
+    // rather than duplicated inside it — one .aux, one reading of it.
+    viewer.sectionNumbers = sectionNumbers;
+
     const review = new ReviewUi({
         coord, viewer, output,
         mapView: (file) => {

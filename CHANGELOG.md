@@ -4,10 +4,26 @@ All notable changes to **Wolfbook** are documented here.
 
 ---
 
-## Unreleased
+## [2.9.2] - 2026-08-26
 
 ### Added
 
+- **WPaper, a live LaTeX writing workspace.** Open a `.tex` source beside its
+  continuously rebuilt paper, compiled out of tree from the unsaved editor
+  buffer. Source-to-paper and paper-to-source navigation use exact LuaLaTeX
+  glyph maps when available and SyncTeX otherwise. The page adds a compact
+  document contents navigator, working PDF links, section copy/cut/delete and
+  folding controls, image paste at a chosen point, inline Wolfram computation
+  cards, comparisons against disk/Git/another paper, and a guided tour.
+- **Reviewable agent edits for LaTeX.** WPaper groups changes by the equation,
+  figure, paragraph or section a reader would regard as one change, shows each
+  change on the compiled page, and lets it be kept or undone independently.
+  `paper_*` tools expose structured paper objects and reject stale edits with
+  source-hash guards. WPaper deliberately coexists with LaTeX Workshop instead
+  of replacing its grammar or compiler diagnostics.
+- **Interactive `Manipulate` demonstration and clearer README media layout.**
+  Demo captions are now guaranteed to sit below their animations rather than
+  flowing beside them.
 - **Wolfbook MCP Control Room.** A polished, authenticated localhost dashboard
   shows MCP agent sessions, running and background operations, kernel/window
   topology, notebook files and exact cell changes across all VS Code windows.
@@ -102,6 +118,14 @@ All notable changes to **Wolfbook** are documented here.
 
 ### Fixed
 
+- WPaper now follows the active `.tex` tab to the correct paper, removes stale
+  pages before switching, builds a previously unseen paper automatically, and
+  avoids blank pages caused by an older asynchronous PDF render completing
+  after a newer document has replaced it.
+- WPaper's page number follows the page nearest the viewport centre; selection
+  and caret state stay synchronized between source, page and computation-card
+  editors; review panes can be resized; and pre-rendered computation output
+  loads its KaTeX styling before display.
 - Abort and Restart no longer disappear from a Wolfbook toolbar when another
   local or remote controller changes a legacy global `wolframKernelActive`
   context flag. In the multi-kernel design, availability is notebook-specific;

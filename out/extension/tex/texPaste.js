@@ -137,6 +137,31 @@ function hasGraphicx(text) {
 }
 
 /**
+ * Where `\usepackage{graphicx}` goes, for a paper that needs one and has none.
+ *
+ * After `\documentclass{...}` — with its optional argument, which may span
+ * lines — because that is where a package belongs and where a person would
+ * have put it. Falls back to just before `\begin{document}`. Returns null when
+ * the paper already loads it, or when there is nowhere sensible to put it.
+ *
+ * @returns {{offset:number, text:string}|null}
+ */
+function graphicxInsertion(text) {
+    const t = String(text || '');
+    if (hasGraphicx(t)) return null;
+    const cls = /\\documentclass\s*(\[[^\]]*\])?\s*\{[^}]*\}/.exec(t);
+    if (cls) {
+        const end = cls.index + cls[0].length;
+        const nl = t.indexOf('\n', end);
+        const at = nl < 0 ? end : nl + 1;
+        return { offset: at, text: '\\usepackage{graphicx}\n' };
+    }
+    const beg = t.indexOf('\\begin{document}');
+    if (beg >= 0) return { offset: beg, text: '\\usepackage{graphicx}\n' };
+    return null;
+}
+
+/**
  * The first image-like item in a DataTransfer, whatever mime it arrived under.
  *
  * Clipboard images reach an extension under names that vary by platform and by
@@ -180,5 +205,5 @@ function findImageItem(dataTransfer) {
 
 module.exports = {
     MIME_EXT, PASTE_MIMES, imagePathFor, labelSuggestion,
-    figureSnippet, insideFloat, hasGraphicx, findImageItem,
+    figureSnippet, insideFloat, hasGraphicx, graphicxInsertion, findImageItem,
 };

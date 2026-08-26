@@ -7,6 +7,7 @@
 <p align="center">
   <a href="https://github.com/vanbaalon/wolfbook/blob/main/docs/getting-started.md">Get Started</a> ·
   <a href="https://github.com/vanbaalon/wolfbook/blob/main/docs/features.md">Features</a> ·
+  <a href="https://github.com/vanbaalon/wolfbook/blob/main/README.md#wpaper-a-live-latex-writing-workspace">WPaper</a> ·
   <a href="https://github.com/vanbaalon/wolfbook/blob/main/docs/ai-integration.md">AI Integration</a> ·
   <a href="https://github.com/vanbaalon/wolfbook/blob/main/docs/mcp-and-agent-tools.md">MCP & Agent Tools</a> ·
   <a href="https://github.com/vanbaalon/wolfbook/blob/main/docs/using_cline.md">Using Cline</a> ·
@@ -18,7 +19,7 @@
   <a href="https://github.com/vanbaalon/wolfbook/blob/main/README.md#citing-wolfbook">Citing</a>
 </p>
 
-Wolfbook is a Mathematica-style notebook frontend for VS Code. Create, edit and run **Wolfram Language** notebooks against a local **Wolfram Engine** or **Mathematica** kernel — with typeset LaTeX and inline graphics, a live kernel that AI agents can drive, and plain-text notebooks that diff cleanly in Git.
+Wolfbook is a Mathematica-style notebook frontend for VS Code. Create, edit and run **Wolfram Language** notebooks against a local **Wolfram Engine** or **Mathematica** kernel — with typeset LaTeX and inline graphics, a live kernel that AI agents can drive, and plain-text notebooks that diff cleanly in Git. Wolfbook also includes **WPaper**, a live compiled-paper view and review workflow for writing LaTeX in VS Code.
 
 > **Requires a Wolfram kernel.** Wolfbook is the notebook interface; the mathematics runs in [Wolfram Engine](https://wolfram.com/engine) (free for personal and developer use) or Mathematica, which you install separately. Setup takes a few minutes — see [Getting Started](https://github.com/vanbaalon/wolfbook/blob/main/docs/getting-started.md).
 
@@ -32,6 +33,7 @@ Wolfbook is a Mathematica-style notebook frontend for VS Code. Create, edit and 
 - Plain-text `.wb` / `.vsnb` notebooks — **diffable in Git**, readable by AI tools
 - Rich math output: **LaTeX / KaTeX**, **SVG / PNG graphics**,  **TikZ**
 - Interactive **3D graphics** and coordinate tooltips for 2D plots
+- **WPaper for LaTeX** — live compiled pages, source↔paper navigation and reviewable AI edits
 - **Live kernel access for AI agents** — Copilot, Claude Code, Codex, MCP-compatible tools
 - **Mid-evaluation abort**, **Dynamic[]** widgets, debugger and watch panel
 - Globally numbered kernels (`K1`, `K2`, …) with a picker that can bind a
@@ -63,21 +65,54 @@ Wolfbook is a Mathematica-style notebook frontend for VS Code. Create, edit and 
 
 ## Recent features
 
-![Rotate a Wolfram Language Graphics3D output interactively inside a Wolfbook notebook](images/demos/3d-rotation.gif)
-*Interactive 3D output: drag a rendered `Graphics3D` result to rotate it directly in the notebook.*
+<p align="center">
+  <img src="images/demos/manipulate.gif" alt="Use Manipulate controls and rotate a live Wolfram Language 3D plot in Wolfbook" width="640"/>
+  <br/>
+  <em><code>Manipulate</code> stays interactive: move Wolfram Language controls and rotate the resulting <code>Graphics3D</code> directly in the notebook.</em>
+</p>
 
-![Open and convert an existing Mathematica NB notebook in Wolfbook](images/demos/nb-conversion.gif)
-*Open existing Mathematica `.nb` files as safe, read-only notebook views, then save an editable `.wb` copy.*
+<p align="center">
+  <img src="images/demos/3d-rotation.gif" alt="Rotate a Wolfram Language Graphics3D output interactively inside a Wolfbook notebook" width="640"/>
+  <br/>
+  <em>Interactive 3D output: drag a rendered <code>Graphics3D</code> result to rotate it directly in the notebook.</em>
+</p>
 
-![Format Wolfram Language code in a Wolfbook notebook cell](images/demos/formatting.gif)
-*Format Wolfram Language cells in place, including named-character conversion and indentation.*
+<p align="center">
+  <img src="images/demos/nb-conversion.gif" alt="Open and convert an existing Mathematica NB notebook in Wolfbook" width="640"/>
+  <br/>
+  <em>Open existing Mathematica <code>.nb</code> files as safe, read-only notebook views, then save an editable <code>.wb</code> copy.</em>
+</p>
 
-![Inspect plot coordinates with an interactive tooltip in Wolfbook](images/demos/plot-tooltip.gif)
-*Hover over a 2D plot to inspect curve coordinates without leaving the notebook.*
+<p align="center">
+  <img src="images/demos/formatting.gif" alt="Format Wolfram Language code in a Wolfbook notebook cell" width="640"/>
+  <br/>
+  <em>Format Wolfram Language cells in place, including named-character conversion and indentation.</em>
+</p>
+
+<p align="center">
+  <img src="images/demos/plot-tooltip.gif" alt="Inspect plot coordinates with an interactive tooltip in Wolfbook" width="640"/>
+  <br/>
+  <em>Hover over a 2D plot to inspect curve coordinates without leaving the notebook.</em>
+</p>
 
 ---
 
 ## What You Get
+
+### WPaper: a live LaTeX writing workspace
+
+Open a `.tex` file and WPaper keeps the source editor beside the compiled paper. It rebuilds from the **unsaved editor buffer** after you pause, without writing generated files into your project, and keeps the page aligned with where you are writing. Click the paper to return to source; move through source to follow it on the page. Exact LuaLaTeX mapping is used when available, with SyncTeX fallback for documents that need another engine.
+
+WPaper is designed for the part of scientific writing that a PDF preview alone does not solve:
+
+- a structural outline, folding, CodeLens and deterministic reference/environment diagnostics
+- printed previews when hovering `\ref` / `\eqref`, plus labels revealed directly on the page
+- image paste that creates the figure source and asset together
+- comparisons against disk, Git revisions or another paper
+- a focused review of agent changes, where each change can be shown on the compiled page and kept or undone independently
+- `paper_*` agent tools with source-hash guards, so an AI edit is rejected if the paper changed underneath it
+
+WPaper deliberately does not register another LaTeX grammar or replace your existing language tooling. It works alongside LaTeX Workshop while Wolfbook supplies the compiled-paper navigation, editing and agent-review layer. Run **Wolfbook: Open WPaper** (or **WPaper: Show Me Around** for the guided tour) from any `.tex` file.
 
 ### A proper notebook in VS Code
 

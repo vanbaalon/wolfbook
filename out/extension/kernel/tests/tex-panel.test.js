@@ -136,6 +136,43 @@ test('THE MINI-EDITOR SELECTION IS NOT OPAQUE — an opaque one erases the code'
     assert.ok(/box-shadow:\s*inset|outline:/.test(sel[1]), 'it draws an outline');
 });
 
+test('every place the tour points at exists on the page', () => {
+    // A step that points at nothing draws its ring over empty space, and the
+    // reader is told to press a button that is not there. Cheap to check and
+    // exactly the kind of thing that rots when the toolbar is rearranged.
+    const shell = fs.readFileSync(SHELL, 'utf8');
+    const steps = fs.readFileSync(
+        path.join(__dirname, '../../tex/tourSteps.js'), 'utf8');
+    const points = [...steps.matchAll(/point:\s*'#([a-zA-Z][\w-]*)'/g)].map(m => m[1]);
+    assert.ok(points.length >= 3, 'the tour points at something (found ' + points.length + ')');
+    const missing = points.filter(id => !new RegExp(`id="${id}"`).test(shell));
+    assert.deepStrictEqual(missing, [], 'the tour points at ids the page does not have');
+});
+
+test('every gesture the tour waits for is one the panel actually sends', () => {
+    // A step whose satisfy() names a message nobody posts can never be
+    // completed: the tour stops dead on it and the reader cannot get past
+    // except by skipping. The tour is fed EVERY panel message, so the check is
+    // just whether the client says it.
+    const js = fs.readFileSync(CLIENT_JS, 'utf8');
+    const steps = fs.readFileSync(
+        path.join(__dirname, '../../tex/tourSteps.js'), 'utf8');
+    const wanted = new Set(
+        [...steps.matchAll(/e\.type === '([a-zA-Z]+)'/g)].map(m => m[1]));
+    // `cursor` has no webview message: the forward sync raises it directly.
+    wanted.delete('cursor');
+    const sent = new Set();
+    for (const m of js.matchAll(/postMessage\(\{\s*type:\s*'([a-zA-Z]+)'/g)) sent.add(m[1]);
+    for (const m of js.matchAll(/type:\s*[^,\n]*\?\s*'([a-zA-Z]+)'\s*:\s*'([a-zA-Z]+)'/g)) {
+        sent.add(m[1]); sent.add(m[2]);
+    }
+    for (const m of js.matchAll(/sendClick\([^;]*?,\s*'([a-zA-Z]+)'\s*\)/g)) sent.add(m[1]);
+    sent.add('click');
+    const unreachable = [...wanted].filter(t => !sent.has(t));
+    assert.deepStrictEqual(unreachable, [],
+        'the tour waits for gestures the panel never posts: ' + unreachable.join(', '));
+});
+
 test('every message the client posts has a handler in the extension', () => {
     // The two halves talk over postMessage, so a typo on either side fails
     // SILENTLY — the click simply does nothing, and there is no error anywhere
@@ -146,6 +183,12 @@ test('every message the client posts has a handler in the extension', () => {
 
     const sent = new Set();
     for (const m of js.matchAll(/postMessage\(\{\s*type:\s*'([a-zA-Z]+)'/g)) sent.add(m[1]);
+    // `type:` written as a choice — two gestures that differ only in what the
+    // click finally means share one postMessage. Without this the check goes
+    // BLIND to exactly the messages a refactor is most likely to break.
+    for (const m of js.matchAll(/type:\s*[^,\n]*\?\s*'([a-zA-Z]+)'\s*:\s*'([a-zA-Z]+)'/g)) {
+        sent.add(m[1]); sent.add(m[2]);
+    }
     // sendClick takes its type as a parameter, with 'click' as the default.
     for (const m of js.matchAll(/sendClick\([^;]*?,\s*'([a-zA-Z]+)'\s*\)/g)) sent.add(m[1]);
     sent.add('click');

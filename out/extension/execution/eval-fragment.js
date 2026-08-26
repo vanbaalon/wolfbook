@@ -35,12 +35,29 @@ let _btl = null;
 let _btlTried = false;
 let _prerender = null;
 
+/**
+ * Where the addon is, from HERE.
+ *
+ * THREE levels, not two. This file is at out/extension/execution/, so `../..`
+ * is `out/` and the addon is beside `out/`, not inside it. Two levels was
+ * copied in from tools/, which is the same depth and had the same mistake — so
+ * `require` threw, `loadBtl()` returned null, and every result quietly took
+ * the text fallback. Reported as "Mathematica output does not use BTL, it
+ * inserts Mathematica-form expressions": that IS the fallback, working exactly
+ * as designed, for a converter that was never found.
+ *
+ * Exported so a test can check the path resolves WITHOUT loading a native
+ * binary — which is the part that was wrong, and the part that is checkable on
+ * any machine.
+ */
+function btlDir() { return path.join(__dirname, '../../../wllatex-addon'); }
+
 /** Load wolfbook_btl.node, preferring the prebuilt for this platform+arch. */
 function loadBtl() {
     if (_btlTried) return _btl;
     _btlTried = true;
     try {
-        const dir = path.join(__dirname, '../../wllatex-addon');
+        const dir = btlDir();
         const prebuilt = path.join(dir, 'prebuilt', `wolfbook_btl-${process.platform}-${process.arch}.node`);
         const fallback = path.join(dir, 'wolfbook_btl.node');
         _btl = require(fs.existsSync(prebuilt) ? prebuilt : fallback);
@@ -282,6 +299,7 @@ function toSlideOutput(res, opts = {}) {
 
 module.exports = {
     loadBtl,
+    btlDir,
     escapeForKernel,
     buildEvalExpr,
     parseEvalResult,

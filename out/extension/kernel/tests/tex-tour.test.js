@@ -33,12 +33,16 @@ test('A PAPER WITH NOTHING TO SHOW IS NEVER ASKED TO LOOK AT IT', () => {
     // not offered, and the count on the card shrinks with it.
     const all = stepsFor(WITH_LABELS).map(s => s.id);
     const bare = stepsFor(BARE).map(s => s.id);
-    assert.deepStrictEqual(all, ['click', 'widen', 'cursor', 'labels', 'tag', 'fold',
-        'edit', 'takeMe', 'review']);
-    for (const id of ['labels', 'tag', 'fold']) {
+    assert.deepStrictEqual(all, ['click', 'widen', 'cursor', 'contents', 'labels', 'tag',
+        'fold', 'sectionAction', 'edit', 'computation', 'takeMe', 'follow', 'review']);
+    for (const id of ['labels', 'tag', 'fold', 'contents', 'sectionAction']) {
         assert.ok(!bare.includes(id), `${id} needs something on the page to point at`);
     }
-    assert.deepStrictEqual(bare, ['click', 'widen', 'cursor', 'edit', 'takeMe', 'review'],
+    // A computation can be dropped into ANY paper — it needs nothing already
+    // there — so it survives the bare case, and so does deciding how much the
+    // page follows you.
+    assert.deepStrictEqual(bare,
+        ['click', 'widen', 'cursor', 'edit', 'computation', 'takeMe', 'follow', 'review'],
         'what is left is what any paper can do');
     assert.strictEqual(stepAt({ at: 0 }, BARE).total, bare.length,
         'the card counts the steps this reader will actually see');

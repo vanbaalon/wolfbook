@@ -298,6 +298,7 @@ async function openDocument(msg) {
             placeholders = buildPagePlaceholders();
         }
         el('pagecount').textContent = String(state.pageCount);
+        paintPageNow();
         status(`${state.pageCount} pages · gen ${msg.generation}`, 'ok');
         observeVisible();
         // A NEW GENERATION INVALIDATES THE OLD HIGHLIGHT.
@@ -401,6 +402,32 @@ async function openDocument(msg) {
 }
 
 /** Pages currently intersecting the scroll viewport, top first. */
+/**
+ * Which page the reader is looking at.
+ *
+ * The page whose middle is nearest the middle of the window — not simply the
+ * first visible one, which flips to the next page as soon as a sliver of it
+ * appears at the bottom and reads as jumpy.
+ */
+function currentPage() {
+    const main = document.querySelector('main');
+    if (!main) return 0;
+    const mid = main.scrollTop + main.clientHeight / 2;
+    let best = 0; let bestD = Infinity;
+    for (const w of pagesEl().children) {
+        const d = Math.abs((w.offsetTop + w.offsetHeight / 2) - mid);
+        if (d < bestD) { bestD = d; best = Number(w.dataset.page); }
+    }
+    return best;
+}
+
+function paintPageNow() {
+    const cur = el('pagecur');
+    if (!cur) return;
+    const n = currentPage();
+    cur.textContent = n > 0 ? String(n) : '–';
+}
+
 function visiblePages() {
     const main = document.querySelector('main');
     if (!main) return [];
@@ -492,10 +519,20 @@ async function renderPage(n) {
     // top. That is the "it goes to the beginning and only the second click
     // works" report; the second click worked because the render had landed.
     if (state.pending.has(n)) return state.pending.get(n);
-    const wrap = pagesEl().querySelector(`.page[data-page="${n}"]`);
-    if (!wrap) return;
+    if (!pagesEl().querySelector(`.page[data-page="${n}"]`)) return;
     const job = (async () => {
-        const page = await state.doc.getPage(n);
+        // WHICH DOCUMENT THIS RENDER IS OF.
+        //
+        // A render takes tens of milliseconds and a recompile can land in the
+        // middle of one. openDocument clears `rendered` and `pending`, but it
+        // cannot cancel a job already running — so the job used to finish,
+        // append its canvas to a wrapper that innerHTML='' had just detached,
+        // and then RE-ADD itself to `rendered`. The page the reader could see
+        // had no canvas at all, and renderPage short-circuited on the stale
+        // entry for ever after: a blank page that only a forced compile could
+        // clear. Reported exactly that way.
+        const doc = state.doc;
+        const page = await doc.getPage(n);
         const vp = page.getViewport({ scale: state.scale });
         const dpr = window.devicePixelRatio || 1;
         const canvas = document.createElement('canvas');
@@ -508,6 +545,14 @@ async function renderPage(n) {
         ctx.fillRect(0, 0, canvas.width, canvas.height);
         ctx.scale(dpr, dpr);
         await page.render({ canvasContext: ctx, viewport: vp, canvas }).promise;
+
+        // Superseded while it drew: a canvas of the previous paper is worse
+        // than no canvas, because the page it belongs to is gone.
+        if (state.doc !== doc) return;
+        // And the WRAPPER may have been rebuilt even for the same document,
+        // so the live one is looked up now rather than captured before.
+        const wrap = pagesEl().querySelector(`.page[data-page="${n}"]`);
+        if (!wrap) return;
 
         wrap.style.width = `${Math.floor(vp.width)}px`;
         wrap.style.height = `${Math.floor(vp.height)}px`;
@@ -529,10 +574,328 @@ async function renderPage(n) {
         if (state.moveCaret) paintMoveCaret(state.moveCaret);
         if (state.edit) paintEditCard();
         if (state.mma) paintMmaCard();
+        paintLinks(n).catch(() => { /* a paper without links is the common case */ });
     })().finally(() => state.pending.delete(n));
     state.pending.set(n, job);
     return job;
 }
+
+/**
+ * THE PDF'S OWN LINKS, made to work.
+ *
+ * A LaTeX paper is full of them — every \ref, \eqref, \cite and contents entry
+ * is a link annotation, and hyperref writes them whether or not anything ever
+ * follows one. The viewer drew none of them, so a click on "(4.2)" fell
+ * through to click-to-source, which resolved the LINE the number sits on and
+ * opened whatever file the map named — for a contents entry that is the
+ * generated .toc, which is not a place anyone wants to be taken and not a file
+ * worth editing, since the next compile rewrites it.
+ *
+ * Internal links jump inside the paper; external ones go to the browser
+ * through the extension, because a webview cannot open one itself.
+ */
+async function paintLinks(n) {
+    const wrap = pagesEl().querySelector(`.page[data-page="${n}"]`);
+    const r = state.rendered.get(n);
+    if (!wrap || !r || !state.doc) return;
+    for (const el2 of wrap.querySelectorAll('.pdflink')) el2.remove();
+
+    const doc = state.doc;
+    let anns = [];
+    try { anns = await doc.getAnnotations({ intent: 'display' }, n); }
+    catch (_) { anns = []; }
+    // Awaiting gave the paper time to change underneath us.
+    if (state.doc !== doc || state.rendered.get(n) !== r) return;
+
+    for (const a of anns || []) {
+        if (!a || a.subtype !== 'Link') continue;
+        const url = a.url || a.unsafeUrl || null;
+        if (!url && !a.dest) continue;
+        let v = null;
+        try { v = r.viewport.convertToViewportRectangle(a.rect); } catch (_) { v = null; }
+        if (!v) continue;
+        const x = Math.min(v[0], v[2]); const y = Math.min(v[1], v[3]);
+        const w = Math.abs(v[2] - v[0]); const h = Math.abs(v[3] - v[1]);
+        if (!(w > 0 && h > 0)) continue;
+
+        const el2 = document.createElement('a');
+        el2.className = 'pdflink' + (url ? ' ext' : '');
+        el2.style.left = `${x}px`;
+        el2.style.top = `${y}px`;
+        el2.style.width = `${w}px`;
+        el2.style.height = `${h}px`;
+        if (url) {
+            el2.href = url;
+            el2.title = url;
+        } else {
+            el2.href = '#';
+            el2.title = 'Go to it in the paper';
+            el2._dest = a.dest;
+        }
+        wrap.appendChild(el2);
+    }
+}
+
+/**
+ * Follow a link the reader clicked.
+ *
+ * An internal destination is a name or an array; either way it resolves to a
+ * page reference and a position on it, which is enough to scroll exactly there
+ * rather than to the top of the page it happens to be on.
+ */
+async function followPdfLink(el2) {
+    if (!state.doc) return;
+    const dest = el2._dest;
+    if (!dest) return;
+    try {
+        const d = typeof dest === 'string' ? await state.doc.getDestination(dest) : dest;
+        if (!Array.isArray(d) || !d.length) return;
+        const idx = await state.doc.getPageIndex(d[0]);
+        const page = idx + 1;
+        await renderPage(page);
+        const wrap = pagesEl().querySelector(`.page[data-page="${page}"]`);
+        const r = state.rendered.get(page);
+        if (!wrap) return;
+        // A destination carries a POSITION, and using it is the difference
+        // between landing on the equation and landing on the page it is on.
+        let top = wrap.offsetTop;
+        const yInPdf = d.length > 3 && typeof d[3] === 'number' ? d[3] : null;
+        if (r && yInPdf != null) {
+            try {
+                const v = r.viewport.convertToViewportPoint(0, yInPdf);
+                top = wrap.offsetTop + Math.max(0, v[1]);
+            } catch (_) { /* the page itself is still the right answer */ }
+        }
+        const main = document.querySelector('main');
+        if (main) {
+            main.scrollTo({ top: Math.max(0, top - main.clientHeight * 0.25), behavior: 'smooth' });
+        }
+        status(`went to p.${page}`);
+    } catch (e) {
+        status('that link goes nowhere in this paper', 'warn');
+    }
+}
+
+// Clicks on a link never mean "find this in the source".
+pagesEl().addEventListener('click', (ev) => {
+    const a = ev.target && ev.target.closest ? ev.target.closest('.pdflink') : null;
+    if (!a) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    if (a.classList.contains('ext')) {
+        // A webview cannot open a browser; the extension can.
+        vscode.postMessage({ type: 'openExternal', url: a.href });
+        return;
+    }
+    followPdfLink(a).catch(() => {});
+}, true);
+
+// ===========================================================================
+// THE CONTENTS, ON DEMAND
+// ===========================================================================
+//
+// A way THROUGH the paper that costs nothing until it is asked for: over the
+// page rather than beside it, and gone the instant it has been used. Built
+// from the section anchors the extension already sends for the Shift overlay,
+// so it needs no new data and cannot disagree with what the margins show.
+
+function navItems() {
+    const S = state.sections;
+    if (!S || !S.items) return [];
+    // IN THE ORDER THEY APPEAR IN THE PAPER, which is the order the extension
+    // already emits them in: file by file, heading by heading. Sorting by PAGE
+    // was wrong — a heading the render map cannot place has no page, and every
+    // one of them sorted to 0 and piled up above section 1. Reported as "what
+    // are these things on top?".
+    return S.items.filter(i => i.kind !== 'equation' && i.line > 0);
+}
+
+function renderNav() {
+    const list = el('navlist');
+    if (!list) return;
+    list.textContent = '';
+    const items = navItems();
+    if (!items.length) {
+        const row = document.createElement('div');
+        row.className = 'np-row';
+        row.textContent = 'this paper has no sections';
+        list.appendChild(row);
+        return;
+    }
+    const here = currentPage();
+    let best = null;
+    for (const it of items) {
+        const row = document.createElement('div');
+        row.className = 'np-row';
+        row.dataset.line = String(it.line);
+        row.dataset.end = String(it.spanEnd || it.line);
+        row.dataset.file = it.file || '';
+        row.dataset.page = String(it.page || 0);
+        // INDENTED BY LEVEL, so the shape of the paper is visible at a glance
+        // rather than having to be read off the numbers.
+        row.style.paddingLeft = `${10 + Math.max(0, (it.level || 2) - 2) * 10}px`;
+        // AN UNNUMBERED UNIT IS NOT A SECTION. A \paragraph prints no number
+        // and is not a place in the paper's numbering — showing it exactly
+        // like a numbered one is what makes a contents list look longer than
+        // the paper is.
+        if (!it.number) row.classList.add('np-plain');
+        const num = document.createElement('span');
+        num.className = 'np-num';
+        num.textContent = it.number || '·';
+        const title = document.createElement('span');
+        title.className = 'np-title';
+        title.textContent = it.title || '(untitled)';
+        const page = document.createElement('span');
+        page.className = 'np-page';
+        page.textContent = it.page ? `p.${it.page}` : '';
+
+        // THE SAME CONTROLS THE PAGE OFFERS, on the same units.
+        //
+        // Reorganising a paper means finding each heading first, and the
+        // contents is where they all already are — so fold, the three actions
+        // and the tag are here too rather than only in the margin, where they
+        // have to be hunted for one at a time. Same messages, so the two
+        // surfaces cannot come to mean different things.
+        const acts = document.createElement('span');
+        acts.className = 'np-acts';
+        const mk = (kind, key, label, tip, cls) => {
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.className = `np-act ${cls || ''}`;
+            b.dataset.navAct = kind;
+            b.dataset.navKey = it.key;
+            b.title = tip;
+            b.setAttribute('aria-label', tip);
+            if (ACTION_ICONS[label]) {
+                const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+                svg.setAttribute('viewBox', '0 0 16 16');
+                svg.setAttribute('width', '11');
+                svg.setAttribute('height', '11');
+                svg.setAttribute('aria-hidden', 'true');
+                const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                path.setAttribute('d', ACTION_ICONS[label]);
+                path.setAttribute('fill', 'currentColor');
+                svg.appendChild(path);
+                b.appendChild(svg);
+            } else {
+                b.textContent = label;
+            }
+            return b;
+        };
+        if (it.foldable) {
+            acts.appendChild(it.collapsed
+                ? mk('unfold', it.key, '▸', `Bring back ${it.hidden || 0} hidden lines`, 'on')
+                : mk('fold', it.key, '▾', 'Fold this section out of the paper'));
+        }
+        acts.append(
+            mk('copy', it.key, 'copy', 'Copy this section and everything in it'),
+            mk('cut', it.key, 'cut', 'Cut this section and everything in it'),
+            mk('delete', it.key, 'delete', 'Delete this section and everything in it', 'np-del'),
+            mk('tag', it.key, '§', 'Copy its file and line, to point an agent at it'),
+        );
+        if (it.collapsed) row.classList.add('np-folded');
+        row.append(num, title, page, acts);
+        list.appendChild(row);
+        // WHERE THE READER IS NOW, marked: opening the contents in the middle
+        // of a paper and having to hunt for your own place is the thing that
+        // makes an outline useless.
+        if (it.page && it.page <= here) best = row;
+    }
+    if (best) {
+        best.classList.add('on');
+        try { best.scrollIntoView({ block: 'center' }); } catch (_) { /* fine */ }
+    }
+}
+
+function setNav(on) {
+    const p = el('navpanel');
+    if (!p) return;
+    if (on) renderNav();
+    p.hidden = !on;
+    const b = el('outline');
+    if (b) b.setAttribute('aria-pressed', on ? 'true' : 'false');
+}
+
+function navVisible() {
+    const p = el('navpanel');
+    return !!p && !p.hidden;
+}
+
+el('outline').addEventListener('click', () => setNav(!navVisible()));
+el('navclose').addEventListener('click', () => setNav(false));
+
+el('navlist').addEventListener('click', (ev) => {
+    // A CONTROL IS NOT A NAVIGATION. Checked first, and it does not close the
+    // panel: folding three sections in a row means staying where you are.
+    const act = ev.target && ev.target.closest ? ev.target.closest('[data-nav-act]') : null;
+    if (act) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        const key = act.dataset.navKey;
+        const kind = act.dataset.navAct;
+        if (kind === 'fold' || kind === 'unfold') {
+            vscode.postMessage({ type: 'sectionFold', key, collapse: kind === 'fold' });
+        } else if (kind === 'tag') {
+            vscode.postMessage({ type: 'copyAnchor', key, alt: !!ev.altKey });
+        } else {
+            vscode.postMessage({ type: 'anchorAction', key, action: kind });
+        }
+        return;
+    }
+    const row = ev.target && ev.target.closest ? ev.target.closest('.np-row') : null;
+    if (!row || !row.dataset.line) return;
+    // GONE THE MOMENT IT HAS BEEN USED. It is a way through the paper, not a
+    // panel to keep open beside it.
+    setNav(false);
+    vscode.postMessage({
+        type: 'revealSection',
+        line: Number(row.dataset.line) || 0,
+        // Where the unit ENDS: a heading that prints nothing of its own is
+        // still reachable through its body.
+        endLine: Number(row.dataset.end) || 0,
+        file: row.dataset.file || null,
+    });
+});
+
+/**
+ * Drag the review panel's top edge to resize it.
+ *
+ * A bottom panel resizes from its TOP, which is why the browser's own grip is
+ * no use: it sits at the bottom right, and dragging the bottom of something
+ * anchored to the bottom moves nothing anyone can see. The height is kept in
+ * px on the element and clamped to the window, so a panel dragged tall on a
+ * big screen cannot swallow the paper on a small one.
+ */
+document.addEventListener('pointerdown', (ev) => {
+    if (ev.button !== 0) return;
+    const grip = ev.target && ev.target.closest ? ev.target.closest('#rpgrip') : null;
+    if (!grip) return;
+    const panel = el('reviewpanel');
+    if (!panel) return;
+    ev.preventDefault();
+    const y0 = ev.clientY;
+    const h0 = panel.offsetHeight;
+    document.body.classList.add('rp-sizing');
+    const move = (e2) => {
+        // Upwards is BIGGER: the panel grows into the paper, which is the
+        // direction the edge being dragged is moving.
+        const want = h0 + (y0 - e2.clientY);
+        const max = Math.max(120, window.innerHeight * 0.75);
+        panel.style.height = `${Math.max(90, Math.min(want, max))}px`;
+    };
+    const up = () => {
+        document.body.classList.remove('rp-sizing');
+        document.removeEventListener('pointermove', move, true);
+        document.removeEventListener('pointerup', up, true);
+        document.removeEventListener('pointercancel', up, true);
+    };
+    // On the DOCUMENT, in the capture phase: a resize drag routinely leaves
+    // the 7px grip on its first frame, and a listener bound to the grip
+    // itself would then hear nothing more.
+    document.addEventListener('pointermove', move, true);
+    document.addEventListener('pointerup', up, true);
+    document.addEventListener('pointercancel', up, true);
+}, true);
 
 function renderAround(n) {
     for (let i = Math.max(1, n - 1); i <= Math.min(state.pageCount, n + 1); i++) renderPage(i);
@@ -1593,12 +1956,65 @@ function paintSections() {
             t.title = 'Copy ' + (it.kind === 'equation' ? 'this equation' : 'this heading') +
                 ' as path:line, to point an agent at it · Alt-click to add its name';
             box.appendChild(t);
+
+            // COPY / CUT / DELETE THE WHOLE UNIT — the same three the selection
+            // bar offers, on the thing a reader most often wants to move: a
+            // section WITH its body. Only sectioning units: an equation
+            // already has the selection ladder and its own card.
+            if (it.kind !== 'equation') {
+                // THEIR OWN STRIP, DIRECTLY ABOVE THE FOLD BADGE.
+                //
+                // Trailing the tag they were nearly invisible: three 11 px
+                // glyphs at a third opacity, at the end of a row that already
+                // held a fold control and a copy tag, over whatever the page
+                // happened to print underneath. Given a strip of their own —
+                // above the cluster, so the fold and the tag do not move — they
+                // read as a small toolbar attached to the heading, which is
+                // what they are.
+                const acts = document.createElement('div');
+                acts.className = 'wpa-acts';
+                for (const a of ['copy', 'cut', 'delete']) {
+                    const b = document.createElement('button');
+                    b.type = 'button';
+                    b.className = 'wpaact';
+                    b.dataset.anchorAction = a;
+                    b.dataset.anchorKey = it.key;
+                    b.title = (a === 'copy' ? 'Copy' : a === 'cut' ? 'Cut' : 'Delete')
+                        + ' this section and everything in it';
+                    b.setAttribute('aria-label', b.title);
+                    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+                    svg.setAttribute('viewBox', '0 0 16 16');
+                    svg.setAttribute('width', '11');
+                    svg.setAttribute('height', '11');
+                    svg.setAttribute('aria-hidden', 'true');
+                    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                    path.setAttribute('d', ACTION_ICONS[a]);
+                    path.setAttribute('fill', 'currentColor');
+                    svg.appendChild(path);
+                    b.appendChild(svg);
+                    acts.appendChild(b);
+                }
+                box.appendChild(acts);
+            }
         }
         if (box.childNodes.length) wrap.appendChild(box);
     }
 }
 
 document.addEventListener('click', (e) => {
+    // Checked FIRST: the action buttons sit in the same cluster as the tag,
+    // and a delete must never be read as "copy this address".
+    const act = e.target && e.target.closest ? e.target.closest('[data-anchor-action]') : null;
+    if (act) {
+        e.preventDefault();
+        e.stopPropagation();
+        vscode.postMessage({
+            type: 'anchorAction',
+            key: act.dataset.anchorKey,
+            action: act.dataset.anchorAction,
+        });
+        return;
+    }
     const t = e.target && e.target.closest ? e.target.closest('.wpatag') : null;
     if (t) {
         e.preventDefault();
@@ -2377,9 +2793,12 @@ pagesEl().addEventListener('click', (ev) => {
     // ARMED: this click places a computation and means nothing else. It must
     // not also be read as "jump to source", which is what the rest of this
     // handler is for.
-    if (armInsert) {
+    if (armMode) {
         ev.stopPropagation();
-        vscode.postMessage({ type: 'insertCommit', page: n, xBp: pt.xBp, yTopBp: pt.yTopBp });
+        vscode.postMessage({
+            type: armMode === 'paste' ? 'pasteCommit' : 'insertCommit',
+            page: n, xBp: pt.xBp, yTopBp: pt.yTopBp,
+        });
         setArmInsert(false);
         return;
     }
@@ -2570,19 +2989,24 @@ const DRAG_ARM_PX2 = 5 * 5;
  * same seam-finder in the extension — a reader who has learned where a dragged
  * block lands already knows where a computation will.
  */
-let armInsert = false;
+// One armed state, two gestures: ∑+ places a computation, ⌘V places the
+// clipboard. They differ only in what the click finally does, so they share
+// the seam-finder, the caret, the crosshair and the Esc rung.
+let armMode = null;                       // null | 'insert' | 'paste'
 let lastInsertPreview = 0;
 
-function setArmInsert(on) {
-    armInsert = !!on;
-    document.body.classList.toggle('arming-insert', armInsert);
+function setArmInsert(on, mode = 'insert') {
+    armMode = on ? mode : null;
+    document.body.classList.toggle('arming-insert', !!armMode);
     const b = el('addmma');
-    if (b) b.setAttribute('aria-pressed', armInsert ? 'true' : 'false');
-    if (!armInsert) {
+    if (b) b.setAttribute('aria-pressed', armMode === 'insert' ? 'true' : 'false');
+    if (!armMode) {
         paintMoveCaret(null);
         vscode.postMessage({ type: 'insertCancel' });
     } else {
-        status('click where the computation belongs · Esc to cancel');
+        status(armMode === 'paste'
+            ? 'click where the clipboard goes · Esc to cancel'
+            : 'click where the computation belongs · Esc to cancel');
     }
 }
 
@@ -2590,7 +3014,7 @@ window.addEventListener('mousemove', (ev) => {
     // Armed and not already dragging something: every move asks the extension
     // where this point would land. Throttled by the same budget as the move
     // preview — one round trip per frame or two.
-    if (armInsert && !dragMove && !dragSel) {
+    if (armMode && !dragMove && !dragSel) {
         const now = performance.now();
         if (now - lastInsertPreview < 60) return;   // one round trip per frame or two
         const target = document.elementFromPoint(ev.clientX, ev.clientY);
@@ -2602,7 +3026,10 @@ window.addEventListener('mousemove', (ev) => {
         const r = wrap.getBoundingClientRect();
         const pt = fromViewport(n, ev.clientX - r.left, ev.clientY - r.top);
         if (!pt) return;
-        vscode.postMessage({ type: 'insertPreview', page: n, xBp: pt.xBp, yTopBp: pt.yTopBp });
+        vscode.postMessage({
+            type: armMode === 'paste' ? 'pastePreview' : 'insertPreview',
+            page: n, xBp: pt.xBp, yTopBp: pt.yTopBp,
+        });
         return;
     }
     if (dragMove) {
@@ -2969,7 +3396,46 @@ function buildEditCard(e) {
             vscode.postMessage({ type: 'editChange', editId: e.id, text: ta.value });
         }, 250);
         syncHighlight(card);
+        sendCaret();
     });
+
+    // THE CARET IN THE CARD IS A CARET IN THE PAPER.
+    //
+    // Moving it used to show nothing on the page, while moving the same caret
+    // in the editor behind it lit the word up — so the card, which is the
+    // thing you are actually typing in, was the one place the paper stopped
+    // answering. The offsets are relative to the block; the extension adds the
+    // block's own start and treats it exactly as it treats the editor's.
+    let caretT = null;
+    const sendCaret = () => {
+        clearTimeout(caretT);
+        caretT = setTimeout(() => {
+            if (!state.edit) return;
+            const a = ta.selectionStart; const b = ta.selectionEnd;
+            const key = `${a}:${b}`;
+            // A repaint is not a movement — and neither is a range the PAGE
+            // just put here. `_caretSent` is kept on the session rather than in
+            // this closure so that selectInEditCard can prime it: without that
+            // the page's own selection arrives, sets the range, fires `select`,
+            // and is posted straight back as though the reader had moved.
+            if (key === state.edit._caretSent) return;
+            state.edit._caretSent = key;
+            // THE BOX AROUND THE LOCATED WORD IS AN ANSWER TO ONE QUESTION,
+            // and moving the caret asks a different one. It used to stay drawn
+            // for the life of the card, so a word clicked once stayed marked
+            // however far away the reader then typed — reported as "the
+            // initially highlighted word stays highlighted forever".
+            if (state.edit && state.edit.sel &&
+                (state.edit.sel.start !== a || state.edit.sel.end !== b)) {
+                state.edit.sel = null;
+                syncHighlight(card);
+            }
+            vscode.postMessage({ type: 'editCaret', editId: e.id, start: a, end: b });
+        }, 90);
+    };
+    for (const ev of ['keyup', 'mouseup', 'select', 'focus']) {
+        ta.addEventListener(ev, sendCaret);
+    }
     ta.addEventListener('keydown', (ev) => {
         ev.stopPropagation();                     // Esc here must not exit full screen
         if (ev.altKey && (ev.key === 'ArrowUp' || ev.key === 'ArrowDown')) {
@@ -3021,6 +3487,38 @@ const mmaPending = new Map();
  * builtin-symbol table (69 KB of it), and because a failure to load must leave
  * a WORKING card with plain text in it rather than no card at all.
  */
+/**
+ * The stylesheet that makes pre-rendered KaTeX look like mathematics.
+ *
+ * The card receives HTML the extension already typeset — a tree of
+ * `<span class="katex">` — and WITHOUT this it renders as a pile of unstyled
+ * fragments, which is what "the editor shows the output not in LaTeX" looks
+ * like. The viewer never needed KaTeX before, so it never loaded any.
+ *
+ * Lazy, and once: the file is 360 KB because every font is inlined as a data:
+ * URI (which is exactly why it needs no network and cannot flash unstyled),
+ * and a reader who never opens a computation should not pay for it.
+ */
+let katexCssState = null;               // null | Promise | true
+function ensureKatexCss() {
+    if (katexCssState === true) return Promise.resolve();
+    if (katexCssState) return katexCssState;
+    katexCssState = (async () => {
+        try {
+            const { KATEX_CSS } = await import('./katex-css.js');
+            const st = document.createElement('style');
+            st.id = 'katexcss';
+            st.textContent = KATEX_CSS;
+            document.head.appendChild(st);
+            katexCssState = true;
+        } catch (_) {
+            // The LaTeX source is still shown; only the typesetting is lost.
+            katexCssState = null;
+        }
+    })();
+    return katexCssState;
+}
+
 async function ensureWolframHighlighter() {
     if (mmaHl !== null) return mmaHl;
     try {
@@ -3162,7 +3660,28 @@ function buildMmaCard(e) {
         b.addEventListener('click', fn);
         return b;
     };
-    head.append(title, where, badge, spacer, buildKernelPicker(),
+    // HOW WIDE THE LaTeX MAY BE. Measured from the printed page and SHOWN
+    // rather than hidden: the measurement is a good guess about a one-column
+    // article and no guess at all about a two-column one, and a wrong width is
+    // invisible in the card — it only shows once the equation is on the page.
+    const wrapW = document.createElement('label');
+    wrapW.className = 'mc-w';
+    wrapW.title = 'How wide the LaTeX may be, in em — what the converter breaks lines to.'
+        + '\nMeasured from the printed page; change it if this sits in a narrower column.';
+    const width = document.createElement('input');
+    width.type = 'number';
+    width.min = '10';
+    width.max = '200';
+    width.step = '1';
+    width.className = 'mc-width';
+    width.value = e.pageWidthEm ? String(e.pageWidthEm) : '';
+    width.addEventListener('change', () => {
+        const v = Math.round(Number(width.value));
+        if (state.mma) state.mma.pageWidthEm = v > 0 ? v : null;
+    });
+    wrapW.append(width, document.createTextNode('em'));
+
+    head.append(title, where, badge, spacer, wrapW, buildKernelPicker(),
         btn('↗', 'Open this block in the editor', () =>
             vscode.postMessage({ type: 'editReveal', editId: e.editId })),
         btn('✕', 'Close (Esc)', () => closeMmaCard()));
@@ -3250,6 +3769,7 @@ function buildMmaCell(cell, e) {
         vscode.postMessage({
             type: 'mmaRun', runId, blockId: e.blockId,
             cellId: cell.cellId || null, code: ta.value,
+            pageWidthEm: (state.mma && state.mma.pageWidthEm) || null,
         });
     };
     run.addEventListener('click', doRun);
@@ -3444,6 +3964,9 @@ function selectInEditCard(msg) {
     if (!card) return;
     const ta = card.querySelector('textarea');
     e.sel = { start: msg.start, end: msg.end };
+    // Claim this position before setting it: setSelectionRange fires `select`,
+    // and an un-primed card would post it back as the reader's own movement.
+    e._caretSent = `${msg.start}:${msg.end}`;
     syncHighlight(card);
     try { ta.setSelectionRange(msg.start, msg.end); } catch (_) { /* out of range */ }
     // preventScroll for the same reason as opening: the reveal below is
@@ -3527,11 +4050,13 @@ function renderEditNav() {
     const reviewing = !!(state.review && state.review.pending);
     wrap.classList.toggle('review', reviewing);
 
+    const kind = el('ednkind');
     if (reviewing) {
         const hunks = reviewHunks();
         const i = reviewFocusIndex();
         const h = i >= 0 ? hunks[i] : null;
         wrap.hidden = false;
+        if (kind) { kind.textContent = 'to review'; kind.title = 'Changes still to be decided'; }
         keep.hidden = false; undo.hidden = false; done.hidden = true;
         // The same name the review list gives it — `h.where` is a placement
         // code ('rows' | 'gap' | 'none'), not something to show a reader.
@@ -3549,6 +4074,10 @@ function renderEditNav() {
     const i = Math.max(0, Math.min(items.length - 1, (st && st.index) || 0));
     const e = items[i];
     wrap.hidden = false;
+    if (kind) {
+        kind.textContent = 'recent edits';
+        kind.title = 'Places you have been editing — ◀ ▶ walks them, ✓ drops this one';
+    }
     keep.hidden = true; undo.hidden = true; done.hidden = false;
     // Counted from the NEWEST, which is how the reader thinks of it: 1 is
     // "where I just was", and the numbers grow into the past.
@@ -3646,7 +4175,42 @@ el('follow').addEventListener('click', () => {
     setFollowMode(FOLLOW_MODES[(FOLLOW_MODES.indexOf(state.followMode) + 1) % FOLLOW_MODES.length]);
 });
 el('recompile').addEventListener('click', () => vscode.postMessage({ type: 'recompile' }));
-el('addmma').addEventListener('click', () => setArmInsert(!armInsert));
+el('addmma').addEventListener('click', () => setArmInsert(armMode !== 'insert', 'insert'));
+
+// ⌘V ON THE PAGE ASKS WHERE.
+//
+// In an editor paste means "replace the selection", and on a page there need
+// not be one — so it arms the same blue caret every other placing gesture uses
+// and the click decides. A paste with a SELECTION on the page still means
+// replace it: that is what the selection bar's own paste button is for, and
+// this must not quietly take it over.
+// ⌘⌥O / Ctrl+Alt+O — "outline".
+//
+// ⌘N was tried and is VS Code's New File: a webview only sees the keys the
+// host has not already claimed, so a shortcut here has to be one with NO
+// default binding. ⌘⌥O has none on either platform, and O for outline is the
+// same letter the editor's own "go to symbol" family uses — which is exactly
+// the action this performs, on the paper instead of the file.
+//
+// The toolbar button is the discoverable route; this is for people who stop
+// reaching for the mouse.
+window.addEventListener('keydown', (e) => {
+    if (e.key !== 'o' && e.key !== 'O') return;
+    if (!(e.metaKey || e.ctrlKey) || !e.altKey || e.shiftKey) return;
+    const t = e.target;
+    if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT')) return;
+    e.preventDefault();
+    setNav(!navVisible());
+});
+
+window.addEventListener('keydown', (e) => {
+    if (e.key !== 'v' || !(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey) return;
+    const t = e.target;
+    if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT')) return;   // the card owns it
+    if (state.selection && !state.selection.pendingStart) return;           // replace, not place
+    e.preventDefault();
+    setArmInsert(true, 'paste');
+});
 el('pin').addEventListener('change', (e) => {
     state.pinHighlight = e.target.checked;
     paintHighlight();
@@ -3666,6 +4230,9 @@ el('pin').addEventListener('change', (e) => {
                 lastLeft = main.scrollLeft;
                 paintEditCard();
             }
+            // Cheap enough to do on every scroll event: it walks the page
+            // elements and touches one text node.
+            paintPageNow();
             clearTimeout(t);
             t = setTimeout(() => {
                 const a = scrollAnchor();
@@ -3771,9 +4338,17 @@ window.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
     if (e.target && e.target.tagName === 'TEXTAREA') return;   // the card owns it
 
-    // Arming is the newest thing the reader turned on, so it is the first
+    // The contents are over the paper, so they are the first thing Esc takes
+    // away — anything else would be answering a question about what is behind
+    // them.
+    if (navVisible()) {
+        setNav(false);
+        e.preventDefault();
+        return;
+    }
+    // Arming is the newest thing the reader turned on, so it is the next
     // thing Esc turns off — and it must not also clear their selection.
-    if (armInsert) {
+    if (armMode) {
         setArmInsert(false);
         e.preventDefault();
         return;
@@ -4115,6 +4690,9 @@ window.addEventListener('message', async (ev) => {
         case 'sections':
             state.sections = { generation: msg.generation, items: msg.items || [], pageWidth: msg.pageWidth };
             paintSections();
+            // Folding from the contents changes the contents; leaving the old
+            // list up would show a section as open that has just been folded.
+            if (navVisible()) renderNav();
             break;
         case 'labels':
             state.labels = { generation: msg.generation, items: msg.items || [] };
@@ -4184,14 +4762,15 @@ window.addEventListener('message', async (ev) => {
                 editId: msg.editId, blockId: msg.blockId, file: msg.file,
                 startLine: msg.startLine, endLine: msg.endLine,
                 cells: msg.cells || [], state: msg.state, stateReason: msg.stateReason,
+                pageWidthEm: msg.pageWidthEm || null,
                 rects: msg.rects || [],
                 page: (msg.rects && msg.rects[0] && msg.rects[0].page) || 1,
                 pos: null,
             };
-            // The tokeniser is loaded BEFORE the card is painted, so the first
-            // paint is already coloured — a card that starts plain and then
-            // repaints reads as a glitch.
-            await ensureWolframHighlighter();
+            // Both loaded BEFORE the card is painted, so the first paint is
+            // already coloured and the first result is already typeset — a
+            // card that starts plain and then repaints reads as a glitch.
+            await Promise.all([ensureWolframHighlighter(), ensureKatexCss()]);
             const page = state.mma.rects.length
                 ? state.mma.rects[state.mma.rects.length - 1].page : state.mma.page;
             await renderPage(page);
@@ -4235,6 +4814,12 @@ window.addEventListener('message', async (ev) => {
             state.editStack = { items: msg.items || [], index: msg.index || 0 };
             renderEditNav();
             break;
+        case 'blank':
+            // The paper changed. Nothing on screen belongs to the new one.
+            clearPages();
+            state.generation = null;
+            closeEditCard(false);
+            break;
         case 'mmaAnchor':
             if (state.mma && state.mma.blockId === msg.blockId) {
                 state.mma.rects = msg.rects || state.mma.rects;
@@ -4261,6 +4846,11 @@ window.addEventListener('message', async (ev) => {
                 timing.textContent = msg.error ? ''
                     : `${msg.ms} ms · ${msg.pageWidthEm} em`;
             }
+            // Show what was ACTUALLY used, which is the measurement until the
+            // reader overrides it — otherwise the box sits empty beside a
+            // result that plainly was broken to something.
+            const wIn = document.querySelector('.mc-width');
+            if (wIn && msg.pageWidthEm && !wIn.value) wIn.value = String(msg.pageWidthEm);
             paintMmaResult(cellEl, msg);
             // Only a result that could actually go into the paper offers to.
             if (insert) insert.disabled = !!msg.error;
@@ -4348,6 +4938,29 @@ vscode.postMessage({ type: 'ready' });
 // before the first `open` — so the one test that needs it says so explicitly
 // rather than half-simulating it by emptying the DOM.
 /**
+ * Take every page off the screen.
+ *
+ * Used when the viewer changes PAPER: whatever is up belongs to the paper
+ * being left, and leaving it there under the new one's name shows the reader
+ * another document's pages as though they were this one's.
+ */
+function clearPages() {
+    pagesEl().innerHTML = '';
+    state.pageCount = 0;
+    state.rendered.clear();
+    state.pending.clear();
+    textCache.clear();
+    state.highlight = null;
+    state.selection = null;
+    state.labels = null;
+    state.sections = null;
+    for (const el of document.querySelectorAll('.lbc, .lbcink, .wpa, .movecaret, .hl, .selfill')) el.remove();
+    const pc = el('pagecount');
+    if (pc) pc.textContent = '?';
+    paintPageNow();
+}
+
+/**
  * Un-render ONE page without touching the DOM.
  *
  * forgetPagesForTest wipes the pages entirely, which stages a FRESH PANEL —
@@ -4369,4 +4982,4 @@ function forgetPagesForTest() {
     textCache.clear();
 }
 
-window.__wbTexViewerTest = { fitToolbar, dropRenderedForTest, snapToInk, itemWords, prefixWidths, textItems, wordKey, foldGlyphs, wordAtPoint, highlightLatex, fromViewport, rectToViewport, forgetPagesForTest };
+window.__wbTexViewerTest = { fitToolbar, dropRenderedForTest, renderPage, snapToInk, itemWords, prefixWidths, textItems, wordKey, foldGlyphs, wordAtPoint, highlightLatex, fromViewport, rectToViewport, forgetPagesForTest };

@@ -161,6 +161,60 @@ function offsetOfLine(starts, line, text) {
  *                               produce hundreds, and posting all their text is
  *                               slow and useless)
  */
+/**
+ * Join changes that a reader would call ONE change.
+ *
+ * diffLines splits at every identical line, which is right for a diff and
+ * wrong for a worklist: a six-line equation with edits on lines 2, 4 and 5
+ * arrives as THREE items, all of them named "display-equation eq:…", all on the
+ * same page, and every one of them has to be approved separately. Reported as
+ * "many small items which are in the same place".
+ *
+ * Two hunks become one when either holds:
+ *
+ *   - they are inside the SAME addressable object. An equation is one thing to
+ *     agree to; nobody keeps half of one.
+ *   - nothing separates them at all. `gap` defaults to ZERO, and that is a
+ *     measured decision rather than caution: at 1, a document the agent
+ *     rewrote on every other line — every hunk with a single paired line
+ *     between it and the next — collapses into ONE item covering the paper,
+ *     which is a worse answer than the many-small-items it was meant to fix.
+ *
+ * The lines between two merged hunks are identical on both sides — that is why
+ * the diff paired them — so the union's slice of OURS and of THEIRS both carry
+ * them unchanged, and the merged hunk's text is still exactly what to keep or
+ * put back. The kind is recomputed from the union rather than carried over: an
+ * `add` merged across context is a `change`.
+ */
+function coalesceHunks(hunks, objectAt, gap) {
+    if (!hunks.length) return hunks;
+    const keyAt = (line) => {
+        const o = objectAt(line);
+        return o ? keyOf(o) : '';
+    };
+    const out = [hunks[0]];
+    for (let i = 1; i < hunks.length; i++) {
+        const cur = hunks[i];
+        const prev = out[out.length - 1];
+        const between = cur.aStart - prev.aEnd;         // identical lines in ours
+        const sameObject = (() => {
+            const a = keyAt(prev.aStart);
+            return !!a && a === keyAt(cur.aStart);
+        })();
+        if (between <= gap || sameObject) {
+            prev.aStart = Math.min(prev.aStart, cur.aStart);
+            prev.aEnd = Math.max(prev.aEnd, cur.aEnd);
+            prev.bStart = Math.min(prev.bStart, cur.bStart);
+            prev.bEnd = Math.max(prev.bEnd, cur.bEnd);
+            prev.kind = prev.aEnd === prev.aStart ? 'add'
+                : (prev.bEnd === prev.bStart ? 'del' : 'change');
+            continue;
+        }
+        out.push(cur);
+    }
+    return out;
+}
+
 function buildComparison(o = {}) {
     const ourText = String(o.ourText == null ? '' : o.ourText);
     const theirText = String(o.theirText == null ? '' : o.theirText);
@@ -169,7 +223,11 @@ function buildComparison(o = {}) {
 
     const A = splitLines(ourText);
     const B = splitLines(theirText);
-    const all = diffLines(A, B);
+    // One item per THING CHANGED, not one per run of changed lines.
+    const all = coalesceHunks(
+        diffLines(A, B),
+        (line) => safeCall(map, 'objectAtLine', line),
+        Number.isFinite(o.coalesceGap) ? o.coalesceGap : 0);
     const starts = lineStarts(ourText);
 
     const hunks = [];
@@ -241,4 +299,4 @@ function describeSummary(s) {
     return bits.join(' · ');
 }
 
-module.exports = { buildComparison, placeHunk, describeSummary, WHERE };
+module.exports = { buildComparison, coalesceHunks, placeHunk, describeSummary, WHERE };

@@ -31,6 +31,7 @@ const { readAuxLabels } = require('./auxLabels');
 const { buildLabelChips, formatLabelCopy, altFormat,
     blockOf, inColumn, tagRows, rowsOver, CHIP_H } = require('./labelChips');
 const { stepAt, satisfies } = require('./tourSteps');
+const { graphicxInsertion } = require('./texPaste');
 const mmaBlocks = require('./mmaBlocks');
 const mmaWrite = require('./mmaWrite');
 const { announceAgentEdit } = require('./reviewBus');
@@ -563,11 +564,48 @@ class TexViewer {
         }
         // A DIFFERENT PAPER HAS A DIFFERENT PLACE. Carrying the last one's
         // scroll position into it would open the new paper somewhere arbitrary.
-        if (this.root !== root) this._viewState = this._viewFor(root);
+        const switching = this.root !== root;
+        if (switching) {
+            this._viewState = this._viewFor(root);
+            // AND NOTHING ON SCREEN BELONGS TO IT.
+            //
+            // refresh() returns early when the new paper has no PDF, which
+            // left the PREVIOUS paper's pages up under the new one's name —
+            // reported as "showing old file pdf from the previous tab". Taking
+            // them down first means the worst case is an empty viewer saying
+            // so, rather than another document shown as though it were this
+            // one.
+            this._post({ type: 'blank' });
+            this.shownGeneration = null;
+            this.shownPdfHash = null;
+            this.shownAnything = false;
+            this._text = null;
+            this._objMaps.clear();
+            this._chips = null;
+            this._chipModels = null;
+            this._edit = null;
+            this._mma = null;
+        }
         this.root = root;
         this._rememberRoot(root);
         this._postTheme();
         await this.refresh({ force: true });
+
+        // A PAPER WITH NO PDF SHOULD BUILD ONE, not sit there telling the
+        // reader to press a button. Switching tabs is not a request to compile
+        // everything in the workspace, so only the paper actually being shown
+        // is built, and only when compiling is on at all.
+        try {
+            const st = this.coord.roots.get(root);
+            const off = vscode.workspace.getConfiguration('wolfbook.tex').get('compile', 'onSave') === 'off';
+            if (!off && (!st || (!st.generation && !st.compiling))) {
+                this._post({ type: 'status', text: 'compiling the paper…', kind: '' });
+                await this.coord.build(doc);
+                await this.refresh({ force: true });
+            }
+        } catch (e) {
+            this._post({ type: 'status', text: `could not compile: ${e.message}`, kind: 'err' });
+        }
     }
 
     /**
@@ -731,6 +769,30 @@ class TexViewer {
         }
     }
 
+    /**
+     * Say that the paper is being rebuilt BECAUSE OF SOMETHING JUST DONE.
+     *
+     * A live rebuild while typing is deliberately quiet — one marker, no
+     * chrome — because it happens hundreds of times a session and the reader
+     * did not ask for it. A structural action is the opposite: folding a
+     * section, cutting one, pasting into the page. The reader DID ask, the
+     * paper is about to change under them, and nothing on screen said so
+     * until the new PDF arrived, which on a real paper is seconds away.
+     *
+     * Cleared by the next refresh, whether it ships a new PDF or decides the
+     * ink did not move — a spinner that outlives its work is worse than none.
+     */
+    _busy(text) {
+        this._busyText = text;
+        this._post({ type: 'status', text, kind: 'busy' });
+    }
+
+    _clearBusy(text, kind = '') {
+        if (!this._busyText) return;
+        this._busyText = null;
+        this._post({ type: 'status', text, kind });
+    }
+
     /** Push the current generation's PDF into the webview. */
     async refresh({ force = false } = {}) {
         if (!this.panel || !this.root) return;
@@ -765,6 +827,7 @@ class TexViewer {
         if (!decision.ship) {
             if (decision.reason === 'identical pdf') {
                 this._log(`generation ${st.generation.generation}: ${decision.reason} — nothing shipped`);
+                this._clearBusy('the paper is unchanged');
                 // The ink did not move, but the SOURCE did (that is why we
                 // recompiled), so the map did. Re-answer from the new map
                 // without disturbing the document the webview already holds —
@@ -791,6 +854,7 @@ class TexViewer {
         // state if it is being opened again, or after a reload.
         const place = this._viewState || this._viewFor(this.root);
         this.shownGeneration = st.generation.generation;
+        this._busyText = null;   // the new pages ARE the answer; the panel says the rest
         this.panel.title = `WPaper · ${path.basename(this.root)}`;
         const w = this.panel.webview;
 
@@ -1110,9 +1174,55 @@ class TexViewer {
     get autoHidden() { return !!this._autoHidden; }
 
     async autoRestore(doc) {
-        if (this.panel || !this._autoHidden) return;
+        // ALREADY OPEN ON ANOTHER PAPER IS THE COMMON CASE, and it used to do
+        // nothing at all: this returned early whenever a panel existed, so
+        // switching from one .tex tab to another left the viewer showing the
+        // paper you had just left. Reported as "changing tex files does not
+        // switch the viewer to the new source".
+        //
+        // Re-opening is guarded on the ROOT, not the file: two files of one
+        // project share a paper, and re-opening on every tab change within it
+        // would throw away the reader's place and recompile for nothing.
+        if (this.panel) {
+            let root = null;
+            try { root = this.coord.rootFor(doc); } catch (e) {
+                this._log(`follow: cannot resolve a root for ${path.basename(doc.uri.fsPath)}: ${e.message}`);
+                root = null;
+            }
+            // `this.root` is NOT required to be set. It is null for a panel VS
+            // Code restored from a previous window, and requiring it meant the
+            // viewer sat there showing a paper it could not name and refusing
+            // to follow anything — the switch silently did nothing.
+            if (root && root !== this.root) {
+                this._log(`follow: ${this.root ? path.basename(this.root) : '(none)'} -> ${path.basename(root)}`);
+                await this.open(doc, { reveal: true });
+                return;
+            }
+            // Same paper. Two files of one project SHARE a root, and re-opening
+            // between them would throw away the reader's place and recompile
+            // for nothing — but the title still names the file being edited.
+            this._retitle(doc);
+            return;
+        }
+        if (!this._autoHidden) return;
         this._autoHidden = null;
         await this.open(doc, { reveal: true });
+    }
+
+    /**
+     * Keep the panel's title on the file the reader is in.
+     *
+     * Within one project the root does not change as they move between files,
+     * so nothing reloads — but a title still naming the file they left is the
+     * viewer looking unpaired even when it is showing the right paper.
+     */
+    _retitle(doc) {
+        if (!this.panel || !doc) return;
+        try {
+            const name = path.basename(doc.uri.fsPath);
+            const want = `WPaper · ${name}`;
+            if (this.panel.title !== want) this.panel.title = want;
+        } catch (_) { /* a title is not worth an exception */ }
     }
 
     /** Is the Page view actually on screen? Live rebuilds are for it alone. */
@@ -2154,6 +2264,18 @@ class TexViewer {
             start: new vscode.Position(sel.start.line, sel.start.character),
             end: new vscode.Position(sel.end.line, sel.end.character),
         };
+        // AND INTO THE CARD, when the selection falls inside the open block.
+        //
+        // The card already knew how to show a range — that is what an inverse
+        // click has always done — but only the inverse click ever told it. A
+        // range picked out ON THE PAGE left the card showing whatever it was
+        // showing before, so the two halves of one selection disagreed.
+        // _postEditSelection ignores a range outside the open block, and does
+        // nothing at all when no card is open.
+        try {
+            this._postEditSelection(doc, new vscode.Range(sel.start, sel.end), false);
+        } catch (_) { /* the page's own span is the main event */ }
+
         this._post({
             type: 'selection',
             span: {
@@ -2324,10 +2446,22 @@ class TexViewer {
                 break;
             case 'editStep': await this._stepEditSession(m); break;
             case 'editChange': await this._applyEditChange(m); break;
+            case 'editCaret': await this._onEditCaret(m); break;
             case 'editClose': this._edit = null; break;
             case 'editSave': await this._saveEditDoc(); break;
             case 'editReveal': await this._revealEditRange(); break;
             case 'editNav': await this._onEditNav(m); break;
+            case 'openExternal':
+                // A webview cannot open a browser; this can. Only http(s) and
+                // mailto — a PDF is an untrusted document, and `file:` or a
+                // command URI in one is somebody else's idea, not the reader's.
+                if (m && typeof m.url === 'string' && /^(https?|mailto):/i.test(m.url)) {
+                    try { await vscode.env.openExternal(vscode.Uri.parse(m.url)); }
+                    catch (e) { this._post({ type: 'status', text: `could not open it: ${e.message}`, kind: 'err' }); }
+                } else {
+                    this._post({ type: 'status', text: 'that link is not a web address', kind: 'warn' });
+                }
+                break;
             case 'revealSection':
                 // Reviewing a list of changes means wanting to see where they
                 // are. Same path the worklist uses, so both scroll the same way
@@ -2337,10 +2471,14 @@ class TexViewer {
                     await this._gotoEdit({
                         file: m.file || this.root,
                         line: Number(m.line),
+                        endLine: Number(m.endLine) || 0,
                         label: 'section',
                     });
                 }
                 break;
+            case 'anchorAction': await this._onAnchorAction(m); break;
+            case 'pastePreview': await this._insertPreview(m, 'paste'); break;
+            case 'pasteCommit': await this._pasteCommit(m); break;
             case 'insertPreview': await this._insertPreview(m); break;
             case 'insertCommit': await this._insertCommit(m); break;
             case 'insertCancel':
@@ -2716,6 +2854,40 @@ class TexViewer {
         }
     }
 
+    /**
+     * copy / cut / delete over one range of one document.
+     *
+     * Shared by the selection bar and the section anchors, for the invariant in
+     * the middle of it: A CUT THAT CANNOT COPY MUST NOT DELETE. That is the one
+     * way to lose text with nothing to paste back, and it is too easy to write
+     * a second copy of this that gets it wrong.
+     *
+     * @returns {{ok: true, text: string, changed: boolean} | {ok: false, reason: string}}
+     */
+    async _rangeAction(doc, range, action) {
+        const text = doc.getText(range);
+        if (action === 'copy') {
+            try { await vscode.env.clipboard.writeText(text); }
+            catch (e) { return { ok: false, reason: `could not copy: ${e.message}` }; }
+            return { ok: true, text, changed: false };
+        }
+        if (action !== 'cut' && action !== 'delete') {
+            return { ok: false, reason: `unknown action ${action}` };
+        }
+        if (action === 'cut') {
+            try { await vscode.env.clipboard.writeText(text); }
+            catch (e) {
+                return { ok: false, reason: `could not copy, so nothing was cut: ${e.message}` };
+            }
+        }
+        const edit = new vscode.WorkspaceEdit();
+        edit.delete(doc.uri, range);
+        let ok = false;
+        try { ok = await vscode.workspace.applyEdit(edit); } catch (_) { ok = false; }
+        if (!ok) return { ok: false, reason: `the ${action} could not be applied` };
+        return { ok: true, text, changed: true };
+    }
+
     async _selectionAction(m) {
         const action = m && m.action;
         const t = await this._selectionTarget();
@@ -2735,20 +2907,8 @@ class TexViewer {
         }
 
         if (action === 'cut' || action === 'delete') {
-            if (action === 'cut') {
-                try { await vscode.env.clipboard.writeText(text); }
-                catch (e) {
-                    // A cut that cannot copy must not delete: that is the one
-                    // way to lose the text with nothing to paste back.
-                    this._post({ type: 'status', text: `could not copy, so nothing was cut: ${e.message}`, kind: 'err' });
-                    return;
-                }
-            }
-            const edit = new vscode.WorkspaceEdit();
-            edit.delete(doc.uri, range);
-            let ok = false;
-            try { ok = await vscode.workspace.applyEdit(edit); } catch (e) { ok = false; }
-            if (!ok) { this._post({ type: 'status', text: `the ${action} could not be applied`, kind: 'err' }); return; }
+            const r = await this._rangeAction(doc, range, action);
+            if (!r.ok) { this._post({ type: 'status', text: r.reason, kind: 'err' }); return; }
             this._afterSelectionEdit(sel.file, sel.start, sel.start, 'gone');
             this._post({
                 type: 'status', kind: 'ok',
@@ -3721,6 +3881,7 @@ class TexViewer {
         if (editor) {
             editor.selection = new vscode.Selection(range.start, range.end);
             editor.revealRange(range, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+            this._offerSmoothScroll();
             // The page marks where you are with a wash that fades; the editor
             // end of the same gesture now does too, decaying into the ordinary
             // selection rather than just appearing there.
@@ -4108,6 +4269,9 @@ class TexViewer {
             if (text == null) continue;
             const lines = text.split('\n');
             const heads = (model.objects || []).filter(o => o.kind === 'section-heading');
+            let numbers = new Map();
+            try { numbers = (this.sectionNumbers && this.sectionNumbers(file)) || new Map(); }
+            catch (_) { numbers = new Map(); }
             const equations = (model.objects || []).filter(o => o.kind === 'display-equation');
             if (!heads.length && !equations.length) continue;
             let spans = [];
@@ -4124,14 +4288,38 @@ class TexViewer {
                 if (!rows.length && h.sourceRange.endLine !== h.sourceRange.startLine) {
                     try { rows = st.map.lineRows(file, h.sourceRange.startLine) || []; } catch (_) { rows = []; }
                 }
+                // A HEADING WITH NO RECORD OF ITS OWN STILL HAS A PLACE.
+                //
+                // A run-in \paragraph sets its title inside the following
+                // paragraph's first line, so the map may file every glyph under
+                // that line and leave the heading's own with none. Such an entry
+                // used to carry no page at all — which sorted it to the top of
+                // the contents, ahead of section 1, and made it unreachable,
+                // because going there asks for rows this line does not have.
+                // Reported as "what are these things on top? not clickable and
+                // no number".
+                // ACROSS THE WHOLE UNIT, not a few lines past its heading. A
+                // run-in \paragraph can be followed by macro lines, comments or
+                // a display before anything is printed, so counting lines finds
+                // nothing; the unit's own body always prints something.
+                if (!rows.length) {
+                    const to = Math.max(h.sourceRange.endLine, span ? span.endLine : h.sourceRange.endLine);
+                    try { rows = st.map.rangeRows(file, h.sourceRange.startLine, to) || []; }
+                    catch (_) { rows = []; }
+                }
                 const row = rows.length ? rows[rows.length - 1] : null;
+                const skey = h.stableKey || `${file}:${h.sourceRange.startLine}`;
                 out.push({
-                    key: h.stableKey || `${file}:${h.sourceRange.startLine}`,
+                    key: skey,
                     kind: 'section',
                     foldable: true,
                     line: h.sourceRange.startLine,
                     file,
                     title: h.title || '',
+                    // What LaTeX printed beside it, when the last compile knew.
+                    // A contents list without these is a flat run of titles in
+                    // which a subsection looks exactly like a section.
+                    number: numbers.get(skey) || null,
                     level: h.level || 0,
                     headStart: h.sourceRange.startLine,
                     headEnd: h.sourceRange.endLine,
@@ -4291,13 +4479,14 @@ class TexViewer {
         let ok = false;
         try { ok = await vscode.workspace.applyEdit(we); } catch (_) { ok = false; }
         if (!ok) { this._post({ type: 'status', text: 'the fold could not be applied', kind: 'err' }); return; }
-        this._post({
-            type: 'status', kind: 'ok',
-            text: m.collapse
-                ? `folded away ${r.hidden} line${r.hidden === 1 ? '' : 's'} of "${it.title}" — ` +
-                  'the .tex keeps every word; only WPaper\'s copy leaves it out'
-                : `brought back ${r.shown} line${r.shown === 1 ? '' : 's'} of "${it.title}"`,
-        });
+        // The SPINNER is the only thing added here. The words stay exactly as
+        // they were: "the .tex keeps every word" is the reassurance the whole
+        // fold design rests on, and dropping it to say "rebuilding…" would
+        // trade the thing worth saying for the thing already visible.
+        this._busy(m.collapse
+            ? `folded away ${r.hidden} line${r.hidden === 1 ? '' : 's'} of "${it.title}" — ` +
+              'the .tex keeps every word; only WPaper\'s copy leaves it out'
+            : `brought back ${r.shown} line${r.shown === 1 ? '' : 's'} of "${it.title}"`);
         // The controls are read from the file, so they are stale the moment it
         // changes; the recompile that follows re-posts them with the geometry.
         await this._postSections();
@@ -4702,6 +4891,58 @@ class TexViewer {
         });
     }
 
+    /**
+     * The caret moved in the card — answer as the paper answers the editor.
+     *
+     * The card is the thing the reader is typing in, and it was the one place
+     * the page stopped responding: moving this caret showed nothing, while
+     * moving the same caret in the editor behind it lit the word up.
+     *
+     * The offsets arrive relative to the BLOCK, because that is all the card
+     * knows; the block's own start makes them document offsets, and from there
+     * it is the ordinary forward-sync — a wash for a caret, a marked span for
+     * a range, and `follow` governing whether the page also moves.
+     *
+     * WHEN THE FILE IS ALREADY OPEN IN A VISIBLE EDITOR, the selection is
+     * mirrored there and that editor's own change event does the rest: two
+     * halves of one document should not disagree about where the reader is.
+     * An editor that is NOT on screen is left alone — asked for explicitly,
+     * and right: a card is for editing without opening the file.
+     */
+    async _onEditCaret(m) {
+        const s = this._edit;
+        if (!s || !this.panel || !m || m.editId !== s.id) return;
+        let doc;
+        try { doc = await vscode.workspace.openTextDocument(vscode.Uri.file(s.file)); }
+        catch (_) { return; }
+
+        const span = Math.max(0, s.endOffset - s.startOffset);
+        const lo = Math.max(0, Math.min(Number(m.start) || 0, span));
+        const hi = Math.max(lo, Math.min(Number(m.end) || lo, span));
+        const from = doc.positionAt(s.startOffset + lo);
+        const to = doc.positionAt(s.startOffset + hi);
+        const sel = new vscode.Selection(from, to);
+
+        const open = (vscode.window.visibleTextEditors || [])
+            .find(e => e.document && e.document.uri.fsPath === s.file);
+        if (open) {
+            // Setting a selection does not scroll — revealRange would, and the
+            // reader did not ask to be taken anywhere in the editor.
+            try { open.selection = sel; } catch (_) { /* fall through to the direct sync */ }
+            // Its own selection-change event drives the page from here, so
+            // syncing again would post the same answer twice.
+            return;
+        }
+        // `active` is where the CARET is — the end of a drag, and the whole
+        // position for a plain caret. Spelled out rather than left to the
+        // constructor: the forward sync reads it directly, and a selection
+        // without it answers about the wrong end of a range.
+        this.syncFromEditor({
+            document: doc,
+            selection: { start: from, end: to, anchor: from, active: to, isEmpty: lo === hi },
+        });
+    }
+
     async _applyEditChange(m) {
         const s = this._edit;
         if (!s || m.editId !== s.id || typeof m.text !== 'string') return;
@@ -5017,7 +5258,17 @@ class TexViewer {
             this._post({ type: 'status', text: 'no render map yet', kind: 'warn' });
             return;
         }
-        const rects = this._editRects(st, entry.file, entry.line, entry.line);
+        let rects = this._editRects(st, entry.file, entry.line, entry.line);
+        // The line asked for may print nothing of its own — a run-in heading,
+        // a `\label` on its own line, a comment. The unit's own BODY does, so
+        // the first row anywhere in it is the honest answer to "take me
+        // there"; refusing outright is not, since the reader can see the thing
+        // in the contents and asked for it by name.
+        if (!rects.length && entry.endLine > entry.line) {
+            const all = this._editRects(st, entry.file, entry.line,
+                Math.min(entry.endLine, entry.line + 60));
+            rects = all.slice(0, 1);
+        }
         if (!rects.length) {
             this._post({ type: 'status', text: `${entry.label} is not on the page`, kind: 'warn' });
             return;
@@ -5034,8 +5285,8 @@ class TexViewer {
         });
     }
 
-    /** Live feedback while the insert gesture is armed. */
-    async _insertPreview(m) {
+    /** Live feedback while an arming gesture is on — insert, or paste. */
+    async _insertPreview(m, what = 'computation') {
         const st = this.root && this.coord.roots.get(this.root);
         if (!st || !st.map || !st.map.available) return;
         const hit = this._resolvePoint(st, m);
@@ -5052,8 +5303,121 @@ class TexViewer {
         if (!t) { this._post({ type: 'moveCaret', rects: [] }); return; }
         this._post({
             type: 'moveCaret', rects: t.rects, block: true,
-            label: `computation here · line ${t.line}`,
+            label: `${what} here · line ${t.line}`,
         });
+    }
+
+    /**
+     * copy / cut / delete a whole sectioning unit, from its tag.
+     *
+     * The same three actions the selection bar offers, on the thing a reader
+     * most often wants to move around: a section, with its body. The span is
+     * `headStart..spanEnd` — the heading AND everything under it down to the
+     * next heading of the same level or above — because a section without its
+     * body is a title, and cutting a title alone would silently orphan pages
+     * of prose.
+     */
+    async _onAnchorAction(m) {
+        const st = this.root && this.coord.roots.get(this.root);
+        if (!st || !m || !m.key) return;
+        let item = null;
+        try { item = this._sectionControls(st).find(i => i.key === m.key) || null; }
+        catch (_) { item = null; }
+        if (!item) {
+            this._post({ type: 'status', text: 'that section is no longer there', kind: 'warn' });
+            return;
+        }
+        let doc;
+        try { doc = await vscode.workspace.openTextDocument(vscode.Uri.file(item.file)); }
+        catch (_) { return; }
+
+        const lastLine = Math.max(0, Math.min(item.spanEnd - 1, doc.lineCount - 1));
+        const start = new vscode.Position(Math.max(0, item.headStart - 1), 0);
+        // Whole lines, and the newline that ends the last one — so a cut
+        // section leaves no blank gap where it was.
+        const end = lastLine + 1 < doc.lineCount
+            ? new vscode.Position(lastLine + 1, 0)
+            : new vscode.Position(lastLine, doc.lineAt(lastLine).text.length);
+        const range = new vscode.Range(start, end);
+        const lines = item.spanEnd - item.headStart + 1;
+        const what = item.title ? `"${item.title}"` : 'the section';
+
+        if (m.action === 'copy') {
+            const r = await this._rangeAction(doc, range, 'copy');
+            this._post({
+                type: 'status', kind: r.ok ? 'ok' : 'err',
+                text: r.ok ? `copied ${what} — ${lines} lines` : r.reason,
+            });
+            return;
+        }
+        if (m.action !== 'cut' && m.action !== 'delete') return;
+
+        // DELETING A SECTION IS NOT A CLICK TO MAKE BY ACCIDENT. A cut can be
+        // pasted back; a delete of forty lines cannot, except by undo, and the
+        // button is one pixel from the fold control.
+        if (m.action === 'delete' && lines > 3) {
+            const yes = await vscode.window.showWarningMessage(
+                `Delete ${what} and everything in it?`,
+                { modal: true, detail: `${lines} lines. This can be undone with ⌘Z.` },
+                'Delete');
+            if (yes !== 'Delete') { this._post({ type: 'status', text: 'left alone', kind: '' }); return; }
+        }
+
+        const ok = await this._guardedWrite(doc, 'wpaper.sectionAction',
+            `${m.action} ${what}`, () => {});
+        if (!ok) return;                     // the guard already said why
+        const r = await this._rangeAction(doc, range, m.action);
+        this._post({
+            type: 'status', kind: r.ok ? 'ok' : 'err',
+            text: r.ok ? `${m.action === 'cut' ? 'cut' : 'deleted'} ${what} — ${lines} lines` : r.reason,
+        });
+        if (r.ok) this._busy(`${m.action === 'cut' ? 'cut' : 'deleted'} ${what} — rebuilding…`);
+    }
+
+    /**
+     * Paste the clipboard at the seam under the pointer.
+     *
+     * ⌘V on the page cannot mean "replace the selection" — there need not be
+     * one — so it asks WHERE, with the same blue caret every other placing
+     * gesture uses.
+     */
+    async _pasteCommit(m) {
+        const st = this.root && this.coord.roots.get(this.root);
+        this._post({ type: 'moveCaret', rects: [] });
+        if (!st) return;
+        let clip = '';
+        try { clip = await vscode.env.clipboard.readText(); } catch (_) { clip = ''; }
+        if (!clip) {
+            this._post({ type: 'status', text: 'the clipboard holds no text', kind: 'warn' });
+            return;
+        }
+
+        let t = this._insertTarget;
+        this._insertTarget = null;
+        let doc = null;
+        if (m && m.page) {
+            const hit = this._resolvePoint(st, m);
+            if (hit && hit.flag !== FLAG.UNMAPPED && hit.file) {
+                try {
+                    doc = await vscode.workspace.openTextDocument(vscode.Uri.file(hit.file));
+                    t = this._blockDropTarget(st, m, doc) || t;
+                } catch (_) { /* the preview's answer stands */ }
+            }
+        }
+        if (!t) { this._post({ type: 'status', text: 'nothing there to paste into', kind: 'warn' }); return; }
+        if (!doc || doc.uri.fsPath !== t.file) {
+            try { doc = await vscode.workspace.openTextDocument(vscode.Uri.file(t.file)); }
+            catch (_) { return; }
+        }
+
+        // Whole lines land as whole lines: the seam is a line boundary, so
+        // text without a trailing newline would weld itself to what follows.
+        const text = /\n$/.test(clip) ? clip : `${clip}\n`;
+        const ok = await this._guardedWrite(doc, 'wpaper.paste', 'pasted from the clipboard', (we) => {
+            we.insert(doc.uri, doc.positionAt(t.offset), text);
+        });
+        if (!ok) return;
+        this._busy(`pasted at line ${t.line} — rebuilding…`);
     }
 
     /**
@@ -5101,7 +5465,7 @@ class TexViewer {
                 we.insert(doc.uri, doc.positionAt(t.offset), snippet);
             }))) return;
 
-        this._post({ type: 'status', text: `computation added at line ${t.line}`, kind: 'ok' });
+        this._busy(`computation added at line ${t.line} — rebuilding…`);
         await this._openMmaSession(doc.uri.fsPath, blockId, st, m);
     }
 
@@ -5215,6 +5579,10 @@ class TexViewer {
             cells: block.cells.map(c => this._cellForPanel(c)),
             state: block.state,
             stateReason: block.stateReason,
+            // What the LaTeX will be broken to, so the card can show it and
+            // let the reader disagree. Measured from the printed page; see
+            // TexComputeService.widthFor for the ladder behind it.
+            pageWidthEm: this._pageWidthEm(st, file),
             rects,
         });
         await this._postKernels();
@@ -5325,7 +5693,12 @@ class TexViewer {
         if (!s || !m || typeof m.code !== 'string') { reply({ error: 'nothing to run' }); return; }
 
         const st = this.root && this.coord.roots.get(this.root);
-        const pageWidthEm = this._pageWidthEm(st, s.file);
+        // THE READER'S NUMBER WINS. The measurement is a good guess about a
+        // one-column article and no guess at all about a two-column one, a
+        // wide margin note, or a figure the equation has to sit beside — and
+        // they can see the result and we cannot.
+        const asked = Number(m.pageWidthEm);
+        const pageWidthEm = asked > 0 ? Math.round(asked) : this._pageWidthEm(st, s.file);
         this._post({ type: 'status', text: 'running…', kind: '' });
 
         const out = await svc.run(s.file, m.code, {
@@ -5480,6 +5853,15 @@ class TexViewer {
             return;
         }
 
+        // A FIGURE NEEDS A PACKAGE, and this paper may not load it.
+        //
+        // Reported: the computation inserted an \includegraphics into a paper
+        // with no graphicx, so the compiler could not draw it. The paste path
+        // only warns; a GENERATED figure is different — the reader did not
+        // choose to write \includegraphics, we did — so the package goes in
+        // with it, in the same edit and therefore the same undo.
+        const needsPkg = /\\includegraphics/.test(built.body) ? graphicxInsertion(text) : null;
+
         const ok = await this._guardedWrite(doc, 'wpaper.mathematica',
             `managed output for ${cellId}`, (we) => {
                 // The fence is written FIRST because it sits below the block:
@@ -5495,8 +5877,19 @@ class TexViewer {
                         new vscode.Range(doc.positionAt(blockEdit.startOffset), doc.positionAt(blockEdit.endOffset)),
                         blockEdit.newText);
                 }
+                // The preamble is ABOVE both of the others, so all three stay
+                // disjoint and each is expressed against the document as read.
+                if (needsPkg) {
+                    we.insert(doc.uri, doc.positionAt(needsPkg.offset), needsPkg.text);
+                }
             });
         if (!ok) return;
+        if (needsPkg) {
+            this._post({
+                type: 'status', kind: 'ok',
+                text: 'added \\usepackage{graphicx} — this paper did not load it',
+            });
+        }
 
         this._post({
             type: 'status', kind: 'ok',
@@ -5638,6 +6031,42 @@ class TexViewer {
             state: block.state,
             stateReason: block.stateReason,
         });
+    }
+
+    /**
+     * The editor SNAPS to the place; VS Code can ease it instead.
+     *
+     * An extension cannot animate a text editor: `revealRange` is the only
+     * lever the API gives, it is one-shot, and stepping it over intermediate
+     * lines to fake easing is both janky and a fight with anyone who scrolls
+     * mid-flight. What DOES animate it is VS Code's own `editor.smoothScrolling`
+     * — an extension reveal is a smooth-type scroll, whose duration that
+     * setting sets, and which is zero while it is off.
+     *
+     * So the honest thing is to say so, ONCE, and offer to turn it on rather
+     * than either living with the snap or silently changing a global setting
+     * on somebody's behalf. Marked as asked BEFORE the dialog, so a dismissed
+     * one does not come back on the next click.
+     */
+    async _offerSmoothScroll() {
+        const KEY = 'wolfbook.tex.smoothScrollOffered';
+        try {
+            const store = this.context && this.context.globalState;
+            if (!store || store.get(KEY)) return;
+            const cfg = vscode.workspace.getConfiguration('editor');
+            if (cfg.get('smoothScrolling') === true) { await store.update(KEY, true); return; }
+            await store.update(KEY, true);
+            const yes = await vscode.window.showInformationMessage(
+                'The editor jumps straight to the place you clicked. VS Code can scroll there '
+                + 'instead — that is one setting, editor.smoothScrolling.',
+                'Scroll smoothly', 'Leave it');
+            if (yes !== 'Scroll smoothly') return;
+            await cfg.update('smoothScrolling', true, vscode.ConfigurationTarget.Global);
+            this._post({
+                type: 'status', kind: 'ok',
+                text: 'the editor will scroll to the place now, rather than jump',
+            });
+        } catch (_) { /* an offer is never worth an error */ }
     }
 
     /** Paint a source line range back onto the pages, within reason. */

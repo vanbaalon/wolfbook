@@ -134,6 +134,33 @@ test('base64 never contains the separator, so the split cannot go wrong', () => 
     assert.ok(!/[$]/.test(Buffer.from('any bytes at all \u0000\u00ff').toString('base64')));
 });
 
+test('THE LaTeX CONVERTER IS WHERE THE LOADER LOOKS FOR IT', () => {
+    // The whole BOXES branch is a no-op if the addon cannot be found: require
+    // throws, loadBtl returns null, and every result quietly takes the text
+    // fallback — which is what "the output is Mathematica-form, not LaTeX"
+    // looks like from the outside. The path was two levels up instead of
+    // three, and nothing said so, because the fallback is a legitimate answer
+    // when the converter really is missing.
+    //
+    // Checked as a PATH, not by loading the binary: the depth is the thing
+    // that was wrong, and a path is checkable on any machine, including one
+    // whose prebuilt is for another architecture.
+    const fs = require('fs');
+    const dir = E.btlDir();
+    assert.ok(fs.existsSync(dir), `the addon directory is not at ${dir}`);
+    assert.ok(fs.existsSync(require('path').join(dir, 'katexPrerender.js')),
+        'and it is the real addon directory, not merely a directory');
+});
+
+test('a real box expression comes back as real LaTeX', () => {
+    // Skipped where the native addon cannot load — an Intel prebuilt on an
+    // arm64 machine, say — because that is a build problem, not this one.
+    if (!E.loadBtl()) { results.push('  --   a real box expression comes back as real LaTeX  (no addon here)'); return; }
+    const r = E.parseEvalResult('BOXES:FractionBox["1","4"]', { pageWidthEm: 35 });
+    assert.strictEqual(r.kind, 'latex', 'boxes become LaTeX, not text');
+    assert.ok(/\\frac/.test(r.latex), `expected a fraction, got ${JSON.stringify(r.latex)}`);
+});
+
 // --- boxes -> LaTeX --------------------------------------------------------
 
 function fakeBtl(record) {

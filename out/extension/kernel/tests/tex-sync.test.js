@@ -1194,9 +1194,79 @@ test('the mini-editor round trip: open, type, no echo, editor change flows back'
         assert.strictEqual(v._edit.startOffset, before.s + 7, 'the block moved down');
         assert.ok(!v.posted.find(p => p.type === 'editUpdate'), 'and nothing was reposted');
 
+        // A SELECTION MADE ON THE PAGE REACHES THE CARD.
+        //
+        // The card always knew how to show a range — that is what an inverse
+        // click has always done — but only the inverse click ever told it, so
+        // a range picked out on the page left the card showing something else
+        // and the two halves of one selection disagreed.
+        v.posted.length = 0;
+        {
+            const st2 = v.coord.roots.get(v.root) || [...v.coord.roots.values()][0];
+            const a = mdoc.positionAt(v._edit.startOffset + 2);
+            const b = mdoc.positionAt(v._edit.startOffset + 7);
+            v._postSelection(st2, mdoc, { start: a, end: b });
+            const es = v.posted.find(p => p.type === 'editSelect');
+            assert.ok(es, 'the open card is told about a selection made on the page');
+            assert.strictEqual(es.start, 2, 'in the block\'s own offsets');
+            assert.strictEqual(es.end, 7);
+            assert.strictEqual(es.focus, false,
+                'and it does not steal the caret — the reader is on the page');
+        }
+
+        // A selection OUTSIDE the open block is not forced into it.
+        v.posted.length = 0;
+        {
+            const st2 = v.coord.roots.get(v.root) || [...v.coord.roots.values()][0];
+            const far = mdoc.positionAt(0);
+            v._postSelection(st2, mdoc, { start: far, end: far });
+            assert.ok(!v.posted.find(p => p.type === 'editSelect'),
+                'a selection outside the block says nothing to the card');
+        }
+
+        // THE CARET IN THE CARD IS A CARET IN THE PAPER.
+        //
+        // The card sends offsets relative to the BLOCK, because that is all it
+        // knows; the block's own start makes them document offsets. Moving the
+        // caret used to show nothing on the page while the same caret in the
+        // editor lit the word up.
+        v.posted.length = 0;
+        const base = v._edit.startOffset;
+        await v._onMessage({ type: 'editCaret', editId: eo.editId, start: 3, end: 3 });
+        const hl = v.posted.find(p => p.type === 'highlight' || p.type === 'selection');
+        assert.ok(hl, 'a caret in the card answers on the page');
+
+        // With the file open in a VISIBLE editor the selection is mirrored
+        // there instead, and that editor's own event drives the page — two
+        // halves of one document must not disagree about where the reader is.
+        const seen = [];
+        stub.window.visibleTextEditors = [{
+            document: mdoc,
+            get selection() { return this._s; },
+            set selection(v2) { this._s = v2; seen.push(v2); },
+            revealRange: () => { throw new Error('a caret move must not scroll the editor'); },
+        }];
+        v.posted.length = 0;
+        await v._onMessage({ type: 'editCaret', editId: eo.editId, start: 2, end: 6 });
+        assert.strictEqual(seen.length, 1, 'the visible editor was told');
+        assert.strictEqual(mdoc.offsetAt(seen[0].start), base + 2, 'from the block start');
+        assert.strictEqual(mdoc.offsetAt(seen[0].end), base + 6, 'as a RANGE, not a caret');
+        assert.ok(!v.posted.find(p => p.type === 'selection'),
+            'and the page is not told twice — that editor answers for it');
+        stub.window.visibleTextEditors = [];
+
+        // An offset past the end of the block cannot address anything outside
+        // it: the card can only ever be talking about its own text.
+        v.posted.length = 0;
+        await v._onMessage({ type: 'editCaret', editId: eo.editId, start: 99999, end: 99999 });
+        assert.ok(v._edit, 'a nonsense offset is clamped, not thrown on');
+
         // Closing forgets the session.
         await v._onMessage({ type: 'editClose', editId: eo.editId });
         assert.strictEqual(v._edit, null);
+        v.posted.length = 0;
+        await v._onMessage({ type: 'editCaret', editId: eo.editId, start: 1, end: 1 });
+        assert.strictEqual(v.posted.length, 0, 'and a caret from a closed card says nothing');
     } finally {
         stub.workspace.openTextDocument = oldOpen;
         stub.workspace.applyEdit = async () => true;
@@ -2159,6 +2229,120 @@ test('auto-hide is idempotent and never closes twice', async () => {
     await v.autoHide();
     await v.autoHide();
     assert.strictEqual(disposed, 1);
+});
+
+test('AN OPEN VIEWER FOLLOWS THE TAB TO ANOTHER PAPER', async () => {
+    // Reported: "switching tex tab did not trigger reload of viewer — they
+    // should be paired at all times". autoRestore used to return the moment a
+    // panel existed, so it only ever restored a HIDDEN viewer and never
+    // switched a visible one.
+    const v = makeViewer(null, null);
+    v.panel = { webview: { postMessage: () => {} }, dispose: () => {}, title: 'WPaper' };
+    const opened = [];
+    v.open = async (d) => { opened.push(d.uri.fsPath); };
+
+    v.root = '/proj/paperA.tex';
+    v.coord.rootFor = (d) => (d.uri.fsPath.includes('B') ? '/proj/paperB.tex' : '/proj/paperA.tex');
+
+    await v.autoRestore({ uri: { fsPath: '/proj/paperB.tex' } });
+    assert.deepStrictEqual(opened, ['/proj/paperB.tex'], 'another paper reloads the viewer');
+});
+
+test('but NOT between two files of the SAME paper', async () => {
+    // Two files of one project share a root. Re-opening between them would
+    // throw away the reader's place and recompile for nothing — but the title
+    // must still name the file they are in, or the viewer looks unpaired even
+    // while it is showing the right paper.
+    const v = makeViewer(null, null);
+    v.panel = { webview: { postMessage: () => {} }, dispose: () => {}, title: 'WPaper · paperA.tex' };
+    let opened = 0;
+    v.open = async () => { opened++; };
+    v.root = '/proj/paperA.tex';
+    v.coord.rootFor = () => '/proj/paperA.tex';
+
+    await v.autoRestore({ uri: { fsPath: '/proj/chapter2.tex' } });
+    assert.strictEqual(opened, 0, 'the same paper is not rebuilt');
+    assert.strictEqual(v.panel.title, 'WPaper · chapter2.tex', 'but the title follows the file');
+});
+
+test('a panel that cannot name its own paper still follows', async () => {
+    // A panel VS Code restored from a previous window has no root yet.
+    // Requiring one meant the viewer sat there showing a paper it could not
+    // name and refusing to follow anything at all — silently.
+    const v = makeViewer(null, null);
+    v.panel = { webview: { postMessage: () => {} }, dispose: () => {}, title: 'WPaper' };
+    let opened = 0;
+    v.open = async () => { opened++; };
+    v.root = null;
+    v.coord.rootFor = () => '/proj/paperB.tex';
+
+    await v.autoRestore({ uri: { fsPath: '/proj/paperB.tex' } });
+    assert.strictEqual(opened, 1, 'it opens rather than doing nothing');
+});
+
+test('a paper whose root cannot be resolved does not throw', async () => {
+    const v = makeViewer(null, null);
+    v.panel = { webview: { postMessage: () => {} }, dispose: () => {}, title: 'WPaper' };
+    let opened = 0;
+    v.open = async () => { opened++; };
+    v.root = '/proj/paperA.tex';
+    v.coord.rootFor = () => { throw new Error('no root'); };
+    await v.autoRestore({ uri: { fsPath: '/proj/odd.tex' } });
+    assert.strictEqual(opened, 0, 'it declines rather than guessing');
+});
+
+test('SWITCHING PAPER TAKES THE OLD ONE OFF THE SCREEN AND BUILDS THE NEW', async () => {
+    // Reported: the viewer said "no compiled PDF yet — press Compile" while
+    // still showing the PREVIOUS paper's pages. refresh() returns early when
+    // there is no PDF, so whatever was up stayed up — another document shown
+    // under this one's name — and nothing ever started a compile.
+    const v = makeViewer(null, null);
+    v.panel = { webview: { postMessage: (m) => v.posted.push(m) }, dispose: () => {},
+                title: 'WPaper', reveal: () => {} };
+    v.root = '/proj/paperA.tex';
+    v.shownAnything = true;
+    v.shownPdfHash = 'old';
+    v.coord.rootFor = () => '/proj/paperB.tex';
+    v.coord.roots = new Map();                       // paperB has never been built
+    let built = 0;
+    v.coord.build = async () => { built++; };
+    v.refresh = async () => {};
+    v._postTheme = () => {};
+    v._rememberRoot = () => {};
+    v._viewFor = () => null;
+
+    v.posted.length = 0;
+    await v.open({ uri: { fsPath: '/proj/paperB.tex' } });
+
+    assert.ok(v.posted.some(p => p.type === 'blank'),
+        'the previous paper is taken off the screen');
+    assert.strictEqual(v.shownAnything, false, 'and the viewer forgets it was showing it');
+    assert.strictEqual(v.shownPdfHash, null);
+    assert.strictEqual(built, 1, 'and the new paper is BUILT, not merely reported as missing');
+});
+
+test('switching does not compile when compiling is turned off', async () => {
+    // Someone who turned compiling off did not ask for it back by changing tab.
+    const saved = stub.workspace.getConfiguration;
+    stub.workspace.getConfiguration = () => ({
+        get: (k, d) => (k === 'compile' ? 'off' : d),
+    });
+    try {
+        const v = makeViewer(null, null);
+        v.panel = { webview: { postMessage: (m) => v.posted.push(m) }, dispose: () => {},
+                    title: 'WPaper', reveal: () => {} };
+        v.root = '/proj/paperA.tex';
+        v.coord.rootFor = () => '/proj/paperB.tex';
+        v.coord.roots = new Map();
+        let built = 0;
+        v.coord.build = async () => { built++; };
+        v.refresh = async () => {};
+        v._postTheme = () => {}; v._rememberRoot = () => {}; v._viewFor = () => null;
+        await v.open({ uri: { fsPath: '/proj/paperB.tex' } });
+        assert.strictEqual(built, 0, 'nothing was compiled');
+        assert.ok(v.posted.some(p => p.type === 'blank'),
+            'but the other paper still came off the screen — it is not this one');
+    } finally { stub.workspace.getConfiguration = saved; }
 });
 
 test('a panel the READER closed is not auto-restored', async () => {
@@ -3458,6 +3642,25 @@ test('EVERY EQUATION AND HEADING CARRIES A TAG THAT NAMES ITS PLACE', async () =
     assert.ok(head.foldable, 'a heading can be folded');
     assert.strictEqual(head.line, head.headStart);
 
+    // THE NUMBER THE PAPER PRINTS TRAVELS WITH THE HEADING.
+    //
+    // The contents panel showed bare titles because this lookup was wired into
+    // sectionAt — which only the review uses — and nowhere else. The browser
+    // test did not catch it because its fixture supplied a number BY HAND that
+    // the real message never carried: a fixture richer than the shipped data
+    // proves nothing.
+    v.sectionNumbers = () => new Map([[head.key, '3.2']]);
+    const renumbered = await foldItems(v);
+    const h2 = renumbered.find(i => i.kind === 'section');
+    assert.strictEqual(h2.number, '3.2', 'a heading carries its printed number');
+    const eq2 = renumbered.find(i => i.kind === 'equation');
+    assert.ok(!eq2.number, 'and an equation, which is not in the contents, does not');
+
+    // With no .aux read yet, a heading simply has none — never a guess.
+    v.sectionNumbers = () => new Map();
+    const bare = await foldItems(v);
+    assert.strictEqual(bare.find(i => i.kind === 'section').number, null);
+
     // AN EQUATION'S TAG IS PLACED, NOT MEASURED PAST ITS ROW.
     //
     // The panel puts a cluster at `x + w + 6`, which for a heading is the empty
@@ -3616,7 +3819,12 @@ test('THE TOUR ADVANCES ON THE TWO GESTURES THE GUIDE GAINED', async () => {
     // A paper with sections and equations, so every step applies.
     v._tourContext = () => ({ hasLabels: true, hasSections: true, hasAnchors: true, hasReview: false });
     v.startTour(true);
-    v._tourSave({ at: 4 });                       // the tag step
+    // FOUND, NOT COUNTED. A hardcoded index means every step added to the tour
+    // silently re-points this test at a different one — which is exactly what
+    // happened when the contents step was inserted above the tag.
+    const { stepsFor } = require('../../tex/tourSteps');
+    const order = stepsFor(v._tourContext()).map(x => x.id);
+    v._tourSave({ at: order.indexOf('tag') });
     v._tourPost();
     assert.strictEqual(lastTour(v).step.id, 'tag');
 
@@ -3630,7 +3838,10 @@ test('THE TOUR ADVANCES ON THE TWO GESTURES THE GUIDE GAINED', async () => {
 
     await v._onMessage({ type: 'sectionFold', key: 's1', collapse: true });
     await wait(700);
-    assert.strictEqual(lastTour(v).step.id, 'edit', 'folding one is');
+    // Whatever the tour teaches NEXT — named by the script, not by a count, so
+    // adding a step between them does not turn this into a false failure.
+    assert.strictEqual(lastTour(v).step.id, order[order.indexOf('fold') + 1],
+        'folding one is');
 });
 
 test('the tour watches the panel\'s real messages, and skipping still works', async () => {

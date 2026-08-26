@@ -1,9 +1,9 @@
 {
   "name": "wolfbook",
   "displayName": "Wolfbook — Mathematica & Wolfram Language Notebooks",
-  "description": "Mathematica-style Wolfram Language notebooks in VS Code. Open existing .nb files, run a live Wolfram kernel, render LaTeX/graphics, debug code, and let Copilot, Claude Code or MCP agents evaluate cells.",
+  "description": "Mathematica-style Wolfram Language notebooks and WPaper LaTeX editing in VS Code, with live kernels, compiled-paper navigation, rich output, debugging and agent tools.",
   "publisher": "wolfbook",
-  "version": "2.9.1",
+  "version": "2.9.2",
   "engines": {
     "vscode": "^1.95.0"
   },
@@ -39,6 +39,8 @@
     "computer-algebra",
     "cas",
     "latex",
+    "latex-editor",
+    "pdf-preview",
     "tikz",
     "math",
     "physics",

@@ -38,6 +38,15 @@ const STEPS = [
         satisfy: (e) => e.type === 'cursor',
     },
     {
+        id: 'contents',
+        title: 'Find your way through it',
+        say: 'The contents open over the paper, numbered as the paper numbers them, with the section you are in already marked. Click one and they get out of the way. The paper\'s own cross-references work too — a \\ref or a contents entry is a live link, marked with a dashed rule.',
+        doIt: 'Press ☰ in the toolbar (or ⌘⌥O), then click a section.',
+        point: '#outline',
+        when: (ctx) => !!ctx.hasSections,
+        satisfy: (e) => e.type === 'revealSection',
+    },
+    {
         id: 'labels',
         title: 'Hold Shift: the paper\'s own skeleton',
         say: 'Every \\label appears beside the thing it names and every \\ref beside what it points at — and every heading and equation grows a tag and a fold control.',
@@ -63,6 +72,14 @@ const STEPS = [
         satisfy: (e) => e.type === 'sectionFold' && !!e.collapse,
     },
     {
+        id: 'sectionAction',
+        title: 'Move a section, from the page',
+        say: 'The same three the selection bar offers — copy, cut, delete — on a whole sectioning unit WITH its body. Copy one, then press ⌘V on the paper: a paste asks WHERE, with the same blue caret, and the click decides.',
+        doIt: 'With Shift held, press the copy icon beside a heading.',
+        when: (ctx) => !!ctx.hasSections,
+        satisfy: (e) => e.type === 'anchorAction',
+    },
+    {
         id: 'edit',
         title: 'Edit it where it prints',
         say: 'Right-click a paragraph or an equation and it opens in a card pinned under it. What you type goes straight into the .tex.',
@@ -70,11 +87,27 @@ const STEPS = [
         satisfy: (e) => e.type === 'editHere',
     },
     {
+        id: 'computation',
+        title: 'Compute inside the paper',
+        say: 'Drop a Mathematica cell where you want its result. Run it on a kernel and the answer comes back as real LaTeX — an equation broken to the paper\'s own width, or a PDF figure — written into the .tex as managed output with its own provenance. The .tex still compiles anywhere: everything Wolfbook adds is a comment.',
+        doIt: 'Press ∑+ and move over the paper — the caret shows where it would go. Esc if you would rather not.',
+        point: '#addmma',
+        satisfy: (e) => e.type === 'insertPreview' || e.type === 'insertCommit',
+    },
+    {
         id: 'takeMe',
         title: 'Go to the source',
         say: 'Double-click anything to jump to it in the editor — and out of full screen, if you are in it.',
         doIt: 'Double-click a word.',
         satisfy: (e) => e.type === 'click' && !!e.takeMe,
+    },
+    {
+        id: 'follow',
+        title: 'Decide how much the page follows you',
+        say: 'follow cycles off, mark and scroll. `mark` shows where your caret is without moving the paper — which is what you want while writing prose beside it. The footer keeps the places you have been editing, so getting back to one is a click.',
+        doIt: 'Click follow in the toolbar.',
+        point: '#follow',
+        satisfy: (e) => e.type === 'follow',
     },
     {
         id: 'review',
