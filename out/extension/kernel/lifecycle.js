@@ -84,7 +84,8 @@ function writeHostRecord(self) {
 
 let _diagChannel = null;   // lazily-created "Wolfbook Kernel Diagnostics" output channel
 
-async function _reportKernelFailure(self, kernelCommand, wstpError, { addonLoaded = true } = {}) {
+async function _reportKernelFailure(self, kernelCommand, wstpError,
+                                    { addonLoaded = true, licensePreflight = null } = {}) {
     let diag;
     try {
         const configCompat = require('../config-compat');
@@ -92,7 +93,7 @@ async function _reportKernelFailure(self, kernelCommand, wstpError, { addonLoade
         let discovered = [];
         try { discovered = self.findKernel.discoverKernels(); } catch (_) {}
         diag = await _diagnose.diagnoseKernelLaunch(kernelCommand, {
-            wstpError, customPath, discovered, addonLoaded,
+            wstpError, customPath, discovered, addonLoaded, licensePreflight,
         });
     } catch (e) {
         // Diagnostics must never mask the original failure.
@@ -111,14 +112,33 @@ async function _reportKernelFailure(self, kernelCommand, wstpError, { addonLoade
     const buttons = ['Show Details'];
     const pathIssue = diag.cause === 'not-installed' || diag.cause === 'custom-path-missing';
     if (pathIssue) buttons.push('Open Settings');
-    if (diag.cause !== 'not-installed') buttons.push('Retry');
+    if (diag.cause === 'license') {
+        // A licence failure is persistent until the user repairs activation or
+        // MathPass. Mark it as an error (not unresolved) so notebook visibility
+        // does not trigger Wolfbook's automatic launch loop.
+        self.kernelStatusString = 'error';
+        applyKernelOfflineUI(self);
+        if (diag.mathPassCandidates?.some(c => c.exists || fs.existsSync(path.dirname(c.path)))) {
+            buttons.push('Open Licensing Folder');
+        }
+        buttons.push('Retry after Repair');
+    } else if (diag.cause !== 'not-installed') {
+        buttons.push('Retry');
+    }
 
     // Fire-and-forget: launchKernel must not stay pending on user interaction.
     vscode.window.showErrorMessage(`Wolfram kernel: ${diag.summary}`, ...buttons).then(choice => {
         if (choice === 'Show Details') _diagChannel.show(true);
         else if (choice === 'Open Settings') {
             vscode.commands.executeCommand('workbench.action.openSettings', 'wolfbook.systemKernel');
-        } else if (choice === 'Retry') {
+        } else if (choice === 'Open Licensing Folder') {
+            const candidates = diag.mathPassCandidates || [];
+            const selected = candidates.find(c => c.exists)
+                || candidates.find(c => fs.existsSync(path.dirname(c.path)));
+            if (selected) {
+                vscode.env.openExternal(vscode.Uri.file(path.dirname(selected.path)));
+            }
+        } else if (choice === 'Retry' || choice === 'Retry after Repair') {
             vscode.commands.executeCommand('wolfbook.launchKernel');
         }
     });
@@ -451,6 +471,33 @@ async function launchKernel(self, WstpSession) {
 
     self.kernelStatusString = 'launching';
     applyKernelOfflineUI(self);  // make sure UI stays gray during launch
+
+    // IMPORTANT: do this before constructing WstpSession or calling connect().
+    // Those native operations are synchronous. If Wolfram exits during licence
+    // startup (for example "No valid password found" after MathPass disappears),
+    // WSTP can wait forever and freeze VS Code's shared extension host. The
+    // documented `-licenseinfo` check is a cheap child process (~tens of ms), is
+    // asynchronous from VS Code's point of view, and has a hard timeout.
+    let _licensePreflight;
+    try {
+        _licensePreflight = await _diagnose.probeKernelLicense(kernelCommand);
+    } catch (e) {
+        _licensePreflight = {
+            ok: false, timedOut: false, exitCode: null, output: '',
+            spawnError: String(e.message || e), durationMs: 0,
+        };
+    }
+    if (!_licensePreflight.ok) {
+        scrollLog('[launchKernel] licence preflight failed — WSTP launch skipped');
+        self.kernelStatusString = 'error';
+        applyKernelOfflineUI(self);
+        await _reportKernelFailure(self, kernelCommand, 'pre-WSTP licence check failed', {
+            licensePreflight: _licensePreflight,
+        });
+        return;
+    }
+    devLog(LOG_CHANNELS.KERNEL,
+        `[launchKernel] licence preflight passed (${_licensePreflight.durationMs} ms)`);
 
     try {
         devLog(LOG_CHANNELS.KERNEL, '[launchKernel] creating WstpSession…');

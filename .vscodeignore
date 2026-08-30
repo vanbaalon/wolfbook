@@ -61,6 +61,7 @@ config_defaults.json
 
 # Unit tests that live beside runtime code (not needed at runtime).
 out/extension/nb-import/tests/**
+out/extension/kernel/tests/**
 
 # Oberon agent test suites + gold benchmark baselines.
 # The baselines embed /Users/<maintainer>/… paths, quest ids and task titles.

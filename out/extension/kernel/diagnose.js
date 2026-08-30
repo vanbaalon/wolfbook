@@ -25,6 +25,8 @@
  */
 
 const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const { spawn } = require('child_process');
 
 // ── addon load error relay ───────────────────────────────────────────────────
@@ -40,6 +42,12 @@ function getAddonLoadError() { return _addonLoadError; }
 // Ordered: first match wins.  Sources: classic Mathematica password messages,
 // Wolfram Engine entitlement/activation flow, MathLM network licensing.
 const LICENSE_PATTERNS = [
+    { re: /no valid password found|cannot find a valid password/i,
+      sub: 'mathpass-invalid',
+      human: 'Wolfram could not find a valid MathPass license entry' },
+    { re: /mathpass.*(?:missing|not found|invalid|corrupt|unreadable)|(?:missing|invalid|corrupt|unreadable).*mathpass/i,
+      sub: 'mathpass-invalid',
+      human: 'The Wolfram MathPass license file is missing, unreadable, or invalid' },
     { re: /cannot find a valid password|no valid password|invalid password/i,
       sub: 'license-missing',
       human: 'No valid license found (missing or invalid password/license file)' },
@@ -78,6 +86,127 @@ function classifyKernelOutput(text) {
 // ── direct-spawn probe ──────────────────────────────────────────────────────
 const PROBE_SENTINEL = 'WB_DIAG_KERNEL_OK';
 const PROBE_TIMEOUT_MS = 30000;
+const LICENSE_PROBE_TIMEOUT_MS = 15000;
+
+/**
+ * Return the standard MathPass locations without ever reading their contents.
+ * Both current "Wolfram" and legacy "Mathematica" directories are included;
+ * existing installations may legitimately use either after an upgrade.
+ */
+function findMathPassCandidates(kernelPath) {
+    const home = os.homedir();
+    const candidates = [];
+    const add = (p, scope) => {
+        if (!p || candidates.some(c => c.path === p)) return;
+        let exists = false, readable = false;
+        try {
+            exists = fs.existsSync(p);
+            if (exists) { fs.accessSync(p, fs.constants.R_OK); readable = true; }
+        } catch (_) {}
+        candidates.push({ path: p, scope, exists, readable });
+    };
+
+    if (process.platform === 'darwin') {
+        add(path.join(home, 'Library', 'Wolfram', 'Licensing', 'mathpass'), 'user');
+        add(path.join(home, 'Library', 'Mathematica', 'Licensing', 'mathpass'), 'user-legacy');
+        add('/Library/Wolfram/Licensing/mathpass', 'system');
+        add('/Library/Mathematica/Licensing/mathpass', 'system-legacy');
+    } else if (process.platform === 'win32') {
+        const roaming = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
+        const programData = process.env.ProgramData || 'C:\\ProgramData';
+        add(path.join(roaming, 'Wolfram', 'Licensing', 'mathpass'), 'user');
+        add(path.join(roaming, 'Mathematica', 'Licensing', 'mathpass'), 'user-legacy');
+        add(path.join(programData, 'Wolfram', 'Licensing', 'mathpass'), 'system');
+        add(path.join(programData, 'Mathematica', 'Licensing', 'mathpass'), 'system-legacy');
+    } else {
+        add(path.join(home, '.Wolfram', 'Licensing', 'mathpass'), 'user');
+        add(path.join(home, '.Mathematica', 'Licensing', 'mathpass'), 'user-legacy');
+        add('/usr/share/Wolfram/Licensing/mathpass', 'system');
+        add('/usr/share/Mathematica/Licensing/mathpass', 'system-legacy');
+    }
+
+    // Wolfram also supports <installation>/Configuration/Licensing/mathpass.
+    // The executable is normally one or two directories below that root.
+    if (kernelPath && kernelPath !== 'kernel-not-found') {
+        const exeDir = path.dirname(kernelPath);
+        const roots = [path.dirname(exeDir), path.dirname(path.dirname(exeDir))];
+        for (const root of roots) add(path.join(root, 'Configuration', 'Licensing', 'mathpass'), 'installation');
+    }
+    return candidates;
+}
+
+function _redactLicenseText(text) {
+    return String(text || '')
+        // Activation keys and conventional L-prefixed license IDs.
+        .replace(/\b(?:[A-Z]\d{3,6}-\d{3,6}|\d{4}-\d{4}-[A-Z0-9]{4,})\b/gi, '[license-id]')
+        // Password fields contain several colon-separated numeric groups.
+        .replace(/\b\d{3,}-\d{3,}-\d{3,}(?::[^\s]+)+\b/g, '[license-password]');
+}
+
+/**
+ * Cheap, asynchronous licence preflight used BEFORE entering WSTP.  Native
+ * WSTP connect/open calls are synchronous and can block VS Code's extension
+ * host indefinitely when the kernel exits during licence startup.  Wolfram's
+ * documented -licenseinfo option exits non-zero when no valid licence exists.
+ */
+function probeKernelLicense(kernelPath,
+                            { timeoutMs = LICENSE_PROBE_TIMEOUT_MS, spawnFn = spawn } = {}) {
+    return new Promise((resolve) => {
+        const started = Date.now();
+        let out = '', done = false, timedOut = false;
+        const finish = (r) => {
+            if (done) return;
+            done = true;
+            // A successful response contains the user's licence identifier.
+            // Wolfbook only needs the exit status, so do not retain it at all.
+            const safeOutput = r.ok ? '' : _redactLicenseText(out);
+            resolve({ ...r, output: safeOutput, durationMs: Date.now() - started });
+        };
+        let child;
+        try {
+            child = spawnFn(kernelPath, ['-licenseinfo'], { stdio: ['ignore', 'pipe', 'pipe'] });
+        } catch (e) {
+            return finish({ ok: false, timedOut: false, exitCode: null,
+                            spawnError: String(e.message || e) });
+        }
+        const collect = (d) => {
+            // Licence diagnostics are tiny. Bound captured output in case a
+            // broken launcher unexpectedly writes without exiting.
+            if (out.length < 65536) out += d.toString().slice(0, 65536 - out.length);
+        };
+        child.stdout.on('data', collect);
+        child.stderr.on('data', collect);
+        const timer = setTimeout(() => {
+            timedOut = true;
+            try { child.kill('SIGKILL'); } catch (_) {}
+            // Resolve independently of the child's eventual `close` event. A
+            // wedged launcher must not turn the safety preflight into a new
+            // extension-host wait of its own.
+            finish({ ok: false, timedOut: true, exitCode: null,
+                     reason: 'timeout', spawnError: null });
+        }, timeoutMs);
+        child.on('error', (e) => {
+            clearTimeout(timer);
+            finish({ ok: false, timedOut: false, exitCode: null,
+                     spawnError: String(e.message || e) });
+        });
+        child.on('close', (code) => {
+            clearTimeout(timer);
+            // Wolfram documents a non-zero status (and normally 0/0/0 fields)
+            // when no valid licence is available.
+            const fields = out.trim().split(/\s+/);
+            const looksLikeInfo = fields.length >= 3;
+            const zeroInfo = looksLikeInfo && fields.slice(0, 3).every(v => v === '0');
+            // Field 3 is the number of currently available kernel processes.
+            // Avoid entering blocking WSTP startup when it is exactly zero.
+            // "Infinity" and positive integers are both healthy.
+            const noSeats = looksLikeInfo && fields[2] === '0' && !zeroInfo;
+            finish({ ok: code === 0 && looksLikeInfo && !zeroInfo && !noSeats,
+                     reason: noSeats ? 'no-seats' : zeroInfo ? 'no-valid-license' : null,
+                     timedOut, exitCode: code, spawnError: null });
+        });
+    });
+}
 
 /**
  * Launch the kernel directly (no WSTP) and capture everything it says.
@@ -187,7 +316,54 @@ async function diagnoseKernelLaunch(kernelPath, opts = {}) {
                  detailLines: detail };
     }
 
-    // 2. Binary exists — run it directly and let it tell us what is wrong.
+    // 2. A pre-WSTP licence check already failed. Do not launch another kernel:
+    // retrying here can prompt again or stall on the same licence server.
+    if (opts.licensePreflight && !opts.licensePreflight.ok) {
+        const r = opts.licensePreflight;
+        push(`license preflight: ok=false timedOut=${r.timedOut} exit=${r.exitCode} ` +
+             `spawnError=${r.spawnError || 'none'} (${r.durationMs} ms)`);
+        if (r.output && r.output.trim()) {
+            push('── licence-check output (secrets redacted) ─────────');
+            for (const line of r.output.trim().split(/\r?\n/).slice(0, 20)) push('  ' + line);
+            push('───────────────────────────────────────────────');
+        }
+        const mathpass = findMathPassCandidates(kernelPath);
+        for (const c of mathpass) {
+            push(`mathpass        : ${c.path} [${c.exists ? (c.readable ? 'present/readable' : 'present/unreadable') : 'not found'}]`);
+        }
+        const lic = classifyKernelOutput(r.output);
+        if (r.reason === 'no-seats') {
+            return { cause: 'license', sub: 'license-seats',
+                     summary: 'All Wolfram kernel processes allowed by the licence are currently in use. Close another Wolfram kernel or ask the MathLM administrator for an available seat, then try again.',
+                     detailLines: detail, mathPassCandidates: mathpass };
+        }
+        if (lic) {
+            const present = mathpass.filter(c => c.exists);
+            const locationNote = present.length === 0
+                ? ' No MathPass file was found in the standard locations.'
+                : present.every(c => !c.readable)
+                    ? ' The detected MathPass file is not readable.'
+                    : '';
+            return { cause: 'license', sub: lic.sub,
+                     summary: `${lic.human}.${locationNote} Open Mathematica/Wolfram once to repair activation, then try again.`,
+                     detailLines: detail, mathPassCandidates: mathpass };
+        }
+        if (r.timedOut) {
+            return { cause: 'license', sub: 'license-check-timeout',
+                     summary: 'Wolfram did not finish its licence check in time. It may be waiting for activation or an unavailable MathLM server. Open Mathematica/Wolfram to repair or verify the licence, then try again.',
+                     detailLines: detail, mathPassCandidates: mathpass };
+        }
+        if (r.spawnError) {
+            return { cause: 'kernel-crash',
+                     summary: `The kernel binary could not be started for its licence check: ${r.spawnError}`,
+                     detailLines: detail };
+        }
+        return { cause: 'license', sub: 'license-invalid',
+                 summary: `Wolfram's licence check failed (exit code ${r.exitCode}). Open Mathematica/Wolfram to repair activation or MathPass, then try again.`,
+                 detailLines: detail, mathPassCandidates: mathpass };
+    }
+
+    // 3. Binary exists — run it directly and let it tell us what is wrong.
     if (opts.skipProbe) {
         return { cause: 'unknown',
                  summary: `Failed to launch the Wolfram kernel: ${opts.wstpError || 'unknown error'}`,
@@ -247,8 +423,11 @@ async function diagnoseKernelLaunch(kernelPath, opts = {}) {
 module.exports = {
     diagnoseKernelLaunch,
     probeKernelDirect,
+    probeKernelLicense,
     classifyKernelOutput,
+    findMathPassCandidates,
     recordAddonLoadError,
     getAddonLoadError,
     PROBE_SENTINEL,
+    LICENSE_PROBE_TIMEOUT_MS,
 };
