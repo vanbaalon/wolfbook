@@ -520,6 +520,11 @@ class TexViewer {
         this._labelsWanted = false;
         this._flash = new EditorFlash();
         this._disposables = [];
+        this._viewerProbeSeq = 0;
+        this._viewerProbes = new Map();
+        this._viewerReloading = false;
+        this._viewerReloadTimer = null;
+        this._reviewFocus = null;
     }
 
     get visible() { return !!this.panel; }
@@ -625,6 +630,9 @@ class TexViewer {
         try { panel.webview.options = this._webviewOptions; } catch (_) { /* new panel: already set */ }
         panel.webview.html = this._html();
         panel.onDidDispose(() => {
+            this._cancelViewerProbes('viewer closed');
+            clearTimeout(this._viewerReloadTimer);
+            this._viewerReloading = false;
             // Closing the panel must not leave the window maximised with
             // nothing in it.
             if (this._fsActions) {
@@ -1339,6 +1347,13 @@ class TexViewer {
     /** One full-state message, the pattern the comparison already uses. */
     showReview(payload) {
         this._reviewShown = !!(payload && payload.pending);
+        if (!payload || !payload.focus) {
+            this._reviewFocus = null;
+        } else {
+            const h = (payload.groups || []).flatMap(g => g.hunks || [])
+                .find(x => x.id === payload.focus);
+            if (h) this._reviewFocus = h;
+        }
         this._post({ type: 'review', session: payload || null });
     }
 
@@ -1357,7 +1372,94 @@ class TexViewer {
     /** Scroll the page to a change and mark it there. */
     focusReviewHunk(h) {
         if (!h) return;
+        // Remember it independently of the webview. A worker recovery reloads
+        // the page module, so the first focus message can legitimately cross
+        // while there is nobody listening; `opened` replays it below.
+        this._reviewFocus = h;
         this._post({ type: 'reviewFocus', id: h.id, page: h.page, rects: h.rects || [] });
+    }
+
+    _cancelViewerProbes(reason) {
+        for (const done of this._viewerProbes.values()) {
+            try { done({ ok: false, reason }); } catch (_) { /* already settled */ }
+        }
+        this._viewerProbes.clear();
+    }
+
+    _finishViewerProbe(m) {
+        const done = this._viewerProbes.get(m && m.requestId);
+        if (!done) return;
+        this._viewerProbes.delete(m.requestId);
+        done(m);
+    }
+
+    /** Ask the webview to prove both its document and worker still answer. */
+    _probeViewer(page) {
+        if (!this.panel) return Promise.resolve({ ok: false, reason: 'viewer is closed' });
+        const requestId = `viewer-${Date.now().toString(36)}-${++this._viewerProbeSeq}`;
+        return new Promise((resolve) => {
+            let settled = false;
+            const finish = (answer) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                this._viewerProbes.delete(requestId);
+                resolve(answer);
+            };
+            const timer = setTimeout(() => finish({ ok: false, reason: 'viewer did not answer' }), 1700);
+            this._viewerProbes.set(requestId, finish);
+            try {
+                const sent = this.panel.webview.postMessage({
+                    type: 'viewerProbe', requestId, page: page || 1,
+                    // This is the generation whose BYTES refresh() last sent,
+                    // not necessarily the newest source-only generation.
+                    generation: this.shownGeneration,
+                });
+                Promise.resolve(sent).then(ok => {
+                    if (ok === false) finish({ ok: false, reason: 'viewer refused the health check' });
+                }, () => finish({ ok: false, reason: 'viewer health check failed' }));
+            } catch (e) {
+                finish({ ok: false, reason: e && e.message ? e.message : String(e) });
+            }
+        });
+    }
+
+    /** Replace the webview document: this terminates the old pdf.js worker. */
+    _reloadViewer(reason) {
+        if (!this.panel || this._viewerReloading) return;
+        this._viewerReloading = true;
+        clearTimeout(this._viewerReloadTimer);
+        // A malformed PDF may prevent `opened` forever. Do not let one failed
+        // recovery disable health checks for the rest of the panel's life.
+        this._viewerReloadTimer = setTimeout(() => {
+            this._viewerReloading = false;
+            this._viewerReloadTimer = null;
+        }, 15000);
+        if (this._viewerReloadTimer && this._viewerReloadTimer.unref) this._viewerReloadTimer.unref();
+        this._cancelViewerProbes('viewer is restarting');
+        this._log(`viewer recovery: ${reason || 'health check failed'}`);
+        this._post({ type: 'status', text: 'restarting the PDF viewer…', kind: 'busy' });
+        // The next `ready` forces the current PDF across. Mark this as a fresh
+        // surface so it does not use live-swap assumptions about canvases that
+        // belonged to the dead webview.
+        this.shownGeneration = null;
+        this.shownPdfHash = null;
+        this.shownAnything = false;
+        this._text = null;
+        this._objMaps.clear();
+        try { this.panel.webview.html = this._html(); }
+        catch (e) {
+            this._viewerReloading = false;
+            clearTimeout(this._viewerReloadTimer);
+            this._viewerReloadTimer = null;
+            this._post({ type: 'status', text: `could not restart the PDF viewer: ${e.message}`, kind: 'err' });
+        }
+    }
+
+    async _ensureViewerForReview(h) {
+        if (!this.panel || this._viewerReloading) return;
+        const health = await this._probeViewer(h && h.page);
+        if (!health || !health.ok) this._reloadViewer(health && health.reason);
     }
 
     /** A line in the panel's footer — the review speaks to the reader here. */
@@ -1374,7 +1476,12 @@ class TexViewer {
             case 'undoAll': return r.undoAll(file);
             case 'keepBatch': return r.keepBatch(file, m.batch);
             case 'keepMany': return r.keepMany(file, m.ids);
-            case 'show': return r.show(file, m.id);
+            case 'show': {
+                const session = r.sessions && r.sessions.get(file);
+                const h = session && session.hunks && session.hunks.find(x => x.id === m.id);
+                await this._ensureViewerForReview(h);
+                return r.show(file, m.id);
+            }
             case 'next': return r.step(file, +1);
             case 'prev': return r.step(file, -1);
             case 'close': return r.close(file);
@@ -2296,6 +2403,12 @@ class TexViewer {
     }
 
     async _onMessage(m) {
+        // A health reply is transport bookkeeping, not a reader gesture. Deal
+        // with it before the tour and sync-animation machinery observe it.
+        if (m && m.type === 'viewerProbeResult') {
+            this._finishViewerProbe(m);
+            return;
+        }
         // The tour watches the SAME messages the panel already sends, so what
         // it teaches and what the reader does are the same event.
         try { this._tourObserve(m); } catch (_) { /* the tour never breaks the panel */ }
@@ -2360,6 +2473,9 @@ class TexViewer {
                 break;
             }
             case 'opened':
+                this._viewerReloading = false;
+                clearTimeout(this._viewerReloadTimer);
+                this._viewerReloadTimer = null;
                 // The pages just changed underneath the reader. Any ladder was
                 // built against the old source positions, and the old rects
                 // were measured against the old compile, so both are dropped
@@ -2375,6 +2491,7 @@ class TexViewer {
                 this._postEditAnchor().catch(() => {});
                 if (this._labelsWanted) this._postLabels().catch(() => {});
                 this._postSections().catch(() => {});
+                if (this._reviewFocus) this.focusReviewHunk(this._reviewFocus);
                 break;
             case 'textLayer': this._onTextLayer(m); break;
             case 'textLayerDone':

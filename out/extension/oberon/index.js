@@ -30,8 +30,6 @@ const { clarifyQuestGate, applyDeclaredAssumptions }     = require('./core/resea
 const { runExecutiveAnalysis }                           = require('./core/executive');
 const establishedFacts                                   = require('./memory/establishedFacts');
 const wolframShim                                        = require('./core/wolframShim');
-const { TestSuiteRunner }                                = require('./tests/runner');
-const { TestResultsPanel }                               = require('./ui/testResultsPanel');
 const { prepareCharmNotebook }                           = require('./memory/charmNotebook');
 const { prepareSummaryNotebook }                         = require('./memory/summaryNotebook');
 const { populateResearchNotebooks }                      = require('./memory/populateNotebooks');
@@ -83,16 +81,32 @@ function activate(context, opts = {}) {
     const inspector       = new RunInspectorManager({ context, runManager, bus, onCommand: dispatch });
     const charmDebugger   = new CharmDebuggerManager({ context, bus, onCommand: dispatch });
     const sidebar         = new ControlRoomProvider({ runManager, bus, onCommand: dispatch });
-    const testRunner      = new TestSuiteRunner({
-        bus, runManager,
-        // Same live quick-compute path as wolfbook_fairy_dispatch; `dispatch`
-        // is resolved at call time (suite runs long after activation).
-        dispatchBrief: (payload) => dispatch('startFairy', payload),
-        // Run reports land in workspace state; a blessed report is copied to
-        // <repo>/oberon/tests/baselines/ by hand when promoting a baseline.
-        outDir: (() => { try { const o = project.oberonDir(); return o ? require('path').join(o, 'gold') : null; } catch (_) { return null; } })(),
-    });
-    const testResultsPanel = new TestResultsPanel({ context, runner: testRunner, runManager });
+    // The gold suite is developer benchmark material and is intentionally not
+    // shipped in the public VSIX. It used to be imported at module scope even
+    // though .vscodeignore removes oberon/tests/**, making EVERY clean install
+    // fail Oberon activation. Load it only in a source/development checkout.
+    let testRunner = null;
+    let testResultsPanel = null;
+    try {
+        const { TestSuiteRunner } = require('./tests/runner');
+        const { TestResultsPanel } = require('./ui/testResultsPanel');
+        testRunner = new TestSuiteRunner({
+            bus, runManager,
+            // Same live quick-compute path as wolfbook_fairy_dispatch; `dispatch`
+            // is resolved at call time (suite runs long after activation).
+            dispatchBrief: (payload) => dispatch('startFairy', payload),
+            // Run reports land in workspace state; a blessed report is copied to
+            // <repo>/oberon/tests/baselines/ by hand when promoting a baseline.
+            outDir: (() => { try { const o = project.oberonDir(); return o ? require('path').join(o, 'gold') : null; } catch (_) { return null; } })(),
+        });
+        testResultsPanel = new TestResultsPanel({ context, runner: testRunner, runManager });
+    } catch (e) {
+        // Missing is the normal production shape. A different loader failure
+        // remains visible to developers without taking Oberon down with it.
+        const missingDevSuite = e && e.code === 'MODULE_NOT_FOUND' &&
+            /(?:\.\/tests\/runner|oberon[\\/]tests[\\/])/.test(String(e.message || ''));
+        if (!missingDevSuite) console.warn('[oberon] gold suite unavailable:', e && e.stack || e);
+    }
     const { ContributionReviewPanel } = require('./ui/contributionReview');
     const contributionReviewPanel = new ContributionReviewPanel(context);
     const { SkilXivExplorerPanel } = require('./ui/skilxivExplorer');
@@ -163,7 +177,9 @@ function activate(context, opts = {}) {
         ['wolfbook.oberon.openSettings',       () => settings.openSettingsUI()],
         ['wolfbook.oberon.configureProviders', () => settings.openProviderSettingsUI()],
         ['wolfbook.oberon.emitMockEvents',     () => emitMockEvents({ bus, runManager })],
-        ['wolfbook.oberon.runTestSuite', () => testResultsPanel.show()],
+        ['wolfbook.oberon.runTestSuite', () => testResultsPanel
+            ? testResultsPanel.show()
+            : vscode.window.showInformationMessage('Oberon gold suite is available in development builds only.')],
         ['wolfbook.oberon.openRunLog', async () => {
             const fp = bus.filePath;
             if (fp) {
@@ -345,6 +361,9 @@ function activate(context, opts = {}) {
         // upgrade plan). Fire-and-forget; poll goldStatus. Grading is machine-
         // only: fresh kernel → replay clean.wb → task verifier.
         ['wolfbook.oberon.goldRun', async (args) => {
+            if (!testRunner) {
+                return { ok: false, error: 'Oberon gold suite is not included in production builds.' };
+            }
             if (!roles.minimallyConfigured()) {
                 return { ok: false, error: 'Oberon LLM roles are not configured.' };
             }
@@ -367,6 +386,9 @@ function activate(context, opts = {}) {
             };
         }],
         ['wolfbook.oberon.goldStatus', async () => {
+            if (!testRunner) {
+                return { ok: false, running: false, error: 'Oberon gold suite is not included in production builds.' };
+            }
             const rep = testRunner.lastReport;
             return {
                 ok: true,
@@ -502,7 +524,7 @@ function activate(context, opts = {}) {
         try { sidebar.dispose(); } catch (_) {}
         try { inspector.dispose(); } catch (_) {}
         try { charmDebugger.dispose(); } catch (_) {}
-        try { testResultsPanel.dispose(); } catch (_) {}
+        try { if (testResultsPanel) testResultsPanel.dispose(); } catch (_) {}
         bus.endRun().catch(() => {});
     }});
 

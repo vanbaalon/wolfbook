@@ -1605,6 +1605,51 @@ test('focusing a hunk moves the editor AND tells the page', async () => {
     }
 });
 
+test('a healthy viewer is kept when a review change is opened', async () => {
+    const v = makeViewer(null, { file: FILE, line: 5, dx: 2 });
+    v.shownGeneration = 7;
+    let html = 'the live viewer';
+    Object.defineProperty(v.panel.webview, 'html', {
+        get: () => html, set: value => { html = value; }, configurable: true,
+    });
+    v.panel.webview.postMessage = (m) => {
+        v.posted.push(m);
+        if (m.type === 'viewerProbe') {
+            queueMicrotask(() => v._onMessage({
+                type: 'viewerProbeResult', requestId: m.requestId, ok: true, generation: 7,
+            }));
+        }
+        return true;
+    };
+    await v._ensureViewerForReview({ page: 1 });
+    assert.strictEqual(html, 'the live viewer', 'a responsive viewer is not disturbed');
+    assert.strictEqual(v._viewerReloading, false);
+});
+
+test('a dead or stale viewer is recreated before a review change is focused', async () => {
+    const v = makeViewer(null, { file: FILE, line: 5, dx: 2 });
+    v.shownGeneration = 8;
+    let html = 'stale viewer';
+    Object.defineProperty(v.panel.webview, 'html', {
+        get: () => html, set: value => { html = value; }, configurable: true,
+    });
+    v._html = () => '<fresh viewer>';
+    v.panel.webview.postMessage = (m) => {
+        v.posted.push(m);
+        if (m.type === 'viewerProbe') {
+            queueMicrotask(() => v._onMessage({
+                type: 'viewerProbeResult', requestId: m.requestId, ok: false,
+                reason: 'PDF worker stopped', workerDead: true,
+            }));
+        }
+        return true;
+    };
+    await v._ensureViewerForReview({ page: 1 });
+    assert.strictEqual(html, '<fresh viewer>', 'the webview document — and therefore its worker — is replaced');
+    assert.strictEqual(v.shownGeneration, null, 'the replacement must receive current PDF bytes');
+    assert.strictEqual(v._viewerReloading, true, 'recovery remains active until the replacement reports opened');
+});
+
 test('closing the comparison clears it on both sides', async () => {
     const mdoc = new MutableDoc(SRC, FILE);
     const oldOpen = stub.workspace.openTextDocument;

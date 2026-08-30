@@ -277,6 +277,16 @@ test('EVERY open is timed, not just the first', () => {
         'the text-layer sweep reports how long it took');
 });
 
+test('a change click can prove the PDF worker and loaded viewer are alive', () => {
+    const js = fs.readFileSync(CLIENT_JS, 'utf8');
+    assert.ok(/workerPort:\s*null/.test(js), 'the worker port is retained after startup');
+    assert.ok(/addEventListener\('error',\s*died\)/.test(js), 'late worker death is observed');
+    assert.ok(/addEventListener\('messageerror',\s*died\)/.test(js), 'a broken worker channel is observed');
+    assert.ok(/async function probeViewer\(/.test(js), 'the viewer has a health probe');
+    assert.ok(/getPageIndex\(page\.ref\)/.test(js), 'the probe makes a real worker round-trip');
+    assert.ok(/case 'viewerProbe':\s*await probeViewer\(msg\)/.test(js), 'the probe is on the message wire');
+});
+
 console.log('the Page view panel (markup, CSP, one-copy rule)\n');
 results.forEach(r => console.log(r));
 console.log(`\n${pass} passed, ${fail} failed`);

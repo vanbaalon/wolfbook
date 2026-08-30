@@ -4,6 +4,23 @@ All notable changes to **Wolfbook** are documented here.
 
 ---
 
+## [2.9.3] - 2026-08-30
+
+### Fixed
+
+- **Fixed clean-install startup in every platform package.** Production VSIX
+  files intentionally exclude Oberon's private developer benchmark corpus;
+  Oberon no longer imports that excluded tree during activation. Developer-only
+  gold-suite commands now report that they are unavailable in production, and
+  the optional research-evaluation sidecar can be absent without preventing the
+  core postmortem from being written.
+- **WPaper recovers a stopped PDF worker when opening a reviewed change.** A
+  change click verifies the loaded generation, page structure and worker
+  round-trip; an unhealthy or stale webview is recreated and the selected
+  change is restored after the current PDF opens.
+- Added a production-package boundary regression test that runs with all
+  `oberon/tests` imports blocked, matching a clean public VSIX.
+
 ## [2.9.2] - 2026-08-26
 
 ### Added

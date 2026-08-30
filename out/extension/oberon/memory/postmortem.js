@@ -20,7 +20,6 @@ const project  = require('./project');
 const settings = require('../config/settings');
 const roles    = require('../config/roles');
 const { getAdapter } = require('../providers');
-const { assessTelemetry, toMarkdown } = require('../tests/researchEval');
 
 const POSTMORTEM_SYSTEM_PROMPT =
     'You are a concise science communicator writing a postmortem for an automated ' +
@@ -66,6 +65,10 @@ async function writePostmortem(opts) {
     // grader supplies evidence; a clean replay alone is never scientific proof.
     let capabilityReport = null;
     try {
+        // researchEval belongs to the developer benchmark tree, which is not
+        // present in production packages. Its sidecars are optional; the core
+        // postmortem must still be written when that evaluator is absent.
+        const { assessTelemetry, toMarkdown } = require('../tests/researchEval');
         capabilityReport = assessTelemetry((opts && opts.runEvents) || [], {
             runId, source: 'production_postmortem',
         });

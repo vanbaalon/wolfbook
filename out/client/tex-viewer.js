@@ -35,6 +35,11 @@ const HINT_DWELL_DEFAULT = 900;
 const state = {
     pdfjs: null,
     doc: null,
+    workerPort: null,        // the port pdf.js is using, retained so its death is observable
+    workerDead: false,
+    workerError: '',
+    openInFlight: false,
+    openError: '',
     pageCount: 0,
     scale: 1.25,
     rendered: new Map(),      // pageNumber -> {canvas, viewport}
@@ -235,6 +240,21 @@ async function loadPdfjs(base) {
     mark('pdfjs imported');
     const w = await makeWorkerPort(base);
     state.workerHow = w.how;
+    state.workerPort = w.port || null;
+    state.workerDead = false;
+    state.workerError = '';
+    if (w.port) {
+        // Worker failures are asynchronous and can happen hours after the
+        // half-second construction check above. Keeping no reference and no
+        // listener made pdf.js look healthy forever after its worker died.
+        const died = (ev) => {
+            if (state.workerPort !== w.port) return;
+            state.workerDead = true;
+            state.workerError = (ev && ev.message) || (ev && ev.type) || 'PDF worker stopped';
+        };
+        w.port.addEventListener('error', died);
+        w.port.addEventListener('messageerror', died);
+    }
     mark('worker ' + (w.port ? 'ready' : 'unavailable'));
     try {
         if (w.port) mod.GlobalWorkerOptions.workerPort = w.port;
@@ -246,6 +266,8 @@ async function loadPdfjs(base) {
 
 async function openDocument(msg) {
     const pdfjs = await loadPdfjs(msg.base);
+    state.openInFlight = true;
+    state.openError = '';
     status('loading…');
     // PER-OPEN timing, distinct from the module-level marks above: those
     // measure cold start and are reported once, which meant a LIVE rebuild —
@@ -397,8 +419,73 @@ async function openDocument(msg) {
             vscode.postMessage({ type: 'timing', marks, worker: state.workerHow });
         }
     } catch (e) {
-        status(`could not open the PDF: ${e && e.message ? e.message : e}`, 'err');
+        state.openError = e && e.message ? e.message : String(e);
+        status(`could not open the PDF: ${state.openError}`, 'err');
+    } finally {
+        state.openInFlight = false;
     }
+}
+
+/** Reject a worker operation that has silently stopped answering. */
+function before(deadline, promise) {
+    let timer = null;
+    return Promise.race([
+        promise,
+        new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error('PDF worker did not answer')), deadline);
+        }),
+    ]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * Prove that the page the extension thinks it shipped is still usable.
+ *
+ * Merely having `state.doc` is not proof: a dead pdf.js worker leaves that
+ * proxy behind indefinitely. getPageIndex is a small real round-trip through
+ * the worker, while the generation and DOM checks catch a failed live refresh
+ * and the detached-page stale-view failure respectively.
+ */
+async function probeViewer(msg) {
+    const reply = { type: 'viewerProbeResult', requestId: msg.requestId, ok: false,
+        generation: state.generation, worker: state.workerHow || 'unknown' };
+    try {
+        // A probe arriving during a live open gets a short chance to observe
+        // its completion rather than restarting a viewer that is merely busy.
+        for (let i = 0; state.openInFlight && i < 20; i++) {
+            await new Promise(resolve => setTimeout(resolve, 50));
+        }
+        if (state.openInFlight) throw new Error('PDF is still loading');
+        if (state.openError) throw new Error(state.openError);
+        if (state.workerDead) throw new Error(state.workerError || 'PDF worker stopped');
+        if (!state.doc) throw new Error('PDF document is missing');
+        if (msg.generation != null && String(msg.generation) !== String(state.generation)) {
+            throw new Error(`stale PDF generation ${state.generation == null ? '–' : state.generation}`);
+        }
+        if (state.pageCount !== state.doc.numPages || pagesEl().children.length !== state.doc.numPages) {
+            throw new Error('PDF page view is incomplete');
+        }
+        const n = Math.max(1, Math.min(Number(msg.page) || 1, state.doc.numPages));
+        const wrap = pagesEl().querySelector(`.page[data-page="${n}"]`);
+        if (!wrap) throw new Error(`page ${n} is missing`);
+        const drawn = state.rendered.get(n);
+        if (drawn && wrap.querySelector('canvas') !== drawn.canvas) {
+            throw new Error(`page ${n} has a detached render`);
+        }
+        const page = await before(1200, state.doc.getPage(n));
+        // PDFPageProxy may be cached locally. Resolving its reference back to
+        // an index is deliberately a fresh, tiny message to the worker.
+        if (page.ref && typeof state.doc.getPageIndex === 'function') {
+            const index = await before(1200, state.doc.getPageIndex(page.ref));
+            if (index + 1 !== n) throw new Error(`page ${n} resolved as ${index + 1}`);
+        } else {
+            await before(1200, page.getTextContent({ disableNormalization: true }));
+        }
+        reply.ok = true;
+    } catch (e) {
+        reply.reason = e && e.message ? e.message : String(e);
+        reply.workerDead = !!state.workerDead;
+    }
+    vscode.postMessage(reply);
 }
 
 /** Pages currently intersecting the scroll viewport, top first. */
@@ -4635,6 +4722,7 @@ window.addEventListener('message', async (ev) => {
     const msg = ev.data || {};
     switch (msg.type) {
         case 'open': await openDocument(msg); break;
+        case 'viewerProbe': await probeViewer(msg); break;
         case 'fullscreen':
             state.fullscreen = !!msg.value;
             el('full').textContent = state.fullscreen ? '⤡' : '⛶';
@@ -4982,4 +5070,4 @@ function forgetPagesForTest() {
     textCache.clear();
 }
 
-window.__wbTexViewerTest = { fitToolbar, dropRenderedForTest, renderPage, snapToInk, itemWords, prefixWidths, textItems, wordKey, foldGlyphs, wordAtPoint, highlightLatex, fromViewport, rectToViewport, forgetPagesForTest };
+window.__wbTexViewerTest = { fitToolbar, dropRenderedForTest, renderPage, probeViewer, snapToInk, itemWords, prefixWidths, textItems, wordKey, foldGlyphs, wordAtPoint, highlightLatex, fromViewport, rectToViewport, forgetPagesForTest };
