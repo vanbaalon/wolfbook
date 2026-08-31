@@ -4262,7 +4262,7 @@
         "displayName": "Wolfslide: Get Slide",
         "toolReferenceName": "wolfslideGetSlide",
         "canBeReferencedInPrompt": true,
-        "modelDescription": "Returns the ASCII diagram, image summary, and raw JSON for a single slide. Call with NO arguments to see the slide the user is currently looking at — the response includes a '▶ CURRENTLY VIEWING' banner confirming the slide number and label. Use this as the first step when the user says 'this slide' or 'the current slide'. Accepts slideIndex (1-based), slideNumber (alias), or slideId to target a specific slide. Use brief:true to skip the raw JSON — saves context when you only need the ASCII layout.",
+        "modelDescription": "Returns the ASCII block tree (with block IDs), image summary, speaker notes and render warnings for a single slide. Call with NO arguments to see the slide the user is currently looking at — the response carries a '▶ CURRENTLY VIEWING' banner. Accepts slideIndex (1-based), slideNumber (alias) or slideId.\n\nThe raw slide JSON is OMITTED by default (it is several times larger than the tree and rarely needed). Pass brief:false for it, or wolfslide_patchBlock(blockId:'…') with no patch to inspect one block. For layout questions use wolfslide_getSlideHtml(format:'fit') — this tool shows structure, not geometry.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -4280,11 +4280,15 @@
             },
             "brief": {
               "type": "boolean",
-              "description": "If true, skip the raw JSON block tree. Use when you only need the ASCII layout diagram — much smaller context footprint."
+              "description": "Default true — the raw JSON is omitted. Pass brief:false to include the full slide object."
             },
             "docUri": {
               "type": "string",
               "description": "Optional: target a specific open .wslide file."
+            },
+            "full": {
+              "type": "boolean",
+              "description": "Alias for brief:false — include the raw slide JSON."
             }
           }
         }
@@ -4294,7 +4298,7 @@
         "displayName": "Wolfslide: Get Slide Preview",
         "toolReferenceName": "wolfslideGetSlideHtml",
         "canBeReferencedInPrompt": true,
-        "modelDescription": "Preview a slide. Default (format:'image'): captures a JPEG screenshot of the slide at its FINAL state — all animation fragments visible at once. IMPORTANT: outputPath is REQUIRED for format:'image' — omitting it returns ~100KB base64 inline and exhausts context. Pass outputPath:\"/tmp/slide.jpg\" (or any absolute path). Use format:'html' to get standalone static HTML without requiring outputPath. Accepts slideIndex (1-based), slideNumber (alias), or slideId. Defaults to the currently visible slide.\n\n⚠ KNOWN CAPTURE LIMITATIONS (format:'image' uses html2canvas, NOT a real browser render): some things can look WRONG in the screenshot even when the live deck is correct — do NOT treat these as bugs/failures: (1) advanced CSS — gradients, backdrop-filter, some box-shadows/text-shadows, and bare-element rules from theme editorCSS (e.g. a custom h2 title bar) — may not be captured; (2) inline <svg> in raw blocks may be blank. For a faithful check of styling, use format:'html', write it to outputPath, and open it in a browser.",
+        "modelDescription": "Inspect a slide. THREE formats:\n\nformat:'fit' — START HERE when the question is \"does this content fit / is anything cut off?\". Returns a ~90-token layout report: total content height vs the 1080px canvas, each column's y-range, which blocks are clipped or fully out of frame, shrink-wrapped columns with their cause, and a closed-form fit hint (\"set #left_col { fontSize: 0.90em } → est. 1068px\") computed from available/actual with fixed-size images held out of the ratio. About 16x cheaper than a screenshot and strictly more actionable — a JPEG cannot tell you BY HOW MUCH or WHICH block. Needs a live editor; it measures off-screen so the visible slide never changes.\n\nformat:'image' — a JPEG screenshot, for AESTHETIC judgement (colour, balance, crowding), not as a compilation step. outputPath is REQUIRED (inline base64 is ~100KB and exhausts context). Capture auto-retries at progressively lower scale on timeout and tells you which scale succeeded.\n\nformat:'html' — standalone static HTML; add animationSteps:true for Reveal.js with step navigation.\n\nAccepts slideIndex (1-based), slideNumber (alias) or slideId; defaults to the visible slide.\n\n⚠ format:'image' uses html2canvas, not a real browser: gradients, backdrop-filter, some shadows and bare-element rules from theme editorCSS may be missing FROM THE SCREENSHOT even though the live deck and the HTML export are correct. Inline <svg> in raw blocks renders correctly in the editor and in export; it is only the html2canvas capture that may show it blank. Never rewrite working markup because a screenshot looked wrong — check format:'html' in a browser first.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -4313,10 +4317,11 @@
             "format": {
               "type": "string",
               "enum": [
+                "fit",
                 "image",
                 "html"
               ],
-              "description": "Output format. 'image' (default): JPEG screenshot via html2canvas — shows the final slide state with all elements visible, costs zero extra tokens. 'html': standalone static HTML with all elements visible. Use animationSteps:true with 'html' to get Reveal.js with step navigation."
+              "description": "'fit' (recommended for layout questions): compact overflow/clipping report with a rescale hint, ~90 tokens. 'image' (default): JPEG screenshot, needs outputPath, for aesthetics. 'html': standalone static HTML."
             },
             "animationSteps": {
               "type": "boolean",
@@ -4385,7 +4390,7 @@
         "displayName": "Wolfslide: Insert Slide",
         "toolReferenceName": "wolfslideInsert",
         "canBeReferencedInPrompt": true,
-        "modelDescription": "Inserts a single slide. For inserting many slides at once, prefer wolfslide_bulkInsert. To rebuild an existing slide, use wolfslide_replaceSlide. Block types: container, heading, text, image, list, math, box, code, arrow, eval, raw. list items may be plain strings (auto-wrapped to text blocks) or {type:\"text\",content}; eval blocks accept the expression in `input` (or `content`). Content supports KaTeX math via $...$ (inline) and $$...$$ (display); fragmentOrder:N for animation; CSS classes .gl .te .ro .mu .bl .re .cy for colored text. If afterIndex is omitted, appends at the end.\n\nMinimal example: {label:\"Title\", background:\"#1a1a2e\", layout:\"column\", children:[{type:\"heading\", content:\"Hello\"}, {type:\"text\", content:\"Body text here.\"}]}",
+        "modelDescription": "Inserts a single slide. For inserting many slides at once, prefer wolfslide_bulkInsert. To rebuild an existing slide, use wolfslide_replaceSlide. Block types: container, heading, text, image, list, math, box, code, arrow, eval, raw. list items may be plain strings (auto-wrapped to text blocks) or {type:\"text\",content}; eval blocks accept the expression in `input` (or `content`). Content supports KaTeX math via $...$ (inline) and $$...$$ (display); fragmentOrder:N for animation; CSS classes .gl .te .ro .mu .bl .re .cy for colored text. If afterIndex is omitted, appends at the end.\n\nMinimal example: {label:\"Title\", background:\"#1a1a2e\", layout:\"column\", children:[{type:\"heading\", content:\"Hello\"}, {type:\"text\", content:\"Body text here.\"}]}\n\nThe response states the deck length READ BACK from the editor after the write (a mismatch is reported loudly — a mutation can be lost to a racing autosave, and a false success is worse than a failure), plus a one-line FIT summary of the affected slide against the 1080px canvas. Pass fit:false to skip the fit check.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -4396,6 +4401,10 @@
             "slide": {
               "type": "object",
               "description": "Slide object. Required: label. Optional: background, layout (column/row/grid), gap, padding, children:[{type, content, style, ...}]. Block types: container, heading, text, image, list, math, box, code, arrow, eval, raw."
+            },
+            "fit": {
+              "type": "boolean",
+              "description": "Set false to skip the FIT summary in the response."
             }
           },
           "required": [
@@ -4408,7 +4417,7 @@
         "displayName": "Wolfslide: Replace Slide",
         "toolReferenceName": "wolfslideReplace",
         "canBeReferencedInPrompt": true,
-        "modelDescription": "Replaces an entire slide's structure in one call — the first-class way to REBUILD a slide (no insert+delete index juggling). The target slide's id is preserved by default so references stay stable; pass slide.id to override. To change only a few block properties, prefer wolfslide_patchBlock; to change only slide metadata (label/background/layout), prefer wolfslide_editSlide. Block types: container, heading, text, image, list, math, box, code, arrow, eval, raw. List items may be plain strings or {type:\"text\",content}. Eval blocks accept the expression in `input` (or `content`).\n\nExample: wolfslide_replaceSlide(slideIndex:3, slide:{label:\"Recap\", layout:\"column\", children:[{type:\"heading\", content:\"Recap\"}, {type:\"list\", items:[\"point one\", \"point two\"]}]})",
+        "modelDescription": "Replaces an entire slide's structure in one call — the first-class way to REBUILD a slide (no insert+delete index juggling). The target slide's id is preserved by default so references stay stable; pass slide.id to override. To change only a few block properties, prefer wolfslide_patchBlock; to change only slide metadata (label/background/layout), prefer wolfslide_editSlide. Block types: container, heading, text, image, list, math, box, code, arrow, eval, raw. List items may be plain strings or {type:\"text\",content}. Eval blocks accept the expression in `input` (or `content`).\n\nExample: wolfslide_replaceSlide(slideIndex:3, slide:{label:\"Recap\", layout:\"column\", children:[{type:\"heading\", content:\"Recap\"}, {type:\"list\", items:[\"point one\", \"point two\"]}]})\n\nThe response states the deck length READ BACK from the editor after the write (a mismatch is reported loudly — a mutation can be lost to a racing autosave, and a false success is worse than a failure), plus a one-line FIT summary of the affected slide against the 1080px canvas. Pass fit:false to skip the fit check.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -4423,6 +4432,10 @@
             "slide": {
               "type": "object",
               "description": "The full replacement slide. Optional: label, background, layout (column/row/grid), gap, padding, children:[{type, content, ...}]. The existing slide id is kept unless you set slide.id."
+            },
+            "fit": {
+              "type": "boolean",
+              "description": "Set false to skip the FIT summary in the response."
             }
           },
           "required": [
@@ -4435,7 +4448,7 @@
         "displayName": "Wolfslide: Edit Slide",
         "toolReferenceName": "wolfslideEdit",
         "canBeReferencedInPrompt": true,
-        "modelDescription": "Updates SLIDE-LEVEL metadata only: label, background, layout, gap, padding, hidden, transition, notes, align, justify, scale, baseFontSize. Omit slideIndex to target the currently visible slide.\n\nLAYOUT/FILL helpers: align (cross-axis: flex-start/center/flex-end/stretch) and justify (main-axis: flex-start/center/flex-end/space-between/space-around) control alignment on the slide root — e.g. patch:{justify:\"center\"} vertically centers a column slide to kill bottom whitespace. scale (number, default 1) multiplies the built-in base text + heading sizes to enlarge a whole slide (e.g. scale:1.2); baseFontSize (px) is an alias (relative to 36). Block-level inline fontSize still overrides.\n\n🚫 NEVER use this to change block properties. For any block change (style, content, position, etc.) use wolfslide_patchBlock — it finds the block anywhere in the tree by id and never risks losing sibling blocks.\n\nChildren arrays: the ONLY safe use is pure id-only stubs {\"id\":\"...\"} for reordering top-level blocks. ANY entry with extra fields (style, offset, content, etc.) is REJECTED with an error before saving — the tool will tell you which blocks to patch and with what call.",
+        "modelDescription": "Updates SLIDE-LEVEL metadata only: label, background, layout, gap, padding, hidden, transition, notes, align, justify, scale, baseFontSize. Omit slideIndex to target the currently visible slide.\n\nLAYOUT/FILL helpers: align (cross-axis: flex-start/center/flex-end/stretch) and justify (main-axis: flex-start/center/flex-end/space-between/space-around) control alignment on the slide root — e.g. patch:{justify:\"center\"} vertically centers a column slide to kill bottom whitespace. scale (number, default 1) multiplies the built-in base text + heading sizes to enlarge a whole slide (e.g. scale:1.2); baseFontSize (px) is an alias (relative to 36). Block-level inline fontSize still overrides.\n\n🚫 NEVER use this to change block properties. For any block change (style, content, position, etc.) use wolfslide_patchBlock — it finds the block anywhere in the tree by id and never risks losing sibling blocks.\n\nChildren arrays: the ONLY safe use is pure id-only stubs {\"id\":\"...\"} for reordering top-level blocks. ANY entry with extra fields (style, offset, content, etc.) is REJECTED with an error before saving — the tool will tell you which blocks to patch and with what call.\n\nThe response states the deck length READ BACK from the editor after the write (a mismatch is reported loudly — a mutation can be lost to a racing autosave, and a false success is worse than a failure), plus a one-line FIT summary of the affected slide against the 1080px canvas. Pass fit:false to skip the fit check.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -4454,6 +4467,10 @@
             "dryRun": {
               "type": "boolean",
               "description": "When true and patch includes a children/items/elements array: compute the diff (blocks preserved, patched, added, DELETED) and return it WITHOUT saving. Use this to verify no blocks are accidentally deleted before committing. Required when passing a children array to avoid silent data loss."
+            },
+            "fit": {
+              "type": "boolean",
+              "description": "Set false to skip the FIT summary in the response."
             }
           },
           "required": [
@@ -4601,7 +4618,7 @@
         "displayName": "Wolfslide: Insert Eval Block",
         "toolReferenceName": "wolfslideInsertEval",
         "canBeReferencedInPrompt": true,
-        "modelDescription": "Inserts a Mathematica evaluable block on a slide. Graphics (Plot, Graphics, etc.) render as crisp SVG; symbolic expressions (Integrate, Series, etc.) render as beautifully typeset LaTeX via KaTeX; fallback is PNG. Auto-evaluates immediately by default. Use this for computed plots, formulas, diagrams, or any dynamic Wolfram Language output in presentations.",
+        "modelDescription": "Inserts a Mathematica evaluable block on a slide. Graphics (Plot, Graphics, etc.) render as crisp SVG; symbolic expressions (Integrate, Series, etc.) render as beautifully typeset LaTeX via KaTeX; fallback is PNG. Auto-evaluates immediately by default. Use this for computed plots, formulas, diagrams, or any dynamic Wolfram Language output in presentations.\n\nkernel_id selects the kernel when the window has more than one live kernel; it is FORWARDED (it used to be dropped, so the error demanding it repeated no matter what you passed). If resolution still fails the error lists every live kernel and the exact retry call. When no kernel can run the expression the block is still inserted, and the response says which of 'no kernel running' / 'could not resolve' / 'reachable but returned nothing' applies.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -4640,6 +4657,10 @@
             "docUri": {
               "type": "string",
               "description": "Document URI (multi-editor)."
+            },
+            "kernel_id": {
+              "type": "string",
+              "description": "Kernel to evaluate in (from wolfbook_list_clients / wolfbook_status scope:'kernels'). Required only when this window has several live kernels."
             }
           },
           "required": [
@@ -4652,7 +4673,7 @@
         "displayName": "Wolfslide: Run Eval Block",
         "toolReferenceName": "wolfslideRunEval",
         "canBeReferencedInPrompt": true,
-        "modelDescription": "Evaluates (or re-evaluates) an existing eval block on a slide. Optionally updates the input expression before running. Graphics produce SVG, symbolic math produces LaTeX (KaTeX), with PNG fallback. Returns the evaluation result type (svg/latex/image/text/error).",
+        "modelDescription": "Evaluates (or re-evaluates) an existing eval block on a slide. Optionally updates the input expression before running. Graphics produce SVG, symbolic math produces LaTeX (KaTeX), with PNG fallback. Returns the evaluation result type (svg/latex/image/text/error).\n\nkernel_id selects the kernel when the window has more than one live kernel; it is FORWARDED (it used to be dropped, so the error demanding it repeated no matter what you passed). If resolution still fails the error lists every live kernel and the exact retry call. When no kernel can run the expression the block is still inserted, and the response says which of 'no kernel running' / 'could not resolve' / 'reachable but returned nothing' applies.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -4675,6 +4696,10 @@
             "docUri": {
               "type": "string",
               "description": "Document URI (multi-editor)."
+            },
+            "kernel_id": {
+              "type": "string",
+              "description": "Kernel to evaluate in (from wolfbook_list_clients / wolfbook_status scope:'kernels'). Required only when this window has several live kernels."
             }
           },
           "required": [
@@ -4734,7 +4759,7 @@
         "displayName": "Wolfslide: Bulk Insert Slides",
         "toolReferenceName": "wolfslideBulk",
         "canBeReferencedInPrompt": true,
-        "modelDescription": "Inserts multiple slides in one call — use this when building a presentation from scratch instead of calling insertSlide repeatedly. Block types MUST be one of: container, heading, text, image, list, math, box, code, arrow, eval, raw — passing an unknown type returns a validation error before inserting anything. Content supports KaTeX math via $...$ / $$...$$; fragmentOrder:N for animation; CSS color classes .gl .te .ro .mu .bl .re .cy. Tip: call wolfslide_getContext first to see theme presets.\n\nMinimal slide: {label:\"Slide title\", background:\"#1a1a2e\", layout:\"column\", children:[{type:\"heading\", content:\"Title\"}, {type:\"text\", content:\"Body.\"}]}",
+        "modelDescription": "Inserts multiple slides in one call — use when building a presentation from scratch instead of repeated insertSlide. Block types MUST be one of: container, heading, text, image, list, math, box, code, arrow, eval, raw; an unknown type is rejected before anything is inserted. Content supports KaTeX via $...$ / $$...$$; fragmentOrder:N for animation; CSS colour classes .gl .te .ro .mu .bl .re .cy. Call wolfslide_getContext first for theme presets and existing stylePresets.\n\nPAYLOAD SIZE: the MCP transport can truncate a large inline `slides` array mid-string (seen around 10 KB), and the resulting JSON error looks like an escaping bug in your input when it is not. Keep inline batches to roughly 3 slides / under ~8 KB, or pass slidesPath — an absolute (or deck-relative) path to a local JSON file holding the slides array — which avoids the wire entirely and has no size limit.\n\nThe response states the deck length read back after the write, and flags any inserted slide whose content overflows the 1080px canvas.\n\nMinimal slide: {label:'Slide title', background:'#1a1a2e', layout:'column', children:[{type:'heading', content:'Title'}, {type:'text', content:'Body.'}]}",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -4759,11 +4784,16 @@
             "docUri": {
               "type": "string",
               "description": "Document URI (multi-editor)."
+            },
+            "slidesPath": {
+              "type": "string",
+              "description": "Path to a local JSON file holding the slides array (or {slides:[...]}), absolute or relative to the deck. Use instead of `slides` for large batches — it bypasses the transport payload limit."
+            },
+            "fit": {
+              "type": "boolean",
+              "description": "Set false to skip the per-slide fit check in the response."
             }
-          },
-          "required": [
-            "slides"
-          ]
+          }
         }
       },
       {
@@ -4874,7 +4904,7 @@
         "displayName": "Wolfslide: Search Slides",
         "toolReferenceName": "wolfslideSearch",
         "canBeReferencedInPrompt": true,
-        "modelDescription": "Search slides by label OR block content — use this to find the correct slideIndex BEFORE editing, especially when slide labels are not unique (e.g. 'N=4 SYM via QSC' on multiple slides). A query matches both slide labels and block text content. Returns slideIndex for every match so you can pass it directly to edit tools.\n\nExamples:\n  wolfslide_searchSlides(query:\"Spectrum from FME\")  ← find which slide number has this label\n  wolfslide_searchSlides(query:\"gamma_cusp\")           ← find which slides contain this equation\n  wolfslide_searchSlides(blockType:\"image\")            ← list all slides with images\n  wolfslide_searchSlides(query:\"red\", styleKey:\"color\")  ← find blocks with color containing 'red'\n\nAlso supports blockType (exact block type filter) and styleKey+styleValue (CSS property search). All filters can be combined.",
+        "modelDescription": "Grep the deck: returns LOCATIONS (slide index + block id + matching snippet), never whole documents. Use it for any deck-wide question instead of paging through getSlide — auditing citations, finding every hard-coded colour, locating a formula. Also the way to find the right slideIndex before editing when labels are not unique.\n\n  searchSlides(query:'Spectrum from FME')                        ← which slide has this label\n  searchSlides(query:'arXiv|\\\\d{4}\\\\.\\\\d{4,5}', regex:true)      ← every citation, with block ids\n  searchSlides(query:'#0070cc', regex:true, searchRaw:true)      ← a hex colour inside inline markup\n  searchSlides(blockType:'image')                                ← every image block\n  searchSlides(query:'red', styleKey:'color')                    ← blocks whose color contains 'red'\n\nregex:true switches query to a JavaScript regular expression (case-insensitive unless caseSensitive:true) and returns the match in context. searchRaw:true searches the raw HTML/markup instead of stripped text, so hrefs, class names and inline styles are visible. blockType and styleKey/styleValue can be combined with either.",
         "inputSchema": {
           "type": "object",
           "required": [],
@@ -4898,6 +4928,18 @@
             "styleValue": {
               "type": "string",
               "description": "Style property value to match (partial, case-insensitive). Requires styleKey."
+            },
+            "regex": {
+              "type": "boolean",
+              "description": "Treat query as a JavaScript regular expression. Returns the match in context."
+            },
+            "searchRaw": {
+              "type": "boolean",
+              "description": "Search the raw HTML/markup rather than tag-stripped text — needed for hrefs, class names, inline styles."
+            },
+            "caseSensitive": {
+              "type": "boolean",
+              "description": "Only with regex:true. Default false."
             }
           }
         }
@@ -4994,7 +5036,7 @@
         "displayName": "Wolfslide: Patch Block",
         "toolReferenceName": "wolfslidePatchBlock",
         "canBeReferencedInPrompt": true,
-        "modelDescription": "Merge a patch into a single block, OR inspect a block's current JSON — both by blockId or blockName. Finds the block recursively across all slides. THE preferred tool for changing any block property (color, style, content, size, position, etc.). Setting a value to null removes that key. Style properties merge deeply: { style: { background: 'red' } } only changes background, leaving other style keys intact.\n\nInspect (no patch): wolfslide_patchBlock(blockId: \"9c0rx643\")  ← returns current JSON without modifying\nPatch by ID: wolfslide_patchBlock(blockId: \"9c0rx643\", patch: {style: {background: \"red\"}})\nPatch by name: wolfslide_patchBlock(blockName: \"slide-title\", patch: {...})  ← stable across re-inserts\n\nStyle preset: add stylePreset:\"preset-name\" to a block patch to apply a named style bundle (created via wolfslide_setTheme(stylePresets:{...})). The preset supplies base styles; block.style always overrides.\n\nSupported block style keys: background, color, borderRadius, border, boxShadow, padding, margin, fontSize, fontWeight, fontStyle, lineHeight, textAlign, letterSpacing, opacity, flex, alignSelf, overflow, whiteSpace, textShadow, backdropFilter, transform.",
+        "modelDescription": "Merge a patch into a single block, OR inspect a block's current JSON — both by blockId or blockName. Finds the block recursively across all slides. If the id or name matches blocks on MORE THAN ONE slide and no slideIndex is given, this ERRORS and lists the candidates rather than guessing — the resolver used to silently pick whichever slide was on screen, which meant the same call edited a different block depending on where the cursor happened to be. Pass slideIndex to disambiguate. THE preferred tool for changing any block property (color, style, content, size, position, etc.). Setting a value to null removes that key. Style properties merge deeply: { style: { background: 'red' } } only changes background, leaving other style keys intact.\n\nInspect (no patch): wolfslide_patchBlock(blockId: \"9c0rx643\")  ← returns current JSON without modifying\nPatch by ID: wolfslide_patchBlock(blockId: \"9c0rx643\", patch: {style: {background: \"red\"}})\nPatch by name: wolfslide_patchBlock(blockName: \"slide-title\", patch: {...})  ← stable across re-inserts\n\nStyle preset: add stylePreset:\"preset-name\" to a block patch to apply a named style bundle (created via wolfslide_setTheme(stylePresets:{...})). The preset supplies base styles; block.style always overrides.\n\nSupported block style keys: background, color, borderRadius, border, boxShadow, padding, margin, fontSize, fontWeight, fontStyle, lineHeight, textAlign, letterSpacing, opacity, flex, alignSelf, overflow, whiteSpace, textShadow, backdropFilter, transform.\n\nThe response states the deck length read back after the write and a one-line FIT summary (content height vs the 1080px canvas) for the slide it touched, so an overflow introduced by a patch is visible immediately without a screenshot. Pass fit:false to skip it.\n\nPatching an image's w/h warns when the declared ratio cannot be produced from the source file. Patching math content is linted for \\\\color switches and unescaped % — markup that renders without error and means something other than it looks like.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -5021,6 +5063,10 @@
             "docUri": {
               "type": "string",
               "description": "Optional: target a specific open .wslide file."
+            },
+            "fit": {
+              "type": "boolean",
+              "description": "Set false to skip the FIT summary in the response."
             }
           },
           "required": [
@@ -5033,7 +5079,7 @@
         "displayName": "Wolfslide: Advanced Operations",
         "toolReferenceName": "wolfslideAdvanced",
         "canBeReferencedInPrompt": true,
-        "modelDescription": "Advanced slide operations. Actions: 'duplicate' deep-copies a slide (alias of wolfslide_duplicateSlide — prefer that tool), 'check' audits the entire deck for issues (empty slides, missing alt-text, fragment gaps, duplicate labels), 'reorderFragments' sets animation step order on a slide, 'measure' returns rendered block sizes and detects overflow.",
+        "modelDescription": "Deck-wide operations. Actions:\n  'fitAll'      — measure EVERY slide and report only the ones that overflow 1080px, are clipped, or trip a layout lint, each with a rescale hint. One call replaces a slide-by-slide screenshot audit.\n  'measure'     — the same fit report for one slide (identical to getSlideHtml format:'fit'); raw:true for full per-block boxes as JSON.\n  'check'       — static deck audit: empty slides, missing alt-text, fragment gaps, duplicate labels, duplicate block IDs, and layout lints (alignItems:center + width:100% shrink-wrap, distorted image aspect ratios, and MATH LINTS: \\\\color inside math is a SWITCH that recolours everything to the end of the enclosing group — it renders without error and silently changes what the slide asserts). No render needed.\n  'checkRefs'   — resolve every arXiv id in the deck against INSPIRE-HEP and report title, authors and journal ref, flagging AUTHOR MISMATCH — the cited names appearing nowhere on the record, which is what a transposed identifier looks like. Query INSPIRE, not arXiv: arXiv's own journal_ref is unreliable. houseFormat:true also emits a [Authors, Journal Vol (Year) Page, arXiv:ID] line per reference.\n  'promoteStyle'— find inline styles repeated on 3+ blocks (clustering by shape, so 0.73em/0.74em/0.64em variants of one callout box land together) and promote each to a named deck stylePreset. Dry run by default; apply:true rewrites the blocks, preserving the majority rendering exactly and keeping outliers as explicit overrides. Afterwards a deck-wide density or colour change is ONE setTheme call.\n  'duplicate'   — deep-copy a slide (prefer wolfslide_duplicateSlide).\n  'reorderFragments' — set animation step order on a slide.",
         "inputSchema": {
           "type": "object",
           "required": [
@@ -5046,9 +5092,12 @@
                 "duplicate",
                 "check",
                 "reorderFragments",
-                "measure"
+                "measure",
+                "fitAll",
+                "checkRefs",
+                "promoteStyle"
               ],
-              "description": "duplicate: copy a slide. check: audit deck for issues. reorderFragments: set animation order. measure: get rendered block sizes."
+              "description": "fitAll: measure every slide, report only problems. measure: fit report for one slide. check: static deck audit + layout lints. checkRefs: resolve arXiv ids against INSPIRE and flag author mismatches. promoteStyle: promote repeated inline styles to deck stylePresets. duplicate: copy a slide. reorderFragments: set animation order."
             },
             "slideId": {
               "type": "string",
@@ -5086,6 +5135,38 @@
             "docUri": {
               "type": "string",
               "description": "Optional: target a specific open .wslide file."
+            },
+            "raw": {
+              "type": "boolean",
+              "description": "measure only: return full per-block boxes as JSON instead of the compact report."
+            },
+            "from": {
+              "type": "number",
+              "description": "fitAll only: first 1-based slide to check (default 1)."
+            },
+            "to": {
+              "type": "number",
+              "description": "fitAll only: last 1-based slide to check (default: last slide)."
+            },
+            "maxRefs": {
+              "type": "number",
+              "description": "checkRefs only: cap on distinct arXiv ids to resolve (default 60)."
+            },
+            "houseFormat": {
+              "type": "boolean",
+              "description": "checkRefs only: also emit a house-format citation line per reference."
+            },
+            "apply": {
+              "type": "boolean",
+              "description": "promoteStyle only: actually create the presets and rewrite blocks. Default false (dry run)."
+            },
+            "minCount": {
+              "type": "number",
+              "description": "promoteStyle only: minimum blocks sharing a style before it is promoted (default 3)."
+            },
+            "presetName": {
+              "type": "string",
+              "description": "promoteStyle only: name for the promoted preset (numbered when several clusters are found)."
             }
           }
         }

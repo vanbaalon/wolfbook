@@ -243,6 +243,29 @@ function renderMathInContent(html) {
     }).join('');
 }
 
+// The KaTeX auto-render delimiter set, as DATA.
+//
+// This exists because hand-writing it into emitted JavaScript lost one level of
+// escaping and nobody could see it. A template literal turns `'\\('` into the
+// text `'\('`, and a JS engine reading THAT sees `'('` — because \( is not a
+// valid escape, so the backslash is silently dropped. The exported HTML and
+// every PDF therefore treated BARE parentheses and BARE square brackets as math
+// delimiters: "(divergent!)" was typeset as italic math with the parens eaten,
+// and every "[Author, Journal (Year) page]" citation in a deck went the same
+// way. Nothing errored; the editor was fine because it uses these values
+// directly rather than emitting them.
+//
+// Emit with JSON.stringify(KATEX_DELIMITERS) — never by writing the literal out
+// by hand, which is what makes the escaping depth a matter of counting.
+const KATEX_DELIMITERS = [
+    { left: '$$',  right: '$$',  display: true  },
+    { left: '\\[', right: '\\]', display: true  },
+    { left: '$',   right: '$',   display: false },
+    { left: '\\(', right: '\\)', display: false },
+];
+/** The delimiter list as JavaScript source, correctly escaped for embedding. */
+function katexDelimitersJS() { return JSON.stringify(KATEX_DELIMITERS); }
+
 /**
  * Return the HTML snippet that provides KaTeX in an exported file.
  * If we have local katex and pre-render everything, only the CSS is needed
@@ -263,7 +286,7 @@ function katexHeadAssets(forPdf) {
             `<script>document.addEventListener('DOMContentLoaded',function(){`,
             `  if(typeof renderMathInElement!=='undefined')`,
             `    renderMathInElement(document.body,{throwOnError:false,output:'html',`,
-            `      delimiters:[{left:'$$',right:'$$',display:true},{left:'\\[',right:'\\]',display:true},{left:'$',right:'$',display:false},{left:'\\(',right:'\\)',display:false}]});`,
+            `      delimiters:${katexDelimitersJS()}});`,
             `});</script>`,
         ].join('\n') : '';
         return `<style>\n${css}\n</style>\n${autoRenderTag}`;
@@ -273,8 +296,10 @@ function katexHeadAssets(forPdf) {
         '<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16/dist/katex.min.css">',
         '<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16/dist/katex.min.js"></script>',
         `<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16/dist/contrib/auto-render.min.js"`,
-        ` onload="renderMathInElement(document.body,{throwOnError:false,output:'html',delimiters:`,
-        `[{left:'$$',right:'$$',display:true},{left:'\\[',right:'\\]',display:true},{left:'$',right:'$',display:false},{left:'\\(',right:'\\)',display:false}]})">`,
+        // NOTE: this one lands inside an HTML attribute, so the JSON's double
+        // quotes must not terminate it — hence the single-quoted attribute.
+        ` onload='renderMathInElement(document.body,{throwOnError:false,output:"html",delimiters:`,
+        `${katexDelimitersJS()}})'>`,
         `</script>`,
     ].join('\n');
 }
@@ -1004,7 +1029,7 @@ function exportSlideStepHtml(slide, step, deck, deckDir) {
     const _shotAutoRender = _katexInlineJS
         ? `<script>${_katexInlineJS}</script>\n<script>document.addEventListener('DOMContentLoaded',function(){` +
           `if(typeof renderMathInElement!=='undefined')renderMathInElement(document.body,{throwOnError:false,output:'html',` +
-          `delimiters:[{left:'$$',right:'$$',display:true},{left:'\\[',right:'\\]',display:true},{left:'$',right:'$',display:false},{left:'\\(',right:'\\)',display:false}]});});</script>`
+          `delimiters:${katexDelimitersJS()}});});</script>`
         : '';
     const katexCSS = _katexLocalFontCSS
         ? `<style>\n${_katexLocalFontCSS}\n</style>\n${_shotAutoRender}`

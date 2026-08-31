@@ -108,6 +108,7 @@ function parseInspireHit(h) {
         texkey: m.texkeys?.[0] || null,
         year,
         citations: m.citation_count ?? null,
+        journal: formatJournalRef(m.publication_info),
         ar5ivUrl: arxivEprint ? `https://ar5iv.labs.arxiv.org/html/${arxivEprint}` : null,
         inspireUrl: `https://inspirehep.net/literature/${h.id}`,
     };
@@ -125,6 +126,51 @@ async function searchInspire(params, maxResults = 5, { sort } = {}) {
     const data = await jsonGet(url);
     const hits = data?.hits?.hits || [];
     return hits.map(parseInspireHit);
+}
+
+/**
+ * Resolve ONE identifier (arXiv id, INSPIRE id or texkey) to its record.
+ *
+ * Exists so a caller can ask "what does this id actually point at?" without
+ * running a relevance search that will cheerfully return *something*. Returns
+ * null when the id resolves to nothing — which is itself the answer.
+ *
+ * Query INSPIRE rather than arXiv: arXiv's own journal_ref is unreliable
+ * (in one 23-id sample it reported "none" for 14 papers INSPIRE knew were
+ * published), and arXiv cannot tell you a citation's authors are wrong.
+ */
+async function resolveInspireId(identifier) {
+    const direct = inspireUrlForId(identifier);
+    const fields = 'titles,authors.full_name,arxiv_eprints,dois,texkeys,publication_info,imprints,citation_count';
+    try {
+        if (direct) {
+            const data = await jsonGet(`https://inspirehep.net${direct}?fields=${fields}`);
+            if (data && data.metadata) return withJournal(parseInspireHit(data));
+        }
+    } catch (_) { /* fall through to search */ }
+    try {
+        const hits = await searchInspire({ eprint: identifier.replace(/v\d+$/, '') }, 1);
+        if (hits && hits.length) return withJournal(hits[0]);
+    } catch (_) {}
+    return null;
+}
+
+/** Attach a human-readable journal reference when INSPIRE has one. */
+function withJournal(rec) {
+    if (!rec) return rec;
+    const pi = rec._publication_info || rec.publicationInfo;
+    if (!rec.journal && pi) rec.journal = formatJournalRef(pi);
+    return rec;
+}
+
+/** "Phys.Rev.Lett. 115 (2015) 251601" from an INSPIRE publication_info entry. */
+function formatJournalRef(pubInfo) {
+    const p = Array.isArray(pubInfo) ? pubInfo[0] : pubInfo;
+    if (!p || !p.journal_title) return null;
+    const vol  = p.journal_volume ? ` ${p.journal_volume}` : '';
+    const year = p.year ? ` (${p.year})` : '';
+    const page = p.artid || p.page_start ? ` ${p.artid || p.page_start}` : '';
+    return `${p.journal_title}${vol}${year}${page}`;
 }
 
 /**
@@ -598,6 +644,8 @@ module.exports = {
     // Bibliography
     getInspireBibtex,
     getInspireLatexUS,
+    resolveInspireId,
+    formatJournalRef,
     // References & citations
     getInspireReferences,
     getCitationContexts,

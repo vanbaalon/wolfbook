@@ -762,7 +762,7 @@ class SlideEditorProvider {
 
                 case 'measureResult': {
                     if (msg.id && this._measurePending && this._measurePending[msg.id]) {
-                        this._measurePending[msg.id](msg.result);
+                        this._measurePending[msg.id](msg);
                         delete this._measurePending[msg.id];
                     }
                     break;
@@ -785,42 +785,26 @@ class SlideEditorProvider {
                 }
 
                 case 'presentFullscreen': {
-                    // Zen mode hides ALL VS Code chrome (tabs, sidebar, activity bar,
-                    // status bar) AND enters OS fullscreen (hiding title bar / window
-                    // controls on macOS).  We track state to avoid accidentally toggling
-                    // OUT of zen mode if it's already active.
-                    console.log('[wslide-ext] presentFullscreen: _presZenMode=', this._presZenMode);
+                    // Zen mode alone is NOT enough. Its defaults changed: since VS
+                    // Code 1.85 `zenMode.showTabs` defaults to "multiple", so the tab
+                    // bar stays on screen, and zen mode never hid breadcrumbs or the
+                    // custom title bar. A talk was therefore presented with three rows
+                    // of editor chrome above the slide.
+                    //
+                    // So force every setting that actually clears the screen, and put
+                    // the originals back on exit. Same trick the centerLayout override
+                    // already used — generalised, because one setting was never enough.
                     if (!this._presZenMode) {
-                        // Prevent the gray "centered-layout-margin" divs that zen mode injects
-                        // when zenMode.centerLayout is true (the VS Code default).
-                        // Strategy: flip the config to false BEFORE entering zen mode so the
-                        // margins are never created.  We restore the original value on exit.
-                        const zenCfg = vscode.workspace.getConfiguration('zenMode');
-                        const origCenterLayout = zenCfg.get('centerLayout');
-                        this._presOrigCenterLayout = origCenterLayout;
-                        if (origCenterLayout !== false) {
-                            console.log('[wslide-ext] setting zenMode.centerLayout=false to prevent margin divs');
-                            await zenCfg.update('centerLayout', false, vscode.ConfigurationTarget.Global);
-                        }
-                        vscode.commands.executeCommand('workbench.action.toggleZenMode');
+                        await this._enterPresentationLayout();
                         this._presZenMode = true;
                     }
                     break;
                 }
 
                 case 'exitFullscreen': {
-                    console.log('[wslide-ext] exitFullscreen: _presZenMode=', this._presZenMode);
                     if (this._presZenMode) {
-                        vscode.commands.executeCommand('workbench.action.toggleZenMode');
                         this._presZenMode = false;
-                        // Restore zenMode.centerLayout to whatever the user had before
-                        if (this._presOrigCenterLayout !== false) {
-                            const zenCfg = vscode.workspace.getConfiguration('zenMode');
-                            const restoreVal = (this._presOrigCenterLayout === undefined) ? undefined : this._presOrigCenterLayout;
-                            devLog(LOG_CHANNELS.SLIDE, '[wslide-ext] restoring zenMode.centerLayout to', restoreVal);
-                            // undefined = remove the override (revert to default)
-                            zenCfg.update('centerLayout', restoreVal, vscode.ConfigurationTarget.Global);
-                        }
+                        await this._exitPresentationLayout();
                     }
                     break;
                 }
@@ -985,6 +969,8 @@ class SlideEditorProvider {
         webviewPanel.onDidDispose(() => {
             onchange.dispose();
             this._panels.delete(docKey);
+            // Closing the tab while presenting must not strand the user's settings.
+            this._endPresentationIfActive();
         }, null, this._context.subscriptions);
     }
 
@@ -1049,7 +1035,23 @@ class SlideEditorProvider {
     }
     setScope(docUriStr, scope) {
         const { e } = this._resolveEntry(docUriStr);
-        if (e) e._scope = scope || null;
+        if (!e) return;
+        const changed = (e._scope || null) !== (scope || null);
+        e._scope = scope || null;
+        // Reprint counter: the full banner is worth its ~55 tokens once, when
+        // the scope is set or changed. Repeating it on every tool result cost
+        // 40+ reprints in one session AND kept instructing the agent to ignore
+        // work the user had since asked for — a stale instruction repeated is
+        // an active hazard, not just waste (field report §3c).
+        if (changed) e._scopeShown = 0;
+    }
+
+    /** How many times the scope banner has been printed since it was last set. */
+    noteScopeShown(docUriStr) {
+        const { e } = this._resolveEntry(docUriStr);
+        if (!e) return 0;
+        e._scopeShown = (e._scopeShown || 0) + 1;
+        return e._scopeShown;
     }
 
     /** Current deck for the active (or specified) editor. */
@@ -1135,6 +1137,111 @@ class SlideEditorProvider {
         return freshDeck;
     }
 
+    /**
+     * Settings forced while presenting, with the reason each one is needed.
+     * Applied before entering zen mode and restored on exit.
+     */
+    static get PRESENTATION_SETTINGS() {
+        return [
+            // Zen mode centres the editor and injects grey margin divs.
+            { section: 'zenMode', key: 'centerLayout',   value: false },
+            // Since VS Code 1.85 zen mode KEEPS the tab bar by default.
+            { section: 'zenMode', key: 'showTabs',       value: 'none' },
+            // Older name, still honoured by some builds. Guarded by inspect().
+            { section: 'zenMode', key: 'hideTabs',       value: true },
+            // OS fullscreen — without it the window title bar stays put.
+            { section: 'zenMode', key: 'fullScreen',     value: true },
+            { section: 'zenMode', key: 'hideStatusBar',  value: true },
+            { section: 'zenMode', key: 'hideActivityBar', value: true },
+            { section: 'zenMode', key: 'hideLineNumbers', value: true },
+            // Zen mode does not touch breadcrumbs, so the file path row survived.
+            { section: 'breadcrumbs', key: 'enabled',    value: false },
+        ];
+    }
+
+    /**
+     * Put the workbench into presentation layout.
+     *
+     * `workbench.action.toggleZenMode` is a TOGGLE, and the only record of
+     * whether we are in zen mode was a boolean on this object. Nothing keeps
+     * that in sync with VS Code: the user can enter or leave zen mode with
+     * Ctrl+K Z, a window can be restored already in zen mode, and a reload
+     * resets the flag while the workbench keeps its layout. When the two
+     * disagree, "enter presentation" TOGGLES ZEN MODE OFF and the talk starts
+     * with every panel on screen.
+     *
+     * So never toggle blind: `workbench.action.exitZenMode` is not a toggle and
+     * is a no-op when zen mode is off, which gives a known state to enter from.
+     */
+    async _enterPresentationLayout() {
+        const run = async (cmd) => {
+            try { await vscode.commands.executeCommand(cmd); } catch (_) {}
+        };
+        // 1. Known state, whatever the workbench was doing before.
+        await run('workbench.action.exitZenMode');
+        // 2. Settings that zen mode itself consults, before it reads them.
+        await this._applyPresentationSettings();
+        // 3. Now this definitely ENTERS rather than possibly leaving.
+        await run('workbench.action.toggleZenMode');
+        // 4. Zen mode does not close the SECONDARY side bar (chat panels live
+        //    there), and leaves the panel open in some layouts. These are close
+        //    commands, not toggles, so they cannot re-open anything.
+        await run('workbench.action.closeAuxiliaryBar');
+        await run('workbench.action.closePanel');
+        await run('workbench.action.closeSidebar');
+    }
+
+    /** Leave presentation layout. Idempotent — safe to call when not presenting. */
+    async _exitPresentationLayout() {
+        try { await vscode.commands.executeCommand('workbench.action.exitZenMode'); } catch (_) {}
+        await this._restorePresentationSettings();
+    }
+
+    /**
+     * Override the presentation settings, remembering each previous GLOBAL value.
+     * Unknown keys (older/newer VS Code) are skipped rather than throwing.
+     */
+    async _applyPresentationSettings() {
+        this._presSaved = [];
+        for (const { section, key, value } of SlideEditorProvider.PRESENTATION_SETTINGS) {
+            try {
+                const cfg = vscode.workspace.getConfiguration(section);
+                const info = cfg.inspect(key);
+                if (!info) continue;                       // key not registered in this build
+                const current = cfg.get(key);
+                if (current === value) continue;           // already right; nothing to restore
+                // globalValue, not the effective value: restoring the effective value
+                // would WRITE a setting the user never had, turning a default into an
+                // explicit override that outlives the talk.
+                this._presSaved.push({ section, key, prev: info.globalValue });
+                await cfg.update(key, value, vscode.ConfigurationTarget.Global);
+            } catch (_) { /* one unsupported key must not abort the presentation */ }
+        }
+    }
+
+    /** Put every overridden setting back. undefined removes the override. */
+    async _restorePresentationSettings() {
+        const saved = this._presSaved || [];
+        this._presSaved = [];
+        for (const { section, key, prev } of saved) {
+            try {
+                await vscode.workspace.getConfiguration(section)
+                    .update(key, prev, vscode.ConfigurationTarget.Global);
+            } catch (_) {}
+        }
+    }
+
+    /**
+     * Leave presentation mode if it is active. Called when the deck's panel is
+     * disposed: closing the tab mid-talk used to leave the user's zen-mode and
+     * breadcrumb settings globally overridden with nothing left to restore them.
+     */
+    async _endPresentationIfActive() {
+        if (!this._presZenMode) return;
+        this._presZenMode = false;
+        await this._exitPresentationLayout();
+    }
+
     /** List all open .wslide document URIs (panels + unresolved TextDocuments). */
     listOpenEditors() {
         const inPanels = new Set(this._panels.keys());
@@ -1145,23 +1252,35 @@ class SlideEditorProvider {
         return [...inPanels, ...fromTextDocs];
     }
 
-    /** Request rendered measurements from the webview for a specific slide. */
-    async measureSlide(slideIndex, docUriStr) {
+    /**
+     * Request rendered measurements from the webview for a specific slide.
+     * The webview measures off-screen, so this neither changes nor flashes the
+     * slide the user is looking at — which is what lets a fit report ride along
+     * with ordinary mutations.
+     * @param {number} slideIndex 0-based
+     * @param {string} [docUriStr]
+     * @param {{timeoutMs?:number}} [opts]
+     * @returns {Promise<{blocks:object, contentBottom:number, canvas:{w:number,h:number}}>}
+     */
+    async measureSlide(slideIndex, docUriStr, opts) {
         const e = docUriStr ? this._panels.get(docUriStr) : this.getActiveEntry();
         if (!e) throw new Error('No active .wslide editor found');
         if (!this._measurePending) this._measurePending = {};
         if (!this._measureNextId) this._measureNextId = 0;
         const id = ++this._measureNextId;
+        const timeoutMs = opts?.timeoutMs ?? 5000;
         return new Promise((resolve, reject) => {
-            this._measurePending[id] = resolve;
+            this._measurePending[id] = (msg) => {
+                if (msg && msg.error) reject(new Error(msg.error));
+                else resolve(msg && msg.result);
+            };
             e.webviewPanel.webview.postMessage({ cmd: 'measure', id, slideIndex });
-            // Timeout after 5s
             setTimeout(() => {
                 if (this._measurePending[id]) {
                     delete this._measurePending[id];
-                    reject(new Error('Measurement timed out'));
+                    reject(new Error(`Measurement timed out after ${timeoutMs} ms`));
                 }
-            }, 5000);
+            }, timeoutMs);
         });
     }
 

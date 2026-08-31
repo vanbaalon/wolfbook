@@ -940,6 +940,13 @@ window.addEventListener('message', e => {
         }
         deck = msg.deck;
         _lastSnapshot = JSON.parse(JSON.stringify(deck));
+        // The provider has just written this deck to disk, so anything this
+        // webview had queued to save is stale. Firing it anyway races the
+        // mutation and can silently drop a just-inserted slide (field report
+        // 2026-08-30 §2b: insertSlide reported success for a slide that was
+        // not in the next listSlides).
+        if (_autoSaveTimer) { clearTimeout(_autoSaveTimer); _autoSaveTimer = null; }
+        dirty = false;
         // Auto-navigate to changed slide and flash — only for Copilot-originated edits
         if (msg.source === 'copilot' && oldDeck && deck && deck.slides) {
           let changedIdx = -1;
@@ -991,45 +998,15 @@ window.addEventListener('message', e => {
     }
 
     if (msg.cmd === 'measure') {
-        // Measure all blocks on the requested slide
-        const reqIdx = msg.slideIndex != null ? msg.slideIndex : slideIdx;
-        const prevIdx = slideIdx;
-        if (reqIdx !== slideIdx) { slideIdx = reqIdx; renderSlide(); }
-        requestAnimationFrame(() => {
-            const canvas = document.getElementById('slide-canvas');
-            const canvasRect = canvas.getBoundingClientRect();
-            const scale = 1920 / canvasRect.width;
-            const blockEls = canvas.querySelectorAll('[data-block-id]');
-            const blocks = {};
-            blockEls.forEach(el => {
-                const id = el.dataset.blockId;
-                const r = el.getBoundingClientRect();
-                const x = Math.round((r.left - canvasRect.left) * scale);
-                const y = Math.round((r.top - canvasRect.top) * scale);
-                const w = Math.round(r.width * scale);
-                const h = Math.round(r.height * scale);
-                const entry = { renderedPosition: { x, y }, renderedSize: { w, h } };
-                // Check for overflow
-                if (y + h > 1080) entry.overflow = { clippedBottom: true };
-                if (x + w > 1920) entry.overflow = { ...(entry.overflow || {}), clippedRight: true };
-                // Natural size for images
-                const img = el.querySelector('img');
-                if (img && img.naturalWidth) {
-                    entry.naturalSize = { w: img.naturalWidth, h: img.naturalHeight };
-                }
-                // Visibility (fragment-based)
-                const vis = el.offsetWidth > 0 && el.offsetHeight > 0;
-                entry.visible = vis;
-                blocks[id] = entry;
-            });
-            const lastBlock = Array.from(blockEls).reduce((lowest, el) => {
-                const r = el.getBoundingClientRect();
-                const bottom = (r.bottom - canvasRect.top) * scale;
-                return bottom > lowest ? bottom : lowest;
-            }, 0);
-            const remainingVerticalSpace = Math.max(0, Math.round(1080 - lastBlock));
-            if (reqIdx !== prevIdx) { slideIdx = prevIdx; renderSlide(); }
-            vscodeApi.postMessage({ cmd: 'measureResult', id: msg.id, result: { blocks, remainingVerticalSpace } });
+        // Measure OFF-SCREEN. The previous implementation swapped slideIdx,
+        // re-rendered, measured and swapped back — which flashed the user's
+        // editor and made a fit check too disruptive to run automatically.
+        // Rendering into a detached-but-laid-out stage costs the same and is
+        // invisible, so a fit report can now ride along with every mutation.
+        measureSlideOffscreen(msg.slideIndex).then(result => {
+            vscodeApi.postMessage({ cmd: 'measureResult', id: msg.id, result });
+        }).catch(err => {
+            vscodeApi.postMessage({ cmd: 'measureResult', id: msg.id, error: String(err && err.message || err) });
         });
         return;
     }
@@ -1040,13 +1017,30 @@ window.addEventListener('message', e => {
     if (msg.cmd === 'screenshot') {
         // Capture the rendered slide as a JPEG image using html2canvas.
         // html2canvas is loaded lazily from CDN on first use.
+        //
+        // ONE capture at a time. Capture removes the canvas's fit-to-panel
+        // transform so html2canvas sees a true 1920x1080, and the host retries
+        // at lower scales on timeout — so a second capture could start while
+        // the first was still running, save the ALREADY-CLEARED transform as
+        // its "original", and restore that. The slide then stayed blown up
+        // until something else called fitCanvas() (switching slides, toggling
+        // the side panel), which is exactly the reported symptom.
+        if (_capturing) {
+            vscodeApi.postMessage({ cmd: 'screenshotResult', id: msg.id,
+                error: 'a capture is already running in this window — retry after it finishes' });
+            return;
+        }
+        // Claim the slot SYNCHRONOUSLY, while still handling the message. Setting
+        // it inside doCapture() is too late: doCapture now waits a frame, so two
+        // queued screenshot messages would both pass the check above and both
+        // start.
+        _capturing = true;
         const reqIdx = msg.slideIndex != null ? msg.slideIndex : slideIdx;
         const prevIdx = slideIdx;
         if (reqIdx !== slideIdx) { slideIdx = reqIdx; renderSlide(); }
         async function doCapture() {
             const canvasEl = document.getElementById('slide-canvas');
             // Temporarily remove CSS scale so html2canvas captures at full 1920x1080
-            const savedTransform = canvasEl.style.transform;
             canvasEl.style.transform = '';
             // Convert vscode-webview-resource:// img srcs → data URLs so html2canvas can load them.
             // For images that fail to fetch, inject a visible placeholder div so the capture
@@ -1078,11 +1072,20 @@ window.addEventListener('message', e => {
                     placeholders.push({ img, ph });
                 }
             }));
+            let restored = false;
             const restore = () => {
+                if (restored) return;
+                restored = true;
                 imgs.forEach((img, k) => { img.src = origSrcs[k]; });
                 placeholders.forEach(({ img, ph }) => { img.style.display = ''; if (ph.parentNode) ph.parentNode.removeChild(ph); });
-                canvasEl.style.transform = savedTransform;
                 if (reqIdx !== prevIdx) { slideIdx = prevIdx; renderSlide(); }
+                // RECOMPUTE the zoom rather than replaying a saved inline value.
+                // fitCanvas() is the single authority on the canvas transform
+                // (it also maintains canvasArea's min-width/height), so calling
+                // it is correct no matter what state the capture left behind.
+                canvasEl.style.transform = '';
+                fitCanvas();
+                _capturing = false;
             };
             try {
                 const captured = await html2canvas(canvasEl, {
@@ -1090,23 +1093,33 @@ window.addEventListener('message', e => {
                     width: 1920, height: 1080,
                     useCORS: true, logging: false, backgroundColor: null,
                 });
-                restore();
                 const dataUrl = captured.toDataURL('image/jpeg', 0.88);
                 vscodeApi.postMessage({ cmd: 'screenshotResult', id: msg.id, dataUrl });
             } catch(err) {
-                restore();
                 vscodeApi.postMessage({ cmd: 'screenshotResult', id: msg.id, error: String(err) });
+            } finally {
+                // Always — an html2canvas throw used to be handled, but a hang or
+                // an exception on any other line left the canvas unscaled.
+                restore();
             }
         }
         if (window.html2canvas) {
-            requestAnimationFrame(doCapture);
+            // _settleFrame, never a bare requestAnimationFrame: VS Code throttles
+            // rAF in a webview that is not the visible tab, so a bare rAF meant
+            // the capture never started at all and every call timed out until
+            // the window was looked at again (field report #2 §4b).
+            _settleFrame().then(doCapture);
         } else {
             const script = document.createElement('script');
             script.src = 'https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js';
-            script.onload  = () => requestAnimationFrame(doCapture);
+            script.onload  = () => _settleFrame().then(doCapture);
             script.onerror = () => {
                 if (reqIdx !== prevIdx) { slideIdx = prevIdx; renderSlide(); }
-                vscodeApi.postMessage({ cmd: 'screenshotResult', id: msg.id, error: 'html2canvas failed to load from CDN' });
+                _capturing = false;
+                vscodeApi.postMessage({ cmd: 'screenshotResult', id: msg.id,
+                    error: 'html2canvas failed to load from https://cdn.jsdelivr.net — the webview has no ' +
+                           'network access or the CDN is blocked. Screenshots are unavailable until the ' +
+                           'window is reloaded; use getSlideHtml(format:"fit") for layout, or format:"html".' });
             };
             document.head.appendChild(script);
         }
@@ -1176,6 +1189,20 @@ let _inlineEditDom = null;   // DOM element of the block being edited
 let _inlineEditPanel = null; // the editor panel element
 let _savedRange = null;       // selection range saved before toolbar color picker
 let _currentBlockBase = 32;   // rendered base font-size of the block being edited (for A−/A+)
+let _editorChrome = null;     // { color, basePx } the inline editor imposes — stripped on commit
+let _capturing = false;       // a screenshot capture is in flight (see cmd:'screenshot')
+// KaTeX auto-render delimiters, as DATA. Writing this list out by hand into
+// EMITTED JavaScript lost one level of escaping in the exporter: the file ended
+// up with '\(' , which a JS engine reads as '(' because \( is not a valid
+// escape. Bare parentheses and bare square brackets then became math
+// delimiters in every exported HTML/PDF. Use the constant; emit with
+// JSON.stringify so the escaping is never a matter of counting backslashes.
+const KATEX_DELIMS = [
+  { left: '$$',  right: '$$',  display: true  },
+  { left: '\\[', right: '\\]', display: true  },
+  { left: '$',   right: '$',   display: false },
+  { left: '\\(', right: '\\)', display: false },
+];
 let _clipboard = null;        // internal block clipboard {block: deepClone}
 let _styleClip = null;        // format-painter: copied style snapshot
 let _slideClipboard = null;   // array of slides for Cmd+C/V on slide panel (always array or null)
@@ -1829,9 +1856,11 @@ function renderSlide() {
 
   // KaTeX rendering — run badges AFTER KaTeX so that math-induced layout shifts
   // don't leave badges at pre-KaTeX (wrong) positions for flow-positioned blocks.
-  requestAnimationFrame(() => {
+  // _settleFrame, not a bare rAF: a throttled webview would otherwise leave the
+  // slide untypeset and the badges unplaced.
+  _settleFrame().then(() => {
     if (window.renderMathInElement) {
-      try { renderMathInElement(contentDiv, { delimiters:[{left:'$$',right:'$$',display:true},{left:'\\[',right:'\\]',display:true},{left:'$',right:'$',display:false},{left:'\\(',right:'\\)',display:false}], throwOnError:false }); } catch(e) {}
+      try { renderMathInElement(contentDiv, { delimiters:KATEX_DELIMS, throwOnError:false }); } catch(e) {}
     }
     renderAllFragBadges();
     _positionAiAffordance();          // Stage 3c: ✦ affordance follows the selection
@@ -1864,6 +1893,109 @@ function resolveSlideScale(slide, dk) {
   ];
   const s = cands.find(v => v != null && v > 0);
   return (s && s > 0) ? s : 1;
+}
+
+/** One layout frame, with a timer fallback for a throttled/hidden webview. */
+function _settleFrame() {
+  return new Promise(res => {
+    let done = false;
+    const fin = () => { if (!done) { done = true; res(); } };
+    requestAnimationFrame(fin);
+    setTimeout(fin, 60);
+  });
+}
+
+// ── Off-screen layout measurement ─────────────────────────────────────────
+// Renders any slide into a detached-but-laid-out stage and reports every
+// block's box. Deliberately does NOT touch slideIdx or canvasEl: the caller
+// (a fit report, folded into every mutation response) must be free to run on
+// any slide at any time without the user seeing a flash.
+//
+// The stage reuses renderBlock/applyContainerLayout and the global
+// .slide-content typography, so the boxes it reports are the boxes the editor
+// draws. Keep it that way — a second, drifting renderer would report numbers
+// that no longer describe what ships.
+async function measureSlideOffscreen(slideIndex) {
+  const idx = (slideIndex != null) ? slideIndex : slideIdx;
+  const slide = deck && deck.slides && deck.slides[idx];
+  if (!slide) throw new Error('Slide ' + (idx + 1) + ' not found');
+
+  const stage = document.createElement('div');
+  // position:fixed off the left edge — laid out (so boxes are real) but never
+  // painted anywhere the user can see. display:none would give zero boxes.
+  stage.setAttribute('aria-hidden', 'true');
+  stage.style.cssText = 'position:fixed;left:-100000px;top:0;width:1920px;height:1080px;' +
+                        'overflow:hidden;contain:layout size;pointer-events:none;';
+  stage.style.background = slide.background || '#fafcff';
+
+  const styleEl = document.createElement('style');
+  styleEl.textContent = getThemeVarsCSS();
+  stage.appendChild(styleEl);
+
+  const contentDiv = document.createElement('div');
+  contentDiv.className = 'slide-content';
+  contentDiv.style.cssText = 'width:1920px;height:1080px;position:relative;overflow:hidden;';
+  applyContainerLayout(contentDiv, slide);
+  if (slide.padding) contentDiv.style.padding = slide.padding;
+  const _scale = resolveSlideScale(slide, deck);
+  if (_scale !== 1) contentDiv.style.fontSize = (36 * _scale) + 'px';
+
+  (slide.children || []).forEach(block => {
+    const dom = renderBlock(block, slide);
+    if (dom) contentDiv.appendChild(dom);
+  });
+  stage.appendChild(contentDiv);
+  document.body.appendChild(stage);
+
+  try {
+    // Math changes heights substantially; measuring before KaTeX runs reports
+    // the pre-typeset layout, which is not what the slide looks like.
+    if (window.renderMathInElement) {
+      try {
+        renderMathInElement(contentDiv, { delimiters: KATEX_DELIMS, throwOnError: false });
+      } catch (e) {}
+    }
+    // Images contribute their height only once decoded.
+    const imgs = Array.from(contentDiv.querySelectorAll('img'));
+    if (imgs.length) {
+      await Promise.race([
+        Promise.all(imgs.map(im => {
+          if (im.complete && im.naturalWidth) return Promise.resolve();
+          if (im.decode) return im.decode().catch(() => {});
+          return new Promise(res => { im.onload = im.onerror = res; });
+        })),
+        new Promise(res => setTimeout(res, 1500)),
+      ]);
+    }
+    // Two frames for layout to settle — but NEVER wait on rAF alone. VS Code
+    // throttles requestAnimationFrame in a webview that is not the visible tab,
+    // and a fit report that rides on every mutation must not hang when the user
+    // has the deck in a background tab. Race each frame against a short timer.
+    await _settleFrame(); await _settleFrame();
+
+    const stageRect = contentDiv.getBoundingClientRect();
+    const blocks = {};
+    let contentBottom = 0;
+    contentDiv.querySelectorAll('[data-block-id]').forEach(el => {
+      const id = el.dataset.blockId;
+      if (!id) return;
+      const r = el.getBoundingClientRect();
+      const entry = {
+        x: Math.round(r.left - stageRect.left),
+        y: Math.round(r.top - stageRect.top),
+        w: Math.round(r.width),
+        h: Math.round(r.height),
+        visible: el.offsetWidth > 0 && el.offsetHeight > 0,
+      };
+      const img = el.matches('img') ? el : el.querySelector('img');
+      if (img && img.naturalWidth) entry.natural = { w: img.naturalWidth, h: img.naturalHeight };
+      blocks[id] = entry;
+      if (entry.visible) contentBottom = Math.max(contentBottom, entry.y + entry.h);
+    });
+    return { blocks, contentBottom, canvas: { w: 1920, h: 1080 } };
+  } finally {
+    stage.remove();
+  }
 }
 
 function applyContainerLayout(dom, block) {
@@ -2331,7 +2463,7 @@ function renderShape(block) {
     inner.innerHTML = block.content;
     t.appendChild(inner);
     d.appendChild(t);
-    if (window.renderMathInElement) { try { renderMathInElement(inner, { delimiters:[{left:'$$',right:'$$',display:true},{left:'\\[',right:'\\]',display:true},{left:'$',right:'$',display:false},{left:'\\(',right:'\\)',display:false}], throwOnError:false }); } catch (e) {} }
+    if (window.renderMathInElement) { try { renderMathInElement(inner, { delimiters:KATEX_DELIMS, throwOnError:false }); } catch (e) {} }
   }
   return d;
 }
@@ -2491,7 +2623,7 @@ function buildRawSrcdoc(html, bg, css) {
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16/dist/katex.min.css">
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16/dist/katex.min.js"><\/script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16/dist/contrib/auto-render.min.js"
-  onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'\\[',right:'\\]',display:true},{left:'$',right:'$',display:false},{left:'\\(',right:'\\)',display:false}],throwOnError:false})"><\/script>
+  onload='renderMathInElement(document.body,{delimiters:${JSON.stringify(KATEX_DELIMS)},throwOnError:false})'><\/script>
 <style>:root{--navy:#0a244a;--blue:#0064b4;--cyan:#009ac8;--accent:#be1e2d;}html,body{margin:0;padding:0;overflow:hidden;background:${bg};}${css}</style>
 </head><body>${html}</body></html>`;
 }
@@ -3147,11 +3279,18 @@ function _editorBgForBlock(slideBg, textColor) {
   if (!bgRgb || !textRgb) return slideBg || '#fafcff';
   const bgLum   = luminance(bgRgb);
   const txtLum  = luminance(textRgb);
-  // If the block's actual text colour has good contrast against the slide bg, use it
+  // If the block's actual text colour has good contrast against the slide bg,
+  // use the slide's own background — that is true WYSIWYG.
   if (contrast(bgLum, txtLum) >= 4.5) return slideBg;
-  // Text colour blends into slide bg — choose white or dark bg based on text luminance
-  // (light text → dark bg; dark text → light bg)
-  return txtLum > 0.18 ? '#ffffff' : '#fafcff';
+  // Otherwise the text would be unreadable against the slide bg in a panel that
+  // is only as big as the text, so substitute a background that contrasts with
+  // the TEXT: light text → dark panel, dark text → light panel.
+  //
+  // This branch used to be inverted (light text returned '#ffffff'), so the dark
+  // panel '#1a2035' was unreachable and _editorTextColor below always resolved
+  // to near-black. White slide text therefore appeared BLACK in the rich editor,
+  // and any edit baked that near-black into the deck. Keep the two consistent.
+  return txtLum > 0.5 ? '#1a2035' : '#fafcff';
 }
 
 function startInlineEdit(dom, block) {
@@ -3183,12 +3322,18 @@ function startInlineEdit(dom, block) {
   modebar.appendChild(btnJson);
   panel.appendChild(modebar);
 
-  // Choose an editor bg that has readable contrast against the block's text colour
+  // Choose an editor bg that has readable contrast against the block's text colour.
+  // The colour must come from the RENDERED element, not block.color: most blocks
+  // inherit their colour from the slide, a container or theme CSS and carry no
+  // colour of their own, and the old block.color||'#333333' fallback meant the
+  // editor showed a colour the slide never used.
   const _rawSlideBg = deck?.slides[slideIdx]?.background || '#fafcff';
-  const _textColor  = block.color || '#333333';
+  const _textColor  = getComputedStyle(dom).color || block.color || '#333333';
   const _editorBg   = _editorBgForBlock(_rawSlideBg, _textColor);
-  // Derive editor text colour: light text on dark bg, dark text on light bg
-  const _editorTextColor = _editorBg === '#1a2035' ? '#e8e8e8' : '#1a2035';
+  // WYSIWYG: the editor shows the text in the colour the SLIDE shows it in.
+  // Only the surface behind it is substituted, and only when the real pairing
+  // would be unreadable in a small panel.
+  const _editorTextColor = _textColor;
 
   // Rich contenteditable div
   const ce = document.createElement('div');
@@ -3204,6 +3349,12 @@ function startInlineEdit(dom, block) {
   // comfortable editing size. zoom (unlike transform) keeps the caret correct.
   const _renderedBase = parseFloat(getComputedStyle(dom).fontSize) || 36;
   _currentBlockBase = _renderedBase; // used by the toolbar's A−/A+ font-size buttons
+  // Remember exactly what the editor imposes on the text, so commit can strip
+  // any span that merely restates it. Chromium's contenteditable bakes the
+  // COMPUTED colour and size into spans on paste, on removeFormat, and
+  // sometimes just on typing — without this the editor's own chrome ends up in
+  // the deck and the slide silently changes appearance after a manual edit.
+  _editorChrome = { color: _textColor, basePx: _renderedBase };
   ce.style.fontSize = _renderedBase + 'px';
   ce.style.zoom = Math.max(0.25, Math.min(1, 22 / _renderedBase)).toFixed(3);
   panel.style.background = _editorBg;
@@ -3257,7 +3408,7 @@ function startInlineEdit(dom, block) {
     block.content = html;
     dom.innerHTML = html;
     if (window.renderMathInElement) {
-      try { renderMathInElement(dom, { delimiters:[{left:'$$',right:'$$',display:true},{left:'\\[',right:'\\]',display:true},{left:'$',right:'$',display:false},{left:'\\(',right:'\\)',display:false}], throwOnError:false }); } catch(e) {}
+      try { renderMathInElement(dom, { delimiters:KATEX_DELIMS, throwOnError:false }); } catch(e) {}
     }
     positionPanel();
   }
@@ -3370,6 +3521,62 @@ function startInlineEdit(dom, block) {
   requestAnimationFrame(() => positionPanel());
 }
 
+/** Same colour? Compares through the canvas so '#fff', 'white' and
+ *  'rgb(255,255,255)' all agree. */
+function _sameColor(a, b) {
+  if (!a || !b) return false;
+  const norm = css => {
+    try {
+      const c = document.createElement('canvas'); c.width = c.height = 1;
+      const x = c.getContext('2d');
+      x.fillStyle = '#000'; x.fillStyle = css; x.fillRect(0, 0, 1, 1);
+      const d = x.getImageData(0, 0, 1, 1).data;
+      return d[0] + ',' + d[1] + ',' + d[2];
+    } catch (_) { return String(css); }
+  };
+  return norm(a) === norm(b);
+}
+
+/**
+ * Remove inline colour/font-size that merely restates what the EDITOR was
+ * showing, then drop spans left with nothing to say.
+ *
+ * The rich editor renders the block at its true colour and its rendered pixel
+ * size. Chromium serialises those computed values into spans during ordinary
+ * editing, so without this pass a manual edit rewrites inherited styling as
+ * explicit styling — the text stops following its container, and a later
+ * container-level change silently stops reaching it. Stripping is safe
+ * precisely because these declarations are no-ops at the moment they are
+ * written: they restate the inherited value.
+ */
+function _stripEditorChrome(html) {
+  if (!_editorChrome || !html) return html;
+  let tpl;
+  try {
+    tpl = document.createElement('template');
+    tpl.innerHTML = html;
+  } catch (_) { return html; }
+  const basePx = _editorChrome.basePx;
+  tpl.content.querySelectorAll('span[style]').forEach(sp => {
+    if (sp.style.color && _sameColor(sp.style.color, _editorChrome.color)) sp.style.color = '';
+    if (sp.style.fontSize) {
+      const v = parseFloat(sp.style.fontSize);
+      // Within half a pixel of the base is the editor restating the base.
+      if (/px$/.test(sp.style.fontSize) && basePx && Math.abs(v - basePx) < 0.5) sp.style.fontSize = '';
+    }
+    if (!sp.getAttribute('style')) sp.removeAttribute('style');
+  });
+  // Unwrap spans that now carry nothing (keep any that still hold a class).
+  let guard = 0;
+  while (guard++ < 50) {
+    const bare = tpl.content.querySelector('span:not([style]):not([class])');
+    if (!bare) break;
+    while (bare.firstChild) bare.parentNode.insertBefore(bare.firstChild, bare);
+    bare.remove();
+  }
+  return tpl.innerHTML;
+}
+
 function commitInlineEdit() {
   if (!_inlineEditBlock) return;
   // Read content from whichever editor is active
@@ -3400,8 +3607,11 @@ function commitInlineEdit() {
   } else if (_inlineEditorMode === 'html' && ta) {
     _inlineEditBlock.content = ta.value;            // raw HTML mode — verbatim, never sanitized
   } else if (ce) {
-    // Rich mode only — collapse nested spans / strip pasted cruft on commit (Phase 2).
-    _inlineEditBlock.content = _sanitizeRich ? sanitizeRichHtml(ce.innerHTML) : ce.innerHTML;
+    // Rich mode only — strip the editor's own chrome FIRST (so a span that just
+    // restates the colour/size the editor was showing never reaches the deck),
+    // then collapse nested spans / strip pasted cruft (Phase 2).
+    const cleaned = _stripEditorChrome(ce.innerHTML);
+    _inlineEditBlock.content = _sanitizeRich ? sanitizeRichHtml(cleaned) : cleaned;
   }
 
   if (_inlineEditDom) {
@@ -3413,6 +3623,7 @@ function commitInlineEdit() {
   hideRichToolbar();
   _inlineEditBlock = null;
   _inlineEditDom = null;
+  _editorChrome = null;
   markDirty();
   renderSlide();
 }
@@ -5511,7 +5722,7 @@ function populatePanel(panel, sIdx) {
 
   requestAnimationFrame(() => {
     if (window.renderMathInElement) {
-      try { renderMathInElement(contentDiv, { delimiters:[{left:'$$',right:'$$',display:true},{left:'\\[',right:'\\]',display:true},{left:'$',right:'$',display:false},{left:'\\(',right:'\\)',display:false}], throwOnError:false }); } catch(e) {}
+      try { renderMathInElement(contentDiv, { delimiters:KATEX_DELIMS, throwOnError:false }); } catch(e) {}
     }
   });
 }
@@ -5902,7 +6113,7 @@ async function serializeDeckForExport(id) {
       host.innerHTML = '';
       host.appendChild(content);
       if (window.renderMathInElement) {
-        try { renderMathInElement(content, { delimiters:[{left:'$$',right:'$$',display:true},{left:'\\[',right:'\\]',display:true},{left:'$',right:'$',display:false},{left:'\\(',right:'\\)',display:false}], throwOnError:false }); } catch (_) {}
+        try { renderMathInElement(content, { delimiters:KATEX_DELIMS, throwOnError:false }); } catch (_) {}
       }
       if (window.Prism && Prism.highlightAllUnder) { try { Prism.highlightAllUnder(content); } catch (_) {} }
       await _inlineExportImages(content);
@@ -5948,6 +6159,10 @@ function renderThumbContent(preview, slide) {
   contentDiv.style.cssText = 'width:1920px;height:1080px;position:relative;overflow:hidden;';
   applyContainerLayout(contentDiv, slide);
   if (slide.padding) contentDiv.style.padding = slide.padding;
+  // Slide/deck font scale — renderSlide applies this, so a thumbnail that skips
+  // it shows a differently-sized slide than the canvas does.
+  const _tScale = resolveSlideScale(slide, deck);
+  if (_tScale !== 1) contentDiv.style.fontSize = (36 * _tScale) + 'px';
 
   _thumbMode = true;
   try {
@@ -5961,6 +6176,21 @@ function renderThumbContent(preview, slide) {
 
   inner.appendChild(contentDiv);
   preview.appendChild(inner);
+
+  // Typeset the math. Without this a thumbnail showed raw LaTeX source where
+  // the slide shows a formula — so the panel was least trustworthy on exactly
+  // the slides that are hardest to identify at a glance, the maths-heavy ones.
+  //
+  // Deferred to a frame so a 36-slide rebuild paints immediately and the
+  // formulae fill in, rather than blocking on KaTeX for every slide at once.
+  if (window.renderMathInElement && /\$/.test(JSON.stringify(slide.children || []))) {
+    _settleFrame().then(() => {
+      if (!contentDiv.isConnected) return;   // thumbnail was replaced meanwhile
+      try {
+        renderMathInElement(contentDiv, { delimiters: KATEX_DELIMS, throwOnError: false });
+      } catch (e) {}
+    });
+  }
 }
 
 // Structural hash to detect slide add/delete/reorder (avoids full DOM rebuild on selection change)
@@ -7088,7 +7318,7 @@ function _liveUpdateFromHtml(html) {
   _inlineEditBlock.content = html;
   _inlineEditDom.innerHTML = html;
   if (window.renderMathInElement) {
-    try { renderMathInElement(_inlineEditDom, { delimiters:[{left:'$$',right:'$$',display:true},{left:'\\[',right:'\\]',display:true},{left:'$',right:'$',display:false},{left:'\\(',right:'\\)',display:false}], throwOnError:false }); } catch(e) {}
+    try { renderMathInElement(_inlineEditDom, { delimiters:KATEX_DELIMS, throwOnError:false }); } catch(e) {}
   }
 }
 function _afterRichEdit() {
@@ -7126,10 +7356,20 @@ function _execStyle(cmd, value, useCss) {
   if (ce && sel && sel.rangeCount && !sel.isCollapsed && ce.contains(sel.anchorNode)) _savedRange = sel.getRangeAt(0).cloneRange();
   _afterRichEdit();
 }
-// Clean px font-size via Range — execCommand can't do px. extractContents keeps
-// inner formatting; inner font-sizes are stripped so the new size fully governs.
+/** Express a slide-pixel size relative to the block's own base, as an em value.
+ *  Absolute px would pin the run: a later container-level rescale (which is how
+ *  overflow now gets fixed) would move everything around it and leave this
+ *  fragment behind at its old size. em keeps it proportional. */
+function _emForPx(px) {
+  const base = _currentBlockBase || 32;
+  const em = Math.round((px / base) * 100) / 100;
+  return (em > 0 ? em : 1) + 'em';
+}
+// Clean relative font-size via Range — execCommand can't do this. extractContents
+// keeps inner formatting; inner font-sizes are stripped so the new size governs.
 function _applyFontSize(px) {
-  if (_inlineEditorMode === 'html') { _wrapHtmlMode(`<span style="font-size:${px}px">`, '</span>'); return; }
+  const size = _emForPx(px);
+  if (_inlineEditorMode === 'html') { _wrapHtmlMode(`<span style="font-size:${size}">`, '</span>'); return; }
   if (!_restoreCeSelection()) { setStatus('Select text first'); return; }
   const sel = window.getSelection();
   if (sel.isCollapsed) { setStatus('Select text first'); return; }
@@ -7138,7 +7378,7 @@ function _applyFontSize(px) {
   // rather than wrapping a new one — this stops A−/A+ nesting span-on-span.
   const wrap = _exactWrapperSpan(range);
   if (wrap) {
-    wrap.style.fontSize = px + 'px';
+    wrap.style.fontSize = size;
     const r0 = document.createRange(); r0.selectNodeContents(wrap);
     sel.removeAllRanges(); sel.addRange(r0); _savedRange = r0.cloneRange();
     _afterRichEdit(); return;
@@ -7146,7 +7386,7 @@ function _applyFontSize(px) {
   const frag = range.extractContents();
   frag.querySelectorAll('span').forEach(s => { if (s.style && s.style.fontSize) { s.style.fontSize = ''; if (!s.getAttribute('style')) s.removeAttribute('style'); } });
   const span = document.createElement('span');
-  span.style.fontSize = px + 'px';
+  span.style.fontSize = size;
   span.appendChild(frag);
   range.insertNode(span);
   const r = document.createRange(); r.selectNodeContents(span);
@@ -7171,11 +7411,17 @@ function _selFontSize() {
   let node = (window.getSelection() || {}).anchorNode;
   if (node && node.nodeType === 3) node = node.parentElement;
   const ce = _ceEl();
+  const base = _currentBlockBase || 32;
   while (node && node !== ce) {
-    if (node.style && node.style.fontSize) { const v = parseFloat(node.style.fontSize); if (v) return v; }
+    if (node.style && node.style.fontSize) {
+      const raw = node.style.fontSize;
+      const v = parseFloat(raw);
+      // em is relative to the block base; px is already in slide units.
+      if (v) return /em$/i.test(raw) ? v * base : v;
+    }
     node = node.parentElement;
   }
-  return _currentBlockBase || 32;
+  return base;
 }
 // Highlight active inline styles for the current selection.
 function _syncRichToolbarState() {

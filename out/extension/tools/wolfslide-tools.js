@@ -12,6 +12,7 @@ const {
     acquireKernelForAgent, releaseKernelForAgent, trackedKernelEvaluate,
 } = require('./shared');
 const { readCommittedOutputs } = require('./cell-pipeline');
+const wsfit = require('./wslide-fit');
 
 // =============================================================================
 // Wolfslide tools  —  manipulate .wslide custom editors
@@ -25,6 +26,142 @@ function _slideResult(text) {
     return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(text)]);
 }
 function _uid() { return Math.random().toString(36).slice(2, 10); }
+
+
+// ── Kernel resolution for eval blocks ─────────────────────────────────────
+//
+// Field report #2 §4a: with two live kernels, runEvalBlock answered "kernel_id
+// is required because this window has multiple live kernels" — and passing
+// kernel_id produced the SAME error verbatim, because every call site here
+// invoked this._getController() with NO ARGUMENTS. The advertised recovery was
+// a no-op, so there was no path through and the author fell back to CSS-scaling
+// the rendered SVG, which shrank the plot's own axis type.
+//
+// Two changes: forward what the caller passed, and when resolution still fails,
+// return an error that names the call which fixes it rather than restating the
+// problem.
+function _evalController(getController, input) {
+    const spec = {};
+    if (input && input.kernel_id) spec.kernel_id = input.kernel_id;
+    if (input && input.notebook)  spec.notebook  = input.notebook;
+    try {
+        return { controller: getController?.(spec) };
+    } catch (err) {
+        return { error: _kernelHelp(err, getController, input) };
+    }
+}
+
+/** Turn a kernel-resolution failure into something the caller can act on. */
+function _kernelHelp(err, getController, input) {
+    const manager = getController?.manager;
+    let rows = [];
+    try { rows = manager?.list?.() || []; } catch (_) {}
+    const lines = [`Eval block could not reach a kernel: ${err.message}`];
+    if (rows.length) {
+        lines.push('', 'Live kernels in this window:');
+        rows.forEach(k => lines.push(
+            `  ${k.kernel_id}  ${k.kernel_label || ''}  ${k.lifecycle || ''}` +
+            `${(k.notebooks || []).length ? `  bound to: ${(k.notebooks || []).join(', ')}` : '  (no notebook bound)'}`));
+        lines.push('', 'Retry with the kernel named explicitly — this call is the fix:');
+        lines.push(`  wolfslide_runEvalBlock(blockId:"${input?.blockId || '…'}", kernel_id:"${rows[0].kernel_id}")`);
+        if (rows.length > 1) {
+            lines.push(`  …or any of: ${rows.map(k => k.kernel_id).join(', ')}`);
+        }
+    } else {
+        lines.push('', 'No Wolfram kernel is running. Start one from the notebook toolbar, ' +
+                       'or wolfbook_kernelControl(action:"start").');
+    }
+    return lines.join('\n');
+}
+
+// ── Fit reporting ─────────────────────────────────────────────────────────
+//
+// Field report 2026-08-30: ~37 screenshot reads in one session (~45k tokens),
+// almost all of them answering one binary question — does this column overflow
+// 1080px? The renderer already computes the box. These helpers report it.
+//
+// _fitFooter is deliberately best-effort and silent on failure: a fit line is
+// a bonus on a mutation response, never a reason for the mutation to look like
+// it failed. It costs one off-screen measure (~50-150 ms, no visible flash).
+
+/**
+ * Analyse one slide. Returns { fit, lints }.
+ *
+ * Call this only AFTER applyDeck. Ordering is load-bearing and not obvious:
+ * applyDeck posts 'deckUpdate' to the webview, this posts 'measure', and the
+ * webview handles both from one message listener in FIFO order — so the
+ * measurement always sees the deck the mutation just wrote. Measuring before
+ * applyDeck would silently report the previous layout.
+ */
+async function _analyzeFit(p, slide, slideIdx0, docUri, timeoutMs) {
+    const measurement = await p.measureSlide(slideIdx0, docUri, { timeoutMs: timeoutMs ?? 5000 });
+    // Pass the deck so hints can snap to its type scale and prefer a size it
+    // already uses, instead of inventing a new one per overflow.
+    const deck = (() => { try { return p.getDeck(docUri); } catch (_) { return null; } })();
+    const fit = wsfit.computeFit(slide, measurement || {}, { deck });
+    const lints = wsfit.lintSlide(slide);
+    return { fit, lints };
+}
+
+/**
+ * One-line fit summary to append to a mutation result. Never throws.
+ * Returns '' when no editor is rendering (headless deck, unresolved webview).
+ */
+async function _fitFooter(p, deck, slideIdx0, docUri, opts) {
+    if (opts && opts.fit === false) return '';
+    try {
+        const slide = deck?.slides?.[slideIdx0];
+        if (!slide) return '';
+        const { fit, lints } = await _analyzeFit(p, slide, slideIdx0, docUri, 3000);
+        return '\n' + [wsfit.fitLine(fit), ...wsfit.lintFooterLines(lints)].join('\n');
+    } catch (_) {
+        // No live webview, or the measurement timed out. The STATIC lints still
+        // hold — a \color switch corrupts the slide whether or not anything is
+        // rendering — so report those rather than going silent.
+        try {
+            const slide = deck?.slides?.[slideIdx0];
+            const lines = slide ? wsfit.lintFooterLines(wsfit.lintSlide(slide)) : [];
+            return lines.length ? '\n' + lines.join('\n') : '';
+        } catch (_) { return ''; }
+    }
+}
+
+/**
+ * Re-read the deck after applyDeck and report what is actually there.
+ *
+ * Field report §2b: insertSlide answered "Inserted slide at position 35" for a
+ * slide that the very next listSlides did not contain — ~3 KB of content
+ * re-authored because a false success is indistinguishable from a real one.
+ * Every mutation now states the resulting deck length, read back from the
+ * provider rather than from the object we just mutated, and says so loudly
+ * when the read-back disagrees with what we asked for.
+ *
+ * @returns {string} " Deck: 36 slides." or a ⚠ line when the write did not land
+ */
+function _deckReadback(p, docUri, expect) {
+    let after = null;
+    try { after = p.getDeck(docUri); } catch (_) { return ''; }
+    if (!after || !Array.isArray(after.slides)) return '';
+    const n = after.slides.length;
+    const problems = [];
+    if (expect && typeof expect.slideCount === 'number' && expect.slideCount !== n) {
+        problems.push(`expected ${expect.slideCount} slides, deck now has ${n}`);
+    }
+    if (expect && expect.slideId && !after.slides.some(s => s.id === expect.slideId)) {
+        problems.push(`slide id="${expect.slideId}" is NOT in the deck after the write`);
+    }
+    if (expect && expect.blockId) {
+        const present = after.slides.some(s => _collectAllBlocks(s).some(b => b.id === expect.blockId));
+        if (!present) problems.push(`block id="${expect.blockId}" is NOT in the deck after the write`);
+    }
+    if (problems.length) {
+        return `\n⚠ WRITE NOT CONFIRMED — ${problems.join('; ')}. ` +
+               `The edit did not survive the save (an editor autosave can race it). ` +
+               `Re-run wolfslide_listSlides before doing any more work; do NOT assume this succeeded.`;
+    }
+    return `  Deck: ${n} slides.`;
+}
+
 
 /** Smooth over two common authoring papercuts on a single block (see feedback §G):
  *   • list items given as plain strings → wrapped into {type:'text', content}
@@ -126,6 +263,38 @@ function _collectAllBlocks(node) {
     return blocks;
 }
 
+/**
+ * Warn when a declared w:h cannot be produced from the source file.
+ *
+ * Field report §2d: a 1024x1024 logo shipped in the deck as w:50 h:481 — a
+ * vertical smear nobody chose. getImageDimensions already existed; nothing
+ * called it at insert time. Local files only (a header read is ~64 bytes and
+ * synchronous); remote URLs are skipped rather than blocking the write.
+ */
+function _checkImageAspects(slide, p, docUri, warnings) {
+    let deckDir = null;
+    try { deckDir = p.getDeckDir ? p.getDeckDir(docUri) : null; } catch (_) {}
+    for (const img of _collectImages(slide)) {
+        const src = img.src || '';
+        if (!src || /^(https?:|data:|vscode)/i.test(src)) continue;
+        if (!(Number(img.w) > 0) || !(Number(img.h) > 0)) continue;
+        try {
+            let fp = src;
+            if (!path.isAbsolute(fp)) {
+                if (!deckDir) continue;
+                fp = path.resolve(deckDir, fp);
+            }
+            const fd = fs.openSync(fp, 'r');
+            const buf = Buffer.alloc(64);
+            try { fs.readSync(fd, buf, 0, 64, 0); } finally { fs.closeSync(fd); }
+            const dims = _parseImageHeader(buf);
+            if (!dims || !dims.w || !dims.h) continue;
+            const w = wsfit.aspectWarning(img, { w: dims.w, h: dims.h });
+            if (w) warnings.push(w);
+        } catch (_) { /* unreadable file is not this tool's problem */ }
+    }
+}
+
 /** Resolve a slide from options (slideId or slideIndex), returning { deck, idx, slide, docUri } or null. */
 function _resolveSlide(options) {
     const p = _getSlideProvider();
@@ -198,32 +367,54 @@ function _findBlockByName(name, root) {
  * Returns { found, resolvedSlide, resolvedIdx } or { error }.
  */
 function _resolveBlockRef(options, r) {
-    let blockId   = options.input?.blockId;
+    const blockId   = options.input?.blockId;
     const blockName = options.input?.blockName;
     if (!blockId && !blockName) return { error: 'blockId or blockName is required.' };
 
-    if (blockId) {
-        const found = _findBlockRecursive(blockId, r.slide);
-        if (found) return { found, resolvedSlide: r.slide, resolvedIdx: r.idx };
-        // Not on current slide — search all slides
-        for (let si = 0; si < r.deck.slides.length; si++) {
-            if (si === r.idx) continue;
-            const f = _findBlockRecursive(blockId, r.deck.slides[si]);
-            if (f) return { found: f, resolvedSlide: r.deck.slides[si], resolvedIdx: si };
-        }
-        const allIds = _collectAllBlocks(r.slide).map(b => b.id);
-        return { error: `Block "${blockId}" not found on slide ${r.idx + 1}. Valid ids: ${allIds.join(', ')}` };
+    // Was a slide named explicitly? If so, the search is confined to it and
+    // ambiguity across the deck is not this call's problem.
+    const slidePinned = options.input?.slideIndex != null
+        || options.input?.slideNumber != null
+        || options.input?.slideId != null;
+
+    const key   = blockId ? 'id' : 'name';
+    const want  = blockId || blockName;
+    const finder = blockId ? _findBlockRecursive : _findBlockByName;
+
+    // Search the pinned/current slide first, then everywhere.
+    const onTarget = finder(want, r.slide);
+    if (slidePinned) {
+        if (onTarget) return { found: onTarget, resolvedSlide: r.slide, resolvedIdx: r.idx };
+        const allIds = _collectAllBlocks(r.slide).map(b => (blockId ? b.id : b.name)).filter(Boolean);
+        return { error: `Block ${key}="${want}" not found on slide ${r.idx + 1}. Present on that slide: ${allIds.join(', ') || '(none)'}` };
     }
 
-    // blockName path
-    let nameMatch = _findBlockByName(blockName, r.slide);
-    if (nameMatch) return { found: nameMatch, resolvedSlide: r.slide, resolvedIdx: r.idx };
+    // No slide given — collect EVERY match across the deck.
+    //
+    // Field report §2a: "left_col" existed on slides 16 and 20; the call meant
+    // slide 20, the resolver silently took slide 16 because that happened to be
+    // the slide the user was looking at, and reported success. The editor's
+    // cursor position must never be an implicit argument to a mutation, so a
+    // deck-wide ambiguity is now an error that lists the candidates.
+    const matches = [];
     for (let si = 0; si < r.deck.slides.length; si++) {
-        if (si === r.idx) continue;
-        nameMatch = _findBlockByName(blockName, r.deck.slides[si]);
-        if (nameMatch) return { found: nameMatch, resolvedSlide: r.deck.slides[si], resolvedIdx: si };
+        const f = finder(want, r.deck.slides[si]);
+        if (f) matches.push({ found: f, resolvedSlide: r.deck.slides[si], resolvedIdx: si });
     }
-    return { error: `No block with name="${blockName}" found in any slide.` };
+    if (matches.length === 1) return matches[0];
+    if (matches.length > 1) {
+        const list = matches.map(m =>
+            `    slide ${m.resolvedIdx + 1} "${m.resolvedSlide.label || m.resolvedSlide.id}"  ${_blockLabel(m.found.block)}`
+        ).join('\n');
+        return {
+            error: `✗ Ambiguous ${key} "${want}" — matches ${matches.length} blocks in this deck:\n${list}\n` +
+                   `  Pass slideIndex to disambiguate, e.g. slideIndex:${matches[0].resolvedIdx + 1}.\n` +
+                   `  (Refusing to guess: picking by whichever slide is on screen would edit a different ` +
+                   `block depending on where the cursor happens to be.)`,
+        };
+    }
+    const allIds = _collectAllBlocks(r.slide).map(b => (blockId ? b.id : b.name)).filter(Boolean);
+    return { error: `Block ${key}="${want}" not found in any slide. On the current slide ${r.idx + 1}: ${allIds.join(', ') || '(none)'}` };
 }
 
 /** Deep merge source into target (mutates target). Arrays are replaced, not merged.
@@ -339,6 +530,38 @@ function _asciiSlide(slide) {
     return lines.join('\n');
 }
 
+/**
+ * Render the scope reminder.
+ *
+ * Full banner only when the scope was just set or changed; a single line
+ * thereafter; nothing at all after it has been shown enough times to have
+ * been read. Field report §3c: the banner printed on essentially every
+ * wolfslide result for a whole session, and by the second half it was still
+ * telling the agent to "ignore problems outside" a scope the user had already
+ * widened. Cost aside, a stale instruction repeated 40 times is a hazard.
+ */
+const SCOPE_QUIET_AFTER = 6;
+function _scopeNote(p, docUri, { full = false } = {}) {
+    let scope = null;
+    try { scope = p && p.getScope ? p.getScope(docUri) : null; } catch (_) { return ''; }
+    if (!scope) return '';
+    let shown = 0;
+    try { shown = p.noteScopeShown ? p.noteScopeShown(docUri) : 0; } catch (_) {}
+    if (full || shown <= 1) {
+        return [
+            '╔══════════════════════════════════════════════════════════════╗',
+            `║  ⚑ SCOPE: ${scope.slice(0, 52).padEnd(52)}║`,
+            '║  Work within this scope unless the user widens it.           ║',
+            '║  To update: wolfslide_getContext(scope:"new task")           ║',
+            '║  To clear:  wolfslide_getContext(scope:"")                   ║',
+            '╚══════════════════════════════════════════════════════════════╝',
+            '',
+        ].join('\n');
+    }
+    if (shown <= SCOPE_QUIET_AFTER) return `scope: ${scope}\n`;
+    return '';   // read by now; if the user has moved on, so should this
+}
+
 // ── Theme presets ─────────────────────────────────────────────────────────
 const THEME_PRESETS = {
     'academic-light': {
@@ -414,20 +637,21 @@ class WolfslideGetContextTool {
 
         const lines = [];
 
-        // Scope banner — always first so the model can't miss it
-        if (currentScope) {
-            lines.push('╔══════════════════════════════════════════════════════════════╗');
-            lines.push(`║  ⚑ SCOPE: ${currentScope.padEnd(52)}║`);
-            lines.push('║  Work ONLY within this scope. Ignore problems outside it.   ║');
-            lines.push('║  To update: wolfslide_getContext(scope:"new task")           ║');
-            lines.push('║  To clear:  wolfslide_getContext(scope:"")                   ║');
-            lines.push('╚══════════════════════════════════════════════════════════════╝');
-            lines.push('');
-        }
+        // Scope banner — full form here (getContext is where scope is set), so
+        // the model sees it in full at the moment it matters.
+        if (currentScope) lines.push(_scopeNote(p, activeUri, { full: true }).replace(/\n$/, ''));
 
-        lines.push('🚫 NEVER read or write .wslide files directly with file/disk tools.');
-        lines.push('   All edits MUST go through wolfslide_* tools. Direct file edits bypass');
-        lines.push('   the live editor state and corrupt the undo stack.');
+        // Reading the file is harmless and sometimes far cheaper than the tool
+        // path (a deck-wide citation audit through getSlide is tens of
+        // thousands of tokens). Writing is what corrupts editor state. The old
+        // blanket "NEVER read or write" pushed a caller off-tool anyway, which
+        // is what a guardrail nobody can afford always does (field report §3d).
+        lines.push('🚫 NEVER WRITE .wslide files directly with file/disk tools — all edits MUST go');
+        lines.push('   through wolfslide_* tools. A direct write bypasses the live editor state and');
+        lines.push('   corrupts the undo stack.');
+        lines.push('   Reading the .wslide JSON directly is FINE (it may lag unsaved editor edits by');
+        lines.push('   a moment). For deck-wide questions prefer wolfslide_searchSlides — it takes a');
+        lines.push('   regex and returns slide+block locations, not whole documents.');
         lines.push('');
 
         // Only show real file:// URIs — filter out VS Code internal virtual docs
@@ -543,15 +767,50 @@ class WolfslideGetContextTool {
             for (const b of styled) { const k = JSON.stringify(b.style); sig.set(k, (sig.get(k) || 0) + 1); }
             const dups = [...sig.entries()].filter(([, n]) => n >= 3).sort((a, b) => b[1] - a[1]);
             if (dups.length) {
-                lines.push(`⚠ ${dups.length} inline style(s) are repeated on ≥3 blocks — promote each to a stylePreset so ONE edit restyles all of them:`);
-                dups.slice(0, 4).forEach(([k, n], i) => {
-                    const name = `shared${i + 1}`;
-                    lines.push(`   ${n}× ${k}`);
-                    lines.push(`     → wolfslide_setTheme(stylePresets:{ "${name}": ${k} })`);
-                    lines.push(`     → then wolfslide_patchBlock per matching block: { "stylePreset":"${name}" }  (and remove the now-duplicated style keys)`);
-                });
+                // Promoting used to be described as a multi-call refactor with no
+                // immediate payoff — so it was (rationally) ignored, and the
+                // duplication grew. One call does the whole thing now; say that
+                // instead of describing the manual route.
+                lines.push(`⚠ ${dups.length} inline style(s) are repeated on ≥3 blocks. ONE call promotes them all:`);
+                lines.push('     wolfslide_advanced(action:"promoteStyle")            ← dry run, shows what it would do');
+                lines.push('     wolfslide_advanced(action:"promoteStyle", apply:true) ← creates the presets and rewrites the blocks');
+                lines.push('   It clusters near-identical styles too (0.73em/0.74em variants of one box land together),');
+                lines.push('   keeps the majority rendering exactly, and leaves outliers as explicit overrides.');
+                lines.push('   Afterwards a deck-wide density or colour change is one setTheme call, not one patch per block.');
+                dups.slice(0, 3).forEach(([k, n]) => lines.push(`     ${n}× ${k.slice(0, 110)}`));
+            }
+            // Font-size drift: the cost of making per-block nudging frictionless.
+            const emSizes = wsfit.emSizesInUse(activeDeck);
+            if (emSizes.length >= 5) {
+                lines.push('');
+                lines.push(`⚠ ${emSizes.length} distinct em font sizes in this deck: ` +
+                    emSizes.map(([v, n]) => `${v}em×${n}`).join(', '));
+                lines.push('   Most of these are drift, not design — each is the local answer to "make this fit".');
+                lines.push('   Fit hints now snap to a type scale and prefer a size already in use. To pin the');
+                lines.push('   vocabulary explicitly, set deck.typeScale, e.g. [1, 0.95, 0.9, 0.85, 0.8, 0.75].');
+                lines.push('   Prefer rescaling the CONTAINER over its children — one value, no drift.');
             }
         }
+
+        // ── Verify/audit surface ─────────────────────────────────────────
+        // These live behind action: parameters and were repeatedly not found:
+        // one session re-parsed the .wslide file by hand for a citation audit
+        // that checkRefs does in a single call, and reported style presets as
+        // unimplemented while promoteStyle was one call away. getContext is the
+        // opening move, so this is where they have to be named.
+        lines.push('');
+        lines.push('=== Checking your work (cheap — prefer these over screenshots) ===');
+        lines.push('Layout:     wolfslide_getSlideHtml(slideIndex:N, format:"fit")  — overflow in px, which block,');
+        lines.push('            and a rescale hint. ~16x cheaper than a screenshot and it names the block.');
+        lines.push('            wolfslide_advanced(action:"fitAll")  — every slide at once, reports only problems.');
+        lines.push('Deck audit: wolfslide_advanced(action:"check")   — empty slides, missing alt, duplicate ids,');
+        lines.push('            shrink-wrapped columns, distorted image ratios, and \\color-switch math bugs.');
+        lines.push('Citations:  wolfslide_advanced(action:"checkRefs") — resolves every arXiv id against');
+        lines.push('            INSPIRE-HEP and flags AUTHOR MISMATCH, which is what a transposed id looks like.');
+        lines.push('Find:       wolfslide_searchSlides(query:"…", regex:true) — returns slide+block locations,');
+        lines.push('            not documents. Use it instead of reading the .wslide file for deck-wide questions.');
+        lines.push('Styles:     wolfslide_advanced(action:"promoteStyle") — repeated inline styles → deck presets.');
+        lines.push('Screenshots are for AESTHETIC judgement only; they are not a layout check.');
 
         // ── Critical reminders (non-obvious traps only) ──────────────────
         lines.push('');
@@ -667,8 +926,7 @@ class WolfslideListSlidesTool {
             ? (options.input?.verbose !== false)          // single slide: default verbose=true
             : !!options.input?.verbose;                   // full listing: default verbose=false
 
-        const scope = p.getScope ? p.getScope(docUri) : null;
-        const scopeBanner = scope ? `⚑ SCOPE: ${scope}\n` : '';
+        const scopeBanner = _scopeNote(p, docUri);
 
         const allSlides = deck.slides || [];
         const slides = targetIdx !== null
@@ -793,11 +1051,13 @@ class WolfslideGetSlideTool {
             ? `\n\n## ⚠ Render Warnings (${renderWarnings.length})\n${renderWarnings.map(w => '  - ' + w).join('\n')}`
             : '';
 
-        const brief = !!options.input?.brief;
-        const currentScope = p.getScope ? p.getScope(docUri) : null;
-        const scopeFooter = currentScope
-            ? `\n\n⚑ SCOPE: "${currentScope}" — work here only. Ignore anything outside this scope.`
-            : '';
+        // Brief by DEFAULT. The ASCII tree plus the image/notes summaries answer
+        // almost every question; the raw JSON is several times larger and was
+        // rarely needed. Pass brief:false (or full:true) when you really want it
+        // — wolfslide_patchBlock with no patch also returns one block's JSON.
+        const brief = options.input?.brief !== false && options.input?.full !== true;
+        const scopeNote = _scopeNote(p, docUri);
+        const scopeFooter = scopeNote ? `\n\n${scopeNote.trimEnd()}` : '';
 
         const output =
             currentBanner +
@@ -806,7 +1066,10 @@ class WolfslideGetSlideTool {
             imgSummary +
             notesSummary +
             renderWarnStr +
-            (brief ? '' : '\n\n## Raw JSON\n```json\n' + JSON.stringify(slide, null, 2) + '\n```') +
+            (brief
+                ? '\n\n(raw JSON omitted — pass brief:false for the full slide object, or ' +
+                  'wolfslide_patchBlock(blockId:"…") with no patch for one block)'
+                : '\n\n## Raw JSON\n```json\n' + JSON.stringify(slide, null, 2) + '\n```') +
             scopeFooter;
         return _slideResult(output);
     }
@@ -837,10 +1100,14 @@ class WolfslideInsertSlideTool {
         _freshenConflicts(existingIds, newSlide.elements, insertSlideWarnings);
         const afterIndex = options.input?.afterIndex;
         const insertAt = (afterIndex != null) ? Math.min(afterIndex, deck.slides.length) : deck.slides.length;
+        const expectedCount = deck.slides.length + 1;
         deck.slides.splice(insertAt, 0, newSlide);
+        _checkImageAspects(newSlide, p, docUri, insertSlideWarnings);
         await p.applyDeck(deck, docUri);
         const warnStr = insertSlideWarnings.length ? `\nWarnings:\n${insertSlideWarnings.map(w => `  ⚠ ${w}`).join('\n')}` : '';
-        return _slideResult(`Inserted slide at position ${insertAt + 1} (id=${newSlide.id}).${warnStr}`);
+        const readback = _deckReadback(p, docUri, { slideCount: expectedCount, slideId: newSlide.id });
+        const fitFoot = await _fitFooter(p, p.getDeck(docUri), insertAt, docUri, options.input);
+        return _slideResult(`Inserted slide at position ${insertAt + 1} (id=${newSlide.id}).${readback}${warnStr}${fitFoot}`);
     }
 }
 
@@ -901,10 +1168,14 @@ class WolfslideReplaceSlideTool {
         _freshenConflicts(otherIds, newSlide.items, warnings);
         _freshenConflicts(otherIds, newSlide.elements, warnings);
 
+        const expectedCount = deck.slides.length;
         deck.slides[idx] = newSlide;
+        _checkImageAspects(newSlide, p, docUri, warnings);
         await p.applyDeck(deck, docUri);
         const warnStr = warnings.length ? `\nWarnings:\n${warnings.map(w => `  ⚠ ${w}`).join('\n')}` : '';
-        return _slideResult(`Replaced slide ${idx + 1} (id=${newSlide.id}) "${oldSlide.label || ''}" → "${newSlide.label || ''}".${warnStr}`);
+        const readback = _deckReadback(p, docUri, { slideCount: expectedCount, slideId: newSlide.id });
+        const fitFoot = await _fitFooter(p, p.getDeck(docUri), idx, docUri, options.input);
+        return _slideResult(`Replaced slide ${idx + 1} (id=${newSlide.id}) "${oldSlide.label || ''}" → "${newSlide.label || ''}".${readback}${warnStr}${fitFoot}`);
     }
 }
 
@@ -1054,13 +1325,16 @@ class WolfslideEditSlideTool {
                 warnings.push(`⚠ DUPLICATE BLOCK IDs introduced by this edit: ${dupes.map(d => `"${d.id}" on slides [${d.slides.join(',')}]`).join('; ')}. Fix with wolfslide_advanced(action:"check") or rename manually.`);
             }
         }
+        const expectedCount = r.deck.slides.length;
         await r.p.applyDeck(r.deck, r.docUri);
         const warningStr = warnings.length ? `\nWarnings:\n${warnings.map(w => `  ⚠ ${w}`).join('\n')}` : '';
         const wasCurrentSlide = options.input?.slideIndex == null && options.input?.slideNumber == null && options.input?.slideId == null;
         const whichSlide = wasCurrentSlide
             ? `Currently visible Slide ${r.idx + 1} "${r.slide.label || r.slide.id}" (id=${r.slide.id}) updated.`
             : `Slide ${r.idx + 1} "${r.slide.label || r.slide.id}" (id=${r.slide.id}) updated.`;
-        return _slideResult(whichSlide + warningStr);
+        const readback = _deckReadback(r.p, r.docUri, { slideCount: expectedCount, slideId: r.slide.id });
+        const fitFoot = await _fitFooter(r.p, r.deck, r.idx, r.docUri, options.input);
+        return _slideResult(whichSlide + readback + warningStr + fitFoot);
     }
 }
 
@@ -1225,11 +1499,24 @@ class WolfslideSearchSlidesTool {
         if (!p) return _slideResult('No .wslide editor is open.');
         const deck = p.getDeck(options.input?.docUri);
         if (!deck) return _slideResult('No deck found.');
-        const query = (options.input?.query || '').toLowerCase().trim();
+        const rawQuery = (options.input?.query || '').trim();
+        const useRegex = options.input?.regex === true;
+        // Search the markup too when asked: an href, a class name or an inline
+        // style only exists in the raw content, and stripping tags hides it.
+        const searchRaw = options.input?.searchRaw === true;
+        let rx = null;
+        if (useRegex && rawQuery) {
+            try {
+                rx = new RegExp(rawQuery, options.input?.caseSensitive ? 'g' : 'gi');
+            } catch (e) {
+                return _slideResult(`Invalid regex ${JSON.stringify(rawQuery)}: ${e.message}`);
+            }
+        }
+        const query = rawQuery.toLowerCase();
         const blockTypeFilter = (options.input?.blockType || '').toLowerCase().trim();
         const styleKey   = (options.input?.styleKey   || '').trim();
         const styleValue = (options.input?.styleValue || '').toLowerCase().trim();
-        if (!query && !blockTypeFilter && !styleKey)
+        if (!rawQuery && !blockTypeFilter && !styleKey)
             return _slideResult('Provide at least one of: query, blockType, or styleKey.');
         const results = [];
         (deck.slides || []).forEach((s, i) => {
@@ -1237,7 +1524,9 @@ class WolfslideSearchSlidesTool {
             const matches = [];
 
             // Check if slide label matches query (slide-level match — no block filter needed)
-            const slideLabelMatch = query && (s.label || '').toLowerCase().includes(query);
+            const slideLabelMatch = rawQuery && (rx
+                ? (() => { rx.lastIndex = 0; return rx.test(s.label || ''); })()
+                : (s.label || '').toLowerCase().includes(query));
 
             allBlocks.forEach(b => {
                 // Type filter
@@ -1250,15 +1539,29 @@ class WolfslideSearchSlidesTool {
                     if (styleValue && !val.includes(styleValue)) return;
                 }
                 // Text content filter
-                if (query) {
-                    const haystack = [
-                        _stripHtml(b.content || ''),
-                        b.alt || '', b.src || '', b.label || '',
-                        ...(b.items || []).map(it => _stripHtml(it.content || '')),
-                    ].join(' ').toLowerCase();
-                    if (!haystack.includes(query)) return;
+                let hit = null;
+                if (rawQuery) {
+                    const parts = searchRaw
+                        ? [b.content || '', b.alt || '', b.src || '', b.label || '', b.input || '',
+                           ...(b.items || []).map(it => it.content || '')]
+                        : [_stripHtml(b.content || ''), b.alt || '', b.src || '', b.label || '',
+                           _stripHtml(b.input || ''),
+                           ...(b.items || []).map(it => _stripHtml(it.content || ''))];
+                    const haystack = parts.join(' ');
+                    if (rx) {
+                        rx.lastIndex = 0;
+                        const m = rx.exec(haystack);
+                        if (!m) return;
+                        // Show the match in context — the point of a grep is to
+                        // return locations, not documents.
+                        const at = m.index;
+                        hit = haystack.slice(Math.max(0, at - 30), at + m[0].length + 40)
+                                      .replace(/\s+/g, ' ').trim();
+                    } else if (!haystack.toLowerCase().includes(query)) {
+                        return;
+                    }
                 }
-                const preview = _stripHtml(b.content || b.alt || (b.items?.[0]?.content) || '').slice(0, 70);
+                const preview = hit || _stripHtml(b.content || b.alt || (b.items?.[0]?.content) || '').slice(0, 70);
                 const styleHint = styleKey ? `  ${styleKey}=${b.style?.[styleKey]}` : '';
                 matches.push(`    block id=${b.id} type=${b.type}${styleHint}: "${preview}"`);
             });
@@ -1271,7 +1574,7 @@ class WolfslideSearchSlidesTool {
                 results.push(`[${i + 1}] id=${s.id} label="${s.label || ''}" slideIndex=${i + 1}:\n${matches.join('\n')}`);
             }
         });
-        const desc = [query && `text/label:"${query}"`, blockTypeFilter && `type:${blockTypeFilter}`, styleKey && `style.${styleKey}${styleValue ? '='+styleValue : ''}`].filter(Boolean).join(', ');
+        const desc = [rawQuery && `${rx ? 'regex' : 'text'}:"${rawQuery}"${searchRaw ? ' (raw markup)' : ''}`, blockTypeFilter && `type:${blockTypeFilter}`, styleKey && `style.${styleKey}${styleValue ? '='+styleValue : ''}`].filter(Boolean).join(', ');
         if (!results.length) return _slideResult(`No matches for [${desc}] across ${deck.slides.length} slide(s).`);
         return _slideResult(`Matches for [${desc}] in ${results.length} slide(s):\n${results.join('\n')}`);
     }
@@ -1336,17 +1639,32 @@ class WolfslideEditBlockTool {
             if (Object.keys(restUpdates).length) _deepMerge(found.block, restUpdates);
             _ensureBlockIds(found.block.children);
             await r.p.applyDeck(r.deck, r.docUri);
-            return _slideResult(`Block ${blockId} on slide ${resolvedIdx + 1} "${resolvedSlide.label || resolvedSlide.id}" — childrenOps: ${opsLog.join('; ')}`);
+            const opsFit = await _fitFooter(r.p, r.deck, resolvedIdx, r.docUri, options.input);
+            return _slideResult(`Block ${blockId} on slide ${resolvedIdx + 1} "${resolvedSlide.label || resolvedSlide.id}" — childrenOps: ${opsLog.join('; ')}` +
+                _deckReadback(r.p, r.docUri, { blockId }) + opsFit);
         }
 
         _deepMerge(found.block, updates);
         _ensureBlockIds(found.block.children);
         _ensureBlockIds(found.block.items);
         _ensureBlockIds(found.block.elements);
+        // A distorted w:h is nearly always introduced by PATCHING an existing
+        // image, not by inserting one — checking only at insert time meant the
+        // warning never fired in practice (field report #2 §4d).
+        const patchWarnings = [];
+        if (found.block.type === 'image') {
+            _checkImageAspects({ children: [found.block] }, r.p, r.docUri, patchWarnings);
+        } else if (updates.children || updates.items || updates.elements) {
+            _checkImageAspects(found.block, r.p, r.docUri, patchWarnings);
+        }
         await r.p.applyDeck(r.deck, r.docUri);
-        const wasCurrentSlide = options.input?.slideIndex == null && options.input?.slideId == null;
-        const slideNote = wasCurrentSlide ? `currently visible Slide` : `Slide`;
-        return _slideResult(`Block "${blockId}" updated on ${slideNote} ${resolvedIdx + 1} "${resolvedSlide.label || resolvedSlide.id}". Keys changed: ${Object.keys(updates).join(', ')}`);
+        const fitFoot = await _fitFooter(r.p, r.deck, resolvedIdx, r.docUri, options.input);
+        const patchWarnStr = patchWarnings.length
+            ? `\nWarnings:\n${patchWarnings.map(w => `  ⚠ ${w}`).join('\n')}` : '';
+        return _slideResult(
+            `Block "${blockId}" updated on slide ${resolvedIdx + 1} "${resolvedSlide.label || resolvedSlide.id}". ` +
+            `Keys changed: ${Object.keys(updates).join(', ')}.` +
+            _deckReadback(r.p, r.docUri, { blockId }) + patchWarnStr + fitFoot);
     }
 }
 
@@ -1482,6 +1800,11 @@ class WolfslideCheckDeckTool {
                     issues.push({ slide: sn, blockId: b.id, issue: 'large_negative_offset', dx: b.offset.dx, dy: b.offset.dy, detail: 'large negative offset often means fighting the layout' });
                 }
             });
+            // Static layout lints — no render needed, so they run over the
+            // whole deck in one call (field report §5).
+            wsfit.lintSlide(s).forEach(l => {
+                issues.push({ slide: sn, blockId: l.blockId, issue: l.rule, detail: l.detail, fix: l.fix });
+            });
             // Fragment gaps
             const steps = allBlocks.filter(b => b.fragmentOrder != null && b.fragmentOrder >= 1).map(b => b.fragmentOrder).sort((a, b) => a - b);
             if (steps.length > 0) {
@@ -1564,44 +1887,41 @@ class WolfslideMeasureSlideTool {
         if (!r) return _slideResult('No .wslide editor is open.');
         if (r.error) return _slideResult(r.error);
         try {
-            const result = await r.p.measureSlide(r.idx, r.docUri);
-            // Enrich with block type info from data
-            const allBlocks = _collectAllBlocks(r.slide);
-            const blockMap = {};
-            allBlocks.forEach(b => { blockMap[b.id] = b; });
-            const enriched = {};
-            for (const [id, meas] of Object.entries(result.blocks || {})) {
-                const b = blockMap[id];
-                enriched[id] = {
-                    type: b?.type || '?',
-                    name: b?.name || undefined,
-                    requestedSize: { w: b?.w || null, h: b?.h || null },
-                    ...meas,
-                };
+            const { fit, lints } = await _analyzeFit(r.p, r.slide, r.idx, r.docUri, 8000);
+            if (options.input?.raw === true) {
+                // Full numbers, for the rare case where the compact report is
+                // not enough. Everything the report shows is derived from this.
+                const blocks = {};
+                for (const [id, rec] of fit.recById) {
+                    blocks[id] = {
+                        type: rec.type, name: rec.block.name || undefined,
+                        x: rec.x, y: rec.y, w: rec.w, h: rec.h,
+                        bottom: rec.bottom, right: rec.right,
+                        visible: rec.visible,
+                        natural: rec.natural || undefined,
+                        clippedBottom: rec.clippedBottom || undefined,
+                        clippedRight: rec.clippedRight || undefined,
+                    };
+                }
+                return _slideResult(JSON.stringify({
+                    slideIndex: r.idx + 1, canvas: fit.canvas,
+                    contentBottom: fit.contentBottom, overflow: fit.overflow,
+                    fits: fit.fits, blocks,
+                    hints: fit.hints, notes: fit.notes, lints,
+                }, null, 2));
             }
-            // Detect issues
-            const issues = [];
-            for (const [id, m] of Object.entries(enriched)) {
-                if (m.overflow?.clippedBottom || m.overflow?.clippedRight) {
-                    issues.push({ blockId: id, issue: 'content_overflow', detail: `rendered extends beyond canvas` });
-                }
-                if (m.requestedSize.h && m.renderedSize.h > m.requestedSize.h + 5) {
-                    issues.push({ blockId: id, issue: 'content_overflow', detail: `rendered height ${m.renderedSize.h}px exceeds allocated ${m.requestedSize.h}px` });
-                }
-                if (m.type === 'image' && blockMap[id] && !blockMap[id].alt) {
-                    issues.push({ blockId: id, issue: 'no_alt_text' });
-                }
-            }
-            const output = {
-                slideIndex: r.idx + 1,
-                canvasSize: { w: 1920, h: 1080 },
-                blocks: enriched,
-                issues,
-                remainingVerticalSpace: result.remainingVerticalSpace,
-            };
-            return _slideResult(JSON.stringify(output, null, 2));
+            return _slideResult(wsfit.formatFitReport(r.slide, r.idx + 1, fit, lints));
         } catch (e) {
-            return _slideResult(`Measurement failed: ${e.message}`);
+            // Static lints still work without a live render — say what is
+            // known rather than returning nothing.
+            const lints = wsfit.lintSlide(r.slide);
+            const lintStr = lints.length
+                ? '\nStatic checks (no render needed):\n' + lints.map(l => `  #${l.blockId} ⚠ ${l.rule}: ${l.detail}`).join('\n')
+                : '';
+            return _slideResult(
+                `Measurement failed: ${e.message}. A live .wslide editor must be open and rendering ` +
+                `for box measurement (it happens off-screen, so it never disturbs the visible slide).${lintStr}`
+            );
         }
     }
 }
@@ -1621,6 +1941,26 @@ class WolfslideGetSlideHtmlTool {
 
         const fmt = (options.input?.format || 'image').toLowerCase();
 
+        // ── Fit mode: the box, not the picture ─────────────────────────────
+        //
+        // This is the cheap answer to "does it fit". ~90 tokens against ~1500
+        // for a screenshot plus a vision read, and it names the offending
+        // block and the scale factor that fixes it — neither of which a JPEG
+        // can tell you. Reach for format:"image" for AESTHETIC judgement, not
+        // as a compilation step.
+        if (fmt === 'fit') {
+            try {
+                const { fit, lints } = await _analyzeFit(r.p, r.slide, r.idx, r.docUri, 8000);
+                return _slideResult(wsfit.formatFitReport(r.slide, r.idx + 1, fit, lints));
+            } catch (e) {
+                const lints = wsfit.lintSlide(r.slide);
+                const lintStr = lints.length
+                    ? '\nStatic checks (no render needed):\n' + lints.map(l => `  #${l.blockId} ⚠ ${l.rule}: ${l.detail}`).join('\n')
+                    : '';
+                return _slideResult(`Fit measurement failed: ${e.message}. A .wslide editor must be open and rendering.${lintStr}`);
+            }
+        }
+
         // ── Image mode (default): capture via webview html2canvas ──────────
         if (fmt === 'image') {
             const outputPath = options.input?.outputPath;
@@ -1628,21 +1968,50 @@ class WolfslideGetSlideHtmlTool {
                 return _slideResult(
                     'Error: outputPath is required for format:"image". ' +
                     'Returning a screenshot inline as base64 produces ~100 KB of text and will exhaust the context window. ' +
-                    'Pass outputPath:"/absolute/path/slide.jpg" to save the file to disk instead, then use the path to reference it.'
+                    'Pass outputPath:"/absolute/path/slide.jpg" to save the file to disk instead, then use the path to reference it.\n' +
+                    'If you only need to know whether the content FITS, use format:"fit" — it is ~16x cheaper and names the block.'
                 );
             }
-            try {
-                const scale = Number(options.input?.scale) || 0.5;
-                const dataUrl = await r.p.screenshotSlide(r.idx, r.docUri, scale);
-                // Strip the data:image/jpeg;base64, prefix to return raw base64
-                const base64 = dataUrl.replace(/^data:[^;]+;base64,/, '');
-                require('fs').writeFileSync(outputPath, Buffer.from(base64, 'base64'));
-                return _slideResult(
-                    `Slide ${r.idx + 1} "${r.slide.label || ''}" screenshot saved to ${outputPath} (${Math.round(base64.length * 3/4 / 1024)}KB, scale=${scale}).`
-                );
-            } catch (e) {
-                return _slideResult(`Screenshot failed: ${e.message}. Try format:"html" as fallback.`);
+            // Capture timeouts correlate with scale and are otherwise a wasted
+            // round trip: each failure costs the caller a whole turn to notice
+            // and retry by hand. Step down and report which scale succeeded.
+            const asked = Number(options.input?.scale) || 0.5;
+            const ladder = [asked, ...[0.85, 0.6, 0.5, 0.35].filter(v => v < asked)];
+            const attempts = [];
+            for (const scale of ladder) {
+                try {
+                    const dataUrl = await r.p.screenshotSlide(r.idx, r.docUri, scale);
+                    const base64 = dataUrl.replace(/^data:[^;]+;base64,/, '');
+                    fs.writeFileSync(outputPath, Buffer.from(base64, 'base64'));
+                    const retried = scale !== asked
+                        ? ` (timed out at scale=${asked}, rendered at ${scale})`
+                        : '';
+                    return _slideResult(
+                        `Slide ${r.idx + 1} "${r.slide.label || ''}" screenshot saved to ${outputPath} ` +
+                        `(${Math.round(base64.length * 3/4 / 1024)}KB, scale=${scale})${retried}.`
+                    );
+                } catch (e) {
+                    attempts.push(`scale=${scale}: ${e.message}`);
+                    // "already running" means an EARLIER capture is still in
+                    // flight past our timeout, not that this scale is too big.
+                    // Stepping down the ladder just collects the same refusal
+                    // four times, so stop and say what is actually happening.
+                    if (/already running/i.test(e.message)) {
+                        return _slideResult(
+                            `A previous capture in this window has not finished. Wait a few seconds and retry ` +
+                            `the same call — stepping the scale down will not help.\n  ${attempts.join('\n  ')}`
+                        );
+                    }
+                }
             }
+            return _slideResult(
+                `Screenshot failed at every scale (${ladder.join(', ')}):\n  ${attempts.join('\n  ')}\n\n` +
+                `The capture runs in the slide editor's webview. If EVERY scale times out, the webview is ` +
+                `most likely not the visible tab or has lost its rendering context — bring the .wslide ` +
+                `editor to the foreground, or reload the window, then retry.\n` +
+                `Meanwhile wolfslide_getSlideHtml(format:"fit") still answers every LAYOUT question ` +
+                `without rendering, and format:"html" gives the markup.`
+            );
         }
 
         // ── HTML mode: return standalone static HTML (all elements visible) ─
@@ -2399,9 +2768,40 @@ class WolfslideBulkInsertTool {
         const deck = p.getDeck(docUri);
         if (!deck) return _slideResult('No deck found.');
 
-        const slides = options.input?.slides;
+        // slidesPath sidesteps the transport payload ceiling entirely.
+        //
+        // Field report §2c: a 2-slide batch was truncated mid-string at 10,128
+        // bytes somewhere between the agent and this tool, and the resulting
+        // JSON parse error blamed the caller's escaping — so the one tool that
+        // exists to batch work was abandoned for the rest of the session, on a
+        // payload of exactly the size it is designed for. The truncation
+        // happens in the client transport, which this extension cannot widen;
+        // reading the array off disk avoids the wire altogether.
+        let slides = options.input?.slides;
+        const slidesPath = options.input?.slidesPath;
+        if (slidesPath) {
+            try {
+                let sp = slidesPath;
+                if (!path.isAbsolute(sp)) {
+                    const dd = p.getDeckDir ? p.getDeckDir(docUri) : null;
+                    if (dd) sp = path.resolve(dd, sp);
+                }
+                const raw = fs.readFileSync(sp, 'utf8');
+                const parsed = JSON.parse(raw);
+                slides = Array.isArray(parsed) ? parsed : parsed.slides;
+                if (!Array.isArray(slides)) {
+                    return _slideResult(`slidesPath "${sp}" must hold a JSON array of slides, or an object with a "slides" array. Got ${typeof parsed}.`);
+                }
+            } catch (e) {
+                if (e instanceof SyntaxError) {
+                    return _slideResult(`slidesPath "${slidesPath}" is not valid JSON: ${e.message}. The file is on disk, so nothing was truncated in transit — this is a real syntax error.`);
+                }
+                return _slideResult(`Could not read slidesPath "${slidesPath}": ${e.message}`);
+            }
+        }
         if (!slides || !Array.isArray(slides) || slides.length === 0) {
-            return _slideResult('"slides" array is required and must be non-empty. Each slide: {label, background, layout, children:[{type, ...}]}. Block types: container, heading, text, image, list, math, box, code, arrow, eval, raw.');
+            return _slideResult('"slides" array is required and must be non-empty (or pass slidesPath to read it from a local JSON file). Each slide: {label, background, layout, children:[{type, ...}]}. Block types: container, heading, text, image, list, math, box, code, arrow, eval, raw.\n' +
+                'If a previous call failed with a JSON parse error mentioning a byte count near 10 KB, the payload was TRUNCATED IN TRANSIT — your escaping is probably fine. Split into batches of ~3 slides, or write the array to a file and pass slidesPath.');
         }
 
         // Normalize authoring shorthands (string list items, eval content→input)
@@ -2466,9 +2866,26 @@ class WolfslideBulkInsertTool {
             Object.assign(deck.meta, options.input.meta);
         }
 
+        const expectedCount = deck.slides.length;
+        slides.forEach(sl => _checkImageAspects(sl, p, docUri, bulkWarnings));
         await p.applyDeck(deck, docUri);
         const bulkWarnStr = bulkWarnings.length ? `\nWarnings:\n${bulkWarnings.map(w => `  ⚠ ${w}`).join('\n')}` : '';
-        return _slideResult(`Bulk-inserted ${slides.length} slides at position ${insertAt + 1}–${insertAt + slides.length}. Deck now has ${deck.slides.length} slides.${bulkWarnStr}`);
+        const readback = _deckReadback(p, docUri, {
+            slideCount: expectedCount,
+            slideId: slides[slides.length - 1]?.id,
+        });
+        // Fit is per-slide; report every inserted slide that does not fit
+        // rather than only the last, so a bad batch is caught in one call.
+        const fitLines = [];
+        if (options.input?.fit !== false) {
+            const after = p.getDeck(docUri);
+            for (let i = 0; i < slides.length; i++) {
+                const foot = await _fitFooter(p, after, insertAt + i, docUri, options.input);
+                if (foot && foot.includes('⚠')) fitLines.push(`  slide ${insertAt + i + 1}:${foot.replace(/\n/g, '\n  ')}`);
+            }
+        }
+        const fitStr = fitLines.length ? `\nFIT problems:\n${fitLines.join('\n')}` : '';
+        return _slideResult(`Bulk-inserted ${slides.length} slides at position ${insertAt + 1}–${insertAt + slides.length}.${readback}${bulkWarnStr}${fitStr}`);
     }
 }
 
@@ -2530,24 +2947,50 @@ class WolfslideInsertEvalBlockTool {
         // Auto-evaluate if requested (default: true)
         const autoRun = options.input?.autoRun !== false;
         if (autoRun) {
-            const evalResult = await this._evalBlockExpr(input, options.input?.w || 800);
+            const evalResult = await this._evalBlockExpr(input, options.input?.w || 800, options.input);
             if (evalResult) {
                 block.output = evalResult;
             }
         }
 
         await r.p.applyDeck(r.deck, r.docUri);
+        // A dead kernel used to produce an empty block and a vague message, so
+        // the caller had to probe wolfbook_status first to be sure the eval
+        // meant anything. Say which it was (field report §6).
         const status = block.output
             ? `Output: ${block.output.type}${block.output.error ? ' — ' + block.output.error : ''}`
-            : 'Not evaluated (kernel unavailable or autoRun=false)';
-        return _slideResult(`Inserted eval block id=${block.id} at position ${pos} on slide ${r.idx + 1}. ${status}`);
+            : (autoRun
+                ? `NOT EVALUATED — ${this._kernelState(options.input)}. The block is in the deck with no output; ` +
+                  `start the kernel and re-run it with wolfslide_runEvalBlock(blockId:"${block.id}").`
+                : 'Not evaluated (autoRun:false).');
+        const readback = _deckReadback(r.p, r.docUri, { blockId: block.id });
+        const fitFoot = await _fitFooter(r.p, r.deck, r.idx, r.docUri, options.input);
+        return _slideResult(`Inserted eval block id=${block.id} at position ${pos} on slide ${r.idx + 1}. ${status}${readback}${fitFoot}`);
     }
 
-    async _evalBlockExpr(input, imgW) {
+    /** Human-readable reason the kernel could not run an expression. */
+    _kernelState(input) {
+        let controller = null;
+        try { controller = _evalController(this._getController, input).controller; } catch (_) {}
+        if (!controller) {
+            let rows = [];
+            try { rows = this._getController?.manager?.list?.() || []; } catch (_) {}
+            return rows.length
+                ? `the kernel could not be resolved. Live kernels: ${rows.map(k => k.kernel_id).join(', ')} — ` +
+                  `re-run with kernel_id set`
+                : 'no Wolfram kernel is running (start it from the notebook toolbar, or wolfbook_kernelControl action:"start")';
+        }
+        if (!controller.session)  return 'the Wolfram kernel is not running (start it from the notebook toolbar, or wolfbook_kernelControl action:"start")';
+        return 'the kernel was reachable but returned nothing — check wolfbook_status(scope:"kernels")';
+    }
+
+    async _evalBlockExpr(input, imgW, kernelSpec) {
         let controller;
         let lease;
         try {
-            controller = this._getController?.();
+            const res = _evalController(this._getController, kernelSpec);
+            if (res.error) return { type: 'error', error: res.error };
+            controller = res.controller;
             if (!controller?.session) return null;
             const claim = await acquireKernelForAgent(controller, {
                 owner: 'wolfslide_insertEvalBlock', kind: 'slide-evaluation', caption: 'Evaluate inserted slide block'
@@ -2593,8 +3036,16 @@ class WolfslideRunEvalBlockTool {
         if (options.input?.input) found.block.input = options.input.input; // update input if provided
         if (!input) return _slideResult('Block has no input expression. Provide input parameter or edit the block first.');
 
-        const controller = this._getController?.();
-        if (!controller?.session) return _slideResult('Kernel not connected. Start a Wolfram kernel first.');
+        // Forward the caller's kernel choice. This used to be a bare
+        // _getController(), so an explicit kernel_id was dropped and the error
+        // demanding one repeated verbatim however many times you supplied it.
+        const res = _evalController(this._getController, options.input);
+        if (res.error) return _slideResult(res.error);
+        const controller = res.controller;
+        if (!controller?.session) {
+            return _slideResult(_kernelHelp(
+                new Error('the resolved kernel has no live session'), this._getController, options.input));
+        }
         let lease;
         try {
             const claim = await acquireKernelForAgent(controller, {
@@ -3257,6 +3708,248 @@ class WolfslideBlockTool {
     }
 }
 
+// ── Deck-wide fit sweep ───────────────────────────────────────────────────
+
+class WolfslideFitAllTool {
+    prepareInvocation() { return { invocationMessage: 'Checking fit across the deck' }; }
+    async invoke(options, _token) {
+        const p = _getSlideProvider();
+        if (!p) return _slideResult('No .wslide editor is open.');
+        const docUri = options.input?.docUri;
+        const deck = p.getDeck(docUri);
+        if (!deck) return _slideResult('No deck found.');
+
+        const all = deck.slides || [];
+        const from = Math.max(1, Number(options.input?.from) || 1);
+        const to   = Math.min(all.length, Number(options.input?.to) || all.length);
+
+        const bad = [], clean = [], failed = [];
+        for (let i = from - 1; i < to; i++) {
+            const slide = all[i];
+            try {
+                const { fit, lints } = await _analyzeFit(p, slide, i, docUri, 8000);
+                if (fit.fits && !fit.notes.length && !lints.length) { clean.push(i + 1); continue; }
+                bad.push(wsfit.formatFitReport(slide, i + 1, fit, lints));
+            } catch (e) {
+                failed.push(`  slide ${i + 1}: ${e.message}`);
+            }
+        }
+
+        const head = `Fit sweep over slides ${from}–${to}: ${clean.length} clean, ${bad.length} with problems` +
+                     (failed.length ? `, ${failed.length} not measurable` : '') + '.';
+        const parts = [head];
+        if (bad.length)    parts.push('', bad.join('\n\n'));
+        if (failed.length) parts.push('', 'Not measured:', failed.join('\n'));
+        if (!bad.length && !failed.length) parts.push('Every slide fits within 1920×1080 with no layout warnings.');
+        return _slideResult(parts.join('\n'));
+    }
+}
+
+// ── Citation resolution ───────────────────────────────────────────────────
+
+class WolfslideCheckRefsTool {
+    prepareInvocation() { return { invocationMessage: 'Resolving citations against INSPIRE-HEP' }; }
+    async invoke(options, _token) {
+        const p = _getSlideProvider();
+        if (!p) return _slideResult('No .wslide editor is open.');
+        const docUri = options.input?.docUri;
+        const deck = p.getDeck(docUri);
+        if (!deck) return _slideResult('No deck found.');
+
+        const cites = wsfit.extractCitations(deck);
+        if (!cites.length) {
+            return _slideResult('No arXiv identifiers found in this deck. ' +
+                'checkRefs matches new-style (1234.56789) and old-style (hep-th/9711200) ids in block text.');
+        }
+
+        // One network call per DISTINCT id; the same paper cited on five
+        // slides is resolved once and adjudicated five times.
+        const byId = new Map();
+        for (const c of cites) {
+            if (!byId.has(c.arxivId)) byId.set(c.arxivId, []);
+            byId.get(c.arxivId).push(c);
+        }
+        const limit = Number(options.input?.maxRefs) || 60;
+        const ids = [...byId.keys()].slice(0, limit);
+
+        let ps;
+        try { ps = require('./paperSearch'); }
+        catch (e) { return _slideResult(`Citation checking needs tools/paperSearch.js: ${e.message}`); }
+
+        const lines = [];
+        let problems = 0, unresolved = 0;
+        for (const id of ids) {
+            let rec = null, err = null;
+            try { rec = await ps.resolveInspireId(id); }
+            catch (e) { err = e.message; }
+
+            const sites = byId.get(id);
+            const where = sites.map(s => `slide ${s.slide} #${s.blockId}`).join(', ');
+
+            if (!rec) {
+                unresolved++;
+                lines.push(`✗ arXiv:${id}  (${where})`);
+                lines.push(`    NOT FOUND on INSPIRE${err ? ` — ${err}` : ''}. Either the id is wrong, or the paper is outside HEP.`);
+                continue;
+            }
+
+            // The author check is the one that matters: a transposed id almost
+            // always has the wrong authors, and that is invisible from the id
+            // itself. Names cited beside the id are compared against the record.
+            const citedNames = [...new Set(sites.flatMap(s => s.names))];
+            const verdict = wsfit.authorVerdict(citedNames, rec.authors);
+            const authorStr = rec.authors.length > 4
+                ? rec.authors.slice(0, 3).map(a => wsfit.lastName(a)).join(', ') + `, +${rec.authors.length - 3} more`
+                : rec.authors.map(a => wsfit.lastName(a)).join(', ');
+            const pub = rec.journal ? `  [${rec.journal}]` : '  [not published / no journal ref on INSPIRE]';
+
+            if (verdict.status === 'mismatch') {
+                problems++;
+                lines.push(`⚠ arXiv:${id}  (${where})`);
+                lines.push(`    "${rec.title}"`);
+                lines.push(`    authors: ${authorStr}${pub}`);
+                lines.push(`    ⚠ AUTHOR MISMATCH — none of the names cited beside this id (${verdict.missing.join(', ')}) appear on the record.`);
+                lines.push(`    This is what a transposed identifier looks like. Verify before presenting.`);
+            } else if (verdict.status === 'ok' && verdict.missing.length) {
+                lines.push(`✓ arXiv:${id}  "${rec.title.slice(0, 70)}"  — ${authorStr}${pub}  (${where})`);
+                lines.push(`    note: cited alongside ${verdict.missing.join(', ')}, not on the author list — check if that is a co-citation or an error.`);
+            } else {
+                lines.push(`✓ arXiv:${id}  "${rec.title.slice(0, 70)}"  — ${authorStr}${pub}  (${where})`);
+            }
+            if (options.input?.houseFormat) {
+                const first = rec.authors.length ? wsfit.lastName(rec.authors[0]) : '';
+                const etal  = rec.authors.length > 3 ? ' et al.' : rec.authors.slice(1).map(a => wsfit.lastName(a)).map(n => `, ${n}`).join('');
+                lines.push(`    house: [${first}${etal}${rec.journal ? `, ${rec.journal}` : ''}, arXiv:${id}]`);
+            }
+        }
+
+        const head = `Resolved ${ids.length} distinct arXiv id(s) from ${cites.length} citation site(s) against INSPIRE-HEP.` +
+            (problems ? `  ⚠ ${problems} AUTHOR MISMATCH — likely a wrong identifier.` : '') +
+            (unresolved ? `  ${unresolved} not found.` : '') +
+            (!problems && !unresolved ? '  All consistent.' : '') +
+            (byId.size > ids.length ? `\n(${byId.size - ids.length} further ids not checked — raise maxRefs.)` : '');
+        return _slideResult(head + '\n\n' + lines.join('\n'));
+    }
+}
+
+// ── One-call style promotion ──────────────────────────────────────────────
+
+class WolfslidePromoteStyleTool {
+    prepareInvocation() { return { invocationMessage: 'Promoting repeated inline styles to presets' }; }
+    async invoke(options, _token) {
+        const p = _getSlideProvider();
+        if (!p) return _slideResult('No .wslide editor is open.');
+        const docUri = options.input?.docUri;
+        const deck = p.getDeck(docUri);
+        if (!deck) return _slideResult('No deck found.');
+
+        const minCount = Math.max(2, Number(options.input?.minCount) || 3);
+
+        // Cluster on the style's SHAPE — its key set plus every value except
+        // the ones that drift. Byte-identical matching under-reports badly:
+        // one deck carried the same callout box at 0.74em, 0.73em and 0.64em
+        // across ~20 blocks, differences nobody chose. Those belong in one
+        // preset with the odd ones out kept as explicit overrides.
+        const DRIFTY = new Set(['fontSize', 'padding', 'lineHeight', 'margin', 'gap', 'maxWidth', 'width']);
+        const clusters = new Map();
+        for (let si = 0; si < deck.slides.length; si++) {
+            for (const b of _collectAllBlocks(deck.slides[si])) {
+                if (!b || !b.style || typeof b.style !== 'object') continue;
+                const keys = Object.keys(b.style).sort();
+                if (keys.length < 2) continue;
+                const shape = JSON.stringify(keys.map(k => [k, DRIFTY.has(k) ? '*' : b.style[k]]));
+                if (!clusters.has(shape)) clusters.set(shape, []);
+                clusters.get(shape).push({ block: b, slide: si + 1 });
+            }
+        }
+        const found = [...clusters.entries()]
+            .filter(([, m]) => m.length >= minCount)
+            .sort((a, b) => b[1].length - a[1].length);
+
+        if (!found.length) {
+            return _slideResult(`No inline style repeated on ${minCount}+ blocks. Nothing to promote.`);
+        }
+
+        const apply = options.input?.apply === true;
+        const nameHint = options.input?.presetName;
+        const lines = [];
+        let promoted = 0;
+
+        found.forEach(([, members], ci) => {
+            // The preset takes the MODAL value of every key, so the majority
+            // rendering is unchanged and only the outliers carry an override.
+            const keys = Object.keys(members[0].block.style);
+            const preset = {};
+            for (const k of keys) {
+                const tally = new Map();
+                for (const m of members) {
+                    const v = JSON.stringify(m.block.style[k]);
+                    tally.set(v, (tally.get(v) || 0) + 1);
+                }
+                const [best] = [...tally.entries()].sort((a, b) => b[1] - a[1]);
+                preset[k] = JSON.parse(best[0]);
+            }
+            const name = (found.length === 1 && nameHint) ? nameHint
+                       : (nameHint ? `${nameHint}${ci + 1}` : _presetName(members[0].block, preset, ci));
+
+            const overrides = [];
+            for (const m of members) {
+                const kept = {};
+                for (const k of keys) {
+                    if (JSON.stringify(m.block.style[k]) !== JSON.stringify(preset[k])) kept[k] = m.block.style[k];
+                }
+                if (Object.keys(kept).length) overrides.push({ slide: m.slide, id: m.block.id, kept });
+                if (apply) {
+                    m.block.stylePreset = name;
+                    if (Object.keys(kept).length) m.block.style = kept;
+                    else delete m.block.style;
+                }
+            }
+            promoted += members.length;
+            lines.push(`"${name}"  ${members.length} block(s) on slides ${[...new Set(members.map(m => m.slide))].join(', ')}`);
+            lines.push(`   ${JSON.stringify(preset)}`);
+            if (overrides.length) {
+                lines.push(`   ${overrides.length} block(s) keep an explicit override (values that differed from the majority):`);
+                overrides.slice(0, 6).forEach(o =>
+                    lines.push(`     slide ${o.slide} #${o.id}: ${JSON.stringify(o.kept)}`));
+                if (overrides.length > 6) lines.push(`     …and ${overrides.length - 6} more`);
+                lines.push(`   Those differences were probably drift, not design — clear them with`);
+                lines.push(`     wolfslide_arrange(action:"bulkPatch", selector:{stylePreset:"${name}"}, patch:{style:null})`);
+            }
+            if (apply) {
+                if (!deck.stylePresets) deck.stylePresets = {};
+                deck.stylePresets[name] = preset;
+            }
+        });
+
+        if (!apply) {
+            return _slideResult(
+                `${found.length} promotable style cluster(s) covering ${promoted} block(s). ` +
+                `This was a DRY RUN — pass apply:true to create the presets and rewrite the blocks ` +
+                `(the majority rendering is preserved exactly; only outliers keep an inline override).\n\n` +
+                lines.join('\n'));
+        }
+
+        await p.applyDeck(deck, docUri);
+        return _slideResult(
+            `Promoted ${found.length} style cluster(s) across ${promoted} block(s) to deck stylePresets.` +
+            _deckReadback(p, docUri, { slideCount: deck.slides.length }) +
+            `\nA density or colour change is now ONE wolfslide_setTheme(stylePresets:{…}) call instead of ${promoted} patches.\n\n` +
+            lines.join('\n'));
+    }
+}
+
+/** Suggest a semantic preset name from what the style looks like. */
+function _presetName(block, preset, i) {
+    const bg = String(preset.background || preset.backgroundColor || '');
+    const border = String(preset.border || '');
+    if (block.type === 'heading') return 'slide-title';
+    if (bg && border) return 'box-callout' + (i ? String(i + 1) : '');
+    if (bg) return 'box-fill' + (i ? String(i + 1) : '');
+    if (preset.fontSize && Object.keys(preset).length <= 3) return 'cite' + (i ? String(i + 1) : '');
+    return 'shared' + (i + 1);
+}
+
 // ---------------------------------------------------------------------------
 // Consolidated tool: wolfslide_advanced — duplicate, check, reorderFragments, measure
 // ---------------------------------------------------------------------------
@@ -3267,23 +3960,30 @@ class WolfslideAdvancedTool {
         this._check = new WolfslideCheckDeckTool();
         this._reorder = new WolfslideReorderFragmentsTool();
         this._measure = new WolfslideMeasureSlideTool();
+        this._fitAll = new WolfslideFitAllTool();
+        this._checkRefs = new WolfslideCheckRefsTool();
+        this._promote = new WolfslidePromoteStyleTool();
     }
     async prepareInvocation(options, _token) {
         const action = options.input?.action || '?';
         return { invocationMessage: `Slide advanced: ${action}` };
     }
     async invoke(options, _token) {
+        const ACTIONS = 'duplicate, check, measure, fitAll, checkRefs, promoteStyle, reorderFragments';
         const action = options.input?.action;
         if (!action) {
-            return _slideResult('Error: action is required. Use "duplicate", "check", "reorderFragments", or "measure".');
+            return _slideResult(`Error: action is required. Use one of: ${ACTIONS}.`);
         }
         switch (action) {
             case 'duplicate':        return this._duplicate.invoke(options, _token);
             case 'check':            return this._check.invoke(options, _token);
             case 'reorderFragments': return this._reorder.invoke(options, _token);
             case 'measure':          return this._measure.invoke(options, _token);
+            case 'fitAll':           return this._fitAll.invoke(options, _token);
+            case 'checkRefs':        return this._checkRefs.invoke(options, _token);
+            case 'promoteStyle':     return this._promote.invoke(options, _token);
             default:
-                return _slideResult(`Unknown action "${action}". Use "duplicate", "check", "reorderFragments", or "measure".`);
+                return _slideResult(`Unknown action "${action}". Use one of: ${ACTIONS}.`);
         }
     }
 }

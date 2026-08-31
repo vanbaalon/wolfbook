@@ -640,12 +640,31 @@ class WolframMCPServer {
                 // never silently run in the wrong window.
                 this._pruneWorkers();
                 if (!targetClientId && !sessionTarget && this._workers.size > 0) {
+                    // Name the actual candidates and emit a call that resolves
+                    // this. Field report #2 §4c: the generic message cost 2-3
+                    // calls to diagnose each time it appeared, because it
+                    // restated the problem and gave an example with a client id
+                    // that does not exist in this session.
+                    const rows = [];
+                    for (const [cid, w] of this._workers.entries()) {
+                        const docs = (w.notebooks || []).map(p => p.split(/[\\/]/).pop());
+                        rows.push(`  client_id: "${cid}"${docs.length ? `  open: ${docs.join(', ')}` : '  (no notebooks open)'}`);
+                    }
+                    const first = [...this._workers.entries()][0];
+                    const firstDoc = (first?.[1]?.notebooks || [])[0];
+                    const suggestion = first
+                        ? `wolfbook_setTarget(client_id: "${first[0]}"` +
+                          (firstDoc ? `, notebook: "${firstDoc.split(/[\\/]/).pop()}"` : '') + ')'
+                        : 'wolfbook_setTarget(client_id: "…")';
                     return {
                         content: [{ type: 'text', text:
-                            'No session target set.\n\n' +
-                            'Use `wolfbook_setTarget` to pick a client and notebook before running tools, ' +
-                            'or use `wolfbook_list_clients` to see available clients.\n\n' +
-                            'Example: wolfbook_setTarget(client_id: "VSCode[BaxterSolver]", notebook: "proto2.wb")'
+                            `No session target set, and ${this._workers.size} other window(s) are connected — ` +
+                            'refusing to guess which one you mean.\n\n' +
+                            'Connected clients:\n' + rows.join('\n') + '\n\n' +
+                            'This call sets the target:\n  ' + suggestion + '\n\n' +
+                            'A target set this way survives SSE reconnects for 60 minutes. ' +
+                            'Note that .wslide decks are not listed above — they are not registered ' +
+                            'cross-window — so for a slide deck pick the client by its notebooks or workspace.'
                         }],
                         isError: false,
                     };
