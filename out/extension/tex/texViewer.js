@@ -1586,6 +1586,22 @@ class TexViewer {
         const cur = ranged ? sel.start : editor.selection.active;
         const line = cur.line + 1;
         const column = cur.character;
+        // ...BUT THE CARET IS DRAWN WHERE THE CARET ACTUALLY IS.
+        //
+        // The rule above is about RESOLUTION — which token the selection names —
+        // and it has to read the start, or an inverse click lights up the token
+        // after the one that was clicked. The in-word caret is a different
+        // question: it shows the reader where their cursor sits, and after an
+        // inverse click VS Code leaves that at the END of the word it selected.
+        // Using the resolution column for both drew the caret at the START of a
+        // word whose editor cursor was at the end — reported, and visibly wrong
+        // against the editor sitting next to it.
+        //
+        // Only when `active` is on the line we resolved: for a selection
+        // spanning lines there is no position on this line to honour, and a
+        // caret invented for it would be worse than the start.
+        const caretCol = (sel && sel.active && sel.active.line === cur.line)
+            ? sel.active.character : column;
         const { model } = this.projection.get(doc);
         const obj = model.objects
             .filter(o => o.sourceRange.startLine <= line && o.sourceRange.endLine >= line &&
@@ -1629,7 +1645,7 @@ class TexViewer {
         // exact rect of the glyph that token printed — so the highlight is that
         // glyph, with no name matching in the webview and no chance of the two
         // directions disagreeing about what corresponds to what.
-        if (this._postAlignedGlyph(st, doc, line, column, obj ? obj.stableKey : `line ${line}`)) return;
+        if (this._postAlignedGlyph(st, doc, line, column, obj ? obj.stableKey : `line ${line}`, caretCol)) return;
 
         // MATHS NARROWS TOO. A display equation is an object, but "the whole
         // equation" is a poor answer to where the cursor is in a six-line
@@ -2084,7 +2100,7 @@ class TexViewer {
      * to what. Returns false when the column is unaligned, so the caller can
      * fall back to searching the text layer by name.
      */
-    _postAlignedGlyph(st, doc, line, column, title) {
+    _postAlignedGlyph(st, doc, line, column, title, caretCol) {
         const amap = this._alignMap(st, doc, line, null);
         if (!amap) return false;
         const t = tokenAt(amap, line, column);
@@ -2110,7 +2126,8 @@ class TexViewer {
         // so the caret is read off the same table rather than guessed. Default
         // range is the token itself, which is the right unit in maths; prose
         // widens it to the whole word below.
-        let caret = caretInRange(amap, line, column, { start: tok.startCol, end: tok.endCol });
+        const caretAt = (caretCol == null) ? column : caretCol;
+        let caret = caretInRange(amap, line, caretAt, { start: tok.startCol, end: tok.endCol });
         if (amap.exact && !tok.inMath) {
             const lineSrc = doc.lineAt(Math.max(0, line - 1)).text;
             const run = this._wordFromTokens(amap, t.index, lineSrc, null);
@@ -2130,7 +2147,7 @@ class TexViewer {
                 }
                 if (parts.length) {
                     rects = mergeRows(parts); what = `"${run.word}"`; glyph = false;
-                    const c = caretInRange(amap, line, column, run);
+                    const c = caretInRange(amap, line, caretAt, run);
                     if (c) caret = c;
                 }
             }
@@ -2298,9 +2315,9 @@ class TexViewer {
      * which fades on its own. Returns false when the word cannot be placed, so
      * the span remains the fallback.
      */
-    _postWordMarker(st, doc, line, column) {
+    _postWordMarker(st, doc, line, column, caretCol) {
         const file = doc.uri.fsPath;
-        if (this._postAlignedGlyph(st, doc, line, column, `line ${line}`)) {
+        if (this._postAlignedGlyph(st, doc, line, column, `line ${line}`, caretCol)) {
             this._lastSelection = null;
             return true;
         }
@@ -2340,7 +2357,11 @@ class TexViewer {
         const text = doc.getText(sel).trim();
         if (startLine === endLine && text && !/\s/.test(text)) {
             this._post({ type: 'selection', span: null });
-            if (this._postWordMarker(st, doc, startLine, sel.start.character)) return;
+            // Same split as syncFromEditor: resolve from the start, draw the
+            // caret where the reader's cursor is.
+            const wmCaret = (sel.active && sel.active.line === sel.start.line)
+                ? sel.active.character : sel.start.character;
+            if (this._postWordMarker(st, doc, startLine, sel.start.character, wmCaret)) return;
         }
 
         const anchorAt = (line, column) => this._selectionAnchor(st, doc, line, column);

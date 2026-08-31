@@ -223,4 +223,98 @@ t('the caret does not inherit the highlight’s fade', () => {
     assert.ok(/prefers-reduced-motion/.test(css), 'blinking is motion and must be opt-out-able');
 });
 
+// ── RESOLUTION COLUMN vs CARET COLUMN ─────────────────────────────────────
+//
+// These are two different questions and the answer is different for each:
+//
+//   which token does this selection NAME?  → its START. Reading the active end
+//     lights up the token AFTER the one an inverse click resolved (measured:
+//     92 of 243 maths glyphs landed exactly one glyph right).
+//   where is the reader's cursor?          → its ACTIVE end. After an inverse
+//     click VS Code leaves the caret at the END of the word it selected.
+//
+// Using one column for both drew the caret at the start of a word whose editor
+// cursor was at the end — reported, and visibly wrong against the editor next
+// to it. This drives the REAL method with a stubbed alignment map.
+
+console.log('resolution column vs caret column');
+
+const Module = require('module');
+const { TexViewer } = (() => {
+    const orig = Module._load;
+    Module._load = function (req, ...rest) {
+        if (req === 'vscode') return require('./_stub-vscode').makeVscodeStub();
+        return orig.call(this, req, ...rest);
+    };
+    try { return require('../../tex/texViewer'); }
+    finally { Module._load = orig; }
+})();
+
+/** Drive _postAlignedGlyph over "half" at columns 10..13 and return the message. */
+function postFor(column, caretCol) {
+    const amap = word('half');
+    amap.exact = true;
+    amap.tokens.forEach(t => { t.inMath = false; });
+    let sent = null;
+    const self = {
+        _alignMap: () => amap,
+        _macrosFor: () => ({}),
+        _wordFromTokens: () => ({ start: 10, end: 14, word: 'half', line: 5 }),
+        _mayScroll: () => false,
+        _invertedAt: 0,
+        _syncInstant: false,
+        _post: (m) => { sent = m; },
+    };
+    const st = { map: { _baseFlag: () => 0 } };
+    const doc = { uri: { fsPath: '/x.tex' }, lineAt: () => ({ text: '          half more' }) };
+    TexViewer.prototype._postAlignedGlyph.call(self, st, doc, 5, column, 'title', caretCol);
+    return sent;
+}
+
+t('the caret honours the ACTIVE end while the word came from the start', () => {
+    // Exactly the inverse-click case: selection [10,14), caret left at 14.
+    const m = postFor(10, 14);
+    assert.ok(m, 'a highlight must be posted');
+    assert.strictEqual(m.word, 'half', 'the word is still resolved from the start');
+    assert.ok(m.caret, 'a caret must travel with it');
+    assert.strictEqual(m.caret.x, 140, 'drawn at the END of the word, where the cursor is');
+    assert.strictEqual(m.caret.at, 'after');
+});
+
+t('with no caret column given it falls back to the resolution column', () => {
+    const m = postFor(10, undefined);
+    assert.strictEqual(m.caret.x, 100, 'the start, as before');
+});
+
+t('a caret column of 0 is honoured, not treated as missing', () => {
+    // The falsy-zero trap: `caretCol || column` would silently use the start.
+    const m = postFor(12, 0);
+    assert.strictEqual(m.caret.x, 100, 'column 0 clamps to the word’s left edge');
+});
+
+t('an interior caret column lands inside the word', () => {
+    const m = postFor(10, 12);
+    assert.strictEqual(m.caret.x, 120);
+    assert.strictEqual(m.caret.at, 'inside');
+});
+
+t('syncFromEditor takes the caret column from the selection’s active end', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '..', '..', 'tex', 'texViewer.js'), 'utf8');
+    assert.ok(/const caretCol = \(sel && sel\.active && sel\.active\.line === cur\.line\)\s*\n?\s*\? sel\.active\.character : column;/.test(src),
+        'the caret column must come from sel.active, guarded to the resolved line');
+    assert.ok(/_postAlignedGlyph\(st, doc, line, column, obj \? obj\.stableKey : `line \$\{line\}`, caretCol\)/.test(src),
+        'and be passed through — resolution still uses `column`');
+});
+
+t('a selection spanning lines falls back rather than inventing a position', () => {
+    // There is no position on the resolved line to honour, and a caret placed
+    // for a different line would be a fabrication.
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '..', '..', 'tex', 'texViewer.js'), 'utf8');
+    assert.ok(/sel\.active\.line === cur\.line/.test(src), 'guarded on the line');
+});
+
 console.log(`\n${pass} assertions passed`);
