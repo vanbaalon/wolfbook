@@ -20,7 +20,7 @@ const {
     locateByContext, visibleWords,
 } = require('./texWords');
 const { selectionLadder, paragraphSpan, CONTAINER_KINDS } = require('./texSelect');
-const { buildObjectMap, glyphAtPoint, tokenAt, groupAround, symbolicFonts } = require('./glyphAlign');
+const { buildObjectMap, glyphAtPoint, tokenAt, groupAround, symbolicFonts, caretInRange } = require('./glyphAlign');
 const { buildComparison, describeSummary } = require('./texCompare');
 const { shipDecision } = require('./livePolicy');
 const { balanceRange, closeFor, commentMask } = require('./texBalance');
@@ -2103,6 +2103,14 @@ class TexViewer {
         let what = JSON.stringify(tok.ch);
         let glyph = true;
         let word; let occurrence;
+        // WHERE IN THE WORD, not just which word.
+        //
+        // The wash answers "this word"; a reader following their own typing
+        // also needs "and I am here in it". The exact map has a box per glyph,
+        // so the caret is read off the same table rather than guessed. Default
+        // range is the token itself, which is the right unit in maths; prose
+        // widens it to the whole word below.
+        let caret = caretInRange(amap, line, column, { start: tok.startCol, end: tok.endCol });
         if (amap.exact && !tok.inMath) {
             const lineSrc = doc.lineAt(Math.max(0, line - 1)).text;
             const run = this._wordFromTokens(amap, t.index, lineSrc, null);
@@ -2120,7 +2128,11 @@ class TexViewer {
                     const j = amap.srcToRen[i];
                     if (j >= 0) parts.push(inkRect(amap.glyphs[j]));
                 }
-                if (parts.length) { rects = mergeRows(parts); what = `"${run.word}"`; glyph = false; }
+                if (parts.length) {
+                    rects = mergeRows(parts); what = `"${run.word}"`; glyph = false;
+                    const c = caretInRange(amap, line, column, run);
+                    if (c) caret = c;
+                }
             }
         }
         this._post({
@@ -2128,6 +2140,11 @@ class TexViewer {
             rects,
             glyph,
             word, occurrence,
+            // Only an EXACT map may place a caret. An approximate one is right
+            // about the word and has no business claiming a position inside it
+            // — a caret two letters out looks like a bug in the editor, not a
+            // limit of the map, so it is better not drawn at all.
+            caret: amap.exact ? caret : null,
             exact: !!amap.exact,
             flag: flag === FLAG.FRESH ? 'fresh' : flag === FLAG.STALE ? 'stale' : 'approx',
             reveal: this._mayScroll() && Date.now() - this._invertedAt >= 1500,

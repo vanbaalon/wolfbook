@@ -2423,9 +2423,41 @@ function paintMoveCaret(msg) {
     }
 }
 
+/**
+ * THE EDITOR'S CARET, DRAWN ON THE PAGE.
+ *
+ * The wash says which word; this says where in it. Deliberately a separate
+ * element from `.hl`: the wash FADES after three seconds so it stops competing
+ * with the text, while the caret marks a position that is still true — a text
+ * cursor that faded out would be lying about where you are.
+ *
+ * Cleared and redrawn by paintHighlight, so it can never outlive the highlight
+ * it belongs to.
+ */
+function paintCursorCaret(h) {
+    for (const c of document.querySelectorAll('.curcaret')) c.remove();
+    const cr = h && h.caret;
+    if (!cr) return;
+    const wrap = pagesEl().querySelector(`.page[data-page="${cr.page}"]`);
+    if (!wrap || !state.rendered.has(cr.page)) return;
+    // Zero width: rectToViewport scales a box, and a caret is a box with no
+    // width. The visible thickness is CSS, so it stays 2 px at every zoom
+    // instead of growing into a bar.
+    const v = rectToViewport(cr.page, { page: cr.page, x: cr.x, y: cr.y, w: 0, h: cr.h });
+    if (!v) return;
+    const el = document.createElement('div');
+    el.className = 'curcaret' + (state.pinHighlight ? ' pinned' : '');
+    el.style.left = `${v.x}px`;
+    el.style.top = `${v.y}px`;
+    el.style.height = `${Math.max(6, v.h)}px`;
+    el.title = `cursor · ${cr.offset >= 0 ? `${cr.offset} character${cr.offset === 1 ? '' : 's'} into the word` : ''}`;
+    wrap.appendChild(el);
+}
+
 function paintHighlight() {
     for (const box of document.querySelectorAll('.hl')) box.remove();
     const h = state.highlight;
+    paintCursorCaret(h);
     if (!h || !h.rects || !h.rects.length) return;
     for (const rect of h.rects) {
         const wrap = pagesEl().querySelector(`.page[data-page="${rect.page}"]`);
@@ -4758,7 +4790,13 @@ window.addEventListener('message', async (ev) => {
                 } catch (_) { /* keep the row highlight */ }
             }
             state.highlight = rects.length
-                ? { page: rects[0].page, rects, flag: msg.flag, title: msg.title }
+                ? { page: rects[0].page, rects, flag: msg.flag, title: msg.title,
+                    // The caret is only meaningful against the rects the
+                    // EXTENSION sent. When the client narrows a non-exact
+                    // highlight through the text layer above, the geometry it
+                    // lands on is its own and the caret's x no longer belongs
+                    // to it — so it travels only with an exact highlight.
+                    caret: msg.exact ? (msg.caret || null) : null }
                 : null;
             if (state.highlight && msg.reveal) revealHighlight({ smooth: !msg.instant }).catch(() => {});
             else paintHighlight();
@@ -4770,6 +4808,11 @@ window.addEventListener('message', async (ev) => {
             // different questions and showing both at once reads as neither.
             if (msg.span) {
                 for (const box of document.querySelectorAll('.hl')) box.remove();
+                // The caret belongs to the cursor answer, so it goes with the
+                // wash. Removing only .hl left a blinking caret sitting inside
+                // a range selection, pointing at a cursor position that was no
+                // longer the question being asked.
+                for (const c of document.querySelectorAll('.curcaret')) c.remove();
                 state.highlight = null;
             }
             await paintSelection(msg.span ? { ...msg.span, reveal: msg.reveal, instant: msg.instant } : null);

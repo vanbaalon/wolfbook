@@ -872,7 +872,84 @@ function tokenAt(map, line, col) {
     return { index: -1, exact: false };
 }
 
+/**
+ * WHERE THE EDITOR'S CARET SITS INSIDE THE PRINTED WORD.
+ *
+ * The word highlight says which word the cursor is on. It cannot say where in
+ * that word — and for a reader following their own edit that is the question:
+ * am I before or after this letter. The exact map already carries a box per
+ * glyph and a source column range per token, so the answer is a lookup rather
+ * than an estimate.
+ *
+ * Snapping is to GLYPH EDGES, because that is what the engine actually placed.
+ * The one interpolation is inside a token whose glyph prints SEVERAL source
+ * characters (a ligature, `\\ss`, an accent): there the caret is placed
+ * proportionally through the glyph's advance, which is the honest best guess —
+ * the engine drew one shape and there is no interior position to read off.
+ *
+ * @param {object} amap   an object map from buildObjectMap (needs tokens,
+ *                        glyphs, srcToRen)
+ * @param {number} line   1-based source line the cursor is on
+ * @param {number} column 0-based character offset in that line
+ * @param {{start:number,end:number}} range  the printed unit's source columns
+ *                        (a prose word, or one token in maths)
+ * @returns {{page:number,x:number,y:number,h:number,
+ *            at:'before'|'inside'|'after',offset:number}|null}
+ *          null when nothing in the range printed anything, which is the
+ *          correct answer for a source-only run (a comment, `\\label{…}`).
+ */
+function caretInRange(amap, line, column, range) {
+    if (!amap || !amap.tokens || !amap.glyphs || !amap.srcToRen || !range) return null;
+    const cells = [];
+    for (let i = 0; i < amap.tokens.length; i++) {
+        const t = amap.tokens[i];
+        if (t.line !== line) continue;
+        if (t.startCol < range.start || t.startCol >= range.end) continue;
+        const j = amap.srcToRen[i];
+        if (!(j >= 0)) continue;                     // this token printed nothing
+        const g = amap.glyphs[j];
+        if (!g || !(g.w >= 0)) continue;
+        cells.push({ startCol: t.startCol, endCol: Math.max(t.endCol, t.startCol + 1), g });
+    }
+    if (!cells.length) return null;
+    // Source order, which in prose is also print order. A word whose glyphs the
+    // engine reordered would be wrong here, and there is no such case in the
+    // Latin scripts this viewer renders.
+    cells.sort((a, b) => a.startCol - b.startCol || a.endCol - b.endCol);
+
+    const edge = (cell, frac) => ({
+        page: cell.g.page,
+        // The EM box, not the ink: a caret is a line-height mark, and an ink
+        // box stops at the top of an 'x' and below a 'p'.
+        y: cell.g.y, h: cell.g.h,
+        x: cell.g.x + cell.g.w * frac,
+    });
+
+    const first = cells[0];
+    const last = cells[cells.length - 1];
+    if (column <= first.startCol) return { ...edge(first, 0), at: 'before', offset: 0 };
+    if (column >= last.endCol) {
+        return { ...edge(last, 1), at: 'after', offset: column - first.startCol };
+    }
+    for (let i = 0; i < cells.length; i++) {
+        const c = cells[i];
+        if (column >= c.startCol && column < c.endCol) {
+            const span = c.endCol - c.startCol;
+            const frac = span > 1 ? (column - c.startCol) / span : 0;
+            return { ...edge(c, frac), at: 'inside', offset: column - first.startCol };
+        }
+        // A GAP between two printed tokens — source that printed nothing, such
+        // as a `~` or a macro's braces. The caret belongs at the start of the
+        // next thing that DID print, not floating in the gap.
+        if (column < c.startCol) {
+            return { ...edge(c, 0), at: 'inside', offset: column - first.startCol };
+        }
+    }
+    return { ...edge(last, 1), at: 'after', offset: column - first.startCol };
+}
+
 module.exports = {
     PRECISION, sourceTokens, renderedGlyphs, align, buildObjectMap,
     glyphAtPoint, tokenAt, groupAround, keyOf, symbolicFonts, WILD,
+    caretInRange,
 };
