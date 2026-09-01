@@ -1993,6 +1993,66 @@ test('…and a click between words there is still not a letter', async () => {
     assert.ok(got.length > 1 || got === '', `never a lone letter, got ${JSON.stringify(got)}`);
 });
 
+// --- THE OPEN MINI-EDITOR MUST FOLLOW THE CLICK ------------------------------
+//
+// Reported: "when I click in the viewer it does not move the cursor in an
+// already opened mini-editor". The card's own handling is proven in the browser
+// harness, so what is left is whether the EXTENSION tells it — through the real
+// click path, with a card open, rather than by posting editSelect by hand.
+
+test('a click with a card open tells the card where the caret went', async () => {
+    const LN = 5;
+    const text = LINES[LN - 1];
+    const at = text.indexOf('wavefunction');
+    const v = viewerWithAlignment(LN);
+    // A card open on the block that contains the clicked line.
+    const doc = makeDoc();
+    v._edit = {
+        id: 42, file: FILE,
+        startOffset: doc.offsetAt(new stub.Position(LN - 1, 0)),
+        endOffset: doc.offsetAt(new stub.Position(LN - 1, text.length)),
+        lastText: text,
+    };
+    v.posted.length = 0;
+    await v._jumpToSource({ page: 1, xBp: 100 + (at + 4) * 8, yTopBp: 95 });
+    const m = v.posted.find(p => p.type === 'editSelect');
+    assert.ok(m, 'the card must be told about the click');
+    assert.strictEqual(m.editId, 42, 'addressed to the open card');
+    const blockText = text;
+    assert.strictEqual(blockText.slice(m.start, m.end), 'wavefunction',
+        `the word is marked, got ${JSON.stringify(blockText.slice(m.start, m.end))}`);
+    assert.ok(Number.isFinite(m.caret), 'a caret must travel with it');
+    assert.ok(m.caret >= m.start && m.caret <= m.end,
+        `the caret sits inside the marked word (${m.caret} of ${m.start}..${m.end})`);
+    assert.ok(m.caret > m.start,
+        'and at the CLICKED character, not the start of the word');
+});
+
+test('a second click moves the card caret again', async () => {
+    // The reported symptom is about an ALREADY-OPEN card, so moving it twice is
+    // the thing to assert — setting it once could pass while the card is stuck.
+    const LN = 5;
+    const text = LINES[LN - 1];
+    const at = text.indexOf('wavefunction');
+    const v = viewerWithAlignment(LN);
+    const doc = makeDoc();
+    v._edit = {
+        id: 42, file: FILE,
+        startOffset: doc.offsetAt(new stub.Position(LN - 1, 0)),
+        endOffset: doc.offsetAt(new stub.Position(LN - 1, text.length)),
+        lastText: text,
+    };
+    v.posted.length = 0;
+    await v._jumpToSource({ page: 1, xBp: 100 + (at + 1) * 8, yTopBp: 95 });
+    const a = v.posted.filter(p => p.type === 'editSelect').pop();
+    v.posted.length = 0;
+    await v._jumpToSource({ page: 1, xBp: 100 + (at + 8) * 8, yTopBp: 95 });
+    const b = v.posted.filter(p => p.type === 'editSelect').pop();
+    assert.ok(a && b, 'both clicks tell the card');
+    assert.notStrictEqual(a.caret, b.caret,
+        `the caret must MOVE (${a.caret} then ${b.caret})`);
+});
+
 test('AN UNPAIRED GLYPH IN PROSE DOES NOT SELECT THE PARAGRAPH', async () => {
     // The enclosing-construct answer is a MATHS answer: prose has no numerator
     // or subscript to fall back to, so "the smallest certain thing" there is the

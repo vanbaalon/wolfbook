@@ -4110,7 +4110,17 @@ class TexViewer {
             // so it is no longer decoration — it is half the answer.
             this._flash.show(editor, range);
         }
-        this._post({ type: 'status', text: `→ ${what}`, kind: 'ok' });
+        const _cardWhy = (() => {
+            try { return this._postEditSelection(doc, range, !m.takeMe, caretHere ? hitPos : null); }
+            catch (_) { return null; }
+        })();
+        this._post({
+            type: 'status',
+            // Only worth saying when a card IS open and did not follow — with
+            // no card there is nothing to explain.
+            text: `→ ${what}` + (this._edit && _cardWhy ? `  · card not moved: ${_cardWhy}` : ''),
+            kind: 'ok',
+        });
 
         // WITH A MINI-EDITOR OPEN, THE CARD IS THE EDITING SURFACE.
         //
@@ -4119,10 +4129,9 @@ class TexViewer {
         // behind it. Focus follows for a plain click (which leaves focus in the
         // webview anyway); a double-click means "take me to the editor", so it
         // must not be stolen back.
-        // The card gets the same treatment the editor does: the word marked,
-        // the caret at the character that was clicked. `caretHere` is the
-        // decision already made above, so the two surfaces cannot disagree.
-        this._postEditSelection(doc, range, !m.takeMe, caretHere ? hitPos : null);
+        // (The card was told above, together with the status line that reports
+        // it when it could not follow. `caretHere` is the decision already made
+        // for the editor, so the two surfaces cannot disagree.)
 
         // MORE THAN ONE WORD IS A SELECTION, AND THE PAGE SAYS SO.
         //
@@ -5253,11 +5262,25 @@ class TexViewer {
      */
     _postEditSelection(doc, range, focus, caretPos) {
         const s = this._edit;
-        if (!s || !doc || !range || doc.uri.fsPath !== s.file) return;
+        // WHY THE CARD DID NOT MOVE, when it did not.
+        //
+        // Every branch below is a silent return, and from the reader's seat all
+        // of them look the same: "I clicked and the card ignored me". Reported
+        // as exactly that. The reason is returned so the click can say it —
+        // a decline that explains itself is diagnosable; a silent one is not.
+        if (!s) return 'no mini-editor is open';
+        if (!doc || !range) return null;
+        if (doc.uri.fsPath !== s.file) {
+            return `the card is editing ${require('path').basename(s.file)}, and this is another file`;
+        }
         let a; let b;
         try { a = doc.offsetAt(range.start); b = doc.offsetAt(range.end); }
-        catch (_) { return; }
-        if (b < s.startOffset || a > s.endOffset) return;
+        catch (_) { return null; }
+        if (b < s.startOffset || a > s.endOffset) {
+            const from = doc.positionAt(s.startOffset).line + 1;
+            const to = doc.positionAt(s.endOffset).line + 1;
+            return `outside the card's block (it holds lines ${from}\u2013${to})`;
+        }
         const clamp = (n) => Math.max(0, Math.min(n, s.endOffset) - s.startOffset);
         const start = clamp(Math.max(a, s.startOffset));
         const end = clamp(Math.max(b, s.startOffset));
@@ -5272,6 +5295,7 @@ class TexViewer {
             } catch (_) { /* no caret, just the range */ }
         }
         this._post({ type: 'editSelect', editId: s.id, focus: !!focus, start, end, caret });
+        return null;
     }
 
     /** After a recompile the block has new geometry — move the card to it. */

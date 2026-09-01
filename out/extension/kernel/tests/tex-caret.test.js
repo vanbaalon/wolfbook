@@ -521,6 +521,40 @@ t('the click path passes the caret only when it placed one', () => {
         'the card and the editor must make the SAME decision, not two');
 });
 
+t('a decline says WHY, so the next report is diagnosable', () => {
+    // Every branch used to be a silent return, and from the reader's seat all
+    // of them look identical: "I clicked and the card ignored me" — which is
+    // exactly how it was reported.
+    const { self } = cardViewer(null);
+    assert.strictEqual(self._postEditSelection(flatDoc(),
+        { start: { line: 0, character: 1 }, end: { line: 0, character: 2 } }, true, null),
+        'no mini-editor is open');
+
+    const other = cardViewer({ id: 'e1', file: '/other.tex', startOffset: 0, endOffset: 50 });
+    assert.ok(/another file/.test(other.self._postEditSelection(flatDoc('/x.tex'),
+        { start: { line: 0, character: 1 }, end: { line: 0, character: 2 } }, true, null)));
+
+    const outside = cardViewer({ id: 'e1', file: '/x.tex', startOffset: 100, endOffset: 200 });
+    const why = outside.self._postEditSelection(flatDoc(),
+        { start: { line: 0, character: 10 }, end: { line: 0, character: 20 } }, true, null);
+    assert.ok(/outside the card's block/.test(why), why);
+    assert.ok(/lines/.test(why), 'and names the lines it does hold, so it can be checked');
+});
+
+t('a successful post returns no reason', () => {
+    const { self } = cardViewer({ id: 'e1', file: '/x.tex', startOffset: 100, endOffset: 200 });
+    assert.strictEqual(self._postEditSelection(flatDoc(),
+        { start: { line: 0, character: 120 }, end: { line: 0, character: 132 } },
+        true, { line: 0, character: 126 }), null);
+});
+
+t('the click puts that reason in the status line', () => {
+    assert.ok(/card not moved: \$\{_cardWhy\}/.test(VIEWER_SRC),
+        'the reason must reach the reader, not just the return value');
+    assert.ok(/this\._edit && _cardWhy/.test(VIEWER_SRC),
+        'and only when a card is actually open — with none there is nothing to explain');
+});
+
 console.log('mini-editor: card → page');
 
 at('moving the card’s caret carries it as the selection’s ACTIVE end', async () => {
