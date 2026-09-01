@@ -1,42 +1,51 @@
 'use strict';
-// running-lines.js — mark the lines of a cell that are running RIGHT NOW.
+// running-lines.js — say which cell is running, and which of its lines.
 //
 // A cell is not evaluated as one thing. checkout.js splits it into top-level
 // sub-expressions (utils/wl-parse) and sends them to the kernel one at a time,
 // and each part already carries the line range it came from — so which lines
-// are executing at any moment is known and was simply never shown. VS Code's
-// own spinner says "this cell"; on a thirty-line cell that is not the question
-// a reader is asking, which is "where has it got to".
+// are executing at any moment is known and was simply never shown.
 //
-// SUBTLE ON PURPOSE. This paints while the reader is watching a computation
-// they are already anxious about; it has to be findable at a glance and then
-// stay out of the way. A slow, narrow-band breath does that. Anything with
-// contrast enough to notice from across the room would be unbearable at thirty
-// seconds. The numbers are all named below — they are the whole design.
+// TWO MARKS, ONE FOR EACH QUESTION:
+//
+//   which CELL is running?  → a gold border around it. VS Code's own spinner
+//     answers this too, but it is small and lives in the margin; on a scrolled
+//     notebook the border is what you see from across the page.
+//   which LINES of it?      → a faint wash on the current sub-expression.
+//
+// NEITHER MOVES. An earlier version breathed, and it was right that a moving
+// mark is easy to find and wrong that you would want one: this paints while a
+// reader is watching a computation they are already anxious about, for as long
+// as it takes, and anything moving beside text is something you cannot stop
+// looking at. Reported as distracting. A static mark is found once and then
+// ignored, which is the whole job.
 
 const vscode = require('vscode');
 
-// One full breath. Slower than a UI spinner on purpose: this is ambient state,
-// not a progress bar, and a fast pulse next to text you are trying to read is
-// the definition of distracting.
-const CYCLE_MS = 1800;
-const STEPS = 6;
-// The band. The low end must still be visible as "these lines"; the high end
-// must not compete with the syntax colouring on top of it.
-const ALPHA_LO = 0.07;
-const ALPHA_HI = 0.19;
+// The wash on the running lines. Deliberately at the bottom of the range where
+// a background is still legible as a background — it sits UNDER syntax colours
+// that must stay readable, and it has a gold border around the cell already
+// telling the eye where to look.
+const LINE_ALPHA = 0.09;
+const GOLD = '255, 205, 60';
+// The cell outline. Solid, because it is the coarse "here" mark and has a whole
+// cell's width to be quiet in.
+const BORDER_ALPHA = 0.85;
+const BORDER_PX = 2;
+
+let _types = null;
 
 /**
- * The breath curve: a raised cosine, so the ends ease instead of stepping.
- * Pure — this is the part worth testing.
- * @param {number} step 0..steps-1
- * @returns {number} alpha in [lo, hi]
+ * Which border edges a line of the cell needs, so the four decorations
+ * together outline the cell rather than boxing every line.
+ * Pure — the part worth testing.
+ * @returns {'single'|'top'|'middle'|'bottom'}
  */
-function pulseAlpha(step, steps = STEPS, lo = ALPHA_LO, hi = ALPHA_HI) {
-    if (!(steps > 0)) return lo;
-    const phase = ((step % steps) + steps) % steps / steps;      // 0..1
-    const wave = (1 - Math.cos(2 * Math.PI * phase)) / 2;        // 0..1..0
-    return lo + (hi - lo) * wave;
+function edgeFor(line, firstLine, lastLine) {
+    if (firstLine === lastLine) return 'single';
+    if (line === firstLine) return 'top';
+    if (line === lastLine) return 'bottom';
+    return 'middle';
 }
 
 /**
@@ -47,8 +56,6 @@ function pulseAlpha(step, steps = STEPS, lo = ALPHA_LO, hi = ALPHA_HI) {
  * range from throwing, and returning null for a range that has fallen entirely
  * off the end is better than painting the last line as though it were running.
  *
- * @param {{startLine:number,endLine:number}} sub
- * @param {number} lineCount
  * @returns {{startLine:number,endLine:number}|null}
  */
 function rangeFor(sub, lineCount) {
@@ -62,40 +69,29 @@ function rangeFor(sub, lineCount) {
     return { startLine: lo, endLine: hi };
 }
 
-/**
- * Should the mark animate?
- *
- * VS Code does not surface the OS's prefers-reduced-motion to extensions, but
- * `workbench.reduceMotion` is the setting a reader who wants less of it will
- * have set. On, the lines are still marked — only the breathing stops, because
- * WHICH lines are running is information and the animation is decoration.
- * @param {string} reduceMotion 'on' | 'off' | 'auto'
- */
-function shouldAnimate(reduceMotion) {
-    return String(reduceMotion || 'auto') !== 'on';
-}
-
-// --- the decoration itself ------------------------------------------------
-
-let _types = null;          // one decoration type per step of the breath
-let _timer = null;
-let _step = 0;
-let _active = null;         // { uri, range } — what is painted, if anything
-
 function _makeTypes() {
     if (_types) return _types;
-    _types = [];
-    for (let i = 0; i < STEPS; i++) {
-        _types.push(vscode.window.createTextEditorDecorationType({
+    const border = (widths) => vscode.window.createTextEditorDecorationType({
+        isWholeLine: true,
+        borderStyle: 'solid',
+        borderColor: `rgba(${GOLD}, ${BORDER_ALPHA})`,
+        borderWidth: widths,
+    });
+    const p = `${BORDER_PX}px`;
+    _types = {
+        // The running sub-expression's lines.
+        line: vscode.window.createTextEditorDecorationType({
             isWholeLine: true,
-            backgroundColor: `rgba(255, 205, 60, ${pulseAlpha(i).toFixed(3)})`,
-            // The ruler mark does NOT pulse: a blinking tick in the scrollbar is
-            // exactly the kind of peripheral motion this is trying to avoid, and
-            // its job is only to say "the work is over here" on a long cell.
-            overviewRulerColor: 'rgba(255, 205, 60, 0.55)',
+            backgroundColor: `rgba(${GOLD}, ${LINE_ALPHA})`,
+            overviewRulerColor: `rgba(${GOLD}, 0.55)`,
             overviewRulerLane: vscode.OverviewRulerLane.Center,
-        }));
-    }
+        }),
+        // The cell outline, one type per edge case.
+        single: border(p),
+        top: border(`${p} ${p} 0 ${p}`),
+        middle: border(`0 ${p} 0 ${p}`),
+        bottom: border(`0 ${p} ${p} ${p}`),
+    };
     return _types;
 }
 
@@ -104,29 +100,50 @@ function _editorFor(uriString) {
         .find(e => e.document && e.document.uri.toString() === uriString) || null;
 }
 
+let _active = null;         // { uri, range } — the running cell and its lines
+
+function _clearOn(editor, types) {
+    for (const key of ['line', 'single', 'top', 'middle', 'bottom']) {
+        try { editor.setDecorations(types[key], []); } catch (_) {}
+    }
+}
+
 function _paint() {
     const types = _makeTypes();
     if (!_active) {
-        // Nothing running: every editor showing any of these must be cleared,
-        // not just the one we last painted — a cell editor can be recreated
-        // (scrolled out and back) while a decoration is on it.
-        for (const ed of (vscode.window.visibleTextEditors || [])) {
-            for (const t of types) { try { ed.setDecorations(t, []); } catch (_) {} }
-        }
+        // Every visible editor, not just the one last painted: a cell editor
+        // can be recreated (scrolled out and back) while decorated.
+        for (const ed of (vscode.window.visibleTextEditors || [])) _clearOn(ed, types);
         return;
     }
     const ed = _editorFor(_active.uri);
-    if (!ed) return;                       // cell scrolled out of view; nothing to do
-    const r = rangeFor(_active.range, ed.document.lineCount);
-    if (!r) { clearRunning(); return; }
-    let range;
-    try {
-        range = [new vscode.Range(r.startLine, 0, r.endLine,
-            ed.document.lineAt(r.endLine).text.length)];
-    } catch (_) { return; }
-    for (let i = 0; i < types.length; i++) {
-        try { ed.setDecorations(types[i], i === _step ? range : []); } catch (_) {}
+    if (!ed) return;                       // cell scrolled out of view
+    const last = Math.max(0, ed.document.lineCount - 1);
+    const mk = (n) => {
+        try { return new vscode.Range(n, 0, n, ed.document.lineAt(n).text.length); }
+        catch (_) { return null; }
+    };
+
+    // The cell outline: every line, each carrying the edges it needs.
+    const buckets = { single: [], top: [], middle: [], bottom: [] };
+    for (let n = 0; n <= last; n++) {
+        const r = mk(n);
+        if (r) buckets[edgeFor(n, 0, last)].push(r);
     }
+    for (const key of ['single', 'top', 'middle', 'bottom']) {
+        try { ed.setDecorations(types[key], buckets[key]); } catch (_) {}
+    }
+
+    // The running lines.
+    const sub = rangeFor(_active.range, ed.document.lineCount);
+    const lines = [];
+    if (sub) {
+        for (let n = sub.startLine; n <= sub.endLine; n++) {
+            const r = mk(n);
+            if (r) lines.push(r);
+        }
+    }
+    try { ed.setDecorations(types.line, lines); } catch (_) {}
 }
 
 function _enabled() {
@@ -136,13 +153,8 @@ function _enabled() {
     } catch (_) { return true; }
 }
 
-function _reduceMotion() {
-    try { return vscode.workspace.getConfiguration('workbench').get('reduceMotion', 'auto'); }
-    catch (_) { return 'auto'; }
-}
-
 /**
- * Mark `sub`'s lines in `cell` as the ones running now.
+ * Mark `cell` as running and `sub`'s lines as the part running now.
  * Safe to call repeatedly; each call replaces the previous mark.
  */
 function showRunning(cell, sub) {
@@ -151,26 +163,17 @@ function showRunning(cell, sub) {
     const r = rangeFor(sub, cell.document.lineCount);
     if (!r) { clearRunning(); return; }
     _active = { uri: cell.document.uri.toString(), range: r };
-    _step = 0;
     _paint();
-    if (_timer) { clearInterval(_timer); _timer = null; }
-    if (!shouldAnimate(_reduceMotion())) return;         // marked, but still
-    _timer = setInterval(() => {
-        _step = (_step + 1) % STEPS;
-        _paint();
-    }, Math.max(60, Math.round(CYCLE_MS / STEPS)));
 }
 
 /**
- * Take the mark away.
+ * Take both marks away.
  *
  * Called from the cell's `finally`, so it runs on success, failure, abort and
  * kernel death alike. A mark left behind would say a computation is running
- * when none is — the worst thing this feature could do, and worse than never
- * having painted it.
+ * when none is — the worst thing this could do, and worse than never painting.
  */
 function clearRunning() {
-    if (_timer) { clearInterval(_timer); _timer = null; }
     _active = null;
     if (_types) _paint();
 }
@@ -180,13 +183,15 @@ function refresh() { if (_active) _paint(); }
 
 function dispose() {
     clearRunning();
-    if (_types) { for (const t of _types) { try { t.dispose(); } catch (_) {} } }
+    if (_types) {
+        for (const t of Object.values(_types)) { try { t.dispose(); } catch (_) {} }
+    }
     _types = null;
 }
 
 module.exports = {
     showRunning, clearRunning, refresh, dispose,
     // pure, for tests
-    pulseAlpha, rangeFor, shouldAnimate,
-    CYCLE_MS, STEPS, ALPHA_LO, ALPHA_HI,
+    rangeFor, edgeFor,
+    LINE_ALPHA, BORDER_ALPHA, BORDER_PX, GOLD,
 };

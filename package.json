@@ -1187,7 +1187,7 @@
         "wolfbook.notebook.highlightRunningLines": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "While a cell runs, gently highlight the **lines currently being evaluated** rather than the whole cell. A cell is sent to the kernel one top-level expression at a time, so on a long cell this shows where the computation has got to.\n\nThe highlight breathes slowly; set `#workbench.reduceMotion#` to `on` to keep the mark and stop the animation."
+          "markdownDescription": "While a cell runs, outline it in gold and gently shade the **lines currently being evaluated** rather than the whole cell. A cell is sent to the kernel one top-level expression at a time, so on a long cell this shows where the computation has got to.\n\nNeither mark moves or blinks — they are found once and then ignored. Both disappear when the cell finishes, however it finishes."
         }
       }
     },

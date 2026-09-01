@@ -31,6 +31,9 @@ let visibleEditors = [];
 let config = {};
 let disposedTypes = 0;
 let nextTypeId = 0;
+const typesById = new Map();
+/** The line wash carries a backgroundColor; the outline carries a border. */
+const isWash = (typeId) => !!(typesById.get(typeId) || {}).backgroundColor;
 
 function makeEditor(uriString, lineCount, lineLen = 40) {
     const ed = {
@@ -50,9 +53,11 @@ function makeEditor(uriString, lineCount, lineLen = 40) {
 const stub = {
     window: {
         get visibleTextEditors() { return visibleEditors; },
-        createTextEditorDecorationType: (opts) => ({
-            id: nextTypeId++, opts, dispose: () => { disposedTypes++; },
-        }),
+        createTextEditorDecorationType: (opts) => {
+            const t = { id: nextTypeId++, opts, dispose: () => { disposedTypes++; } };
+            typesById.set(t.id, opts);
+            return t;
+        },
         onDidChangeVisibleTextEditors: () => ({ dispose() {} }),
     },
     workspace: {
@@ -86,48 +91,15 @@ const reset = () => {
 };
 /** Ranges actually painted (non-empty) in the recorded calls. */
 const painted = () => decoCalls.filter(c => c.ranges && c.ranges.length);
-
-// ── the breath ────────────────────────────────────────────────────────────
-
-console.log('pulseAlpha — the breath curve');
-
-t('stays inside the band at every step', () => {
-    for (let i = 0; i < RL.STEPS * 3; i++) {
-        const a = RL.pulseAlpha(i);
-        assert.ok(a >= RL.ALPHA_LO - 1e-9 && a <= RL.ALPHA_HI + 1e-9,
-            `step ${i} gave ${a}, outside [${RL.ALPHA_LO}, ${RL.ALPHA_HI}]`);
+/** The lines carrying the running-lines WASH (as opposed to the cell outline). */
+const washedLines = () => {
+    const out = [];
+    for (const c of decoCalls) {
+        if (!isWash(c.typeId)) continue;
+        for (const r of (c.ranges || [])) out.push(r.sl);
     }
-});
-
-t('is a closed loop — the cycle rejoins itself', () => {
-    // A curve that jumped at the wrap would read as a flicker, not a breath.
-    assert.ok(Math.abs(RL.pulseAlpha(0) - RL.pulseAlpha(RL.STEPS)) < 1e-9);
-    assert.ok(Math.abs(RL.pulseAlpha(1) - RL.pulseAlpha(RL.STEPS + 1)) < 1e-9);
-});
-
-t('rises then falls, rather than sawtoothing', () => {
-    const xs = Array.from({ length: RL.STEPS }, (_, i) => RL.pulseAlpha(i));
-    const peak = xs.indexOf(Math.max(...xs));
-    assert.ok(peak > 0 && peak < RL.STEPS - 1, `peak at ${peak} of ${RL.STEPS}`);
-    for (let i = 1; i <= peak; i++) assert.ok(xs[i] >= xs[i - 1], 'rises to the peak');
-    for (let i = peak + 1; i < xs.length; i++) assert.ok(xs[i] <= xs[i - 1], 'falls after it');
-});
-
-t('never reaches an alpha that would compete with the text', () => {
-    // The point of the feature is to be noticeable and then ignorable.
-    assert.ok(RL.ALPHA_HI <= 0.25, `high end ${RL.ALPHA_HI} is too strong for text to sit on`);
-    assert.ok(RL.ALPHA_LO >= 0.04, `low end ${RL.ALPHA_LO} would be invisible`);
-});
-
-t('breathes slowly — this is ambient state, not a progress bar', () => {
-    assert.ok(RL.CYCLE_MS >= 1200, `a ${RL.CYCLE_MS}ms cycle beside text is a strobe`);
-});
-
-t('negative and huge steps are handled, not thrown on', () => {
-    assert.ok(Number.isFinite(RL.pulseAlpha(-3)));
-    assert.ok(Number.isFinite(RL.pulseAlpha(1e6)));
-    assert.strictEqual(RL.pulseAlpha(0, 0), RL.ALPHA_LO, 'zero steps degrades to the low end');
-});
+    return out.sort((a, b) => a - b);
+};
 
 // ── the range ─────────────────────────────────────────────────────────────
 
@@ -162,56 +134,63 @@ t('rubbish input yields null rather than an exception', () => {
     assert.strictEqual(RL.rangeFor({ startLine: 0, endLine: 0 }, 0), null);
 });
 
-// ── reduced motion ────────────────────────────────────────────────────────
-
-console.log('reduced motion');
-
-t('workbench.reduceMotion:on stops the animation', () => {
-    assert.strictEqual(RL.shouldAnimate('on'), false);
-    assert.strictEqual(RL.shouldAnimate('off'), true);
-    assert.strictEqual(RL.shouldAnimate('auto'), true);
-    assert.strictEqual(RL.shouldAnimate(undefined), true);
-});
-
-t('but the lines are STILL marked — which ones run is information', () => {
-    reset();
-    config['workbench.reduceMotion'] = 'on';
-    const ed = makeEditor('cell:1', 10);
-    visibleEditors = [ed];
-    RL.showRunning({ document: ed.document }, { startLine: 1, endLine: 3 });
-    assert.ok(painted().length >= 1, 'the mark must still be painted');
-    RL.clearRunning();
-});
-
 // ── painting ──────────────────────────────────────────────────────────────
 
 console.log('painting');
 
-t('marks exactly the sub-expression’s lines, not the whole cell', () => {
+t('shades exactly the sub-expression’s lines, not the whole cell', () => {
     reset();
     const ed = makeEditor('cell:1', 30);
     visibleEditors = [ed];
     RL.showRunning({ document: ed.document }, { startLine: 12, endLine: 14 });
-    const p = painted();
-    assert.strictEqual(p.length, 1, 'exactly one decoration type carries the range');
-    const r = p[0].ranges[0];
-    assert.strictEqual(r.sl, 12);
-    assert.strictEqual(r.el, 14);
+    assert.deepStrictEqual(washedLines(), [12, 13, 14]);
     RL.clearRunning();
 });
 
-t('only ONE step of the breath is painted at a time', () => {
-    // Every other type must be explicitly emptied, or the alphas stack up and
-    // the mark gets darker every tick until it is a solid block.
+t('the whole cell is outlined while only the running lines are shaded', () => {
+    // The two marks answer different questions: which CELL, and which LINES.
     reset();
     const ed = makeEditor('cell:1', 10);
     visibleEditors = [ed];
-    RL.showRunning({ document: ed.document }, { startLine: 0, endLine: 1 });
-    const nonEmpty = decoCalls.filter(c => c.ranges.length).length;
-    const empty = decoCalls.filter(c => !c.ranges.length).length;
-    assert.strictEqual(nonEmpty, 1, `${nonEmpty} types painted at once`);
-    assert.strictEqual(empty, RL.STEPS - 1, 'all the others are cleared');
+    RL.showRunning({ document: ed.document }, { startLine: 3, endLine: 4 });
+    const shaded = [];
+    const bordered = new Set();
+    for (const c of decoCalls) {
+        for (const r of (c.ranges || [])) {
+            if (isWash(c.typeId)) shaded.push(r.sl); else bordered.add(r.sl);
+        }
+    }
+    assert.strictEqual(bordered.size, 10, 'every line of the cell is bordered');
+    assert.deepStrictEqual(shaded.sort((a, b) => a - b), [3, 4],
+        'only the running lines are shaded');
     RL.clearRunning();
+});
+
+t('the outline is a box, not a box per line', () => {
+    reset();
+    const ed = makeEditor('cell:1', 5);
+    visibleEditors = [ed];
+    RL.showRunning({ document: ed.document }, { startLine: 0, endLine: 0 });
+    // top on the first line, bottom on the last, sides in between.
+    assert.strictEqual(RL.edgeFor(0, 0, 4), 'top');
+    assert.strictEqual(RL.edgeFor(2, 0, 4), 'middle');
+    assert.strictEqual(RL.edgeFor(4, 0, 4), 'bottom');
+    assert.strictEqual(RL.edgeFor(0, 0, 0), 'single', 'a one-line cell is closed on all sides');
+    RL.clearRunning();
+});
+
+t('nothing animates', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(
+        path.join(__dirname, '..', '..', 'execution', 'running-lines.js'), 'utf8');
+    assert.ok(!/setInterval/.test(src), 'no timer — a moving mark beside text cannot be ignored');
+    assert.ok(!/pulse|blink|breath\w*\(/.test(src), 'and no pulse left behind');
+});
+
+t('the wash is faint enough to read code through', () => {
+    assert.ok(RL.LINE_ALPHA <= 0.12, `${RL.LINE_ALPHA} would compete with the syntax colours`);
+    assert.ok(RL.LINE_ALPHA >= 0.05, `${RL.LINE_ALPHA} would be invisible`);
 });
 
 t('a second call replaces the first mark', () => {
@@ -221,9 +200,7 @@ t('a second call replaces the first mark', () => {
     RL.showRunning({ document: ed.document }, { startLine: 0, endLine: 0 });
     decoCalls.length = 0;
     RL.showRunning({ document: ed.document }, { startLine: 5, endLine: 6 });
-    const p = painted();
-    assert.strictEqual(p.length, 1);
-    assert.strictEqual(p[0].ranges[0].sl, 5, 'the new range, and only it');
+    assert.deepStrictEqual(washedLines(), [5, 6], 'the new range, and only it');
     RL.clearRunning();
 });
 
@@ -246,59 +223,8 @@ t('scrolling back into view re-applies the mark', () => {
     visibleEditors = [ed];
     decoCalls.length = 0;
     RL.refresh();
-    assert.strictEqual(painted().length, 1, 'refresh must repaint');
-    RL.clearRunning();
-});
-
-// ── it actually breathes ──────────────────────────────────────────────────
-//
-// A pulse that never ticks is the silent-failure mode: everything above would
-// still pass while the mark sat perfectly still. So watch it move, and then
-// watch it stop.
-
-console.log('the animation runs');
-
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-const asyncTests = [];
-const at = (name, fn) => asyncTests.push({ name, fn });
-
-at('the painted step advances on its own', async () => {
-    reset();
-    const ed = makeEditor('cell:1', 10);
-    visibleEditors = [ed];
-    RL.showRunning({ document: ed.document }, { startLine: 0, endLine: 1 });
-    const first = painted()[0].typeId;
-    decoCalls.length = 0;
-    await sleep(Math.round(RL.CYCLE_MS / RL.STEPS) + 120);
-    const later = painted();
-    assert.ok(later.length >= 1, 'the timer must repaint');
-    assert.notStrictEqual(later[later.length - 1].typeId, first,
-        'a different step of the breath — otherwise the mark is static');
-    RL.clearRunning();
-});
-
-at('and stops the moment it is cleared', async () => {
-    // A timer left running after the cell finishes would keep repainting for
-    // the rest of the session.
-    reset();
-    const ed = makeEditor('cell:1', 10);
-    visibleEditors = [ed];
-    RL.showRunning({ document: ed.document }, { startLine: 0, endLine: 1 });
-    RL.clearRunning();
-    decoCalls.length = 0;
-    await sleep(Math.round(RL.CYCLE_MS / RL.STEPS) * 2 + 120);
-    assert.strictEqual(decoCalls.length, 0, 'no repaints after clearing');
-});
-
-at('reduced motion really does stand still', async () => {
-    reset();
-    config['workbench.reduceMotion'] = 'on';
-    const ed = makeEditor('cell:1', 10);
-    visibleEditors = [ed];
-    RL.showRunning({ document: ed.document }, { startLine: 0, endLine: 1 });
-    decoCalls.length = 0;
-    await sleep(Math.round(RL.CYCLE_MS / RL.STEPS) * 2 + 120);
-    assert.strictEqual(decoCalls.length, 0, 'marked, but not animated');
+    assert.deepStrictEqual(washedLines(), [1, 2], 'refresh must repaint the wash');
+    assert.ok(painted().some(c => !isWash(c.typeId)), 'and the outline with it');
     RL.clearRunning();
 });
 
@@ -314,7 +240,8 @@ t('clearRunning empties every decoration type', () => {
     decoCalls.length = 0;
     RL.clearRunning();
     assert.strictEqual(painted().length, 0, 'nothing may remain painted');
-    assert.strictEqual(decoCalls.length, RL.STEPS, 'every type is explicitly emptied');
+    assert.strictEqual(decoCalls.length, 5,
+        'the wash and all four outline edges are explicitly emptied');
 });
 
 t('it clears editors it never painted, too', () => {
@@ -440,14 +367,9 @@ t('dispose releases every type it made', () => {
     visibleEditors = [ed];
     RL.showRunning({ document: ed.document }, { startLine: 0, endLine: 1 });
     RL.dispose();
-    assert.strictEqual(disposedTypes - before, RL.STEPS, 'all of them');
+    assert.strictEqual(disposedTypes - before, 5,
+        'the wash plus the four outline edges');
 });
 
-(async () => {
-    for (const a of asyncTests) {
-        try { await a.fn(); pass++; console.log(`  ✓ ${a.name}`); }
-        catch (e) { console.error(`  ✗ ${a.name}\n    ${e.message}`); process.exitCode = 1; }
-    }
-    RL.dispose();
-    console.log(`\n${pass} assertions passed`);
-})();
+RL.dispose();
+console.log(`\n${pass} assertions passed`);
