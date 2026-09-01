@@ -317,4 +317,116 @@ t('a selection spanning lines falls back rather than inventing a position', () =
     assert.ok(/sel\.active\.line === cur\.line/.test(src), 'guarded on the line');
 });
 
+// ── THE INVERSE CLICK: WORD OUTLINED, CARET WHERE YOU POINTED ─────────────
+//
+// VS Code's caret is always at one END of a selection, so a selected word can
+// only ever put it before or after the word — never where the pointer actually
+// was. The word is therefore OUTLINED with the decoration this gesture already
+// drew, and the selection collapses to the clicked character.
+//
+// These read the real source: the branch lives inside _jumpToSource, which
+// needs a compiled paper, a webview and an open editor to run. What can be
+// pinned without all that is the CONTRACT — which gestures collapse and which
+// keep a selection, and that the bookkeeping records what was actually set.
+
+console.log('inverse click: caret placement');
+
+const VIEWER_SRC = (() => {
+    const fs = require('fs');
+    const path = require('path');
+    return fs.readFileSync(path.join(__dirname, '..', '..', 'tex', 'texViewer.js'), 'utf8');
+})();
+
+/** The plain-click block of _jumpToSource. */
+const CLICK_BLOCK = (() => {
+    // Start at the containment helper, which sits just above the decision, so
+    // the block under test is the whole plain-click branch.
+    const i = VIEWER_SRC.indexOf('const inRange = (r, pos)');
+    return i > 0 ? VIEWER_SRC.slice(i, i + 2800) : '';
+})();
+
+t('the clicked CHARACTER is carried alongside the word', () => {
+    assert.ok(/const hitPos = \(aligned && aligned\.line === lineIdx \+ 1/.test(VIEWER_SRC),
+        'the hit position must come from the aligned glyph — the exact map already knows it');
+});
+
+t('a plain click on a word collapses the selection to that character', () => {
+    assert.ok(CLICK_BLOCK, 'the plain-click branch must exist');
+    assert.ok(/step\.kind === 'word'/.test(CLICK_BLOCK), 'only for a word rung');
+    assert.ok(/new vscode\.Selection\(hitPos, hitPos\)/.test(CLICK_BLOCK),
+        'a collapsed selection IS the caret');
+});
+
+t('a double-click still SELECTS the word, so it can be typed over', () => {
+    assert.ok(/!m\.takeMe/.test(CLICK_BLOCK),
+        'takeMe (double-click) means "take me there to work on it" — it wants a real selection');
+});
+
+t('a widened Cmd-click still selects the group', () => {
+    assert.ok(/!m\.widen/.test(CLICK_BLOCK),
+        'widening is an explicit "select this much" and must not collapse');
+});
+
+t('MATHS still selects the macro that printed the symbol', () => {
+    // A click on a Ψ resolves `\Psi`, and selecting it is the right answer:
+    // the reader clicked the SYMBOL, not a letter of its name, so there is no
+    // "middle of the word" to point at. Collapsing there would take away a
+    // useful selection and answer a question nobody asked.
+    assert.ok(/hitInProse/.test(CLICK_BLOCK), 'the collapse must be gated on prose');
+    assert.ok(/hitInProse = !isMath;/.test(VIEWER_SRC),
+        'and that flag must come from the same isMath decision the word unit uses');
+});
+
+t('containment is computed, never asked of the host', () => {
+    // Range.contains is a host method, and this must never be able to throw out
+    // of the jump — the rule the flash decoration already follows. A stubbed
+    // host caught it doing exactly that.
+    assert.ok(!/range\.contains\(/.test(CLICK_BLOCK),
+        'no host method in the caret decision');
+    assert.ok(/const inRange = \(r, pos\)/.test(CLICK_BLOCK),
+        'arithmetic on line/character needs nothing from vscode');
+});
+
+t('the caret must actually be inside the word it outlines', () => {
+    assert.ok(/inRange\(range, hitPos\)/.test(CLICK_BLOCK),
+        'a hit outside the resolved word would put the caret somewhere the outline does not cover');
+});
+
+t('the word is still outlined — that outline is now half the answer', () => {
+    assert.ok(/_flash\.show\(editor, range\)/.test(CLICK_BLOCK),
+        'with the selection collapsed the decoration is the only thing naming the word');
+    assert.ok(/revealRange\(range,/.test(CLICK_BLOCK),
+        'and the WORD is revealed, not the zero-width caret');
+});
+
+t('the self-selection bookkeeping records what was ACTUALLY set', () => {
+    // Recording the word while placing a caret would leave the forward sync
+    // unable to recognise its own gesture, and every click would come back
+    // looking like the reader had made a selection.
+    assert.ok(/sl: placed\.start\.line, sc: placed\.start\.character/.test(CLICK_BLOCK),
+        '_selfRange must be built from the placed selection, not from `range`');
+    assert.ok(/editor\.selection = placed;/.test(CLICK_BLOCK));
+});
+
+t('the behaviour is settable, and defaults to on', () => {
+    assert.ok(/_inverseClickCaret\(\)/.test(CLICK_BLOCK), 'gated by the setting');
+    assert.ok(/get\('inverseClickCaret', true\) !== false/.test(VIEWER_SRC),
+        'default on, and only an explicit false turns it off');
+    const pkg = require('../../../../package.json');
+    const cfg = pkg.contributes.configuration;
+    const props = Array.isArray(cfg) ? Object.assign({}, ...cfg.map(c => c.properties)) : cfg.properties;
+    const dec = props['wolfbook.tex.inverseClickCaret'];
+    assert.ok(dec, 'the setting must be declared, or nobody can find it');
+    assert.strictEqual(dec.default, true);
+});
+
+t('reading the setting can never break the click', () => {
+    // A decoration is decoration and a setting is a setting: neither may be
+    // able to throw out of the jump. The same lesson EditorFlash records.
+    const i = VIEWER_SRC.indexOf('_inverseClickCaret() {');
+    const body = VIEWER_SRC.slice(i, i + 400);
+    assert.ok(/try \{/.test(body) && /catch \(_\) \{ return true; \}/.test(body),
+        'it must fall back to the default rather than throwing');
+});
+
 console.log(`\n${pass} assertions passed`);

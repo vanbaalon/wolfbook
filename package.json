@@ -1178,6 +1178,11 @@
           ],
           "default": "command",
           "markdownDescription": "What clicking a label chip in the WPaper view puts on the clipboard. Hold Shift over the page to reveal the labels; **Alt-click** a chip copies the other of bare/command, so the setting never has to be visited mid-flow."
+        },
+        "wolfbook.tex.inverseClickCaret": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "When you click a word in the WPaper page, put the editor's caret at the **character you clicked** and outline the word, instead of selecting the whole word. VS Code's caret can only sit at one end of a selection, so a selected word cannot show where in it you pointed.\n\nTurn this off to restore the older behaviour (the word selected, caret at its end) — useful if you click a word in order to type over it. **Double-click still selects the word** either way, and ⌘/Ctrl-click still selects the widened group."
         }
       }
     },

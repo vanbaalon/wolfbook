@@ -3498,6 +3498,21 @@ class TexViewer {
     }
 
     /** INVERSE SYNC — the thing that makes this Page mode. */
+    /**
+     * Should a plain inverse click place the caret where the pointer was,
+     * rather than selecting the whole word?
+     *
+     * Off restores the older behaviour — the word selected, caret at its end —
+     * which is what you want if you habitually click a word in order to type
+     * over it. Double-click still selects either way.
+     */
+    _inverseClickCaret() {
+        try {
+            return vscode.workspace.getConfiguration('wolfbook.tex')
+                .get('inverseClickCaret', true) !== false;
+        } catch (_) { return true; }
+    }
+
     async _jumpToSource(m) {
         const st = this.root && this.coord.roots.get(this.root);
         if (!st || !st.map || !st.map.available) return;
@@ -3632,6 +3647,8 @@ class TexViewer {
                 }
             }
         }
+        // Set inside the aligned branch below; false until something says prose.
+        let hitInProse = false;
         if (aligned) {
             hit.line = aligned.line;
             lineIdx = Math.max(0, Math.min(aligned.line - 1, doc.lineCount - 1));
@@ -3659,6 +3676,14 @@ class TexViewer {
             // The alignment has already said WHICH character; the word is
             // simply the token containing that column.
             const isMath = (alignObj && MATH_KINDS.includes(alignObj.kind)) || aligned.inMath;
+            // THE CARET-IN-WORD IDEA IS A PROSE ONE.
+            //
+            // In maths a click resolves the MACRO that printed the symbol —
+            // `\Psi` for a Ψ — and selecting it is the right answer: there is
+            // no "middle of the word" to point at, because the reader clicked
+            // the symbol, not a letter of its name. Collapsing there would take
+            // away a useful selection and answer a question nobody asked.
+            hitInProse = !isMath;
             if (isMath) {
                 w = glyphToken;
             } else if (exactHit) {
@@ -3930,6 +3955,17 @@ class TexViewer {
                 preview: false,
             });
 
+        // THE CHARACTER THAT WAS CLICKED, kept beside the word it belongs to.
+        //
+        // A reader clicks the MIDDLE of a word, and the answer has always been
+        // the whole word — right for saying which word, but it threw away the
+        // finer thing the exact map already knew. `aligned` is the glyph that
+        // was actually hit, so its source column is where the pointer was.
+        const hitPos = (aligned && aligned.line === lineIdx + 1 && aligned.startCol != null)
+            ? new vscode.Position(lineIdx,
+                Math.max(0, Math.min(aligned.startCol, doc.lineAt(lineIdx).text.length)))
+            : null;
+
         let range;
         let what;
         if (step) {
@@ -4025,21 +4061,53 @@ class TexViewer {
         // turn an ordinary click three minutes later into a mystery range.
         this._pickAnchor = null;
 
+        // A CLICK IN THE MIDDLE OF A WORD PUTS THE CARET IN THE MIDDLE OF IT.
+        //
+        // VS Code's caret is always at one END of a selection, so a selected
+        // word can only ever put it before or after — never where the pointer
+        // actually was. The word is therefore OUTLINED rather than selected
+        // (the decoration this gesture already drew), and the selection
+        // collapses to the clicked character. The reader gets both: the word is
+        // visibly marked, and typing continues exactly where they pointed.
+        //
+        // Only for a plain click on a WORD. A widened Cmd-click means "select
+        // this group" and a double-click means "take me there to work on it" —
+        // both want a real selection, and a double-clicked word stays selected
+        // so it can be typed over.
+        // Containment computed, not asked for: `Range.contains` is a host method
+        // and this must never be able to throw out of the jump — the same rule
+        // the flash decoration follows, and a stubbed host caught it doing
+        // exactly that. Arithmetic on line/character needs nothing from vscode.
+        const inRange = (r, pos) => !!r && !!pos &&
+            (pos.line > r.start.line || (pos.line === r.start.line && pos.character >= r.start.character)) &&
+            (pos.line < r.end.line || (pos.line === r.end.line && pos.character <= r.end.character));
+        const caretHere = !!hitPos && hitInProse && !m.takeMe && !m.widen &&
+            !!step && step.kind === 'word' && inRange(range, hitPos) &&
+            this._inverseClickCaret();
+        const placed = caretHere
+            ? new vscode.Selection(hitPos, hitPos)
+            : new vscode.Selection(range.start, range.end);
         // Remember what this click is about to select, so the change event it
-        // provokes is not mistaken for the reader making a selection.
+        // provokes is not mistaken for the reader making a selection. It must
+        // record what is ACTUALLY set: recording the word while placing a caret
+        // would leave the forward sync unable to recognise its own gesture.
         this._selfRange = {
             file: doc.uri.fsPath, kind: 'click',
-            sl: range.start.line, sc: range.start.character,
-            el: range.end.line, ec: range.end.character,
+            sl: placed.start.line, sc: placed.start.character,
+            el: placed.end.line, ec: placed.end.character,
             at: Date.now(),
         };
         if (editor) {
-            editor.selection = new vscode.Selection(range.start, range.end);
+            editor.selection = placed;
+            // Reveal the WORD, not the caret: scrolling to a zero-width
+            // position can leave the rest of the word off the edge.
             editor.revealRange(range, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
             this._offerSmoothScroll();
             // The page marks where you are with a wash that fades; the editor
             // end of the same gesture now does too, decaying into the ordinary
-            // selection rather than just appearing there.
+            // selection rather than just appearing there. With the caret placed
+            // inside the word this outline is the ONLY thing naming the word,
+            // so it is no longer decoration — it is half the answer.
             this._flash.show(editor, range);
         }
         this._post({ type: 'status', text: `→ ${what}`, kind: 'ok' });
