@@ -4,7 +4,6 @@ const path = require('path');
 
 let escapeAliases = {};
 let isInEscapeMode = false;
-let escapeBuffer = '';
 let escapeStartPosition = null;
 let escapeStartEditor = null;
 let escapeDecorationType = null;
@@ -122,46 +121,30 @@ function registerEscapeMode(context, extensionPath) {
     });
     context.subscriptions.push(focusChangeListener);
 
-    // Register character accumulator — intercepts keypresses while in escape mode
-    // so typed characters build up the alias buffer.  Backtick is no longer special
-    // (falls through to normal typing).  Escape key is handled by wolfram.escapeKey below.
-    const disposable = vscode.commands.registerCommand('type', async (args) => {
-        const editor = vscode.window.activeTextEditor;
-        if (!editor) {
-            return vscode.commands.executeCommand('default:type', args);
-        }
-
-        const doc = editor.document;
-        const isWolframFile = doc.languageId === 'wolfram' || 
-                             doc.fileName.endsWith('.evsnb') || 
-                             doc.fileName.endsWith('.vsnb') ||
-                             doc.uri.scheme === 'vscode-notebook-cell';
-
-        if (!isWolframFile) {
-            return vscode.commands.executeCommand('default:type', args);
-        }
-
-        // If in escape mode, accumulate characters and update highlight
-        if (isInEscapeMode) {
-            escapeBuffer += args.text;
-            // Let the character be typed first
-            await vscode.commands.executeCommand('default:type', args);
-            // Then update the highlight
-            setTimeout(() => {
-                const ed = vscode.window.activeTextEditor;
-                if (ed && isInEscapeMode) {
-                    updateEscapeModeHighlight(ed);
-                }
-            }, 10);
-            // Don't auto-trigger - let user press Ctrl+Space if they want suggestions
-            return;
-        }
-
-        // Normal typing (backtick is now just typed as-is)
-        return vscode.commands.executeCommand('default:type', args);
-    });
-
-    context.subscriptions.push(disposable);
+    // NO `type` COMMAND. THIS IS NOT AN OVERSIGHT.
+    //
+    // There used to be a global vscode.commands.registerCommand('type', …) here
+    // to accumulate keystrokes while escape mode was active. VS Code allows
+    // exactly ONE registration of `type` in the whole editor, so whichever
+    // extension activates first wins and every other one's registration fails.
+    // VSCodeVim is built on `type`: with Wolfbook installed it simply stopped
+    // working — in EVERY file type, including plain text, because Vim never got
+    // to register at all. Reported as vanbaalon/wolfbook#17 ("VSCodeVim
+    // functionality is disabled when Wolfbook is installed"), and the delegation
+    // to `default:type` on every path did not help one bit: the damage was done
+    // by taking the registration, not by what the handler did with it.
+    //
+    // Nothing was lost by deleting it, because it did nothing:
+    //   - it appended to `escapeBuffer`, which NOTHING read — tryReplaceAlias
+    //     reads the document text between escapeStartPosition and the cursor,
+    //     and updateEscapeModeHighlight works from positions;
+    //   - it called updateEscapeModeHighlight on a 10 ms timer, which the
+    //     selection-change listener above already does on every cursor move,
+    //     and typing moves the cursor;
+    //   - every branch ended in `default:type`, so it never changed typing.
+    //
+    // If keystroke-level interception is ever genuinely needed here, observe
+    // onDidChangeTextDocument instead. Never take `type`.
 
     // --- wolfram.escapeKey ---
     // Bound to the Escape key (see keybindings in package.json).
@@ -183,7 +166,6 @@ function registerEscapeMode(context, extensionPath) {
         if (!isInEscapeMode) {
             // Start escape mode
             isInEscapeMode = true;
-            escapeBuffer = '';
             escapeStartPosition = editor.selection.active;
             escapeStartEditor = editor;
             vscode.commands.executeCommand('setContext', 'wolframInEscapeMode', true);
@@ -300,7 +282,6 @@ async function tryReplaceAlias(editor) {
 
 function resetEscapeMode() {
     isInEscapeMode = false;
-    escapeBuffer = '';
     escapeStartPosition = null;
     escapeStartEditor = null;
     vscode.commands.executeCommand('setContext', 'wolframInEscapeMode', false);
