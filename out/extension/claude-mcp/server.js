@@ -17,6 +17,24 @@ const crypto = require('crypto');
 const path   = require('path');
 const fs     = require('fs');
 const { setMcpCallActive } = require('../tools/shared');
+
+// Resolve the per-user application-data directory for the current platform.
+//
+// Callers previously inlined `isWin ? %APPDATA% : ~/Library/Application Support`,
+// which silently sent Linux down the macOS branch: it created a stray
+// ~/Library tree in $HOME and wrote MCP registrations to a path no Linux
+// client reads. Linux follows the XDG Base Directory Specification, where
+// config lives in $XDG_CONFIG_HOME (default ~/.config). Claude Desktop, an
+// Electron app, honours that variable, so ignoring it here would desync the
+// two. Windows keeps its own branch at each call site.
+function appSupportDir(base) {
+    if (process.platform === 'darwin') return path.join(base, 'Library', 'Application Support');
+    const xdgConfigHome = process.env.XDG_CONFIG_HOME;
+    return (xdgConfigHome && path.isAbsolute(xdgConfigHome))
+        ? xdgConfigHome
+        : path.join(base, '.config');
+}
+
 const { McpResultStore } = require('./result-store');
 const { runWithActivityContext } = require('../monitor/activity');
 
@@ -1512,7 +1530,7 @@ function writeClaudeConfig(bridgePath, nodeBin, home, port, workspacePaths) {
     const results = [];
 
     // 1. Claude Desktop — flat mcpServers at root
-    const desktopConfigPath = path.join(home, 'Library', 'Application Support', 'Claude', 'claude_desktop_config.json');
+    const desktopConfigPath = path.join(appSupportDir(home), 'Claude', 'claude_desktop_config.json');
     try {
         let config = {};
         try { if (fs.existsSync(desktopConfigPath)) config = JSON.parse(fs.readFileSync(desktopConfigPath, 'utf8')); } catch {}
@@ -1639,7 +1657,7 @@ function needsConfigUpdate(bridgePath, nodeBin, workspacePaths) {
     // Check Claude Desktop config
     try {
         const cfg = JSON.parse(fs.readFileSync(
-            path.join(home, 'Library', 'Application Support', 'Claude', 'claude_desktop_config.json'), 'utf8'));
+            path.join(appSupportDir(home), 'Claude', 'claude_desktop_config.json'), 'utf8'));
         const entry = cfg?.mcpServers?.wolfbook;
         if (!entry || entry.command !== nodeBin || entry.args?.[0] !== bridgePath) return true;
     } catch { return true; }
@@ -1745,8 +1763,8 @@ function needsSkillInstall() {
 
 // ---------------------------------------------------------------------------
 // Cline (saoudrizwan.claude-dev) MCP config
-// Path: ~/Library/Application Support/Code/User/globalStorage/
-//         saoudrizwan.claude-dev/settings/cline_mcp_settings.json  (macOS/Linux)
+// Path: <app-support>/Code/User/globalStorage/
+//         saoudrizwan.claude-dev/settings/cline_mcp_settings.json  (macOS: ~/Library/Application Support, Linux: $XDG_CONFIG_HOME)
 //       %APPDATA%\Code\User\globalStorage\saoudrizwan.claude-dev\settings\cline_mcp_settings.json  (Windows)
 // Format: { mcpServers: { wolfbook: { command, args, disabled, autoApprove } } }
 // ---------------------------------------------------------------------------
@@ -1759,7 +1777,7 @@ function _clineConfigPath() {
         : (process.env.HOME || '~');
     return isWin
         ? path.join(base, 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'settings', 'cline_mcp_settings.json')
-        : path.join(base, 'Library', 'Application Support', 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'settings', 'cline_mcp_settings.json');
+        : path.join(appSupportDir(base), 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'settings', 'cline_mcp_settings.json');
 }
 
 /** Write the wolfbook MCP entry into Cline's settings file.
@@ -1812,8 +1830,8 @@ function needsClineConfigUpdate(bridgePath, nodeBin) {
 
 // ---------------------------------------------------------------------------
 // Roo Code (rooveterinaryinc.roo-cline) MCP config
-// Path: ~/Library/Application Support/Code/User/globalStorage/
-//         rooveterinaryinc.roo-cline/settings/cline_mcp_settings.json  (macOS/Linux)
+// Path: <app-support>/Code/User/globalStorage/
+//         rooveterinaryinc.roo-cline/settings/cline_mcp_settings.json  (macOS: ~/Library/Application Support, Linux: $XDG_CONFIG_HOME)
 //       %APPDATA%\Code\User\globalStorage\rooveterinaryinc.roo-cline\settings\cline_mcp_settings.json  (Windows)
 // Format identical to Cline's — same key, different extension folder.
 // ---------------------------------------------------------------------------
@@ -1826,7 +1844,7 @@ function _rooCodeConfigPath() {
         : (process.env.HOME || '~');
     return isWin
         ? path.join(base, 'Code', 'User', 'globalStorage', 'rooveterinaryinc.roo-cline', 'settings', 'cline_mcp_settings.json')
-        : path.join(base, 'Library', 'Application Support', 'Code', 'User', 'globalStorage', 'rooveterinaryinc.roo-cline', 'settings', 'cline_mcp_settings.json');
+        : path.join(appSupportDir(base), 'Code', 'User', 'globalStorage', 'rooveterinaryinc.roo-cline', 'settings', 'cline_mcp_settings.json');
 }
 
 /** Write the wolfbook MCP entry into Roo Code's settings file.
@@ -1899,14 +1917,14 @@ function getMcpInfoPayload(bridgePath, nodeBin, port, isSecondary, isDisabled) {
     const configPaths = {
         claudeDesktop: isWin
             ? path.join(appData, 'Claude', 'claude_desktop_config.json')
-            : path.join(home, 'Library', 'Application Support', 'Claude', 'claude_desktop_config.json'),
+            : path.join(appSupportDir(home), 'Claude', 'claude_desktop_config.json'),
         claudeCode:  path.join(home, '.claude.json'),
         cline: isWin
             ? path.join(appData, 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'settings', 'cline_mcp_settings.json')
-            : path.join(home, 'Library', 'Application Support', 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'settings', 'cline_mcp_settings.json'),
+            : path.join(appSupportDir(home), 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'settings', 'cline_mcp_settings.json'),
         rooCode: isWin
             ? path.join(appData, 'Code', 'User', 'globalStorage', 'rooveterinaryinc.roo-cline', 'settings', 'cline_mcp_settings.json')
-            : path.join(home, 'Library', 'Application Support', 'Code', 'User', 'globalStorage', 'rooveterinaryinc.roo-cline', 'settings', 'cline_mcp_settings.json'),
+            : path.join(appSupportDir(home), 'Code', 'User', 'globalStorage', 'rooveterinaryinc.roo-cline', 'settings', 'cline_mcp_settings.json'),
         antigravity: path.join(home, '.gemini', 'antigravity', 'mcp_config.json'),
         codex:       path.join(home, '.codex', 'config.toml'),
     };
