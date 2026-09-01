@@ -125,6 +125,19 @@ class ExecutionQueue {
     hasPendingForCell(cell) {
         return this.queue.some(item => !item.started && item.execution.cell === cell);
     }
+    /**
+     * True if this cell has ANY item in the queue — pending OR already running.
+     *
+     * `end()` removes the item, so presence means live. This is the guard that
+     * matters for re-running: VS Code refuses to create a second
+     * NotebookCellExecution for a cell that already has one, and it does so by
+     * THROWING. Checking only for a not-yet-started item let a Shift+Enter on a
+     * long-running cell reach createNotebookCellExecution, which threw out of
+     * executeHandler and left the run looking like it had finished instantly.
+     */
+    hasAnyForCell(cell) {
+        return this.queue.some(item => item.execution.cell === cell);
+    }
     findIndex(id) {
         return this.queue.findIndex(item => (item.id === id));
     }

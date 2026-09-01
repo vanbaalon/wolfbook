@@ -1796,7 +1796,18 @@ class WolframNotebookKernel {
             try {
                 return this._controller.createNotebookCellExecution(cell);
             } catch (e) {
-                if (!String(e?.message).includes('not associated')) throw e;
+                // A THROW HERE MUST NOT TAKE THE WHOLE BATCH DOWN.
+                //
+                // Anything other than "not associated" used to propagate out of
+                // executeHandler, so one bad cell aborted a Run All and the run
+                // ended with no explanation. The commonest cause is a second
+                // execution requested for a cell that already has one — now
+                // guarded above, but the guard is a check and this is the
+                // backstop.
+                if (!String(e?.message).includes('not associated')) {
+                    scrollLog('[execute] cell', cell.index, 'createNotebookCellExecution threw:', e?.message);
+                    return null;
+                }
                 const { associateNotebook } = require('./kernel/association');
                 // Silent (agent) runs restore the user's active tab afterwards;
                 // human runs happen in the already-active notebook.
@@ -1817,7 +1828,21 @@ class WolframNotebookKernel {
         if (this.kernelStatusString === "resolved") {
             for (const cell of cells) {
                 // Don't double-queue a cell that already has a pending execution.
-                if (this.executionQueue.hasPendingForCell(cell)) { scrollLog('[execute] cell', cell.index, 'already pending — skipping double-queue'); _report.skipped.push({ ..._cellRef(cell), reason: 'already-pending' }); continue; }
+                // ALREADY RUNNING COUNTS, not just already queued. VS Code
+                // throws rather than hand out a second execution for one cell,
+                // and that throw escaped executeHandler and made the re-run look
+                // like it had finished instantly.
+                if (this.executionQueue.hasAnyForCell(cell)) {
+                    const running = !this.executionQueue.hasPendingForCell(cell);
+                    scrollLog('[execute] cell', cell.index, running ? 'already running — skipping' : 'already pending — skipping double-queue');
+                    _report.skipped.push({ ..._cellRef(cell), reason: running ? 'already-running' : 'already-pending' });
+                    if (running && !isSilent) {
+                        // Say so: silence here reads as "Shift+Enter did nothing".
+                        vscode.window.setStatusBarMessage(
+                            `Cell ${cell.index + 1} is still running — interrupt it first to re-run`, 4000);
+                    }
+                    continue;
+                }
                 // Always use the real VS Code execution API so outputs are written to
                 // the notebook and visible to the user.  Auto-scroll is suppressed by
                 // the scroll guard (_agentGuardActive) which restores the viewport at Idle.
@@ -1844,7 +1869,7 @@ class WolframNotebookKernel {
             for (const cell of cells) {
                 // Don't double-queue a cell that already has a pending execution
                 // (guards against rapid Shift+Enter before kernel is ready).
-                if (this.executionQueue.hasPendingForCell(cell)) { scrollLog('[execute] cell', cell.index, 'already pending — skipping'); _report.skipped.push({ ..._cellRef(cell), reason: 'already-pending' }); continue; }
+                if (this.executionQueue.hasAnyForCell(cell)) { scrollLog('[execute] cell', cell.index, 'already queued or running — skipping'); _report.skipped.push({ ..._cellRef(cell), reason: 'already-pending' }); continue; }
                 const execution = await _createExecution(cell);
                 if (!execution) { _report.skipped.push({ ..._cellRef(cell), reason: 'not-associated' }); continue; }
                 // Queued to run after the kernel launches — dispatched, not skipped.
