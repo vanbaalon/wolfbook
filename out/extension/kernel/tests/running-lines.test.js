@@ -247,6 +247,100 @@ t('scrolling back into view re-applies the mark', () => {
     RL.clearRunning();
 });
 
+// ── the queue ─────────────────────────────────────────────────────────────
+//
+// A queued cell is accepted but not started. It gets the same outline, DASHED:
+// a broken line is what "not yet" looks like without needing a legend.
+
+console.log('queued cells');
+
+t('a queued cell is outlined dashed, and more faintly than a running one', () => {
+    assert.ok(RL.QUEUED_ALPHA < RL.BORDER_ALPHA,
+        'waiting must read as quieter than running');
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(
+        path.join(__dirname, '..', '..', 'execution', 'running-lines.js'), 'utf8');
+    assert.ok(/borderStyle: 'dashed'/.test(src), 'dashed says "not yet" with no legend');
+    assert.ok(/borderStyle: 'solid'/.test(src), 'and solid stays for the running cell');
+});
+
+t('queued cells are marked, and the running one is not among them', () => {
+    reset();
+    const a = makeEditor('cell:1', 4);
+    const b = makeEditor('cell:2', 4);
+    const c = makeEditor('cell:3', 4);
+    visibleEditors = [a, b, c];
+    RL.showRunning({ document: a.document }, { startLine: 0, endLine: 1 });
+    RL.setQueued([{ document: b.document }, { document: c.document }]);
+    const marked = new Set(painted().map(x => x.uri));
+    assert.ok(marked.has('cell:2') && marked.has('cell:3'), 'both waiting cells are marked');
+    assert.ok(marked.has('cell:1'), 'and the running one still has its own mark');
+    RL.clearRunning(); RL.setQueued([]);
+});
+
+t('a cell in BOTH lists is drawn as running, not as queued', () => {
+    // Running is the stronger and more specific claim.
+    reset();
+    const a = makeEditor('cell:1', 3);
+    visibleEditors = [a];
+    RL.showRunning({ document: a.document }, { startLine: 0, endLine: 0 });
+    decoCalls.length = 0;
+    RL.setQueued([{ document: a.document }]);
+    const dashedUsed = painted().some(x => /dashed/.test((typesById.get(x.typeId) || {}).borderStyle || ''));
+    assert.ok(!dashedUsed, 'the running cell must not also be outlined as waiting');
+    RL.clearRunning(); RL.setQueued([]);
+});
+
+t('emptying the queue removes the dashed marks', () => {
+    reset();
+    const b = makeEditor('cell:2', 3);
+    visibleEditors = [b];
+    RL.setQueued([{ document: b.document }]);
+    assert.ok(painted().length > 0, 'marked while waiting');
+    decoCalls.length = 0;
+    RL.setQueued([]);
+    assert.strictEqual(painted().length, 0, 'and unmarked when the queue drains');
+});
+
+t('a finishing cell does not clear the rest of the queue', () => {
+    // One cell finishing is not the queue emptying; they are separate calls for
+    // exactly that reason.
+    reset();
+    const a = makeEditor('cell:1', 3);
+    const b = makeEditor('cell:2', 3);
+    visibleEditors = [a, b];
+    RL.showRunning({ document: a.document }, { startLine: 0, endLine: 0 });
+    RL.setQueued([{ document: b.document }]);
+    decoCalls.length = 0;
+    RL.clearRunning();
+    assert.ok(painted().some(x => x.uri === 'cell:2'),
+        'the cell still waiting keeps its mark');
+    RL.setQueued([]);
+});
+
+t('turning the feature off marks nothing, queued included', () => {
+    reset();
+    config['wolfbook.notebook.highlightRunningLines'] = false;
+    const b = makeEditor('cell:2', 3);
+    visibleEditors = [b];
+    RL.setQueued([{ document: b.document }]);
+    assert.strictEqual(painted().length, 0);
+});
+
+t('the marks are driven from the QUEUE, not tracked beside it', () => {
+    // One source of truth: a mark cannot then survive a path that forgot to
+    // update it.
+    const fs = require('fs');
+    const path = require('path');
+    const ctrl = fs.readFileSync(path.join(__dirname, '..', '..', 'controller.js'), 'utf8');
+    const co = fs.readFileSync(path.join(__dirname, '..', '..', 'execution', 'checkout.js'), 'utf8');
+    assert.ok(/setQueued\(this\.executionQueue\.pendingCells\(\)\)/.test(ctrl),
+        'the controller reads the queue');
+    assert.ok((co.match(/setQueued\(self\.executionQueue\.pendingCells\(\)\)/g) || []).length >= 2,
+        'and checkout re-reads it when a cell starts AND when one ends');
+});
+
 // ── the lifetime, which is the part that matters ──────────────────────────
 
 console.log('clearing');
@@ -259,8 +353,8 @@ t('clearRunning empties every decoration type', () => {
     decoCalls.length = 0;
     RL.clearRunning();
     assert.strictEqual(painted().length, 0, 'nothing may remain painted');
-    assert.strictEqual(decoCalls.length, 5,
-        'the wash and all four outline edges are explicitly emptied');
+    assert.strictEqual(decoCalls.length, 9,
+        'the wash, the four running edges and the four queued edges are all emptied');
 });
 
 t('it clears editors it never painted, too', () => {
@@ -386,8 +480,8 @@ t('dispose releases every type it made', () => {
     visibleEditors = [ed];
     RL.showRunning({ document: ed.document }, { startLine: 0, endLine: 1 });
     RL.dispose();
-    assert.strictEqual(disposedTypes - before, 5,
-        'the wash plus the four outline edges');
+    assert.strictEqual(disposedTypes - before, 9,
+        'the wash plus four running edges plus four queued edges');
 });
 
 RL.dispose();

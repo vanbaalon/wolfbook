@@ -1792,6 +1792,16 @@ class WolframNotebookKernel {
         // falls back to the bare kernel-picker UI — that is a modal an agent can
         // never dismiss, and for humans the association either works or the skip
         // is reported.
+        // Mark the cells waiting their turn. Read from the QUEUE rather than
+        // tracked alongside it: one source of truth, so a mark cannot survive a
+        // path that forgot to update it.
+        const _syncQueued = () => {
+            try {
+                require('./execution/running-lines')
+                    .setQueued(this.executionQueue.pendingCells());
+            } catch (_) { /* a decoration must never break a run */ }
+        };
+
         const _createExecution = async (cell) => {
             try {
                 return this._controller.createNotebookCellExecution(cell);
@@ -1855,6 +1865,7 @@ class WolframNotebookKernel {
                     this.abortEvaluation();
                 });
             }
+            _syncQueued();
             scrollLog('[execute] kernel resolved — calling checkoutExecutionQueue | queue:', this.executionQueue.queueLength(), '| silent:', isSilent);
             _report.queueDepthAfter = this.executionQueue.queueLength();
             this.checkoutExecutionQueue();

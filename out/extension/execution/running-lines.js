@@ -34,6 +34,11 @@ const GOLD = '255, 205, 60';
 // cell from across the page and stops competing with the code inside it.
 const BORDER_ALPHA = 0.42;
 const BORDER_PX = 1;
+// A QUEUED cell — accepted, not started. Dashed, because a broken line is what
+// "not yet" looks like without needing a legend, and fainter still: several
+// cells can be queued at once and they must read as a group waiting behind the
+// one that is running, never as several things happening.
+const QUEUED_ALPHA = 0.30;
 
 let _types = null;
 
@@ -80,6 +85,12 @@ function _makeTypes() {
         borderWidth: widths,
     });
     const p = `${BORDER_PX}px`;
+    const dashed = (widths) => vscode.window.createTextEditorDecorationType({
+        isWholeLine: true,
+        borderStyle: 'dashed',
+        borderColor: `rgba(${GOLD}, ${QUEUED_ALPHA})`,
+        borderWidth: widths,
+    });
     _types = {
         // The running sub-expression's lines.
         line: vscode.window.createTextEditorDecorationType({
@@ -93,6 +104,11 @@ function _makeTypes() {
         top: border(`${p} ${p} 0 ${p}`),
         middle: border(`0 ${p} 0 ${p}`),
         bottom: border(`0 ${p} ${p} ${p}`),
+        // The same outline, dashed, for a cell still waiting its turn.
+        qSingle: dashed(p),
+        qTop: dashed(`${p} ${p} 0 ${p}`),
+        qMiddle: dashed(`0 ${p} 0 ${p}`),
+        qBottom: dashed(`0 ${p} ${p} ${p}`),
     };
     return _types;
 }
@@ -103,46 +119,61 @@ function _editorFor(uriString) {
 }
 
 let _active = null;         // { uri, range } — the running cell and its lines
+let _queued = [];           // uri strings of cells accepted but not yet started
+
+const RUN_EDGES = ['single', 'top', 'middle', 'bottom'];
+const QUEUE_EDGES = ['qSingle', 'qTop', 'qMiddle', 'qBottom'];
+const ALL_KEYS = ['line', ...RUN_EDGES, ...QUEUE_EDGES];
 
 function _clearOn(editor, types) {
-    for (const key of ['line', 'single', 'top', 'middle', 'bottom']) {
+    for (const key of ALL_KEYS) {
         try { editor.setDecorations(types[key], []); } catch (_) {}
+    }
+}
+
+/** Outline one editor's whole document with the given four edge types. */
+function _outline(editor, types, keys) {
+    const last = Math.max(0, editor.document.lineCount - 1);
+    const buckets = { single: [], top: [], middle: [], bottom: [] };
+    for (let n = 0; n <= last; n++) {
+        let r = null;
+        try { r = new vscode.Range(n, 0, n, editor.document.lineAt(n).text.length); }
+        catch (_) { continue; }
+        buckets[edgeFor(n, 0, last)].push(r);
+    }
+    const byEdge = { single: keys[0], top: keys[1], middle: keys[2], bottom: keys[3] };
+    for (const edge of ['single', 'top', 'middle', 'bottom']) {
+        try { editor.setDecorations(types[byEdge[edge]], buckets[edge]); } catch (_) {}
     }
 }
 
 function _paint() {
     const types = _makeTypes();
-    if (!_active) {
-        // Every visible editor, not just the one last painted: a cell editor
-        // can be recreated (scrolled out and back) while decorated.
-        for (const ed of (vscode.window.visibleTextEditors || [])) _clearOn(ed, types);
-        return;
+    // Start from a clean slate on every visible editor: a cell can move between
+    // states (queued -> running -> done) and between them the OLD mark has to
+    // go, or a finished cell keeps a dashed outline for ever.
+    for (const ed of (vscode.window.visibleTextEditors || [])) _clearOn(ed, types);
+
+    // Queued cells first, so a cell that is somehow in both lists ends up drawn
+    // as RUNNING — the stronger and more specific claim.
+    for (const uri of _queued) {
+        if (_active && uri === _active.uri) continue;
+        const ed = _editorFor(uri);
+        if (ed) _outline(ed, types, QUEUE_EDGES);
     }
+
+    if (!_active) return;
     const ed = _editorFor(_active.uri);
     if (!ed) return;                       // cell scrolled out of view
-    const last = Math.max(0, ed.document.lineCount - 1);
-    const mk = (n) => {
-        try { return new vscode.Range(n, 0, n, ed.document.lineAt(n).text.length); }
-        catch (_) { return null; }
-    };
+    _outline(ed, types, RUN_EDGES);
 
-    // The cell outline: every line, each carrying the edges it needs.
-    const buckets = { single: [], top: [], middle: [], bottom: [] };
-    for (let n = 0; n <= last; n++) {
-        const r = mk(n);
-        if (r) buckets[edgeFor(n, 0, last)].push(r);
-    }
-    for (const key of ['single', 'top', 'middle', 'bottom']) {
-        try { ed.setDecorations(types[key], buckets[key]); } catch (_) {}
-    }
-
-    // The running lines.
+    // The lines of the sub-expression running right now.
     const sub = rangeFor(_active.range, ed.document.lineCount);
     const lines = [];
     if (sub) {
         for (let n = sub.startLine; n <= sub.endLine; n++) {
-            const r = mk(n);
-            if (r) lines.push(r);
+            try { lines.push(new vscode.Range(n, 0, n, ed.document.lineAt(n).text.length)); }
+            catch (_) { /* line gone */ }
         }
     }
     try { ed.setDecorations(types.line, lines); } catch (_) {}
@@ -180,10 +211,25 @@ function clearRunning() {
     if (_types) _paint();
 }
 
+/**
+ * The cells accepted for evaluation but not yet started.
+ *
+ * Separate from clearRunning on purpose: one cell finishing does not empty the
+ * queue, and the queue emptying is not one cell finishing.
+ */
+function setQueued(cells) {
+    if (!_enabled()) { _queued = []; if (_types) _paint(); return; }
+    _queued = (cells || [])
+        .map(c => { try { return c.document.uri.toString(); } catch (_) { return null; } })
+        .filter(Boolean);
+    _paint();
+}
+
 /** Re-apply after a visibility change — a cell scrolled back into view. */
-function refresh() { if (_active) _paint(); }
+function refresh() { if (_active || _queued.length) _paint(); }
 
 function dispose() {
+    _queued = [];
     clearRunning();
     if (_types) {
         for (const t of Object.values(_types)) { try { t.dispose(); } catch (_) {} }
@@ -192,8 +238,8 @@ function dispose() {
 }
 
 module.exports = {
-    showRunning, clearRunning, refresh, dispose,
+    showRunning, clearRunning, setQueued, refresh, dispose,
     // pure, for tests
     rangeFor, edgeFor,
-    LINE_ALPHA, BORDER_ALPHA, BORDER_PX, GOLD,
+    LINE_ALPHA, BORDER_ALPHA, BORDER_PX, QUEUED_ALPHA, GOLD,
 };

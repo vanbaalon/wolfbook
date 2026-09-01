@@ -58,6 +58,10 @@ async function checkoutExecutionQueue(self) {
         currentExecution.execution.cell.document.uri.toString()
     );
 
+    // This cell is about to start, so it is no longer one of the waiting ones —
+    // and whatever else is still waiting keeps its dashed outline.
+    try { runningLines.setQueued(self.executionQueue.pendingCells()); } catch (_) {}
+
     const code = currentExecution.execution.cell.document.getText();
     const _cellForOperation = currentExecution.execution.cell;
     const _cellOperationId = self.arbiter?.status(self)?.activeOperation?.operationId || null;
@@ -1713,6 +1717,8 @@ async function checkoutExecutionQueue(self) {
         // A mark left behind would say a computation is running when none is,
         // which is worse than never having painted it.
         try { runningLines.clearRunning(); } catch (_) {}
+        // The queue has moved on; re-read it rather than assume what is left.
+        try { runningLines.setQueued(self.executionQueue.pendingCells()); } catch (_) {}
         if (self.session?.endTransaction) {
             try { await self.session.endTransaction(self.isAborting ? 'aborted' : 'completed'); } catch (_) {}
         }

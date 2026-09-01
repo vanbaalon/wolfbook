@@ -202,6 +202,10 @@ class ExecutionQueue {
             scrollLog(`[queue.end] id not found (already cleared) succeed=${succeed}`);
         }
     }
+    /** The cells accepted for evaluation but not yet started, in queue order. */
+    pendingCells() {
+        return this.queue.filter(item => !item.started).map(item => item.execution.cell);
+    }
     getNextPendingExecution() {
         if (this.queue.length > 0 && !(this.queue[0]?.started)) {
             return this.queue[0];
