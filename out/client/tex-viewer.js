@@ -2446,7 +2446,7 @@ function paintCursorCaret(h) {
     const v = rectToViewport(cr.page, { page: cr.page, x: cr.x, y: cr.y, w: 0, h: cr.h });
     if (!v) return;
     const el = document.createElement('div');
-    el.className = 'curcaret' + (state.pinHighlight ? ' pinned' : '');
+    el.className = 'curcaret';
     el.style.left = `${v.x}px`;
     el.style.top = `${v.y}px`;
     el.style.height = `${Math.max(6, v.h)}px`;
@@ -3525,32 +3525,51 @@ function buildEditCard(e) {
     // thing you are actually typing in, was the one place the paper stopped
     // answering. The offsets are relative to the block; the extension adds the
     // block's own start and treats it exactly as it treats the editor's.
+    // LEADING EDGE, NOT TRAILING.
+    //
+    // This was a flat 90 ms trailing debounce, so EVERY caret movement waited
+    // 90 ms before the page heard about it — including a single arrow-key
+    // press, where there was nothing to coalesce. Beside the text editor, whose
+    // selection event reaches the page with no delay at all, the card visibly
+    // lagged. Reported as exactly that.
+    //
+    // An isolated move now posts immediately; a burst (a held arrow key, typing)
+    // still collapses to one message per MIN_GAP.
+    //
+    // flushCaret is declared BEFORE sendCaret refers to it: `const` is not
+    // hoisted, and this file has shipped a temporal-dead-zone bug before.
+    const MIN_GAP = 60;
     let caretT = null;
+    let caretLastSent = 0;
+    const flushCaret = () => {
+        caretLastSent = Date.now();
+        if (!state.edit) return;
+        const a = ta.selectionStart; const b = ta.selectionEnd;
+        const key = `${a}:${b}`;
+        // A repaint is not a movement — and neither is a range the PAGE just
+        // put here. `_caretSent` is kept on the session rather than in this
+        // closure so that selectInEditCard can prime it: without that the
+        // page's own selection arrives, sets the range, fires `select`, and is
+        // posted straight back as though the reader had moved.
+        if (key === state.edit._caretSent) return;
+        state.edit._caretSent = key;
+        // THE BOX AROUND THE LOCATED WORD IS AN ANSWER TO ONE QUESTION, and
+        // moving the caret asks a different one. It used to stay drawn for the
+        // life of the card, so a word clicked once stayed marked however far
+        // away the reader then typed — reported as "the initially highlighted
+        // word stays highlighted forever".
+        if (state.edit && state.edit.sel &&
+            (state.edit.sel.start !== a || state.edit.sel.end !== b)) {
+            state.edit.sel = null;
+            syncHighlight(card);
+        }
+        vscode.postMessage({ type: 'editCaret', editId: e.id, start: a, end: b });
+    };
     const sendCaret = () => {
         clearTimeout(caretT);
-        caretT = setTimeout(() => {
-            if (!state.edit) return;
-            const a = ta.selectionStart; const b = ta.selectionEnd;
-            const key = `${a}:${b}`;
-            // A repaint is not a movement — and neither is a range the PAGE
-            // just put here. `_caretSent` is kept on the session rather than in
-            // this closure so that selectInEditCard can prime it: without that
-            // the page's own selection arrives, sets the range, fires `select`,
-            // and is posted straight back as though the reader had moved.
-            if (key === state.edit._caretSent) return;
-            state.edit._caretSent = key;
-            // THE BOX AROUND THE LOCATED WORD IS AN ANSWER TO ONE QUESTION,
-            // and moving the caret asks a different one. It used to stay drawn
-            // for the life of the card, so a word clicked once stayed marked
-            // however far away the reader then typed — reported as "the
-            // initially highlighted word stays highlighted forever".
-            if (state.edit && state.edit.sel &&
-                (state.edit.sel.start !== a || state.edit.sel.end !== b)) {
-                state.edit.sel = null;
-                syncHighlight(card);
-            }
-            vscode.postMessage({ type: 'editCaret', editId: e.id, start: a, end: b });
-        }, 90);
+        const since = Date.now() - caretLastSent;
+        if (since >= MIN_GAP) flushCaret();
+        else caretT = setTimeout(flushCaret, MIN_GAP - since);
     };
     for (const ev of ['keyup', 'mouseup', 'select', 'focus']) {
         ta.addEventListener(ev, sendCaret);

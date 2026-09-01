@@ -209,7 +209,12 @@ t('the client only paints a caret that came with an exact highlight', () => {
         'paintHighlight must drive the caret, so it can never outlive its highlight');
 });
 
-t('the caret does not inherit the highlight’s fade', () => {
+t('the caret neither fades nor blinks', () => {
+    // It does not FADE, because the position is still true — a caret that
+    // dimmed out would lie about where you are. And it does not BLINK: a text
+    // cursor blinks to be findable in a field you are typing into, but this one
+    // sits on a page you are READING, where the same motion is something moving
+    // in the corner of your eye that you cannot ignore. Reported as distracting.
     const fs = require('fs');
     const path = require('path');
     const css = fs.readFileSync(
@@ -218,9 +223,9 @@ t('the caret does not inherit the highlight’s fade', () => {
     assert.ok(i > 0, '.curcaret must be styled');
     const block = css.slice(i, i + 400);
     assert.ok(!/hlfade/.test(block), 'a caret that faded out would lie about where you are');
-    assert.ok(/caretblink/.test(block), 'it blinks, like a text cursor');
+    assert.ok(!/animation/.test(block), 'no animation at all on the caret');
+    assert.ok(!/caretblink/.test(css), 'and the blink keyframes are gone, not merely unused');
     assert.ok(/width:\s*2px/.test(block), 'fixed px, so it does not become a bar at high zoom');
-    assert.ok(/prefers-reduced-motion/.test(css), 'blinking is motion and must be opt-out-able');
 });
 
 // ── RESOLUTION COLUMN vs CARET COLUMN ─────────────────────────────────────

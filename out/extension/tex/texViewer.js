@@ -5166,6 +5166,13 @@ class TexViewer {
             try { open.selection = sel; } catch (_) { /* fall through to the direct sync */ }
             // Its own selection-change event drives the page from here, so
             // syncing again would post the same answer twice.
+            //
+            // Tempting to sync directly as well, to save a hop through VS
+            // Code's event loop — but the MEASURED cause of the reported lag
+            // was the card's own 90 ms debounce (now 1 ms), and there is no
+            // measurement saying this hop is slow. Breaking a deliberate
+            // one-answer-per-movement invariant on a hunch is how a page
+            // starts repainting twice for every keystroke.
             return;
         }
         // `active` is where the CARET is — the end of a drag, and the whole

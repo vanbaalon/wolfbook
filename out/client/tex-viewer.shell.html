@@ -104,20 +104,15 @@
      Thickness is fixed in px rather than scaled with the page — a caret is a
      piece of UI, not part of the type, and a 2 px line that grew into a bar at
      400% zoom would cover the letter it is pointing between. */
+  /* IT DOES NOT BLINK. A text cursor blinks because it has to be findable in a
+     field you are typing into; this one sits on a PAGE you are reading, where
+     the same motion is just something moving in the corner of your eye that you
+     cannot ignore. Reported as distracting, and it was. A solid 2 px rule is
+     perfectly findable and then stops asking for attention. */
   .curcaret { position:absolute; pointer-events:none; z-index:9;
               width:2px; margin-left:-1px; border-radius:1px;
-              background:#e5484d; box-shadow:0 0 0 .5px rgba(255,255,255,.55);
-              animation: caretblink 1.06s steps(1,end) infinite; }
+              background:#e5484d; box-shadow:0 0 0 .5px rgba(255,255,255,.55); }
   .wb-dark-pages .curcaret { background:#ff6169; box-shadow:0 0 0 .5px rgba(0,0,0,.5); }
-  /* Pinning the highlight means "hold this still while I look at it", so the
-     caret stops blinking with it. */
-  .curcaret.pinned { animation:none; }
-  @keyframes caretblink { 0%,50% { opacity:1; } 50.01%,100% { opacity:.12; } }
-  /* Blinking is motion, and some readers have asked the OS not to show it.
-     The caret stays — only the animation goes. */
-  @media (prefers-reduced-motion: reduce) {
-      .curcaret { animation:none; }
-  }
   /* A darkened page would swallow a multiply blend, so the wash goes on top
      instead. Keyed off the PAGE theme, not `prefers-color-scheme`: that is the
      operating system's preference, and a light VS Code theme on a dark desktop
