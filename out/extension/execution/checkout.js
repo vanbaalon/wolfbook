@@ -8,6 +8,7 @@ const fs      = require('fs');
 const { scrollLog, wstpLog } = require('../utils/dev-logger');
 const _output = require('../output/renderer');
 const { splitIntoSubexpressions } = require('../utils/wl-parse');
+const runningLines = require('./running-lines');
 
 function _operationOutputPreview(cell) {
     const parts = [];
@@ -509,6 +510,22 @@ async function checkoutExecutionQueue(self) {
             // Substitute display-only Unicode operators back to ASCII for the kernel.
             // The formatter renders -> as → (\u2192) and :> as ⧴ (\u29f4).
             subExpr = subExpr.replace(/\u2192/g, '->').replace(/\u29f4/g, ':>');
+            // MARK THE LINES THAT ARE RUNNING NOW.
+            //
+            // The split already knows the range this part came from, so the
+            // reader can see where a long cell has got to instead of watching
+            // one spinner for the whole thing. Cleared in the cell's `finally`,
+            // whatever ends it.
+            //
+            // A comment-only part is stepped over rather than evaluated, so
+            // marking it would say a computation is happening on a line where
+            // nothing is — and on a commented cell the mark would race down the
+            // file for no reason. The previous part's mark stays until real
+            // work begins.
+            if (!(subExpr.startsWith('(*') && subExpr.endsWith('*)'))) {
+                try { runningLines.showRunning(currentExecution.execution.cell, subExprs[i]); }
+                catch (_) { /* a decoration must never be able to stop an evaluation */ }
+            }
             scrollLog('[checkout] sub', i, '/', subExprs.length, 'start | cell', currentExecution.execution.cell.index, '| expr:', subExpr.slice(0, 60));
             self.writeDebugLog(`[CHECKOUT] cell ${currentExecution.execution.cell.index} | sub ${i}/${subExprs.length} start | expr: ${subExpr.slice(0, 80)}`);
 
@@ -1692,6 +1709,10 @@ async function checkoutExecutionQueue(self) {
         // Non-fatal error: queue already cleared above, nothing more to dequeue.
         return;
     } finally {
+        // Success, failure, abort, kernel death — all of them come through here.
+        // A mark left behind would say a computation is running when none is,
+        // which is worse than never having painted it.
+        try { runningLines.clearRunning(); } catch (_) {}
         if (self.session?.endTransaction) {
             try { await self.session.endTransaction(self.isAborting ? 'aborted' : 'completed'); } catch (_) {}
         }

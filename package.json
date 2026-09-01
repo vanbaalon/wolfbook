@@ -1183,6 +1183,11 @@
           "type": "boolean",
           "default": true,
           "markdownDescription": "When you click a word in the WPaper page, put the editor's caret at the **character you clicked** and outline the word, instead of selecting the whole word. VS Code's caret can only sit at one end of a selection, so a selected word cannot show where in it you pointed.\n\nTurn this off to restore the older behaviour (the word selected, caret at its end) — useful if you click a word in order to type over it. **Double-click still selects the word** either way, and ⌘/Ctrl-click still selects the widened group."
+        },
+        "wolfbook.notebook.highlightRunningLines": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "While a cell runs, gently highlight the **lines currently being evaluated** rather than the whole cell. A cell is sent to the kernel one top-level expression at a time, so on a long cell this shows where the computation has got to.\n\nThe highlight breathes slowly; set `#workbench.reduceMotion#` to `on` to keep the mark and stop the animation."
         }
       }
     },

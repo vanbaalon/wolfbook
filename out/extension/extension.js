@@ -110,6 +110,15 @@ async function activate(context) {
         open(name.fsPath);
     } }));
     context.subscriptions.push(vscode_1.commands.registerCommand('wolfbook.DownloadWolframEngine', onDownloadWolframEngine));
+    // A cell editor scrolled out of view and back is a NEW editor object with no
+    // decorations on it, so the running-lines mark has to be re-applied or it
+    // silently disappears part-way through a long computation.
+    context.subscriptions.push(
+        vscode.window.onDidChangeVisibleTextEditors(() => {
+            try { require('./execution/running-lines').refresh(); } catch (_) {}
+        }),
+        { dispose: () => { try { require('./execution/running-lines').dispose(); } catch (_) {} } },
+    );
     context.subscriptions.push(vscode.commands.registerCommand("wolfbook.openConfigurations", async () => {
         await vscode.commands.executeCommand("workbench.action.openSettings", "@ext:wolfbook.wolfbook");
     }));
@@ -3180,6 +3189,7 @@ exports.activate = activate;
  * are left running after a window reload.
  */
 function deactivate() {
+    try { require('./execution/running-lines').dispose(); } catch (_) {}
     if (_activeController) {
         try { _activeController.quitKernel(); } catch(_) {}
         _activeController = null;
