@@ -188,6 +188,25 @@ t('nothing animates', () => {
     assert.ok(!/pulse|blink|breath\w*\(/.test(src), 'and no pulse left behind');
 });
 
+t('the cell outline is a hairline, and translucent', () => {
+    // It runs the whole way round the cell, so it has much more length to be
+    // loud with than the wash has area. A solid 2px gold frame read as exactly
+    // that; reported.
+    assert.ok(RL.BORDER_PX <= 1, `${RL.BORDER_PX}px reads as a frame, not a hint`);
+    assert.ok(RL.BORDER_ALPHA <= 0.55,
+        `${RL.BORDER_ALPHA} is too strong for a line that long`);
+    assert.ok(RL.BORDER_ALPHA >= 0.2,
+        `${RL.BORDER_ALPHA} would not be findable`);
+});
+
+t('the outline is still stronger than the wash', () => {
+    // They answer different questions at different scales: the border says
+    // WHICH CELL from across the page, the wash says which lines once you are
+    // reading it. Inverting that would make the cell hard to find.
+    assert.ok(RL.BORDER_ALPHA > RL.LINE_ALPHA,
+        'the coarse mark must not be fainter than the fine one');
+});
+
 t('the wash is faint enough to read code through', () => {
     assert.ok(RL.LINE_ALPHA <= 0.12, `${RL.LINE_ALPHA} would compete with the syntax colours`);
     assert.ok(RL.LINE_ALPHA >= 0.05, `${RL.LINE_ALPHA} would be invisible`);

@@ -28,10 +28,12 @@ const vscode = require('vscode');
 // telling the eye where to look.
 const LINE_ALPHA = 0.09;
 const GOLD = '255, 205, 60';
-// The cell outline. Solid, because it is the coarse "here" mark and has a whole
-// cell's width to be quiet in.
-const BORDER_ALPHA = 0.85;
-const BORDER_PX = 2;
+// The cell outline. A HAIRLINE, and translucent: it runs the whole way round a
+// cell, so it has far more length to be loud with than the line wash has, and
+// at 2px/0.85 it read as a hard yellow frame. One pixel at 0.42 still finds the
+// cell from across the page and stops competing with the code inside it.
+const BORDER_ALPHA = 0.42;
+const BORDER_PX = 1;
 
 let _types = null;
 
