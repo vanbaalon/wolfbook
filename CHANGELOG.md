@@ -4,6 +4,100 @@ All notable changes to **Wolfbook** are documented here.
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- **Wolfbook no longer disables VSCodeVim.** Escape mode registered the global
+  `type` command. VS Code allows exactly one registration of `type` in the
+  editor, so whichever extension activates first wins and every other one's
+  registration fails — which left Vim inert in *every* file type, plain text
+  included, and made the symptom appear or disappear across restarts depending
+  on activation order. Forwarding to `default:type` did not help: the harm is
+  in taking the registration. The interception was removed entirely, having
+  turned out to do nothing — it filled a buffer nothing read, and refreshed a
+  highlight the selection listener already refreshes. A regression test now
+  scans the whole extension for `type` and the other single-owner editor
+  commands. (#17)
+- **Keyboard shortcuts no longer reach into files Wolfbook was not asked to
+  handle.** `Ctrl+V` was bound in every `.tex` file from activation, as were
+  `Alt+[` and `Alt+]`, whether or not the paper had ever been opened in WPaper.
+  Every `.tex` shortcut now additionally requires the WPaper viewer to be open
+  for that paper; a `.tex` file you are only editing keeps your own bindings.
+- **Re-running a cell that is still running.** Pressing Shift+Enter on a
+  running cell appeared to run it and finish instantly. VS Code refuses to
+  create a second execution for a cell that already has one, and refuses by
+  throwing; the guard only recognised cells that had not yet *started*. The
+  re-run is now declined with an explanation in the status bar, and a failure
+  to create an execution no longer aborts the rest of a Run All.
+- **WPaper: the caret is drawn where the cursor is.** After an inverse search
+  the editor leaves the caret at the end of the word it selected, while the
+  page drew it at the start — resolution and caret placement were sharing one
+  column.
+- **WPaper: the mini-editor answers immediately.** Its caret was reported on a
+  fixed 90 ms delay, so every movement lagged the page; an isolated move now
+  reaches the page in about 1 ms while bursts are still coalesced. A held
+  arrow key also moves the page caret live rather than only on release.
+- **WPaper: parentheses and brackets are no longer typeset as mathematics in
+  exported HTML and PDF.** The exporter wrote its KaTeX delimiter list into the
+  exported file as JavaScript source and lost one level of escaping, leaving
+  bare `(` and `[` acting as inline-math delimiters. In one 36-slide talk that
+  affected 94 parenthetical and 44 bracketed spans across 28 slides, citations
+  included.
+
+### Added
+
+- **Wolfbook's shortcuts can be turned off.** `wolfbook.keybindings.notebook`
+  and `wolfbook.keybindings.tex`, both enabled by default, disable each group
+  without uninstalling. Disabled bindings are not registered at all, so the
+  keys return to whatever else wants them.
+- **WPaper is discoverable from a `.tex` file.** `Ctrl+Alt+W` opens the viewer,
+  and the first LaTeX file opened offers it once, with a shortcut to the guided
+  tour. Nothing about a `.tex` file previously suggested that the wolf icon in
+  the editor title bar would render it.
+- **WPaper shows where in a word the cursor sits.** A thin caret marks the exact
+  character inside the highlighted word, read from the same exact glyph map the
+  highlight uses. Clicking the middle of a word now outlines the word and places
+  the editor caret at the character clicked, instead of selecting the whole
+  word — the two are separate marks because a selection can only put the caret
+  at one of its ends. Applies in both directions to the mini-editor.
+- **Notebook cells show what is running and what is waiting.** The running cell
+  is outlined in gold and the lines of the sub-expression currently being
+  evaluated are shaded; cells queued behind it are outlined dashed. A cell is
+  sent to the kernel one top-level expression at a time, so on a long cell this
+  shows where the computation has reached. Nothing animates, and every mark is
+  cleared however the run ends. Disable with
+  `wolfbook.notebook.highlightRunningLines`.
+- **Wolfslide reports layout instead of requiring a screenshot.**
+  `wolfslide_getSlideHtml(format:"fit")` returns overflow in pixels, which block
+  is clipped, and a closed-form rescale hint; `wolfslide_advanced(action:"fitAll")`
+  sweeps a deck. Mutations carry a one-line fit summary and the deck length read
+  back after the write. Also added: `checkRefs` resolves arXiv identifiers
+  against INSPIRE-HEP and flags author mismatches, `promoteStyle` promotes
+  repeated inline styles to deck presets, and `searchSlides` accepts a regular
+  expression and returns block locations.
+- **Wolfslide flags markup that renders without error but means something
+  else.** `\color{…}{…}` inside mathematics is a switch, not a scoped command:
+  it recolours everything to the end of the enclosing group. The lint names
+  what else was coloured. Unescaped `%` inside mathematics is flagged too.
+
+### Changed
+
+- **Wolfslide: an ambiguous `blockId` is now an error.** When a block id matches
+  more than one slide and no `slideIndex` is given, the candidates are listed
+  instead of the tool editing whichever slide happened to be visible.
+- **Wolfslide: the slide editor's rich text editor no longer alters colour or
+  size on edit.** It now renders text in the colour the slide uses, and never
+  writes its own display colour or pixel size back into the deck. Thumbnails
+  typeset mathematics like the canvas does, and taking a screenshot no longer
+  leaves the slide enlarged.
+- **Wolfslide presentation mode hides the editor chrome again.** Zen mode's
+  defaults changed and no longer hide the tab bar, and never hid breadcrumbs or
+  the secondary side bar. Presentation settings are restored when the deck is
+  closed as well as on exit.
+
+---
+
 ## [2.9.3] - 2026-08-30
 
 ### Fixed
