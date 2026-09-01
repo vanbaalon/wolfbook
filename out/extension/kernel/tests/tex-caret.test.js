@@ -240,10 +240,25 @@ t('the caret does not inherit the highlight’s fade', () => {
 console.log('resolution column vs caret column');
 
 const Module = require('module');
+const stubVscode = require('./_stub-vscode').makeVscodeStub();
+// The shared stub has no Selection/Range — _onEditCaret builds one.
+if (!stubVscode.Selection) {
+    stubVscode.Selection = class {
+        constructor(a, b) {
+            this.anchor = a; this.active = b; this.start = a; this.end = b;
+            this.isEmpty = a.line === b.line && a.character === b.character;
+        }
+    };
+}
+// Async tests run in a queue at the end: `t` is synchronous, so an async body
+// passed to it would run detached and an assertion failure would surface as an
+// unhandled rejection long after the summary said everything passed.
+const asyncTests = [];
+const at = (name, fn) => asyncTests.push({ name, fn });
 const { TexViewer } = (() => {
     const orig = Module._load;
     Module._load = function (req, ...rest) {
-        if (req === 'vscode') return require('./_stub-vscode').makeVscodeStub();
+        if (req === 'vscode') return stubVscode;
         return orig.call(this, req, ...rest);
     };
     try { return require('../../tex/texViewer'); }
@@ -429,4 +444,138 @@ t('reading the setting can never break the click', () => {
         'it must fall back to the default rather than throwing');
 });
 
-console.log(`\n${pass} assertions passed`);
+// ── THE MINI-EDITOR, BOTH WAYS ────────────────────────────────────────────
+//
+// The card is a second editing surface for the same text, so the cursor has to
+// behave the same there: a click on the page puts the card's caret at the
+// character clicked (with the word still marked), and moving the card's caret
+// moves the caret drawn on the page. Two surfaces for one document should not
+// disagree about where the reader is.
+
+console.log('mini-editor: page → card');
+
+/** A document whose offsets and positions are a single line, for simplicity. */
+function flatDoc(fsPath = '/x.tex') {
+    return {
+        uri: { fsPath, toString: () => `file://${fsPath}` },
+        positionAt: (n) => ({ line: 0, character: n }),
+        offsetAt: (pos) => pos.character,
+        lineCount: 1,
+        lineAt: () => ({ text: 'x'.repeat(400) }),
+    };
+}
+
+function cardViewer(edit) {
+    const posted = [];
+    const self = Object.create(TexViewer.prototype);
+    self._edit = edit;
+    self._post = (m) => posted.push(m);
+    return { self, posted };
+}
+
+t('a click sends the card the word AND the clicked character', () => {
+    const { self, posted } = cardViewer({ id: 'e1', file: '/x.tex', startOffset: 100, endOffset: 200 });
+    const doc = flatDoc();
+    // The word occupies 120..132; the reader clicked at 126.
+    self._postEditSelection(doc,
+        { start: { line: 0, character: 120 }, end: { line: 0, character: 132 } },
+        true, { line: 0, character: 126 });
+    const m = posted.find(x => x.type === 'editSelect');
+    assert.ok(m, 'the card must be told');
+    assert.strictEqual(m.start, 20, 'block-relative word start');
+    assert.strictEqual(m.end, 32, 'block-relative word end');
+    assert.strictEqual(m.caret, 26, 'block-relative caret, inside the word');
+});
+
+t('a caret outside the marked word is dropped, not sent', () => {
+    // It would put the card's cursor somewhere the mark does not cover, which
+    // is the confusion this whole change exists to remove.
+    const { self, posted } = cardViewer({ id: 'e1', file: '/x.tex', startOffset: 100, endOffset: 200 });
+    self._postEditSelection(flatDoc(),
+        { start: { line: 0, character: 120 }, end: { line: 0, character: 132 } },
+        true, { line: 0, character: 180 });
+    assert.strictEqual(posted.find(x => x.type === 'editSelect').caret, undefined);
+});
+
+t('with no caret given the card still gets the range', () => {
+    // A widened Cmd-click or a dragged selection: a real range is the answer.
+    const { self, posted } = cardViewer({ id: 'e1', file: '/x.tex', startOffset: 100, endOffset: 200 });
+    self._postEditSelection(flatDoc(),
+        { start: { line: 0, character: 120 }, end: { line: 0, character: 132 } }, true, null);
+    const m = posted.find(x => x.type === 'editSelect');
+    assert.strictEqual(m.caret, undefined);
+    assert.strictEqual(m.start, 20);
+    assert.strictEqual(m.end, 32);
+});
+
+t('a click outside the open block still tells the card nothing', () => {
+    const { self, posted } = cardViewer({ id: 'e1', file: '/x.tex', startOffset: 100, endOffset: 200 });
+    self._postEditSelection(flatDoc(),
+        { start: { line: 0, character: 10 }, end: { line: 0, character: 20 } },
+        true, { line: 0, character: 15 });
+    assert.strictEqual(posted.length, 0, 'the range is not in this block');
+});
+
+t('the click path passes the caret only when it placed one', () => {
+    assert.ok(/_postEditSelection\(doc, range, !m\.takeMe, caretHere \? hitPos : null\)/.test(VIEWER_SRC),
+        'the card and the editor must make the SAME decision, not two');
+});
+
+console.log('mini-editor: card → page');
+
+at('moving the card’s caret carries it as the selection’s ACTIVE end', async () => {
+    // This is what makes the page draw its in-word caret: syncFromEditor reads
+    // sel.active, so a card caret that did not travel there would move the word
+    // highlight and leave the caret behind.
+    const doc = flatDoc();
+    const self = Object.create(TexViewer.prototype);
+    self._edit = { id: 'e1', file: '/x.tex', startOffset: 100, endOffset: 200 };
+    self.panel = {};
+    let seen = null;
+    self.syncFromEditor = (e) => { seen = e; };
+    stubVscode.workspace.openTextDocument = async () => doc;
+    stubVscode.window.visibleTextEditors = [];       // no editor open → direct sync
+    await TexViewer.prototype._onEditCaret.call(self, { editId: 'e1', start: 26, end: 26 });
+    assert.ok(seen, 'the page must be synced');
+    assert.strictEqual(seen.selection.active.character, 126, 'the caret offset, in document terms');
+    assert.strictEqual(seen.selection.isEmpty, true, 'a caret, not a range');
+});
+
+at('a range dragged in the card keeps its active END', async () => {
+    const doc = flatDoc();
+    const self = Object.create(TexViewer.prototype);
+    self._edit = { id: 'e1', file: '/x.tex', startOffset: 100, endOffset: 200 };
+    self.panel = {};
+    let seen = null;
+    self.syncFromEditor = (e) => { seen = e; };
+    stubVscode.workspace.openTextDocument = async () => doc;
+    stubVscode.window.visibleTextEditors = [];
+    await TexViewer.prototype._onEditCaret.call(self, { editId: 'e1', start: 20, end: 32 });
+    assert.strictEqual(seen.selection.start.character, 120);
+    assert.strictEqual(seen.selection.active.character, 132, 'active is the far end of the drag');
+    assert.strictEqual(seen.selection.isEmpty, false);
+});
+
+t('the card marks the WORD while its textarea holds only the caret', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const client = fs.readFileSync(
+        path.join(__dirname, '..', '..', '..', 'client', 'tex-viewer.js'), 'utf8');
+    const i = client.indexOf('function selectInEditCard(');
+    const body = client.slice(i, i + 1800);
+    assert.ok(/e\.sel = \{ start: msg\.start, end: msg\.end \}/.test(body),
+        'the highlight layer keeps the WORD — it reads e.sel, not the textarea');
+    assert.ok(/setSelectionRange\(taFrom, taTo\)/.test(body),
+        'while the textarea collapses to the caret');
+    assert.ok(/_caretSent = `\$\{taFrom\}:\$\{taTo\}`/.test(body),
+        'the echo guard must claim what the TEXTAREA will report, or the card ' +
+        'posts the position straight back as the reader’s own movement');
+});
+
+(async () => {
+    for (const a of asyncTests) {
+        try { await a.fn(); pass++; console.log(`  ✓ ${a.name}`); }
+        catch (e) { console.error(`  ✗ ${a.name}\n    ${e.message}`); process.exitCode = 1; }
+    }
+    console.log(`\n${pass} assertions passed`);
+})();

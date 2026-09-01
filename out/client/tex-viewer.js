@@ -4082,12 +4082,23 @@ function selectInEditCard(msg) {
     const card = document.querySelector('.editcard');
     if (!card) return;
     const ta = card.querySelector('textarea');
+    // THE MARKED WORD AND THE CARET ARE TWO ANSWERS.
+    //
+    // A textarea's caret, like the editor's, can only sit at one END of a
+    // selection — so selecting the word cannot also say where in it the reader
+    // clicked. When the extension sends a caret, the word stays MARKED in the
+    // highlight layer (which is `e.sel`, and is independent of the textarea's
+    // own selection) and the textarea collapses to the clicked character.
     e.sel = { start: msg.start, end: msg.end };
+    const caret = Number.isFinite(msg.caret) ? msg.caret : null;
+    const taFrom = caret == null ? msg.start : caret;
+    const taTo = caret == null ? msg.end : caret;
     // Claim this position before setting it: setSelectionRange fires `select`,
     // and an un-primed card would post it back as the reader's own movement.
-    e._caretSent = `${msg.start}:${msg.end}`;
+    // It must claim what the TEXTAREA will report, not what is marked.
+    e._caretSent = `${taFrom}:${taTo}`;
     syncHighlight(card);
-    try { ta.setSelectionRange(msg.start, msg.end); } catch (_) { /* out of range */ }
+    try { ta.setSelectionRange(taFrom, taTo); } catch (_) { /* out of range */ }
     // preventScroll for the same reason as opening: the reveal below is
     // minimal, a focus-scroll is not.
     if (msg.focus) { try { ta.focus({ preventScroll: true }); } catch (_) { ta.focus(); } }

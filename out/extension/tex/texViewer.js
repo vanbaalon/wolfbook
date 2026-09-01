@@ -4119,7 +4119,10 @@ class TexViewer {
         // behind it. Focus follows for a plain click (which leaves focus in the
         // webview anyway); a double-click means "take me to the editor", so it
         // must not be stolen back.
-        this._postEditSelection(doc, range, !m.takeMe);
+        // The card gets the same treatment the editor does: the word marked,
+        // the caret at the character that was clicked. `caretHere` is the
+        // decision already made above, so the two surfaces cannot disagree.
+        this._postEditSelection(doc, range, !m.takeMe, caretHere ? hitPos : null);
 
         // MORE THAN ONE WORD IS A SELECTION, AND THE PAGE SAYS SO.
         //
@@ -5239,7 +5242,16 @@ class TexViewer {
      * would take the block they are editing off the screen. Right-click is how
      * you move it.
      */
-    _postEditSelection(doc, range, focus) {
+    /**
+     * Mirror an inverse hit into the open card.
+     *
+     * `caretPos`, when given, is the CHARACTER that was clicked. The card then
+     * behaves like the text editor does: the word is marked, and the caret goes
+     * where the pointer was rather than to the end of the word. Without it the
+     * whole range is selected, which is still right for a widened Cmd-click or
+     * a dragged selection.
+     */
+    _postEditSelection(doc, range, focus, caretPos) {
         const s = this._edit;
         if (!s || !doc || !range || doc.uri.fsPath !== s.file) return;
         let a; let b;
@@ -5247,11 +5259,19 @@ class TexViewer {
         catch (_) { return; }
         if (b < s.startOffset || a > s.endOffset) return;
         const clamp = (n) => Math.max(0, Math.min(n, s.endOffset) - s.startOffset);
-        this._post({
-            type: 'editSelect', editId: s.id, focus: !!focus,
-            start: clamp(Math.max(a, s.startOffset)),
-            end: clamp(Math.max(b, s.startOffset)),
-        });
+        const start = clamp(Math.max(a, s.startOffset));
+        const end = clamp(Math.max(b, s.startOffset));
+        let caret;
+        if (caretPos) {
+            try {
+                const c = clamp(Math.max(doc.offsetAt(caretPos), s.startOffset));
+                // Only inside the marked word: a caret outside it would put the
+                // card's cursor somewhere the mark does not cover, which is the
+                // confusion this whole change exists to remove.
+                if (c >= start && c <= end) caret = c;
+            } catch (_) { /* no caret, just the range */ }
+        }
+        this._post({ type: 'editSelect', editId: s.id, focus: !!focus, start, end, caret });
     }
 
     /** After a recompile the block has new geometry — move the card to it. */
