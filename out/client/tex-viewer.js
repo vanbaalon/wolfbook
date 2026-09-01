@@ -3568,10 +3568,24 @@ function buildEditCard(e) {
     const sendCaret = () => {
         clearTimeout(caretT);
         const since = Date.now() - caretLastSent;
-        if (since >= MIN_GAP) flushCaret();
-        else caretT = setTimeout(flushCaret, MIN_GAP - since);
+        // NEVER SYNCHRONOUSLY, even on the leading edge.
+        //
+        // Two reasons, both of which cost real debugging. A click fires
+        // several of these in ONE tick (mouseup, then select) and the browser
+        // finalises selectionStart between them, so reading it synchronously in
+        // the first can read the position the caret was leaving. And two posts
+        // from one gesture race each other through _onEditCaret, which awaits
+        // openTextDocument — whichever resolves last wins, which may be the
+        // stale one. A zero delay is still ~1 ms to a reader, and collapses
+        // every event of one gesture into a single message.
+        caretT = setTimeout(flushCaret, since >= MIN_GAP ? 0 : MIN_GAP - since);
     };
-    for (const ev of ['keyup', 'mouseup', 'select', 'focus']) {
+    // NOT `focus`. Focusing the card moves nothing: the caret is wherever it
+    // already was, which for a freshly filled textarea is the END of the block.
+    // Posting that says the reader jumped to the end of the paragraph when all
+    // they did was click a word on the page. Every real movement — clicking in
+    // the card, arrow keys, typing, a selection — fires one of the three below.
+    for (const ev of ['keyup', 'mouseup', 'select']) {
         ta.addEventListener(ev, sendCaret);
     }
     ta.addEventListener('keydown', (ev) => {
