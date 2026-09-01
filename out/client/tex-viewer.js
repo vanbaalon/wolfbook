@@ -3282,6 +3282,10 @@ pagesEl().addEventListener('contextmenu', (ev) => {
 
 // --- the mini-editor card ----------------------------------------------------
 
+// Wired once, for the life of the panel — see the selectionchange comment in
+// the card setup.
+let wiredSelectionChange = false;
+
 function closeEditCard(notify = true) {
     for (const c of document.querySelectorAll('.editcard')) c.remove();
     if (state.edit && notify) vscode.postMessage({ type: 'editClose', editId: state.edit.id });
@@ -3583,10 +3587,33 @@ function buildEditCard(e) {
     // NOT `focus`. Focusing the card moves nothing: the caret is wherever it
     // already was, which for a freshly filled textarea is the END of the block.
     // Posting that says the reader jumped to the end of the paragraph when all
-    // they did was click a word on the page. Every real movement — clicking in
-    // the card, arrow keys, typing, a selection — fires one of the three below.
+    // they did was click a word on the page.
     for (const ev of ['keyup', 'mouseup', 'select']) {
         ta.addEventListener(ev, sendCaret);
+    }
+    // AND `selectionchange`, WHICH IS THE ONLY ONE A HELD ARROW KEY FIRES.
+    //
+    // Reported: hold an arrow key in the card and the page's caret sits still
+    // until you let go. Neither of the events above can see it — auto-repeat
+    // produces `keydown`, not `keyup`, and `select` fires for a SELECTION, not
+    // for a collapsed caret moving one character. So the page only heard about
+    // the whole journey on release.
+    //
+    // `selectionchange` is document-level (the element-level one is much newer)
+    // and fires for a collapsed caret too, so it is wired ONCE and filtered to
+    // the focused card. Being global it needs no teardown, which is why it is
+    // not on the textarea: a per-card document listener would leak one per card
+    // opened for the life of the panel.
+    e._sendCaret = sendCaret;
+    if (!wiredSelectionChange) {
+        wiredSelectionChange = true;
+        document.addEventListener('selectionchange', () => {
+            const sess = state.edit;
+            if (!sess || !sess._sendCaret) return;
+            const openCard = document.querySelector('.editcard');
+            const openTa = openCard && openCard.querySelector('textarea');
+            if (openTa && document.activeElement === openTa) sess._sendCaret();
+        });
     }
     ta.addEventListener('keydown', (ev) => {
         ev.stopPropagation();                     // Esc here must not exit full screen

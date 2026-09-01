@@ -560,6 +560,40 @@ t('the click puts that reason in the status line', () => {
         'and only when a card is actually open — with none there is nothing to explain');
 });
 
+t('a held arrow key is heard — the card listens to selectionchange', () => {
+    // Auto-repeat produces keydown, not keyup, and the `select` event fires for
+    // a SELECTION, not for a collapsed caret moving one character. So none of
+    // keyup/mouseup/select can see a held arrow key, and the page only heard
+    // about the whole journey on release. Reported.
+    //
+    // Asserted structurally because the browser harness CANNOT discriminate
+    // here: the HTML spec has setSelectionRange itself queue a `select`, so any
+    // synthetic caret move fires the path this replaces.
+    const fs = require('fs');
+    const path = require('path');
+    const client = fs.readFileSync(
+        path.join(__dirname, '..', '..', '..', 'client', 'tex-viewer.js'), 'utf8');
+    assert.ok(/document\.addEventListener\('selectionchange'/.test(client),
+        'selectionchange is the only event a held arrow key fires');
+    assert.ok(/document\.activeElement === openTa/.test(client),
+        'and it must be filtered to the focused card — it is a DOCUMENT event');
+    assert.ok(/e\._sendCaret = sendCaret/.test(client),
+        'the global listener reaches the card through the session');
+});
+
+t('the selectionchange listener is wired ONCE, not per card', () => {
+    // It is a document listener, so one per card opened would leak for the life
+    // of the panel and post the same movement many times over.
+    const fs = require('fs');
+    const path = require('path');
+    const client = fs.readFileSync(
+        path.join(__dirname, '..', '..', '..', 'client', 'tex-viewer.js'), 'utf8');
+    assert.ok(/if \(!wiredSelectionChange\) \{\s*\n\s*wiredSelectionChange = true;/.test(client),
+        'guarded by a module-level flag');
+    assert.strictEqual((client.match(/document\.addEventListener\('selectionchange'/g) || []).length, 1,
+        'exactly one registration site');
+});
+
 console.log('mini-editor: card → page');
 
 at('moving the card’s caret carries it as the selection’s ACTIVE end', async () => {
