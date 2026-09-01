@@ -622,8 +622,27 @@ class TexViewer {
      * listener — an empty grey rectangle that never syncs again, which is what
      * a window reload used to leave behind.
      */
+    /**
+     * Tell VS Code whether a WPaper viewer is open.
+     *
+     * The .tex keybindings are gated on this. Without it they were live in
+     * EVERY .tex file the moment the extension activated — so Ctrl+V in a paper
+     * this extension has nothing to do with went through our smart paste, and
+     * Alt+[ / Alt+] were taken from whatever the reader had them bound to.
+     * Reported alongside vanbaalon/wolfbook#17: shortcuts leaking into formats
+     * we are not being asked to handle.
+     *
+     * Opening the viewer is the reader saying "this paper is mine to work on",
+     * and that is exactly when the shortcuts should exist.
+     */
+    static _setViewerContext(open) {
+        try { vscode.commands.executeCommand('setContext', 'wolfbook.texViewerOpen', !!open); }
+        catch (_) { /* context keys are a nicety, never a failure path */ }
+    }
+
     _wire(panel) {
         this.panel = panel;
+        TexViewer._setViewerContext(true);
         panel.iconPath = undefined;
         // A restored panel arrives with its options and content dropped, so
         // both are re-established rather than assumed.
@@ -645,6 +664,7 @@ class TexViewer {
                 })();
             }
             this.panel = null;
+            TexViewer._setViewerContext(false);
             this.shownGeneration = null;
             // Results that were never inserted are SESSION-ONLY by design: the
             // .tex is the single source of truth for what this paper contains,

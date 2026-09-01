@@ -110,6 +110,32 @@ async function activate(context) {
         open(name.fsPath);
     } }));
     context.subscriptions.push(vscode_1.commands.registerCommand('wolfbook.DownloadWolframEngine', onDownloadWolframEngine));
+    // ---- Are our keyboard shortcuts wanted? ----------------------------------
+    //
+    // Every Wolfbook keybinding is now gated on one of these, so a reader who
+    // wants their own bindings back can have them without uninstalling. They
+    // default ON: the shortcuts are most of what makes the notebook usable.
+    //
+    // Kept as context keys rather than read in each command, because a command
+    // that runs and does nothing has still TAKEN the key from whatever else
+    // wanted it — which is the whole complaint.
+    const _applyKeybindingContexts = () => {
+        const cfg = vscode.workspace.getConfiguration('wolfbook.keybindings');
+        for (const [key, ctx] of [['notebook', 'wolfbook.keysNotebook'], ['tex', 'wolfbook.keysTex']]) {
+            let on = true;
+            try { on = cfg.get(key, true) !== false; } catch (_) {}
+            try { vscode.commands.executeCommand('setContext', ctx, on); } catch (_) {}
+        }
+    };
+    _applyKeybindingContexts();
+    context.subscriptions.push(
+        vscode.workspace.onDidChangeConfiguration(e => {
+            if (e.affectsConfiguration('wolfbook.keybindings')) _applyKeybindingContexts();
+        }),
+    );
+    // No viewer is open at activation; say so, or a stale key from a previous
+    // window would leave the .tex shortcuts live with nothing behind them.
+    try { vscode.commands.executeCommand('setContext', 'wolfbook.texViewerOpen', false); } catch (_) {}
     // A cell editor scrolled out of view and back is a NEW editor object with no
     // decorations on it, so the running-lines mark has to be re-applied or it
     // silently disappears part-way through a long computation.

@@ -924,6 +924,45 @@ function registerTexSupport(context, deps = {}) {
     const diagnostics = vscode.languages.createDiagnosticCollection('wolfbook-tex');
     context.subscriptions.push(diagnostics);
 
+    // ---- SAY THAT THE VIEWER EXISTS -----------------------------------------
+    //
+    // Nothing about a .tex file suggests that clicking a wolf icon in the
+    // editor title bar renders it. A reader who never finds that never uses
+    // WPaper at all — and, now that the .tex shortcuts are gated on the viewer
+    // being open, never sees those either. So say it once, the first time a
+    // .tex is opened, and never again.
+    //
+    // ONCE EVER, not once per session: an offer repeated on every launch is an
+    // advert, and the reader who does not want it has no way to say so beyond
+    // the button. The button is there too.
+    const HINT_KEY = 'wolfbook.tex.viewerHintShown';
+    const maybeOfferViewer = async (doc) => {
+        try {
+            if (!doc || doc.languageId !== 'latex' || doc.uri.scheme !== 'file') return;
+            const store = context.globalState;
+            if (!store || store.get(HINT_KEY)) return;
+            await store.update(HINT_KEY, true);
+            const open = 'Open WPaper';
+            const tour = 'Show me around';
+            const pick = await vscode.window.showInformationMessage(
+                'Wolfbook can show this paper as a live page — click in the text to find it on the ' +
+                'page, and click the page to jump back. Ctrl+Alt+W, or the wolf icon above.',
+                open, tour);
+            if (pick === open) await vscode.commands.executeCommand('wolfbook.tex.openViewer');
+            else if (pick === tour) {
+                await vscode.commands.executeCommand('wolfbook.tex.openViewer');
+                await vscode.commands.executeCommand('wolfbook.tex.tour');
+            }
+        } catch (_) { /* a hint must never be able to break opening a file */ }
+    };
+    // Both hooks: a file opened while VS Code was closed is already open by the
+    // time this runs and fires no open event.
+    context.subscriptions.push(
+        vscode.workspace.onDidOpenTextDocument(maybeOfferViewer),
+        vscode.window.onDidChangeActiveTextEditor(ed => maybeOfferViewer(ed && ed.document)),
+    );
+    if (vscode.window.activeTextEditor) maybeOfferViewer(vscode.window.activeTextEditor.document);
+
     const lensEmitter = new vscode.EventEmitter();
     context.subscriptions.push(lensEmitter);
 

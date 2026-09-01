@@ -1188,6 +1188,16 @@
           "type": "boolean",
           "default": true,
           "markdownDescription": "While a cell runs, outline it in gold and gently shade the **lines currently being evaluated** rather than the whole cell. A cell is sent to the kernel one top-level expression at a time, so on a long cell this shows where the computation has got to.\n\nNeither mark moves or blinks — they are found once and then ignored. Both disappear when the cell finishes, however it finishes."
+        },
+        "wolfbook.keybindings.notebook": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Enable Wolfbook's keyboard shortcuts inside Wolfram notebooks (`.wb`, `.vsnb`, `.evsnb`) — Shift+Enter to evaluate, the arrow-key cell navigation, bracket wrapping, Escape-mode aliases, and the rest.\n\nTurn this off to keep your own bindings and use the Command Palette instead. Shortcuts in other file types are unaffected."
+        },
+        "wolfbook.keybindings.tex": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Enable Wolfbook's keyboard shortcuts in `.tex` files — smart paste, and Alt+[ / Alt+] to step through an agent's changes.\n\nThese are additionally gated on the **WPaper viewer being open** for the paper, so a `.tex` file you are simply editing keeps your own bindings either way. Turn this off to disable them entirely."
         }
       }
     },
@@ -1967,13 +1977,13 @@
         "command": "wolfbook.tex.smartPaste",
         "key": "ctrl+v",
         "mac": "cmd+v",
-        "when": "editorTextFocus && !editorReadonly && resourceExtname == .tex && !editorHasMultipleSelections"
+        "when": "(editorTextFocus && !editorReadonly && resourceExtname == .tex && !editorHasMultipleSelections) && wolfbook.keysTex && wolfbook.texViewerOpen"
       },
       {
         "command": "wolfbook.saveNbCopyAsWb",
         "key": "ctrl+s",
         "mac": "cmd+s",
-        "when": "notebookType == 'extended-wolfram-notebook' && resourceExtname == .nb"
+        "when": "(notebookType == 'extended-wolfram-notebook' && resourceExtname == .nb) && wolfbook.keysNotebook"
       },
       {
         "command": "wolfbook.saveNbCopyAsWb",
@@ -1982,268 +1992,273 @@
         "args": {
           "forceDialog": true
         },
-        "when": "notebookType == 'extended-wolfram-notebook' && resourceExtname == .nb"
+        "when": "(notebookType == 'extended-wolfram-notebook' && resourceExtname == .nb) && wolfbook.keysNotebook"
       },
       {
         "command": "editor.action.blockComment",
         "key": "ctrl+/",
         "mac": "cmd+/",
-        "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook'"
+        "when": "(editorTextFocus && notebookType == 'extended-wolfram-notebook') && wolfbook.keysNotebook"
       },
       {
         "command": "-editor.action.formatDocument",
         "key": "alt+shift+f",
-        "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook'"
+        "when": "(editorTextFocus && notebookType == 'extended-wolfram-notebook') && wolfbook.keysNotebook"
       },
       {
         "command": "wolfbook.formatWithUTF",
         "key": "alt+shift+f",
-        "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook'"
+        "when": "(editorTextFocus && notebookType == 'extended-wolfram-notebook') && wolfbook.keysNotebook"
       },
       {
         "command": "-editor.action.formatDocument",
         "key": "alt+shift+f",
-        "when": "notebookEditorFocused && !editorTextFocus && notebookType == 'extended-wolfram-notebook'"
+        "when": "(notebookEditorFocused && !editorTextFocus && notebookType == 'extended-wolfram-notebook') && wolfbook.keysNotebook"
       },
       {
         "command": "wolfbook.formatNotebook",
         "key": "alt+shift+f",
-        "when": "notebookEditorFocused && !editorTextFocus && notebookType == 'extended-wolfram-notebook'"
+        "when": "(notebookEditorFocused && !editorTextFocus && notebookType == 'extended-wolfram-notebook') && wolfbook.keysNotebook"
       },
       {
         "command": "wolfbook.handleEnter",
         "key": "enter",
-        "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook' && !wolframInEscapeMode && !suggestWidgetVisible"
+        "when": "(editorTextFocus && notebookType == 'extended-wolfram-notebook' && !wolframInEscapeMode && !suggestWidgetVisible) && wolfbook.keysNotebook"
       },
       {
         "command": "wolfbook.wrapFraction",
         "key": "ctrl+/",
-        "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook' && !wolframInEscapeMode && !suggestWidgetVisible"
+        "when": "(editorTextFocus && notebookType == 'extended-wolfram-notebook' && !wolframInEscapeMode && !suggestWidgetVisible) && wolfbook.keysNotebook"
       },
       {
         "command": "wolfbook.wrapSqrt",
         "key": "ctrl+2",
-        "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook' && !wolframInEscapeMode && !suggestWidgetVisible"
+        "when": "(editorTextFocus && notebookType == 'extended-wolfram-notebook' && !wolframInEscapeMode && !suggestWidgetVisible) && wolfbook.keysNotebook"
       },
       {
         "command": "wolfbook.wrapBracket",
         "args": "(",
         "key": "alt+shift+0",
-        "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook' && !wolframInEscapeMode && !suggestWidgetVisible"
+        "when": "(editorTextFocus && notebookType == 'extended-wolfram-notebook' && !wolframInEscapeMode && !suggestWidgetVisible) && wolfbook.keysNotebook"
       },
       {
         "command": "wolfbook.wrapBracket",
         "args": "[",
         "key": "alt+]",
-        "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook' && !wolframInEscapeMode && !suggestWidgetVisible"
+        "when": "(editorTextFocus && notebookType == 'extended-wolfram-notebook' && !wolframInEscapeMode && !suggestWidgetVisible) && wolfbook.keysNotebook"
       },
       {
         "command": "wolfbook.wrapBracket",
         "args": "{",
         "key": "alt+shift+]",
-        "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook' && !wolframInEscapeMode && !suggestWidgetVisible"
+        "when": "(editorTextFocus && notebookType == 'extended-wolfram-notebook' && !wolframInEscapeMode && !suggestWidgetVisible) && wolfbook.keysNotebook"
       },
       {
         "command": "wolfbook.pasteImageCellBelow",
         "key": "ctrl+v",
         "mac": "cmd+v",
-        "when": "notebookEditorFocused && !editorTextFocus && !inputFocus && notebookType == 'extended-wolfram-notebook'"
+        "when": "(notebookEditorFocused && !editorTextFocus && !inputFocus && notebookType == 'extended-wolfram-notebook') && wolfbook.keysNotebook"
       },
       {
         "command": "wolfbook.pasteImageCell",
         "key": "ctrl+shift+v",
         "mac": "cmd+shift+v",
-        "when": "notebookEditorFocused && notebookType == 'extended-wolfram-notebook'"
+        "when": "(notebookEditorFocused && notebookType == 'extended-wolfram-notebook') && wolfbook.keysNotebook"
       },
       {
         "command": "wolfbook.abortEvaluation",
         "key": "cmd+.",
-        "when": "(notebookEditorFocused || editorTextFocus) && notebookType == 'extended-wolfram-notebook'"
+        "when": "((notebookEditorFocused || editorTextFocus) && notebookType == 'extended-wolfram-notebook') && wolfbook.keysNotebook"
       },
       {
         "command": "wolfbook.openDialogSubsession",
         "key": "alt+shift+enter",
-        "when": "notebookEditorFocused && notebookType == 'extended-wolfram-notebook'"
+        "when": "(notebookEditorFocused && notebookType == 'extended-wolfram-notebook') && wolfbook.keysNotebook"
       },
       {
         "command": "wolfbook.formatAndExecute",
         "key": "shift+enter",
-        "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook' && !wolframInEscapeMode && !suggestWidgetVisible"
+        "when": "(editorTextFocus && notebookType == 'extended-wolfram-notebook' && !wolframInEscapeMode && !suggestWidgetVisible) && wolfbook.keysNotebook"
       },
       {
         "command": "wolfbook.executeCell",
         "key": "shift+enter",
-        "when": "notebookEditorFocused && !notebookEditorTabFocused && notebookType == 'extended-wolfram-notebook'"
+        "when": "(notebookEditorFocused && !notebookEditorTabFocused && notebookType == 'extended-wolfram-notebook') && wolfbook.keysNotebook"
       },
       {
         "command": "wolfbook.evaluateEditorExpression",
         "key": "shift+enter",
-        "when": "editorTextFocus && (resourceExtname == .m || resourceExtname == .wl || resourceExtname == .wls || resourceExtname == .cdf) && !suggestWidgetVisible"
+        "when": "(editorTextFocus && (resourceExtname == .m || resourceExtname == .wl || resourceExtname == .wls || resourceExtname == .cdf) && !suggestWidgetVisible) && wolfbook.keysNotebook"
       },
       {
         "command": "wolfbook.escapeKey",
         "key": "escape",
-        "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook' && (!suggestWidgetVisible || wolframInEscapeMode)"
+        "when": "(editorTextFocus && notebookType == 'extended-wolfram-notebook' && (!suggestWidgetVisible || wolframInEscapeMode)) && wolfbook.keysNotebook"
       },
       {
         "command": "wolfbook.cursorLeft",
         "key": "left",
-        "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook' && !wolframInEscapeMode && !suggestWidgetVisible"
+        "when": "(editorTextFocus && notebookType == 'extended-wolfram-notebook' && !wolframInEscapeMode && !suggestWidgetVisible) && wolfbook.keysNotebook"
       },
       {
         "command": "wolfbook.cursorRight",
         "key": "right",
-        "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook' && !wolframInEscapeMode && !suggestWidgetVisible"
+        "when": "(editorTextFocus && notebookType == 'extended-wolfram-notebook' && !wolframInEscapeMode && !suggestWidgetVisible) && wolfbook.keysNotebook"
       },
       {
         "command": "wolfbook.cursorUp",
         "key": "up",
-        "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook' && !wolframInEscapeMode && !suggestWidgetVisible"
+        "when": "(editorTextFocus && notebookType == 'extended-wolfram-notebook' && !wolframInEscapeMode && !suggestWidgetVisible) && wolfbook.keysNotebook"
       },
       {
         "command": "wolfbook.cursorDown",
         "key": "down",
-        "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook' && !wolframInEscapeMode && !suggestWidgetVisible"
+        "when": "(editorTextFocus && notebookType == 'extended-wolfram-notebook' && !wolframInEscapeMode && !suggestWidgetVisible) && wolfbook.keysNotebook"
       },
       {
         "command": "cursorUpSelect",
         "key": "shift+up",
-        "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook' && !wolframInEscapeMode && !suggestWidgetVisible"
+        "when": "(editorTextFocus && notebookType == 'extended-wolfram-notebook' && !wolframInEscapeMode && !suggestWidgetVisible) && wolfbook.keysNotebook"
       },
       {
         "command": "cursorDownSelect",
         "key": "shift+down",
-        "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook' && !wolframInEscapeMode && !suggestWidgetVisible"
+        "when": "(editorTextFocus && notebookType == 'extended-wolfram-notebook' && !wolframInEscapeMode && !suggestWidgetVisible) && wolfbook.keysNotebook"
       },
       {
         "command": "list.expandSelectionUp",
         "key": "shift+up",
-        "when": "notebookEditorFocused && !editorTextFocus && !inputFocus && notebookType == 'extended-wolfram-notebook'"
+        "when": "(notebookEditorFocused && !editorTextFocus && !inputFocus && notebookType == 'extended-wolfram-notebook') && wolfbook.keysNotebook"
       },
       {
         "command": "list.expandSelectionDown",
         "key": "shift+down",
-        "when": "notebookEditorFocused && !editorTextFocus && !inputFocus && notebookType == 'extended-wolfram-notebook'"
+        "when": "(notebookEditorFocused && !editorTextFocus && !inputFocus && notebookType == 'extended-wolfram-notebook') && wolfbook.keysNotebook"
       },
       {
         "command": "wolfbook.navLeft",
         "key": "left",
-        "when": "notebookEditorFocused && !editorTextFocus && !inputFocus && notebookType == 'extended-wolfram-notebook'"
+        "when": "(notebookEditorFocused && !editorTextFocus && !inputFocus && notebookType == 'extended-wolfram-notebook') && wolfbook.keysNotebook"
       },
       {
         "command": "wolfbook.navRight",
         "key": "right",
-        "when": "notebookEditorFocused && !editorTextFocus && !inputFocus && notebookType == 'extended-wolfram-notebook'"
+        "when": "(notebookEditorFocused && !editorTextFocus && !inputFocus && notebookType == 'extended-wolfram-notebook') && wolfbook.keysNotebook"
       },
       {
         "command": "wolfbook.navUp",
         "key": "up",
-        "when": "notebookEditorFocused && !editorTextFocus && !inputFocus && notebookType == 'extended-wolfram-notebook'"
+        "when": "(notebookEditorFocused && !editorTextFocus && !inputFocus && notebookType == 'extended-wolfram-notebook') && wolfbook.keysNotebook"
       },
       {
         "command": "wolfbook.navDown",
         "key": "down",
-        "when": "notebookEditorFocused && !editorTextFocus && !inputFocus && notebookType == 'extended-wolfram-notebook'"
+        "when": "(notebookEditorFocused && !editorTextFocus && !inputFocus && notebookType == 'extended-wolfram-notebook') && wolfbook.keysNotebook"
       },
       {
         "command": "wolfbook.debug.toggleBreakpoint",
         "key": "f9",
-        "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook'"
+        "when": "(editorTextFocus && notebookType == 'extended-wolfram-notebook') && wolfbook.keysNotebook"
       },
       {
         "command": "wolfbook.debug.stepOver",
         "key": "f10",
-        "when": "wolfbook.debugActive"
+        "when": "(wolfbook.debugActive) && wolfbook.keysNotebook"
       },
       {
         "command": "wolfbook.debug.stepInto",
         "key": "f11",
-        "when": "wolfbook.debugActive"
+        "when": "(wolfbook.debugActive) && wolfbook.keysNotebook"
       },
       {
         "command": "wolfbook.debug.stepOut",
         "key": "shift+f11",
-        "when": "wolfbook.debugActive"
+        "when": "(wolfbook.debugActive) && wolfbook.keysNotebook"
       },
       {
         "command": "wolfbook.debug.continueToBreakpoint",
         "key": "f5",
-        "when": "wolfbook.debugActive"
+        "when": "(wolfbook.debugActive) && wolfbook.keysNotebook"
       },
       {
         "command": "wolfbook.debug.continueToEnd",
         "key": "ctrl+f5",
         "mac": "ctrl+f5",
-        "when": "wolfbook.debugActive"
+        "when": "(wolfbook.debugActive) && wolfbook.keysNotebook"
       },
       {
         "command": "wolfbook.debug.stop",
         "key": "shift+f5",
-        "when": "wolfbook.debugActive"
+        "when": "(wolfbook.debugActive) && wolfbook.keysNotebook"
       },
       {
         "command": "wolfbook.debug.debugCell",
         "key": "ctrl+shift+d",
         "mac": "cmd+shift+d",
-        "when": "notebookEditorFocused && notebookType == 'extended-wolfram-notebook' && !wolfbook.debugActive"
+        "when": "(notebookEditorFocused && notebookType == 'extended-wolfram-notebook' && !wolfbook.debugActive) && wolfbook.keysNotebook"
       },
       {
         "command": "wolfbook.debug.stop",
         "key": "ctrl+shift+d",
         "mac": "cmd+shift+d",
-        "when": "notebookEditorFocused && notebookType == 'extended-wolfram-notebook' && wolfbook.debugActive"
+        "when": "(notebookEditorFocused && notebookType == 'extended-wolfram-notebook' && wolfbook.debugActive) && wolfbook.keysNotebook"
       },
       {
         "command": "wolfbook.evaluateSelection",
         "key": "ctrl+shift+e",
         "mac": "cmd+shift+e",
-        "when": "editorTextFocus && (notebookType == 'extended-wolfram-notebook' || resourceExtname == .m || resourceExtname == .wl || resourceExtname == .wls || resourceExtname == .cdf)"
+        "when": "(editorTextFocus && (notebookType == 'extended-wolfram-notebook' || resourceExtname == .m || resourceExtname == .wl || resourceExtname == .wls || resourceExtname == .cdf)) && wolfbook.keysNotebook"
       },
       {
         "command": "wolfbook.evaluateSelection",
         "key": "ctrl+shift+e",
         "mac": "ctrl+shift+e",
-        "when": "editorTextFocus && (notebookType == 'extended-wolfram-notebook' || resourceExtname == .m || resourceExtname == .wl || resourceExtname == .wls || resourceExtname == .cdf)"
+        "when": "(editorTextFocus && (notebookType == 'extended-wolfram-notebook' || resourceExtname == .m || resourceExtname == .wl || resourceExtname == .wls || resourceExtname == .cdf)) && wolfbook.keysNotebook"
       },
       {
         "command": "wolfbook.addSelectionToWatch",
         "key": "ctrl+shift+w",
         "mac": "cmd+shift+w",
-        "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook'"
+        "when": "(editorTextFocus && notebookType == 'extended-wolfram-notebook') && wolfbook.keysNotebook"
       },
       {
         "command": "wolfbook.insertCellAbove",
         "key": "ctrl+shift+a",
         "mac": "cmd+shift+a",
-        "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook'"
+        "when": "(editorTextFocus && notebookType == 'extended-wolfram-notebook') && wolfbook.keysNotebook"
       },
       {
         "command": "wolfbook.insertCellBelow",
         "key": "ctrl+shift+b",
         "mac": "cmd+shift+b",
-        "when": "editorTextFocus && notebookType == 'extended-wolfram-notebook'"
+        "when": "(editorTextFocus && notebookType == 'extended-wolfram-notebook') && wolfbook.keysNotebook"
       },
       {
         "command": "wolfbook.deleteActiveCell",
         "key": "ctrl+shift+x",
         "mac": "cmd+shift+x",
-        "when": "(editorTextFocus || notebookEditorFocused) && notebookType == 'extended-wolfram-notebook'"
+        "when": "((editorTextFocus || notebookEditorFocused) && notebookType == 'extended-wolfram-notebook') && wolfbook.keysNotebook"
       },
       {
         "command": "wolfbook.restartKernel",
         "key": "ctrl+shift+r",
         "mac": "cmd+shift+r",
-        "when": "(notebookEditorFocused || editorTextFocus) && notebookType == 'extended-wolfram-notebook'"
+        "when": "((notebookEditorFocused || editorTextFocus) && notebookType == 'extended-wolfram-notebook') && wolfbook.keysNotebook"
       },
       {
         "command": "wolfbook.tex.reviewNext",
         "key": "alt+]",
-        "when": "editorTextFocus && resourceExtname == .tex"
+        "when": "(editorTextFocus && resourceExtname == .tex) && wolfbook.keysTex && wolfbook.texViewerOpen"
       },
       {
         "command": "wolfbook.tex.reviewPrev",
         "key": "alt+[",
-        "when": "editorTextFocus && resourceExtname == .tex"
+        "when": "(editorTextFocus && resourceExtname == .tex) && wolfbook.keysTex && wolfbook.texViewerOpen"
+      },
+      {
+        "command": "wolfbook.tex.openViewer",
+        "key": "ctrl+alt+w",
+        "when": "editorTextFocus && resourceExtname == .tex && wolfbook.keysTex"
       }
     ],
     "views": {
