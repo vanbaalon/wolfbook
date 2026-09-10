@@ -6,7 +6,8 @@
 // judged. It cannot require tex/reviewUi.js (that pulls vscode into the tool
 // module's require graph and makes a cycle), so it announces here instead.
 //
-// Pure, no vscode, no fs, and deliberately tiny: an announcement nobody is
+// No direct vscode dependency; optionally reads MCP activity context for attribution.
+// Deliberately tiny: an announcement nobody is
 // listening for is dropped, never queued.
 
 const listeners = new Set();
@@ -34,6 +35,12 @@ function onAgentEdit(fn) {
 /** Tell whoever is listening that an agent changed a paper. Never throws. */
 function announceAgentEdit(ev) {
     if (!ev || !ev.file) return;
+    try {
+        const context = require('../monitor/activity').getActivityContext();
+        if (context?.agentName || context?.agentSessionId) ev = { ...ev, author: ev.author || {
+            name: context.agentName || 'MCP client', sessionId: context.agentSessionId || null,
+            operationId: context.operationId || null } };
+    } catch (_) { /* identity is optional; never infer a model from a filename */ }
     for (const fn of [...listeners]) {
         try { fn(ev); } catch (_) { /* a listener's failure is not the writer's */ }
     }

@@ -225,6 +225,54 @@ async function main() {
         assert.ok(r.attachedTo && r.attachedTo.kind === 'display-equation');
     });
 
+    await test('paper project scope follows includes for outline, references, and search', async () => {
+        const fs = require('fs'); const os = require('os'); const path = require('path');
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wb-paper-project-'));
+        const rootFile = path.join(dir, 'root.tex'); const childFile = path.join(dir, 'section.tex');
+        const root = '\\documentclass{article}\n\\begin{document}\nSee \\eqref{eq:child}.\n\\input{section}\n\\end{document}\n';
+        const child = '\\section{Included}\n\\begin{equation}\\label{eq:child}\nQ=42\n\\end{equation}\n';
+        fs.writeFileSync(rootFile, root); fs.writeFileSync(childFile, child);
+        try {
+            const docs = [makeTextDoc(rootFile, root), makeTextDoc(childFile, child)];
+            const T = freshRequire('../../tools/tex-tools', texStub(docs));
+            const outline = json(await new T.PaperGetOutlineTool().invoke({ input: {
+                file: rootFile, include_project: true,
+            } }));
+            assert.strictEqual(outline.project.fileCount, 2);
+            assert.strictEqual(outline.project.edges[0].from, 'f0');
+            assert.strictEqual(outline.project.edges[0].to, 'f1');
+            assert.ok(outline.project.files[1].objects >= 1);
+            const refs = json(await new T.PaperFindReferencesTool().invoke({ input: {
+                file: rootFile, name: 'eq:child', include_project: true,
+            } }));
+            assert.strictEqual(refs.declaredIn[0].file, childFile);
+            assert.strictEqual(refs.referencedBy[0].file, rootFile);
+            const search = json(await new T.PaperSearchTool().invoke({ input: {
+                file: rootFile, query: 'Q=42', include_project: true,
+            } }));
+            assert.strictEqual(search.hits[0].file, childFile);
+            const eq = json(await new T.PaperGetObjectTool().invoke({ input: {
+                file: childFile, selector: 'eq:child',
+            } }));
+            const safe = json(await new T.PaperPreviewEditTool().invoke({ input: {
+                file: childFile, edits: [{ operation: 'replace', selector: 'eq:child',
+                    expected_source_hash: eq.sourceHash,
+                    new_text: '\\begin{equation}\\label{eq:child}\nQ=43\n\\end{equation}' }],
+            } }));
+            assert.deepStrictEqual(safe.referenceDelta.unresolved.introduced, [],
+                'project declaration/reference health is evaluated as one graph');
+            const rename = json(await new T.PaperPreviewEditTool().invoke({ input: {
+                file: childFile, edits: [{ operation: 'rename_label',
+                    old: 'eq:child', new: 'eq:renamed' }],
+            } }));
+            assert.strictEqual(rename.state, 'cross-file-required');
+            assert.strictEqual(docs[0].getText(), root);
+            assert.strictEqual(docs[1].getText(), child, 'unsafe partial project rename is refused');
+        } finally {
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
     await test('paper_search finds objects by text and returns their keys', async () => {
         const doc = makeTextDoc('/proj/paper.tex', PAPER);
         const T = freshRequire('../../tools/tex-tools', texStub([doc]));
@@ -243,6 +291,41 @@ async function main() {
             input: { file: '/proj/paper.tex', query: '([', regex: true },
         }));
         assert.ok(/bad regex/.test(t));
+    });
+
+    await test('paper_getOutline is compact by default and progressive on request', async () => {
+        const nested = PAPER.replace('\\section{Numerics}', '\\subsection{Nested}\n\\section{Numerics}');
+        const doc = makeTextDoc('/proj/paper.tex', nested);
+        const T = freshRequire('../../tools/tex-tools', texStub([doc]));
+        const summary = json(await new T.PaperGetOutlineTool().invoke({ input: { file: '/proj/paper.tex' } }));
+        assert.strictEqual(summary.mode, 'summary');
+        assert.strictEqual(typeof summary.outline[0].children, 'number', 'default returns only a child count');
+        assert.strictEqual(summary.outline[0].children, 1);
+        assert.strictEqual(summary.outline[0].stableKey, undefined, 'identity is opt-in');
+        const tree = json(await new T.PaperGetOutlineTool().invoke({ input: {
+            file: '/proj/paper.tex', mode: 'tree', max_depth: 2, include_identity: true,
+        } }));
+        assert.strictEqual(tree.outline[0].children[0].title, 'Nested');
+        assert.ok(tree.outline[0].stableKey);
+        const selected = json(await new T.PaperGetOutlineTool().invoke({ input: {
+            file: '/proj/paper.tex', selector: 'Nested', mode: 'tree', max_depth: 1,
+        } }));
+        assert.strictEqual(selected.outline.length, 1);
+        assert.strictEqual(selected.outline[0].title, 'Nested');
+    });
+
+    await test('paper_search batches filtered semantic queries in one call', async () => {
+        const doc = makeTextDoc('/proj/paper.tex', PAPER);
+        const T = freshRequire('../../tools/tex-tools', texStub([doc]));
+        const r = json(await new T.PaperSearchTool().invoke({ input: {
+            file: '/proj/paper.tex', queries: [
+                { text: 'dispersion', kinds: ['display-equation'], within_section: 'sec:strong' },
+                { label_prefix: 'fig:', within_section: 'Numerics' },
+            ],
+        } }));
+        assert.strictEqual(r.queryCount, 2);
+        assert.strictEqual(r.results[0].hits[0].label, 'eq:dispersion');
+        assert.strictEqual(r.results[1].hits[0].label, 'fig:branch');
     });
 
     // ---- the guard, which is the point of the write side ------------------
@@ -274,6 +357,81 @@ async function main() {
         }));
         assert.ok(r.introducesWarnings.length >= 1,
             'an unbalanced environment must be visible BEFORE it is written');
+    });
+
+    await test('paper preview/apply performs several semantic edits atomically', async () => {
+        const doc = makeTextDoc('/proj/paper.tex', PAPER);
+        const stub = texStub([doc]);
+        const T = freshRequire('../../tools/tex-tools', stub);
+        const eq = json(await new T.PaperGetObjectTool().invoke({ input: {
+            file: '/proj/paper.tex', selector: 'eq:dispersion',
+        } }));
+        const preview = json(await new T.PaperPreviewEditTool().invoke({ input: {
+            file: '/proj/paper.tex', edits: [
+                { operation: 'replace', selector: 'eq:dispersion', expected_source_hash: eq.sourceHash,
+                    new_text: '\\begin{equation}\\label{eq:dispersion}\nE=7\n\\end{equation}' },
+                { operation: 'insert_after', selector: 'fig:branch', new_text: '\nA new concluding sentence.\n' },
+            ],
+        } }));
+        assert.strictEqual(preview.editCount, 2);
+        assert.ok(preview.transaction_id);
+        assert.strictEqual(doc.getText(), PAPER, 'preview is read-only');
+        const applied = json(await new T.PaperApplyEditTool().invoke({ input: {
+            transaction_id: preview.transaction_id,
+        } }));
+        assert.strictEqual(applied.applied, true);
+        assert.strictEqual(applied.editCount, 2);
+        assert.ok(doc.getText().includes('E=7'));
+        assert.ok(doc.getText().includes('new concluding sentence'));
+        assert.strictEqual(stub.__applied.length, 1, 'one WorkspaceEdit means one undo step');
+    });
+
+    await test('paper rename_label changes declaration and inbound references together', async () => {
+        const src = PAPER.replace('which reduces', 'See \\eqref{eq:dispersion}; this reduces');
+        const doc = makeTextDoc('/proj/paper.tex', src);
+        const T = freshRequire('../../tools/tex-tools', texStub([doc]));
+        const preview = json(await new T.PaperPreviewEditTool().invoke({ input: {
+            file: '/proj/paper.tex', edits: [{ operation: 'rename_label',
+                old: 'eq:dispersion', new: 'eq:dressed-dispersion' }],
+        } }));
+        const applied = json(await new T.PaperApplyEditTool().invoke({ input: {
+            transaction_id: preview.transaction_id,
+        } }));
+        assert.strictEqual(applied.applied, true);
+        assert.ok(doc.getText().includes('\\label{eq:dressed-dispersion}'));
+        assert.ok(doc.getText().includes('\\eqref{eq:dressed-dispersion}'));
+        assert.ok(!doc.getText().includes('{eq:dispersion}'));
+    });
+
+    await test('paper delete refuses to strand inbound references', async () => {
+        const src = PAPER.replace('which reduces', 'See \\eqref{eq:dispersion}; this reduces');
+        const doc = makeTextDoc('/proj/paper.tex', src);
+        const T = freshRequire('../../tools/tex-tools', texStub([doc]));
+        const r = json(await new T.PaperPreviewEditTool().invoke({ input: {
+            file: '/proj/paper.tex', edits: [{ operation: 'delete', selector: 'eq:dispersion' }],
+        } }));
+        assert.strictEqual(r.state, 'conflict');
+        assert.ok(/references remain/.test(r.reason));
+        assert.strictEqual(doc.getText(), src);
+    });
+
+    await test('verified paper transaction rolls back atomically on parse failure', async () => {
+        const doc = makeTextDoc('/proj/paper.tex', PAPER);
+        const stub = texStub([doc]);
+        const T = freshRequire('../../tools/tex-tools', stub);
+        const preview = json(await new T.PaperPreviewEditTool().invoke({ input: {
+            file: '/proj/paper.tex', edits: [{ operation: 'replace', selector: 'eq:dispersion',
+                new_text: '\\begin{equation}\nE=broken' }],
+            verify: { parse: true, references: true, rollback_on_failure: true },
+        } }));
+        const applied = json(await new T.PaperApplyEditTool().invoke({ input: {
+            transaction_id: preview.transaction_id,
+        } }));
+        assert.strictEqual(applied.applied, false);
+        assert.strictEqual(applied.rolledBack, true);
+        assert.strictEqual(applied.verification.parse.ok, false);
+        assert.strictEqual(doc.getText(), PAPER, 'the exact prior buffer is restored');
+        assert.strictEqual(stub.__applied.length, 2, 'one apply and one rollback');
     });
 
     await test('AN EDIT IS REFUSED WHEN THE FILE CHANGED ON DISK', async () => {
@@ -392,6 +550,25 @@ async function main() {
         assert.strictEqual(r.applied, true);
         assert.strictEqual(r.unguarded, true);
         assert.ok(/expected_source_hash/.test(r.unguarded_note));
+    });
+
+    await test('paper edit receipts provide compact history and guarded undo', async () => {
+        const doc = makeTextDoc('/proj/paper.tex', PAPER);
+        const T = freshRequire('../../tools/tex-tools', texStub([doc]));
+        const applied = json(await new T.PaperApplyEditTool().invoke({ input: {
+            file: '/proj/paper.tex', selector: 'eq:dispersion',
+            new_text: '\\begin{equation}\\label{eq:dispersion}\nE=11\n\\end{equation}',
+        } }));
+        assert.ok(applied.undo_token);
+        const historyText = text(await new T.PaperApplyEditTool().invoke({ input: { action: 'history' } }));
+        const history = JSON.parse(historyText);
+        assert.strictEqual(history.entries[0].undoToken, applied.undo_token);
+        assert.ok(!historyText.includes('documentclass'), 'history does not repeat complete source');
+        const undone = json(await new T.PaperApplyEditTool().invoke({ input: {
+            action: 'undo', undo_token: applied.undo_token,
+        } }));
+        assert.strictEqual(undone.applied, true);
+        assert.strictEqual(doc.getText(), PAPER);
     });
 
     await test('expected_stable_key and expected_object_id also guard', async () => {

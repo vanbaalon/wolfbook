@@ -107,6 +107,19 @@ async function checkoutExecutionQueue(self) {
         return;
     }
 
+    // Retain the actual WL source for the compact per-kernel status indicator.
+    // This also covers ordinary Shift+Enter runs, which do not have an MCP
+    // OperationRegistry record. Markdown and empty cells return above and do
+    // not replace the last real Wolfram Language task.
+    self._lastWolframTask = {
+        source: String(code).slice(0, 1048576),
+        caption: `Evaluate ${path.basename(_cellForOperation.notebook.uri.fsPath)} cell ${_cellForOperation.index + 1}`,
+        notebook: _cellForOperation.notebook.uri.fsPath,
+        cellNumber: _cellForOperation.index + 1,
+        operationId: self.arbiter?.status(self)?.activeOperation?.operationId || null,
+        startedAt: Date.now(),
+    };
+
     // Clear previous diagnostics and decorations
     self.diagnosticCollection.delete(currentExecution.execution.cell.document.uri);
     self.clearSyntaxErrorDecorations(currentExecution.execution.cell);

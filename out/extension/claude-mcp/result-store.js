@@ -2,6 +2,26 @@
 const crypto = require('crypto');
 const { resolveJsonPath } = require('../kernel/json-path');
 
+function structuralSummary(value, format = 'text') {
+    const text = String(value ?? '');
+    const summary = { type: 'text', chars: text.length, bytes: Buffer.byteLength(text, 'utf8') };
+    if (format === 'json' || /^\s*[\[{]/.test(text)) {
+        try {
+            const parsed = JSON.parse(text);
+            if (Array.isArray(parsed)) return { type: 'array', length: parsed.length, chars: text.length, bytes: summary.bytes };
+            if (parsed && typeof parsed === 'object') return {
+                type: 'object', keys: Object.keys(parsed).slice(0, 50), key_count: Object.keys(parsed).length,
+                chars: text.length, bytes: summary.bytes,
+            };
+            return { type: typeof parsed, chars: text.length, bytes: summary.bytes };
+        } catch (_) {}
+    }
+    const head = /^\s*([A-Za-z$][A-Za-z0-9$`]*)\s*\[/.exec(text)?.[1];
+    if (head) summary.wolfram_head = head;
+    summary.lines = text ? text.split('\n').length : 0;
+    return summary;
+}
+
 class McpResultStore {
     constructor(options = {}) {
         this.maximum = options.maximum || 50;
@@ -45,7 +65,8 @@ class McpResultStore {
     envelope(value, previewChars = 2000, format = 'text', metadata = {}) {
         const item = this.put(value, format, metadata);
         return { preview: item.value.slice(0, previewChars), truncated: item.value.length > previewChars,
-            total_chars: item.value.length, result_handle: item.handle,
+            total_chars: item.value.length, returned_chars: Math.min(item.value.length, previewChars),
+            summary: structuralSummary(item.value, format), result_handle: item.handle,
             expires_at: new Date(item.expiresAt).toISOString(), format, ...metadata };
     }
     _trim() {
@@ -53,4 +74,4 @@ class McpResultStore {
         while (this._items.size > this.maximum) this._items.delete(this._items.keys().next().value);
     }
 }
-module.exports = { McpResultStore };
+module.exports = { McpResultStore, structuralSummary };

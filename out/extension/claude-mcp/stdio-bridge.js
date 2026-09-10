@@ -29,6 +29,9 @@ const PORT_RANGE    = 20;
 const POLL_INTERVAL = 1000;   // ms between health-check retries
 const MAX_WAIT_MS   = 60000;  // give VS Code up to 60s to start
 const PING_TIMEOUT  = 3000;   // ms per health-check attempt
+const PROFILE_ARG   = process.argv.slice(2).find(arg => arg.startsWith('--profile='));
+const PROFILE       = PROFILE_ARG ? PROFILE_ARG.slice('--profile='.length) : 'full';
+const SSE_PATH      = PROFILE === 'economy' ? '/sse/economy' : '/sse';
 
 // ── Find the HTTP server ───────────────────────────────────────────────────
 function checkPort(port) {
@@ -64,7 +67,7 @@ async function findServer() {
 // ── SSE client (persistent connection to HTTP server) ─────────────────────
 function openSSE(port) {
     return new Promise((resolve, reject) => {
-        const req = http.get(`http://127.0.0.1:${port}/sse`, {
+        const req = http.get(`http://127.0.0.1:${port}${SSE_PATH}`, {
             headers: { Accept: 'text/event-stream' }
         }, res => {
             let sessionPath = null;
@@ -190,7 +193,7 @@ function writeStdout(msg) {
         process.exit(1);
     }
 
-    process.stderr.write(`[wolfbook-mcp-bridge] Found server on port ${port}, connecting SSE...\n`);
+    process.stderr.write(`[wolfbook-mcp-bridge] Found server on port ${port}, connecting ${PROFILE} profile...\n`);
 
     const { sessionPath } = await openSSE(port);
     process.stderr.write(`[wolfbook-mcp-bridge] Ready. Session: ${sessionPath}\n`);

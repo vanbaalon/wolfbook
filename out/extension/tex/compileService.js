@@ -45,6 +45,7 @@ const crypto = require('crypto');
 
 const { parseLog, needsRerun } = require('./texLog');
 const { readPassLimit } = require('./livePolicy');
+const { inferManager, missingToolIssue, missingTexFileIssue } = require('./dependencyHelp');
 
 const sha256 = (b) => crypto.createHash('sha256').update(b).digest('hex');
 
@@ -86,6 +87,64 @@ const GATE_TIMEOUT_MS = 30000;
 
 /** Which project each out dir's empty-directory skeleton was mirrored from. */
 const _mirrored = new Map();   // outDir -> projectDir
+
+// Executable checks are process-wide and immutable for the life of an
+// extension host. If the user installs TeX, the instructions correctly ask
+// them to restart VS Code; the new host then gets a clean cache and PATH.
+const _toolProbes = new Map();
+
+function probeExecutable(command, { timeoutMs = 8000, spawnFn = spawn } = {}) {
+    const cacheable = spawnFn === spawn;
+    if (cacheable && _toolProbes.has(command)) return _toolProbes.get(command);
+    const promise = new Promise((resolve) => {
+        let child; let output = ''; let settled = false; let timer = null;
+        const finish = (result) => {
+            if (settled) return;
+            settled = true;
+            if (timer) clearTimeout(timer);
+            resolve(result);
+        };
+        try {
+            child = spawnFn(command, ['--version'], { stdio: ['ignore', 'pipe', 'pipe'] });
+        } catch (e) {
+            finish({ ok: false, command, code: e && e.code, output: '' });
+            return;
+        }
+        timer = setTimeout(() => {
+            try { child.kill('SIGKILL'); } catch (_) { /* gone */ }
+            finish({ ok: false, command, code: 'ETIMEDOUT', output });
+        }, timeoutMs);
+        if (child.stdout) child.stdout.on('data', (d) => { output += d; });
+        if (child.stderr) child.stderr.on('data', (d) => { output += d; });
+        child.on('error', (e) => finish({ ok: false, command, code: e && e.code, output }));
+        child.on('close', (code) => finish({ ok: code === 0, command, code, output }));
+    });
+    if (cacheable) _toolProbes.set(command, promise);
+    return promise;
+}
+
+async function detectManager() {
+    if (process.platform !== 'win32') return null;
+    const miktex = await probeExecutable('miktex');
+    if (miktex.ok) return 'miktex';
+    const mpm = await probeExecutable('mpm');
+    if (mpm.ok) return 'miktex';
+    const tlmgr = await probeExecutable('tlmgr');
+    return tlmgr.ok ? 'texlive' : null;
+}
+
+async function checkToolchain(engine) {
+    for (const tool of ['latexmk', engine]) {
+        const probe = await probeExecutable(tool);
+        if (!probe.ok) {
+            return { ok: false, issue: missingToolIssue(tool, {
+                platform: process.platform,
+                manager: await detectManager(),
+            }) };
+        }
+    }
+    return { ok: true };
+}
 
 /** Stable, per-document scratch directory. Never inside the user's project. */
 function defaultOutDir(root) {
@@ -304,6 +363,14 @@ function cancelledRecord({ root, projectDir, outDir, engine, queuedAt }) {
 async function _compileLocked(o, ctx) {
     const { root, projectDir, outDir, engine, job, timeoutMs, maxPasses, t0, queuedAt } = ctx;
 
+    const toolchain = await checkToolchain(engine);
+    if (!toolchain.ok) {
+        return unavailableRecord({
+            root, projectDir, outDir, engine, queuedAt, t0,
+            issue: toolchain.issue,
+        });
+    }
+
     fs.mkdirSync(outDir, { recursive: true });
     // The skeleton is only walked when it might have changed. A directory the
     // project GAINS mid-session is picked up by the next save or explicit
@@ -439,6 +506,10 @@ async function _compileLocked(o, ctx) {
     let logText = '';
     try { logText = fs.readFileSync(logPath, 'utf8'); } catch (_) { logText = run.stdout; }
     const parsed = parseLog(logText, { file: root });
+    const manager = inferManager(`${run.stdout}\n${run.stderr}\n${logText}`);
+    const dependencyIssue = missingTexFileIssue(parsed.diagnostics, {
+        platform: process.platform, manager,
+    });
 
     let pdfHash = null; let pageCount = null; let pdfBytes = null; let pageSize = null;
     const hasPdf = fs.existsSync(pdfPath);
@@ -512,7 +583,7 @@ async function _compileLocked(o, ctx) {
     const rerunWanted = needsRerun(logText);
 
     return {
-        ok: hasPdf && !run.cancelled,
+        ok: hasPdf && !run.cancelled && !dependencyIssue,
         runner: 'latexmk',
         engine,
         root,
@@ -556,7 +627,26 @@ async function _compileLocked(o, ctx) {
         // pdflatex can be pushed into DVI mode by a 2009-era class; it exits 0,
         // logs nothing wrong, and produces no PDF. Naming it beats "ok: false".
         dviOnly: !hasPdf && parsed.outputFormat === 'dvi',
+        dependencyIssue,
         finishedAt: Date.now(),
+    };
+}
+
+/** A compile blocked before latexmk could usefully run. */
+function unavailableRecord({ root, projectDir, outDir, engine, queuedAt, t0, issue }) {
+    return {
+        ok: false, runner: 'latexmk', engine, root, projectDir, outDir,
+        pdfPath: null, synctexPath: null, logPath: null,
+        generation: nextGeneration(), sourceSnapshotHash: null,
+        overlayDir: null, live: false, pdfHash: null, pdfBytes: null,
+        synctexHash: null, glyphMapPath: null, glyphMapMetaPath: null,
+        glyphMapHash: null, pageCount: null, pageSize: null,
+        diagnostics: [], stopped: true, stopReason: issue.summary,
+        errors: 1, warnings: 0, passes: null, maxPasses: null,
+        passesLimited: false, rerunWanted: false, rcUnsupported: false,
+        ms: Date.now() - t0, queuedMs: t0 - queuedAt,
+        exit: null, cancelled: false, timedOut: false, dviOnly: false,
+        dependencyIssue: issue, finishedAt: Date.now(),
     };
 }
 
@@ -662,6 +752,7 @@ function probeInitCode(code, { timeoutMs = 5000 } = {}) {
 
 function saveGeneration(gen) {
     if (!gen || !gen.outDir || !gen.ok) return false;
+    if (gen.dependencyIssue) return false;
     // A CAPPED OR UNCONVERGED BUILD IS NOT A BASELINE. Its ink is current but
     // its cross-references may be one pass behind, and a record restored on the
     // next window open would present that as a finished compile — with the
@@ -731,6 +822,7 @@ function probeLualatex() {
 
 module.exports = {
     glyphMapHookPath, probeLualatex,
+    probeExecutable, checkToolchain,
     saveGeneration,
     loadGeneration,
     generationPath,

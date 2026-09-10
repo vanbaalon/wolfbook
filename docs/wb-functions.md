@@ -51,7 +51,12 @@ WBInclude["path/to/file.m"]
 
 **Supported file types:** `.wl`, `.wls`, `.m`, `.nb`, `.evsnb`, `.wb`
 
-The converter uses the bundled `resources/convert_nb_to_vsnb.wls` script, which internally calls WolframScript to parse `.nb` files and convert them to Wolfbook's plain-text cell format. Markdown cells and code cells are both preserved.
+`.nb` files are parsed directly by Wolfbook's bounded JavaScript importer. It
+does not launch the former `convert_nb_to_vsnb.wls` / `nb2m` WolframScript
+pipeline. Markdown, code, and existing outputs are preserved. A short-lived
+Wolfram helper is used only when an approximate box needs optional refinement
+or a stored graphic needs rasterisation; those helpers are single-flight,
+cancellable, time-bounded, and owned by the extension lifecycle.
 
 **Example:**
 ```wolfram

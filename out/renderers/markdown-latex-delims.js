@@ -32,6 +32,21 @@ function convertLatexDelimiters(src) {
             // half-consumed by the inline rule.
             .replace(/\\\[([\s\S]+?)\\\]/g, (_m, body) => '$$' + body + '$$')
             .replace(/\\\(([\s\S]+?)\\\)/g, (_m, body) => '$' + body + '$');
+
+        // VS Code owns the final notebook Markdown KaTeX invocation and does
+        // not expose its `macros` option to renderer extensions. Expand the
+        // small Wolfbook macro vocabulary while the source is still under our
+        // control. `\\ii` is a very common LLM shorthand for the imaginary
+        // unit; the negative lookahead deliberately leaves \\iint/\\iiint alone.
+        parts[i] = parts[i].replace(
+            /\$\$([\s\S]+?)\$\$|\$([^$\n]+?)\$/g,
+            (_m, display, inline) => {
+                const isDisplay = display !== undefined;
+                const body = (isDisplay ? display : inline)
+                    .replace(/\\ii(?![A-Za-z])/g, '\\mathrm{i}');
+                return isDisplay ? '$$' + body + '$$' : '$' + body + '$';
+            }
+        );
     }
     return parts.join('');
 }

@@ -278,6 +278,33 @@ function readTocNumbers(outDir, root, deps) {
     return { byTitle, entries };
 }
 
+/**
+ * Match LaTeX's printed section numbers to projection objects.
+ *
+ * A declared label is the authoritative join key. Title text is only a
+ * fallback for unlabelled headings: user macros are expanded before LaTeX
+ * writes the `.aux`, so a source title containing `\Qp` cannot in general be
+ * reconstructed from the expanded `\mathbb Q_{+}` stored there. Labels do
+ * not have that ambiguity, and also distinguish repeated section titles.
+ */
+function sectionNumbersForObjects(objects, tocData, labelData) {
+    const byKey = new Map();
+    const byTitle = tocData && tocData.byTitle instanceof Map
+        ? tocData.byTitle : new Map();
+    const labels = labelData && labelData.labels instanceof Map
+        ? labelData.labels : new Map();
+    for (const o of objects || []) {
+        if (!o || o.kind !== 'section-heading') continue;
+        const labelled = o.label ? labels.get(o.label) : null;
+        const number = labelled && labelled.printed
+            ? labelled.printed
+            : byTitle.get(normalizeTocTitle(sectionTitleSource(o.text)));
+        if (!number) continue;
+        byKey.set(o.stableKey || `s${o.sourceRange.startLine}`, number);
+    }
+    return byKey;
+}
+
 function readAuxLabels(outDir, root, deps) {
     const empty = { labels: new Map(), cites: new Map() };
     if (!outDir || !root || !deps || typeof deps.readFile !== 'function') return empty;
@@ -306,5 +333,5 @@ function readAuxLabels(outDir, root, deps) {
 module.exports = {
     parseAux, readAuxLabels, readGroup, splitGroups, cleanPrinted,
     parseToc, readTocNumbers, normalizeTocTitle,
-    expandTexorpdfstring, sectionTitleSource,
+    expandTexorpdfstring, sectionTitleSource, sectionNumbersForObjects,
 };

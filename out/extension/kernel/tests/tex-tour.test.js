@@ -28,13 +28,24 @@ test('every step says what to do, and every gesture step can be satisfied', () =
     }
 });
 
+test('THE INTERACTIVE GUIDE NAMES THE RECENT READING WORKFLOWS', () => {
+    const copy = Object.fromEntries(STEPS.map(s => [s.id, s.say]));
+    assert.match(copy.contents, /hover an equation number.*miniature.*click it to jump/i);
+    assert.match(copy.comments, /feedback for agents[\s\S]*arrow lists every note[\s\S]*‹ and ›/i);
+    assert.match(copy.commentAt, /heading, title page or abstract[\s\S]*\+ bubble[\s\S]*resizable/i);
+    assert.match(copy.edit, /main-editor caret kept in sync[\s\S]*does not move your reading position/i);
+    assert.match(copy.review, /advances only to a nearby change/i);
+    assert.match(copy.fit, /Double-click Fit[\s\S]*editor separator[\s\S]*horizontal scrollbar reaches both edges/i);
+});
+
 test('A PAPER WITH NOTHING TO SHOW IS NEVER ASKED TO LOOK AT IT', () => {
     // The dead-end case: a step whose feature is not present on this paper is
     // not offered, and the count on the card shrinks with it.
     const all = stepsFor(WITH_LABELS).map(s => s.id);
     const bare = stepsFor(BARE).map(s => s.id);
-    assert.deepStrictEqual(all, ['click', 'widen', 'cursor', 'contents', 'labels', 'tag',
-        'fold', 'sectionAction', 'edit', 'computation', 'takeMe', 'follow', 'review']);
+    assert.deepStrictEqual(all, ['click', 'widen', 'cursor', 'contents', 'compare', 'pageTheme', 'fit',
+        'labels', 'tag', 'comments', 'commentAt', 'fold', 'sectionAction', 'edit',
+        'computation', 'takeMe', 'follow', 'layout', 'review']);
     for (const id of ['labels', 'tag', 'fold', 'contents', 'sectionAction']) {
         assert.ok(!bare.includes(id), `${id} needs something on the page to point at`);
     }
@@ -42,7 +53,8 @@ test('A PAPER WITH NOTHING TO SHOW IS NEVER ASKED TO LOOK AT IT', () => {
     // there — so it survives the bare case, and so does deciding how much the
     // page follows you.
     assert.deepStrictEqual(bare,
-        ['click', 'widen', 'cursor', 'edit', 'computation', 'takeMe', 'follow', 'review'],
+        ['click', 'widen', 'cursor', 'compare', 'pageTheme', 'fit', 'comments', 'commentAt',
+            'edit', 'computation', 'takeMe', 'follow', 'layout', 'review'],
         'what is left is what any paper can do');
     assert.strictEqual(stepAt({ at: 0 }, BARE).total, bare.length,
         'the card counts the steps this reader will actually see');
@@ -76,6 +88,13 @@ test('the gestures the panel posts are the ones that advance the tour', () => {
     assert.ok(satisfies({ id: 'edit' }, { type: 'editHere', page: 1 }));
     assert.ok(satisfies({ id: 'labels' }, { type: 'labelsWanted' }));
     assert.ok(satisfies({ id: 'cursor' }, { type: 'cursor' }));
+    assert.ok(satisfies({ id: 'compare' }, { type: 'compare' }));
+    assert.ok(satisfies({ id: 'pageTheme' }, { type: 'pageTheme', value: 'dark' }));
+    assert.ok(satisfies({ id: 'fit' }, { type: 'fitMode', value: true }));
+    assert.ok(satisfies({ id: 'comments' }, { type: 'commentView', open: true }));
+    assert.ok(!satisfies({ id: 'comments' }, { type: 'commentView', open: false }));
+    assert.ok(satisfies({ id: 'commentAt' }, { type: 'click', commentTarget: true }));
+    assert.ok(satisfies({ id: 'layout' }, { type: 'layoutCycle' }));
 
     // The two gestures added since: a place copied, and a section folded.
     assert.ok(satisfies({ id: 'tag' }, { type: 'copyAnchor', key: 'eq:1' }));

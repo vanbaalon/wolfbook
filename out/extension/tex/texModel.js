@@ -250,7 +250,7 @@ function rangesContain(outer, inner) {
 /** Objects addressable by an agent — the rest are spans, refs and bookkeeping. */
 const ADDRESSABLE = new Set([
     'display-equation', 'figure', 'table', 'tabular', 'theorem',
-    'paragraph', 'section-heading', 'list', 'verbatim', 'abstract', 'environment',
+    'paragraph', 'section-heading', 'list', 'verbatim', 'abstract', 'titlepage', 'environment',
 ]);
 
 /** A compact projection for tool output — never the full text unless asked. */

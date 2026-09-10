@@ -1,0 +1,13 @@
+interface:
+  display_name: "Wolfbook for Mathematica"
+  short_description: "Use Wolfbook's live Wolfram kernel in VS Code"
+  default_prompt: "Use $wolfbook to work with this Mathematica or Wolfram Language task through the live VS Code notebook kernel."
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "wolfbook"
+      description: "Wolfbook notebook and Wolfram kernel tools inside VS Code"
+
+policy:
+  allow_implicit_invocation: true

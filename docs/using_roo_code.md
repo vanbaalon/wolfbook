@@ -61,7 +61,7 @@ Wolfbook runs an **MCP server** inside VS Code on port 27182. Roo Code connects 
 
 ### Automatic setup (recommended)
 
-Wolfbook configures Roo Code automatically when VS Code starts, **if Roo Code is already installed**. After installing both extensions:
+Wolfbook configures Roo Code automatically when VS Code starts, **if Roo Code is already installed**. It also installs the cross-agent routing skill at `~/.agents/skills/wolfbook/`, a global location Roo and Codex both discover. After installing both extensions:
 
 1. Reload the VS Code window (`⌘⇧P` → **Reload Window**)
 2. Open the Roo Code panel → **MCP Servers** icon — you should see **wolfbook** listed
@@ -118,6 +118,7 @@ Substituting the paths from Steps 1 and 2.
 1. Reload the VS Code window
 2. Open the Roo Code panel → **MCP Servers** icon
 3. You should see **wolfbook** listed as a connected server with all tools visible
+4. Confirm that the **wolfbook** skill appears in Roo's available skills
 
 > **Note:** Wolfbook's MCP server starts a few seconds after VS Code loads. The stdio bridge waits automatically — no manual retry needed.
 

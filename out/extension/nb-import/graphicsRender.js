@@ -18,9 +18,10 @@ const fs     = require('fs');
 const os     = require('os');
 const path   = require('path');
 const crypto = require('crypto');
-const { spawn } = require('child_process');
+const supervisor = require('./subprocessSupervisor');
 
 const { findRunner } = require('./kernelAssist');
+const flights = new Map();
 
 // The live kernel path uses 144 dpi (2x the 72 dpi Wolfram default) — matching it
 // means our PNGs display at the same physical size as freshly evaluated ones.
@@ -149,7 +150,7 @@ function asciiJson(obj) {
  *                    rendered:Object<string,{absPath:string, size:{w,h}|null}>,
  *                    fromCache:number, kernelRan:boolean}>}
  */
-async function renderGraphics(tasks, opts) {
+async function renderGraphicsOnce(tasks, opts) {
     opts = opts || {};
     const imgDir = opts.imgDir;
     const rendered = Object.create(null);
@@ -174,7 +175,7 @@ async function renderGraphics(tasks, opts) {
     }
     if (!todo.length) return { ok: true, rendered, fromCache, kernelRan: false };
 
-    const runner  = findRunner(opts.kernelPath);
+    const runner  = opts.runner || findRunner(opts.kernelPath);
     const tmpDir  = fs.mkdtempSync(path.join(os.tmpdir(), 'wb-nbgfx-'));
     const inFile  = path.join(tmpDir, 'payload.json');
     const outFile = path.join(tmpDir, 'result.json');
@@ -190,36 +191,22 @@ async function renderGraphics(tasks, opts) {
     }
 
     return new Promise((resolve) => {
+        const subject = opts.notebook ? ` for ${opts.notebook}` : '';
         let child;
         try {
-            child = spawn(runner.cmd, runner.args.concat([wlFile]), {
+            child = supervisor.spawn(runner.cmd, runner.args.concat([wlFile]), {
                 env: Object.assign({}, process.env, { WB_GFX_IN: inFile, WB_GFX_OUT: outFile }),
                 stdio: ['ignore', 'pipe', 'pipe'],
-            });
+            }, { stage: 'graphics', notebook: opts.notebook, key: opts.key });
         } catch (e) {
             cleanup();
             resolve({ ok: false, unavailable: true, error: String(e.message || e), rendered, fromCache, kernelRan: false });
             return;
         }
 
-        let stderr = '', settled = false;
-        const finish = (res) => { if (settled) return; settled = true; cleanup(); resolve(res); };
-
-        const timer = setTimeout(() => {
-            try { child.kill('SIGKILL'); } catch (_) {}
-            collect();
-            finish({ ok: false, error: 'kernel timed out', rendered, fromCache, kernelRan: true });
-        }, opts.timeoutMs || 300000);
-
-        if (opts.signal) {
-            opts.signal.addEventListener?.('abort', () => {
-                try { child.kill('SIGKILL'); } catch (_) {}
-                clearTimeout(timer);
-                collect();
-                finish({ ok: false, error: 'cancelled', rendered, fromCache, kernelRan: true });
-            }, { once: true });
-        }
-
+        let stdout = '', stderr = '', settled = false;
+        let requestedResult = null;
+        let abortListener = null;
         // Believe the filesystem, not the report: a partial run still yields
         // every image that made it to disk.
         const collect = () => {
@@ -228,24 +215,70 @@ async function renderGraphics(tasks, opts) {
                 if (fs.existsSync(t.outPath)) rendered[t.id] = { absPath: t.outPath, size: displaySize(t.outPath) };
             }
         };
-
-        child.stderr.on('data', d => { stderr += String(d); });
-        child.on('error', (e) => {
+        const finish = (res) => {
+            if (settled) return;
+            settled = true;
             clearTimeout(timer);
+            if (opts.signal && abortListener) opts.signal.removeEventListener?.('abort', abortListener);
+            cleanup();
+            resolve(res);
+        };
+        const stop = (res) => {
+            if (settled || requestedResult) return;
+            requestedResult = res;
+            clearTimeout(timer);
+            supervisor.terminate(child).then(() => finish(res));
+        };
+
+        const timer = setTimeout(() => {
+            collect();
+            stop({ ok: false, error: `graphics rendering${subject} timed out after ${opts.timeoutMs || 300000} ms`, rendered, fromCache, kernelRan: true });
+        }, opts.timeoutMs || 300000);
+
+        if (opts.signal) {
+            abortListener = () => {
+                collect();
+                stop({ ok: false, error: `graphics rendering${subject} cancelled`, rendered, fromCache, kernelRan: true });
+            };
+            if (opts.signal.aborted) abortListener();
+            else opts.signal.addEventListener?.('abort', abortListener, { once: true });
+        }
+
+        child.stdout.on('data', d => { stdout = (stdout + String(d)).slice(-65536); });
+        child.stderr.on('data', d => { stderr = (stderr + String(d)).slice(-65536); });
+        child.on('error', (e) => {
             finish({ ok: false, unavailable: true, error: String(e.message || e), rendered, fromCache, kernelRan: false });
         });
         child.on('close', () => {
-            clearTimeout(timer);
             collect();
+            if (requestedResult) { finish(requestedResult); return; }
             const missing = todo.length - Object.keys(rendered).length + fromCache;
             finish({
                 ok: missing === 0,
                 error: missing > 0 ? (missing + ' graphic(s) could not be rendered' +
-                                      (stderr.trim() ? ': ' + stderr.trim().split('\n').pop() : '')) : undefined,
+                                      (stderr.trim() ? ': ' + stderr.trim().split('\n').pop() :
+                                       (stdout.trim() ? ': ' + stdout.trim().split('\n').pop() : ''))) : undefined,
                 rendered, fromCache, kernelRan: true,
             });
         });
     });
+}
+
+/** Coalesce duplicate render requests for the same notebook and image set. */
+function renderGraphics(tasks, opts = {}) {
+    const key = opts.key ? `graphics:${opts.key}` : null;
+    if (key && flights.has(key)) return flights.get(key);
+    const promise = renderGraphicsOnce(tasks, opts);
+    if (key) {
+        flights.set(key, promise);
+        const forget = () => { if (flights.get(key) === promise) flights.delete(key); };
+        promise.then(forget, forget);
+    }
+    return promise;
+}
+
+function cancel(key) {
+    return supervisor.terminateKey(key);
 }
 
 module.exports = {
@@ -256,4 +289,6 @@ module.exports = {
     pngDimensions,
     displaySize,
     IMAGE_RESOLUTION,
+    cancel,
+    dispose: supervisor.dispose,
 };

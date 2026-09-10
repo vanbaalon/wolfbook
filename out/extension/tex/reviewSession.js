@@ -83,6 +83,56 @@ class ReviewSession {
         this.hunks = [];
         this.summary = {};
         this._lastText = null;          // the document text of the last update
+        // WHICH RENDER THE RECTS DESCRIBE. A placement is true only of the
+        // pages it was measured against; carried so the panel can refuse to
+        // draw one over a render it does not describe.
+        this.generation = null;
+        this.feedback = [];
+        this.feedbackDraft = '';
+        this.arrivals = [];
+    }
+
+    serialize() {
+        return { file: this.file, baseText: this.baseText, openedAt: this.openedAt,
+            batches: this.batches, batchSeq: this._batchSeq, current: this._current,
+            firstSeen: [...this.firstSeen], edited: [...this.edited], decided: this.decided,
+            lastText: this._lastText, feedback: this.feedback, feedbackDraft: this.feedbackDraft, arrivals: this.arrivals };
+    }
+    static restore(value) {
+        const s = new ReviewSession(value);
+        s.openedAt = value.openedAt || s.openedAt;
+        s.batches = value.batches || []; s._batchSeq = value.batchSeq || 0; s._current = value.current;
+        s.firstSeen = new Map(value.firstSeen || []); s.edited = new Set(value.edited || []);
+        s.decided = value.decided || []; s.feedback = value.feedback || []; s.arrivals = value.arrivals || [];
+        s.feedbackDraft = value.feedbackDraft || '';
+        if (typeof value.lastText === 'string') s.update({ currentText: value.lastText });
+        return s;
+    }
+
+    recordArrival(o = {}) {
+        const text = String(o.text ?? '');
+        const previous = this.arrivals[this.arrivals.length - 1];
+        if (previous && previous.after === text) return;
+        this.arrivals.push({ at: o.at || this.now(), source: o.source || 'external/unknown',
+            author: o.author || null, before: this._lastText ?? this.baseText, after: text });
+    }
+    addFeedback(id, comment) {
+        const h = this.hunks.find(h => h.id === id);
+        if (!h) return false;
+        const batch = this.batches.find(b => b.id === this.firstSeen.get(id));
+        this.feedback.push({ id, at: this.now(), file: this.file, line: h.ourRange.startLine,
+            endLine: h.ourRange.endLine, name: h.object?.name || null, comment: String(comment),
+            object: h.object ? {
+                stableKey: h.object.stableKey || null,
+                kind: h.object.kind || null,
+                label: h.object.label || null,
+            } : null,
+            author: batch?.author || null, before: h.theirText, after: h.ourText });
+        this.feedbackDraft += (this.feedbackDraft ? '\n\n' : '') +
+            `### ${this.file}:${h.ourRange.startLine} — ${h.object?.name || 'reviewed change'}\n` +
+            `${new Date(this.now()).toISOString()} · ${batch?.author?.name || 'external/unknown'}${batch?.author?.sessionId ? ' · ' + batch.author.sessionId : ''}\n` +
+            `Change ${id} (line at review time)\n${String(comment)}`;
+        return true;
     }
 
     get pendingCount() { return this.hunks.length; }
@@ -112,7 +162,7 @@ class ReviewSession {
         const at = o.at || this.now();
         const source = o.source || 'disk';
         const last = this.batches[this.batches.length - 1];
-        if (last && this.groupWindowMs > 0 && last.source === source &&
+        if (last && this.groupWindowMs > 0 && last.source === source && JSON.stringify(last.author || null) === JSON.stringify(o.author || null) &&
             at - last.lastAt <= this.groupWindowMs && at - last.at <= this.maxEpisodeMs) {
             last.lastAt = at;
             last.writes += 1;
@@ -124,6 +174,7 @@ class ReviewSession {
         this.batches.push({
             id, at, lastAt: at, writes: 1,
             source,
+            author: o.author || null,
             note: o.note || '',
             seen: false,
         });
@@ -215,6 +266,8 @@ class ReviewSession {
         this.hunks = hunks;
         this.summary = built.summary;
         this._lastText = currentText;
+        const g = (o.map || {}).generation;
+        this.generation = g == null ? null : g;
         return { hunks, summary: built.summary, census: describeSummary(built.summary) };
     }
 
@@ -372,10 +425,11 @@ class ReviewSession {
                 { id, at: this.openedAt, lastAt: this.openedAt, writes: 1, source: 'unknown' };
             return {
                 id, at: b.at, lastAt: b.lastAt || b.at, writes: b.writes || 1,
-                source: b.source, note: b.note,
+                source: b.source, note: b.note, author: b.author || null,
                 count: hs.length,
                 hunks: hs.map(h => ({
                     id: h.id,
+                    at: b.at, author: b.author || null, source: b.source,
                     verb: h.verb,
                     where: h.where, confidence: h.confidence, why: h.why,
                     page: h.page, rects: h.rects,
@@ -401,9 +455,13 @@ class ReviewSession {
         return {
             file: this.file,
             pending: this.hunks.length,
+            generation: this.generation,
             census: describeSummary(this.summary),
             summary: this.summary,
             groups,
+            feedback: this.feedback.map(({ before, after, ...item }) => item),
+            feedbackDraft: this.feedbackDraft,
+            arrivals: this.arrivals.map(a => ({ at: a.at, source: a.source, author: a.author })),
             decided: this.decided.slice(0, 12),
             ...o,
         };

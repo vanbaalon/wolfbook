@@ -8,9 +8,10 @@
 //   * render-aware diagnostics ("paragraph exceeds text width by 1.6 mm")
 //
 // TYPING IS NEVER BLOCKED. A compile of a real 89-page paper takes ~17 s, so it
-// runs on save and on demand, never on a keystroke. Between compiles the map
-// stays useful: edits are fed to RenderMap.noteEdit, so answers degrade from
-// `fresh` to `probably-current` with a known displacement instead of vanishing.
+// runs after a short typing pause, on save and on demand. Between compiles the map
+// stays useful for gutters and diagnostics: edits are fed to RenderMap.noteEdit
+// so line positions can be translated. The page tracer itself pauses until the
+// matching PDF is visible; word matching against old ink is never trustworthy.
 
 const vscode = require('vscode');
 const path = require('path');
@@ -24,10 +25,11 @@ const { RenderMap, FLAG } = require('./renderMap');
 const { GlyphMap } = require('./glyphMap');
 const { findRoot, buildGraph } = require('./texProject');
 const {
-    nextLiveDelayMs, cooldownDelayMs, blendLiveMs, synctexUnchanged,
+    nextLiveDelayMs, liveDeadlineDelayMs, cooldownDelayMs, blendLiveMs, synctexUnchanged,
     generationSatisfies, authoritativeDelayMs,
 } = require('./livePolicy');
 const { foldForCompile, MARK: COLLAPSE_MARK } = require('./collapse');
+const { formatDependencyHelp } = require('./dependencyHelp');
 
 const FLAG_ICON = {
     [FLAG.FRESH]: '$(pass-filled)',
@@ -98,6 +100,11 @@ class RootState {
         // until the first one finishes, and null means "use the ceiling".
         this.liveMsEwma = null;
         this.authoritativeRunning = false;
+        this.dependencyIssue = null;
+        // True from the first source edit until a compile of those exact bytes
+        // lands. This is deliberately independent of line displacement: a
+        // same-line word edit makes the old PDF just as unfit for tracing.
+        this.sourceAhead = false;
     }
 }
 
@@ -111,8 +118,10 @@ class RenderCoordinator {
         this._emitter = new vscode.EventEmitter();
         this.onDidChange = this._emitter.event;
         this._liveTimers = new Map();    // rootPath -> debounce handle
+        this._liveFirst = new Map();
         this._idleTimers = new Map();    // rootPath -> the full-rebuild handle
         this._capOk = null;              // can latexmk take our -e? probed once
+        this._reportedDependencyIssues = new Set();
     }
 
     dispose() {
@@ -120,6 +129,7 @@ class RenderCoordinator {
         for (const t of this._liveTimers.values()) clearTimeout(t);
         for (const t of this._idleTimers.values()) clearTimeout(t);
         this._liveTimers.clear();
+        this._liveFirst.clear();
         this._idleTimers.clear();
         this._emitter.dispose();
     }
@@ -181,14 +191,23 @@ class RenderCoordinator {
         // 400 ms should feel immediate; one that takes 17 s must stay calm,
         // because firing sooner than the last build finished only queues work
         // the next keystroke will cancel.
-        const wait = delayMs ?? nextLiveDelayMs({
+        let wait = delayMs ?? nextLiveDelayMs({
             lastMs: st && st.liveMsEwma,
             ceilingMs: Math.max(200, cfg.get('liveRenderDelayMs', 900)),
         });
         const prev = this._liveTimers.get(root);
+        if (!this._liveFirst.has(root)) this._liveFirst.set(root, Date.now());
+        // A continuous stream of agent edits must not postpone the first
+        // refresh indefinitely. build() already coalesces an in-flight run.
+        wait = liveDeadlineDelayMs({
+            waitMs: wait,
+            firstAtMs: this._liveFirst.get(root),
+            nowMs: Date.now(),
+        });
         if (prev) clearTimeout(prev);
         this._liveTimers.set(root, setTimeout(() => {
             this._liveTimers.delete(root);
+            this._liveFirst.delete(root);
             this.build(doc, { live: true }).catch(() => { /* reported via state */ });
         }, wait));
         // Typing also postpones the full rebuild that converges cross-references.
@@ -298,7 +317,9 @@ class RenderCoordinator {
     /** Feed an edit through, so the map can translate rather than go stale. */
     noteChange(e) {
         const st = this.stateFor(e.document);
-        if (!st || !st.map) return;
+        if (!st) return;
+        st.sourceAhead = true;
+        if (!st.map) return;
         const file = e.document.uri.fsPath;
         for (const c of e.contentChanges) {
             const removed = c.range.end.line - c.range.start.line;
@@ -320,6 +341,7 @@ class RenderCoordinator {
         const root = this.rootOf.get(file) || file;
         const st = this.roots.get(root);
         if (!st) return false;
+        st.sourceAhead = true;
         this._emitter.fire(st);
         return true;
     }
@@ -346,6 +368,15 @@ class RenderCoordinator {
      */
     async build(doc, { force = false, live = false, authoritative = false, quiet = false } = {}) {
         const root = this.rootFor(doc);
+        // A deliberate save/Compile supersedes the debounce which preceded it.
+        // Leaving that timer armed lets it wake during the authoritative build
+        // and abort the very compile the reader explicitly requested.
+        if (!live) {
+            const pending = this._liveTimers.get(root);
+            if (pending) clearTimeout(pending);
+            this._liveTimers.delete(root);
+            this._liveFirst.delete(root);
+        }
         const st = this.roots.get(root);
         const overlay = this.liveOverlay(root);
         // ONE snapshot per build. It used to be computed twice — here and again
@@ -371,7 +402,16 @@ class RenderCoordinator {
             wantGlyphMap = !!this._luaOk && !st.glyphMapRefused;
         }
         const mapIsStale = wantGlyphMap && st.map && !st.map.exact;
-        if (!force && !mapIsStale && this.isCurrent(st, snapshot, { authoritative: wantFull }) && st.map) return st;
+        if (!force && !mapIsStale && this.isCurrent(st, snapshot, { authoritative: wantFull }) && st.map) {
+            // The reader may have typed and undone back to the exact compiled
+            // bytes. No process needs to run, but the viewer still needs the
+            // state transition that lets tracing wake up again.
+            if (st.sourceAhead) {
+                st.sourceAhead = false;
+                this._emitter.fire(st);
+            }
+            return st;
+        }
 
         // A COMPILE ALREADY DONE IS NOT WORTH DOING AGAIN.
         //
@@ -391,6 +431,8 @@ class RenderCoordinator {
                     pageSize: this._pageSize(cached),
                 });
                 st.lastError = null;
+                st.dependencyIssue = null;
+                st.sourceAhead = false;
                 this.log(`reused the previous compile of ${path.basename(root)} ` +
                     `(${cached.pageCount ?? '?'} pages, nothing changed)`);
                 this._emitter.fire(st);
@@ -538,8 +580,19 @@ class RenderCoordinator {
                 synctexDoc: (prevDoc && synctexUnchanged(prevGen, gen)) ? prevDoc : null,
                 glyphDoc: (prevGlyph && prevGen && gen.glyphMapHash && prevGen.glyphMapHash === gen.glyphMapHash) ? prevGlyph : null,
             });
+            st.dependencyIssue = gen.dependencyIssue || null;
+            // A compile can finish while the reader is still typing. Resume
+            // tracing only when the generation describes the bytes that are
+            // current NOW, not merely those captured when this run started.
+            // Failed/unavailable builds never make an old page current.
+            let currentSnapshot = null;
+            try { currentSnapshot = snapshotSources(st.files, this.liveOverlay(root)); }
+            catch (_) { currentSnapshot = null; }
+            st.sourceAhead = !(gen.ok && gen.pdfPath && gen.sourceSnapshotHash &&
+                gen.sourceSnapshotHash === currentSnapshot);
             if (st.map.exact) this.log('  render map: exact (GlyphMap)');
-            st.lastError = gen.ok ? null : (gen.stopReason || 'compile produced no PDF');
+            st.lastError = gen.dependencyIssue?.summary || (gen.ok ? null : (gen.stopReason || 'compile produced no PDF'));
+            if (gen.dependencyIssue) this._reportDependencyIssue(gen.dependencyIssue);
             saveGeneration(gen);
             // Tune the debounce to what this paper actually costs. gen.ms, not
             // the wall time: queue time is an artefact of the previous build,
@@ -596,6 +649,22 @@ class RenderCoordinator {
             try { this.scheduleLive(doc, wait); } catch (_) { /* the next keystroke will */ }
         }
         return st;
+    }
+
+    _reportDependencyIssue(issue) {
+        if (!issue || this._reportedDependencyIssues.has(issue.key)) return;
+        this._reportedDependencyIssues.add(issue.key);
+        const help = formatDependencyHelp(issue);
+        if (help) this.output.appendLine(help);
+        const show = 'Show setup instructions';
+        const open = 'Open setup page';
+        Promise.resolve(vscode.window.showErrorMessage(
+            `WPaper setup required: ${issue.summary}`,
+            show, open,
+        )).then((pick) => {
+            if (pick === show) this.output.show(true);
+            if (pick === open && issue.helpUrl) vscode.env.openExternal(vscode.Uri.parse(issue.helpUrl));
+        }).catch(() => { /* a setup hint must never break compiling */ });
     }
 
     _modelFor(root) {
@@ -661,6 +730,12 @@ function makeStatusItem(coord, projection) {
         if (st && st.compiling && !st.liveCompiling) {
             item.text = '$(sync~spin) compiling…';
             item.tooltip = 'WPaper is compiling this paper';
+            item.show();
+            return;
+        }
+        if (st && st.sourceAhead) {
+            item.text = `$(history) page behind${st.liveCompiling || st.authoritativeRunning ? ' $(sync~spin)' : ''}`;
+            item.tooltip = 'The WPaper page is behind the editor. Tracing is paused until the matching compile is visible.';
             item.show();
             return;
         }

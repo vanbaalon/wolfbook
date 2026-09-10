@@ -15,6 +15,7 @@ const os = require('os');
 const fs = require('fs');
 // Module-level controller reference so deactivate() can call quitKernel().
 let _activeController = null;
+let _activeKernelManager = null;
 const find_kernel_1 = require("./find-kernel");
 const vscode = require("vscode");
 const controller_1 = require("./controller");
@@ -100,6 +101,9 @@ async function activate(context) {
     }
 
     const config = configCompat.getConfiguration();
+    // Agent notebook work can run without taking editor focus. Register the
+    // opt-in Follow Agent UI before any LM/MCP tools can fire.
+    require('./tools/shared').registerAgentFollow(context);
 
     // Hoisted here so wolfram.expandHoverDoc command (registered below) can close over it
     // even though the LSP client (which populates it) is set up later.
@@ -762,6 +766,7 @@ async function activate(context) {
             return isolated;
         },
     });
+    _activeKernelManager = kernelManager;
     const _defaultKernelEntry = kernelManager.addDefault(controller);
     context.subscriptions.push({ dispose: () => kernelManager.releaseLabels() });
     controller._controller.label = `Wolfram ${_defaultKernelEntry.label}`;
@@ -1064,6 +1069,51 @@ async function activate(context) {
     });
     _resolveController.manager = kernelManager;
     _controllerResolver = _resolveController;
+    const { registerKernelStatusIndicators } = require('./kernel/status-indicators');
+    registerKernelStatusIndicators(context, kernelManager, {
+        // Local state is live to the millisecond; registry topology is used
+        // only for remote kernels and refreshes on its normal heartbeat.
+        getSnapshot: entry => entry.remote
+            ? (_liveKernelTopology().find(kernel => kernel.kernel_id === entry.id) || kernelManager.describe(entry))
+            : kernelManager.describe(entry),
+        abort: async (entry, snapshot) => {
+            if (entry.remote) {
+                await entry.controller.session.abort();
+                return;
+            }
+            const status = entry.controller.arbiter?.status(entry.controller) || {};
+            const operationId = status.activeOperation?.operationId ||
+                snapshot.active_operation?.operationId || snapshot.active_operation?.operation_id;
+            await entry.controller.arbiter?.abort(entry.controller, {
+                operationId, requestedBy: 'kernel-status-indicator', reason: 'user selected Abort Task',
+            });
+            if (operationId) entry.controller.operations?.abort(operationId, {
+                requestedBy: 'kernel-status-indicator', reason: 'user selected Abort Task', ts: Date.now(),
+            });
+        },
+        restart: async (entry, snapshot) => {
+            if (entry.remote && (snapshot.busy || ['busy', 'aborting'].includes(snapshot.lifecycle))) {
+                await entry.controller.session.abort();
+            }
+            entry.controller.arbiter?.invalidate('kernel restart requested from status indicator');
+            entry.controller.operations?.invalidateAll('kernel restart requested from status indicator');
+            await entry.controller.restartKernel();
+            vscode.window.showInformationMessage(`Restarting Wolfram ${entry.label}.`);
+        },
+        stop: async (entry, snapshot) => {
+            if (entry.remote) {
+                if (snapshot.busy || ['busy', 'aborting'].includes(snapshot.lifecycle)) {
+                    await entry.controller.session.abort();
+                }
+                await entry.controller.session.stop();
+                _detachRemoteKernel(entry);
+            } else {
+                await Promise.resolve(entry.controller.quitKernel());
+                if (!entry.isDefault) await kernelManager.stop(entry.id);
+            }
+            vscode.window.showInformationMessage(`Stopped Wolfram ${entry.label}.`);
+        },
+    });
     const _kernelIdentityItem = vscode.window.createStatusBarItem(
         'wolfbook-kernel-identity', vscode.StatusBarAlignment.Right, 100
     );
@@ -1209,6 +1259,10 @@ async function activate(context) {
 
     // Register Copilot language model tools (Phase 4)
     const _toolMap = _tools.registerTools(context, _resolveController, _debugCtrl, () => _askPanel);
+    // Per-window history of notebooks and slide decks actually changed or run
+    // through MCP. The process-local event bus keeps secondary VS Code windows
+    // isolated, while workspaceState preserves the list across a window reload.
+    require('./monitor/recent-mcp-files').registerRecentMcpFiles(context);
 
     // Late-bind notebook tools for Oberon's Fairy so it can read/edit the
     // charm notebook during revision runs. Uses the same tool implementations
@@ -1263,10 +1317,10 @@ async function activate(context) {
     if (_mcpDisabled) {
         devLog(LOG_CHANNELS.EXTENSION, '[Wolfbook MCP] MCP server disabled via wolfbook.mcpEnabled setting');
     }
-    let WolframMCPServer, loadMCPSchemas, configureClaudeDesktop, writeClaudeConfig, repairStaleClaudeConfigs, needsConfigUpdate, resolveNodeBinary, validateNodeBinary, writeAntigravityConfig, needsAntigravityConfigUpdate, installAntigravitySkill, needsSkillInstall, writeClineConfig, needsClineConfigUpdate, writeRooCodeConfig, needsRooCodeConfigUpdate, getMcpInfoPayload, WorkerServer, assignClientId;
+    let WolframMCPServer, loadMCPSchemas, configureClaudeDesktop, writeClaudeConfig, repairStaleClaudeConfigs, needsConfigUpdate, resolveNodeBinary, validateNodeBinary, writeAntigravityConfig, needsAntigravityConfigUpdate, installAgentSkills, needsAgentSkillsInstall, installAntigravitySkill, writeClineConfig, needsClineConfigUpdate, writeRooCodeConfig, needsRooCodeConfigUpdate, getMcpInfoPayload, WorkerServer, assignClientId;
     let _mcpUnavailable = false;
     try {
-        ({ WolframMCPServer, loadMCPSchemas, configureClaudeDesktop, writeClaudeConfig, repairStaleClaudeConfigs, needsConfigUpdate, resolveNodeBinary, validateNodeBinary, writeAntigravityConfig, needsAntigravityConfigUpdate, installAntigravitySkill, needsSkillInstall, writeClineConfig, needsClineConfigUpdate, writeRooCodeConfig, needsRooCodeConfigUpdate, getMcpInfoPayload } = require('./claude-mcp/server'));
+        ({ WolframMCPServer, loadMCPSchemas, configureClaudeDesktop, writeClaudeConfig, repairStaleClaudeConfigs, needsConfigUpdate, resolveNodeBinary, validateNodeBinary, writeAntigravityConfig, needsAntigravityConfigUpdate, installAgentSkills, needsAgentSkillsInstall, installAntigravitySkill, writeClineConfig, needsClineConfigUpdate, writeRooCodeConfig, needsRooCodeConfigUpdate, getMcpInfoPayload } = require('./claude-mcp/server'));
         ({ WorkerServer } = require('./claude-mcp/worker'));
         ({ assignClientId } = require('./claude-mcp/registry'));
     } catch (err) {
@@ -1275,9 +1329,10 @@ async function activate(context) {
         loadMCPSchemas = () => ({});
         resolveNodeBinary = () => process.execPath || 'node';
         validateNodeBinary = () => ({ ok: true });
-        needsConfigUpdate = needsAntigravityConfigUpdate = needsSkillInstall = needsClineConfigUpdate = needsRooCodeConfigUpdate = () => false;
+        needsConfigUpdate = needsAntigravityConfigUpdate = needsAgentSkillsInstall = needsClineConfigUpdate = needsRooCodeConfigUpdate = () => false;
         writeClaudeConfig = () => ({ configPaths: [], bridgePath: '' });
         writeAntigravityConfig = writeClineConfig = writeRooCodeConfig = () => ({ skipped: true });
+        installAgentSkills = () => ({ updated: {}, skillPaths: {} });
         installAntigravitySkill = () => ({});
         configureClaudeDesktop = () => ({});
         getMcpInfoPayload = (bridgePath, nodeBin, port, isSecondary, isDisabled) => ({ bridgePath, nodeBin, port, isSecondary, isDisabled, unavailable: true });
@@ -1304,15 +1359,89 @@ async function activate(context) {
         storageDir: context.globalStorageUri.fsPath,
         logoPath: path.join(context.extensionPath, 'images', 'wolfbook_logo_transparent.png'),
     });
+    _activityMonitor.setActionHandler(async request => {
+        const action = String(request?.action || '');
+        if (action === 'open') {
+            let targetPath = String(request.notebook || '');
+            if (!targetPath) throw new Error('This operation has no notebook target.');
+            if (!require('path').isAbsolute(targetPath)) {
+                const folders = vscode.workspace.workspaceFolders || [];
+                if (folders.length !== 1) throw new Error('Relative target is ambiguous in this window. Open it from the paper editor.');
+                targetPath = require('path').resolve(folders[0].uri.fsPath, targetPath);
+            }
+            const uri = vscode.Uri.file(targetPath);
+            if (/\.(wb|evsnb|vsnb)$/i.test(targetPath)) {
+                const document = (vscode.workspace.notebookDocuments || []).find(doc => doc.uri.fsPath === targetPath)
+                    || await vscode.workspace.openNotebookDocument(uri);
+                const editor = await vscode.window.showNotebookDocument(document, { preserveFocus: false });
+                let index = Number(request.cellNumber) - 1;
+                if (request.cellId) {
+                    const wanted = String(request.cellId);
+                    for (let i = 0; i < document.cellCount; i++) {
+                        const metadata = document.cellAt(i).metadata || {};
+                        if ([metadata.toolId, metadata.id, metadata.cellId].some(value => String(value || '') === wanted)) { index = i; break; }
+                    }
+                }
+                if (Number.isInteger(index) && index >= 0 && document.cellCount) {
+                    index = Math.min(index, document.cellCount - 1);
+                    const range = new vscode.NotebookRange(index, index + 1);
+                    editor.selection = range;
+                    editor.revealRange(range, vscode.NotebookEditorRevealType.InCenter);
+                }
+            } else if (/\.tex$/i.test(targetPath)) {
+                const document = await vscode.workspace.openTextDocument(uri);
+                const editor = await vscode.window.showTextDocument(document, { preserveFocus: false });
+                if (request.selector) {
+                    const { projectionOf, findObject } = require('./tools/tex-tools');
+                    const object = findObject(projectionOf(targetPath, document.getText()).model, request.selector);
+                    if (!object) throw new Error('Paper opened, but the recorded section/object could not be resolved exactly.');
+                    const line = Math.max(0, Number(object.sourceRange.startLine) - 1);
+                    const position = new vscode.Position(line, 0);
+                    editor.selection = new vscode.Selection(position, position);
+                    editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenter);
+                }
+            } else {
+                await vscode.commands.executeCommand('vscode.open', uri);
+            }
+            return { ok: true, action, target: targetPath };
+        }
+        const entry = kernelManager.findEntryByOperation(request.operationId) || kernelManager.get(request.kernelId);
+        if (!entry) throw new Error('The operation kernel is no longer available.');
+        if (entry.remote) throw new Error('This window does not own the kernel. Refresh activity to resolve its owner.');
+        if (action === 'abort') {
+            const operationId = String(request.operationId || '');
+            const current = entry.controller.arbiter?.status(entry.controller)?.activeOperation;
+            if (!operationId || current?.operationId !== operationId) throw new Error('This task is no longer running on that kernel. Refresh activity.');
+            const outcome = await entry.controller.arbiter.abort(entry.controller, {
+                operationId, requestedBy: 'mcp-control-room', reason: 'user selected Abort',
+            });
+            if (!outcome.aborted) throw new Error('Abort was not confirmed. Refresh kernel status before continuing.');
+            if (operationId) entry.controller.operations?.abort(operationId, {
+                requestedBy: 'mcp-control-room', reason: 'user selected Abort', ts: Date.now(),
+            });
+            return { ok: true, action, operationId };
+        }
+        if (action === 'restart') {
+            const choice = await vscode.window.showWarningMessage(`Restart ${entry.label}? All in-memory Wolfram definitions will be lost.`,
+                { modal: true }, 'Restart kernel');
+            if (choice !== 'Restart kernel') return { ok: false, cancelled: true };
+            entry.controller.arbiter?.invalidate('kernel restart requested from MCP activity');
+            entry.controller.operations?.invalidateAll('kernel restart requested from MCP activity');
+            await entry.controller.restartKernel();
+            return { ok: true, action, kernelId: entry.id };
+        }
+        throw new Error(`Unknown control-room action: ${action}`);
+    });
     context.subscriptions.push({ dispose: () => _activityMonitor.dispose() });
     const _mcpExposureOptions = {
-        canonicalProjection: config.get('mcp.canonicalOutputProjection', false),
+        canonicalProjection: config.get('mcp.canonicalOutputProjection', true),
         renderCache: config.get('mcp.renderCache', false),
-        boundedResults: config.get('mcp.boundedResults', false),
-        resultThreshold: config.get('mcp.resultHandleThreshold', 24000),
+        boundedResults: config.get('mcp.boundedResults', true),
+        resultThreshold: config.get('mcp.resultHandleThreshold', 12000),
         exposeDeprecatedTools: config.get('mcp.exposeDeprecatedTools', false),
         profile: config.get('mcp.profile', 'full'),
         activityMonitor: _activityMonitor,
+        notebookNotifier: event => require('./tools/shared').notifyAgentNotebookEvent(event),
     };
     let   _mcpServer = new WolframMCPServer(_toolMap, _mcpSchema, _mcpExposureOptions);
 
@@ -1371,7 +1500,8 @@ async function activate(context) {
         });
         const offOperation = _activityBus.on('operation', ev => {
             const op = ev.operation || {};
-            _activityMonitor.record({ type: `kernel.operation.${ev.action}`, operationId: op.id,
+            _activityMonitor.record({ type: `kernel.operation.${ev.action}`, traceId: op.traceId,
+                operationId: op.id, agentSessionId: op.agentSessionId, agentName: op.agentName,
                 notebook: op.notebook, kernelId: op.kernelId, kernelLabel: op.kernelLabel, state: op.state,
                 background: !!op.background, payload: { ...op, progress: ev.progress || null } });
         });
@@ -1436,9 +1566,8 @@ async function activate(context) {
 
     // ── Eager config write (Fix 3 from diagnostics) ────────────────────────
     // Write Claude config SYNCHRONOUSLY before yielding to the event loop.
-    // Registers in both Claude Desktop (claude_desktop_config.json) and
-    // Claude Code CLI (~/.claude.json, projects[wsPath].mcpServers) so that
-    // new installs by any user get tools visible immediately without manual steps.
+    // Registers Claude Desktop, user-scoped Claude Code, and Codex so new
+    // installs get tools visible immediately without manual steps.
     // The stdio bridge already tolerates the HTTP server not being up yet.
     const _getWsPaths = () => (vscode.workspace.workspaceFolders || []).map(f => f.uri.fsPath);
     {
@@ -1473,12 +1602,8 @@ async function activate(context) {
                 console.warn('[Wolfbook MCP] Eager config write failed:', e.message);
             }
         }
-        // The write above only refreshes workspaces open RIGHT NOW. Every other
-        // project keeps the path of whichever extension version was current when
-        // it was last opened — and VS Code deletes that directory on update, so
-        // those projects silently break ("Failed", MODULE_NOT_FOUND before our
-        // bridge can report anything). Repair them all here; entries that still
-        // resolve are left untouched.
+        // Repair any legacy project-scoped Claude entries that still reference
+        // a removed extension version. Current installs use user scope.
         try {
             const _rep = repairStaleClaudeConfigs(_bridgePath, _nodeBin);
             if (_rep.repaired.length) {
@@ -1496,12 +1621,12 @@ async function activate(context) {
                 console.warn('[Wolfbook MCP] Antigravity eager config write failed:', e.message);
             }
         }
-        if (needsSkillInstall()) {
+        if (needsAgentSkillsInstall()) {
             try {
-                installAntigravitySkill();
-                devLog(LOG_CHANNELS.EXTENSION, '[Wolfbook MCP] Antigravity skill installed at activate()');
+                installAgentSkills();
+                devLog(LOG_CHANNELS.EXTENSION, '[Wolfbook MCP] Agent skills installed at activate()');
             } catch (e) {
-                console.warn('[Wolfbook MCP] Antigravity skill install failed:', e.message);
+                console.warn('[Wolfbook MCP] Agent skill install failed:', e.message);
             }
         }
         if (needsClineConfigUpdate(_bridgePath, _nodeBin)) {
@@ -1559,8 +1684,10 @@ async function activate(context) {
             () => kernelManager.list(_getOpenNbPaths()).map(kernel => ({
                 kernel_id: kernel.kernel_id,
                 notebooks: kernel.notebooks,
-            }))
+            })),
+            event => require('./tools/shared').notifyAgentNotebookEvent(event)
         );
+        ws.activityMonitor = _activityMonitor;
         ws.updateNotebooks(_getOpenNbPaths());
         ws.onPromoted(async () => {
             devLog(LOG_CHANNELS.EXTENSION, '[Wolfbook MCP] Election won — promoting to primary');
@@ -1652,19 +1779,32 @@ async function activate(context) {
     // promotion (which replaces _mcpServer) is picked up automatically.
     // We listen to both notebookDocument events (for loaded docs) AND tabGroups
     // changes (for unloaded background tabs).
+    let _topologyRecordTimer = null;
+    let _lastTopologySignature = null;
+    const _recordTopologyIfChanged = () => {
+        _topologyRecordTimer = null;
+        try {
+            const notebooks = _getOpenNbPaths().slice().sort();
+            const kernels = kernelManager.list(notebooks).map(kernel => ({
+                kernelId: kernel.kernel_id, label: kernel.label, lifecycle: kernel.lifecycle,
+                busy: kernel.busy, notebooks: [...(kernel.notebooks || [])].sort(), remote: !!kernel.remote,
+            })).sort((a, b) => String(a.kernelId).localeCompare(String(b.kernelId)));
+            const signature = JSON.stringify({ notebooks, kernels });
+            if (signature === _lastTopologySignature) return;
+            _lastTopologySignature = signature;
+            _activityMonitor.record({ type: 'kernel.topology', state: 'observed',
+                payload: { notebooks, kernels, category: 'diagnostic' } });
+        } catch (_) {}
+    };
     const _syncNotebooks = () => {
         const paths = _getOpenNbPaths();
         _mcpServer.updateOwnNotebooks?.(paths);
         _workerServer?.updateNotebooks(paths);
-        try {
-            _activityMonitor.record({ type: 'kernel.topology', state: 'observed',
-                payload: { notebooks: paths, kernels: kernelManager.list(paths).map(kernel => ({
-                    kernelId: kernel.kernel_id, label: kernel.label, lifecycle: kernel.lifecycle,
-                    busy: kernel.busy, notebooks: kernel.notebooks, remote: !!kernel.remote,
-                })) } });
-        } catch (_) {}
+        if (_topologyRecordTimer) clearTimeout(_topologyRecordTimer);
+        _topologyRecordTimer = setTimeout(_recordTopologyIfChanged, 150);
     };
     context.subscriptions.push(
+        { dispose: () => { if (_topologyRecordTimer) clearTimeout(_topologyRecordTimer); } },
         kernelManager.onDidChange(_syncNotebooks),
         vscode.workspace.onDidOpenNotebookDocument(() => _syncNotebooks()),
         vscode.workspace.onDidCloseNotebookDocument((closedNotebook) => {
@@ -1684,7 +1824,7 @@ async function activate(context) {
         vscode.window.tabGroups?.onDidChangeTabs?.(() => _syncNotebooks()) ?? { dispose: () => {} }
     );
 
-    // Command: write wolfbook MCP entry into Claude Desktop and Claude Code config
+    // Command: configure Claude Desktop, user-scoped Claude Code, Codex, and skills.
     context.subscriptions.push(vscode.commands.registerCommand('wolfbook.configureClaude', async () => {
         const port = _mcpServer.port;
         if (!port) {
@@ -1708,13 +1848,16 @@ async function activate(context) {
                 path.join(context.extensionPath, 'out', 'extension', 'claude-mcp', 'stdio-bridge.js'),
                 nodeBin, undefined, port, _getWsPaths()
             );
+            const { skillPaths } = installAgentSkills();
             const action = await vscode.window.showInformationMessage(
-                `Claude configured ✓ (${configPaths.length} file(s) updated). Restart Claude to apply.`,
-                'Open Claude Code Settings'
+                `Claude and Codex configured ✓ (${configPaths.length} config file(s); Wolfbook skills installed). Restart the agent if the skill does not appear.`,
+                'Open Claude Code Settings', 'Open Claude Skill'
             );
             if (action === 'Open Claude Code Settings') {
                 const settingsPath = configPaths.find(p => p.includes('.claude')) || configPaths[0];
                 vscode.commands.executeCommand('vscode.open', vscode.Uri.file(settingsPath));
+            } else if (action === 'Open Claude Skill') {
+                vscode.commands.executeCommand('vscode.open', vscode.Uri.file(skillPaths.claudeCode));
             }
         } catch (e) {
             vscode.window.showErrorMessage(`Failed to configure Claude: ${e.message}`);
@@ -1775,12 +1918,15 @@ async function activate(context) {
                 );
                 return;
             }
+            const { skillPaths } = installAgentSkills();
             const action = await vscode.window.showInformationMessage(
-                `Cline configured ✓ wolfbook MCP server entry written to cline_mcp_settings.json. Reload the VS Code window to apply.`,
-                'Open Settings File', 'Reload Window'
+                `Cline configured ✓ MCP entry and Wolfbook skill installed. Reload the VS Code window to apply.`,
+                'Open Settings File', 'Open Skill File', 'Reload Window'
             );
             if (action === 'Open Settings File') {
                 vscode.commands.executeCommand('vscode.open', vscode.Uri.file(configPath));
+            } else if (action === 'Open Skill File') {
+                vscode.commands.executeCommand('vscode.open', vscode.Uri.file(skillPaths.cline));
             } else if (action === 'Reload Window') {
                 vscode.commands.executeCommand('workbench.action.reloadWindow');
             }
@@ -1803,12 +1949,15 @@ async function activate(context) {
                 );
                 return;
             }
+            const { skillPaths } = installAgentSkills();
             const action = await vscode.window.showInformationMessage(
-                `Roo Code configured ✓ wolfbook MCP server entry written to cline_mcp_settings.json. Reload the VS Code window to apply.`,
-                'Open Settings File', 'Reload Window'
+                `Roo Code configured ✓ MCP entry and shared Wolfbook skill installed. Reload the VS Code window to apply.`,
+                'Open Settings File', 'Open Skill File', 'Reload Window'
             );
             if (action === 'Open Settings File') {
                 vscode.commands.executeCommand('vscode.open', vscode.Uri.file(configPath));
+            } else if (action === 'Open Skill File') {
+                vscode.commands.executeCommand('vscode.open', vscode.Uri.file(skillPaths.rooCode));
             } else if (action === 'Reload Window') {
                 vscode.commands.executeCommand('workbench.action.reloadWindow');
             }
@@ -3216,6 +3365,12 @@ exports.activate = activate;
  */
 function deactivate() {
     try { require('./execution/running-lines').dispose(); } catch (_) {}
+    if (_activeKernelManager) {
+        for (const entry of _activeKernelManager._entries?.values?.() || []) {
+            try { entry.operations?.markLost?.('VS Code extension host reloaded or stopped'); } catch (_) {}
+        }
+        _activeKernelManager = null;
+    }
     if (_activeController) {
         try { _activeController.quitKernel(); } catch(_) {}
         _activeController = null;

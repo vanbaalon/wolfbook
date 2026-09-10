@@ -249,9 +249,13 @@ const stubVscode = require('./_stub-vscode').makeVscodeStub();
 // The shared stub has no Selection/Range — _onEditCaret builds one.
 if (!stubVscode.Selection) {
     stubVscode.Selection = class {
-        constructor(a, b) {
-            this.anchor = a; this.active = b; this.start = a; this.end = b;
-            this.isEmpty = a.line === b.line && a.character === b.character;
+        constructor(anchor, active) {
+            const forward = anchor.line < active.line ||
+                (anchor.line === active.line && anchor.character <= active.character);
+            this.anchor = anchor; this.active = active;
+            this.start = forward ? anchor : active;
+            this.end = forward ? active : anchor;
+            this.isEmpty = anchor.line === active.line && anchor.character === active.character;
         }
     };
 }
@@ -362,7 +366,8 @@ const CLICK_BLOCK = (() => {
     // Start at the containment helper, which sits just above the decision, so
     // the block under test is the whole plain-click branch.
     const i = VIEWER_SRC.indexOf('const inRange = (r, pos)');
-    return i > 0 ? VIEWER_SRC.slice(i, i + 2800) : '';
+    const end = VIEWER_SRC.indexOf("type: 'status'", i);
+    return i > 0 ? VIEWER_SRC.slice(i, end > i ? end : i + 6000) : '';
 })();
 
 t('the clicked CHARACTER is carried alongside the word', () => {
@@ -373,7 +378,7 @@ t('the clicked CHARACTER is carried alongside the word', () => {
 t('a plain click on a word collapses the selection to that character', () => {
     assert.ok(CLICK_BLOCK, 'the plain-click branch must exist');
     assert.ok(/step\.kind === 'word'/.test(CLICK_BLOCK), 'only for a word rung');
-    assert.ok(/new vscode\.Selection\(hitPos, hitPos\)/.test(CLICK_BLOCK),
+    assert.ok(/new vscode\.Selection\(caretPos, caretPos\)/.test(CLICK_BLOCK),
         'a collapsed selection IS the caret');
 });
 
@@ -408,7 +413,7 @@ t('containment is computed, never asked of the host', () => {
 });
 
 t('the caret must actually be inside the word it outlines', () => {
-    assert.ok(/inRange\(range, hitPos\)/.test(CLICK_BLOCK),
+    assert.ok(/inRange\(range, caretPos\)/.test(CLICK_BLOCK),
         'a hit outside the resolved word would put the caret somewhere the outline does not cover');
 });
 
@@ -513,6 +518,18 @@ t('with no caret given the card still gets the range', () => {
     assert.strictEqual(m.end, 32);
 });
 
+t('a backward editor selection tells the card which edge is active', () => {
+    const { self, posted } = cardViewer({ id: 'e1', file: '/x.tex', startOffset: 100, endOffset: 200 });
+    self._postEditSelection(flatDoc(), {
+        start: { line: 0, character: 120 },
+        end: { line: 0, character: 132 },
+        anchor: { line: 0, character: 132 },
+        active: { line: 0, character: 120 },
+    }, true, null);
+    const m = posted.find(x => x.type === 'editSelect');
+    assert.strictEqual(m.direction, 'backward', 'the left edge remains active');
+});
+
 t('a click outside the open block still tells the card nothing', () => {
     const { self, posted } = cardViewer({ id: 'e1', file: '/x.tex', startOffset: 100, endOffset: 200 });
     self._postEditSelection(flatDoc(),
@@ -522,7 +539,7 @@ t('a click outside the open block still tells the card nothing', () => {
 });
 
 t('the click path passes the caret only when it placed one', () => {
-    assert.ok(/_postEditSelection\(doc, range, !m\.takeMe, caretHere \? hitPos : null\)/.test(VIEWER_SRC),
+    assert.ok(/_postEditSelection\(\s*doc, range, !m\.takeMe, caretHere \? caretPos : null, m\.typingRequest\)/.test(VIEWER_SRC),
         'the card and the editor must make the SAME decision, not two');
 });
 
@@ -629,6 +646,47 @@ at('a range dragged in the card keeps its active END', async () => {
     assert.strictEqual(seen.selection.isEmpty, false);
 });
 
+at('a backward range in the card keeps its LEFT edge active', async () => {
+    const doc = flatDoc();
+    const self = Object.create(TexViewer.prototype);
+    self._edit = { id: 'e1', file: '/x.tex', startOffset: 100, endOffset: 200 };
+    self.panel = {};
+    self._rememberEditState = () => {};
+    let seen = null;
+    self.syncFromEditor = (e) => { seen = e; };
+    stubVscode.workspace.openTextDocument = async () => doc;
+    stubVscode.window.visibleTextEditors = [];
+    await TexViewer.prototype._onEditCaret.call(self,
+        { editId: 'e1', start: 20, end: 32, direction: 'backward' });
+    assert.strictEqual(seen.selection.start.character, 120);
+    assert.strictEqual(seen.selection.end.character, 132);
+    assert.strictEqual(seen.selection.anchor.character, 132, 'anchor is the right edge');
+    assert.strictEqual(seen.selection.active.character, 120, 'active is the left edge');
+});
+
+at('a visible source editor receives that same backward selection', async () => {
+    const doc = flatDoc();
+    const self = Object.create(TexViewer.prototype);
+    self._edit = { id: 'e1', file: '/x.tex', startOffset: 100, endOffset: 200 };
+    self.panel = {};
+    self._rememberEditState = () => {};
+    let selected = null;
+    const open = {
+        document: doc,
+        set selection(value) { selected = value; },
+        get selection() { return selected; },
+    };
+    stubVscode.workspace.openTextDocument = async () => doc;
+    stubVscode.window.visibleTextEditors = [open];
+    await TexViewer.prototype._onEditCaret.call(self,
+        { editId: 'e1', start: 20, end: 32, direction: 'backward' });
+    assert.strictEqual(selected.start.character, 120);
+    assert.strictEqual(selected.end.character, 132);
+    assert.strictEqual(selected.anchor.character, 132);
+    assert.strictEqual(selected.active.character, 120);
+    stubVscode.window.visibleTextEditors = [];
+});
+
 t('the card marks the WORD while its textarea holds only the caret', () => {
     const fs = require('fs');
     const path = require('path');
@@ -638,11 +696,17 @@ t('the card marks the WORD while its textarea holds only the caret', () => {
     const body = client.slice(i, i + 1800);
     assert.ok(/e\.sel = \{ start: msg\.start, end: msg\.end \}/.test(body),
         'the highlight layer keeps the WORD — it reads e.sel, not the textarea');
-    assert.ok(/setSelectionRange\(taFrom, taTo\)/.test(body),
-        'while the textarea collapses to the caret');
-    assert.ok(/_caretSent = `\$\{taFrom\}:\$\{taTo\}`/.test(body),
+    assert.ok(/setSelectionRange\(taFrom, taTo, direction\)/.test(body),
+        'while the textarea receives the caret and active-edge direction');
+    assert.ok(/_caretSent = `\$\{taFrom\}:\$\{taTo\}:\$\{direction\}`/.test(body),
         'the echo guard must claim what the TEXTAREA will report, or the card ' +
         'posts the position straight back as the reader’s own movement');
+    assert.ok(/msg\.direction === 'backward'/.test(body),
+        'a backward selection must remain backward after the page round trip');
+    assert.ok(/selectionDirection === 'backward'/.test(client),
+        'the card must read which textarea edge the reader is moving');
+    assert.ok(/start: a, end: b, direction/.test(client),
+        'and must send that edge direction with every caret update');
 });
 
 (async () => {

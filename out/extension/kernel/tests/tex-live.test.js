@@ -14,7 +14,7 @@ const test = (name, fn) => Promise.resolve().then(fn)
     .catch((e) => { fail++; results.push('  FAIL ' + name + '\n         ' + String(e && e.message || e).replace(/\n/g, '\n         ')); });
 
 const {
-    nextLiveDelayMs, cooldownDelayMs, blendLiveMs, shipDecision, synctexUnchanged,
+    nextLiveDelayMs, liveDeadlineDelayMs, cooldownDelayMs, blendLiveMs, shipDecision, synctexUnchanged,
     readPassLimit, generationSatisfies, authoritativeDelayMs,
 } = require('../../tex/livePolicy');
 const { needsRerun } = require('../../tex/texLog');
@@ -85,6 +85,18 @@ async function main() {
         let back = after;
         for (let i = 0; i < 8; i++) back = blendLiveMs(back, 400);
         assert.ok(back < 900, `eight ordinary builds bring it back to ${back}`);
+    });
+
+    await test('CONTINUOUS EDITING CANNOT LEAVE THE PAGE BEHIND FOR OVER THREE SECONDS', () => {
+        assert.strictEqual(liveDeadlineDelayMs({
+            waitMs: 10000, firstAtMs: 1000, nowMs: 1000,
+        }), 3000, 'even a long configured debounce is capped');
+        assert.strictEqual(liveDeadlineDelayMs({
+            waitMs: 900, firstAtMs: 1000, nowMs: 3600,
+        }), 400, 'repeated edits retain the first-edit deadline');
+        assert.strictEqual(liveDeadlineDelayMs({
+            waitMs: 900, firstAtMs: 1000, nowMs: 4100,
+        }), 0, 'an overdue page compiles immediately');
     });
 
     await test('the first sample IS the estimate; a bad sample is ignored', () => {

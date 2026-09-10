@@ -40,11 +40,35 @@ const STEPS = [
     {
         id: 'contents',
         title: 'Find your way through it',
-        say: 'The contents open over the paper, numbered as the paper numbers them, with the section you are in already marked. Click one and they get out of the way. The paper\'s own cross-references work too — a \\ref or a contents entry is a live link, marked with a dashed rule.',
+        say: 'The contents open over the paper, numbered as the paper numbers them, with the section you are in already marked. Click one and they get out of the way. The paper\'s own cross-references work too: hover an equation number for a miniature, or click it to jump.',
         doIt: 'Press ☰ in the toolbar (or ⌘⌥O), then click a section.',
         point: '#outline',
         when: (ctx) => !!ctx.hasSections,
         satisfy: (e) => e.type === 'revealSection',
+    },
+    {
+        id: 'compare',
+        title: 'Compare any version',
+        say: 'Compare overlays another saved, Git or working-tree version on this paper. Step through its changes without leaving the place you are reading.',
+        doIt: 'Press the compare icon in the toolbar. You can cancel the version picker.',
+        point: '#compare',
+        satisfy: (e) => e.type === 'compare',
+    },
+    {
+        id: 'pageTheme',
+        title: 'Choose the paper, not the editor',
+        say: 'The page may stay white in a dark editor, or be softened for dark reading. Fit remains edge-to-edge; comment bubbles move inside the sheet when there is no outer margin.',
+        doIt: 'Press the sun or moon in the toolbar.',
+        point: '#pagetheme',
+        satisfy: (e) => e.type === 'pageTheme',
+    },
+    {
+        id: 'fit',
+        title: 'Fit that follows your workspace',
+        say: 'A click fits once. Double-click Fit to keep the page width tied to the visible field while you drag the editor separator, without losing your place. At a larger zoom, the horizontal scrollbar reaches both edges of the paper.',
+        doIt: 'Double-click Fit in the toolbar.',
+        point: '#fit',
+        satisfy: (e) => e.type === 'fitMode',
     },
     {
         id: 'labels',
@@ -62,6 +86,21 @@ const STEPS = [
         doIt: 'With Shift held, click a § or ≡ tag.',
         when: (ctx) => !!ctx.hasAnchors,
         satisfy: (e) => e.type === 'copyAnchor',
+    },
+    {
+        id: 'comments',
+        title: 'Leave instructions for an agent',
+        say: 'Comments are designed chiefly as precise feedback for agents: each note stays attached as the source moves and is saved beside the paper for sharing. The arrow lists every note; ‹ and › move through them on the page.',
+        doIt: 'Press Comments in the toolbar.',
+        point: '#commentsbutton',
+        satisfy: (e) => e.type === 'commentView' && !!e.open,
+    },
+    {
+        id: 'commentAt',
+        title: 'Comment exactly where it belongs',
+        say: 'Cmd-click text—including a heading, title page or abstract—or use its + bubble. The compact card is resizable; its options copy every note with current file and line numbers, ready for one agent prompt.',
+        doIt: 'Cmd-click (Ctrl on Windows) the passage you want to annotate.',
+        satisfy: (e) => e.type === 'click' && !!e.commentTarget,
     },
     {
         id: 'fold',
@@ -82,7 +121,7 @@ const STEPS = [
     {
         id: 'edit',
         title: 'Edit it where it prints',
-        say: 'Right-click a paragraph or an equation and it opens in a card pinned under it. What you type goes straight into the .tex.',
+        say: 'Right-click a paragraph or equation and it opens in a card pinned under it, with the main-editor caret kept in sync. Edits go into the live .tex buffer; tracing pauses while the page is behind and a small edit does not move your reading position.',
         doIt: 'Right-click a paragraph.',
         satisfy: (e) => e.type === 'editHere',
     },
@@ -110,9 +149,17 @@ const STEPS = [
         satisfy: (e) => e.type === 'follow',
     },
     {
+        id: 'layout',
+        title: 'Make room for the work at hand',
+        say: 'The layout button switches between a focused WPaper and WPaper beside your editor. Fit recalculates against the space the paper actually has.',
+        doIt: 'Press the layout icon in the toolbar.',
+        point: '#full',
+        satisfy: (e) => e.type === 'layoutCycle',
+    },
+    {
         id: 'review',
         title: 'When an agent edits the paper',
-        say: 'Its changes wait below, grouped by the section they are in, until you Keep or Undo them — one, a whole section, or all of them. Nothing is ever approved by arriving, and a change that lands while you are typing is merged with your unsaved edits rather than fighting them.',
+        say: 'Its changes wait below until you Keep or Undo them—one, a section, or all. A decision advances only to a nearby change; the arrows can cross the paper deliberately. Accept + comment saves a revision note with the ordinary comments, ready for the next agent prompt.',
         // No gesture: a reader with no pending changes cannot perform one, and
         // asking them to would be a dead end. The card's own button ends it.
         done: 'Done',

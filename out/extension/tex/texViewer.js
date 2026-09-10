@@ -13,6 +13,8 @@
 const vscode = require('vscode');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
+const { execFile } = require('child_process');
 
 const { FLAG } = require('./renderMap');
 const {
@@ -24,7 +26,7 @@ const { buildObjectMap, glyphAtPoint, tokenAt, groupAround, symbolicFonts, caret
 const { buildComparison, describeSummary } = require('./texCompare');
 const { shipDecision } = require('./livePolicy');
 const { balanceRange, closeFor, commentMask } = require('./texBalance');
-const { sectionSpans } = require('./texModel');
+const { sectionSpans, ADDRESSABLE } = require('./texModel');
 const collapse = require('./collapse');
 const { MATH_ENVS } = require('./texScanner');
 const { readAuxLabels } = require('./auxLabels');
@@ -37,6 +39,7 @@ const mmaWrite = require('./mmaWrite');
 const { announceAgentEdit } = require('./reviewBus');
 const { checkWritable } = require('./diskGuard');
 const { TexComputeService } = require('./texCompute');
+const { CommentStore, sidecarFor, markdownFor } = require('./commentStore');
 
 /**
  * THE EQUATION NUMBER IS NOT PART OF THE EQUATION.
@@ -56,10 +59,9 @@ const { TexComputeService } = require('./texCompute');
 /**
  * HOW MANY TIMES A HINT IS STILL WORTH SHOWING.
  *
- * The panel's two long tooltips — what a click does on the page, what clicking
- * a label badge copies — teach the gestures once and then cover the text they
- * describe. Reported as "kind of annoying". Each gets three showings and is
- * then taken off the element.
+ * The label badge's tooltip teaches its local copy gesture and then gets out
+ * of the way. General page gestures are taught by the guide, not by a tooltip
+ * attached to the entire PDF surface.
  *
  * MODULE-LEVEL ON PURPOSE: the count must survive closing and reopening the
  * paper (that is not a new reader) and reset when the window reloads (that is
@@ -69,7 +71,7 @@ const { TexComputeService } = require('./texCompute');
  */
 const TOUR_KEY = 'wolfbook.tex.tour';
 const GROUP_KEY = 'wolfbook.tex.reviewGroup';
-const HINT_BUDGET = { pages: 3, chip: 3 };
+const HINT_BUDGET = { chip: 3 };
 const hintsLeft = { ...HINT_BUDGET };
 
 const TAG_TEXT = /^[([]?[0-9]+[A-Za-z.]*[)\]]?$/;
@@ -368,14 +370,17 @@ const MATH_KINDS = ['display-equation'];
 const PLAIN_CLICK_KINDS = new Set([
     'word', 'glyph', 'sentence', 'group',
     'display-equation', 'figure', 'table', 'tabular', 'theorem',
-    'environment', 'align', 'abstract', 'list', 'itemize', 'enumerate', 'verbatim',
+    'environment', 'align', 'abstract', 'titlepage', 'list', 'itemize', 'enumerate', 'verbatim',
 ]);
 
 const VIEW_TYPE = 'wolfbook.texViewer';
 /** Where the shown paper's root is kept, so a window reload can restore it. */
 const ROOT_KEY = 'wolfbook.tex.viewerRoot';
 /**
- * Where the reader was in each paper: {file: {page, frac}}.
+ * Where the reader was in each paper. Older records contain only {page, frac};
+ * newer ones also carry exact scroll/zoom, full-screen preference, source
+ * cursor and the open mini-editor. Keep the key stable so existing places
+ * migrate simply by being read and written again.
  *
  * Switching to a tab that is not a .tex CLOSES the panel — VS Code has no way
  * to hide a webview — so "keep my place" cannot rely on the DOM surviving. It
@@ -487,6 +492,12 @@ class TexViewer {
         // advance when a document actually crossed into the panel.
         this.shownGeneration = null;
         this.shownPdfHash = null;
+        // `shown*` names the last document SENT. pdf.js opens asynchronously,
+        // so review coordinates may only trust the separate acknowledgement
+        // from the webview below. Otherwise a click during a live rebuild can
+        // scroll the old PDF with rectangles measured on the new one.
+        this._openedGeneration = null;
+        this._openedPdfHash = null;
         // FOLLOW IS TWO THINGS, and conflating them cost the reader a choice
         // they wanted: 'mark' shows where the caret is WITHOUT moving the
         // page, which is what you want while editing prose beside the paper;
@@ -498,8 +509,18 @@ class TexViewer {
         this._invertedAt = 0;      // when the reader last clicked IN the PDF
         this._macros = new Map();  // docPath -> {version, table}
         this._fsActions = null;    // the commands that put us in full screen
+        this._fsSettling = null;   // disposal may still be undoing those commands
+        this._layoutMode = 'all';  // all (source editor + WPaper) | viewer
+        this._layoutMaximized = false;
+        this._layoutOuterActions = [];
+        this._layoutQueue = null;  // serialises quick repeated toolbar clicks
+        this._layoutGuardTimer = null; // coalesces VS Code's external-file reload burst
+        this._restoringPanel = false; // restored chrome still needs reconciling with VS Code
         this._autoHidden = null;   // closed by us because no .tex was active
-        this._viewState = null;    // {page, frac} so hide/restore keeps the place
+        this._viewState = null;    // the persisted reading/editing session for this paper
+        this._webviewReady = false;
+        this._cursorSaveTimer = null;
+        this._cursorPending = null;
         this._edit = null;         // the one live mini-editor session
         this._editSeq = 0;
         this._diff = null;         // the open comparison, if any
@@ -522,9 +543,45 @@ class TexViewer {
         this._disposables = [];
         this._viewerProbeSeq = 0;
         this._viewerProbes = new Map();
+        this._viewCaptureSeq = 0;
+        this._viewCaptures = new Map();
         this._viewerReloading = false;
         this._viewerReloadTimer = null;
         this._reviewFocus = null;
+        this._reviewWaiting = false;
+        // The source has moved but the webview still holds the preceding PDF.
+        // While true, neither direction is allowed to claim a correspondence.
+        this._tracePaused = false;
+        this._traceSource = null;
+        this._traceStateKey = null;
+        this._sourceDirtyKey = null;
+        this._lastEditCaret = null;
+        this._miniApplyingFile = null;
+        this._editApplyQueue = null; // orders card edits before stepping/saving
+        this._syncPreserveView = false; // a render refresh may redraw without navigating
+        this.comments = new CommentStore();
+        this._commentAuthorPromise = null;
+        this._commentDraft = null;   // extension-owned target for the open composer
+        this._commentSeq = 0;
+        this._commentPushTimer = null;
+    }
+
+    /** A human name stored with new shared comments; Git identity is already
+     * the project's collaboration identity, with the OS account as fallback. */
+    async _readerCommentAuthor(file) {
+        if (this._commentAuthorPromise) return this._commentAuthorPromise;
+        this._commentAuthorPromise = new Promise(resolve => {
+            execFile('git', ['config', '--get', 'user.name'], {
+                cwd: path.dirname(file), timeout: 1500, maxBuffer: 4096, windowsHide: true,
+            }, (_error, stdout) => {
+                let name = String(stdout || '').trim();
+                if (!name) {
+                    try { name = String(os.userInfo().username || '').trim(); } catch (_) { /* optional */ }
+                }
+                resolve(name ? { name } : undefined);
+            });
+        });
+        return this._commentAuthorPromise;
     }
 
     get visible() { return !!this.panel; }
@@ -571,6 +628,7 @@ class TexViewer {
         // scroll position into it would open the new paper somewhere arbitrary.
         const switching = this.root !== root;
         if (switching) {
+            this._flushCursorState();
             this._viewState = this._viewFor(root);
             // AND NOTHING ON SCREEN BELONGS TO IT.
             //
@@ -583,6 +641,8 @@ class TexViewer {
             this._post({ type: 'blank' });
             this.shownGeneration = null;
             this.shownPdfHash = null;
+            this._openedGeneration = null;
+            this._openedPdfHash = null;
             this.shownAnything = false;
             this._text = null;
             this._objMaps.clear();
@@ -590,11 +650,20 @@ class TexViewer {
             this._chipModels = null;
             this._edit = null;
             this._mma = null;
+            this._tracePaused = false;
+            this._traceSource = null;
+            this._traceStateKey = null;
+            this._sourceDirtyKey = null;
+            this._lastEditCaret = null;
+            this._commentDraft = null;
         }
         this.root = root;
         this._rememberRoot(root);
+        this._restoreCursor(this._viewState);
         this._postTheme();
+        this._postSourceDirty(true);
         await this.refresh({ force: true });
+        if (this._webviewReady) await this._restoreSessionChrome();
 
         // A PAPER WITH NO PDF SHOULD BUILD ONE, not sit there telling the
         // reader to press a button. Switching tabs is not a request to compile
@@ -642,6 +711,11 @@ class TexViewer {
 
     _wire(panel) {
         this.panel = panel;
+        this._webviewReady = false;
+        // A new webview has not received the last trace state, even when the
+        // extension-side value survived a viewer reload.
+        this._traceStateKey = null;
+        this._sourceDirtyKey = null;
         TexViewer._setViewerContext(true);
         panel.iconPath = undefined;
         // A restored panel arrives with its options and content dropped, so
@@ -649,23 +723,40 @@ class TexViewer {
         try { panel.webview.options = this._webviewOptions; } catch (_) { /* new panel: already set */ }
         panel.webview.html = this._html();
         panel.onDidDispose(() => {
+            this._flushCursorState();
             this._cancelViewerProbes('viewer closed');
+            for (const done of this._viewCaptures.values()) { try { done(false); } catch (_) {} }
+            this._viewCaptures.clear();
             clearTimeout(this._viewerReloadTimer);
+            clearTimeout(this._layoutGuardTimer);
+            this._layoutGuardTimer = null;
+            clearTimeout(this._commentPushTimer);
             this._viewerReloading = false;
-            // Closing the panel must not leave the window maximised with
-            // nothing in it.
+            // Closing the panel must not leave the window maximised or the
+            // agent side bar hidden with nothing in the focused editor area.
             if (this._fsActions) {
-                const undo = [...this._fsActions].reverse();
+                const undo = [...(this._layoutOuterActions || [])].reverse();
+                const restoreGroups = !!this._layoutMaximized;
                 this._fsActions = null;
-                (async () => {
+                this._layoutMode = 'all';
+                this._layoutMaximized = false;
+                this._layoutOuterActions = [];
+                this._fsSettling = (async () => {
                     for (const c of undo) {
                         try { await vscode.commands.executeCommand(c); } catch (_) { /* best effort */ }
                     }
-                })();
+                    if (restoreGroups) {
+                        try { await vscode.commands.executeCommand('workbench.action.toggleMaximizeEditorGroup'); }
+                        catch (_) { /* best effort */ }
+                    }
+                })().finally(() => { this._fsSettling = null; });
             }
             this.panel = null;
+            this._webviewReady = false;
             TexViewer._setViewerContext(false);
             this.shownGeneration = null;
+            this._openedGeneration = null;
+            this._openedPdfHash = null;
             // Results that were never inserted are SESSION-ONLY by design: the
             // .tex is the single source of truth for what this paper contains,
             // and an exploratory result that outlived the panel showing it
@@ -687,6 +778,12 @@ class TexViewer {
             this._chips = null;
             this._chipModels = null;
             this._labelsWanted = false;
+            this._tracePaused = false;
+            this._traceSource = null;
+            this._traceStateKey = null;
+            this._sourceDirtyKey = null;
+            this._lastEditCaret = null;
+            this._miniApplyingFile = null;
             this._crops.clear();
             for (const done of this._cropWaits.values()) { try { done(null); } catch (_) {} }
             this._cropWaits.clear();
@@ -715,25 +812,46 @@ class TexViewer {
                 if (e.affectsConfiguration('wolfbook.tex.pageTheme')) this._postTheme();
             }),
         );
+        // Sidecars are shared files. Pulls and collaborator edits should show
+        // up without closing the paper, but unrelated papers are ignored.
+        try {
+            const watcher = vscode.workspace.createFileSystemWatcher('**/*.timeline.comments');
+            const changed = (uri) => {
+                const wanted = new Set(this._commentFiles().map(sidecarFor));
+                if (uri && wanted.has(uri.fsPath)) this._pushComments(80);
+            };
+            this._disposables.push(watcher,
+                watcher.onDidCreate(changed), watcher.onDidChange(changed), watcher.onDidDelete(changed));
+        } catch (_) { /* a minimal/test host may not expose file watchers */ }
     }
 
-    /** Where the reader was in `root`, or null. */
+    /** The saved reading/editing session for `root`, or null. */
     _viewFor(root) {
         if (!root) return null;
         try {
             const all = this.context.workspaceState.get(VIEW_KEY) || {};
             const v = all[root];
-            return v && Number.isFinite(v.page) ? { page: v.page, frac: Number(v.frac) || 0 } : null;
+            if (!v || typeof v !== 'object') return null;
+            // `at` belongs to the store's eviction policy, not to the session
+            // sent to the viewer. Everything else is forward-compatible: a
+            // newer extension may add another small view property without an
+            // older one destroying it on the next scroll.
+            const out = { ...v };
+            delete out.at;
+            return Object.keys(out).length ? out : null;
         } catch (_) { return null; }
     }
 
-    /** Note where the reader is, for when this paper is opened again. */
-    _rememberView(root, page, frac) {
-        if (!root || !Number.isFinite(page)) return;
-        this._viewState = { page, frac: Number(frac) || 0 };
+    /** Merge a small patch into this paper's saved session. */
+    _rememberState(root, patch) {
+        if (!root || !patch || typeof patch !== 'object') return;
+        const current = ((root === this.root || !this.root) && this._viewState)
+            || this._viewFor(root) || {};
+        const next = { ...current, ...patch };
+        if (root === this.root || !this.root) this._viewState = next;
         try {
             const all = { ...(this.context.workspaceState.get(VIEW_KEY) || {}) };
-            all[root] = { page, frac: Number(frac) || 0, at: Date.now() };
+            all[root] = { ...next, at: Date.now() };
             // Oldest out first, so a workspace with many papers cannot grow the
             // stored object without limit.
             const keys = Object.keys(all);
@@ -743,6 +861,170 @@ class TexViewer {
             }
             this.context.workspaceState.update(VIEW_KEY, all);
         } catch (_) { /* no workspace state: the place lives for this session only */ }
+    }
+
+    /** Note the visible page, exact scroll and magnification. */
+    _rememberView(root, page, frac, extra = {}) {
+        if (!root || !Number.isFinite(page)) return;
+        const patch = { page, frac: Number(frac) || 0 };
+        for (const k of ['top', 'left', 'xFrac', 'scale', 'generation']) {
+            if (Number.isFinite(extra[k])) patch[k] = Number(extra[k]);
+        }
+        if (typeof extra.fit === 'boolean') patch.fit = extra.fit;
+        if (Number.isFinite(extra.focusPage) && Number.isFinite(extra.focusXBp) &&
+            Number.isFinite(extra.focusYTopBp)) {
+            patch.viewCell = this._semanticViewCell(extra);
+        }
+        this._rememberState(root, patch);
+    }
+
+    /** The map whose PDF the view-state coordinates were measured against. */
+    _mapForViewGeneration(st, generation) {
+        const number = (map) => map && map.generation && Number(map.generation.generation);
+        const wanted = Number(generation);
+        if (!st || !Number.isFinite(wanted)) return st && st.map;
+        if (number(st.map) === wanted) return st.map;
+        if (number(st.prevMap) === wanted) return st.prevMap;
+        return null;
+    }
+
+    /** Convert a point in the displayed PDF into a durable source-cell address. */
+    _semanticViewCell(extra) {
+        const st = this.root && this.coord.roots && this.coord.roots.get(this.root);
+        const map = this._mapForViewGeneration(st, extra.generation);
+        if (!map || !map.available) return null;
+        let row = null;
+        try { row = map.lineAtPoint(extra.focusPage, extra.focusXBp, extra.focusYTopBp); }
+        catch (_) { return null; }
+        if (!row || !row.file || !Number.isFinite(row.line)) return null;
+        let object = null;
+        try { object = map.objectAtLine(row.file, row.line); } catch (_) { /* line fallback below */ }
+        if (!object || object.approximate) return null;
+        let full = null;
+        try {
+            full = map.model && map.model.objects && map.model.objects.find(o =>
+                o.objectId === object.objectId && o.sourceRange && o.sourceRange.file === row.file);
+        } catch (_) { /* the compact map object is enough */ }
+        const start = Number(object.startLine) || Number(full && full.sourceRange.startLine) || row.line;
+        return {
+            file: row.file,
+            objectId: object.objectId || (full && full.objectId) || null,
+            stableKey: object.stableKey || (full && full.stableKey) || null,
+            kind: object.kind || (full && full.kind) || null,
+            label: object.label || (full && full.label) || null,
+            sourceHash: full && full.sourceHash || null,
+            normalizedHash: full && full.normalizedHash || null,
+            lineOffset: Math.max(0, row.line - start),
+            viewportFrac: Number.isFinite(extra.focusViewportFrac)
+                ? Math.max(0, Math.min(1, Number(extra.focusViewportFrac))) : 0.35,
+        };
+    }
+
+    /** Ask the live webview, rather than trusting a debounced scroll report. */
+    _captureReaderView(timeoutMs = 500) {
+        if (!this.panel || !this._webviewReady || !this.shownAnything) return Promise.resolve(false);
+        const requestId = `view-${++this._viewCaptureSeq}`;
+        return new Promise(resolve => {
+            const finish = (ok) => {
+                if (!this._viewCaptures.has(requestId)) return;
+                this._viewCaptures.delete(requestId);
+                clearTimeout(timer);
+                resolve(!!ok);
+            };
+            const timer = setTimeout(() => finish(false), Math.max(50, timeoutMs));
+            this._viewCaptures.set(requestId, finish);
+            this._post({ type: 'requestViewState', requestId });
+        });
+    }
+
+    /** Locate a saved source cell in the source/map of the replacement PDF. */
+    _viewCellPlacement(cell) {
+        if (!cell || !cell.file) return null;
+        const objects = this._commentObjects(cell.file).filter(o => o && o.sourceRange);
+        let object = objects.find(o => cell.objectId && o.objectId === cell.objectId);
+        if (!object) object = objects.find(o => cell.stableKey && o.stableKey === cell.stableKey);
+        if (!object) object = objects.find(o => cell.stableKey && o.previousStableKey === cell.stableKey);
+        if (!object) object = objects.find(o => cell.label && o.label === cell.label && o.kind === cell.kind);
+        if (!object) object = objects.find(o => cell.sourceHash && o.sourceHash === cell.sourceHash &&
+            (!cell.kind || o.kind === cell.kind));
+        if (!object) object = objects.find(o => cell.normalizedHash && o.normalizedHash === cell.normalizedHash &&
+            (!cell.kind || o.kind === cell.kind));
+        if (!object) return null;
+        const a = object.sourceRange.startLine;
+        const b = object.sourceRange.endLine;
+        const line = Math.min(b, a + Math.max(0, Number(cell.lineOffset) || 0));
+        let rects = this.objectRects(cell.file, line, line);
+        if (!rects.length) rects = this.objectRects(cell.file, a, b);
+        if (!rects.length) return null;
+        return {
+            page: rects[0].page,
+            rects,
+            viewportFrac: Number.isFinite(cell.viewportFrac) ? cell.viewportFrac : 0.35,
+        };
+    }
+
+    /** Remember an editor selection without opening or focusing an editor. */
+    _rememberCursor(doc, selection) {
+        if (!this.root || !doc || !doc.uri || !selection || !selection.start || !selection.end) return;
+        let root = null;
+        try { root = this.coord.rootFor(doc); } catch (_) { root = doc.uri.fsPath; }
+        if (root !== this.root) return;
+        const pos = (p) => ({ line: Math.max(0, Number(p.line) || 0), character: Math.max(0, Number(p.character) || 0) });
+        const cursor = {
+            file: doc.uri.fsPath,
+            anchor: pos(selection.anchor || selection.start),
+            active: pos(selection.active || selection.end),
+        };
+        // Selection events can arrive for every arrow-key repeat. Update the
+        // in-memory session immediately, but coalesce workspace-state writes.
+        this._viewState = { ...(this._viewState || this._viewFor(this.root) || {}), cursor };
+        this._cursorPending = { root: this.root, cursor };
+        clearTimeout(this._cursorSaveTimer);
+        this._cursorSaveTimer = setTimeout(() => this._flushCursorState(), 250);
+    }
+
+    _flushCursorState() {
+        clearTimeout(this._cursorSaveTimer);
+        this._cursorSaveTimer = null;
+        const pending = this._cursorPending;
+        this._cursorPending = null;
+        if (pending) this._rememberState(pending.root, { cursor: pending.cursor });
+    }
+
+    /** Restore a saved source cursor only when that editor is already visible. */
+    _restoreCursor(saved) {
+        const c = saved && saved.cursor;
+        if (!c || typeof c.file !== 'string') return false;
+        const ed = (vscode.window.visibleTextEditors || [])
+            .find(e => e.document && e.document.uri && e.document.uri.fsPath === c.file);
+        if (!ed || !c.anchor || !c.active) return false;
+        try {
+            const a = new vscode.Position(c.anchor.line, c.anchor.character);
+            const b = new vscode.Position(c.active.line, c.active.character);
+            ed.selection = new vscode.Selection(a, b);
+            return true;
+        } catch (_) { return false; }
+    }
+
+    /** Save the open mini-editor and its caret/placement, or explicitly close it. */
+    _rememberEditState(extra = {}) {
+        if (!this.root) return;
+        const s = this._edit;
+        if (!s) { this._rememberState(this.root, { edit: null }); return; }
+        const old = this._viewState && this._viewState.edit &&
+            this._viewState.edit.file === s.file &&
+            this._viewState.edit.startOffset === s.startOffset &&
+            this._viewState.edit.endOffset === s.endOffset ? this._viewState.edit : {};
+        const edit = {
+            ...old,
+            file: s.file,
+            startOffset: s.startOffset,
+            endOffset: s.endOffset,
+            label: s.label || old.label || 'edit',
+            ...extra,
+        };
+        if (edit.pos && !(Number.isFinite(edit.pos.fx) && Number.isFinite(edit.pos.fy))) delete edit.pos;
+        this._rememberState(this.root, { edit });
     }
 
     /** Remember which paper this panel is showing, across a window reload. */
@@ -769,19 +1051,25 @@ class TexViewer {
             try { panel.dispose(); } catch (_) { /* fine */ }
             return;
         }
+        // Set this BEFORE replacing the webview HTML. Its script may answer
+        // `ready` as soon as the event loop is yielded below.
+        this._restoringPanel = true;
         this._wire(panel);
         this._autoHidden = null;
         let root = (state && state.root) || null;
         try { root = root || this.context.workspaceState.get(ROOT_KEY) || null; } catch (_) { /* none */ }
         // The webview may hand back its own state; workspace state is the
         // authority, because it survives the webview being dropped entirely.
-        this._viewState = this._viewFor(root) ||
-            (state && Number.isFinite(state.page) ? { page: state.page, frac: Number(state.frac) || 0 } : null);
+        const panelState = state && typeof state === 'object' ? { ...state } : null;
+        if (panelState) delete panelState.root;
+        this._viewState = this._viewFor(root) || panelState;
         if (!root || !fs.existsSync(root)) {
             this._post({ type: 'status', text: 'reopen the paper from a .tex file', kind: 'warn' });
             return;
         }
         this.root = root;
+        this._claimRestoredFullScreen();
+        this._restoreCursor(this._viewState);
         this._postTheme();
         try {
             const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(root));
@@ -825,6 +1113,20 @@ class TexViewer {
     async refresh({ force = false } = {}) {
         if (!this.panel || !this.root) return;
         const st = this.coord.roots.get(this.root);
+        if (st && st.sourceAhead) {
+            this._setTracePaused(true, {
+                source: this._traceSource || 'editor',
+                compiling: !!st.compiling,
+            });
+        } else if (st && this._tracePaused && st.generation &&
+            this.shownGeneration === st.generation.generation) {
+            // The source returned to the bytes already on screen (usually an
+            // undo before the debounce fired). Nothing will be shipped, so
+            // this is the only event that can resume tracing.
+            const source = this._traceSource;
+            this._setTracePaused(false);
+            try { await this._resumeTracing({ instant: true, source }); } catch (_) { /* best effort */ }
+        }
         if (!st || !st.generation || !st.generation.pdfPath) {
             this._post({
                 type: 'status',
@@ -861,7 +1163,11 @@ class TexViewer {
                 // without disturbing the document the webview already holds —
                 // this is the round trip the 'opened' handshake would have
                 // triggered had we shipped.
-                try { this.syncFromEditor(vscode.window.activeTextEditor, { instant: true }); } catch (_) { /* best effort */ }
+                if (!st.sourceAhead) {
+                    const source = this._traceSource;
+                    this._setTracePaused(false);
+                    try { await this._resumeTracing({ instant: true, source }); } catch (_) { /* best effort */ }
+                }
                 this._postEditAnchor().catch(() => { /* no open card */ });
                 // The ink did not move, so the chips are still in the right
                 // PLACES — but the source did, so which line each \ref sits on
@@ -870,6 +1176,7 @@ class TexViewer {
                 this._chips = null;
                 if (this._labelsWanted) this._postLabels().catch(() => { /* best effort */ });
                 this._postSections().catch(() => { /* best effort */ });
+                this._pushComments(50);
             }
             return;
         }
@@ -878,9 +1185,16 @@ class TexViewer {
             return;
         }
         const t0 = Date.now();
+        // Capture at the last responsible moment. Scroll reports are
+        // debounced, and an external editor can finish a compile before the
+        // last report arrived. The reply names the OLD displayed generation;
+        // _rememberView resolves it through prevMap after the coordinator has
+        // already installed the new one.
+        await this._captureReaderView();
         // In memory if this panel has been showing the paper; from workspace
         // state if it is being opened again, or after a reload.
         const place = this._viewState || this._viewFor(this.root);
+        const semanticReveal = place && this._viewCellPlacement(place.viewCell);
         this.shownGeneration = st.generation.generation;
         this._busyText = null;   // the new pages ARE the answer; the panel says the rest
         this.panel.title = `WPaper · ${path.basename(this.root)}`;
@@ -910,6 +1224,7 @@ class TexViewer {
                 this.context.extensionUri, 'out', 'client', 'pdfjs')).toString(),
             pdfBase64: data,
             generation: st.generation.generation,
+            pdfHash: st.generation.pdfHash || null,
             pages: st.generation.pageCount,
             // WHERE THE READER WAS — the page AND how far down it.
             //
@@ -919,6 +1234,18 @@ class TexViewer {
             // scroll position not persisting.
             revealPage: place && place.page,
             revealFrac: place && place.frac,
+            revealLeft: place && place.left,
+            revealXFrac: place && place.xFrac,
+            // A raw vertical pixel is exact only against the same PDF
+            // generation. For a changed paper the page/fraction address above
+            // survives reflow and is therefore the honest fallback.
+            revealTop: place && place.generation === st.generation.generation
+                ? place.top : undefined,
+            semanticReveal,
+            restoreView: place ? {
+                scale: place.scale,
+                fit: place.fit === true,
+            } : null,
             // A live rebuild replaces the pages under a reader who did not ask
             // for it, so the viewer keeps their scroll position and swaps each
             // canvas only once its replacement is drawn.
@@ -1369,12 +1696,25 @@ class TexViewer {
         this._reviewShown = !!(payload && payload.pending);
         if (!payload || !payload.focus) {
             this._reviewFocus = null;
+            if (this._reviewWaiting) {
+                this._reviewWaiting = false;
+                this.status('', '');
+            }
         } else {
             const h = (payload.groups || []).flatMap(g => g.hunks || [])
                 .find(x => x.id === payload.focus);
-            if (h) this._reviewFocus = h;
+            // A pending click survives the short source -> compile -> pdf.js
+            // gap, but its OLD rectangles do not. Replace them from every
+            // freshly placed payload and send only when that render is open.
+            if (h && this._reviewFocus && this._reviewFocus.pending &&
+                this._reviewFocus.id === h.id) {
+                this._reviewFocus = {
+                    ...h, generation: payload.generation, pending: true,
+                };
+            }
         }
         this._post({ type: 'review', session: payload || null });
+        this._replayReviewFocus();
     }
 
     /** Bring the paper forward with the list open. */
@@ -1390,13 +1730,34 @@ class TexViewer {
     }
 
     /** Scroll the page to a change and mark it there. */
-    focusReviewHunk(h) {
-        if (!h) return;
-        // Remember it independently of the webview. A worker recovery reloads
-        // the page module, so the first focus message can legitimately cross
-        // while there is nobody listening; `opened` replays it below.
-        this._reviewFocus = h;
-        this._post({ type: 'reviewFocus', id: h.id, page: h.page, rects: h.rects || [] });
+    focusReviewHunk(h, generation = null) {
+        if (!h) return false;
+        // Remember the INTENT, independently of the rectangles. A worker
+        // recovery or external compile can legitimately put the click between
+        // documents; showReview replaces the geometry before replaying it.
+        this._reviewFocus = { ...h, generation, pending: true };
+        return this._replayReviewFocus();
+    }
+
+    _replayReviewFocus() {
+        const h = this._reviewFocus;
+        if (!h || !h.pending) return false;
+        if (h.generation == null || this._openedGeneration == null ||
+            String(h.generation) !== String(this._openedGeneration)) {
+            this._reviewWaiting = true;
+            this.status('updating the page for this change…', 'busy');
+            return false;
+        }
+        this._post({
+            type: 'reviewFocus', id: h.id, page: h.page, rects: h.rects || [],
+            generation: h.generation,
+        });
+        h.pending = false;
+        if (this._reviewWaiting) {
+            this._reviewWaiting = false;
+            this.status('', '');
+        }
+        return true;
     }
 
     _cancelViewerProbes(reason) {
@@ -1414,7 +1775,7 @@ class TexViewer {
     }
 
     /** Ask the webview to prove both its document and worker still answer. */
-    _probeViewer(page) {
+    _probeViewer(page, generation = this._openedGeneration) {
         if (!this.panel) return Promise.resolve({ ok: false, reason: 'viewer is closed' });
         const requestId = `viewer-${Date.now().toString(36)}-${++this._viewerProbeSeq}`;
         return new Promise((resolve) => {
@@ -1431,9 +1792,9 @@ class TexViewer {
             try {
                 const sent = this.panel.webview.postMessage({
                     type: 'viewerProbe', requestId, page: page || 1,
-                    // This is the generation whose BYTES refresh() last sent,
-                    // not necessarily the newest source-only generation.
-                    generation: this.shownGeneration,
+                    // Health and placement both concern what pdf.js has
+                    // ACKNOWLEDGED, not a newer document still in flight.
+                    generation,
                 });
                 Promise.resolve(sent).then(ok => {
                     if (ok === false) finish({ ok: false, reason: 'viewer refused the health check' });
@@ -1464,9 +1825,12 @@ class TexViewer {
         // belonged to the dead webview.
         this.shownGeneration = null;
         this.shownPdfHash = null;
+        this._openedGeneration = null;
+        this._openedPdfHash = null;
         this.shownAnything = false;
         this._text = null;
         this._objMaps.clear();
+        this._traceStateKey = null;
         try { this.panel.webview.html = this._html(); }
         catch (e) {
             this._viewerReloading = false;
@@ -1476,14 +1840,180 @@ class TexViewer {
         }
     }
 
-    async _ensureViewerForReview(h) {
-        if (!this.panel || this._viewerReloading) return;
-        const health = await this._probeViewer(h && h.page);
+    async _ensureViewerForReview(h, generation = this._openedGeneration) {
+        if (!this.panel || this._viewerReloading) return false;
+        // A different PDF is already on its way. Probing the old, healthy
+        // worker would bless the wrong document; restarting it would only make
+        // the race longer. The pending focus is replayed by `opened` instead.
+        if (generation == null || this._openedGeneration == null ||
+            String(generation) !== String(this._openedGeneration)) {
+            this.status('updating the page for this change…', 'busy');
+            try { await this.refresh(); } catch (_) { /* compile/open already owns it */ }
+            return false;
+        }
+        const health = await this._probeViewer(h && h.page, generation);
         if (!health || !health.ok) this._reloadViewer(health && health.reason);
+        return !!(health && health.ok);
     }
 
     /** A line in the panel's footer — the review speaks to the reader here. */
     status(text, kind) { this._post({ type: 'status', text, kind: kind || '' }); }
+
+    /**
+     * The editor buffer is newer than the PDF currently painted in the panel.
+     * Called on EVERY content edit, including same-line typing. The old marker
+     * is cleared in the webview by this message, before the selection event
+     * produced by that keystroke can try to resolve against stale text.
+     */
+    noteSourceChanged(doc) {
+        if (!this.panel || !doc || !doc.uri || !this.root) return false;
+        let root = null;
+        try { root = this.coord.rootFor(doc); } catch (_) { root = doc.uri.fsPath; }
+        if (root !== this.root) return false;
+        this._postSourceDirty();
+        const source = this._miniApplyingFile === doc.uri.fsPath ? 'mini-editor' : 'editor';
+        const st = this.coord.roots && this.coord.roots.get(this.root);
+        this._setTracePaused(true, { source, compiling: !!(st && st.compiling) });
+        return true;
+    }
+
+    /** Every open, unsaved TeX buffer belonging to the paper on screen. */
+    _dirtyPaperDocuments() {
+        if (!this.root) return [];
+        const out = [];
+        for (const doc of vscode.workspace.textDocuments || []) {
+            if (!doc || !doc.isDirty || !doc.uri || !/\.tex$/i.test(doc.uri.fsPath || '')) continue;
+            let root = null;
+            try { root = this.coord.rootFor(doc); } catch (_) { root = doc.uri.fsPath; }
+            if (root === this.root) out.push(doc);
+        }
+        return out;
+    }
+
+    /** Report disk persistence separately from whether the PDF has caught up. */
+    _postSourceDirty(force = false) {
+        if (!this.panel) return;
+        const docs = this._dirtyPaperDocuments();
+        const files = docs.map(d => path.basename(d.uri.fsPath));
+        const key = `${docs.length}:${files.join('|')}`;
+        if (!force && key === this._sourceDirtyKey) return;
+        this._sourceDirtyKey = key;
+        this._post({ type: 'sourceDirty', dirty: docs.length > 0, count: docs.length, files });
+    }
+
+    /** Saving one include may still leave another include dirty. Recount all. */
+    noteSourceSaved(doc) {
+        if (!this.panel || !doc || !doc.uri || !this.root) return false;
+        let root = null;
+        try { root = this.coord.rootFor(doc); } catch (_) { root = doc.uri.fsPath; }
+        if (root !== this.root) return false;
+        this._postSourceDirty(true);
+        return true;
+    }
+
+    /** Save every dirty source buffer in this paper from the viewer badge. */
+    async _savePaperSources() {
+        const docs = this._dirtyPaperDocuments();
+        if (!docs.length) {
+            this._postSourceDirty(true);
+            this._post({ type: 'status', text: 'source is already saved', kind: 'ok' });
+            return true;
+        }
+        let saved = 0;
+        for (const doc of docs) {
+            try { if (await doc.save()) saved++; }
+            catch (_) { /* report the remaining dirty buffers below */ }
+        }
+        this._postSourceDirty(true);
+        const remaining = this._dirtyPaperDocuments().length;
+        if (remaining) {
+            this._post({
+                type: 'status', kind: 'err',
+                text: `could not save ${remaining} source${remaining === 1 ? '' : 's'}`,
+            });
+            return false;
+        }
+        this._post({
+            type: 'status', kind: 'ok',
+            text: `saved ${saved} source${saved === 1 ? '' : 's'} to disk`,
+        });
+        return true;
+    }
+
+    _setTracePaused(paused, { source, compiling } = {}) {
+        const next = !!paused;
+        if (next && source) this._traceSource = source;
+        if (!next) this._traceSource = null;
+        this._tracePaused = next;
+        const msg = {
+            type: 'traceState',
+            paused: next,
+            source: next ? (this._traceSource || 'editor') : null,
+            compiling: next && !!compiling,
+        };
+        const key = `${msg.paused}:${msg.source || ''}:${msg.compiling}`;
+        if (key === this._traceStateKey) return;
+        this._traceStateKey = key;
+        this._post(msg);
+    }
+
+    /** Re-answer from the current caret after the matching page is visible. */
+    async _resumeTracing({ instant = true, source = null, preserveView = false } = {}) {
+        // A REBUILD IS NOT NAVIGATION.
+        //
+        // While focus is inside the page's mini-editor, VS Code still reports
+        // some ordinary .tex editor as active. It may be another included file
+        // with a caret many pages away. Giving that stale caret first refusal
+        // after the PDF swap correctly restored the viewport and then promptly
+        // scrolled it elsewhere. The source of the edit is remembered while
+        // tracing is paused; use the card's own caret when it caused the build,
+        // and redraw it without moving the paper.
+        if (source === 'mini-editor' && this._lastEditCaret && this._edit &&
+            this._lastEditCaret.editId === this._edit.id) {
+            await this._onEditCaret(this._lastEditCaret, {
+                forceSync: true,
+                preserveView: true,
+                instant,
+            });
+            return;
+        }
+        const ed = vscode.window.activeTextEditor;
+        // Preserve the ordinary re-answer even when a webview has focus and
+        // VS Code reports no activeTextEditor; syncFromEditor treats that as a
+        // harmless no-op, while test/instrumentation hooks can still observe
+        // that a refresh requested the answer.
+        if (!ed) this.syncFromEditor(ed, { instant, preserveView });
+        if (ed && ed.document && /\.tex$/i.test(ed.document.uri.fsPath)) {
+            let root = null;
+            try { root = this.coord.rootFor(ed.document); } catch (_) { root = ed.document.uri.fsPath; }
+            if (root === this.root) {
+                this.syncFromEditor(ed, { instant, preserveView });
+                return;
+            }
+        }
+        if (this._lastEditCaret && this._edit && this._lastEditCaret.editId === this._edit.id) {
+            await this._onEditCaret(this._lastEditCaret);
+            return;
+        }
+        // Full-view mode intentionally has no visible source editor. The
+        // source caret is still part of the saved reading session, so a viewer
+        // restart must be able to redraw it without exposing or focusing the
+        // editor merely to obtain a Selection object.
+        const saved = this._viewState && this._viewState.cursor;
+        if (saved && saved.file && saved.anchor && saved.active) {
+            try {
+                const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(saved.file));
+                let root = null;
+                try { root = this.coord.rootFor(doc); } catch (_) { root = doc.uri.fsPath; }
+                if (root === this.root) {
+                    const a = new vscode.Position(saved.anchor.line, saved.anchor.character);
+                    const b = new vscode.Position(saved.active.line, saved.active.character);
+                    this.syncFromEditor({ document: doc, selection: new vscode.Selection(a, b) },
+                        { instant, preserveView });
+                }
+            } catch (_) { /* the saved file may have been removed */ }
+        }
+    }
 
     async _onReviewAction(m) {
         const r = this._review;
@@ -1491,6 +2021,18 @@ class TexViewer {
         if (!r || !file) return;
         switch (m && m.action) {
             case 'keep': return r.keep(file, m.id);
+            case 'keepComment': return r.keepWithComment(file, m.id);
+            case 'feedback': return r.exportFeedback(file);
+            case 'copyFeedback': {
+                if (typeof m.text === 'string') { await vscode.env.clipboard.writeText(m.text); this.status('Review feedback copied', 'ok'); }
+                return;
+            }
+            case 'feedbackDraft': {
+                const session = r.sessions.get(file) || r._archived.get(file);
+                if (session && typeof m.text === 'string') { session.feedbackDraft = m.text; r.persist(file, session); }
+                return;
+            }
+            case 'history': return r.exportHistory(file);
             case 'undo': return r.undo(file, m.id);
             case 'keepAll': return r.keepAll(file);
             case 'undoAll': return r.undoAll(file);
@@ -1499,13 +2041,361 @@ class TexViewer {
             case 'show': {
                 const session = r.sessions && r.sessions.get(file);
                 const h = session && session.hunks && session.hunks.find(x => x.id === m.id);
-                await this._ensureViewerForReview(h);
+                await this._ensureViewerForReview(h, session && session.generation);
                 return r.show(file, m.id);
             }
             case 'next': return r.step(file, +1);
             case 'prev': return r.step(file, -1);
             case 'close': return r.close(file);
             default: return undefined;
+        }
+    }
+
+    // ------------------------------------------------------------- comments --
+
+    /** Every source file represented by the paper currently on screen. */
+    _commentFiles() {
+        if (!this.root) return [];
+        const st = this.coord.roots && this.coord.roots.get(this.root);
+        return [...new Set((st && st.files && st.files.length) ? st.files : [this.root])];
+    }
+
+    /** Current semantic objects without opening an editor just to read them. */
+    _commentObjects(file) {
+        try {
+            const doc = (vscode.workspace.textDocuments || [])
+                .find(d => d.uri && d.uri.fsPath === file && !d.isClosed);
+            if (doc) return this.projection.get(doc).model.objects || [];
+            const text = fs.readFileSync(file, 'utf8');
+            const model = this.projection.fromText(text, file);
+            return model && model.objects || [];
+        } catch (_) { return []; }
+    }
+
+    /**
+     * The persistent comment cell containing a source line.
+     *
+     * Metadata objects (labels, refs, inputs) are not writing units. Prefer a
+     * paragraph, otherwise the tightest semantic block. Very short prose that
+     * the scanner intentionally omits still gets a paragraph cell synthesized
+     * from the same paragraph boundaries the viewer's mini-editor uses.
+     */
+    _commentObject(doc, line, preferred) {
+        const objects = this._commentObjects(doc.uri.fsPath);
+        if (preferred && preferred.stableKey) {
+            const exact = objects.find(o => o.stableKey === preferred.stableKey);
+            if (exact) return exact;
+        }
+        if (preferred && preferred.sourceHash) {
+            const exact = objects.find(o => o.sourceHash === preferred.sourceHash &&
+                (!preferred.kind || o.kind === preferred.kind));
+            if (exact) return exact;
+        }
+        const candidates = objects.filter(o => ADDRESSABLE.has(o.kind) && o.sourceRange &&
+            line >= o.sourceRange.startLine && line <= o.sourceRange.endLine);
+        const priority = o => o.kind === 'paragraph' ? 0
+            : ['display-equation', 'figure', 'table', 'tabular', 'theorem'].includes(o.kind) ? 1
+                : ['abstract', 'titlepage'].includes(o.kind) ? 2
+                    : o.kind === 'environment' ? 4 : 3;
+        candidates.sort((a, b) => {
+            const ap = priority(a); const bp = priority(b);
+            if (ap !== bp) return ap - bp;
+            const ar = a.sourceRange.endLine - a.sourceRange.startLine;
+            const br = b.sourceRange.endLine - b.sourceRange.startLine;
+            return ar - br;
+        });
+        if (candidates.length) return candidates[0];
+
+        const lines = doc.getText().split(/\r?\n/);
+        const span = paragraphSpan(lines, Math.max(1, line));
+        const startLine = span ? span.startLine : Math.max(1, line);
+        const endLine = span ? span.endLine : startLine;
+        const start = new vscode.Position(startLine - 1, 0);
+        const last = Math.max(0, Math.min(endLine - 1, doc.lineCount - 1));
+        const end = new vscode.Position(last, doc.lineAt(last).text.length);
+        return {
+            kind: 'paragraph', label: null, stableKey: null, sectionPath: [],
+            text: doc.getText(new vscode.Range(start, end)),
+            sourceRange: { file: doc.uri.fsPath, startLine, endLine,
+                startOffset: doc.offsetAt(start), endOffset: doc.offsetAt(end) },
+        };
+    }
+
+    /** Disposable PDF geometry for one persistent comment cell. */
+    _commentRects(st, item) {
+        const block = {
+            startLine: item.line,
+            endLine: Number.isFinite(item.endLine) ? item.endLine : item.line,
+        };
+        // SyncTeX sometimes files a section command under the page ship-out
+        // record (`x=0`, one margin wide) instead of under its printed title.
+        // Treating that as real is what put a mid-paper heading comment at the
+        // top of page 1. Other cell kinds keep their old, less opinionated
+        // geometry: this filter exists for the measured heading pathology.
+        const credible = (rows) => {
+            if (item.kind !== 'section-heading') return rows || [];
+            const pageWidth = (st.generation && st.generation.pageSize &&
+                st.generation.pageSize.widthBp) || 595.276;
+            return (rows || []).filter(r => !(r.x <= 2 && r.w <= pageWidth * .2));
+        };
+        let rects = credible(this._blockRows(st, item.file, block));
+        // Environments and macro-expanded front matter can own a render box
+        // even when SyncTeX gives none of their source lines a text row.
+        if (!rects.length) rects = credible(this.objectRects(
+            item.file, block.startLine, block.endLine));
+
+        // A run-in \paragraph prints its heading on the following prose row and
+        // may have no trustworthy record of its own. Walk only inside this
+        // section, taking the first credible printed source line. This is the
+        // same semantic fallback used by the section navigator, but it keeps
+        // the comment near the beginning of the unit rather than at its end.
+        if (!rects.length && item.kind === 'section-heading') {
+            const objects = this._commentObjects(item.file);
+            const headings = objects.filter(o => o.kind === 'section-heading' && o.sourceRange)
+                .sort((a, b) => a.sourceRange.startLine - b.sourceRange.startLine);
+            const here = headings.find(o => item.line >= o.sourceRange.startLine &&
+                item.line <= o.sourceRange.endLine) || null;
+            const after = headings.find(o => o.sourceRange.startLine > block.endLine);
+            const text = this._textOf(item.file);
+            const lines = text == null ? [] : text.split(/\r?\n/);
+            const from = Math.max(block.endLine + 1,
+                here && here.sourceRange ? here.sourceRange.endLine + 1 : block.endLine + 1);
+            const to = Math.min(lines.length || from,
+                after ? after.sourceRange.startLine - 1 : lines.length || from);
+            for (let line = from; line <= to; line++) {
+                const source = String(lines[line - 1] || '').replace(/(^|[^\\])%.*/, '$1').trim();
+                if (!source || /^\\label\b/.test(source)) continue;
+                const found = credible(this._blockRows(st, item.file, {
+                    startLine: line, endLine: line,
+                }));
+                if (found.length) { rects = found; break; }
+            }
+        }
+
+        // Classes such as JHEP store title and abstract text in preamble
+        // commands and typeset it only when `\maketitle` runs. Some engines
+        // attribute that ink to the command, others only to `\maketitle`.
+        // The durable cell remains the title/abstract command; this is merely
+        // its current visual anchor so its bubble cannot disappear.
+        if (!rects.length && ['titlepage', 'abstract'].includes(item.kind)) {
+            const text = this._textOf(item.file);
+            const match = text && /(^|\n)[ \t]*\\maketitle\b/.exec(text);
+            if (match) {
+                const offset = match.index + (match[1] ? match[1].length : 0);
+                const line = text.slice(0, offset).split('\n').length;
+                const total = text.split('\n').length;
+                rects = this._blockRows(st, item.file, {
+                    startLine: line, endLine: Math.min(total, line + 1),
+                });
+                if (!rects.length) rects = this.objectRects(item.file, line, line);
+            }
+        }
+        return rects;
+    }
+
+    /** Import retained review feedback once, so old and new review comments mix. */
+    _importReviewComments(file) {
+        const session = this._review &&
+            (this._review.sessions.get(file) || this._review._archived.get(file));
+        if (!session || !session.feedback || !session.feedback.length) return;
+        let existing;
+        try { existing = this.comments.read(file); } catch (_) { return; }
+        const imported = new Set(existing.comments.flatMap(c =>
+            c.revision && c.revision.originId ? [String(c.revision.originId)] : []));
+        const doc = (vscode.workspace.textDocuments || [])
+            .find(d => d.uri && d.uri.fsPath === file && !d.isClosed);
+        const objects = this._commentObjects(file);
+        for (const feedback of session.feedback) {
+            const originId = `review:${feedback.id}:${feedback.at}`;
+            if (imported.has(originId)) continue;
+            let obj = doc ? this._commentObject(doc, feedback.line, feedback.object) : null;
+            if (!obj && feedback.object && feedback.object.stableKey) {
+                obj = objects.find(o => o.stableKey === feedback.object.stableKey) || null;
+            }
+            if (!obj) {
+                obj = objects.find(o => ADDRESSABLE.has(o.kind) && o.sourceRange &&
+                    feedback.line >= o.sourceRange.startLine && feedback.line <= o.sourceRange.endLine) || null;
+            }
+            // The source file may not be open and the reviewed unit may since
+            // have disappeared. Preserve the feedback as a detached cell using
+            // the revision text rather than dropping it during migration.
+            if (!obj) obj = {
+                kind: feedback.object && feedback.object.kind || 'paragraph',
+                label: feedback.object && feedback.object.label || null,
+                stableKey: feedback.object && feedback.object.stableKey || null,
+                text: feedback.after || feedback.before || '',
+                sectionPath: [],
+                sourceRange: {
+                    file,
+                    startLine: Math.max(1, Number(feedback.line) || 1),
+                    endLine: Math.max(1, Number(feedback.endLine) || Number(feedback.line) || 1),
+                },
+            };
+            this.comments.add(file, obj, feedback.comment, {
+                source: 'revision',
+                revision: {
+                    originId,
+                    changeId: feedback.id,
+                    at: feedback.at,
+                    author: feedback.author || null,
+                    before: feedback.before,
+                    after: feedback.after,
+                },
+            }, objects);
+            imported.add(originId);
+        }
+    }
+
+    /** Send one document-ordered, reconciled view of all comment sidecars. */
+    _pushComments(delay = 0) {
+        clearTimeout(this._commentPushTimer);
+        const run = () => {
+            if (!this.panel || !this.root) return;
+            const files = this._commentFiles();
+            for (const file of files) {
+                try { this._importReviewComments(file); } catch (_) { /* migration is best effort */ }
+            }
+            const result = this.comments.list(files, f => this._commentObjects(f));
+            // Contextual comments live beside what they discuss.  The durable
+            // address is still the source cell ID; these rectangles are only a
+            // disposable projection of that cell into the PDF currently on
+            // screen and are regenerated after every compile.
+            const st = this.coord.roots && this.coord.roots.get(this.root);
+            const generation = st && st.generation && st.generation.generation;
+            const items = result.items.map(item => {
+                let rects = [];
+                if (!item.detached && st && st.map && Number.isFinite(item.line)) {
+                    try {
+                        rects = this._commentRects(st, item)
+                            .map(r => ({ page: r.page, x: r.x, y: r.y, w: r.w, h: r.h }));
+                    } catch (_) { rects = []; }
+                }
+                return { ...item, rects, unplaced: !item.detached && !rects.length };
+            });
+            this._post({
+                type: 'comments', items, errors: result.errors, generation,
+                view: this._viewState && this._viewState.comments || null,
+            });
+        };
+        if (delay > 0) this._commentPushTimer = setTimeout(run, delay);
+        else run();
+    }
+
+    /** The review surface and the ordinary reader share one comment store. */
+    async addRevisionComment(feedback) {
+        if (!feedback || !feedback.file || !String(feedback.comment || '').trim()) return false;
+        let doc;
+        try { doc = await vscode.workspace.openTextDocument(vscode.Uri.file(feedback.file)); }
+        catch (_) { return false; }
+        const objects = this._commentObjects(feedback.file);
+        const obj = this._commentObject(doc, feedback.line, feedback.object);
+        const originId = `review:${feedback.id}:${feedback.at}`;
+        try {
+            const record = this.comments.read(feedback.file);
+            if (!record.comments.some(c => c.revision && c.revision.originId === originId)) {
+                this.comments.add(feedback.file, obj, feedback.comment, {
+                    source: 'revision',
+                    revision: {
+                        originId,
+                        changeId: feedback.id,
+                        at: feedback.at,
+                        author: feedback.author || null,
+                        before: feedback.before,
+                        after: feedback.after,
+                    },
+                }, objects);
+            }
+            this._pushComments();
+            return true;
+        } catch (error) {
+            this.status(`could not save the review comment: ${error.message}`, 'err');
+            return false;
+        }
+    }
+
+    async _onCommentAction(m) {
+        if (!m || !this.root) return;
+        const allowed = new Set(this._commentFiles());
+        try {
+            if (m.action === 'cancelDraft') {
+                this._commentDraft = null;
+                return;
+            }
+            if (m.action === 'add') {
+                const draft = this._commentDraft;
+                if (!draft || String(m.targetId) !== String(draft.id) ||
+                    !String(m.text || '').trim()) return;
+                let doc;
+                try { doc = await vscode.workspace.openTextDocument(vscode.Uri.file(draft.file)); }
+                catch (_) { this.status('that paragraph is no longer available', 'warn'); return; }
+                const obj = this._commentObject(doc, draft.line, draft.object);
+                const author = await this._readerCommentAuthor(draft.file);
+                this.comments.add(draft.file, obj, m.text, { author }, this._commentObjects(draft.file));
+                this._commentDraft = null;
+                this._post({ type: 'commentComposed' });
+                this._pushComments();
+                this.status('comment saved beside the paper', 'ok');
+                return;
+            }
+            if (m.action === 'update' && allowed.has(m.file)) {
+                if (String(m.text || '').trim()) this.comments.update(m.file, m.id, m.text);
+                else this.comments.delete(m.file, m.id);
+                this._pushComments();
+                return;
+            }
+            if (m.action === 'delete' && allowed.has(m.file)) {
+                this.comments.delete(m.file, m.id);
+                this._pushComments();
+                return;
+            }
+            if (m.action === 'copy') {
+                for (const d of Array.isArray(m.drafts) ? m.drafts : []) {
+                    if (!allowed.has(d.file)) continue;
+                    if (String(d.text || '').trim()) this.comments.update(d.file, d.id, d.text);
+                    else this.comments.delete(d.file, d.id);
+                }
+                const listed = this.comments.list([...allowed], f => this._commentObjects(f));
+                await vscode.env.clipboard.writeText(markdownFor(listed.items, this.root));
+                this._pushComments();
+                this.status(`copied ${listed.items.length} comment${listed.items.length === 1 ? '' : 's'} with current line numbers`, 'ok');
+                return;
+            }
+            if (m.action === 'clear') {
+                const listed = this.comments.list([...allowed], f => this._commentObjects(f));
+                if (!listed.items.length) return;
+                const answer = await vscode.window.showWarningMessage(
+                    `Delete all ${listed.items.length} comments for this paper?`,
+                    { modal: true, detail: 'The .timeline.comments sidecars will be removed. Git or another backup can recover them.' },
+                    'Delete all',
+                );
+                if (answer !== 'Delete all') return;
+                const n = this.comments.clear([...allowed]);
+                this._commentDraft = null;
+                this._post({ type: 'commentComposed' });
+                this._pushComments();
+                this.status(`deleted ${n} comment${n === 1 ? '' : 's'}`, 'ok');
+                return;
+            }
+            if (m.action === 'reveal' && allowed.has(m.file)) {
+                const listed = this.comments.list([m.file], f => this._commentObjects(f));
+                const item = listed.items.find(x => x.id === m.id);
+                if (!item || item.detached) {
+                    this.status('that comment is detached from the current source', 'warn');
+                    return;
+                }
+                const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(item.file));
+                const editor = await vscode.window.showTextDocument(doc, {
+                    viewColumn: vscode.ViewColumn.One, preserveFocus: false, preview: false,
+                });
+                const line = Math.max(0, Math.min(item.line - 1, doc.lineCount - 1));
+                const pos = new vscode.Position(line, 0);
+                editor.selection = new vscode.Selection(pos, pos);
+                editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
+                return;
+            }
+        } catch (error) {
+            this.status(`comments could not be updated: ${error.message}`, 'err');
+            this._pushComments();
         }
     }
 
@@ -1521,10 +2411,27 @@ class TexViewer {
      */
     syncFromEditor(editor, opts = {}) {
         this._syncInstant = !!opts.instant;
-        if (!this.panel || !this.followCursor || !editor) return;
+        this._syncPreserveView = !!opts.preserveView;
+        if (!this.panel || !editor) return;
         const doc = editor.document;
         if (!/\.tex$/i.test(doc.uri.fsPath)) return;
+        // Cursor recovery is independent of follow mode: turning tracing off
+        // must not also make the session forget where the source caret was.
+        this._rememberCursor(doc, editor.selection);
+        if (!this.followCursor) return;
         const st = this.coord.stateFor(doc);
+        // THE PAGE IS A GENERATION, NOT A LIVE MIRROR OF THE BUFFER.
+        // Same-line typing used to leave RenderMap._baseFlag() at FRESH, so the
+        // old PDF text layer searched for a word that existed only in the new
+        // buffer and highlighted a neighbour. Once any content changes, wait
+        // for the matching generation to be painted before tracing again.
+        if (this._tracePaused || (st && st.sourceAhead)) {
+            this._setTracePaused(true, {
+                source: this._traceSource || 'editor',
+                compiling: !!(st && st.compiling),
+            });
+            return;
+        }
         // NO MAP MEANS NO ANSWER — AND AN OLD ANSWER LEFT ON THE PAGE IS A LIE.
         //
         // A rebuild that fails while the reader types (a half-typed construct,
@@ -1776,7 +2683,7 @@ class TexViewer {
                 : undefined,
             glyph,
             flag: flag === FLAG.FRESH ? 'fresh' : flag === FLAG.STALE ? 'stale' : 'approx',
-            reveal: !fromClick && this._mayScroll(),
+            reveal: !this._syncPreserveView && !fromClick && this._mayScroll(),
             instant: !!this._syncInstant,
             title: obj ? obj.stableKey : `line ${line}`,
             label: `${where} · p.${rects[0].page} · ${flag}`,
@@ -2184,7 +3091,7 @@ class TexViewer {
             caret: amap.exact ? caret : null,
             exact: !!amap.exact,
             flag: flag === FLAG.FRESH ? 'fresh' : flag === FLAG.STALE ? 'stale' : 'approx',
-            reveal: this._mayScroll() && Date.now() - this._invertedAt >= 1500,
+            reveal: !this._syncPreserveView && this._mayScroll() && Date.now() - this._invertedAt >= 1500,
             instant: !!this._syncInstant,
             title,
             label: `${what} · p.${g.page} · ${flag}${amap.exact ? ' · exact' : ''}`,
@@ -2357,7 +3264,7 @@ class TexViewer {
             occurrence: a.occurrence,
             glyph: a.glyph,
             flag: flag === FLAG.FRESH ? 'fresh' : flag === FLAG.STALE ? 'stale' : 'approx',
-            reveal: this._mayScroll() && Date.now() - this._invertedAt >= 1500,
+            reveal: !this._syncPreserveView && this._mayScroll() && Date.now() - this._invertedAt >= 1500,
             instant: !!this._syncInstant,
             title: `line ${line}`,
             label: `"${a.word}" · p.${rects[0].page} · ${flag}`,
@@ -2438,7 +3345,10 @@ class TexViewer {
         // _postEditSelection ignores a range outside the open block, and does
         // nothing at all when no card is open.
         try {
-            this._postEditSelection(doc, new vscode.Range(sel.start, sel.end), false);
+            // Keep the Selection itself, not a directionless Range. The card
+            // needs to know whether its active edge is the left or right one
+            // so Shift+Arrow can contract as well as expand.
+            this._postEditSelection(doc, sel, false);
         } catch (_) { /* the page's own span is the main event */ }
 
         this._post({
@@ -2449,7 +3359,7 @@ class TexViewer {
                 rows,
                 lines: endLine - startLine + 1,
             },
-            reveal: this._mayScroll() && Date.now() - this._invertedAt >= 1500,
+            reveal: !this._syncPreserveView && this._mayScroll() && Date.now() - this._invertedAt >= 1500,
             instant: !!this._syncInstant,
             // THE LABEL IS THE DIAGNOSTIC. A span that lands on the wrong block
             // is reported as a picture, and the only way to tell a wrong
@@ -2486,7 +3396,9 @@ class TexViewer {
                 if (hintsLeft[m.id] > 0) hintsLeft[m.id] -= 1;
                 break;
             case 'ready':
+                this._webviewReady = true;
                 this._postTheme();
+                this._postSourceDirty(true);
                 this._post({ type: 'hints', left: { ...hintsLeft } });
                 this._post({ type: 'reviewGroup', by: this._reviewGroup() });
                 // FIRST RUN: the tour opens itself once, after the first page
@@ -2497,20 +3409,42 @@ class TexViewer {
                     else if (!t.done && t.started) this._tourPost();
                 }, 1200);
                 await this.refresh({ force: true });
+                await this._restoreSessionChrome();
                 // The list survives a panel reopen: the session is the truth,
                 // the panel is only its picture.
                 if (this._review) this._review.push(this.root);
+                this._pushComments();
                 break;
             case 'reviewAction': await this._onReviewAction(m); break;
+            case 'commentAction': await this._onCommentAction(m); break;
+            case 'commentView':
+                this._rememberState(this.root, {
+                    comments: {
+                        open: !!m.open,
+                        width: Math.max(220, Math.min(520, Number(m.width) || 276)),
+                    },
+                });
+                break;
             case 'follow':
                 this.followMode = ['off', 'mark', 'scroll'].includes(m.mode) ? m.mode
                     : (m.value ? 'scroll' : 'off');
                 break;
+            // The webview owns responsive-fit geometry. The message exists so
+            // the interactive guide observes the real double-click gesture;
+            // persistence follows through the ordinary viewstate snapshot.
+            case 'fitMode': break;
             case 'recompile': await this.rebuild(); break;
+            case 'saveSource': await this._savePaperSources(); break;
             case 'click': await this._jumpToSource(m); break;
-            case 'fullscreen': await this.setFullScreen(m.value); break;
+            case 'fullscreen': await this.setFullScreen(m.value); break; // old webviews
+            case 'layoutCycle': await this.cycleLayoutMode(); break;
+            case 'layoutMode': await this.setLayoutMode(m.mode); break;
             case 'viewstate':
-                this._rememberView(this.root, m.page, m.frac);
+                this._rememberView(this.root, m.page, m.frac, m);
+                if (m.requestId) {
+                    const done = this._viewCaptures.get(m.requestId);
+                    if (done) done(!m.unavailable);
+                }
                 break;
             case 'timing': {
                 // The webview is the one place the extension cannot time from
@@ -2534,6 +3468,9 @@ class TexViewer {
                 this._viewerReloading = false;
                 clearTimeout(this._viewerReloadTimer);
                 this._viewerReloadTimer = null;
+                this._openedGeneration = m.generation;
+                this._openedPdfHash = m.pdfHash ||
+                    (String(this.shownGeneration) === String(m.generation) ? this.shownPdfHash : null);
                 // The pages just changed underneath the reader. Any ladder was
                 // built against the old source positions, and the old rects
                 // were measured against the old compile, so both are dropped
@@ -2544,17 +3481,56 @@ class TexViewer {
                 this._chips = null;
                 this._chipModels = null;
                 this._crops.clear();
-                this.syncFromEditor(vscode.window.activeTextEditor, { instant: true });
+                // The PDF bytes are visible now, but a newer edit may have
+                // arrived while pdf.js was opening them. Resume only when this
+                // is still the coordinator's current source generation.
+                {
+                    const st = this.root && this.coord.roots.get(this.root);
+                    const current = !!(st && !st.sourceAhead && st.generation &&
+                        String(st.generation.generation) === String(m.generation));
+                    const source = this._traceSource;
+                    this._setTracePaused(!current, {
+                        source: this._traceSource || 'editor',
+                        compiling: !!(st && st.compiling),
+                    });
+                    if (current) await this._resumeTracing({ instant: true, source });
+                }
+                await this._restoreEditSession();
                 // The mini-editor's block has new geometry too — move the card.
                 this._postEditAnchor().catch(() => {});
                 if (this._labelsWanted) this._postLabels().catch(() => {});
                 this._postSections().catch(() => {});
-                if (this._reviewFocus) this.focusReviewHunk(this._reviewFocus);
+                this._pushComments(50);
+                // A click made while this PDF was loading can now land. If its
+                // payload still names the previous map, refreshPlacement will
+                // replace its rectangles and replay it a moment later.
+                // A restored webview may reuse the same generation number, but
+                // its canvases and scale are new. Re-place every review before
+                // allowing a pending click to navigate; showReview() replays
+                // that click when the fresh payload arrives.
+                if (this._review) {
+                    try { this._review.refreshPlacement(); } catch (_) { /* list still works */ }
+                } else {
+                    this._replayReviewFocus();
+                }
                 break;
             case 'textLayer': this._onTextLayer(m); break;
             case 'textLayerDone':
                 this._log(`text layer complete for generation ${m.generation}: ` +
                     `${m.pages} pages${m.ms != null ? ` in ${m.ms} ms` : ''}`);
+                // `opened` necessarily arrives before the asynchronous text
+                // sweep. The first cursor answer after a viewer restart is
+                // therefore only row-level and has no exact red caret. Rebuild
+                // the alignment once the complete layer exists, then answer
+                // forward search again without moving the reader's page.
+                if (String(m.generation) === String(this._openedGeneration)) {
+                    this._objMaps.clear();
+                    const st = this.root && this.coord.roots.get(this.root);
+                    if (st && !st.sourceAhead && st.generation &&
+                        String(st.generation.generation) === String(m.generation)) {
+                        await this._resumeTracing({ instant: true, preserveView: true });
+                    }
+                }
                 // A \ref site is placed over its printed NUMBER, which needs the
                 // text layer — and the first Shift after a compile can easily
                 // beat the sweep. Rebuild now that the ink is known, so those
@@ -2622,8 +3598,33 @@ class TexViewer {
             case 'editStep': await this._stepEditSession(m); break;
             case 'editChange': await this._applyEditChange(m); break;
             case 'editCaret': await this._onEditCaret(m); break;
-            case 'editClose': this._edit = null; break;
-            case 'editSave': await this._saveEditDoc(); break;
+            case 'editView':
+                if (this._edit && m.editId === this._edit.id) {
+                    const extra = {};
+                    if (Number.isFinite(m.start)) extra.caretStart = m.start;
+                    if (Number.isFinite(m.end)) extra.caretEnd = m.end;
+                    if (m.direction === 'forward' || m.direction === 'backward') {
+                        extra.caretDirection = m.direction;
+                    }
+                    if (Number.isFinite(m.page)) extra.page = m.page;
+                    if (m.pos === null || (m.pos && Number.isFinite(m.pos.fx) && Number.isFinite(m.pos.fy))) {
+                        extra.pos = m.pos;
+                    }
+                    this._rememberEditState(extra);
+                }
+                break;
+            case 'editClose':
+                this._edit = null;
+                this._lastEditCaret = null;
+                this._rememberEditState();
+                break;
+            case 'editSave': await this._saveEditDoc(m); break;
+            case 'gitCommit':
+                if (await this._saveEditDoc(m)) {
+                    await vscode.commands.executeCommand('wolfbook.tex.commitChanges');
+                }
+                break;
+            case 'gitPush': await vscode.commands.executeCommand('wolfbook.tex.pushChanges'); break;
             case 'editReveal': await this._revealEditRange(); break;
             case 'editNav': await this._onEditNav(m); break;
             case 'openExternal':
@@ -3039,6 +4040,13 @@ class TexViewer {
      *
      * @returns {{ok: true, text: string, changed: boolean} | {ok: false, reason: string}}
      */
+    async _applyReaderEdit(doc, edit) {
+        const event = { file: doc.uri.fsPath, origin: 'user', source: 'wpaper.viewer' };
+        announceAgentEdit({ ...event, phase: 'begin' });
+        try { return await vscode.workspace.applyEdit(edit); }
+        finally { announceAgentEdit({ ...event, phase: 'end' }); }
+    }
+
     async _rangeAction(doc, range, action) {
         const text = doc.getText(range);
         if (action === 'copy') {
@@ -3058,7 +4066,7 @@ class TexViewer {
         const edit = new vscode.WorkspaceEdit();
         edit.delete(doc.uri, range);
         let ok = false;
-        try { ok = await vscode.workspace.applyEdit(edit); } catch (_) { ok = false; }
+        try { ok = await this._applyReaderEdit(doc, edit); } catch (_) { ok = false; }
         if (!ok) return { ok: false, reason: `the ${action} could not be applied` };
         return { ok: true, text, changed: true };
     }
@@ -3092,25 +4100,44 @@ class TexViewer {
             return;
         }
 
-        if (action === 'paste') {
-            let clip = '';
-            try { clip = await vscode.env.clipboard.readText(); } catch (_) { clip = ''; }
-            if (!clip) {
+        if (action === 'paste' || action === 'replace') {
+            let replacement = action === 'replace' && typeof m.text === 'string' ? m.text : '';
+            if (action === 'paste') {
+                try { replacement = await vscode.env.clipboard.readText(); } catch (_) { replacement = ''; }
+            }
+            if (!replacement) {
                 // An image in the clipboard is a figure, not a string — the
                 // same answer ⌘V gives in the editor.
-                this._post({ type: 'status', text: 'the clipboard holds no text', kind: 'warn' });
+                this._post({
+                    type: 'status',
+                    text: action === 'paste' ? 'the clipboard holds no text' : 'nothing to insert',
+                    kind: 'warn',
+                });
                 return;
             }
             const edit = new vscode.WorkspaceEdit();
-            edit.replace(doc.uri, range, clip);
+            edit.replace(doc.uri, range, replacement);
             let ok = false;
-            try { ok = await vscode.workspace.applyEdit(edit); } catch (e) { ok = false; }
-            if (!ok) { this._post({ type: 'status', text: 'the paste could not be applied', kind: 'err' }); return; }
-            // Select what was pasted, so it can be moved or replaced again.
+            try { ok = await this._applyReaderEdit(doc, edit); } catch (e) { ok = false; }
+            if (!ok) {
+                this._post({
+                    type: 'status',
+                    text: `the ${action === 'paste' ? 'paste' : 'typing'} could not be applied`,
+                    kind: 'err',
+                });
+                return;
+            }
             const startOff = doc.offsetAt(sel.start);
-            const end = doc.positionAt(startOff + clip.length);
-            this._afterSelectionEdit(sel.file, sel.start, end, 'kept');
-            this._post({ type: 'status', text: `pasted ${clip.length} characters`, kind: 'ok' });
+            const end = doc.positionAt(startOff + replacement.length);
+            if (action === 'paste') {
+                // Select what was pasted, so it can be moved or replaced again.
+                this._afterSelectionEdit(sel.file, sel.start, end, 'kept');
+                this._post({ type: 'status', text: `pasted ${replacement.length} characters`, kind: 'ok' });
+            } else {
+                // Ordinary typing replaces a selection and leaves a caret just
+                // after the character, exactly as a text editor does.
+                this._afterSelectionEdit(sel.file, end, end, 'gone');
+            }
             return;
         }
 
@@ -3488,7 +4515,7 @@ class TexViewer {
         edit.delete(uri, new vscode.Range(cut.start, cut.end));
         edit.insert(uri, doc.positionAt(t.offset), text);
         let ok = false;
-        try { ok = await vscode.workspace.applyEdit(edit); }
+        try { ok = await this._applyReaderEdit(doc, edit); }
         catch (e) { this._post({ type: 'status', text: `move failed: ${e.message}`, kind: 'err' }); return; }
         if (!ok) { this._post({ type: 'status', text: 'the move could not be applied', kind: 'err' }); return; }
 
@@ -3533,20 +4560,113 @@ class TexViewer {
         } catch (_) { return true; }
     }
 
+    /**
+     * Comments name the text row that offered the +, not arbitrary whitespace
+     * on the same horizontal band. Try the exact clamped point first, then a
+     * few positions inside that verified PDF text box. This fallback is scoped
+     * to comments: editing still requires the stricter point correspondence.
+     */
+    _resolveCommentPoint(st, m) {
+        const first = this._resolvePoint(st, m);
+        if (first && first.flag !== FLAG.UNMAPPED && first.file) return first;
+        const row = m && m.commentRow;
+        if (!row || !Number.isFinite(row.x) || !Number.isFinite(row.y) ||
+            !(row.w > 0) || !(row.h > 0)) return first;
+        const probes = [
+            [.5, .5], [.18, .5], [.82, .5], [.36, .5], [.64, .5],
+            [.5, .25], [.5, .75],
+        ];
+        for (const [fx, fy] of probes) {
+            const hit = this._resolvePoint(st, {
+                ...m,
+                xBp: row.x + row.w * fx,
+                yTopBp: row.y + row.h * fy,
+            });
+            if (hit && hit.flag !== FLAG.UNMAPPED && hit.file) return hit;
+        }
+        return first;
+    }
+
+    /** Resolve a comment to a semantic source unit without doing caret work. */
+    _postCommentTarget(doc, hit) {
+        const obj = this._commentObject(doc, hit.line, hit.object);
+        const r = obj.sourceRange || {};
+        const id = ++this._commentSeq;
+        this._commentDraft = {
+            id,
+            file: doc.uri.fsPath,
+            line: r.startLine || hit.line,
+            object: {
+                kind: obj.kind,
+                stableKey: obj.stableKey || null,
+                sourceHash: obj.sourceHash || null,
+            },
+        };
+        this._post({
+            type: 'commentTarget',
+            target: {
+                id,
+                file: doc.uri.fsPath,
+                line: r.startLine || hit.line,
+                endLine: r.endLine || hit.line,
+                kind: obj.kind || 'paragraph',
+                label: obj.label || obj.title || obj.name || null,
+                sectionPath: Array.isArray(obj.sectionPath) ? obj.sectionPath.map(String) : [],
+                sourcePreview: String(obj.text || '').trim().slice(0, 2400),
+                excerpt: String(obj.text || '').replace(/\s+/g, ' ').trim().slice(0, 180),
+            },
+        });
+        this._post({
+            type: 'status',
+            text: `comment on ${obj.kind || 'paragraph'} at line ${r.startLine || hit.line}`,
+            kind: 'ok',
+        });
+    }
+
     async _jumpToSource(m) {
         const st = this.root && this.coord.roots.get(this.root);
-        if (!st || !st.map || !st.map.available) return;
+        if (!st || !st.map || !st.map.available) {
+            if (m.commentTarget) this._post({
+                type: 'commentTarget', target: null,
+                reason: 'Comments need a compiled page-to-source map.',
+            });
+            return;
+        }
+        if (this._tracePaused || st.sourceAhead) {
+            this._setTracePaused(true, {
+                source: this._traceSource || 'editor', compiling: !!st.compiling,
+            });
+            if (m.commentTarget) this._post({
+                type: 'commentTarget', target: null,
+                reason: 'Wait for the page to catch up before adding a comment.',
+            });
+            return;
+        }
         this._invertedAt = Date.now();
 
-        const hit = this._resolvePoint(st, m);
+        const hit = m.commentTarget
+            ? this._resolveCommentPoint(st, m)
+            : this._resolvePoint(st, m);
         if (!hit || hit.flag === FLAG.UNMAPPED || !hit.file) {
             this._ladder = null;
             this._post({ type: 'status', text: hit && hit.reason ? hit.reason : 'nothing there', kind: 'warn' });
+            if (m.commentTarget) this._post({
+                type: 'commentTarget', target: null,
+                reason: hit && hit.reason ? hit.reason : 'That part of the page has no source location.',
+            });
             return;
         }
 
         const uri = vscode.Uri.file(hit.file);
         const doc = await vscode.workspace.openTextDocument(uri);
+        // Comments attach to the containing paragraph/equation, not a caret.
+        // Stop here: the hundreds of lines below disambiguate an exact printed
+        // glyph for editing, which made the + bubble slow and exposed it to
+        // unrelated word-resolution failures before it could open a composer.
+        if (m.commentTarget) {
+            this._postCommentTarget(doc, hit);
+            return;
+        }
         let lineIdx = Math.max(0, Math.min(hit.line - 1, doc.lineCount - 1));
         let lineSrc = doc.lineAt(lineIdx).text;
         const macros = this._macrosFor(doc);
@@ -3953,7 +5073,7 @@ class TexViewer {
         if (!m.widen && step && step.kind !== 'group' && !PLAIN_CLICK_KINDS.has(step.kind)) step = null;
         // Ink without a source token answers with its neighbour's line only.
         if (unsourced && !m.widen && !(w && w.exact)) step = null;
-        // FULL SCREEN MUST SURVIVE A CLICK.
+        // A FOCUSED READING LAYOUT MUST SURVIVE A CLICK.
         //
         // Full screen is `toggleMaximizeEditorGroup`: only the viewer's group is
         // on screen. `showTextDocument` in column ONE makes that group visible
@@ -3964,9 +5084,15 @@ class TexViewer {
         // So while full screen: use an editor for this document only if one is
         // ALREADY visible, and otherwise move nothing. The card and the page
         // still get the answer. A double-click means "take me there" and is
-        // supposed to leave full screen, so it still reveals.
-        const inFullScreen = !!this._fsActions && !m.takeMe;
-        const editor = inFullScreen
+        // supposed to restore the editor + viewer layout. Do that
+        // BEFORE showTextDocument: recent VS Code builds otherwise try to
+        // repair the maximized groups while the right-hand panel also changes.
+        if (m.takeMe && this._fsActions) await this.setLayoutMode('all');
+        const inFocusedLayout = !!this._fsActions;
+        // Picking a comment target belongs wholly to the viewer. Opening or
+        // focusing the source editor here would make a quiet annotation
+        // gesture rearrange the reader's workspace.
+        const editor = m.commentTarget ? null : inFocusedLayout
             ? (vscode.window.visibleTextEditors || [])
                 .find(e => e.document && e.document.uri.fsPath === doc.uri.fsPath) || null
             : await vscode.window.showTextDocument(doc, {
@@ -4101,11 +5227,48 @@ class TexViewer {
         const inRange = (r, pos) => !!r && !!pos &&
             (pos.line > r.start.line || (pos.line === r.start.line && pos.character >= r.start.character)) &&
             (pos.line < r.end.line || (pos.line === r.end.line && pos.character <= r.end.character));
-        const caretHere = !!hitPos && hitInProse && !m.takeMe && !m.widen &&
-            !!step && step.kind === 'word' && inRange(range, hitPos) &&
-            this._inverseClickCaret();
+        // Type-to-edit cannot fall back to replacing the WHOLE word merely
+        // because the glyph alignment is not ready yet. pdf.js still gives us
+        // the fraction of the printed word that was clicked; map that fraction
+        // into the already-resolved source word and use it as a collapsed
+        // caret. Exact glyph alignment, when present, remains the first choice.
+        const typingInProse = hitInProse ||
+            (Number.isFinite(m.typingRequest) && !clickInMaths);
+        let typingPos = null;
+        if (!hitPos && Number.isFinite(m.typingRequest) && typingInProse &&
+            step && step.kind === 'word' && range.start.line === range.end.line) {
+            const fraction = Number.isFinite(m.rowFraction)
+                ? Math.max(0, Math.min(1, m.rowFraction)) : 0.5;
+            const width = Math.max(0, range.end.character - range.start.character);
+            typingPos = new vscode.Position(
+                range.start.line, range.start.character + Math.round(width * fraction));
+        }
+        // In genuinely blank paper there may be no nearby word at all. Typing
+        // must still collapse to a caret: leaving `typingPos` null here would
+        // select the fallback line and replace all of it with the first key.
+        // The printed row tells us which END of that source line the blank is
+        // nearest to. Between words the `farWord` path above is finer and wins.
+        if (!hitPos && !typingPos && Number.isFinite(m.typingRequest) && typingInProse) {
+            let rows = [];
+            try { rows = (st.map.lineRows(hit.file, hit.line) || []).filter(r => r.page === m.page); }
+            catch (_) { rows = []; }
+            let row = null; let distance = Infinity;
+            for (const r of rows) {
+                const dy = m.yTopBp < r.y ? r.y - m.yTopBp
+                    : (m.yTopBp > r.y + r.h ? m.yTopBp - (r.y + r.h) : 0);
+                if (dy < distance) { distance = dy; row = r; }
+            }
+            const lineText = doc.lineAt(lineIdx).text;
+            const column = row && m.xBp > row.x + row.w / 2 ? lineText.length : 0;
+            typingPos = new vscode.Position(lineIdx, column);
+        }
+        const caretPos = hitPos || typingPos;
+        const caretHere = !!caretPos && typingInProse && !m.takeMe && !m.widen &&
+            ((!step && Number.isFinite(m.typingRequest)) ||
+                (step && step.kind === 'word' && inRange(range, caretPos))) &&
+            (Number.isFinite(m.typingRequest) || this._inverseClickCaret());
         const placed = caretHere
-            ? new vscode.Selection(hitPos, hitPos)
+            ? new vscode.Selection(caretPos, caretPos)
             : new vscode.Selection(range.start, range.end);
         // Remember what this click is about to select, so the change event it
         // provokes is not mistaken for the reader making a selection. It must
@@ -4131,7 +5294,10 @@ class TexViewer {
             this._flash.show(editor, range);
         }
         const _cardWhy = (() => {
-            try { return this._postEditSelection(doc, range, !m.takeMe, caretHere ? hitPos : null); }
+            try {
+                return this._postEditSelection(
+                    doc, range, !m.takeMe, caretHere ? caretPos : null, m.typingRequest);
+            }
             catch (_) { return null; }
         })();
         this._post({
@@ -4172,9 +5338,9 @@ class TexViewer {
             }
         }
 
-        // "Take me there": leave full screen, because the editor is what the
-        // reader now wants to look at.
-        if (m.takeMe && this._fsActions) await this.setFullScreen(false);
+        // "Take me there" restored the complete layout before revealing the
+        // editor above. There must be no late toggle here: it races VS Code's
+        // own group restoration.
     }
 
     // --- comparing two versions ----------------------------------------------
@@ -4225,6 +5391,28 @@ class TexViewer {
                 return r ? { page: r.page, exact: r.exact, matchedLine: r.matchedLine } : null;
             },
         };
+    }
+
+    /** A compare map that is safe to use for the PDF ACTUALLY open. */
+    _reviewMap(st, file) {
+        const base = st ? this._compareMap(st, file) : {};
+        // The source changed but the installed map still belongs to the old
+        // source/PDF pair. Keep semantic object lookup for grouping only; the
+        // absence of rowsFor makes texCompare deliberately return no page
+        // placement until compilation catches up.
+        const geometry = st && st.sourceAhead
+            ? { objectAtLine: base.objectAtLine }
+            : base;
+        let generation = st && !st.sourceAhead && st.generation
+            ? st.generation.generation : null;
+        // Identical bytes are not shipped again. The refreshed map describes
+        // the already-open ink, so name that acknowledged render.
+        if (generation != null && this._openedGeneration != null &&
+            this._openedPdfHash && st.generation.pdfHash &&
+            this._openedPdfHash === st.generation.pdfHash) {
+            generation = this._openedGeneration;
+        }
+        return { ...geometry, generation };
     }
 
     // --- the label overlay ---------------------------------------------------
@@ -4732,7 +5920,7 @@ class TexViewer {
         const we = new vscode.WorkspaceEdit();
         we.replace(doc.uri, new vscode.Range(start, end), body);
         let ok = false;
-        try { ok = await vscode.workspace.applyEdit(we); } catch (_) { ok = false; }
+        try { ok = await this._applyReaderEdit(doc, we); } catch (_) { ok = false; }
         if (!ok) { this._post({ type: 'status', text: 'the fold could not be applied', kind: 'err' }); return; }
         // The SPINNER is the only thing added here. The words stay exactly as
         // they were: "the .tex keeps every word" is the reassurance the whole
@@ -5028,6 +6216,13 @@ class TexViewer {
         const s = this._edit;
         const st = this.root && this.coord.roots.get(this.root);
         if (!s || !st || !st.map || m.editId !== s.id) return;
+        // The client flushes its block before stepping. Webview message
+        // callbacks are asynchronous, so explicitly wait for that edit rather
+        // than assuming two posted messages finish in arrival order.
+        if (this._editApplyQueue) {
+            try { await this._editApplyQueue; } catch (_) { /* its own status explains failure */ }
+        }
+        if (this._edit !== s) return;
         const delta = m.delta < 0 ? -1 : 1;
         const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(s.file));
         const lines = doc.getText().split(/\r?\n/);
@@ -5068,6 +6263,69 @@ class TexViewer {
         this._post({ type: 'status', text: `→ ${block.label} (line ${block.startLine})`, kind: 'ok' });
     }
 
+    /** Recreate the mini-editor that belonged to the saved paper session. */
+    async _restoreEditSession() {
+        if (this._edit || !this.panel || !this.root) return false;
+        const saved = this._viewState && this._viewState.edit;
+        if (!saved || typeof saved.file !== 'string' ||
+            !Number.isFinite(saved.startOffset) || !Number.isFinite(saved.endOffset)) return false;
+        const st = this.coord.roots && this.coord.roots.get(this.root);
+        // Its anchor belongs to the matching render. If a newer source edit is
+        // still compiling, the next `opened` handshake will try again.
+        if (!st || !st.map || !st.map.available || st.sourceAhead) return false;
+        try {
+            const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(saved.file));
+            let owner = null;
+            try { owner = this.coord.rootFor(doc); } catch (_) { owner = doc.uri.fsPath; }
+            if (owner !== this.root) throw new Error('the saved mini-editor belongs to another paper');
+            const len = doc.getText().length;
+            const startOffset = Math.max(0, Math.min(saved.startOffset, len));
+            const endOffset = Math.max(startOffset, Math.min(saved.endOffset, len));
+            const a = doc.positionAt(startOffset);
+            const b = doc.positionAt(endOffset);
+            const s = {
+                id: ++this._editSeq,
+                file: saved.file,
+                startOffset,
+                endOffset,
+                lastText: doc.getText(new vscode.Range(a, b)),
+                label: saved.label || 'edit',
+            };
+            this._edit = s;
+            this._ensureDocListener();
+            let rects = this._editRects(st, s.file, a.line + 1, b.line + 1);
+            if (!rects.length) {
+                try {
+                    const r = st.map.sourceToRender(s.file, a.line + 1, b.line + 1);
+                    if (r && r.page) rects = [{ page: r.page, x: 72, y: 72, w: 4, h: 4 }];
+                } catch (_) { /* the card can use its saved page */ }
+            }
+            const caretStart = Math.max(0, Math.min(Number(saved.caretStart) || 0, endOffset - startOffset));
+            const caretEnd = Math.max(caretStart,
+                Math.min(Number(saved.caretEnd) || caretStart, endOffset - startOffset));
+            this._post({
+                type: 'editOpen', editId: s.id, label: s.label,
+                file: path.basename(s.file), startLine: a.line + 1, endLine: b.line + 1,
+                text: s.lastText, rects,
+                page: Number(saved.page) || (rects[0] && rects[0].page) || 1,
+                pos: saved.pos || null,
+                caretStart, caretEnd,
+                caretDirection: saved.caretDirection === 'backward' ? 'backward' : 'forward',
+                restored: true,
+            });
+            this._rememberEditState({
+                caretStart, caretEnd,
+                caretDirection: saved.caretDirection === 'backward' ? 'backward' : 'forward',
+                pos: saved.pos || null,
+            });
+            return true;
+        } catch (_) {
+            this._edit = null;
+            this._rememberEditState();
+            return false;
+        }
+    }
+
     /** Open (or move) the card onto an already-decided block. */
     async _openBlockSession(doc, file, block, st) {
         const lines = doc.getText().split(/\r?\n/);
@@ -5080,9 +6338,11 @@ class TexViewer {
             startOffset: doc.offsetAt(startPos),
             endOffset: doc.offsetAt(endPos),
             lastText: doc.getText(new vscode.Range(startPos, endPos)),
+            label: block.label,
         };
         this._edit = s;
         this._ensureDocListener();
+        this._rememberEditState();
         let rects = this._editRects(st, file, block.startLine, block.endLine);
         if (!rects.length) {
             // No measurable rows (a figure, an unmapped block): anchor on the
@@ -5108,6 +6368,7 @@ class TexViewer {
     async _openEditSession(m) {
         const st = this.root && this.coord.roots.get(this.root);
         if (!st || !st.map || !st.map.available) return;
+        if (this._tracePaused || st.sourceAhead) return;
         const hit = this._resolvePoint(st, m);
         if (!hit || hit.flag === FLAG.UNMAPPED || !hit.file) {
             this._post({ type: 'status', text: 'nothing editable there', kind: 'warn' });
@@ -5127,9 +6388,11 @@ class TexViewer {
             startOffset: doc.offsetAt(startPos),
             endOffset: doc.offsetAt(endPos),
             lastText: doc.getText(new vscode.Range(startPos, endPos)),
+            label,
         };
         this._edit = s;
         this._ensureDocListener();
+        this._rememberEditState();
         const rects = this._editRects(st, hit.file, startLine, endLine);
         this._post({
             type: 'editOpen',
@@ -5143,6 +6406,7 @@ class TexViewer {
             // the click point itself anchors the card.
             rects: rects.length ? rects
                 : [{ page: m.page, x: m.xBp - 2, y: m.yTopBp - 2, w: 4, h: 4 }],
+            typingRequest: Number.isFinite(m.typingRequest) ? m.typingRequest : undefined,
         });
     }
 
@@ -5164,9 +6428,10 @@ class TexViewer {
      * An editor that is NOT on screen is left alone — asked for explicitly,
      * and right: a card is for editing without opening the file.
      */
-    async _onEditCaret(m) {
+    async _onEditCaret(m, opts = {}) {
         const s = this._edit;
         if (!s || !this.panel || !m || m.editId !== s.id) return;
+        this._lastEditCaret = { ...m };
         let doc;
         try { doc = await vscode.workspace.openTextDocument(vscode.Uri.file(s.file)); }
         catch (_) { return; }
@@ -5174,13 +6439,19 @@ class TexViewer {
         const span = Math.max(0, s.endOffset - s.startOffset);
         const lo = Math.max(0, Math.min(Number(m.start) || 0, span));
         const hi = Math.max(lo, Math.min(Number(m.end) || lo, span));
+        const backward = m.direction === 'backward' && lo !== hi;
+        this._rememberEditState({ caretStart: lo, caretEnd: hi,
+            caretDirection: backward ? 'backward' : 'forward',
+            ...(m.pos && Number.isFinite(m.pos.fx) && Number.isFinite(m.pos.fy) ? { pos: m.pos } : {}) });
         const from = doc.positionAt(s.startOffset + lo);
         const to = doc.positionAt(s.startOffset + hi);
-        const sel = new vscode.Selection(from, to);
+        const anchor = backward ? to : from;
+        const active = backward ? from : to;
+        const sel = new vscode.Selection(anchor, active);
 
         const open = (vscode.window.visibleTextEditors || [])
             .find(e => e.document && e.document.uri.fsPath === s.file);
-        if (open) {
+        if (open && !opts.forceSync) {
             // Setting a selection does not scroll — revealRange would, and the
             // reader did not ask to be taken anywhere in the editor.
             try { open.selection = sel; } catch (_) { /* fall through to the direct sync */ }
@@ -5201,27 +6472,51 @@ class TexViewer {
         // without it answers about the wrong end of a range.
         this.syncFromEditor({
             document: doc,
-            selection: { start: from, end: to, anchor: from, active: to, isEmpty: lo === hi },
-        });
+            selection: { start: from, end: to, anchor, active, isEmpty: lo === hi },
+        }, { instant: !!opts.instant, preserveView: !!opts.preserveView });
     }
 
     async _applyEditChange(m) {
         const s = this._edit;
         if (!s || m.editId !== s.id || typeof m.text !== 'string') return;
-        if (m.text === s.lastText) return;
+        // VS Code does not await one onDidReceiveMessage callback before
+        // starting the next. Serialize edits so Ctrl+S can never overtake a
+        // debounce already in flight and write the previous block text.
+        const before = this._editApplyQueue || Promise.resolve();
+        const work = before.catch(() => {}).then(() => this._applyEditChangeNow(s, m.text));
+        this._editApplyQueue = work;
+        try { return await work; }
+        finally { if (this._editApplyQueue === work) this._editApplyQueue = null; }
+    }
+
+    async _applyEditChangeNow(s, text) {
+        if (text === s.lastText) return true;
+        const previousText = s.lastText;
         try {
             const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(s.file));
             const range = new vscode.Range(
                 doc.positionAt(s.startOffset), doc.positionAt(s.endOffset));
             // Set BEFORE applying: the change event this edit fires must read
             // as our own echo, not as an update to send back to the card.
-            s.lastText = m.text;
+            s.lastText = text;
             const we = new vscode.WorkspaceEdit();
-            we.replace(doc.uri, range, m.text);
-            const ok = await vscode.workspace.applyEdit(we);
-            if (!ok) this._post({ type: 'status', text: 'the edit could not be applied', kind: 'err' });
+            we.replace(doc.uri, range, text);
+            // The global document-change listener uses this to name the small
+            // lag indicator “mini-editor” rather than “editor”. It is set
+            // across applyEdit because that is when VS Code emits the event.
+            this._miniApplyingFile = s.file;
+            const ok = await this._applyReaderEdit(doc, we);
+            if (!ok) {
+                s.lastText = previousText;
+                this._post({ type: 'status', text: 'the edit could not be applied', kind: 'err' });
+            }
+            return !!ok;
         } catch (e) {
+            if (s.lastText === text) s.lastText = previousText;
             this._post({ type: 'status', text: `edit failed: ${e.message}`, kind: 'err' });
+            return false;
+        } finally {
+            this._miniApplyingFile = null;
         }
     }
 
@@ -5249,6 +6544,7 @@ class TexViewer {
         const doc = e.document;
         s.endOffset = Math.min(s.endOffset, doc.getText().length);
         s.startOffset = Math.max(0, Math.min(s.startOffset, s.endOffset));
+        this._rememberEditState();
         const a = doc.positionAt(s.startOffset);
         const b = doc.positionAt(s.endOffset);
         const text = doc.getText(new vscode.Range(a, b));
@@ -5287,7 +6583,7 @@ class TexViewer {
      * whole range is selected, which is still right for a widened Cmd-click or
      * a dragged selection.
      */
-    _postEditSelection(doc, range, focus, caretPos) {
+    _postEditSelection(doc, range, focus, caretPos, typingRequest) {
         const s = this._edit;
         // WHY THE CARD DID NOT MOVE, when it did not.
         //
@@ -5311,6 +6607,13 @@ class TexViewer {
         const clamp = (n) => Math.max(0, Math.min(n, s.endOffset) - s.startOffset);
         const start = clamp(Math.max(a, s.startOffset));
         const end = clamp(Math.max(b, s.startOffset));
+        let direction;
+        if (range.anchor && range.active && start !== end) {
+            try {
+                direction = doc.offsetAt(range.active) < doc.offsetAt(range.anchor)
+                    ? 'backward' : 'forward';
+            } catch (_) { /* a Range has no direction, which is fine */ }
+        }
         let caret;
         if (caretPos) {
             try {
@@ -5321,7 +6624,11 @@ class TexViewer {
                 if (c >= start && c <= end) caret = c;
             } catch (_) { /* no caret, just the range */ }
         }
-        this._post({ type: 'editSelect', editId: s.id, focus: !!focus, start, end, caret });
+        this._post({
+            type: 'editSelect', editId: s.id, focus: !!focus,
+            start, end, caret, direction,
+            typingRequest: Number.isFinite(typingRequest) ? typingRequest : undefined,
+        });
         return null;
     }
 
@@ -5349,21 +6656,39 @@ class TexViewer {
         } catch (_) { /* keep the old anchor */ }
     }
 
-    async _saveEditDoc() {
+    async _saveEditDoc(m = {}) {
         const s = this._edit;
-        if (!s) return;
+        if (!s || (m.editId != null && m.editId !== s.id)) return false;
         try {
+            // Ctrl+S carries the textarea's CURRENT value. Apply it through a
+            // WorkspaceEdit (preserving undo and any open editor), then save
+            // the TextDocument — which writes the complete .tex file, not only
+            // the mini-editor's block — to disk.
+            if (typeof m.text === 'string') {
+                const applied = await this._applyEditChange({ editId: s.id, text: m.text });
+                if (!applied) return false;
+            } else if (this._editApplyQueue) {
+                await this._editApplyQueue;
+            }
             const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(s.file));
+            const needed = !!doc.isDirty;
             const ok = await doc.save();
             this._post({ type: 'status', text: ok ? `saved ${path.basename(s.file)}` : 'nothing to save', kind: 'ok' });
+            return !!ok || !needed;
         } catch (e) {
             this._post({ type: 'status', text: `save failed: ${e.message}`, kind: 'err' });
+            return false;
         }
     }
 
     async _revealEditRange() {
         const s = this._edit;
         if (!s) return;
+        // This command explicitly asks to work in the source editor, so return
+        // to the complete layout before opening column one. Showing an editor
+        // while its group is maximized away makes current VS Code rearrange
+        // the Secondary Side Bar implicitly.
+        if (this._fsActions) await this.setLayoutMode('all');
         const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(s.file));
         const range = new vscode.Range(doc.positionAt(s.startOffset), doc.positionAt(s.endOffset));
         const editor = await vscode.window.showTextDocument(doc, {
@@ -5811,7 +7136,7 @@ class TexViewer {
             }
         } catch (_) { /* an unreadable file is the editor's problem, not ours */ }
 
-        try { announceAgentEdit({ file: doc.uri.fsPath, baseText, phase: 'begin', source }); }
+        try { announceAgentEdit({ file: doc.uri.fsPath, baseText, phase: 'begin', source, origin: 'user' }); }
         catch (_) { /* announcing is never worth failing an edit */ }
 
         const we = new vscode.WorkspaceEdit();
@@ -5822,7 +7147,7 @@ class TexViewer {
             this._post({ type: 'status', text: `edit failed: ${e.message}`, kind: 'err' });
         }
 
-        try { announceAgentEdit({ file: doc.uri.fsPath, baseText, phase: 'end', source, note }); }
+        try { announceAgentEdit({ file: doc.uri.fsPath, baseText, phase: 'end', source, note, origin: 'user' }); }
         catch (_) { /* likewise */ }
 
         if (!ok) this._post({ type: 'status', text: 'the edit could not be applied', kind: 'err' });
@@ -6394,43 +7719,267 @@ class TexViewer {
         try { return this.projection.get(doc).model; } catch (_) { return null; }
     }
 
-    /**
-     * Full screen, reversed by exactly the commands that produced it.
-     *
-     * VS Code offers several ways to get there and they are not all present in
-     * every build, so the ones that exist are discovered at runtime and the
-     * list of what actually ran is kept — undoing a toggle we never fired
-     * would leave the window in a state the reader did not ask for.
-     */
-    async setFullScreen(on) {
-        if (!this.panel) return;
-        if (!!on === !!this._fsActions) return;
-        if (on) {
-            const mode = vscode.workspace.getConfiguration('wolfbook.tex')
-                .get('fullScreenMode', 'maximize');
-            const want = mode === 'zen' ? ['workbench.action.toggleZenMode']
-                : mode === 'fullScreen'
-                    ? ['workbench.action.toggleMaximizeEditorGroup', 'workbench.action.toggleFullScreen']
-                    : ['workbench.action.toggleMaximizeEditorGroup'];
-            const all = new Set(await vscode.commands.getCommands(true));
-            // Maximising acts on the ACTIVE group, so the panel has to be it.
-            this.panel.reveal(this.panel.viewColumn, false);
-            const done = [];
-            for (const c of want) {
-                if (!all.has(c)) continue;
-                try { await vscode.commands.executeCommand(c); done.push(c); } catch (_) { /* skip */ }
-            }
-            this._fsActions = done.length ? done : null;
-            if (!this._fsActions) {
-                this._post({ type: 'status', text: 'this VS Code build has no full-screen command', kind: 'warn' });
-            }
-        } else {
-            for (const c of [...this._fsActions].reverse()) {
-                try { await vscode.commands.executeCommand(c); } catch (_) { /* best effort */ }
-            }
-            this._fsActions = null;
+    /** Restore the saved member of the two-state reading-layout toggle. */
+    async _restoreSessionChrome() {
+        const saved = this._viewState || this._viewFor(this.root) || {};
+        // `viewerAgents` was the retired middle member of the old three-state
+        // cycle. Migrate it to the ordinary editor + viewer layout.
+        const mode = saved.layoutMode === 'viewer' || saved.fullscreen === true
+            ? 'viewer' : 'all';
+        if (this._restoringPanel) {
+            try {
+                await this._queueLayout(() => this._reconcileRestoredLayout(mode));
+            } finally { this._restoringPanel = false; }
+            return;
         }
-        this._post({ type: 'fullscreen', value: !!this._fsActions });
+        await this.setLayoutMode(mode, { remember: false });
+    }
+
+    /**
+     * Make the workbench's real group geometry agree with restored WPaper
+     * state.
+     *
+     * Recent VS Code builds can restore a maximized-group context key before
+     * their editor grid has finished restoring. Merely claiming that state
+     * leaves the source group and WPaper group occupying the same title-bar
+     * pixels until another layout action — the overlapping tabs seen after a
+     * reload. `evenEditorWidths` is an explicit operation, unlike a toggle:
+     * it establishes a known unmaximized baseline whether the old group was
+     * maximized or not. The saved member of WPaper's two-state toggle is then
+     * applied from that baseline.
+     */
+    async _reconcileRestoredLayout(mode) {
+        if (!this.panel) return;
+        const target = mode === 'viewer' ? 'viewer' : 'all';
+        const available = await this._availableLayoutCommands();
+        const restoredOuter = target === 'viewer' ? [...(this._layoutOuterActions || [])] : [];
+        const normalized = await this._runLayoutCommand('workbench.action.evenEditorWidths', available);
+        if (!normalized) {
+            // Older hosts have no explicit reset. Keep the claimed state so a
+            // toggle cannot accidentally reverse a correctly restored layout.
+            await this._setLayoutModeNow(target, { remember: false });
+            return;
+        }
+
+        this._layoutMode = 'all';
+        this._layoutMaximized = false;
+        this._layoutOuterActions = restoredOuter;
+        this._fsActions = null;
+        if (target === 'all') {
+            try { this.panel.reveal(this.panel.viewColumn, false); } catch (_) { /* disposed meanwhile */ }
+            this._postLayout('all');
+            return;
+        }
+        await this._setLayoutModeNow(target, { remember: false, preserveOuter: true });
+    }
+
+    /** Extra chrome used only by the WPaper-only member of the cycle. */
+    _outerFullScreenCommands() {
+        const mode = vscode.workspace.getConfiguration('wolfbook.tex')
+            .get('fullScreenMode', 'maximize');
+        return mode === 'zen' ? ['workbench.action.toggleZenMode']
+            : mode === 'fullScreen' ? ['workbench.action.toggleFullScreen'] : [];
+    }
+
+    /**
+     * VS Code restores maximized groups and Secondary Side Bar visibility on a
+     * window reload. Reclaim that state without firing a toggle which would
+     * immediately reverse the layout VS Code just restored.
+     */
+    _claimRestoredLayout() {
+        const saved = this._viewState || this._viewFor(this.root) || {};
+        const mode = saved.layoutMode === 'viewer' || saved.fullscreen === true
+            ? 'viewer' : 'all';
+        if (mode === 'all' || this._fsActions) return false;
+        const stored = Array.isArray(saved.layoutOuterActions)
+            ? saved.layoutOuterActions
+            : Array.isArray(saved.fullscreenActions)
+                ? saved.fullscreenActions.filter(x => x !== 'workbench.action.toggleMaximizeEditorGroup')
+                : [];
+        this._layoutMode = mode;
+        this._layoutMaximized = true;
+        this._layoutOuterActions = stored.filter(x => typeof x === 'string' && x);
+        this._fsActions = ['workbench.action.toggleMaximizeEditorGroup', ...this._layoutOuterActions];
+        return true;
+    }
+
+    // Kept as a compatibility seam for restored pre-cycle state and tests.
+    _claimRestoredFullScreen() { return this._claimRestoredLayout(); }
+
+    async _availableLayoutCommands() {
+        try {
+            if (typeof vscode.commands.getCommands === 'function') {
+                return new Set(await vscode.commands.getCommands(true));
+            }
+        } catch (_) { /* optimistically try commands on older hosts */ }
+        return null;
+    }
+
+    async _runLayoutCommand(id, available) {
+        if (available && !available.has(id)) return false;
+        try { await vscode.commands.executeCommand(id); return true; }
+        catch (_) { return false; }
+    }
+
+    _rememberLayout(mode) {
+        this._rememberState(this.root, {
+            layoutMode: mode,
+            // Legacy readers understand only viewer-only versus ordinary.
+            fullscreen: mode === 'viewer',
+            fullscreenActions: this._fsActions ? [...this._fsActions] : [],
+            layoutOuterActions: [...(this._layoutOuterActions || [])],
+        });
+    }
+
+    _postLayout(mode) {
+        this._post({ type: 'fullscreen', value: mode !== 'all', mode });
+    }
+
+    /**
+     * Keep an external file reload from exposing the source editor.
+     *
+     * VS Code can unmaximize an editor group while it reloads a clean text
+     * buffer from disk. Our state still correctly says `viewer`, so simply
+     * calling setLayoutMode('viewer') is a no-op. If the reload activated the
+     * source group, reactivate and maximize WPaper; if it left WPaper active,
+     * touch nothing. Delayed and coalesced because the file watcher and
+     * TextDocument reload arrive as one short event burst.
+     */
+    preserveViewerLayoutAfterExternalChange(delayMs = 180) {
+        if (!this.panel || !(this._layoutMode === 'viewer' || this._fsActions)) return false;
+        clearTimeout(this._layoutGuardTimer);
+        this._layoutGuardTimer = setTimeout(() => {
+            this._layoutGuardTimer = null;
+            this._queueLayout(() => this._reassertViewerLayoutNow()).catch(() => { /* best effort */ });
+        }, Math.max(0, Number(delayMs) || 0));
+        return true;
+    }
+
+    async _reassertViewerLayoutNow() {
+        if (!this.panel || !(this._layoutMode === 'viewer' || this._fsActions)) return false;
+        // The common case: VS Code reloaded the buffer without disturbing the
+        // active maximized webview. Do absolutely nothing, avoiding even a
+        // one-frame flash of the source group.
+        if (this.panel.active === true) return true;
+        const available = await this._availableLayoutCommands();
+        const outer = [...(this._layoutOuterActions || [])];
+        if (this.panel.active !== false) {
+            // Older host/test doubles do not expose WebviewPanel.active.
+            // Establish a known baseline there rather than guessing which way
+            // a toggle will go.
+            const normalized = await this._runLayoutCommand('workbench.action.evenEditorWidths', available);
+            if (!normalized) {
+                try { this.panel.reveal(this.panel.viewColumn, false); } catch (_) { /* disposed */ }
+                return false;
+            }
+        }
+        // `active === false` is the measured external-reload failure: VS Code
+        // activated the reloaded source group and in doing so cancelled the
+        // maximize. Go straight back to WPaper and maximize it, without first
+        // revealing an even-width source layout.
+        this._layoutMode = 'all';
+        this._layoutMaximized = false;
+        this._layoutOuterActions = outer;
+        this._fsActions = null;
+        await this._setLayoutModeNow('viewer', { remember: false, preserveOuter: true });
+        return this._layoutMode === 'viewer' && this._layoutMaximized;
+    }
+
+    /**
+     * Set one of two explicit layouts:
+     *   viewer — maximized WPaper
+     *   all    — source editor beside WPaper
+     *
+     * The Secondary Side Bar is independent workspace chrome, not a third
+     * reading layout. Leave it exactly as the reader had it: maximizing an
+     * editor group can hide the source editor without also dismissing Codex,
+     * Claude or Chat on the far right.
+     */
+    _queueLayout(change) {
+        const before = this._layoutQueue || Promise.resolve();
+        const work = before.catch(() => {}).then(change);
+        this._layoutQueue = work;
+        return work.finally(() => {
+            if (this._layoutQueue === work) this._layoutQueue = null;
+        });
+    }
+
+    setLayoutMode(want, opts = {}) {
+        return this._queueLayout(() => this._setLayoutModeNow(want, opts));
+    }
+
+    async _setLayoutModeNow(want, { remember = true, preserveOuter = false } = {}) {
+        if (!this.panel) return;
+        const target = want === 'viewer' ? 'viewer' : 'all';
+        if (this._fsSettling) {
+            try { await this._fsSettling; } catch (_) { /* best effort */ }
+        }
+        // Tests and pre-cycle callers may have populated the old sentinel only.
+        if (this._fsActions && this._layoutMode === 'all') {
+            this._layoutMode = 'viewer';
+            this._layoutMaximized = true;
+            this._layoutOuterActions = this._fsActions
+                .filter(x => x !== 'workbench.action.toggleMaximizeEditorGroup');
+        }
+        if (target === this._layoutMode) {
+            if (remember) this._rememberLayout(target);
+            this._postLayout(target);
+            return;
+        }
+        const panel = this.panel;
+        const available = await this._availableLayoutCommands();
+
+        // Leave OS fullscreen/Zen before showing the source editor.
+        if (target !== 'viewer' && this._layoutOuterActions.length) {
+            for (const c of [...this._layoutOuterActions].reverse()) {
+                await this._runLayoutCommand(c, available);
+            }
+            this._layoutOuterActions = [];
+        }
+
+        if (target === 'all') {
+            if (this._layoutMaximized) {
+                await this._runLayoutCommand('workbench.action.toggleMaximizeEditorGroup', available);
+                this._layoutMaximized = false;
+            }
+            try { panel.reveal(panel.viewColumn, false); } catch (_) { /* disposed meanwhile */ }
+        } else {
+            if (!this._layoutMaximized) {
+                // Maximize acts on the active group, so WPaper must own focus.
+                try { panel.reveal(panel.viewColumn, false); } catch (_) { /* continue */ }
+                this._layoutMaximized = await this._runLayoutCommand(
+                    'workbench.action.toggleMaximizeEditorGroup', available);
+                if (!this._layoutMaximized) {
+                    this._post({ type: 'status', text: 'this VS Code build cannot maximize WPaper', kind: 'warn' });
+                }
+            }
+            if (!preserveOuter) {
+                const done = [];
+                for (const c of this._outerFullScreenCommands()) {
+                    if (await this._runLayoutCommand(c, available)) done.push(c);
+                }
+                this._layoutOuterActions = done;
+            }
+        }
+        this._layoutMode = target;
+        this._fsActions = target === 'all' ? null
+            : ['workbench.action.toggleMaximizeEditorGroup', ...this._layoutOuterActions];
+        if (remember) this._rememberLayout(target);
+        this._postLayout(target);
+    }
+
+    cycleLayoutMode() {
+        // Choose the next state inside the queue. Otherwise two fast clicks can
+        // both observe the same current state before the first command settles.
+        return this._queueLayout(async () => {
+            const current = this._layoutMode === 'viewer' || this._fsActions ? 'viewer' : 'all';
+            const next = current === 'all' ? 'viewer' : 'all';
+            await this._setLayoutModeNow(next);
+        });
+    }
+
+    async setFullScreen(on, opts = {}) {
+        await this.setLayoutMode(on ? 'viewer' : 'all', opts);
     }
 
     _post(msg) { if (this.panel) this.panel.webview.postMessage(msg); }

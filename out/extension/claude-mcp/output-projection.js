@@ -101,6 +101,7 @@ function projectNotebook(notebook, options = {}) {
     return {
         projection: 'wolfbook.mcp.notebook', projection_version: PROJECTION_VERSION,
         notebook: notebook.uri?.fsPath || notebook.uri?.toString?.() || null,
+        notebook_revision: Number(notebook.version || 0), dirty: !!notebook.isDirty,
         cell_count: notebook.cellCount, cells,
     };
 }

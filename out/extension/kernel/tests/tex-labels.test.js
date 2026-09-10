@@ -21,6 +21,7 @@ const {
 } = require('../../tex/labelChips');
 const {
     parseToc, readTocNumbers, normalizeTocTitle, sectionTitleSource,
+    sectionNumbersForObjects,
 } = require('../../tex/auxLabels');
 const { scanTex } = require('../../tex/texScanner');
 const { buildModel } = require('../../tex/texModel');
@@ -544,6 +545,36 @@ test('two sections with the same title are left unnumbered, not guessed at', () 
     assert.strictEqual(read.byTitle.get('unique'), '3');
     assert.strictEqual(read.byTitle.has('setup'), false,
         'a wrong number beside a change is worse than none');
+});
+
+test('A LABEL JOINS A MACRO HEADING TO THE NUMBER LATEX PRINTED', () => {
+    // The reported paper uses \Qp in the source, while LaTeX expands it to
+    // \mathbb Q_{+} in the TOC line. Those titles cannot be compared safely;
+    // the adjacent label is the exact identity LaTeX itself records.
+    const src = [
+        '\\section{The one-site chain: Baxter functions, separated variables and',
+        '\\texorpdfstring{$\\Qp$}{Q+}}',
+        '\\label{sec:J1-sov-Qplus}',
+    ].join('\n');
+    const model = modelOf(src);
+    const heading = model.objects.find(o => o.kind === 'section-heading');
+    assert.ok(heading && heading.label === 'sec:J1-sov-Qplus');
+
+    const auxText = [
+        '\\@writefile{toc}{\\contentsline {section}{\\numberline {3}The one-site chain: Baxter functions, separated variables and $\\mathbb Q_{+}$}{12}{section.3}}',
+        '\\newlabel{sec:J1-sov-Qplus}{{3}{12}{The one-site chain}{section.3}{}}',
+    ].join('\n');
+    assert.notStrictEqual(
+        normalizeTocTitle(sectionTitleSource(heading.text)),
+        parseToc(auxText)[0].title,
+        'the regression fixture really does defeat title matching');
+    const numbers = sectionNumbersForObjects(
+        model.objects,
+        { byTitle: readTocNumbers('/out', '/p/paper.tex', {
+            readFile: () => auxText, exists: () => true,
+        }).byTitle },
+        parseAux(auxText));
+    assert.strictEqual(numbers.get(heading.stableKey), '3');
 });
 
 test('no .aux, or an unreadable one, is simply no numbers', () => {

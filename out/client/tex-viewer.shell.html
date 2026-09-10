@@ -18,7 +18,17 @@
            min-width:26px; height:24px; padding:0 8px; border:none; border-radius:4px;
            background:transparent; color: var(--vscode-foreground);
            cursor:pointer; font-size:12px; line-height:1; }
+  .icon-sprite { position:absolute; width:0; height:0; overflow:hidden; }
+  .tool-icon { width:15px; height:15px; flex:0 0 auto; fill:none;
+           stroke:currentColor; stroke-width:1.55; stroke-linecap:round;
+           stroke-linejoin:round; vector-effect:non-scaling-stroke; }
+  .tool-icon.fill { fill:currentColor; stroke:none; }
+  .tool-icon + .tlbl { margin-left:4px; }
+  header .icon-only { padding:0 5px; }
   header button:hover { background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,.18)); }
+  header button:focus-visible, label.follow:has(input:focus-visible),
+  .comment-marker:focus-visible, #commentpanel button:focus-visible {
+           outline:1px solid var(--vscode-focusBorder, #007fd4); outline-offset:1px; }
   header button:active { transform: translateY(0.5px); }
   #recompile { background: var(--vscode-button-background);
            color: var(--vscode-button-foreground); font-weight:500; }
@@ -28,6 +38,16 @@
   .zoomgroup button { min-width:24px; padding:0 6px; border-radius:3px; }
   #zoom { min-width:42px; text-align:center; opacity:.85; font-size:11px;
           font-variant-numeric: tabular-nums; }
+  /* Responsive Fit is a MODE, so it must remain visibly selected after the
+     pointer leaves. VS Code's secondary-button colour is nearly identical to
+     the dark toolbar in several themes; a focus tint + inset outline keeps
+     both the icon and label unmistakably active without making it primary. */
+  #fit[aria-pressed="true"] {
+          background:color-mix(in srgb, var(--vscode-focusBorder, #0a84ff) 24%, transparent);
+          color:var(--vscode-textLink-foreground, #4daafc);
+          box-shadow:inset 0 0 0 1px var(--vscode-focusBorder, #0a84ff); }
+  #fit[aria-pressed="true"]:hover {
+          background:color-mix(in srgb, var(--vscode-focusBorder, #0a84ff) 34%, transparent); }
   label.follow { display:inline-flex; align-items:center; gap:5px; height:22px;
           padding:0 9px; border-radius:11px; cursor:pointer; opacity:.85;
           border:1px solid var(--vscode-panel-border); }
@@ -41,7 +61,8 @@
   .pp { opacity:.5; font-variant-numeric: tabular-nums; }
 
   /* --- pages --- */
-  main { flex:1 1 auto; overflow:auto; padding:20px 16px;
+  #reader { flex:1 1 auto; min-height:0; display:flex; position:relative; overflow:hidden; }
+  main { flex:1 1 auto; min-width:0; overflow:auto; padding:20px 16px;
          scrollbar-gutter: stable;
          background: var(--vscode-editorPane-background, var(--vscode-editor-background)); }
   /* Fit means edge to edge: the horizontal padding would otherwise inset the
@@ -50,7 +71,21 @@
   body.fitted main { padding-left:0; padding-right:0; }
   body.fitted .page { border-radius:0; }
   body.fitted .page canvas { border-radius:0; }
-  #pages { display:flex; flex-direction:column; align-items:center; gap:18px; }
+  /* The strip, not the viewport, owns centering. `align-items:center` on a
+     viewport-width flex column gives an oversized page a NEGATIVE left edge;
+     scrollLeft can never become negative, so half the paper is unreachable.
+     max-content lets the strip grow to its widest page, while min-width keeps
+     ordinary pages centred in the available field. */
+  #pages { display:flex; flex-direction:column; align-items:center; gap:18px;
+           box-sizing:border-box; width:max-content; min-width:100%; }
+  body.comments-open #pages { box-sizing:border-box; padding-right:42px; }
+  /* At fitted width there is no outer paper margin to host a rail. Keep the
+     page edge-to-edge and place annotation bubbles just inside its edge. */
+  body.fitted.comments-open #pages { padding-right:0; }
+  /* The PDF surface deliberately prevents the browser's default drag focus.
+     Give it an explicit, invisible keyboard focus target so a click can hand
+     subsequent typing and editing shortcuts to the paper. */
+  #pages:focus { outline:none; }
   /* WHILE A ZOOM GESTURE IS RUNNING the canvases are stretched by CSS and the
      overlays are stale — they are placed in the pixels of the viewport the
      page was drawn at, so they would drift away from what they name. One rule
@@ -642,6 +677,259 @@
   @container (max-width: 380px) { .rh .meta { display:none; } }
   #reviewpanel .done { padding:6px 12px; font-size:10.5px; opacity:.6;
              border-top:1px solid var(--vscode-panel-border); }
+
+  /* --- contextual paper comments --------------------------------------- */
+  #commentstool { position:relative; display:inline-flex; align-items:center; }
+  #commentsbutton { gap:4px; }
+  #commentsmenu { display:none; min-width:20px; width:20px; padding:0 3px;
+             margin-left:-1px; border-left:1px solid color-mix(in srgb,
+             var(--vscode-textLink-foreground, #3794ff) 28%, transparent);
+             border-radius:0 4px 4px 0; }
+  #commentsmenu .tool-icon { width:11px; height:11px; }
+  body.comments-open #commentsmenu { display:inline-flex;
+             color:var(--vscode-textLink-activeForeground,
+             var(--vscode-textLink-foreground, #3794ff));
+             background:color-mix(in srgb, var(--vscode-textLink-foreground, #3794ff) 17%, transparent);
+             box-shadow:inset 0 0 0 1px color-mix(in srgb,
+             var(--vscode-textLink-foreground, #3794ff) 42%, transparent); }
+  #commentscount { display:inline-flex; min-width:15px; height:15px; padding:0 4px;
+             align-items:center; justify-content:center; box-sizing:border-box;
+             border-radius:8px; font-size:9.5px; font-variant-numeric:tabular-nums;
+             background:var(--vscode-badge-background, #4d4d4d);
+             color:var(--vscode-badge-foreground, #fff); }
+  #commentscount[hidden] { display:none; }
+  #commentsbutton[aria-pressed="true"] {
+             color:var(--vscode-textLink-activeForeground,
+             var(--vscode-textLink-foreground, #3794ff));
+             background:color-mix(in srgb, var(--vscode-textLink-foreground, #3794ff) 17%, transparent);
+             box-shadow:inset 0 0 0 1px color-mix(in srgb,
+             var(--vscode-textLink-foreground, #3794ff) 42%, transparent); }
+  body.comments-open #commentsbutton { border-radius:4px 0 0 4px; }
+  #commentsbutton[aria-pressed="true"] #commentscount {
+             background:var(--vscode-textLink-foreground, #3794ff); color:#fff; }
+  #commentsdropdown { position:fixed; z-index:80; width:min(330px, calc(100vw - 20px));
+             max-height:min(360px, calc(100vh - 58px)); overflow:auto; padding:5px;
+             border:1px solid var(--vscode-menu-border, var(--vscode-panel-border));
+             border-radius:9px; color:var(--vscode-menu-foreground, var(--vscode-foreground));
+             background:var(--vscode-menu-background,
+             var(--vscode-editorWidget-background, var(--vscode-editor-background)));
+             box-shadow:0 12px 32px rgba(0,0,0,.32); }
+  #commentsdropdown[hidden] { display:none; }
+  .comment-menu-empty { padding:14px 12px; text-align:center;
+             color:var(--vscode-descriptionForeground, #999); }
+  .comment-menu-row { display:grid; grid-template-columns:minmax(0, 1fr) 27px;
+             align-items:center; border-radius:6px; }
+  .comment-menu-row:hover { background:var(--vscode-list-hoverBackground,
+             rgba(128,128,128,.12)); }
+  #commentsdropdown .comment-menu-item { display:grid;
+             grid-template-areas:'where' 'text' 'meta'; gap:2px; width:100%;
+             height:auto; min-height:52px; padding:7px 8px; text-align:left;
+             justify-content:stretch; border-radius:6px; background:transparent; }
+  .comment-menu-where { grid-area:where; min-width:0; overflow:hidden;
+             text-overflow:ellipsis; white-space:nowrap; font-size:10.5px; font-weight:600; }
+  .comment-menu-text { grid-area:text; min-width:0; overflow:hidden;
+             text-overflow:ellipsis; white-space:nowrap;
+             color:var(--vscode-descriptionForeground, #aaa); font-size:10.5px; }
+  .comment-menu-meta { grid-area:meta; min-width:0; overflow:hidden;
+             text-overflow:ellipsis; white-space:nowrap;
+             color:var(--vscode-descriptionForeground, #999); font-size:9.5px;
+             font-variant-numeric:tabular-nums; }
+  #commentsdropdown .comment-menu-delete { width:25px; height:25px; padding:5px;
+             border:0; border-radius:5px; color:var(--vscode-descriptionForeground, #999);
+             background:transparent; opacity:.62; cursor:pointer; }
+  #commentsdropdown .comment-menu-delete:hover { color:var(--vscode-errorForeground, #f48771);
+             background:color-mix(in srgb, var(--vscode-errorForeground, #f48771) 12%, transparent);
+             opacity:1; }
+  .comment-menu-delete .tool-icon { width:13px; height:13px; }
+  .comment-menu-actions { display:flex; gap:4px; padding:6px 2px 1px;
+             margin-top:4px; border-top:1px solid var(--vscode-menu-separatorBackground,
+             var(--vscode-panel-border, rgba(128,128,128,.22))); }
+  .comment-menu-actions button { flex:1; min-width:0; display:flex; align-items:center;
+             justify-content:center; gap:6px; padding:6px 8px; border:0; border-radius:5px;
+             background:transparent; color:var(--vscode-foreground); cursor:pointer;
+             font:inherit; font-size:10.5px; white-space:nowrap; }
+  .comment-menu-actions button:hover:not(:disabled) {
+             background:var(--vscode-list-hoverBackground, rgba(128,128,128,.18)); }
+  .comment-menu-actions button.danger {
+             color:var(--vscode-errorForeground, #f48771); }
+  .comment-menu-actions button:disabled { opacity:.38; cursor:default; }
+  .comment-menu-actions .tool-icon { width:13px; height:13px; }
+  /* Markers live just outside the page, like a proof-reader's margin.  They
+     are part of the page, not a second scrolling surface, so they follow their
+     paragraph through zooming and scrolling without consuming reading width. */
+  .comment-marker { position:absolute; left:calc(100% + 8px); width:25px; height:25px;
+             z-index:28; display:none; align-items:center; justify-content:center;
+             padding:0; border:1px solid color-mix(in srgb,
+             var(--vscode-textLink-foreground, #3794ff) 55%, transparent);
+             border-radius:13px; color:var(--vscode-textLink-foreground, #3794ff);
+             background:var(--vscode-editorWidget-background, #fff); cursor:pointer;
+             box-shadow:0 2px 8px rgba(0,0,0,.20); transition:transform .12s ease,
+             background .12s ease, opacity .12s ease; }
+  body.comments-open .comment-marker { display:inline-flex; }
+  .comment-marker:hover, .comment-marker.on { transform:scale(1.08);
+             background:var(--vscode-button-background, #0e639c);
+             color:var(--vscode-button-foreground, #fff); border-color:transparent; }
+  .comment-marker .tool-icon { width:13px; height:13px; }
+  .comment-marker .cm-count { position:absolute; right:-5px; top:-5px; min-width:14px;
+             height:14px; padding:0 3px; box-sizing:border-box; border-radius:8px;
+             display:flex; align-items:center; justify-content:center; font-size:8.5px;
+             font-weight:650; line-height:1; color:var(--vscode-badge-foreground, #fff);
+             background:var(--vscode-badge-background, #4d4d4d); }
+  /* This node exists only for the row currently being offered. Keep it
+     visible while the pointer crosses the small gap from paper to rail. */
+  .comment-marker.add { opacity:.82; border-style:dashed; box-shadow:none; }
+  .comment-marker.add:hover { opacity:1; }
+  .comment-marker.add.pending { opacity:1; pointer-events:none; }
+  .comment-marker.add.pending .tool-icon { animation:commentSpin .75s linear infinite; }
+  @keyframes commentSpin { to { transform:rotate(360deg); } }
+  .comment-anchor { position:absolute; z-index:5; pointer-events:none; border-radius:2px;
+             background:color-mix(in srgb, var(--vscode-textLink-foreground, #3794ff) 13%, transparent);
+             box-shadow:inset 2px 0 0 color-mix(in srgb,
+             var(--vscode-textLink-foreground, #3794ff) 72%, transparent); }
+
+  /* Only the conversation that is being handled expands.  It floats over the
+     page margin and clamps to the viewport, so the paper never turns into a
+     narrow column merely because one note is open. */
+  #commentpanel { display:none; position:absolute; z-index:40; right:12px; top:12px;
+             width:var(--comment-width, 320px); min-width:260px;
+             max-width:min(520px, 78vw); max-height:min(520px, calc(100% - 24px));
+             overflow:hidden; flex-direction:column; text-align:left;
+             color:var(--vscode-editorWidget-foreground, var(--vscode-foreground));
+             background:color-mix(in srgb,
+             var(--vscode-editorWidget-background, var(--vscode-editor-background)) 97%, transparent);
+             border:1px solid color-mix(in srgb, var(--vscode-editorWidget-border,
+             var(--vscode-panel-border)) 78%, transparent);
+             border-radius:14px; box-shadow:0 16px 42px rgba(0,0,0,.30);
+             backdrop-filter:blur(16px); }
+  body.comment-thread-open #commentpanel { display:flex; }
+  #commentgrip { position:absolute; left:-5px; top:10px; bottom:10px; width:11px;
+             z-index:4; cursor:ew-resize; touch-action:none; border-radius:4px; }
+  #commentgrip:hover, body.comment-sizing #commentgrip {
+             background:var(--vscode-sash-hoverBorder, rgba(55,148,255,.55)); }
+  body.comment-sizing { cursor:ew-resize; user-select:none; }
+  .cp-head { display:flex; align-items:center; gap:7px; min-height:52px;
+             padding:8px 8px 8px 11px; box-sizing:border-box;
+             border-bottom:1px solid color-mix(in srgb, var(--vscode-panel-border) 62%, transparent); }
+  .cp-avatar { display:flex; width:28px; height:28px; flex:0 0 28px; align-items:center;
+             justify-content:center; border-radius:9px;
+             color:var(--vscode-textLink-foreground, #3794ff);
+             background:color-mix(in srgb, var(--vscode-textLink-foreground, #3794ff) 13%, transparent); }
+  .cp-avatar .tool-icon { width:16px; height:16px; }
+  .cp-heading { flex:1; min-width:0; text-align:left; padding:4px 6px !important; }
+  .cp-title { display:block; font-size:12.5px; font-weight:650; overflow:hidden; text-overflow:ellipsis;
+             white-space:nowrap; }
+  .cp-subtitle { display:block; margin-top:2px; font-size:10px;
+             color:var(--vscode-descriptionForeground, #999); overflow:hidden;
+             text-overflow:ellipsis; white-space:nowrap; }
+  .cp-head button, .cp-compose-actions button, .cp-card button {
+             border:none; border-radius:3px; background:transparent; color:inherit;
+             cursor:pointer; font:inherit; padding:3px 6px; }
+  .cp-head button:hover, .cp-compose-actions button:hover, .cp-card button:hover {
+             background:var(--vscode-toolbar-hoverBackground, rgba(128,128,128,.18)); }
+  .cp-head button:disabled { opacity:.35; cursor:default; background:transparent; }
+  .cp-nav { display:flex; align-items:center; flex:0 0 auto; padding:1px;
+             border:1px solid color-mix(in srgb, var(--vscode-panel-border) 66%, transparent);
+             border-radius:7px; background:color-mix(in srgb,
+             var(--vscode-editorWidget-foreground, var(--vscode-foreground)) 4%, transparent); }
+  .cp-nav button { display:flex; width:24px; height:24px; align-items:center;
+             justify-content:center; padding:3px !important; border-radius:5px; }
+  #commentadd { color:var(--vscode-textLink-foreground, #3794ff); }
+  #commentclear:hover { color:var(--vscode-errorForeground, #f48771); }
+  #commenthint { margin:8px 10px 0; padding:8px 10px; border-radius:8px; font-size:10.5px;
+             color:var(--vscode-textLink-foreground, #3794ff);
+             background:color-mix(in srgb, var(--vscode-textLink-foreground, #3794ff) 10%, transparent); }
+  #commenthint[hidden] { display:none; }
+  body.comment-arming #commenthint { color:var(--vscode-textLink-foreground, #3794ff); }
+  body.comment-arming #pages, body.comment-arming #pages * { cursor:crosshair !important; }
+  .cp-context { margin:9px 10px 3px; padding:9px 10px 10px; border-radius:9px;
+             background:color-mix(in srgb, var(--vscode-editorWidget-foreground,
+             var(--vscode-foreground)) 5%, transparent); }
+  .cp-context[hidden] { display:none; }
+  .cp-context-head { display:flex; align-items:center; gap:6px; margin-bottom:6px;
+             color:var(--vscode-descriptionForeground, #999); font-size:9.5px; }
+  .cp-context-head::before { content:''; display:block; width:3px; height:13px;
+             border-radius:2px; background:var(--vscode-textLink-foreground, #3794ff); }
+  #commentlocation { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis;
+             white-space:nowrap; }
+  .cp-context-excerpt { min-height:18px; max-height:102px; overflow:auto;
+             color:var(--vscode-editorWidget-foreground, var(--vscode-foreground));
+             font-family:var(--vscode-font-family); font-size:11px; line-height:1.45; }
+  .cp-context-excerpt .cp-plain { white-space:pre-wrap; }
+  .cp-context-excerpt .cp-math { overflow-x:auto; overflow-y:hidden; padding:2px 0 3px;
+             text-align:center; font-size:12px; }
+  .cp-context-excerpt .cp-inline-math { padding:0 1px; }
+  .cp-context-excerpt .katex-display { margin:.2em 0; }
+  .cp-context-excerpt .cp-render-fallback { font-family:var(--vscode-editor-font-family, monospace);
+             color:var(--vscode-descriptionForeground, #999); white-space:pre-wrap; }
+  #commentcomposer { margin:7px 10px 3px; padding:9px; border:1px solid
+             color-mix(in srgb, var(--vscode-panel-border) 70%, transparent); border-radius:9px;
+             background:var(--vscode-editorWidget-background, transparent); }
+  #commentcomposer[hidden] { display:none; }
+  .cp-target { font-size:10.5px; color:var(--vscode-descriptionForeground, #999);
+             white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-bottom:5px; }
+  #commentdraft, .cp-text { display:block; box-sizing:border-box; width:100%; resize:vertical;
+             min-height:62px; max-height:180px; padding:8px 9px; border-radius:8px;
+             border:1px solid color-mix(in srgb, var(--vscode-input-border,
+             var(--vscode-panel-border)) 72%, transparent);
+             background:color-mix(in srgb, var(--vscode-input-background,
+             var(--vscode-editor-background)) 94%, transparent);
+             color:var(--vscode-input-foreground, inherit); font:inherit; line-height:1.4; }
+  #commentdraft:focus, .cp-text:focus { outline:1px solid var(--vscode-focusBorder, #007fd4);
+             outline-offset:-1px; }
+  .cp-compose-actions { display:flex; justify-content:flex-end; gap:4px; margin-top:5px; }
+  #commentsave { background:var(--vscode-button-background, #0e639c);
+             color:var(--vscode-button-foreground, #fff); }
+  #commenterrors { padding:0 8px; color:var(--vscode-errorForeground, #f48771);
+             font-size:10.5px; white-space:pre-wrap; }
+  #commentlist { flex:1; min-height:0; overflow:auto; padding:4px 10px 9px; }
+  .cp-empty { padding:18px 14px; color:var(--vscode-descriptionForeground, #999);
+             text-align:center; line-height:1.5; }
+  .cp-locating { display:flex; align-items:center; justify-content:center; gap:8px; }
+  .cp-spinner { width:12px; height:12px; border:1.5px solid
+             color-mix(in srgb, var(--vscode-textLink-foreground, #3794ff) 28%, transparent);
+             border-top-color:var(--vscode-textLink-foreground, #3794ff);
+             border-radius:50%; animation:commentSpin .75s linear infinite; }
+  .cp-card { margin-top:6px; padding:9px; border:1px solid
+             color-mix(in srgb, var(--vscode-panel-border) 62%, transparent); border-radius:10px;
+             background:color-mix(in srgb, var(--vscode-editorWidget-foreground,
+             var(--vscode-foreground)) 2.5%, transparent); }
+  .cp-card.detached { border-color:color-mix(in srgb,
+             var(--vscode-editorWarning-foreground, #cca700) 58%, transparent); }
+  .cp-card-head { display:flex; align-items:center; gap:4px; margin-bottom:6px; }
+  .cp-place { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis;
+             white-space:nowrap; font-size:10.5px; font-weight:600;
+             color:var(--vscode-editorWidget-foreground, var(--vscode-foreground)); }
+  .cp-kind { padding:1px 5px; border-radius:8px; background:rgba(128,128,128,.14);
+             font-size:9.5px; }
+  .cp-revision { color:var(--vscode-gitDecoration-modifiedResourceForeground, #d90);
+             font-size:9.5px; }
+  .cp-foot { display:flex; align-items:center; gap:4px; margin-top:7px;
+             color:var(--vscode-descriptionForeground, #999); font-size:9.5px; }
+  .cp-saved { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .cp-foot .sp { flex:1; }
+  .cp-delete:hover { color:var(--vscode-errorForeground, #f48771); }
+  #commentactions { position:absolute; z-index:44; right:34px; top:34px; min-width:180px;
+             padding:5px; border-radius:7px; border:1px solid var(--vscode-menu-border,
+             var(--vscode-panel-border)); background:var(--vscode-menu-background,
+             var(--vscode-editorWidget-background)); box-shadow:0 8px 24px rgba(0,0,0,.3); }
+  #commentactions[hidden] { display:none; }
+  #commentactions button { display:flex; width:100%; align-items:center; gap:8px;
+             border:0; border-radius:4px; padding:6px 8px; color:var(--vscode-menu-foreground,
+             inherit); background:transparent; font:inherit; cursor:pointer; text-align:left; }
+  #commentactions button:hover { background:var(--vscode-menu-selectionBackground,
+             var(--vscode-toolbar-hoverBackground)); }
+  #commentactions button:disabled { opacity:.38; cursor:default; background:transparent; }
+  #commentactions button.danger { color:var(--vscode-errorForeground, #f48771); }
+  #commentactions .tool-icon { width:14px; height:14px; }
+  @media (max-width:620px) {
+    #commentpanel { right:8px; width:min(var(--comment-width, 320px), calc(100vw - 24px));
+               max-width:calc(100vw - 24px); }
+    .comment-marker { left:auto; right:7px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .comment-marker { transition:none; }
+    .comment-marker.add.pending .tool-icon, .cp-spinner { animation:none; }
+  }
   /* A change marked on the page: the same band as a selection, in its own hue. */
   .rband { position:absolute; pointer-events:none; border-radius:2px;
              background: var(--vscode-diffEditor-insertedTextBackground, rgba(80,180,120,.18));
@@ -649,7 +937,12 @@
   .rband.add { box-shadow: inset 2px 0 0 var(--vscode-gitDecoration-addedResourceForeground, #4a8); }
   .rband.del { background:transparent; border-bottom:2px solid
              var(--vscode-gitDecoration-deletedResourceForeground, #c66); }
-  .rband.on { outline:1.5px solid var(--vscode-focusBorder, #57a); outline-offset:1px; }
+  /* Focus belongs to the whole change, not to every PDF text fragment.  The
+     client paints one union contour around its rows; outlining .rband itself
+     produced a distracting blue box around every line and every span. */
+  .rband.on { outline:none; }
+  .rcontour { position:absolute; inset:0; width:100%; height:100%; z-index:6;
+             overflow:visible; pointer-events:none; }
   .rchip { position:absolute; z-index:29; display:flex; gap:4px; align-items:center;
              background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
              border:1px solid var(--vscode-panel-border); border-radius:4px; padding:2px 6px;
@@ -890,30 +1183,100 @@
      glyph brightens when it is on because that is the only state left to see. */
   header.narrow #pin { display:none; }
   .pinwrap { display:inline-flex; align-items:center; gap:3px; cursor:pointer; }
-  .pinwrap .ticon { opacity:.45; }
-  #pin:checked ~ .ticon { opacity:1; color: var(--vscode-charts-orange, #d18616); }
+  .pinwrap .tool-icon { opacity:.55; pointer-events:none; }
+  #pin:checked ~ .tool-icon { opacity:1; color: var(--vscode-charts-orange, #d18616); }
   header.tight  #zoom { display:none; }
   button.follow[data-mode="off"]    { opacity:.6; }
   button.follow[data-mode="mark"]   { color: var(--vscode-charts-blue, #4e94ce); }
   button.follow[data-mode="scroll"] { color: var(--vscode-charts-green, #6cab5b); }
+  /* The source can be newer than the pixels for a few seconds. Keep this
+     separate from the footer status: compile messages come and go, while this
+     state must remain visible until the matching page is actually loaded. */
+  #tracelag { display:inline-flex; align-items:center; gap:5px; flex:none;
+              padding:2px 6px; border:1px solid color-mix(in srgb,
+              var(--vscode-editorWarning-foreground, #cca700) 45%, transparent);
+              border-radius:9px; color:var(--vscode-editorWarning-foreground, #cca700);
+              font-size:10px; line-height:1; white-space:nowrap; }
+  #tracelag[hidden] { display:none; }
+  #tracelag::before { content:''; width:6px; height:6px; border-radius:50%;
+              background:currentColor; opacity:.8; }
+  #tracelag.compiling::before { background:none; border:1px solid currentColor;
+              border-top-color:transparent; animation:wpspin .75s linear infinite; }
+  header.tight #tracelag .lagtext { display:none; }
+  /* SAVED-ON-DISK IS NOT THE SAME AS UP-TO-DATE ON SCREEN. A live compile can
+     catch the page up while the editor buffer is still unsaved, so this has
+     its own persistent, clickable badge rather than borrowing `tracelag`. */
+  #sourceunsaved { min-width:0; height:20px; padding:1px 7px; gap:5px;
+              border:1px solid color-mix(in srgb,
+              var(--vscode-charts-orange, #d18616) 55%, transparent);
+              border-radius:10px; color:var(--vscode-charts-orange, #d18616);
+              background:color-mix(in srgb,
+              var(--vscode-charts-orange, #d18616) 10%, transparent);
+              font-size:10px; line-height:1; white-space:nowrap; }
+  #sourceunsaved[hidden] { display:none; }
+  #sourceunsaved::before { content:'●'; font-size:8px; }
+  #sourceunsaved:hover { background:color-mix(in srgb,
+              var(--vscode-charts-orange, #d18616) 20%, transparent); }
+  header.tight #sourceunsaved .dirtytext { display:none; }
+  @media (prefers-reduced-motion: reduce) {
+    #tracelag.compiling::before { animation:none; opacity:.6; }
+  }
 </style>
+<!-- One hand-drawn, optical-weight icon family.  Symbols keep the toolbar
+     crisp at every display scale and avoid platform-dependent emoji art. -->
+<svg class="icon-sprite" aria-hidden="true">
+  <defs>
+    <symbol id="ti-refresh" viewBox="0 0 16 16"><path d="M13.4 5.4A5.8 5.8 0 1 0 13 11M13.4 2.7v2.9h-2.9"/></symbol>
+    <symbol id="ti-minus" viewBox="0 0 16 16"><path d="M3.5 8h9"/></symbol>
+    <symbol id="ti-plus" viewBox="0 0 16 16"><path d="M8 3.5v9M3.5 8h9"/></symbol>
+    <symbol id="ti-fit" viewBox="0 0 16 16"><path d="M2.5 8h11M5 5.5 2.5 8 5 10.5M11 5.5 13.5 8 11 10.5"/></symbol>
+    <symbol id="ti-compare" viewBox="0 0 16 16"><path d="M2.5 5h9M9.5 2.8 11.8 5 9.5 7.2M13.5 11h-9M6.5 8.8 4.2 11l2.3 2.2"/></symbol>
+    <symbol id="ti-tag" viewBox="0 0 16 16"><path d="M2.4 3.2v4.5l5.9 5.9 5.3-5.3-5.9-5.9H3.2a.8.8 0 0 0-.8.8Z"/><circle cx="5.4" cy="5.4" r=".8"/></symbol>
+    <symbol id="ti-outline" viewBox="0 0 16 16"><path d="M5.5 4h8M5.5 8h8M5.5 12h8"/><circle cx="2.7" cy="4" r=".65"/><circle cx="2.7" cy="8" r=".65"/><circle cx="2.7" cy="12" r=".65"/></symbol>
+    <symbol id="ti-comment" viewBox="0 0 16 16"><path d="M3.1 2.8h9.8a1.6 1.6 0 0 1 1.6 1.6v5.3a1.6 1.6 0 0 1-1.6 1.6H8l-3.5 2.4v-2.4H3.1a1.6 1.6 0 0 1-1.6-1.6V4.4a1.6 1.6 0 0 1 1.6-1.6Z"/></symbol>
+    <symbol id="ti-comment-on" viewBox="0 0 16 16"><path fill="currentColor" stroke="none" d="M3.1 2.15h9.8A2.25 2.25 0 0 1 15.15 4.4v5.3a2.25 2.25 0 0 1-2.25 2.25H8.2l-4.35 2.9v-2.9H3.1A2.25 2.25 0 0 1 .85 9.7V4.4A2.25 2.25 0 0 1 3.1 2.15Z"/></symbol>
+    <symbol id="ti-comment-plus" viewBox="0 0 16 16"><path d="M2.2 2.8h8.6a1.5 1.5 0 0 1 1.5 1.5v4.6a1.5 1.5 0 0 1-1.5 1.5H6.7l-3.1 2.2v-2.2H2.2A1.5 1.5 0 0 1 .7 8.9V4.3a1.5 1.5 0 0 1 1.5-1.5Z"/><path d="M12.8 10.6v4M10.8 12.6h4"/></symbol>
+    <symbol id="ti-compute" viewBox="0 0 16 16"><path d="M10.2 2.4H3.4l3.8 5.4-3.8 5.8h6.8"/><path d="M13 8.8v4.4M10.8 11h4.4"/></symbol>
+    <symbol id="ti-sun" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.8"/><path d="M8 1.3v1.4M8 13.3v1.4M1.3 8h1.4M13.3 8h1.4M3.3 3.3l1 1M11.7 11.7l1 1M12.7 3.3l-1 1M4.3 11.7l-1 1"/></symbol>
+    <symbol id="ti-moon" viewBox="0 0 16 16"><path d="M13.3 10.3A5.8 5.8 0 0 1 5.7 2.7a5.8 5.8 0 1 0 7.6 7.6Z"/></symbol>
+    <symbol id="ti-layout" viewBox="0 0 16 16"><rect x="1.8" y="2.2" width="12.4" height="11.6" rx="1.5"/><path d="M9.1 2.2v11.6"/></symbol>
+    <symbol id="ti-layout-focus" viewBox="0 0 16 16"><rect x="2" y="2.2" width="12" height="11.6" rx="1.5"/><path d="M4.6 5V3.8H6M10 3.8h1.4V5M11.4 11v1.2H10M6 12.2H4.6V11"/></symbol>
+    <symbol id="ti-follow-off" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.7"/><path d="M4 12 12 4"/></symbol>
+    <symbol id="ti-follow-mark" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5"/><circle cx="8" cy="8" r="1.7"/></symbol>
+    <symbol id="ti-follow-scroll" viewBox="0 0 16 16"><path d="M8 2v12M5.5 4.5 8 2l2.5 2.5M5.5 11.5 8 14l2.5-2.5"/></symbol>
+    <symbol id="ti-pin" viewBox="0 0 16 16"><path d="m5 2.2 6 1.5-1.2 2.1 1.1 2.5-2.5.9-1.8 4.6-.8-.3.7-4.8-1.8-1.9 2-1.7Z"/></symbol>
+    <symbol id="ti-more" viewBox="0 0 16 16"><circle cx="3.2" cy="8" r=".85" fill="currentColor" stroke="none"/><circle cx="8" cy="8" r=".85" fill="currentColor" stroke="none"/><circle cx="12.8" cy="8" r=".85" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="ti-close" viewBox="0 0 16 16"><path d="m4 4 8 8M12 4l-8 8"/></symbol>
+    <symbol id="ti-trash" viewBox="0 0 16 16"><path d="M3.2 4.5h9.6M6 2.5h4M4.5 4.5l.6 9h5.8l.6-9M6.8 6.7v4.6M9.2 6.7v4.6"/></symbol>
+    <symbol id="ti-copy" viewBox="0 0 16 16"><rect x="5.3" y="2.2" width="8.1" height="8.1" rx="1.2"/><path d="M10.7 10.3v2.3a1.2 1.2 0 0 1-1.2 1.2H3.8a1.2 1.2 0 0 1-1.2-1.2V6.9a1.2 1.2 0 0 1 1.2-1.2h1.5"/></symbol>
+    <symbol id="ti-chevron-left" viewBox="0 0 16 16"><path d="m10 3.5-4.5 4.5 4.5 4.5"/></symbol>
+    <symbol id="ti-chevron-right" viewBox="0 0 16 16"><path d="m6 3.5 4.5 4.5L6 12.5"/></symbol>
+    <symbol id="ti-chevron-down" viewBox="0 0 16 16"><path d="m3.5 6 4.5 4.5L12.5 6"/></symbol>
+  </defs>
+</svg>
 <header>
-  <button id="recompile" title="Recompile the paper">⟳<span class="tlbl"> Compile</span></button>
+  <button id="recompile" title="Recompile the paper"><svg class="tool-icon"><use href="#ti-refresh"/></svg><span class="tlbl">Compile</span></button>
   <span class="zoomgroup">
-    <button id="zoomout" title="Zoom out (⌘−)">−</button><span id="zoom">125%</span><button id="zoomin" title="Zoom in (⌘+)">+</button>
+    <button id="zoomout" class="icon-only" title="Zoom out (⌘−)" aria-label="Zoom out"><svg class="tool-icon"><use href="#ti-minus"/></svg></button><span id="zoom">125%</span><button id="zoomin" class="icon-only" title="Zoom in (⌘+)" aria-label="Zoom in"><svg class="tool-icon"><use href="#ti-plus"/></svg></button>
   </span>
-  <button id="fit" title="Fit the page width (⌘0)"><span class="ticon">↔</span><span class="tlbl">Fit</span></button>
-  <button id="compare" title="Compare with another version of this paper">⇄</button>
-  <button id="labels" title="Show every label (or just hold Shift)" aria-pressed="false">🏷</button>
-  <button id="outline" title="Contents — the sections of this paper (⌘⌥O)" aria-pressed="false">☰</button>
-  <button id="addmma" title="Insert a Mathematica computation — then click where it goes" aria-pressed="false">∑+</button>
-  <button id="pagetheme" title="Page appearance" aria-pressed="false">☀</button>
-  <button id="full" title="Full screen (Esc to leave, double-click a word to go there and edit)">⛶</button>
+  <button id="fit" title="Fit page width (⌘0) · double-click to keep fitted while resizing" aria-pressed="false"><svg class="tool-icon"><use href="#ti-fit"/></svg><span class="tlbl">Fit</span></button>
+  <button id="compare" class="icon-only" title="Compare with another version of this paper" aria-label="Compare versions"><svg class="tool-icon"><use href="#ti-compare"/></svg></button>
+  <button id="labels" class="icon-only" title="Show every label (or just hold Shift)" aria-label="Show labels" aria-pressed="false"><svg class="tool-icon"><use href="#ti-tag"/></svg></button>
+  <button id="outline" class="icon-only" title="Contents — the sections of this paper (⌘⌥O)" aria-label="Contents" aria-pressed="false"><svg class="tool-icon"><use href="#ti-outline"/></svg></button>
+  <span id="commentstool"><button id="commentsbutton" title="Show comments" aria-pressed="false"><svg class="tool-icon"><use href="#ti-comment"/></svg><span class="tlbl">Comments</span><span id="commentscount" hidden>0</span></button><button id="commentsmenu" title="Choose a comment" aria-label="Choose a comment" aria-haspopup="menu" aria-expanded="false"><svg class="tool-icon"><use href="#ti-chevron-down"/></svg></button></span>
+  <button id="addmma" class="icon-only" title="Insert a Mathematica computation — then click where it goes" aria-label="Insert Mathematica computation" aria-pressed="false"><svg class="tool-icon"><use href="#ti-compute"/></svg></button>
+  <button id="pagetheme" class="icon-only" title="Page appearance" aria-label="Page appearance" aria-pressed="false"><svg class="tool-icon"><use href="#ti-sun"/></svg></button>
+  <button id="full" class="icon-only" title="Show WPaper only" aria-label="Show WPaper only"><svg class="tool-icon"><use href="#ti-layout-focus"/></svg></button>
   <button id="follow" class="follow" data-mode="scroll"
-          title="What the page does about the editor cursor — click to cycle"><span class="ticon">⇕</span><span class="tlbl">follow: scroll</span></button>
-  <label class="follow pinwrap" title="Keep the highlight instead of letting it fade"><input type="checkbox" id="pin"><span class="ticon">📌</span><span class="tlbl"> pin</span></label>
+          title="What the page does about the editor cursor — click to cycle"><svg class="tool-icon"><use href="#ti-follow-scroll"/></svg><span class="tlbl">follow: scroll</span></button>
+  <label id="pincontrol" class="follow pinwrap"
+         title="Pin the current source highlight so it stays visible instead of fading"
+         aria-label="Pin the current source highlight so it stays visible instead of fading"><input type="checkbox" id="pin"><svg class="tool-icon"><use href="#ti-pin"/></svg><span class="tlbl">pin</span></label>
+  <button id="sourceunsaved" hidden><span class="dirtytext">Unsaved source</span></button>
+  <span id="tracelag" hidden><span class="lagtext">page behind</span></span>
   <span id="where"></span>
 </header>
+<div id="commentsdropdown" role="menu" aria-label="Comments in this paper" hidden></div>
 <div id="diffbar">
   <span id="diffwhat"></span>
   <button id="diffprev" title="Previous change">‹</button>
@@ -927,13 +1290,41 @@
   <span class="census" id="reviewcensus"></span>
   <span class="sp"></span>
   <button id="reviewgroup" title="How the list is grouped">by section</button>
+  <button id="reviewfeedbackbutton" title="Open the shared paper comments">Comments</button>
+  <button id="reviewhistory" title="Open the retained external-edit history">History</button>
   <button id="reviewprev" title="Previous change">‹</button>
   <button id="reviewnext" title="Next change">›</button>
   <button id="reviewkeepall" class="keep" title="Agree to every change">✓ Keep all</button>
   <button id="reviewundoall" class="undo" title="Put every change back">↺ Undo all</button>
   <button id="reviewclose" title="Leave the review; nothing is decided">✕</button>
 </div>
-<main><div id="pages" title="Click a word or symbol to find it in the source. Cmd/Ctrl-click selects more of what encloses it; add Shift to go back in. Double-click jumps to the editor. Right-click edits the paragraph or equation in place."></div></main>
+<div id="reader">
+  <main><div id="pages" tabindex="-1"></div></main>
+  <aside id="commentpanel" aria-label="Paper comments">
+    <div id="commentgrip" title="Drag to resize · double-click to reset"></div>
+    <div class="cp-head"><span class="cp-avatar" aria-hidden="true"><svg class="tool-icon"><use href="#ti-comment"/></svg></span><button id="commentheading" class="cp-heading" title="Show the attached passage"><span class="cp-title">Comment</span><span id="commenttarget" class="cp-subtitle"></span></button>
+      <span class="cp-nav" role="group" aria-label="Move between comments"><button id="commentprev" title="Previous comment" aria-label="Previous comment"><svg class="tool-icon"><use href="#ti-chevron-left"/></svg></button><button id="commentnext" title="Next comment" aria-label="Next comment"><svg class="tool-icon"><use href="#ti-chevron-right"/></svg></button></span>
+      <button id="commentadd" title="Comment on another paragraph" aria-label="Add comment"><svg class="tool-icon"><use href="#ti-comment-plus"/></svg></button>
+      <button id="commentmore" title="Comment options" aria-label="Comment options"><svg class="tool-icon"><use href="#ti-more"/></svg></button>
+      <button id="commentclose" title="Close comment" aria-label="Close comment"><svg class="tool-icon"><use href="#ti-close"/></svg></button>
+    </div>
+    <div id="commentactions" hidden>
+      <button id="commentcopy"><svg class="tool-icon"><use href="#ti-copy"/></svg>Copy all with line numbers</button>
+      <button id="commentclear" class="danger"><svg class="tool-icon"><use href="#ti-trash"/></svg>Delete all comments</button>
+    </div>
+    <div id="commenthint" hidden>Click the paragraph or equation you want to comment on.</div>
+    <div id="commentcontext" class="cp-context" hidden>
+      <div class="cp-context-head"><span id="commentlocation"></span></div>
+      <div id="commentexcerpt" class="cp-context-excerpt"></div>
+    </div>
+    <div id="commentcomposer" hidden>
+      <textarea id="commentdraft" rows="3" aria-label="New comment" placeholder="Write a comment…"></textarea>
+      <div class="cp-compose-actions"><button id="commentcancel">Cancel</button><button id="commentsave">Post</button></div>
+    </div>
+    <div id="commenterrors"></div>
+    <div id="commentlist"></div>
+  </aside>
+</div>
 <div id="navpanel" hidden>
   <div class="np-head"><span>Contents</span><span class="np-hint">drag the corner to resize</span>
     <button id="navclose" title="Close (Esc)">✕</button></div>

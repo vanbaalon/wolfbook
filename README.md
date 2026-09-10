@@ -114,6 +114,12 @@ WPaper is designed for the part of scientific writing that a PDF preview alone d
 
 WPaper deliberately does not register another LaTeX grammar or replace your existing language tooling. It works alongside LaTeX Workshop while Wolfbook supplies the compiled-paper navigation, editing and agent-review layer. Run **Wolfbook: Open WPaper** (or **WPaper: Show Me Around** for the guided tour) from any `.tex` file.
 
+Use **Ctrl/Cmd+Alt+Enter** to commit the current repository from either the LaTeX editor or WPaper mini-editor. WPaper proposes an editable message naming the changed section titles and equations added or removed. On first use, choose whether successful commits should always be pushed or kept local for the separate **Ctrl/Cmd+Shift+Alt+Enter** push shortcut. If the folder has no repository, author identity, remote, or upstream yet, WPaper offers to configure each missing piece locally when it is needed.
+
+WPaper fetches and three-way merges remote changes before pushing, keeping every non-conflicting local and collaborator edit and surfacing only genuine overlaps for review. For Overleaf, click the leaf icon in a `.tex` editor or run **WPaper: Configure Overleaf Git Sync**. WPaper detects an existing Overleaf Git remote (whatever it is named), reports that synchronization is configured, and offers to sync or remove it. Otherwise it can safely configure the remote from a pasted Overleaf Git command and authentication token. See [WPaper and Overleaf](docs/wpaper-overleaf.md).
+
+The compiled view checks for `latexmk`, the selected TeX engine, and missing document packages before reporting a build failure. On Windows, see [WPaper setup on Windows](docs/wpaper-windows-setup.md) for MiKTeX and TeX Live installation steps.
+
 ### A proper notebook in VS Code
 
 - `.wb` files with code cells and Markdown cells (with full LaTeX math via KaTeX)
@@ -237,6 +243,7 @@ Both addons are prebuilt for macOS (Apple Silicon and Intel) and Windows and bun
 | [Getting Started](docs/getting-started.md) | Installation, first notebook, setup checklist |
 | [AI Integration](docs/ai-integration.md) | GitHub Copilot agent tools — full reference |
 | [MCP & Agent Tools](docs/mcp-and-agent-tools.md) | Using Wolfbook with Claude Code, Codex, and other MCP clients |
+| [WPaper and Overleaf](docs/wpaper-overleaf.md) | Overleaf Git setup, detection, tokens, merging and conflicts |
 | [Oberon Agent (experimental)](docs/oberon-agent.md) | The autonomous research agent: setup, providers, budgets, SkilXiv, privacy |
 | [Features](docs/features.md) | Notebook interface, kernel control, editor, debugger, Dynamic |
 | [Presentations (.wslide)](docs/presentations.md) | The AI-native slide format |

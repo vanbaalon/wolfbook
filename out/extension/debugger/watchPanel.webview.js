@@ -424,6 +424,8 @@
         var secondary  = !!info.isSecondary;
         var cfgPaths   = info.configPaths  || {};
         var configured = info.configured   || {};
+        var skillPaths = info.skillPaths || {};
+        var skillsInstalled = info.skillsInstalled || {};
 
         // Status line
         var statusColor = disabled ? '#888' : '#3fb950';
@@ -437,13 +439,15 @@
             { key: 'claudeDesktop', label: 'Claude Desktop',
               cmd: 'wolfbook.configureClaude',    cmdLabel: 'Auto-configure' },
             { key: 'claudeCode',    label: 'Claude Code',
-              cmd: null,                          cmdLabel: null },
-            { key: 'cline',         label: 'Cline / RooCode',
+              cmd: 'wolfbook.configureClaude',    cmdLabel: 'Auto-configure' },
+            { key: 'cline',         label: 'Cline',
               cmd: 'wolfbook.configureCline',     cmdLabel: 'Auto-configure' },
-            { key: 'antigravity',   label: 'Antigravity (Gemini CLI)',
+            { key: 'rooCode',       label: 'Roo Code',
+              cmd: 'wolfbook.configureRooCode',   cmdLabel: 'Auto-configure' },
+            { key: 'antigravity',   label: 'Antigravity IDE',
               cmd: 'wolfbook.configureAntigravity', cmdLabel: 'Auto-configure' },
             { key: 'codex',         label: 'OpenAI Codex CLI',
-              cmd: null,                          cmdLabel: null },
+              cmd: 'wolfbook.configureClaude',    cmdLabel: 'Auto-configure' },
         ];
 
         var esc = function(s) {
@@ -453,14 +457,23 @@
         var agentRows = agents.map(function(a) {
             var cfgPath = cfgPaths[a.key] || '—';
             var ok      = configured[a.key];
-            var tick    = ok
-                ? '<span style="color:#3fb950;" title="wolfbook entry present">✓</span>'
-                : '<span style="color:#888;" title="not yet configured">✗</span>';
-            var autoBtn = (a.cmd && !ok)
+            var skillState = skillsInstalled[a.key];
+            var mcpTick = ok
+                ? '<span style="color:#3fb950;" title="Wolfbook MCP entry present">✓ MCP</span>'
+                : '<span style="color:#888;" title="MCP not yet configured">✗ MCP</span>';
+            var skillTick = skillState === null
+                ? '<span style="opacity:0.55;" title="Routing guidance is supplied by the MCP server">MCP guidance</span>'
+                : skillState
+                    ? '<span style="color:#3fb950;" title="Wolfbook skill installed">✓ Skill</span>'
+                    : '<span style="color:#888;" title="Wolfbook skill not installed">✗ Skill</span>';
+            var needsSetup = !ok || (skillState !== null && !skillState);
+            var autoBtn = (a.cmd && needsSetup)
                 ? ' <a href="#" data-cmd="' + esc(a.cmd) + '" style="color:var(--vscode-textLink-foreground,#4e94ce); text-decoration:none;" title="Run the auto-configure VS Code command">' + esc(a.cmdLabel) + '</a>'
                 : '';
-            return '<tr><td style="padding-right:6px; white-space:nowrap;">' + tick + ' ' + esc(a.label) + autoBtn + '</td>'
-                 + '<td style="opacity:0.6; word-break:break-all;">' + esc(cfgPath) + '</td></tr>';
+            var skillPath = skillPaths[a.key];
+            var paths = esc(cfgPath) + (skillPath ? '<br><span title="Skill path">' + esc(skillPath) + '</span>' : '');
+            return '<tr><td style="padding-right:6px; white-space:nowrap;">' + esc(a.label) + autoBtn + '<br>' + mcpTick + ' · ' + skillTick + '</td>'
+                 + '<td style="opacity:0.6; word-break:break-all;">' + paths + '</td></tr>';
         }).join('');
 
         // Manual snippet
@@ -495,8 +508,8 @@
             '  <li>Each VS Code window joins as a client; the <em>primary</em> window runs the HTTP server — secondaries share its port.</li>',
             '  <li>Tool calls target the <em>last active</em> Wolfbook notebook in this window. Use <code>wolfbook_setTarget</code> to pin a specific file.</li>',
             '  <li>Port range: ' + (port || 27182) + '–' + ((port || 27182) + 19) + ' (tries next free port on conflict).</li>',
-            '  <li>For Claude Code: add to <code>~/.claude.json</code> under <code>mcpServers</code>, or run <code>claude mcp add wolfbook --transport stdio ' + esc(node) + ' ' + esc(bridge) + '</code>.</li>',
-            '  <li>For Codex CLI: add to <code>~/.codex/config.toml</code> under <code>[mcp_servers.wolfbook]</code>.</li>',
+            '  <li>Claude Code uses the user-scoped <code>~/.claude.json</code> entry plus <code>~/.claude/skills/wolfbook</code>.</li>',
+            '  <li>Codex and Roo share <code>~/.agents/skills/wolfbook</code>; Codex MCP remains under <code>[mcp_servers.wolfbook]</code>.</li>',
             '</ul>',
         ].join('\n');
 

@@ -20,6 +20,12 @@
 // 0-based index here costs an off-by-one at every comparison with the render
 // map, which is why it is stated here rather than discovered in Stage 2.
 
+// WHAT A COMMAND PRINTS, for rendering a heading as plain text. Both tables
+// already exist for the projection, which asks the same question of the same
+// commands — a second copy here would be a second answer.
+const { SYMBOL_GLYPHS, MATH_OPERATORS } = require('./texWords');
+const { expandTexorpdfstring } = require('./auxLabels');
+
 const MATH_ENVS = new Set([
     'equation', 'equation*', 'align', 'align*', 'alignat', 'alignat*',
     'gather', 'gather*', 'multline', 'multline*', 'flalign', 'flalign*',
@@ -40,6 +46,20 @@ const LABELABLE_KINDS = new Set(['display-equation', 'figure', 'table', 'theorem
 const SECTION_CMDS = ['part', 'chapter', 'section', 'subsection', 'subsubsection', 'paragraph', 'subparagraph'];
 const SECTION_LEVEL = Object.fromEntries(SECTION_CMDS.map((c, i) => [c, i]));
 
+// Front matter is commonly expressed as commands rather than environments.
+// JHEP, in particular, uses `\abstract{...}` before `\begin{document}` and
+// prints it later from `\maketitle`. Treat each source command as a durable
+// writing cell: SyncTeX can then attach a click to the exact title, author or
+// abstract source instead of falling through to a synthetic preamble line.
+const FRONTMATTER_COMMANDS = new Map([
+    ['title', 'titlepage'], ['subtitle', 'titlepage'],
+    ['author', 'titlepage'], ['affiliation', 'titlepage'],
+    ['emailAdd', 'titlepage'], ['date', 'titlepage'],
+    ['dedicated', 'titlepage'], ['proceeding', 'titlepage'],
+    ['arxivnumber', 'titlepage'], ['keywords', 'titlepage'],
+    ['abstract', 'abstract'],
+]);
+
 function classifyEnv(name) {
     if (MATH_ENVS.has(name)) return 'display-equation';
     if (FLOAT_ENVS.has(name)) return name.startsWith('table') ? 'table' : 'figure';
@@ -48,6 +68,7 @@ function classifyEnv(name) {
     if (LIST_ENVS.has(name)) return 'list';
     if (name === 'tabular' || name === 'tabularx' || name === 'longtable') return 'tabular';
     if (name === 'abstract') return 'abstract';
+    if (name === 'titlepage') return 'titlepage';
     if (name === 'document') return 'document';
     return 'environment';
 }
@@ -216,6 +237,33 @@ function scanTex(src, opts = {}) {
         }
 
         if (m[6]) {                                   // a bare control word
+            const frontKind = FRONTMATTER_COMMANDS.get(m[6]);
+            if (frontKind) {
+                const group = commandGroup(masked, off + m[0].length);
+                if (group) {
+                    objects.push(makeObject({
+                        kind: frontKind, cmd: m[6],
+                        title: m[6] === 'title'
+                            ? stripTex(src.slice(group.open + 1, group.close)) : undefined,
+                        startOffset: off, endOffset: group.close + 1,
+                        startLine: line, endLine: lineAt(group.close),
+                        sectionPath: sectionPath(), src, file,
+                    }));
+                    continue;
+                }
+            }
+            // `\maketitle` is often the only source line SyncTeX assigns to
+            // the composed title page. Give that line a real cell too, so a
+            // click never degrades to an anonymous one-line paragraph.
+            if (m[6] === 'maketitle') {
+                objects.push(makeObject({
+                    kind: 'titlepage', cmd: 'maketitle', title: 'Title page',
+                    startOffset: off, endOffset: off + m[0].length,
+                    startLine: line, endLine: line,
+                    sectionPath: sectionPath(), src, file,
+                }));
+                continue;
+            }
             // A stand-in for \label / \ref / \cite, e.g. \la{eq:x}.
             const refAct = refMacros.get(m[6]);
             if (refAct) {
@@ -413,7 +461,7 @@ function scanParagraphs(src, masked, lineAt, objects, file) {
 
     // Spans already claimed by a block-level object.
     const blocked = objects
-        .filter(o => ['display-equation', 'figure', 'table', 'theorem', 'verbatim', 'list', 'tabular', 'abstract', 'environment'].includes(o.kind))
+        .filter(o => ['display-equation', 'figure', 'table', 'theorem', 'verbatim', 'list', 'tabular', 'abstract', 'titlepage', 'environment'].includes(o.kind))
         .map(o => [o.startOffset, o.endOffset])
         .sort((a, b) => a[0] - b[0]);
     const isBlocked = (a, b) => blocked.some(([s, e]) => a < e && b > s);
@@ -614,23 +662,81 @@ function skipSpaceTo(s, from, ch) {
     return s[i] === ch ? i : -1;
 }
 
-function matchBrace(s, openIdx) {
+/** Required command body after whitespace and any optional `[short]` groups. */
+function commandGroup(s, from) {
+    let i = from;
+    const skip = () => { while (i < s.length && /\s/.test(s[i])) i++; };
+    skip();
+    while (s[i] === '[') {
+        const close = matchDelimited(s, i, '[', ']');
+        if (close < 0) return null;
+        i = close + 1;
+        skip();
+    }
+    if (s[i] !== '{') return null;
+    const close = matchBrace(s, i);
+    return close < 0 ? null : { open: i, close };
+}
+
+function matchDelimited(s, openIdx, open, close) {
     let depth = 0;
     for (let i = openIdx; i < s.length; i++) {
         if (s[i] === '\\') { i++; continue; }
-        if (s[i] === '{') depth++;
-        else if (s[i] === '}') { depth--; if (depth === 0) return i; }
+        if (s[i] === open) depth++;
+        else if (s[i] === close) { depth--; if (depth === 0) return i; }
     }
     return -1;
 }
 
+function matchBrace(s, openIdx) {
+    return matchDelimited(s, openIdx, '{', '}');
+}
+
+/**
+ * A heading's source, as the reader should READ it.
+ *
+ * Two things this used to get wrong, both visible in the review list and the
+ * contents panel, and both reported off one heading:
+ *
+ *   \subsection{Preview: the two-site overlap in
+ *               \texorpdfstring{$\langle qq\rangle$}{qq} notation}
+ *
+ * · `\texorpdfstring{TeX}{plain}` gives a heading TWO spellings, and dropping
+ *   the command while keeping both groups printed BOTH of them: the heading
+ *   came out as "…in qqqq notation". hyperref's two arguments are alternatives,
+ *   never a sequence. The TeX half is the one kept — it is what the paper
+ *   prints, it is what the .aux stores, and `expandTexorpdfstring` (auxLabels)
+ *   is already the one rule for this; this was simply not using it.
+ *
+ * · Every command was then deleted outright, so `\langle qq\rangle` lost its
+ *   delimiters and the title no longer read like the heading on the page. The
+ *   symbol table the projection already uses to match glyphs answers exactly
+ *   this question — what does this command PRINT — so a heading with maths in
+ *   it comes back as "⟨qq⟩" rather than as "qq".
+ *
+ * Anything not in the table is still dropped: this is a plain-text rendering
+ * for a list, not a typesetter, and a command whose output is not one known
+ * character has no honest one-character answer.
+ */
 function stripTex(s) {
-    return s
-        // A title wrapped across lines ends the first one with `%`, which is a
-        // line-continuation comment and not part of the title. Without this,
-        // real section names come out as "…Removes the Trivial Line%".
-        .replace(/(^|[^\\])%[^\n]*/g, '$1')
-        .replace(/\\[A-Za-z]+\s*/g, '')
+    // Comments go FIRST: a title wrapped across lines ends the first one with
+    // `%`, a line-continuation comment and not part of the title. Without this,
+    // real section names come out as "…Removes the Trivial Line%".
+    const noComments = String(s).replace(/(^|[^\\])%[^\n]*/g, '$1');
+    return expandTexorpdfstring(noComments)
+        // THE SPACE AFTER A CONTROL WORD IS A SEPARATOR, NOT A SPACE — TeX eats
+        // it, which is why `$\langle qq\rangle$` prints "⟨qq⟩" and not "⟨ qq⟩".
+        // But an operator's space really is one (`$\log x$` prints "log x"), and
+        // a symbol standing between two words keeps the spacing it was written
+        // with (`$x \to y$` reads "x → y", not "x →y").
+        .replace(/\\([A-Za-z]+)([ \t]*)/g, (_m, name, after, at, whole) => {
+            const spaced = after && (at === 0 || /\s/.test(whole[at - 1]));
+            const glyph = SYMBOL_GLYPHS[name];
+            if (glyph) return spaced ? glyph + ' ' : glyph;
+            // An operator typesets its own letters, in roman.
+            if (MATH_OPERATORS.has(name)) return name + (after ? ' ' : '');
+            return '';
+        })
         .replace(/[{}$]/g, '')
         .replace(/\s+/g, ' ')
         .trim();
@@ -666,7 +772,7 @@ function preambleSpan(src) {
 /** Objects that occupy vertical space on a page — what Spike A measures. */
 const MEASURABLE_KINDS = new Set([
     'display-equation', 'figure', 'table', 'theorem', 'paragraph',
-    'section-heading', 'tabular', 'list', 'verbatim', 'abstract',
+    'section-heading', 'tabular', 'list', 'verbatim', 'abstract', 'titlepage',
 ]);
 
 function summarise(objects) {

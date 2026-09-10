@@ -111,6 +111,7 @@ export function activate(context) {
         strict: false,
         maxExpand: 100000,
         macros: {
+            '\\ii': '\\mathrm{i}',
             '\\dd': '\\mathrm{d}',
             '\\R': '\\mathbb{R}',
             '\\C': '\\mathbb{C}',
@@ -571,17 +572,13 @@ export function activate(context) {
             if (msg.type === 'dialog-end') {
                 removeDialogWidget();
             }
-            // ---- Background image (applied to cell-output body) ----
-            if (msg.type === 'bg-image') {
-                let bgStyle = document.querySelector('style[data-wolfram-bg-image]');
-                if (!bgStyle) {
-                    bgStyle = document.createElement('style');
-                    bgStyle.setAttribute('data-wolfram-bg-image', '1');
-                    (document.head || document.documentElement).appendChild(bgStyle);
-                }
-                bgStyle.textContent = msg.dataUrl
-                    ? `body { background-image: url('${msg.dataUrl}'); background-size: cover; background-attachment: fixed; background-position: center; }`
-                    : '';
+            // ---- Per-notebook appearance (message is targeted by NotebookEditor) ----
+            if (msg.type === 'bg-appearance' || msg.type === 'bg-image') {
+                document.body.style.backgroundColor = msg.backgroundColor || '';
+                document.body.style.backgroundImage = msg.dataUrl ? `url("${msg.dataUrl}")` : '';
+                document.body.style.backgroundSize = msg.dataUrl ? 'cover' : '';
+                document.body.style.backgroundAttachment = msg.dataUrl ? 'fixed' : '';
+                document.body.style.backgroundPosition = msg.dataUrl ? 'center' : '';
                 return;
             }
         });

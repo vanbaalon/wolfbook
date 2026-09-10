@@ -415,6 +415,17 @@ class SlideEditorProvider {
         return this._panels.size > 0 ? [...this._panels.values()][0] : null;
     }
 
+    /** Reveal a slide (and optionally select its block) from outside the webview. */
+    async revealSlide(slideIndex, docUriStr, blockId) {
+        const { e } = this._resolveEntry(docUriStr);
+        if (!e || !Array.isArray(e.deck?.slides) || e.deck.slides.length === 0) return false;
+        const idx = Math.max(0, Math.min(Number(slideIndex) || 0, e.deck.slides.length - 1));
+        e.currentSlideIndex = idx;
+        try { e.webviewPanel.reveal(vscode.ViewColumn.Active, false); } catch (_) {}
+        await e.webviewPanel.webview.postMessage({ cmd: 'navigateToSlide', slideIndex: idx, blockId: blockId || null });
+        return true;
+    }
+
     // -------------------------------------------------------------------------
     // CustomTextEditorProvider interface
     // -------------------------------------------------------------------------

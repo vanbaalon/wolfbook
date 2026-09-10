@@ -4,6 +4,7 @@
 // the JSON-fallback marker, the de-TeX rewriter, and MCP tools/list visibility.
 
 const assert = require('assert');
+const path = require('path');
 const { withVscodeStub } = require('./_stub-vscode');
 
 const tools = withVscodeStub(() => require('../../tools/index'));
@@ -49,14 +50,17 @@ assert.strictEqual(_deTexUsage('no tex here'), 'no tex here');
 const Module = require('module');
 const orig = Module._load;
 Module._load = function (request) { if (request === 'vscode') return {}; return orig.apply(this, arguments); };
-const { WolframMCPServer } = require('../../claude-mcp/server');
+const { WolframMCPServer, loadMCPSchemas, ECONOMY_TOOL_NAMES } = require('../../claude-mcp/server');
 Module._load = orig;
 
 const schemas = [
     { name: 'wolfbook_a', description: 'a', inputSchema: { type: 'object', properties: {} }, tags: [] },
     { name: 'wolfbook_hidden', description: 'h', inputSchema: { type: 'object', properties: {} }, tags: ['mcp:hidden'] },
     { name: 'wolfbook_old', description: 'o', inputSchema: { type: 'object', properties: {} }, tags: ['mcp:deprecated', 'mcp:replacedBy:wolfbook_a'] },
+    { name: 'wolfbook_runCell', description: 'run', inputSchema: { type: 'object', properties: {} }, tags: [] },
+    { name: 'wolfbook_debugCell', description: 'debug', inputSchema: { type: 'object', properties: {} }, tags: [] },
     { name: 'wolfslide_x', description: 's', inputSchema: { type: 'object', properties: {} }, tags: [] },
+    { name: 'paper_search', description: 'paper', inputSchema: { type: 'object', properties: {} }, tags: [] },
 ];
 (async () => {
     const srv = new WolframMCPServer(new Map(), schemas, {});
@@ -74,6 +78,38 @@ const schemas = [
     const oldEntry = list2.find(t => t.name === 'wolfbook_old');
     assert.match(oldEntry.description, /^DEPRECATED — use `wolfbook_a` instead/);
     assert(!('tags' in oldEntry), 'tags are internal, never sent to clients');
+
+    const economy = new WolframMCPServer(new Map(), schemas, { profile: 'economy' });
+    const economyNames = (await economy._dispatch('tools/list', {})).tools.map(t => t.name);
+    assert(economyNames.includes('wolfbook_runCell'), 'economy keeps basic notebook execution');
+    assert(economyNames.includes('wolfbook_list_clients'), 'economy keeps routing usable');
+    assert(economyNames.includes('wolfbook_setTarget'), 'economy keeps session targeting usable');
+    assert(economyNames.includes('wolfbook_waitEvaluation'), 'economy keeps long evaluations usable');
+    assert(!economyNames.includes('wolfbook_debugCell'), 'economy omits advanced Wolfbook debugging');
+    assert(!economyNames.includes('wolfslide_x'), 'economy is Wolfbook-only');
+    assert(!economyNames.includes('paper_search'), 'economy omits paper tools');
+
+    const perSession = new WolframMCPServer(new Map(), schemas, { profile: 'full' });
+    perSession._sessionProfiles.set('small-model', 'economy');
+    const perSessionNames = (await perSession._dispatch('tools/list', {}, 'small-model')).tools.map(t => t.name);
+    assert.deepStrictEqual(perSessionNames, economyNames,
+        'the economy endpoint overrides tools/list for only that MCP session');
+
+    const actualSchemas = loadMCPSchemas(path.join(__dirname, '..', '..', '..', '..', 'package.json'));
+    const actualEconomy = await new WolframMCPServer(new Map(), actualSchemas, { profile: 'economy' })
+        ._dispatch('tools/list', {});
+    assert.strictEqual(actualEconomy.tools.length, ECONOMY_TOOL_NAMES.size + 3,
+        'all economy tools plus the three routing/wait helpers are advertised');
+    assert(actualEconomy.tools.every(t => t.name.startsWith('wolfbook_')),
+        'the real economy surface contains only wolfbook_* tools');
+    assert(Buffer.byteLength(JSON.stringify(actualEconomy)) < 12 * 1024,
+        'economy discovery must stay below 12 KiB');
+    const economySearch = actualEconomy.tools.find(t => t.name === 'wolfbook_searchCells');
+    assert(economySearch.inputSchema.properties.notebook, 'economy search exposes explicit notebook routing');
+    assert(economySearch.inputSchema.properties.queries, 'economy search supports batched anchors');
+    const economyEdit = actualEconomy.tools.find(t => t.name === 'wolfbook_editCell');
+    assert(economyEdit.inputSchema.properties.expected_notebook_revision,
+        'economy mutations expose notebook revision guards');
 
     console.log('assert-expression + visibility tests: OK');
 })().catch(err => { console.error(err); process.exit(1); });

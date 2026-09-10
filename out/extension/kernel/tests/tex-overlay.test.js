@@ -203,6 +203,24 @@ test('a source file that has gone missing does not break the build', () => {
     assert.strictEqual(m, null, 'nothing to shadow, and nothing thrown');
 });
 
+test('EVERY SOURCE EDIT marks the page behind, even on the same line', () => {
+    const c = coord([ROOT]);
+    c.rootOf.set(ROOT, ROOT);
+    const st = c.roots.get(ROOT);
+    let shifted = 0;
+    st.map = { noteEdit: () => { shifted++; } };
+    c.noteChange({
+        document: { uri: { fsPath: ROOT } },
+        contentChanges: [{
+            range: { start: { line: 3 }, end: { line: 3 } },
+            text: 'x',
+        }],
+    });
+    assert.strictEqual(st.sourceAhead, true,
+        'same-line typing is newer than the old PDF even though line positions did not move');
+    assert.strictEqual(shifted, 0, 'line translation is unnecessary for a same-line edit');
+});
+
 // --- AND WHETHER A REBUILD IS ALLOWED TO FINISH ------------------------------
 
 /** A document stub good enough for build() to resolve a root from. */
@@ -263,6 +281,25 @@ test('but a SAVE still takes precedence and aborts it', async () => {
     try { await c.build(docFor(ROOT), { authoritative: true }); } catch (_) { /* the stub stops it */ }
     assert.strictEqual(aborted, 1, 'the live build was aborted for it');
     assert.strictEqual(st.liveQueued, false, 'and nothing was queued');
+});
+
+test('a deliberate compile cancels the older live deadline', async () => {
+    write(ROOT, PLAIN);
+    docs.length = 0;
+    const c = coordForBuild();
+    const st = c.roots.get(ROOT);
+    const pending = setTimeout(() => {}, 60000);
+    pending.unref?.();
+    c._liveTimers.set(ROOT, pending);
+    c._liveFirst.set(ROOT, Date.now());
+    st.running = { abort: () => { throw new Error('stop after schedule cleanup'); } };
+    st.liveCompiling = true;
+
+    try { await c.build(docFor(ROOT), { authoritative: true }); } catch (_) { /* expected */ }
+    assert.strictEqual(c._liveTimers.has(ROOT), false,
+        'the trailing live timer cannot wake and interrupt the save build');
+    assert.strictEqual(c._liveFirst.has(ROOT), false,
+        'the next edit starts a fresh three-second deadline');
 });
 
 test('a live rebuild with NOTHING running is not queued behind a ghost', async () => {

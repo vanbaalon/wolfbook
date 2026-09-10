@@ -73,15 +73,11 @@ class VSNBContentSerializer {
             notebook.metadata = metadata;
         }
         catch (e) {
-            notebook = { cells: [], metadata: {} };
+            throw new Error(`Cannot read notebook: ${e.message}. The original file has not been changed.`);
         }
         return notebook;
     }
     async serializeNotebook(data, token) {
-        // MUST stay outside the try below: that catch replaces the notebook with
-        // an empty one, so an error escaping into it would overwrite the source
-        // .nb with {"cells":[]}.
-        //
         // An imported .nb is a view of a Mathematica file. Writing .wb JSON over
         // it would destroy it, so instead the original bytes go back unchanged —
         // the save is a no-op that keeps the file byte-identical. Cmd-S is bound
@@ -99,8 +95,15 @@ class VSNBContentSerializer {
 
         const decoder = new util.TextDecoder();
         const encoder = new util.TextEncoder();
-        let notebook = data;
+        let notebook;
         try {
+            // Copy mutable containers before normalizing output bytes. VS Code
+            // may reuse the supplied NotebookData after this save.
+            notebook = { ...data, cells: data.cells.map(cell => ({
+                ...cell, outputs: cell.outputs?.map(output => ({
+                    ...output, items: output.items.map(item => ({ ...item })),
+                })),
+            })) };
             // Preserve metadata including custom settings
             const metadata = notebook.metadata || {};
             
@@ -126,7 +129,7 @@ class VSNBContentSerializer {
             notebook.metadata = metadata;
         }
         catch (e) {
-            notebook = { cells: [], metadata: {} };
+            throw new Error(`Cannot save notebook: ${e.message}. Saving was cancelled to preserve the existing file.`);
         }
         return encoder.encode(JSON.stringify(notebook, null, 1));
     }

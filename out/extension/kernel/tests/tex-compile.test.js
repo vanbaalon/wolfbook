@@ -247,6 +247,7 @@ async function main() {
     if (!hasLatexmk) {
         skip('a real compile leaves the project byte-identical', 'latexmk not installed');
         skip('a compile of a BROKEN paper still yields a PDF and diagnostics', 'latexmk not installed');
+        skip('a missing LaTeX package becomes a dependency issue', 'latexmk not installed');
         skip('cancellation kills the process group', 'latexmk not installed');
     } else {
         const mkProject = (name, body) => {
@@ -329,6 +330,21 @@ async function main() {
                 'and the page really did change: (?) became the number');
             fs.rmSync(dir, { recursive: true, force: true });
             fs.rmSync(first.outDir, { recursive: true, force: true });
+        });
+
+        await test('a missing LaTeX package becomes a dependency issue', async () => {
+            const { dir, root } = mkProject('missing-package.tex',
+                '\\documentclass{article}\n' +
+                '\\usepackage{wolfbook-package-that-does-not-exist}\n' +
+                '\\begin{document}Hello\\end{document}\n');
+            const r = await compile({ root, sourceFiles: [root], timeoutMs: 120000 });
+            assert.strictEqual(r.ok, false);
+            assert.ok(r.dependencyIssue, 'the raw TeX error is promoted to setup help');
+            assert.strictEqual(r.dependencyIssue.kind, 'missing-tex-file');
+            assert.strictEqual(r.dependencyIssue.filename, 'wolfbook-package-that-does-not-exist.sty');
+            assert.match(r.dependencyIssue.summary, /Install the TeX package/);
+            fs.rmSync(dir, { recursive: true, force: true });
+            fs.rmSync(r.outDir, { recursive: true, force: true });
         });
 
         await test('a real compile leaves the project byte-identical', async () => {

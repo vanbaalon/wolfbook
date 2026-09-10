@@ -38,7 +38,7 @@ class WorkerServer {
      * @param {Map<string,object>} toolMap    name → tool instance (same map as primary)
      * @param {string}             clientId   e.g. "VSCode[ClasterVersion]"
      */
-    constructor(toolMap, clientId, getKernels = null, resolveKernel = null, stopKernel = null, getKernelBindings = null) {
+    constructor(toolMap, clientId, getKernels = null, resolveKernel = null, stopKernel = null, getKernelBindings = null, notebookNotifier = null) {
         this._toolMap  = toolMap;
         this._clientId = clientId;
         // Distinguishes this extension-host lifetime from a stale registration
@@ -48,6 +48,7 @@ class WorkerServer {
         this._resolveKernel = resolveKernel;
         this._stopKernel = stopKernel;
         this._getKernelBindings = getKernelBindings;
+        this._notebookNotifier = notebookNotifier;
         this._kernelTransactions = new Map();
         this._transactionSweepTimer = setInterval(() => this._sweepKernelTransactions(), 10000);
         this._port     = 0;
@@ -128,11 +129,17 @@ class WorkerServer {
     }
 
     _handle(req, res) {
+        if (this.activityMonitor?.handles(new URL(req.url, 'http://127.0.0.1').pathname)) {
+            this.activityMonitor.handle(req, res, new URL(req.url, 'http://127.0.0.1')); return;
+        }
+        if (req.headers.origin) { res.writeHead(403); res.end('Browser access is not allowed'); return; }
         res.setHeader('Access-Control-Allow-Origin', '*');
         const url = new URL(req.url, `http://127.0.0.1:${this._port}`);
 
         if (req.method === 'POST' && url.pathname === '/invoke') {
             this._handleInvoke(req, res);
+        } else if (req.method === 'POST' && url.pathname === '/notebook-notice') {
+            this._handleNotebookNotice(req, res);
         } else if (req.method === 'POST' && url.pathname === '/kernel-session') {
             this._handleKernelSession(req, res);
         } else if (req.method === 'GET' && url.pathname === '/notebooks') {
@@ -154,6 +161,23 @@ class WorkerServer {
         } else {
             res.writeHead(404); res.end();
         }
+    }
+
+    _handleNotebookNotice(req, res) {
+        let body = '';
+        req.setEncoding('utf8');
+        req.on('data', d => { body += d; });
+        req.on('end', () => {
+            let event;
+            try { event = JSON.parse(body); } catch {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Bad JSON' }));
+                return;
+            }
+            res.writeHead(202, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ accepted: true }));
+            try { Promise.resolve(this._notebookNotifier?.(event)).catch(() => {}); } catch (_) {}
+        });
     }
 
     _handleKernelSession(req, res) {

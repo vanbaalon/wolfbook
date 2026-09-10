@@ -180,7 +180,10 @@ async function importForHost(source, opts) {
     if (host && result.graphicsTasks && result.graphicsTasks.length) {
         const { imgDir, imgRel } = imgPathsFor(host);
         try {
-            const res = await gfx.renderGraphics(result.graphicsTasks, { imgDir });
+            const key = `include:${host}:${opts.sourceName || ''}`;
+            const res = await gfx.renderGraphics(result.graphicsTasks, {
+                imgDir, key, notebook: host,
+            });
             nbModel.applyGraphics(result.cells, res.rendered, imgRel);
         } catch (_) { /* fall through to the placeholder cleanup */ }
     }
@@ -272,7 +275,9 @@ async function runGraphicsPass(vscode, doc, opts) {
 
     let res;
     if (allCached || !kernelAssist.kernelAvailable()) {
-        res = await gfx.renderGraphics(tasks, { imgDir });
+        res = await gfx.renderGraphics(tasks, {
+            imgDir, key: doc.uri.toString(), notebook: doc.uri.fsPath,
+        });
     } else {
         res = await vscode.window.withProgress(
             {
@@ -283,7 +288,10 @@ async function runGraphicsPass(vscode, doc, opts) {
             async (_p, token) => {
                 const controller = new AbortController();
                 token.onCancellationRequested(() => controller.abort());
-                return gfx.renderGraphics(tasks, { imgDir, signal: controller.signal });
+                return gfx.renderGraphics(tasks, {
+                    imgDir, signal: controller.signal,
+                    key: doc.uri.toString(), notebook: doc.uri.fsPath,
+                });
             }
         );
     }
@@ -415,23 +423,38 @@ async function saveNbCopyAsWb(vscode, arg) {
         const { imgDir, imgRel } = imgPathsFor(uri.fsPath);
         const tasks = collectTasks(cells, importId);
         if (tasks.length) {
-            const res = await gfx.renderGraphics(tasks, { imgDir });
+            const res = await gfx.renderGraphics(tasks, {
+                imgDir, key: uri.toString(), notebook: uri.fsPath,
+            });
             nbModel.applyGraphics(cells, res.rendered, imgRel);
+            if (res.error) {
+                vscode.window.showWarningMessage(
+                    `Wolfbook: graphics conversion for ${uri.fsPath} did not finish — ${res.error}`);
+            }
         }
     }
 
     // Exactness pass for cells the flattener could not model.
     const approx = collectApprox(cells);
     if (approx.length && kernelAssist.kernelAvailable()) {
-        await vscode.window.withProgress(
+        const refinement = await vscode.window.withProgress(
             { location: vscode.ProgressLocation.Notification, title: `Wolfbook: refining ${approx.length} cell(s) with the Wolfram kernel…`, cancellable: true },
             async (_progress, token) => {
                 const controller = new AbortController();
                 token.onCancellationRequested(() => controller.abort());
-                const res = await kernelAssist.refineCells(approx, { signal: controller.signal });
+                const res = await kernelAssist.refineCells(approx, {
+                    signal: controller.signal,
+                    key: uri.toString(), notebook: uri.fsPath,
+                });
                 if (res.ok) applyRefinements(cells, res.results);
+                return res;
             }
         );
+        if (!refinement.ok) {
+            vscode.window.showWarningMessage(
+                `Wolfbook: refinement for ${uri.fsPath} did not finish — ${refinement.error || 'unknown error'}. ` +
+                'The .wb copy will keep the readable approximate form.');
+        }
     }
 
     nbModel.clearGraphicsPlaceholders(cells);
@@ -497,7 +520,10 @@ async function refineOpenNotebook(vscode) {
         async (_progress, token) => {
             const controller = new AbortController();
             token.onCancellationRequested(() => controller.abort());
-            const res = await kernelAssist.refineCells(approx, { signal: controller.signal });
+            const res = await kernelAssist.refineCells(approx, {
+                signal: controller.signal,
+                key: doc.uri.toString(), notebook: doc.uri.fsPath,
+            });
             if (!res.ok) {
                 vscode.window.showWarningMessage('Wolfbook: kernel refinement failed — ' + (res.error || 'unknown error'));
                 return;
@@ -555,7 +581,14 @@ function registerNbImport(context) {
         vscode.workspace.onDidOpenNotebookDocument(scheduleGraphicsPass),
         vscode.window.onDidChangeActiveNotebookEditor((editor) => {
             if (editor) scheduleGraphicsPass(editor.notebook);
-        })
+        }),
+        vscode.workspace.onDidCloseNotebookDocument((doc) => {
+            if (!isNbUri(doc.uri)) return;
+            const key = doc.uri.toString();
+            void gfx.cancel(key);
+            void kernelAssist.cancel(key);
+        }),
+        new vscode.Disposable(() => kernelAssist.dispose())
     );
 
     // Recover documents whose open event raced extension activation.  The delayed

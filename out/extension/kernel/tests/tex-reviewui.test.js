@@ -160,15 +160,32 @@ function makeUi(o = {}) {
     changeHandlers.length = 0;
     decorations.length = 0; editsApplied.length = 0; infoCalls.length = 0;
     const posted = [];
+    const revisionComments = [];
     const viewer = {
         root: FILE, isOpen: () => true, reviewVisible: false,
         showReview: (p) => posted.push(p),
         focusReviewHunk: (h) => posted.push({ focus: h.id }),
         openReview: async () => {}, status: () => {},
+        addRevisionComment: async (c) => { revisionComments.push(c); return true; },
     };
-    const ui = new ReviewUi({ viewer, output: { appendLine() {} }, mapView: () => ({}) });
+    const ui = new ReviewUi({
+        viewer, output: { appendLine() {} },
+        mapView: o.mapView || (() => ({})),
+    });
     ui.register({ subscriptions: [] });
-    return { ui, viewer, posted };
+    return { ui, viewer, posted, revisionComments };
+}
+
+// A render map that answers for every line, so a hunk places on ROWS — and
+// that can be moved, which is what a recompile does to a real one.
+function movableMap(state) {
+    return () => ({
+        generation: state.generation,
+        rowsFor: (line) => [{ page: 1, x: 100, y: state.y0 + line * 12, w: 300, h: 10 }],
+        objectAtLine: () => null,
+        objectRects: () => [],
+        locate: () => null,
+    });
 }
 
 test('a batch arrives: the status bar counts it and the panel is handed the list', async () => {
@@ -213,7 +230,7 @@ test('ONE TOAST PER BATCH THAT CHANGED SOMETHING, and none while the list is on 
     } finally { stub.workspace.getConfiguration = cfg; }
 });
 
-test('EVERY PENDING CHANGE IS DECORATED, AND CLEARED WHEN THE REVIEW ENDS', async () => {
+test('CLOSING HIDES DECORATIONS BUT NEVER APPROVES PENDING CHANGES', async () => {
     const { ui } = makeUi();
     await ui.noteAgentChange({ file: FILE, baseText: BASE });
     const painted = decorations.filter(d => d.n > 0);
@@ -222,7 +239,8 @@ test('EVERY PENDING CHANGE IS DECORATED, AND CLEARED WHEN THE REVIEW ENDS', asyn
     ui.close(FILE);
     assert.ok(decorations.length >= 5, 'every decoration type is addressed on the way out');
     assert.ok(decorations.every(d => d.n === 0), 'and every one of them is emptied');
-    assert.ok(!ui.status.shown, 'the status bar goes away with the last change');
+    assert.ok(ui.status.shown, 'pending review remains discoverable in the status bar');
+    assert.strictEqual(ui.sessionFor(FILE).pendingCount, 1, 'closing is not acceptance');
 });
 
 test('FOCUSING A CHANGE NEVER TOUCHES THE SELECTION', async () => {
@@ -242,7 +260,7 @@ test('DECIDING ONE CHANGE MOVES TO THE NEXT', async () => {
     // long review feel long.
     const TWO = AGENT.replace('A second paragraph nobody is arguing about.',
         'A second paragraph somebody is arguing about.');
-    const { ui, posted } = makeUi({ docText: TWO });
+    const { ui, posted } = makeUi({ docText: TWO, mapView: movableMap({ generation: 1, y0: 20 }) });
     await ui.noteAgentChange({ file: FILE, baseText: BASE });
     const s = ui.sessionFor(FILE);
     assert.strictEqual(s.hunks.length, 2, 'the fixture really has two changes');
@@ -262,7 +280,7 @@ test('DECIDING ONE CHANGE MOVES TO THE NEXT', async () => {
 test('DECIDING THE LAST CHANGE DOES NOT LEAVE THE FOCUS NOWHERE', async () => {
     const TWO = AGENT.replace('A second paragraph nobody is arguing about.',
         'A second paragraph somebody is arguing about.');
-    const { ui } = makeUi({ docText: TWO });
+    const { ui } = makeUi({ docText: TWO, mapView: movableMap({ generation: 1, y0: 20 }) });
     await ui.noteAgentChange({ file: FILE, baseText: BASE });
     const s = ui.sessionFor(FILE);
     const [first, second] = s.hunks.map(h => h.id);
@@ -275,6 +293,28 @@ test('DECIDING THE LAST CHANGE DOES NOT LEAVE THE FOCUS NOWHERE', async () => {
     assert.strictEqual(ui.sessionFor(FILE), null, 'and deciding the last one ends the review');
 });
 
+test('DECIDING A CHANGE NEVER AUTO-SCROLLS TO A DISTANT PAGE', async () => {
+    const TWO = AGENT.replace('A second paragraph nobody is arguing about.',
+        'A second paragraph somebody is arguing about.');
+    const mapView = () => ({
+        generation: 1,
+        rowsFor: line => [{ page: line < 5 ? 2 : 18, x: 100, y: 40, w: 300, h: 10 }],
+        objectAtLine: () => null,
+        objectRects: () => [],
+        locate: () => null,
+    });
+    const { ui, posted } = makeUi({ docText: TWO, mapView });
+    await ui.noteAgentChange({ file: FILE, baseText: BASE });
+    const [first, second] = ui.sessionFor(FILE).hunks.map(h => h.id);
+    await ui.show(FILE, first);
+    posted.length = 0;
+    await ui.keep(FILE, first);
+    assert.strictEqual(ui.focused.has(FILE), false,
+        'the next distant correction is left for an explicit navigation gesture');
+    assert.ok(!posted.some(p => p && p.focus === second),
+        'the viewer was not told to jump across the paper');
+});
+
 test('KEEP removes exactly that change and leaves the document alone', async () => {
     const { ui } = makeUi();
     await ui.noteAgentChange({ file: FILE, baseText: BASE });
@@ -285,6 +325,17 @@ test('KEEP removes exactly that change and leaves the document alone', async () 
     assert.strictEqual(DOC.getText(), text, 'keeping changes no text');
     assert.strictEqual(ui.sessionFor(FILE), null, 'and the review is over');
     assert.strictEqual(editsApplied.length, 0, 'no edit was applied');
+});
+
+test('ACCEPT + COMMENT enters the shared paper comment stream before the hunk leaves', async () => {
+    const { ui, revisionComments } = makeUi();
+    await ui.noteAgentChange({ file: FILE, baseText: BASE, source: 'paper_applyEdit' });
+    const id = ui.sessionFor(FILE).hunks[0].id;
+    await ui.keepWithComment(FILE, id, 'Explain why the strip is the right domain.');
+    assert.strictEqual(revisionComments.length, 1);
+    assert.strictEqual(revisionComments[0].comment, 'Explain why the strip is the right domain.');
+    assert.strictEqual(revisionComments[0].id, id);
+    assert.strictEqual(ui.sessionFor(FILE), null, 'the reviewed hunk was still accepted');
 });
 
 test('UNDO applies ONE edit and puts the baseline text back', async () => {
@@ -597,6 +648,92 @@ test('A SECOND WRITE WHILE STILL DIRTY JOINS THE SAME LIST', async () => {
     // writes kept, which is what the list shows.
     assert.strictEqual(s.batches.length, 1);
     assert.strictEqual(s.batches[0].writes, 2);
+});
+
+// --- placement follows the render ------------------------------------------
+//
+// Rects are measured through ONE compile's render map. The comparison surface
+// has been re-placed on every new render since it was written; the review was
+// not, so its boxes kept the coordinates of a page that had already reflowed —
+// highlighting sitting beside its own text instead of on it. These are that
+// defect, stated as behaviour.
+
+test('the placement says which render it was measured against', async () => {
+    const map = { generation: 'gen-1', y0: 200 };
+    const { ui, posted } = makeUi({ mapView: movableMap(map) });
+    await ui.noteAgentChange({ file: FILE, baseText: BASE, source: 'disk' });
+    const last = posted[posted.length - 1];
+    assert.strictEqual(last.generation, 'gen-1');
+    const rects = last.groups[0].hunks[0].rects;
+    assert.ok(rects.length, 'the change is placed on the page');
+});
+
+test('a new render RE-PLACES the review instead of leaving it where the old page was', async () => {
+    const map = { generation: 'gen-1', y0: 200 };
+    const { ui, posted } = makeUi({ mapView: movableMap(map) });
+    await ui.noteAgentChange({ file: FILE, baseText: BASE, source: 'disk' });
+    const before = posted[posted.length - 1].groups[0].hunks[0].rects[0].y;
+
+    // The compile lands and the page reflows by 40bp — exactly what happens
+    // when a paragraph above the change grows a line.
+    map.generation = 'gen-2';
+    map.y0 = 240;
+    ui.refreshPlacement();
+    await new Promise(r => setTimeout(r, 120));
+
+    const last = posted[posted.length - 1];
+    assert.strictEqual(last.generation, 'gen-2', 'the placement names the new render');
+    const after = last.groups[0].hunks[0].rects[0].y;
+    assert.strictEqual(after - before, 40, `the boxes moved with the page (${before} -> ${after})`);
+});
+
+test('without the re-placement the boxes would still describe the old page', async () => {
+    // The ablation: the same reflow with nothing asking the question again.
+    const map = { generation: 'gen-1', y0: 200 };
+    const { ui, posted } = makeUi({ mapView: movableMap(map) });
+    await ui.noteAgentChange({ file: FILE, baseText: BASE, source: 'disk' });
+    const before = posted[posted.length - 1].groups[0].hunks[0].rects[0].y;
+    map.generation = 'gen-2';
+    map.y0 = 240;
+    await new Promise(r => setTimeout(r, 120));
+    const last = posted[posted.length - 1];
+    assert.strictEqual(last.groups[0].hunks[0].rects[0].y, before,
+        'nothing re-placed it, so it is stale — and it still claims gen-1');
+    assert.strictEqual(last.generation, 'gen-1',
+        'which is exactly what lets the panel refuse to draw it');
+});
+
+test('one compile fires several coordinator events and costs ONE re-placement', async () => {
+    const map = { generation: 'gen-1', y0: 200 };
+    let asked = 0;
+    const inner = movableMap(map);
+    const { ui } = makeUi({ mapView: (f) => { asked++; return inner(f); } });
+    await ui.noteAgentChange({ file: FILE, baseText: BASE, source: 'disk' });
+    const baseline = asked;
+    map.generation = 'gen-2';
+    for (let i = 0; i < 5; i++) ui.refreshPlacement();
+    await new Promise(r => setTimeout(r, 120));
+    assert.strictEqual(asked - baseline, 1, `re-diffed ${asked - baseline} times for one compile`);
+});
+
+test('re-placing with no review open does nothing at all', async () => {
+    const map = { generation: 'gen-1', y0: 200 };
+    let asked = 0;
+    const inner = movableMap(map);
+    const { ui, posted } = makeUi({ mapView: (f) => { asked++; return inner(f); } });
+    ui.refreshPlacement();
+    await new Promise(r => setTimeout(r, 120));
+    assert.strictEqual(asked, 0);
+    assert.strictEqual(posted.length, 0);
+});
+
+test('a paper that will not compile has no placement, and says so rather than guessing', async () => {
+    const { ui, posted } = makeUi({ mapView: () => ({}) });
+    await ui.noteAgentChange({ file: FILE, baseText: BASE, source: 'disk' });
+    const last = posted[posted.length - 1];
+    assert.strictEqual(last.generation, null, 'no render, no generation');
+    assert.strictEqual(last.groups[0].hunks[0].rects.length, 0, 'and no boxes to be wrong about');
+    assert.strictEqual(last.pending, 1, 'the change is still on the list');
 });
 
 (async () => {

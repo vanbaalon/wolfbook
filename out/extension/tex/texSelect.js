@@ -17,7 +17,7 @@ const { visibleProjection } = require('./texWords');
 /** Kinds that are containers in their own right, not annotations on one. */
 const CONTAINER_KINDS = new Set([
     'display-equation', 'figure', 'table', 'tabular', 'theorem', 'verbatim',
-    'list', 'itemize', 'enumerate', 'align', 'environment', 'abstract',
+    'list', 'itemize', 'enumerate', 'align', 'environment', 'abstract', 'titlepage',
 ]);
 
 /** Never a step of their own — they annotate whatever encloses them. */

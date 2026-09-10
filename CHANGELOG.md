@@ -4,7 +4,7 @@ All notable changes to **Wolfbook** are documented here.
 
 ---
 
-## [Unreleased]
+## [2.10.0] - 2026-09-10
 
 ### Fixed
 

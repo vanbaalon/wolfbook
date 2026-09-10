@@ -35,6 +35,44 @@ Module._load = originalLoad;
     await server._runManagedToolCall({ name: 'wolfbook_runCell', arguments: {} }, 'session-a');
     assert.match(dispatchedId, /^[0-9a-f-]{36}$/);
 
+    // JSON-RPC cancellation must abort the execution UUID already dispatched
+    // for that request. Background operations remain intentionally detached.
+    const cancelling = new WolframMCPServer(new Map(), [], { waitMs: 1000, leaseMs: 1000 });
+    let finishOriginal;
+    const cancelCalls = [];
+    cancelling._dispatch = async (_method, params) => {
+        if (params.name === 'wolfbook_cancelOperation') {
+            cancelCalls.push(params.arguments);
+            return { content: [{ type: 'text', text: 'cancelled' }], isError: false };
+        }
+        return new Promise(resolve => { finishOriginal = resolve; });
+    };
+    const running = cancelling._runManagedToolCall(
+        { name: 'wolfbook_runCell', arguments: { client_id: 'primary', kernel_id: 'k-3' } },
+        'cancel-session', 41
+    );
+    await new Promise(resolve => setImmediate(resolve));
+    const cancelled = await cancelling._cancelManagedRequest('cancel-session', 41, 'permission rejected');
+    assert(cancelled);
+    assert.strictEqual(cancelCalls.length, 1);
+    assert.match(cancelCalls[0].operation_id, /^[0-9a-f-]{36}$/);
+    assert.strictEqual(cancelCalls[0].client_id, 'primary');
+    assert.strictEqual(cancelCalls[0].kernel_id, 'k-3');
+    assert.strictEqual(cancelCalls[0].reason, 'permission rejected');
+    finishOriginal({ content: [{ type: 'text', text: 'aborted' }], isError: false });
+    await running;
+
+    const detached = new WolframMCPServer(new Map(), [], { waitMs: 1000, leaseMs: 1000 });
+    let finishDetached;
+    detached._dispatch = async () => new Promise(resolve => { finishDetached = resolve; });
+    const background = detached._runManagedToolCall(
+        { name: 'wolfbook_runCell', arguments: { wait_mode: 'async' } }, 'background-session', 'bg-1'
+    );
+    await new Promise(resolve => setImmediate(resolve));
+    assert.strictEqual(await detached._cancelManagedRequest('background-session', 'bg-1', 'disconnect'), false);
+    finishDetached({ content: [{ type: 'text', text: 'accepted' }], isError: false });
+    await background;
+
     // A fresh untargeted session discovers an execution UUID on worker windows.
     const discovery = new WolframMCPServer(new Map(), []);
     discovery._ownClientId = 'primary';
@@ -66,7 +104,10 @@ Module._load = originalLoad;
 
     // Client discovery normalizes duplicate paths, and a new registration
     // generation atomically replaces stale details for the same client ID.
-    const clients = new WolframMCPServer(new Map(), []);
+    const notebookNotices = [];
+    const clients = new WolframMCPServer(new Map(), [], {
+        notebookNotifier: event => notebookNotices.push(event),
+    });
     clients.setOwnClientInfo('primary', ['/Tmp/A.wb', '/tmp/a.wb/', '/tmp/B.wb'], 'Primary workspace');
     // registeredAt must be fresh: _buildClientList now prunes workers whose
     // heartbeat is stale (dead windows used to stay listed forever).
@@ -105,6 +146,9 @@ Module._load = originalLoad;
     assert.strictEqual(targetEvents[0].workspace, 'Primary workspace');
     assert.strictEqual(targetEvents[0].payload.targetClientId, 'primary');
     assert.strictEqual(targetEvents[0].payload.targetWorkspace, 'Primary workspace');
+    assert.deepStrictEqual(notebookNotices, [{ notebook: 'B.wb', kind: 'switched' }]);
+    clients._handleSetTarget({ client_id: 'primary', notebook: 'B.wb' }, 'kernel-session');
+    assert.strictEqual(notebookNotices.length, 1, 'reselecting the same notebook is not a switch');
     clients._sessions.set('kernel-session', {});
     clients._sessionConnectedAt.set('kernel-session', 12345);
     const liveSession = clients._buildSessionList()[0];
@@ -112,6 +156,21 @@ Module._load = originalLoad;
     assert.strictEqual(liveSession.hostWorkspace, 'Primary workspace');
     assert.strictEqual(liveSession.targetClientId, 'primary');
     assert.strictEqual(liveSession.notebook, 'B.wb');
+
+    // Two sessions may deliberately share a kernel, but it is never silent:
+    // targeting warns and client discovery exposes the attachment count.
+    clients._sessionClientNames.set('second-session', 'Roo Code');
+    const sharedReply = clients._handleSetTarget({ client_id: 'primary', notebook: 'Other.wb' }, 'second-session');
+    // Other.wb is not in the provider, so explicitly model another target on K1.
+    clients._sessionTargets.set('second-session', {
+        clientId: 'primary', notebook: 'Other.wb', kernelId: 'k-one', ts: Date.now()
+    });
+    const warnedReply = clients._handleSetTarget({ client_id: 'primary', notebook: 'B.wb', force: true }, 'third-session');
+    assert.match(warnedReply.content[0].text, /also attached|share definitions/i);
+    const sharedKernel = clients._buildClientList()[0].kernels[0];
+    assert.strictEqual(sharedKernel.attached_sessions, 2);
+    assert.strictEqual(sharedKernel.shared_by_multiple_sessions, true);
+    assert(sharedReply);
     clients.setKernelProvider(() => [{
         kernel_id: 'k-two', kernel_label: 'K2', lifecycle: 'idle', notebooks: ['/tmp/B.wb']
     }]);
@@ -123,6 +182,24 @@ Module._load = originalLoad;
     assert.strictEqual(envelope.truncated, true);
     assert.strictEqual(envelope.kernel_id, 'k-bounded');
     assert.strictEqual(bounded._resultStore.get(envelope.result_handle, 4090, 20).data.length, 20);
+
+    // Canonical MCP responses keep JSON out of duplicate text blocks while
+    // retaining it under structuredContent.
+    const canonical = bounded._finalizeToolResult({ content: [{ type: 'text', text: JSON.stringify({
+        ok: true, state: 'completed', message: 'Found two cells.', notebook_revision: 7,
+        match_count: 2
+    }) }], isError: false }, 'wolfbook_searchCells', 's');
+    assert.strictEqual(canonical.content[0].text, 'Found two cells.');
+    assert.strictEqual(canonical.structuredContent.data.match_count, 2);
+    assert.strictEqual(canonical.structuredContent.notebookRevision, 7);
+
+    // Explicit notebook resolution is deterministic and detects duplicate
+    // basenames rather than silently following a sticky target.
+    clients._ownNotebooks = ['/tmp/one/Same.wb'];
+    clients._workers.set('worker-two', { port: 31003, pid: process.pid,
+        notebooks: ['/tmp/two/Same.wb'], registeredAt: Date.now() });
+    assert.strictEqual(clients._findClientsByNotebook('/tmp/one/Same.wb').length, 1);
+    assert.strictEqual(clients._findClientsByNotebook('Same.wb').length, 2);
 
     console.log('transport operation tests: OK');
 })().catch(err => { console.error(err); process.exit(1); });

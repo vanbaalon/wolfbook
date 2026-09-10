@@ -36,8 +36,10 @@ try {
 
 const store = new McpResultStore({ maximum: 2, ttlMs: 10000 });
 const envelope = store.envelope('abcdefghijklmnopqrstuvwxyz', 5, 'text', { kernel_id: 'k-test' });
-assert.deepStrictEqual(Object.keys(envelope), ['preview', 'truncated', 'total_chars', 'result_handle', 'expires_at', 'format', 'kernel_id']);
+assert.deepStrictEqual(Object.keys(envelope), ['preview', 'truncated', 'total_chars', 'returned_chars', 'summary', 'result_handle', 'expires_at', 'format', 'kernel_id']);
 assert.strictEqual(envelope.preview, 'abcde');
+assert.strictEqual(envelope.returned_chars, 5);
+assert.strictEqual(envelope.summary.type, 'text');
 assert.strictEqual(store.get(envelope.result_handle, 5, 4).data, 'fghi');
 assert.strictEqual(store.get(envelope.result_handle, 0, 4).kernel_id, 'k-test');
 const json = store.put('{"a":1}', 'text', { kernel_id: 'k-json' });

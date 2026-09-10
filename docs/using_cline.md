@@ -61,7 +61,7 @@ Wolfbook runs an **MCP server** inside VS Code on port 27182. Cline connects to 
 
 ### Automatic setup (recommended)
 
-Wolfbook configures Cline automatically when VS Code starts, **if Cline is already installed**. After installing both extensions:
+Wolfbook configures Cline automatically when VS Code starts, **if Cline is already installed**, and installs its routing skill at `~/.cline/skills/wolfbook/`. After installing both extensions:
 
 1. Reload the VS Code window (`⌘⇧P` → **Reload Window**)
 2. Open the Cline panel → **MCP Servers** icon — you should see **wolfbook** listed
@@ -118,6 +118,7 @@ Substituting the paths from Steps 1 and 2.
 1. Reload the VS Code window
 2. Open the Cline panel → **MCP Servers** icon
 3. You should see **wolfbook** listed as a connected server with all tools visible
+4. In Cline's Skills menu, confirm that **wolfbook** is enabled
 
 > **Note:** Wolfbook's MCP server starts a few seconds after VS Code loads. The stdio bridge waits automatically — no manual retry needed.
 

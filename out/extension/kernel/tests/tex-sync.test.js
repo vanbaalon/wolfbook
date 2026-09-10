@@ -33,7 +33,16 @@ class Range {
         this.end = typeof a === 'object' ? b : new Position(c, d);
     }
 }
-class Selection extends Range {}
+class Selection extends Range {
+    constructor(anchor, active) {
+        const forward = anchor.line < active.line ||
+            (anchor.line === active.line && anchor.character <= active.character);
+        super(forward ? anchor : active, forward ? active : anchor);
+        this.anchor = anchor;
+        this.active = active;
+        this.isEmpty = anchor.line === active.line && anchor.character === active.character;
+    }
+}
 stub.Position = Position;
 stub.Range = Range;
 stub.Selection = Selection;
@@ -248,6 +257,143 @@ test('a cursor in prose posts a highlight naming the word', async () => {
     assert.strictEqual(h.word, 'wavefunction');
     assert.strictEqual(h.glyph, false, 'prose is not glyph-mode');
     assert.ok(h.rects.length, 'with rects');
+});
+
+test('typing pauses tracing until the matching page is visible', async () => {
+    const v = makeViewer(null);
+    v.syncFromEditor(editorAt(5, LINES[4].indexOf('wavefunction')));
+    assert.ok(v.posted.some(p => p.type === 'highlight' && p.rects.length),
+        'the current page traces normally');
+
+    v.posted.length = 0;
+    assert.strictEqual(v.noteSourceChanged(doc), true);
+    const paused = v.posted.find(p => p.type === 'traceState');
+    assert.ok(paused && paused.paused, 'the viewer is told it is behind immediately');
+    assert.strictEqual(paused.source, 'editor');
+
+    v.posted.length = 0;
+    v.syncFromEditor(editorAt(5, LINES[4].indexOf('transformed')));
+    assert.ok(!v.posted.some(p => p.type === 'highlight'),
+        'selection events do not search the stale PDF text layer');
+
+    v._setTracePaused(false);
+    v.posted.length = 0;
+    v.syncFromEditor(editorAt(5, LINES[4].indexOf('transformed')));
+    assert.ok(v.posted.some(p => p.type === 'highlight' && p.word === 'transformed'),
+        'tracing returns after the page catches up');
+});
+
+test('typing in the card names the mini-editor in the lag indicator', async () => {
+    const v = makeViewer(null);
+    v._miniApplyingFile = FILE;
+    v.noteSourceChanged(doc);
+    const paused = v.posted.find(p => p.type === 'traceState');
+    assert.ok(paused && paused.paused);
+    assert.strictEqual(paused.source, 'mini-editor');
+});
+
+test('a mini-editor rebuild redraws its own caret without moving the page', async () => {
+    const mdoc = new MutableDoc(SRC, FILE);
+    const oldOpen = stub.workspace.openTextDocument;
+    const oldActive = stub.window.activeTextEditor;
+    const oldVisible = stub.window.visibleTextEditors;
+    stub.workspace.openTextDocument = async () => mdoc;
+    stub.window.activeTextEditor = editorAt(20, 0); // stale source caret, many pages away in a real paper
+    stub.window.visibleTextEditors = [];
+    try {
+        const v = makeViewer(null);
+        const start = mdoc.offsetAt(new Position(4, 0));
+        const end = mdoc.offsetAt(new Position(4, LINES[4].length));
+        v._edit = { id: 91, file: FILE, startOffset: start, endOffset: end, lastText: LINES[4] };
+        v._lastEditCaret = { type: 'editCaret', editId: 91, start: 8, end: 8, direction: 'forward' };
+        const synced = [];
+        v.syncFromEditor = (editor, opts) => synced.push({ editor, opts });
+        await v._resumeTracing({ instant: true, source: 'mini-editor' });
+        assert.strictEqual(synced.length, 1, 'one caret answer is redrawn');
+        assert.strictEqual(synced[0].editor.selection.active.line, 4,
+            'the card caret wins over the stale ordinary editor caret');
+        assert.strictEqual(synced[0].opts.preserveView, true,
+            'redrawing after a rebuild is explicitly forbidden from navigating');
+    } finally {
+        stub.workspace.openTextDocument = oldOpen;
+        stub.window.activeTextEditor = oldActive;
+        stub.window.visibleTextEditors = oldVisible;
+    }
+});
+
+test('FULL VIEWER RESTART REDRAWS THE SAVED SOURCE CARET WITHOUT SHOWING AN EDITOR', async () => {
+    const oldActive = stub.window.activeTextEditor;
+    const oldVisible = stub.window.visibleTextEditors;
+    const oldOpen = stub.workspace.openTextDocument;
+    stub.window.activeTextEditor = undefined;
+    stub.window.visibleTextEditors = [];
+    let opened = 0;
+    stub.workspace.openTextDocument = async () => { opened++; return doc; };
+    try {
+        const v = makeViewer(null);
+        v._viewState = {
+            cursor: {
+                file: FILE,
+                anchor: { line: 4, character: 13 },
+                active: { line: 4, character: 13 },
+            },
+        };
+        const answers = [];
+        v.syncFromEditor = (editor, opts) => { if (editor) answers.push({ editor, opts }); };
+        await v._resumeTracing({ instant: true, preserveView: true });
+        assert.strictEqual(opened, 1, 'the source is read, not revealed');
+        assert.strictEqual(stub.window.visibleTextEditors.length, 0, 'full-view layout remains intact');
+        assert.strictEqual(answers.length, 1, 'the saved caret gets one real answer');
+        assert.strictEqual(answers[0].editor.selection.active.line, 4);
+        assert.strictEqual(answers[0].editor.selection.active.character, 13);
+        assert.deepStrictEqual(answers[0].opts, { instant: true, preserveView: true });
+    } finally {
+        stub.window.activeTextEditor = oldActive;
+        stub.window.visibleTextEditors = oldVisible;
+        stub.workspace.openTextDocument = oldOpen;
+    }
+});
+
+test('UNSAVED SOURCE STAYS DISTINCT FROM PAGE LAG AND THE BADGE SAVES EVERY INCLUDE', async () => {
+    const v = makeViewer(null);
+    const oldDocs = stub.workspace.textDocuments;
+    let saves = 0;
+    const dirty = (fsPath) => {
+        const d = { ...makeDoc(), uri: { fsPath, scheme: 'file', path: fsPath }, isDirty: true };
+        d.save = async () => { saves++; d.isDirty = false; return true; };
+        return d;
+    };
+    const main = dirty(FILE);
+    const include = dirty('/paper/section.tex');
+    stub.workspace.textDocuments = [main, include];
+    try {
+        v.posted.length = 0;
+        assert.strictEqual(v.noteSourceChanged(main), true);
+        const disk = v.posted.find(p => p.type === 'sourceDirty');
+        assert.ok(disk && disk.dirty);
+        assert.strictEqual(disk.count, 2);
+        assert.deepStrictEqual(disk.files, ['main.tex', 'section.tex']);
+        assert.ok(v.posted.some(p => p.type === 'traceState' && p.paused),
+            'page lag is still reported independently');
+
+        v.posted.length = 0;
+        await v._onMessage({ type: 'saveSource' });
+        assert.strictEqual(saves, 2);
+        const clean = v.posted.filter(p => p.type === 'sourceDirty').pop();
+        assert.ok(clean && !clean.dirty && clean.count === 0);
+        assert.ok(v.posted.some(p => p.type === 'status' && /saved 2 sources/.test(p.text)));
+    } finally {
+        stub.workspace.textDocuments = oldDocs;
+    }
+});
+
+test('a stale page does not inverse-trace into changed source', async () => {
+    const v = makeViewer({ file: FILE, line: 5, flag: FLAG.FRESH });
+    v.noteSourceChanged(doc);
+    selected = null; revealed = null;
+    await v._jumpToSource({ page: 1, xBp: 110, yTopBp: 500, word: 'wavefunction' });
+    assert.strictEqual(selected, null);
+    assert.strictEqual(revealed, null);
 });
 
 test('a cursor on a MACRO in an equation posts its printed glyph', async () => {
@@ -897,36 +1043,36 @@ test('A WIDENED Cmd-CLICK IS SHOWN AS A SELECTION ON THE PAGE', async () => {
         'and the editor holds the same widened range');
 });
 
-test('A HINT IS OFFERED THREE TIMES PER SESSION, AND THE COUNT OUTLIVES THE PANEL', async () => {
-    // Reported: the page's tooltip and the label badge's are "kind of
-    // annoying" after they have been read. The panel spends the budget and
-    // says so; the count lives in the extension, so closing and reopening the
-    // paper does not hand the reader the same three lessons again.
+test('THE LOCAL LABEL HINT IS OFFERED THREE TIMES, AND THE COUNT OUTLIVES THE PANEL', async () => {
+    // The general page gestures live in the guide and therefore have no page-
+    // wide tooltip. The small label badge still teaches its local copy gesture;
+    // its count lives in the extension so reopening the paper does not reset it.
     const v = makeViewer();
     v.posted.length = 0;
     await v._onMessage({ type: 'ready' });
     const first = v.posted.find(p => p.type === 'hints');
     assert.ok(first, 'a panel is told what is left');
-    const start = first.left.pages;
+    assert.strictEqual(first.left.pages, undefined, 'there is no general page hint');
+    const start = first.left.chip;
     assert.ok(start > 0, `and starts with some (got ${start})`);
 
-    await v._onMessage({ type: 'hintShown', id: 'pages' });
-    await v._onMessage({ type: 'hintShown', id: 'pages' });
+    await v._onMessage({ type: 'hintShown', id: 'chip' });
+    await v._onMessage({ type: 'hintShown', id: 'chip' });
 
     // A NEW panel — the reader closed the paper and opened it again.
     const v2 = makeViewer();
     v2.posted.length = 0;
     await v2._onMessage({ type: 'ready' });
     const again = v2.posted.find(p => p.type === 'hints');
-    assert.strictEqual(again.left.pages, start - 2,
+    assert.strictEqual(again.left.chip, start - 2,
         'the count is where the reader left it, not back at the beginning');
 
     // Spent means spent.
-    for (let i = 0; i < start; i++) await v2._onMessage({ type: 'hintShown', id: 'pages' });
+    for (let i = 0; i < start; i++) await v2._onMessage({ type: 'hintShown', id: 'chip' });
     const v3 = makeViewer();
     v3.posted.length = 0;
     await v3._onMessage({ type: 'ready' });
-    assert.strictEqual(v3.posted.find(p => p.type === 'hints').left.pages, 0,
+    assert.strictEqual(v3.posted.find(p => p.type === 'hints').left.chip, 0,
         'and never goes below nothing');
 });
 
@@ -1278,6 +1424,19 @@ test('the mini-editor round trip: open, type, no echo, editor change flows back'
         await v._onMessage({ type: 'editCaret', editId: eo.editId, start: 99999, end: 99999 });
         assert.ok(v._edit, 'a nonsense offset is clamped, not thrown on');
 
+        // Ctrl+S is one ordered operation: its CURRENT card text is applied,
+        // then TextDocument.save writes the entire file to disk.
+        let disk = null;
+        mdoc.save = async () => { disk = mdoc.getText(); return true; };
+        v.posted.length = 0;
+        const savedBlock = '\\[\n  E = saved\\,now\n\\]';
+        await v._onMessage({ type: 'editSave', editId: eo.editId, text: savedBlock });
+        assert.ok(disk && disk.includes(savedBlock), 'the newest card text reached disk');
+        assert.ok(disk.includes('\\documentclass') && disk.includes('\\end{document}'),
+            'the complete backing file was saved, not a block-sized fragment');
+        assert.ok(v.posted.find(p => p.type === 'status' && /saved/.test(p.text)),
+            'the reader is told that the file was saved');
+
         // Closing forgets the session.
         await v._onMessage({ type: 'editClose', editId: eo.editId });
         assert.strictEqual(v._edit, null);
@@ -1457,6 +1616,58 @@ test('a right-click ALSO puts the caret where it was clicked', async () => {
     }
 });
 
+test('TYPE-TO-EDIT CARRIES ONE REQUEST THROUGH THE CARD AND EXACT CARET', async () => {
+    const mdoc = new MutableDoc(SRC, FILE);
+    const oldOpen = stub.workspace.openTextDocument;
+    stub.workspace.onDidChangeTextDocument = () => ({ dispose() {} });
+    stub.workspace.openTextDocument = async () => mdoc;
+    try {
+        const v = makeViewer({ file: FILE, line: 5, flag: FLAG.FRESH, object: null },
+            { file: FILE, line: 5, dx: 2 });
+        await v._onMessage({
+            type: 'editHere', typingRequest: 41,
+            page: 1, xBp: 100, yTopBp: 500,
+            word: 'wavefunction', rowFraction: 0.45,
+        });
+        const eo = v.posted.find(p => p.type === 'editOpen');
+        const sel = v.posted.find(p => p.type === 'editSelect');
+        assert.ok(eo && sel, 'typing opens a card and resolves its caret');
+        assert.strictEqual(eo.typingRequest, 41);
+        assert.strictEqual(sel.typingRequest, 41,
+            'the client can insert only after the matching caret arrives');
+        assert.strictEqual(sel.editId, eo.editId);
+        assert.ok(Number.isFinite(sel.caret), 'ordinary prose supplies a collapsed caret');
+    } finally {
+        stub.workspace.openTextDocument = oldOpen;
+    }
+});
+
+test('TYPE-TO-EDIT ON BLANK PAPER COLLAPSES TO A LINE END, NEVER THE WHOLE LINE', async () => {
+    const mdoc = new MutableDoc(SRC, FILE);
+    const oldOpen = stub.workspace.openTextDocument;
+    stub.workspace.onDidChangeTextDocument = () => ({ dispose() {} });
+    stub.workspace.openTextDocument = async () => mdoc;
+    try {
+        const v = makeViewer({ file: FILE, line: 5, flag: FLAG.FRESH, object: null },
+            { file: FILE, line: 5, dx: 2 });
+        const map = v.coord.roots.get(FILE).map;
+        map.lineRows = () => [{ page: 1, x: 100, y: 490, w: 200, h: 15 }];
+        await v._onMessage({
+            type: 'editHere', typingRequest: 42,
+            page: 1, xBp: 350, yTopBp: 500,
+        });
+        const eo = v.posted.find(p => p.type === 'editOpen');
+        const sel = v.posted.find(p => p.type === 'editSelect');
+        assert.ok(eo && sel && Number.isFinite(sel.caret));
+        assert.strictEqual(sel.start, 0);
+        assert.strictEqual(sel.end, eo.text.length, 'the card may mark the block');
+        assert.strictEqual(sel.caret, eo.text.length,
+            'but typing after its printed row lands at the end, not over the block');
+    } finally {
+        stub.workspace.openTextDocument = oldOpen;
+    }
+});
+
 test('a right-click on PROSE opens the paragraph, not a container', async () => {
     const mdoc = new MutableDoc(SRC, FILE);
     const oldOpen = stub.workspace.openTextDocument;
@@ -1625,6 +1836,7 @@ test('focusing a hunk moves the editor AND tells the page', async () => {
 test('a healthy viewer is kept when a review change is opened', async () => {
     const v = makeViewer(null, { file: FILE, line: 5, dx: 2 });
     v.shownGeneration = 7;
+    v._openedGeneration = 7;
     let html = 'the live viewer';
     Object.defineProperty(v.panel.webview, 'html', {
         get: () => html, set: value => { html = value; }, configurable: true,
@@ -1646,6 +1858,7 @@ test('a healthy viewer is kept when a review change is opened', async () => {
 test('a dead or stale viewer is recreated before a review change is focused', async () => {
     const v = makeViewer(null, { file: FILE, line: 5, dx: 2 });
     v.shownGeneration = 8;
+    v._openedGeneration = 8;
     let html = 'stale viewer';
     Object.defineProperty(v.panel.webview, 'html', {
         get: () => html, set: value => { html = value; }, configurable: true,
@@ -1665,6 +1878,101 @@ test('a dead or stale viewer is recreated before a review change is focused', as
     assert.strictEqual(html, '<fresh viewer>', 'the webview document — and therefore its worker — is replaced');
     assert.strictEqual(v.shownGeneration, null, 'the replacement must receive current PDF bytes');
     assert.strictEqual(v._viewerReloading, true, 'recovery remains active until the replacement reports opened');
+});
+
+test('A REVIEW CLICK WAITS FOR ITS PDF AND REPLAYS WITH FRESH RECTANGLES', () => {
+    const v = makeViewer(null, { file: FILE, line: 5, dx: 2 });
+    v._openedGeneration = 7;
+    const old = { id: 'h1', page: 2, rects: [{ page: 2, x: 10, y: 20, w: 30, h: 8 }] };
+    assert.strictEqual(v.focusReviewHunk(old, 8), false,
+        'coordinates for generation 8 cannot navigate generation 7');
+    assert.ok(!v.posted.some(m => m.type === 'reviewFocus'));
+    assert.ok(v.posted.some(m => m.type === 'status' && m.kind === 'busy'),
+        'the reader is told why the click is waiting');
+
+    v.showReview({
+        pending: 1, focus: 'h1', generation: 8,
+        groups: [{ hunks: [{ ...old, page: 4,
+            rects: [{ page: 4, x: 50, y: 90, w: 100, h: 12 }] }] }],
+    });
+    assert.ok(!v.posted.some(m => m.type === 'reviewFocus'),
+        'a fresh placement still waits until its matching PDF is open');
+
+    v._openedGeneration = 8;
+    assert.strictEqual(v._replayReviewFocus(), true);
+    const focus = v.posted.filter(m => m.type === 'reviewFocus').pop();
+    assert.strictEqual(focus.generation, 8);
+    assert.strictEqual(focus.page, 4);
+    assert.strictEqual(focus.rects[0].y, 90,
+        'the replay uses the re-placed hunk, never the geometry captured at click time');
+    const cleared = v.posted.filter(m => m.type === 'status').pop();
+    assert.strictEqual(cleared.text, '', 'the waiting spinner is cleared when navigation lands');
+    assert.strictEqual(v._replayReviewFocus(), false,
+        'an ordinary later recompile cannot scroll the reader again');
+});
+
+test('A RESTARTED VIEWER RE-PLACES EVERY REVIEW, EVEN WITHOUT A FOCUSED HUNK', async () => {
+    const v = makeViewer(null, { file: FILE, line: 5, dx: 2 });
+    let placed = 0;
+    v._review = { refreshPlacement: () => { placed++; } };
+    v._resumeTracing = async () => {};
+    v._restoreEditSession = async () => {};
+    v._postEditAnchor = async () => {};
+    v._postSections = async () => {};
+    v._pushComments = () => {};
+    await v._onMessage({ type: 'opened', generation: 1, pdfHash: 'same-pdf' });
+    assert.strictEqual(placed, 1,
+        'new canvases always get freshly measured review rectangles');
+});
+
+test('TEXT-LAYER COMPLETION RESTORES EXACT FORWARD SEARCH AFTER VIEWER RESTART', async () => {
+    const v = makeViewer(null, { file: FILE, line: 5, dx: 2 });
+    v._openedGeneration = 1;
+    v._objMaps.set('stale partial alignment', {});
+    let resumed = null;
+    v._resumeTracing = async (opts) => { resumed = opts; };
+    await v._onMessage({ type: 'textLayerDone', generation: '1', pages: 1, ms: 4 });
+    assert.strictEqual(v._objMaps.size, 0,
+        'partial alignments cannot survive completion of the glyph sweep');
+    assert.deepStrictEqual(resumed, { instant: true, preserveView: true },
+        'the caret/search answer is rebuilt without scrolling the paper');
+});
+
+test('A NEW PDF HIDES OLD REVIEW GEOMETRY UNTIL THE HOST RE-PLACES IT', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const client = fs.readFileSync(
+        path.join(__dirname, '..', '..', '..', 'client', 'tex-viewer.js'), 'utf8');
+    assert.match(client,
+        /if \(state\.review\) state\.review = \{ \.\.\.state\.review, generation: null \}/,
+        'old rectangles must not be painted on restarted canvases');
+    assert.match(client,
+        /generation: state\.generation, \.\.\.extra/,
+        'inverse-search clicks name the PDF generation under the pointer');
+});
+
+test('A SOURCE-AHEAD REVIEW HAS NO STALE PAGE PLACEMENT', () => {
+    const v = makeViewer(null, { file: FILE, line: 5, dx: 2 });
+    const st = v.coord.roots.get(FILE);
+    st.sourceAhead = true;
+    const map = v._reviewMap(st, FILE);
+    assert.strictEqual(map.generation, null);
+    assert.strictEqual(map.rowsFor, undefined,
+        'the previous render rows are withheld while the changed source compiles');
+    assert.strictEqual(typeof map.objectAtLine, 'function',
+        'semantic grouping remains available in the review list');
+});
+
+test('AN IDENTICAL PDF REUSES THE ACKNOWLEDGED REVIEW GENERATION', () => {
+    const v = makeViewer(null, { file: FILE, line: 5, dx: 2 });
+    const st = v.coord.roots.get(FILE);
+    st.generation = { ...st.generation, generation: 9, pdfHash: 'same-ink' };
+    v._openedGeneration = 8;
+    v._openedPdfHash = 'same-ink';
+    const map = v._reviewMap(st, FILE);
+    assert.strictEqual(map.generation, 8,
+        'no impossible generation mismatch is invented when no bytes were shipped');
+    assert.strictEqual(typeof map.rowsFor, 'function');
 });
 
 test('closing the comparison clears it on both sides', async () => {
@@ -1720,6 +2028,40 @@ test('FULL SCREEN SURVIVES an inverse click and a right-click', async () => {
         await v._jumpToSource({ page: 1, xBp: 100, yTopBp: 700, glyph: 'x', takeMe: true });
         assert.strictEqual(shown, 1, 'a double-click DOES reveal the editor');
         assert.strictEqual(v._fsActions, null, 'and leaves full screen');
+    } finally {
+        stub.window.showTextDocument = oldShow;
+        stub.workspace.openTextDocument = oldOpen;
+        stub.window.visibleTextEditors = undefined;
+    }
+});
+
+test('A RELOADED FULL-SCREEN VIEWER CLAIMS ITS STATE BEFORE THE FIRST RIGHT-CLICK', async () => {
+    // VS Code preserves the maximized group across reload, but the extension's
+    // old `_fsActions` array was process memory. Without reclaiming it, the
+    // first right-click called showTextDocument, which both opened column one
+    // and made VS Code leave the visually preserved full-screen layout.
+    const mdoc = new MutableDoc(SRC, FILE);
+    const oldShow = stub.window.showTextDocument;
+    const oldOpen = stub.workspace.openTextDocument;
+    stub.workspace.onDidChangeTextDocument = () => ({ dispose() {} });
+    stub.workspace.openTextDocument = async () => mdoc;
+    stub.window.visibleTextEditors = [];
+    let shown = 0;
+    stub.window.showTextDocument = async () => { shown++; return null; };
+    try {
+        const v = makeViewer({ file: FILE, line: 7, flag: FLAG.FRESH, object: eqObject() },
+            { file: FILE, line: 7, dx: 2 });
+        v._viewState = {
+            fullscreen: true,
+            fullscreenActions: ['workbench.action.toggleMaximizeEditorGroup'],
+        };
+        assert.strictEqual(v._claimRestoredFullScreen(), true);
+        assert.ok(v._fsActions, 'the preserved layout is recognised without toggling it');
+
+        await v._onMessage({ type: 'editHere', page: 1, xBp: 100, yTopBp: 700, glyph: 'x' });
+        assert.strictEqual(shown, 0, 'right-click never reveals the source editor');
+        assert.ok(v.posted.find(p => p.type === 'editOpen'), 'the mini-editor opens in the page');
+        assert.ok(v._fsActions, 'and full screen remains owned');
     } finally {
         stub.window.showTextDocument = oldShow;
         stub.workspace.openTextDocument = oldOpen;
@@ -3036,6 +3378,18 @@ test('paste replaces the selection and leaves the new text selected', async () =
         '\\alpha^2'.length);
 });
 
+test('typing replaces a page selection and leaves the caret after the character', async () => {
+    const { v, doc } = moveViewer(MOVE_SRC);
+    v._lastSelection = { file: '/paper/move.tex',
+        start: new Position(3, 2), end: new Position(3, 10) };     // "E = mc^2"
+    await v._onMessage({ type: 'selectionAction', action: 'replace', text: 'Q' });
+    assert.ok(doc.getText().includes('  Q'), `typed replacement: ${JSON.stringify(doc.getText())}`);
+    assert.ok(!doc.getText().includes('E = mc^2'), 'the selected source was replaced');
+    assert.strictEqual(v._lastSelection, null, 'the range becomes an ordinary caret');
+    assert.ok(v.posted.some(p => p.type === 'selection' && p.span === null),
+        'and the page selection is cleared');
+});
+
 test('paste with an empty clipboard changes nothing and says why', async () => {
     const { v, doc } = moveViewer(MOVE_SRC);
     const before = doc.getText();
@@ -3460,6 +3814,380 @@ test('THE PLACE IS REMEMBERED PER PAPER, AND SURVIVES THE PANEL', async () => {
     assert.strictEqual(v2._viewFor('/some/other.tex'), null, 'and only for that paper');
 });
 
+test('THE COMPLETE READING VIEW KEEPS EXACT SCROLL, ZOOM AND FIT MODE', async () => {
+    const mem = {};
+    const v = placeViewer(mem);
+    await v._onMessage({
+        type: 'viewstate', page: 7, frac: 0.42,
+        top: 6312.5, left: 84, scale: 1.875, fit: false, generation: 9,
+    });
+    assert.deepStrictEqual(v._viewFor(FILE), {
+        page: 7, frac: 0.42, top: 6312.5, left: 84,
+        scale: 1.875, generation: 9, fit: false,
+    });
+});
+
+test('A RECOMPILE RESTORES THE SOURCE CELL, NOT THE OLD PHYSICAL PAGE', async () => {
+    const mem = {};
+    const v = placeViewer(mem);
+    const st = v.coord.roots.get(FILE);
+    const oldObject = {
+        objectId: 'cell-reader', stableKey: 'paragraph:old', kind: 'paragraph',
+        label: null, sourceHash: 'same-source', normalizedHash: 'same-normalized',
+        sourceRange: { file: FILE, startLine: 20, endLine: 24 },
+    };
+    st.prevMap = {
+        available: true,
+        generation: { generation: 8 },
+        model: { objects: [oldObject] },
+        lineAtPoint: () => ({ file: FILE, line: 22 }),
+        objectAtLine: () => ({
+            objectId: oldObject.objectId, stableKey: oldObject.stableKey,
+            kind: oldObject.kind, startLine: 20, endLine: 24,
+        }),
+    };
+    st.map.generation = { generation: 9 };
+
+    v._rememberView(FILE, 3, 0.4, {
+        generation: 8, focusPage: 3, focusXBp: 180, focusYTopBp: 300,
+        focusViewportFrac: 0.37,
+    });
+    const saved = v._viewFor(FILE).viewCell;
+    assert.strictEqual(saved.objectId, 'cell-reader');
+    assert.strictEqual(saved.lineOffset, 2, 'the location within the cell is retained');
+
+    // Another editor inserted enough material above this paragraph to move it
+    // from page 3 to page 7. Identity/content survives even though its key and
+    // all of its physical coordinates changed.
+    v._commentObjects = () => [{
+        objectId: 'cell-reader', previousStableKey: 'paragraph:old', stableKey: 'paragraph:new',
+        kind: 'paragraph', sourceHash: 'same-source', normalizedHash: 'same-normalized',
+        sourceRange: { file: FILE, startLine: 80, endLine: 84 },
+    }];
+    let askedLine = null;
+    v.objectRects = (_file, a, b) => {
+        askedLine = a;
+        return a === b ? [{ page: 7, x: 90, y: 410, w: 350, h: 12 }] : [];
+    };
+    const place = v._viewCellPlacement(saved);
+    assert.strictEqual(askedLine, 82, 'the same within-cell line is located in new source');
+    assert.deepStrictEqual(place, {
+        page: 7, rects: [{ page: 7, x: 90, y: 410, w: 350, h: 12 }], viewportFrac: 0.37,
+    });
+});
+
+test('REFRESH REQUESTS A LAST-MOMENT VIEW SNAPSHOT', async () => {
+    const v = placeViewer({});
+    v._webviewReady = true;
+    v.shownAnything = true;
+    v.panel.webview.postMessage = (m) => {
+        v.posted.push(m);
+        if (m.type === 'requestViewState') setImmediate(() => v._onMessage({
+            type: 'viewstate', requestId: m.requestId, page: 2, frac: 0.25,
+            generation: 1, focusPage: 2, focusXBp: 120, focusYTopBp: 320,
+            focusViewportFrac: 0.35,
+        }));
+    };
+    const ok = await v._captureReaderView(250);
+    assert.strictEqual(ok, true);
+    assert.ok(v.posted.some(m => m.type === 'requestViewState'));
+    assert.strictEqual(v._viewState.page, 2, 'the reply replaced any stale debounced position');
+});
+
+test('THE SOURCE CURSOR IS SAVED AND RESTORED WITHOUT OPENING AN EDITOR', () => {
+    const mem = {};
+    const v = placeViewer(mem);
+    v.syncFromEditor(rangeAt(5, 3, 5, 14));
+    v._flushCursorState();
+    const saved = v._viewFor(FILE);
+    assert.deepStrictEqual(saved.cursor, {
+        file: FILE,
+        anchor: { line: 4, character: 3 },
+        active: { line: 4, character: 14 },
+    });
+
+    let restored = null;
+    const oldVisible = stub.window.visibleTextEditors;
+    stub.window.visibleTextEditors = [{
+        document: doc,
+        set selection(s) { restored = s; },
+        get selection() { return restored; },
+    }];
+    try {
+        const v2 = placeViewer(mem);
+        assert.strictEqual(v2._restoreCursor(saved), true);
+        assert.strictEqual(restored.start.line, 4);
+        assert.strictEqual(restored.start.character, 3);
+        assert.strictEqual(restored.end.character, 14);
+    } finally { stub.window.visibleTextEditors = oldVisible; }
+});
+
+test('A SECTION-HEADING COMMENT NEVER BORROWS THE TOP OF PAGE 1', () => {
+    const file = '/paper/heading-comment.tex';
+    const source = [
+        '\\begin{document}',
+        '\\paragraph{Where the Baxter equation comes from.}',
+        '',
+        'The residue of the resolvent determines the Baxter relation.',
+        '\\end{document}',
+    ].join('\n');
+    const model = buildModel(scanTex(source, { file }), { file });
+    const map = {
+        available: true,
+        lineRows: (_file, line) => line === 2
+            ? [{ page: 1, x: 0, y: 61.5, w: 72, h: 10 }]
+            : line === 4
+                ? [{ page: 7, x: 84, y: 312, w: 390, h: 13 }]
+                : [],
+        objectRenderBoxes: () => ({ rects: [] }),
+    };
+    const st = { map, generation: { generation: 1, pageCount: 9,
+        pageSize: { widthBp: 595.276 } } };
+    const v = new TexViewer({ extensionUri: { fsPath: '/ext' } },
+        { roots: new Map([[file, st]]) }, { get: () => ({ model }) });
+    v.root = file;
+    v._commentObjects = () => model.objects;
+    v._textOf = () => source;
+    assert.deepStrictEqual(v._commentRects(st, {
+        file, kind: 'section-heading', line: 2, endLine: 2,
+    }), [{ page: 7, x: 84, y: 312, w: 390, h: 13 }]);
+});
+
+test('TITLEPAGE AND ABSTRACT ARE COMMENT CELLS WITH VISIBLE FALLBACK ANCHORS', () => {
+    const file = '/paper/frontmatter.tex';
+    const source = [
+        '\\documentclass{article}',
+        '\\title[Short]{A title that appears on the composed title page}',
+        '\\author[a]{Ada Lovelace}',
+        '\\affiliation[a]{Analytical Engine Institute}',
+        '\\abstract{An abstract declared in the JHEP command style.}',
+        '\\begin{document}',
+        '\\maketitle',
+        '\\end{document}',
+    ].join('\n');
+    const frontDoc = new MutableDoc(source, file);
+    const frontModel = buildModel(scanTex(source, { file }), { file });
+    const map = {
+        available: true,
+        lineRows: (_file, line) => line === 5
+            ? [{ page: 1, x: 72, y: 180, w: 330, h: 24 }]
+            : line === 7
+                ? [{ page: 1, x: 72, y: 72, w: 330, h: 48 }]
+                : [],
+        objectRenderBoxes: () => ({ rects: [] }),
+        sourceToRender: () => ({ boxes: [], rects: [], flag: FLAG.FRESH }),
+    };
+    const st = { map, generation: { generation: 1, pageCount: 1 } };
+    const coord = { roots: new Map([[file, st]]), rootFor: () => file, stateFor: () => st };
+    const projection = { get: () => ({ model: frontModel }), fromText: () => frontModel };
+    const v = new TexViewer({ extensionUri: { fsPath: '/ext' } }, coord, projection);
+    v.root = file;
+    v._commentObjects = () => frontModel.objects;
+    v._textOf = () => source;
+
+    const title = v._commentObject(frontDoc, 2);
+    const abstract = v._commentObject(frontDoc, 5);
+    assert.strictEqual(title.kind, 'titlepage');
+    assert.strictEqual(abstract.kind, 'abstract');
+    assert.deepStrictEqual(v._commentRects(st, {
+        file, kind: 'titlepage', line: 2, endLine: 2,
+    }), [{ page: 1, x: 72, y: 72, w: 330, h: 48 }],
+    'stored title metadata borrows the visible maketitle anchor when SyncTeX files it there');
+    assert.strictEqual(v._commentRects(st, {
+        file, kind: 'abstract', line: 5, endLine: 5,
+    }).length, 1, 'the command-form abstract keeps its own visible row');
+
+    const wrappedSource = [
+        '\\begin{document}', '\\begin{titlepage}', '\\begin{center}',
+        'A manually composed title.', '\\end{center}',
+        '\\begin{abstract}', 'A nested abstract.', '\\end{abstract}',
+        '\\end{titlepage}', '\\end{document}',
+    ].join('\n');
+    const wrappedDoc = new MutableDoc(wrappedSource, file);
+    const wrappedModel = buildModel(scanTex(wrappedSource, { file }), { file });
+    v._commentObjects = () => wrappedModel.objects;
+    assert.strictEqual(v._commentObject(wrappedDoc, 4).kind, 'titlepage',
+        'a named title-page cell outranks its anonymous center wrapper');
+    assert.strictEqual(v._commentObject(wrappedDoc, 7).kind, 'abstract',
+        'the nested abstract remains the tighter semantic cell');
+});
+
+test('THE TWO-STATE LAYOUT IS PER PAPER, AND OLD AGENT LAYOUTS MIGRATE', async () => {
+    const mem = {};
+    const v = placeViewer(mem);
+    await v.setLayoutMode('viewer');
+    assert.strictEqual(v._viewFor(FILE).layoutMode, 'viewer');
+    assert.strictEqual(v._viewFor(FILE).fullscreen, true,
+        'the legacy flag still identifies the viewer-only state');
+
+    const v2 = placeViewer(mem);
+    v2._viewState = v2._viewFor(FILE);
+    let asked = null;
+    v2.setLayoutMode = async (mode, opts) => { asked = { mode, opts }; };
+    await v2._restoreSessionChrome();
+    assert.deepStrictEqual(asked, { mode: 'viewer', opts: { remember: false } });
+
+    v2._viewState = { layoutMode: 'viewerAgents', fullscreen: false };
+    await v2._restoreSessionChrome();
+    assert.deepStrictEqual(asked, { mode: 'all', opts: { remember: false } },
+        'the removed third state becomes editor + viewer on restore');
+});
+
+test('A RELOADED LAYOUT RESETS REAL GROUP SIZES BEFORE REAPPLYING FULL SCREEN', async () => {
+    const v = placeViewer({});
+    v._viewState = { layoutMode: 'viewer', fullscreen: true };
+    v._restoringPanel = true;
+    assert.strictEqual(v._claimRestoredLayout(), true,
+        'the early claim still protects the first right-click');
+
+    const oldExec = stub.commands.executeCommand;
+    const oldGet = stub.commands.getCommands;
+    const calls = [];
+    stub.commands.getCommands = async () => [
+        'workbench.action.evenEditorWidths',
+        'workbench.action.toggleMaximizeEditorGroup',
+        'workbench.action.closeAuxiliaryBar',
+        'workbench.action.focusAuxiliaryBar',
+    ];
+    stub.commands.executeCommand = async (id) => { calls.push(id); };
+    v.panel.reveal = (_column, preserveFocus) => calls.push(`reveal:${preserveFocus}`);
+    try {
+        await v._restoreSessionChrome();
+        assert.deepStrictEqual(calls, [
+            'workbench.action.evenEditorWidths',
+            'reveal:false',
+            'workbench.action.toggleMaximizeEditorGroup',
+        ], 'an explicit baseline prevents restored groups from painting over one another ' +
+            'without closing the right-side chat panel');
+        assert.strictEqual(v._layoutMode, 'viewer');
+        assert.strictEqual(v._layoutMaximized, true);
+        assert.strictEqual(v._restoringPanel, false);
+    } finally {
+        stub.commands.executeCommand = oldExec;
+        if (oldGet) stub.commands.getCommands = oldGet;
+        else delete stub.commands.getCommands;
+    }
+});
+
+test('AN EXTERNAL FILE RELOAD CANNOT LEAVE THE SOURCE EDITOR SHOWING IN VIEWER MODE', async () => {
+    const v = placeViewer({});
+    v._layoutMode = 'viewer';
+    v._layoutMaximized = true;
+    v._layoutOuterActions = ['workbench.action.toggleZenMode'];
+    v._fsActions = [
+        'workbench.action.toggleMaximizeEditorGroup',
+        'workbench.action.toggleZenMode',
+    ];
+    const oldExec = stub.commands.executeCommand;
+    const oldGet = stub.commands.getCommands;
+    const calls = [];
+    stub.commands.getCommands = async () => [
+        'workbench.action.evenEditorWidths',
+        'workbench.action.toggleMaximizeEditorGroup',
+        'workbench.action.closeAuxiliaryBar',
+        'workbench.action.toggleZenMode',
+    ];
+    stub.commands.executeCommand = async (id) => { calls.push(id); };
+    v.panel.active = false; // the external reload activated the source group
+    v.panel.reveal = (_column, preserveFocus) => calls.push(`reveal:${preserveFocus}`);
+    try {
+        await v._reassertViewerLayoutNow();
+        assert.deepStrictEqual(calls, [
+            'reveal:false',
+            'workbench.action.toggleMaximizeEditorGroup',
+        ], 'WPaper is reactivated and maximized without showing an even-width source layout first: ' +
+            JSON.stringify(calls));
+        assert.strictEqual(v._layoutMode, 'viewer');
+        assert.strictEqual(v._layoutMaximized, true);
+        assert.deepStrictEqual(v._layoutOuterActions, ['workbench.action.toggleZenMode'],
+            'an existing outer full-screen choice is retained, not toggled off');
+
+        calls.length = 0;
+        v.panel.active = true;
+        assert.strictEqual(await v._reassertViewerLayoutNow(), true);
+        assert.deepStrictEqual(calls, [],
+            'an external write that did not disturb the layout produces no visible layout flash');
+    } finally {
+        stub.commands.executeCommand = oldExec;
+        if (oldGet) stub.commands.getCommands = oldGet;
+        else delete stub.commands.getCommands;
+    }
+});
+
+test('THE LAYOUT BUTTON SWITCHES BETWEEN VIEWER AND EDITOR + VIEWER', async () => {
+    const mem = {};
+    const v = placeViewer(mem);
+    const oldExec = stub.commands.executeCommand;
+    const oldGet = stub.commands.getCommands;
+    const calls = [];
+    stub.commands.getCommands = async () => [
+        'workbench.action.toggleMaximizeEditorGroup',
+        'workbench.action.closeAuxiliaryBar',
+    ];
+    stub.commands.executeCommand = async (id) => { calls.push(id); };
+    v.panel.reveal = (_column, preserveFocus) => calls.push(`reveal:${preserveFocus}`);
+    try {
+        await v.cycleLayoutMode();
+        assert.strictEqual(v._layoutMode, 'viewer');
+        assert.deepStrictEqual(calls, [
+            'reveal:false',
+            'workbench.action.toggleMaximizeEditorGroup',
+        ], 'viewer-only preserves an already-open right auxiliary/chat panel');
+        assert.strictEqual(v._viewFor(FILE).layoutMode, 'viewer');
+
+        calls.length = 0;
+        await v.cycleLayoutMode();
+        assert.strictEqual(v._layoutMode, 'all');
+        assert.deepStrictEqual(calls, [
+            'workbench.action.toggleMaximizeEditorGroup',
+            'reveal:false',
+        ]);
+        assert.strictEqual(v._viewFor(FILE).layoutMode, 'all');
+    } finally {
+        stub.commands.executeCommand = oldExec;
+        if (oldGet) stub.commands.getCommands = oldGet;
+        else delete stub.commands.getCommands;
+    }
+});
+
+test('FAST REPEATED LAYOUT CLICKS ADVANCE TWICE, NOT ONCE', async () => {
+    const v = placeViewer({});
+    const oldExec = stub.commands.executeCommand;
+    stub.commands.executeCommand = async () => {};
+    try {
+        await Promise.all([v.cycleLayoutMode(), v.cycleLayoutMode()]);
+        assert.strictEqual(v._layoutMode, 'all');
+        assert.strictEqual(v._fsActions, null);
+    } finally { stub.commands.executeCommand = oldExec; }
+});
+
+test('AN OPEN MINI-EDITOR, ITS CARET AND ITS PLACEMENT SURVIVE REOPENING', async () => {
+    const mem = {};
+    const v = placeViewer(mem);
+    const start = doc.offsetAt(new Position(5, 0));
+    const end = doc.offsetAt(new Position(7, LINES[7].length));
+    v._edit = { id: 1, file: FILE, startOffset: start, endOffset: end,
+        lastText: SRC.slice(start, end), label: 'display equation' };
+    v._rememberEditState({
+        caretStart: 4, caretEnd: 9, caretDirection: 'backward', page: 1,
+        pos: { fx: 0.23, fy: 0.41 },
+    });
+
+    const v2 = placeViewer(mem);
+    v2._viewState = v2._viewFor(FILE);
+    v2.posted.length = 0;
+    assert.strictEqual(await v2._restoreEditSession(), true);
+    const opened = v2.posted.find(m => m.type === 'editOpen');
+    assert.ok(opened && opened.restored, 'the card is recreated as a restoration');
+    assert.strictEqual(opened.caretStart, 4);
+    assert.strictEqual(opened.caretEnd, 9);
+    assert.strictEqual(opened.caretDirection, 'backward');
+    assert.deepStrictEqual(opened.pos, { fx: 0.23, fy: 0.41 });
+
+    await v2._onMessage({ type: 'editClose', editId: opened.editId });
+    assert.strictEqual(v2._viewFor(FILE).edit, null, 'closing it is remembered too');
+});
+
 test('THE FRACTION TRAVELS, NOT JUST THE PAGE', async () => {
     // Only the page number used to be sent, so coming back landed at the TOP
     // of the right page rather than at the paragraph being worked on.
@@ -3561,7 +4289,7 @@ test('a gesture on the page clears a stale restore flag', async () => {
         { file: FILE, line: 5, dx: 0, dy: 0, lead: 12 });
     v.syncFromEditor(editorAt(5, 3), { instant: true });
     assert.strictEqual(v._syncInstant, true);
-    await v._onMessage({ type: 'hintShown', id: 'pages' });
+    await v._onMessage({ type: 'hintShown', id: 'chip' });
     assert.strictEqual(v._syncInstant, false, 'any message from the panel is a gesture');
 });
 
@@ -3939,7 +4667,7 @@ test('A STEP ADVANCES ON THE READER\'S OWN GESTURE, NOT ON A BUTTON', async () =
     assert.strictEqual(lastTour(v2).step.id, 'widen', 'a half-finished tour resumes');
 });
 
-test('THE TOUR ADVANCES ON THE TWO GESTURES THE GUIDE GAINED', async () => {
+test('THE TOUR ADVANCES ON THE NEWER GUIDED GESTURES', async () => {
     // The pure suite proves the script; this proves the WIRING — that a fold
     // and a copied tag reach the tour through the panel's own dispatch, the
     // same way a click does.
@@ -3959,7 +4687,15 @@ test('THE TOUR ADVANCES ON THE TWO GESTURES THE GUIDE GAINED', async () => {
 
     await v._onMessage({ type: 'copyAnchor', key: 'eq:1' });
     await wait(700);
-    assert.strictEqual(lastTour(v).step.id, 'fold', 'copying a place moves the tour on');
+    assert.strictEqual(lastTour(v).step.id, 'comments', 'copying a place moves the tour on');
+
+    await v._onMessage({ type: 'commentView', open: true, width: 320 });
+    await wait(700);
+    assert.strictEqual(lastTour(v).step.id, 'commentAt', 'showing comments moves to placement');
+
+    await v._onMessage({ type: 'click', commentTarget: true, page: 1, xBp: 72, yTopBp: 96 });
+    await wait(700);
+    assert.strictEqual(lastTour(v).step.id, 'fold', 'placing a comment moves the tour on');
 
     await v._onMessage({ type: 'sectionFold', key: 's1', collapse: false });
     await wait(700);
@@ -3988,7 +4724,7 @@ test('the tour watches the panel\'s real messages, and skipping still works', as
     assert.strictEqual(lastTour(v).step.id, 'cursor', 'a step can be passed over');
 
     // Walking off the end finishes the tour rather than showing an empty card.
-    for (let i = 0; i < 12; i++) v._tourAction({ action: 'skip' });
+    for (let i = 0; i < 30 && lastTour(v).step; i++) v._tourAction({ action: 'skip' });
     assert.strictEqual(lastTour(v).step, null);
     assert.strictEqual(mem['wolfbook.tex.tour'].done, true);
 });

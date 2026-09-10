@@ -8,6 +8,7 @@ const root = path.resolve(__dirname, '../..');
 const controller = fs.readFileSync(path.join(root, 'controller.js'), 'utf8');
 const cellReference = fs.readFileSync(path.join(root, 'editor/cell-reference.js'), 'utf8');
 const extension = fs.readFileSync(path.join(root, 'extension.js'), 'utf8');
+const evaluateSelection = fs.readFileSync(path.join(root, 'editor/evaluateSelection.js'), 'utf8');
 const pkg = JSON.parse(fs.readFileSync(path.resolve(root, '../../package.json'), 'utf8'));
 
 assert(!controller.includes('createStatusBarItem(\n            "wolfram-eval-mode"'),
@@ -18,6 +19,10 @@ assert(cellReference.includes('new vscode.NotebookCellStatusBarItem('),
     'the compact in-cell Cell N reference must remain');
 assert(extension.includes("'wolfbook-mcp-control-room'"));
 assert(extension.includes("_mcpControlRoomItem.command = 'wolfbook.openActivityMonitor'"));
+assert(extension.includes("registerKernelStatusIndicators(context, kernelManager"));
+assert(extension.includes("registerRecentMcpFiles(context)"));
+assert(!evaluateSelection.includes('createStatusBarItem('),
+    'the obsolete WLLatex eval-selection format must not consume a status-bar slot');
 assert(pkg.contributes.commands.some(command => command.command === 'wolfbook.openActivityMonitor'
     && /MCP Control Room/.test(command.title)));
 

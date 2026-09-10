@@ -6,6 +6,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { AsyncLocalStorage } = require('async_hooks');
 const { renderDashboard } = require('./dashboard');
+const { projectActivity } = require('./activity-projection');
 
 const activityScope = new AsyncLocalStorage();
 const MAX_EVENTS_IN_MEMORY = 10000;
@@ -86,6 +87,7 @@ class ActivityMonitor {
         this.pending = [];
         this.writeChain = Promise.resolve();
         this.topologyProvider = () => [];
+        this.actionHandler = null;
         fs.mkdirSync(this.eventsDir, { recursive: true });
         this._loadRecent();
         this._cleanup();
@@ -100,6 +102,7 @@ class ActivityMonitor {
         this.workspace = workspace || this.workspace;
     }
     setTopologyProvider(provider) { this.topologyProvider = typeof provider === 'function' ? provider : () => []; }
+    setActionHandler(handler) { this.actionHandler = typeof handler === 'function' ? handler : null; }
     dispose() { if (this.retryTimer) clearInterval(this.retryTimer); this.retryTimer = null; this.listeners.clear(); }
     setPort(port) { if (port) this.port = Number(port); }
     setPrimary(primary) {
@@ -191,6 +194,32 @@ class ActivityMonitor {
         this.events = [...unique.values()].sort((a, b) => a.timestamp - b.timestamp).slice(-MAX_EVENTS_IN_MEMORY);
     }
 
+    async _history() {
+        // History queries must include the start of an operation even when it
+        // predates the selected period. Reparse only journals that changed.
+        this._historyDays ||= new Map();
+        const cutoff = Date.now() - RETENTION_DAYS * 86400000;
+        const unique = new Map();
+        const files = await fs.promises.readdir(this.eventsDir);
+        for (const file of files.filter(name => /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(name)).sort()) {
+            if (Date.parse(file.slice(0, 10)) < cutoff - 86400000) continue;
+            const filename = path.join(this.eventsDir, file);
+            const stat = await fs.promises.stat(filename).catch(() => null);
+            if (!stat) continue;
+            let cached = this._historyDays.get(file);
+            if (!cached || cached.size !== stat.size || cached.mtimeMs !== stat.mtimeMs) {
+                const text = await fs.promises.readFile(filename, 'utf8');
+                const records = text.split('\n').flatMap(line => { try { return [JSON.parse(line)]; } catch (_) { return []; } });
+                cached = { records, size: stat.size, mtimeMs: stat.mtimeMs };
+                this._historyDays.set(file, cached);
+            }
+            for (const record of cached.records) if (record.timestamp >= cutoff) unique.set(record.eventId, record);
+        }
+        for (const file of this._historyDays.keys()) if (!files.includes(file) || Date.parse(file.slice(0, 10)) < cutoff - 86400000) this._historyDays.delete(file);
+        for (const record of this.events) unique.set(record.eventId, record);
+        return [...unique.values()];
+    }
+
     _cleanup() {
         const cutoff = Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000;
         try {
@@ -221,7 +250,9 @@ class ActivityMonitor {
     }
 
     _authorized(req) {
-        const cookies = Object.fromEntries(String(req.headers.cookie || '').split(';').map(x => x.trim().split('=').map(decodeURIComponent)).filter(x => x.length === 2));
+        let cookies;
+        try { cookies = Object.fromEntries(String(req.headers.cookie || '').split(';').map(x => x.trim().split('=').map(decodeURIComponent)).filter(x => x.length === 2)); }
+        catch (_) { return false; }
         const expiry = this.sessions.get(cookies.wolfbook_monitor);
         return !!expiry && expiry > Date.now();
     }
@@ -230,9 +261,18 @@ class ActivityMonitor {
 
     handle(req, res, url) {
         const pathname = url.pathname;
+        if (req.method === 'POST' && pathname === '/monitor/internal/action') {
+            if (req.headers['x-wolfbook-monitor'] !== this.secret) return this._reply(res, 403, { error: 'forbidden' });
+            return this._readJson(req, res, 16 * 1024, async action => {
+                try {
+                    if (action.clientId !== this.clientId) throw new Error('Target window changed. Refresh activity.');
+                    this._reply(res, 200, sanitize(await this.actionHandler(action)));
+                } catch (error) { this._reply(res, 409, { error: error.message }); }
+            });
+        }
         if (req.method === 'POST' && pathname === '/monitor/internal/events') {
             if (req.headers['x-wolfbook-monitor'] !== this.secret) return this._reply(res, 403, { error: 'forbidden' });
-            return this._readJson(req, MAX_EVENT_BYTES, event => { this._append(sanitize(event)); this._reply(res, 202, { ok: true }); });
+            return this._readJson(req, res, MAX_EVENT_BYTES, event => { this._append(sanitize(event)); this._reply(res, 202, { ok: true }); });
         }
         if (req.method === 'POST' && pathname === '/monitor/internal/launch') {
             if (req.headers['x-wolfbook-monitor'] !== this.secret) return this._reply(res, 403, { error: 'forbidden' });
@@ -248,6 +288,37 @@ class ActivityMonitor {
         }
         if (!this._authorized(req)) return this._text(res, 403, 'Wolfbook MCP Control Room is locked. Open it from the Wolfbook command palette.');
         this._securityHeaders(res);
+        if (req.method === 'POST' && pathname === '/monitor/api/action') {
+            if (req.headers['x-wolfbook-action'] !== '1') return this._reply(res, 403, { error: 'action header required' });
+            if (!this.actionHandler) return this._reply(res, 503, { error: 'Control actions are unavailable.' });
+            return this._readJson(req, res, 16 * 1024, async action => {
+                try {
+                    const op = projectActivity(await this._history()).operations.find(op => op.id === action.id);
+                    if (!op) throw new Error('Activity has expired. Refresh the page.');
+                    const resolved = { action: action.action, operationId: op.operationId,
+                        notebook: op.notebook, cellId: op.cellId, cellNumber: op.cellNumber,
+                        kernelId: op.kernelId, clientId: op.clientId, selector: op.selector };
+                    if (action.changeIndex != null) {
+                        const change = Number.isInteger(action.changeIndex) && op.changes[action.changeIndex];
+                        if (action.action !== 'open' || !change) throw new Error('Notebook change is no longer available.');
+                        resolved.notebook = change.notebook || resolved.notebook;
+                        resolved.cellId = change.cellId || null;
+                        resolved.cellNumber = change.cellNumber ?? null;
+                    }
+                    let result;
+                    if (resolved.clientId && resolved.clientId !== this.clientId) {
+                        const topology = this.topologyProvider() || {};
+                        const client = (Array.isArray(topology) ? topology : topology.clients || [])
+                            .find(c => (c.clientId || c.client_id) === resolved.clientId);
+                        const port = Number(client?.workerPort || client?.port);
+                        if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('The owning VS Code window is unavailable.');
+                        result = await this._forwardAction(port, resolved);
+                    } else result = await this.actionHandler(resolved);
+                    this._reply(res, 200, sanitize(result));
+                }
+                catch (error) { this._reply(res, 400, { error: String(error?.message || error) }); }
+            });
+        }
         if (req.method === 'GET' && (pathname === '/monitor' || pathname === '/monitor/')) {
             res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(renderDashboard()); return;
         }
@@ -259,6 +330,10 @@ class ActivityMonitor {
             const since = Number(url.searchParams.get('since') || Date.now() - 24 * 60 * 60 * 1000);
             const limit = Math.max(1, Math.min(10000, Number(url.searchParams.get('limit') || 5000)));
             return this._reply(res, 200, { now: Date.now(), events: this.events.filter(e => e.timestamp >= since).slice(-limit) });
+        }
+        if (req.method === 'GET' && pathname === '/monitor/api/overview') {
+            return this._history().then(events => this._overview(res, url, events))
+                .catch(error => this._reply(res, 500, { error: `Cannot load activity history: ${error.message}` }));
         }
         if (req.method === 'GET' && pathname === '/monitor/api/topology') {
             let topology = []; try { topology = this.topologyProvider() || []; } catch (_) {}
@@ -278,16 +353,74 @@ class ActivityMonitor {
         this._text(res, 404, 'Not found');
     }
 
+    _overview(res, url, events) {
+            const since = Number(url.searchParams.get('since') || Date.now() - 24 * 60 * 60 * 1000);
+            const limit = Math.max(1, Math.min(10000, Number(url.searchParams.get('limit') || 2000)));
+            let topology = []; try { topology = this.topologyProvider() || []; } catch (_) {}
+            const normalizedTopology = Array.isArray(topology)
+                ? { clients: topology, sessions: [] }
+                : { clients: topology.clients || [], sessions: topology.sessions || [] };
+            const projection = projectActivity(events, normalizedTopology);
+            const matching = projection.operations.filter(operation =>
+                (operation.completedAt || operation.startedAt) >= since);
+            const page = matching.slice(0, limit);
+            const visible = new Map(page.map(operation => [operation.id, operation]));
+            for (const operation of projection.activeOperations) visible.set(operation.id, operation);
+            // The operation projection is the normal human-facing API. Raw
+            // transport/system events remain available from /api/events for the
+            // deliberately separate diagnostics view.
+            const operations = [...visible.values()].map(operation => {
+                const copy = { ...operation }; delete copy.events; return sanitize(copy);
+            });
+            const sessions = projection.sessions.map(session => {
+                const copy = { ...session, lastOperationId: session.lastOperation?.id || null };
+                delete copy.lastOperation; return copy;
+            });
+            return this._reply(res, 200, {
+                version: projection.version, now: projection.now, summary: projection.summary,
+                operations, activeOperationIds: projection.activeOperations.map(operation => operation.id),
+                sessions: sessions.map(session => sanitize(session)),
+                kernels: normalizedTopology.clients.flatMap(client => (client.kernels || [])
+                    .filter(kernel => !kernel.remote)
+                    .map(kernel => sanitize({ ...kernel, clientId: client.clientId || client.client_id,
+                        workspace: client.workspace }))),
+                hasMore: matching.length > limit, total: matching.length,
+            });
+    }
+
     _securityHeaders(res) {
         res.setHeader('Content-Security-Policy', "default-src 'self'; img-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'");
         res.setHeader('X-Content-Type-Options', 'nosniff');
         res.setHeader('Referrer-Policy', 'no-referrer');
         res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
     }
-    _readJson(req, max, cb) {
+    _forwardAction(port, action) {
+        return new Promise((resolve, reject) => {
+            const body = JSON.stringify(action);
+            const request = http.request({ hostname: '127.0.0.1', port, path: '/monitor/internal/action',
+                method: 'POST', timeout: 30000, headers: { 'X-Wolfbook-Monitor': this.secret,
+                    'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } }, response => {
+                let text = ''; response.on('data', chunk => { text += chunk; });
+                response.on('end', () => { try { const result = JSON.parse(text);
+                    if (response.statusCode !== 200) reject(new Error(result.error || 'Action failed'));
+                    else resolve(result);
+                } catch (error) { reject(error); } });
+            });
+            request.on('error', reject); request.on('timeout', () => request.destroy(new Error('Target window did not respond')));
+            request.end(body);
+        });
+    }
+    _readJson(req, res, max, cb) {
         let body = ''; req.setEncoding('utf8');
         req.on('data', chunk => { body += chunk; if (Buffer.byteLength(body) > max) req.destroy(); });
-        req.on('end', () => { try { cb(JSON.parse(body)); } catch (_) {} });
+        req.on('end', () => {
+            let value;
+            try { value = JSON.parse(body); if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Expected object'); }
+            catch (_) { this._reply(res, 400, { error: 'Expected a JSON object.' }); return; }
+            Promise.resolve().then(() => cb(value)).catch(error => {
+                if (!res.writableEnded) this._reply(res, 500, { error: String(error.message || error) });
+            });
+        });
     }
     _reply(res, status, body) { this._securityHeaders(res); res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(body)); }
     _text(res, status, body) { this._securityHeaders(res); res.writeHead(status, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(body); }

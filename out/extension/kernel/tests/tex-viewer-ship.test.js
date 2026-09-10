@@ -80,6 +80,21 @@ async function main() {
         assert.strictEqual(v.shownPdfHash, 'HASH-A');
     });
 
+    await test('a fresh viewer receives its exact saved view state', async () => {
+        const { v, posted } = makeViewer({ ...baseGen });
+        v._viewState = {
+            page: 2, frac: 0.37, top: 1440, left: 63,
+            scale: 1.8, fit: false, generation: 1,
+        };
+        await v.refresh();
+        const open = opens(posted)[0];
+        assert.strictEqual(open.revealPage, 2);
+        assert.strictEqual(open.revealFrac, 0.37);
+        assert.strictEqual(open.revealTop, 1440, 'same generation may use the exact pixel top');
+        assert.strictEqual(open.revealLeft, 63);
+        assert.deepStrictEqual(open.restoreView, { scale: 1.8, fit: false });
+    });
+
     await test('A REBUILD THAT DID NOT MOVE THE INK SHIPS NOTHING', async () => {
         const { v, posted, coord } = makeViewer({ ...baseGen });
         await v.refresh();

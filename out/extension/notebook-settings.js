@@ -18,7 +18,39 @@ const _PROMPTS_DIR   = path.join(_WOLFBOOK_DIR, 'prompts');
 // so different projects can have different active prompts.
 const _ACTIVE_PRESET_KEY = 'activeSystemPrompt';
 const _APPEARANCE_KEY = 'notebook.appearanceByUri';
+const _APPEARANCE_STATE_KEY = 'wolfbook.notebookAppearanceByUri.v2';
 const _APPEARANCE_FIELDS = new Set(['backgroundColor', 'backgroundImagePath']);
+let _appearanceMemento = null;
+let _appearanceState = {};
+let _appearanceWriteChain = Promise.resolve();
+const _configuredAppearanceKeys = new Set();
+
+function _appearanceStorageKey(notebook) {
+    const uri = notebook?.uri;
+    if (uri?.scheme === 'file' && uri.fsPath) {
+        const normalized = path.normalize(path.resolve(uri.fsPath));
+        return `file:${process.platform === 'win32' ? normalized.toLowerCase() : normalized}`;
+    }
+    return String(uri?.toString?.(true) || uri?.toString?.() || '');
+}
+
+function _persistAppearanceState() {
+    if (!_appearanceMemento?.update) return Promise.resolve();
+    const snapshot = { ..._appearanceState };
+    _appearanceWriteChain = _appearanceWriteChain.then(
+        () => _appearanceMemento.update(_APPEARANCE_STATE_KEY, snapshot),
+        () => _appearanceMemento.update(_APPEARANCE_STATE_KEY, snapshot)
+    );
+    return _appearanceWriteChain;
+}
+
+function _initializeAppearanceState(context) {
+    _appearanceMemento = context?.workspaceState || null;
+    _appearanceState = { ...(_appearanceMemento?.get?.(_APPEARANCE_STATE_KEY, {}) || {}) };
+    notebookSettingsStore.clear();
+    _configuredAppearanceKeys.clear();
+    for (const key of Object.keys(_appearanceState)) _configuredAppearanceKeys.add(key);
+}
 
 function _ensurePromptsDir() {
     if (!fs.existsSync(_PROMPTS_DIR)) fs.mkdirSync(_PROMPTS_DIR, { recursive: true });
@@ -110,20 +142,22 @@ const _NOTEBOOK_COLOR_KEYS = [
     'notebook.selectedCellBackground',
     'notebook.inactiveSelectedCellBackground',
     'notebook.cellHoverBackground',
+    'notebook.outputContainerBackgroundColor',
+    'notebook.outputContainerBorderColor',
 ];
+const _LEGACY_NOTEBOOK_COLOR_KEYS = _NOTEBOOK_COLOR_KEYS.slice(0, 9);
 
 // workbench.colorCustomizations is not resource-scoped: a Global update affects
-// every VS Code window.  With several Wolfbook windows open, whichever notebook
-// applied last erased the colours required by the others.  Keep only the saved
-// per-URI appearance in Global user settings; materialise its workbench tokens
-// at Workspace scope so they win over legacy workspace values and cannot race
-// with another window.
+// every VS Code window. With several Wolfbook notebooks open, whichever palette
+// is materialised last necessarily colors the native notebook chrome. Persist
+// each URI independently in workspaceState, target renderer appearance per
+// editor, and reserve these Workspace-scoped tokens for the active notebook.
 const _NOTEBOOK_COLOR_TARGET = vscode.ConfigurationTarget.Workspace;
 
 // Earlier Wolfbook builds wrote the effective notebook palette into
-// workbench.colorCustomizations at Workspace scope.  Appearance storage now
-// lives in the user's global settings, but those old workspace values have
-// higher precedence and can pin a notebook to the light palette forever.
+// workbench.colorCustomizations at Workspace scope. Appearance storage now
+// lives in extension workspaceState, but those old workspace values can still
+// pin a notebook to the light palette forever.
 //
 // Be deliberately conservative: only claim a block that has Wolfbook's full
 // nine-key shape and its characteristic equal outer/container colours.  A
@@ -138,7 +172,7 @@ const _LEGACY_OUTER_COLOR_KEYS = [
 
 function _withoutLegacyWolfbookNotebookColors(colors) {
     if (!colors || typeof colors !== 'object' || Array.isArray(colors)) return null;
-    if (!_NOTEBOOK_COLOR_KEYS.every(key => Object.prototype.hasOwnProperty.call(colors, key))) return null;
+    if (!_LEGACY_NOTEBOOK_COLOR_KEYS.every(key => Object.prototype.hasOwnProperty.call(colors, key))) return null;
 
     const outer = colors['notebook.editorBackground'];
     if (typeof outer !== 'string' || !outer) return null;
@@ -244,10 +278,11 @@ function colorSwatch(hex) {
     );
 }
 
-// ── Renderer messaging (for background-image injection into output webviews) ──
-// Each output cell is rendered inside an isolated webview iframe; we broadcast
-// a base64 data-URL so the renderer can set body { background-image: … }.
+// ── Renderer messaging (per-editor output appearance) ─────────────────────────
+// Each output cell is rendered in a webview. Target messages to the originating
+// NotebookEditor so split notebooks can retain different colors and images.
 let _rendererMsg = null;
+const _imageDataCache = new Map();
 function getRendererMsg() {
     if (_rendererMsg) return _rendererMsg;
     try {
@@ -257,12 +292,9 @@ function getRendererMsg() {
         // rendered cell outputs inherit the same background.
         _rendererMsg.onDidReceiveMessage(event => {
             if (event.message.type !== 'renderer-ready') return;
-            const active = vscode.window.activeNotebookEditor;
-            if (active && active.notebook.notebookType === 'extended-wolfram-notebook') {
-                const settings = getNotebookSettings(active.notebook);
-                if (settings.backgroundImagePath) {
-                    _broadcastBgImage(settings.backgroundImagePath).catch(() => {});
-                }
+            const editor = event.editor;
+            if (editor?.notebook?.notebookType === 'extended-wolfram-notebook') {
+                _sendRendererAppearance(editor, getNotebookSettings(editor.notebook)).catch(() => {});
             }
         });
     } catch (e) {
@@ -271,10 +303,11 @@ function getRendererMsg() {
     return _rendererMsg;
 }
 
-// Read an image file and broadcast it as a base64 data-URL to all output renderers.
-async function _broadcastBgImage(imgPath) {
-    const msg = getRendererMsg();
-    if (!msg || !imgPath) return;
+async function _imageDataUrl(imgPath) {
+    if (!imgPath) return null;
+    const stat = fs.statSync(imgPath);
+    const cached = _imageDataCache.get(imgPath);
+    if (cached?.mtimeMs === stat.mtimeMs && cached?.size === stat.size) return cached.dataUrl;
     const data = fs.readFileSync(imgPath);
     const ext  = path.extname(imgPath).slice(1).toLowerCase();
     const mime = ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg'
@@ -284,13 +317,35 @@ async function _broadcastBgImage(imgPath) {
                : ext === 'svg'  ? 'image/svg+xml'
                : 'image/png';
     const dataUrl = `data:${mime};base64,${data.toString('base64')}`;
-    msg.postMessage({ type: 'bg-image', dataUrl });
+    _imageDataCache.set(imgPath, { mtimeMs: stat.mtimeMs, size: stat.size, dataUrl });
+    return dataUrl;
+}
+
+// Target one NotebookEditor. Omitting the editor broadcasts to every renderer
+// and makes two split notebooks overwrite each other's appearance.
+async function _sendRendererAppearance(editor, settings) {
+    const msg = getRendererMsg();
+    if (!msg || !editor) return false;
+    const dataUrl = settings?.backgroundImagePath
+        ? await _imageDataUrl(settings.backgroundImagePath) : null;
+    return msg.postMessage({
+        type: 'bg-appearance', dataUrl,
+        backgroundColor: _autoInvertColor(settings?.backgroundColor || '') || null,
+    }, editor);
+}
+
+async function _refreshVisibleRendererAppearances() {
+    const editors = (vscode.window.visibleNotebookEditors || []).filter(editor =>
+        editor.notebook?.notebookType === 'extended-wolfram-notebook');
+    await Promise.allSettled(editors.map(editor =>
+        _sendRendererAppearance(editor, getNotebookSettings(editor.notebook))));
 }
 
 // ── Settings store ────────────────────────────────────────────────────────────
 const notebookSettingsStore = new Map();
 
 function registerNotebookSettings(context) {
+    _initializeAppearanceState(context);
     context.subscriptions.push(
         vscode.commands.registerCommand('wolfbook.notebookSettings', async () => {
             // Short delay so toolbar-click focus returns to notebook before QuickPick opens
@@ -319,19 +374,28 @@ function registerNotebookSettings(context) {
     context.subscriptions.push(
         vscode.window.onDidChangeActiveNotebookEditor(editor => {
             if (editor && editor.notebook.notebookType === 'extended-wolfram-notebook') {
-                // When multiple wolfram notebooks are visible with DIFFERENT background
-                // colours, skip the global colorCustomizations update to prevent
-                // the two notebooks from fighting each other and causing a blink.
-                const activeColor = (getNotebookSettings(editor.notebook).backgroundColor) || null;
-                const conflict = vscode.window.visibleNotebookEditors.some(e =>
-                    e.notebook !== editor.notebook &&
-                    e.notebook.notebookType === 'extended-wolfram-notebook' &&
-                    ((getNotebookSettings(e.notebook).backgroundColor) || null) !== activeColor
-                );
-                if (!conflict) applyNotebookSettings(editor.notebook);
+                // Native notebook colors are workbench-scoped, not editor-scoped.
+                // Always make the focused notebook authoritative; renderer
+                // backgrounds remain genuinely per-editor through targeted messages.
+                applyNotebookSettings(editor.notebook);
             }
         })
     );
+
+    if (vscode.window.onDidChangeVisibleNotebookEditors) {
+        context.subscriptions.push(vscode.window.onDidChangeVisibleNotebookEditors(() => {
+            _refreshVisibleRendererAppearances().catch(() => {});
+            const active = vscode.window.activeNotebookEditor;
+            if (active?.notebook?.notebookType === 'extended-wolfram-notebook') {
+                applyNotebookSettings(active.notebook);
+            }
+        }));
+    }
+    if (vscode.workspace.onDidCloseNotebookDocument) {
+        context.subscriptions.push(vscode.workspace.onDidCloseNotebookDocument(notebook => {
+            notebookSettingsStore.delete(notebook.uri.toString());
+        }));
+    }
 
     // Re-apply settings when theme changes (dark ↔ light) to auto-invert colours.
     // Debounced: VS Code can fire onDidChangeActiveColorTheme multiple times during
@@ -348,6 +412,7 @@ function registerNotebookSettings(context) {
                 if (active && active.notebook.notebookType === 'extended-wolfram-notebook') {
                     applyNotebookSettings(active.notebook);
                 }
+                _refreshVisibleRendererAppearances().catch(() => {});
             }, 300);
         })
     );
@@ -358,11 +423,12 @@ function registerNotebookSettings(context) {
     _cleanLegacyWorkspaceNotebookColors()
         .catch(err => console.warn('[NotebookSettings] Legacy colour cleanup failed:', err))
         .finally(() => {
-            vscode.window.visibleNotebookEditors.forEach(editor => {
-                if (editor.notebook.notebookType === 'extended-wolfram-notebook') {
-                    applyNotebookSettings(editor.notebook);
-                }
-            });
+            const active = vscode.window.activeNotebookEditor;
+            const fallback = (vscode.window.visibleNotebookEditors || []).find(editor =>
+                editor.notebook.notebookType === 'extended-wolfram-notebook');
+            const authoritative = active?.notebook?.notebookType === 'extended-wolfram-notebook' ? active : fallback;
+            if (authoritative) applyNotebookSettings(authoritative.notebook);
+            _refreshVisibleRendererAppearances().catch(() => {});
         });
 
     // Ensure user has a prompt preset directory with the default prompt
@@ -678,9 +744,15 @@ async function showSettingsUI(notebook) {
 function getNotebookSettings(notebook) {
     const uri = notebook.uri.toString();
     if (notebookSettingsStore.has(uri)) return notebookSettingsStore.get(uri);
+    const storageKey = _appearanceStorageKey(notebook);
     const legacy = notebook.metadata?.wolframSettings || {};
     const appearances = vscode.workspace.getConfiguration('wolfbook').get(_APPEARANCE_KEY, {}) || {};
-    const local = appearances[uri] || {};
+    const stored = _appearanceState[storageKey];
+    const configuredLegacy = Object.prototype.hasOwnProperty.call(appearances, uri);
+    const local = stored || appearances[uri] || {};
+    if (stored || configuredLegacy || legacy.backgroundColor || legacy.backgroundImagePath) {
+        _configuredAppearanceKeys.add(storageKey);
+    }
     const settings = {
         ...legacy,
         backgroundColor: Object.prototype.hasOwnProperty.call(local, 'backgroundColor')
@@ -691,30 +763,29 @@ function getNotebookSettings(notebook) {
     notebookSettingsStore.set(uri, settings);
     // One-way, non-document migration: preserve an existing appearance locally
     // so future Dropbox metadata changes from collaborators cannot make it blink.
-    if (!appearances[uri] && (legacy.backgroundColor || legacy.backgroundImagePath)) {
-        const migrated = { backgroundColor: legacy.backgroundColor || '', backgroundImagePath: legacy.backgroundImagePath || '' };
-        vscode.workspace.getConfiguration('wolfbook').update(
-            _APPEARANCE_KEY, { ...appearances, [uri]: migrated }, vscode.ConfigurationTarget.Global
-        ).catch(() => {});
+    if (!stored && (configuredLegacy || legacy.backgroundColor || legacy.backgroundImagePath)) {
+        const migrated = { backgroundColor: local.backgroundColor || '', backgroundImagePath: local.backgroundImagePath || '' };
+        _appearanceState = { ..._appearanceState, [storageKey]: migrated };
+        _configuredAppearanceKeys.add(storageKey);
+        _persistAppearanceState().catch(() => {});
     }
     return settings;
 }
 
 async function updateNotebookSettings(notebook, newSettings) {
     const uri             = notebook.uri.toString();
+    const storageKey      = _appearanceStorageKey(notebook);
     const currentSettings = getNotebookSettings(notebook);
     const updatedSettings = { ...currentSettings, ...newSettings };
     notebookSettingsStore.set(uri, updatedSettings);
 
     const appearancePatch = Object.fromEntries(Object.entries(newSettings).filter(([key]) => _APPEARANCE_FIELDS.has(key)));
     if (Object.keys(appearancePatch).length) {
-        const cfg = vscode.workspace.getConfiguration('wolfbook');
-        const appearances = cfg.get(_APPEARANCE_KEY, {}) || {};
-        const previous = appearances[uri] || {};
-        await cfg.update(_APPEARANCE_KEY, {
-            ...appearances,
-            [uri]: { ...previous, ...appearancePatch },
-        }, vscode.ConfigurationTarget.Global);
+        const previous = _appearanceState[storageKey] || {};
+        _appearanceState = { ..._appearanceState,
+            [storageKey]: { ...previous, ...appearancePatch } };
+        _configuredAppearanceKeys.add(storageKey);
+        await _persistAppearanceState();
     }
 
     const documentPatch = Object.fromEntries(Object.entries(newSettings).filter(([key]) => !_APPEARANCE_FIELDS.has(key)));
@@ -760,7 +831,14 @@ function createBorderColor(color, isDark) {
 }
 
 // ── Apply settings ────────────────────────────────────────────────────────────
-async function applyNotebookSettings(notebook) {
+let _settingsApplyChain = Promise.resolve();
+function applyNotebookSettings(notebook) {
+    const apply = () => _applyNotebookSettingsNow(notebook);
+    _settingsApplyChain = _settingsApplyChain.then(apply, apply);
+    return _settingsApplyChain;
+}
+
+async function _applyNotebookSettingsNow(notebook) {
     const settings = getNotebookSettings(notebook);
     const uri      = notebook.uri.toString();
     devLog(LOG_CHANNELS.EXTENSION, '[NotebookSettings] Applying settings for:', uri, JSON.stringify(settings));
@@ -794,6 +872,8 @@ async function applyNotebookSettings(notebook) {
                 updated['notebook.selectedCellBackground']          = _outerBg;
                 updated['notebook.inactiveSelectedCellBackground']  = _outerBg;
                 updated['notebook.cellHoverBackground']             = _outerBg;
+                updated['notebook.outputContainerBackgroundColor']  = _cellBg;
+                updated['notebook.outputContainerBorderColor']      = createBorderColor(baseColor, true);
             } else {
                 const _outerBg = adjustColor(baseColor, 0.08);
                 updated['notebook.editorBackground']                = _outerBg;
@@ -806,6 +886,8 @@ async function applyNotebookSettings(notebook) {
                 updated['notebook.selectedCellBackground']          = _outerBg;
                 updated['notebook.inactiveSelectedCellBackground']  = _outerBg;
                 updated['notebook.cellHoverBackground']             = _outerBg;
+                updated['notebook.outputContainerBackgroundColor']  = adjustColor(baseColor, 0.35);
+                updated['notebook.outputContainerBorderColor']      = createBorderColor(baseColor, false);
             }
         } else {
             // rgb(...) or named color — set directly (no lighten/darken math)
@@ -815,6 +897,8 @@ async function applyNotebookSettings(notebook) {
             updated['notebook.selectedCellBackground']         = baseColor;
             updated['notebook.inactiveSelectedCellBackground'] = baseColor;
             updated['notebook.cellHoverBackground']            = baseColor;
+            updated['notebook.outputContainerBackgroundColor'] = baseColor;
+            updated['notebook.outputContainerBorderColor']     = baseColor;
         }
         if (!_notebookColorsUnchanged(currentColors, updated)) {
             await config.update('colorCustomizations', updated, _NOTEBOOK_COLOR_TARGET);
@@ -826,7 +910,7 @@ async function applyNotebookSettings(notebook) {
         //   • never configured  → paint a neutral gray so VS Code's default BLUE
         //                          focused/selected-cell highlight does not leak through.
         //   • explicit '' (None) → strip custom notebook colours (raw VS Code theme).
-        const everConfigured = notebookSettingsStore.has(uri) ||
+        const everConfigured = _configuredAppearanceKeys.has(_appearanceStorageKey(notebook)) ||
             !!(notebook.metadata && notebook.metadata.wolframSettings);
         if (!everConfigured) {
             const isDark = _isDarkTheme();
@@ -845,6 +929,8 @@ async function applyNotebookSettings(notebook) {
                 'notebook.selectedCellBackground':         outer,
                 'notebook.inactiveSelectedCellBackground': outer,
                 'notebook.cellHoverBackground':            outer,
+                'notebook.outputContainerBackgroundColor': cellBg,
+                'notebook.outputContainerBorderColor':     border,
             };
             if (!_notebookColorsUnchanged(currentColors, updated)) {
                 await config.update('colorCustomizations', updated, _NOTEBOOK_COLOR_TARGET);
@@ -856,18 +942,16 @@ async function applyNotebookSettings(notebook) {
         }
     }
 
-    // 2. Background image via renderer messaging (applies to cell output webviews)
-    const msg = getRendererMsg();
-    if (!msg) return;
-    if (settings.backgroundImagePath) {
-        try {
-            await _broadcastBgImage(settings.backgroundImagePath);
-        } catch (err) {
-            console.error('[NotebookSettings] Failed to broadcast bg-image:', err);
-            vscode.window.showErrorMessage(`Background image error: ${err.message}`);
+    // 2. Per-editor output appearance. Unlike workbench colors, the stable
+    // renderer messaging API accepts a NotebookEditor target.
+    for (const editor of vscode.window.visibleNotebookEditors || []) {
+        if (editor.notebook === notebook || editor.notebook?.uri?.toString() === uri) {
+            try { await _sendRendererAppearance(editor, settings); }
+            catch (err) {
+                console.error('[NotebookSettings] Failed to apply renderer appearance:', err);
+                vscode.window.showErrorMessage(`Background image error: ${err.message}`);
+            }
         }
-    } else {
-        try { msg.postMessage({ type: 'bg-image', dataUrl: null }); } catch (_) {}
     }
 
     // 3. Copilot instructions — inject into all Copilot chats via workspace setting
@@ -992,6 +1076,11 @@ exports.BACKGROUND_COLORS = BACKGROUND_COLORS;
 // Exported for the migration regression tests.  These remain internal APIs.
 exports._withoutLegacyWolfbookNotebookColors = _withoutLegacyWolfbookNotebookColors;
 exports._cleanLegacyWorkspaceNotebookColors = _cleanLegacyWorkspaceNotebookColors;
+exports._appearanceStorageKey = _appearanceStorageKey;
+exports._sendRendererAppearance = _sendRendererAppearance;
+exports._initializeAppearanceState = _initializeAppearanceState;
+exports.getNotebookSettings = getNotebookSettings;
+exports.updateNotebookSettings = updateNotebookSettings;
 // Canonical list of workbench.colorCustomizations keys this module writes.
 // Exported so the kernel-offline gray/restore cycle (kernel/lifecycle.js) operates
 // on the EXACT same set — otherwise coloured cell elements are left un-grayed while

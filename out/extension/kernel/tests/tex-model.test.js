@@ -38,10 +38,10 @@ function test(name, fn) {
     });
 }
 
-const { scanTex, summarise, discoverVerbatimEnvs, preambleSpan } = require('../../tex/texScanner');
+const { scanTex, summarise, discoverVerbatimEnvs, preambleSpan, MEASURABLE_KINDS } = require('../../tex/texScanner');
 const {
     buildModel, reconcile, buildOutline, sectionSpans, summariseObject,
-    normalizeSource, similarity,
+    normalizeSource, similarity, ADDRESSABLE,
 } = require('../../tex/texModel');
 const { parseMmaBlocks, parseHeader, BLOCK_STATE, formatOutputFence } = require('../../tex/mmaBlocks');
 const { findRoot, buildGraph, directIncludes, resolveTexPath, ROOT_SOURCE } = require('../../tex/texProject');
@@ -82,6 +82,34 @@ test('scanner finds the classes Wolfbook addresses', () => {
 
 test('scanner produces no warnings on well-formed input', () => {
     assert.deepStrictEqual(scanTex(DOC, { file: 't.tex' }).warnings, []);
+});
+
+test('title pages and abstracts are first-class cells in both LaTeX styles', () => {
+    const environments = model(`\\documentclass{article}
+\\begin{document}
+\\begin{titlepage}
+  A hand-made title page with enough visible words to identify it.
+  \\begin{abstract}A nested abstract with its own identity.\\end{abstract}
+\\end{titlepage}
+\\end{document}`);
+    const titleEnv = environments.objects.find(o => o.kind === 'titlepage');
+    const abstractEnv = environments.objects.find(o => o.kind === 'abstract');
+    assert.ok(titleEnv && titleEnv.envName === 'titlepage', 'titlepage is not an anonymous environment');
+    assert.ok(abstractEnv && abstractEnv.envName === 'abstract');
+
+    const commands = model(`\\documentclass{article}
+\\title[Short title]{A long JHEP-style title}
+\\author[a]{Ada Lovelace}
+\\affiliation[a]{Analytical Engine Institute}
+\\abstract{An abstract declared as a command before the document begins.}
+\\begin{document}
+\\maketitle
+\\end{document}`);
+    const front = commands.objects.filter(o => o.kind === 'titlepage');
+    assert.deepStrictEqual(front.map(o => o.cmd), ['title', 'author', 'affiliation', 'maketitle']);
+    assert.strictEqual(commands.objects.filter(o => o.kind === 'abstract').length, 1);
+    assert.ok(front.every(o => o.stableKey && ADDRESSABLE.has(o.kind)));
+    assert.ok(MEASURABLE_KINDS.has('titlepage') && MEASURABLE_KINDS.has('abstract'));
 });
 
 test('project-defined verbatim envs come from the preamble, not a hardcoded list', () => {
@@ -713,6 +741,58 @@ test('the corpus scanner catches the real bug in spinchain_report.tex', () => {
     // "Bad math environment delimiter". The scanner finds it with no compiler.
     assert.ok(r.warnings.some(w => /:231:/.test(w) && /no matching/.test(w)),
         'expected the duplicated \\end{equation} at line 231; got ' + JSON.stringify(r.warnings));
+});
+
+// --- a heading, as the reader should READ it --------------------------------
+//
+// Reported off the review list, which names each change by its section:
+//
+//   \subsection{Preview: the two-site overlap in
+//               \texorpdfstring{$\langle qq\rangle$}{qq} notation}
+//
+// came out as "Preview: the two-site overlap in qqqq notation". Both halves of
+// \texorpdfstring were being printed, and the maths was being deleted rather
+// than rendered.
+
+const headingTitle = (src) => {
+    const r = scanTex(`\\documentclass{a}\\begin{document}\n${src}\nx\n\\end{document}\n`,
+        { file: 't.tex' });
+    const h = r.objects.find(o => o.kind === 'section-heading');
+    return h ? h.title : null;
+};
+
+test('\\texorpdfstring gives a heading TWO spellings, not two halves of one', () => {
+    const t = headingTitle(
+        '\\subsection{Preview: the two-site overlap in \\texorpdfstring{$\\langle qq\\rangle$}{qq} notation}');
+    assert.ok(!/qqqq/.test(t), `both halves were printed: ${JSON.stringify(t)}`);
+    assert.strictEqual(t, 'Preview: the two-site overlap in ⟨qq⟩ notation');
+});
+
+test('a heading with maths in it reads like the heading on the page', () => {
+    assert.strictEqual(
+        headingTitle('\\section{From $\\alpha$ to $\\Omega$, via $x \\to y$}'),
+        'From α to Ω, via x → y');
+    assert.strictEqual(
+        headingTitle('\\subsection{A first example: the \\texorpdfstring{$J=1$}{J=1} overlap}'),
+        'A first example: the J=1 overlap');
+});
+
+test('an operator typesets its own letters, so it keeps them', () => {
+    assert.strictEqual(headingTitle('\\section{The $\\log$ scale}'), 'The log scale');
+});
+
+test('a command with no single-character output is still dropped, not guessed at', () => {
+    // \emph prints its ARGUMENT, not a glyph of its own: the argument survives
+    // and the command does not. This is a plain-text rendering, not a
+    // typesetter, and inventing a character for an unknown command would put a
+    // wrong one in front of the reader.
+    assert.strictEqual(headingTitle('\\section{The \\emph{measure} itself}'), 'The measure itself');
+    assert.strictEqual(headingTitle('\\section{A \\wibblefrob heading}'), 'A heading');
+});
+
+test('the things stripTex already got right stay right', () => {
+    assert.strictEqual(headingTitle('\\section{Wrapped over %\n  two lines}'), 'Wrapped over two lines');
+    assert.strictEqual(headingTitle('\\section{A plain heading}'), 'A plain heading');
 });
 
 // ---------------------------------------------------------------------------

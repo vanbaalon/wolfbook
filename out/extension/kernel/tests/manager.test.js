@@ -37,6 +37,12 @@ function controller() {
     await assert.rejects(manager.create(), /limit reached/i);
     assert.strictEqual(canonicalNotebook('/tmp/a.wb/'), canonicalNotebook('/tmp/a.wb'));
 
+    // Private kernels are a normal bounded capability now; the legacy
+    // experimentalIsolation setting no longer makes action=create fail.
+    const availableByDefault = new KernelManager(null, { experimental: false, maximum: 2, factory: async () => controller() });
+    availableByDefault.addDefault(controller());
+    assert(await availableByDefault.create());
+
     // Logical slots, unlike runtime kernel IDs, survive an extension-host
     // reload and recreate both the extra process and notebook association.
     await manager.bind('/tmp/persist.wb', k2.id);

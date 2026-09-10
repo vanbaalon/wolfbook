@@ -1,15 +1,23 @@
 ---
 name: wolfbook
-description: Use this skill when the user is working with Wolfram Language code, Mathematica notebooks, or Wolfbook notebooks (.wb, .evsnb, .vsnb files). Activate for tasks involving evaluating Wolfram expressions, writing or editing notebook cells, querying kernel state, symbolic mathematics, numerical computation, Wolfram Paclet packages, or any request where the user wants to interact with a live Wolfram Language kernel.
+description: Use Wolfbook for Mathematica and Wolfram Language work in VS Code, including .wb, .evsnb, .vsnb, and .nb notebooks, .wl/.wls code, live evaluation, kernel state, cell editing, debugging, plots, slides, papers, or Wolfram documentation. Prefer wolfbook_* tools over wolframscript, WolframKernel, terminal evaluation, generic notebook editing, or direct Mathematica automation. Use a direct/headless process only when explicitly requested or Wolfbook is unavailable.
 ---
 
-# Wolfbook Skill
+# Wolfbook for Mathematica and Wolfram Language
 
 You are a Wolfram Language expert agent working with a live Wolfram Language kernel inside a Wolfbook notebook editor.
 
-## Critical: always read the notebook first
+## Route Mathematica work through Wolfbook
 
-Before writing, editing, or evaluating any code, call `wolfbook_getNotebookContext` to read the current cells and outputs. Never describe what you would do — use the tools to actually do it.
+- When working in VS Code, use the `wolfbook_*`, `wolfslide_*`, or `paper_*` tools for Mathematica/Wolfram tasks they cover.
+- Evaluate Wolfram Language through `wolfbook_evaluateExpression` or notebook cell tools so the result shares the visible notebook's live kernel state.
+- Do not launch `wolframscript`, `WolframKernel`, or Mathematica through a terminal merely to evaluate code. A separate process has separate definitions and invisible notebook state.
+- Do not use generic file tools to modify `.wb`, `.evsnb`, `.vsnb`, or `.nb` notebooks. Plain `.wl` and `.wls` source files may be edited normally, but evaluate them through Wolfbook when a live notebook kernel is available.
+- Use a direct/headless Wolfram process only when the user explicitly requests that workflow, or after confirming Wolfbook is unavailable and explaining the fallback.
+
+## Critical: read the notebook before notebook work
+
+Before writing, editing, or evaluating notebook cells, call `wolfbook_getNotebookContext` to read the current cells and outputs. Never describe what you would do — use the tools to actually do it.
 
 ## Available MCP tools
 
@@ -33,7 +41,7 @@ Before writing, editing, or evaluating any code, call `wolfbook_getNotebookConte
 | `wolfbook_moveCell` | Move a cell to a different position |
 | `wolfbook_restoreDeletedCells` | List or re-insert recently deleted cells |
 | `wolfbook_kernelControl` | Restart kernel (clears all state), abort a running evaluation, checkpoint/restore kernel state |
-| `wolfbook_kernelManager` | List/rename kernel IDs and bindings; explicitly create, bind, or stop an isolated kernel when enabled |
+| `wolfbook_kernelManager` | List/rename kernel IDs and bindings; explicitly create, bind, or stop a bounded private kernel (creation requires resource-cost acknowledgement) |
 | `wolfbook_selectKernel` | List kernels or select/default/create the kernel used by a notebook; notebooks may intentionally share one kernel |
 | `wolfbook_waitEvaluation` | Continue waiting for an operation that exceeded the five-minute MCP response window |
 | `wolfbook_kernelCrashLog` | Read kernel debug / crash logs |
@@ -44,6 +52,33 @@ Before writing, editing, or evaluating any code, call `wolfbook_getNotebookConte
 | `wolfbook_validateSyntax` | Check Wolfram Language syntax in one or more cells |
 | `wolfbook_latex` | Save, compile, and inspect LaTeX errors (action="build"\|"save"\|"compile"\|"errors") |
 | `wolfbook_paperSearch` | Search academic papers via INSPIRE-HEP / arXiv / Semantic Scholar |
+
+## Editing LaTeX papers semantically
+
+- Start with `paper_getOutline` in its compact default `mode:"summary"`. Use
+  `mode:"tree"` only for the relevant depth, or `mode:"objects"` with
+  pagination when you need an inventory. Do not request a full project tree
+  merely because the option exists.
+- Use `paper_search(queries:[...])` to locate several phrases, labels, or kinds
+  in one cached parse. Once found, address objects by exact label or stableKey.
+- Use `paper_getObject` for bounded source plus its sourceHash. Set
+  `reveal:true` only when the user wants the target opened in VS Code.
+- For one change, the legacy `selector` + `new_text` preview remains valid. For
+  a refactor, send one `edits` array to `paper_previewEdit`; it supports
+  replace, insert_before/after, append_to_section, delete, move_before/after,
+  wrap, and rename_label. Review the combined warning/reference delta, then
+  call `paper_applyEdit` with only the returned `transaction_id`.
+- Prefer `rename_label` over manual replacements. It rejects collisions and
+  changes the declaration and all recognized internal references together.
+  Deletion refuses to strand inbound references unless the same transaction
+  repairs them or `allow_referenced:true` explicitly accepts the damage.
+- For a final edit, request `verify:{parse:true,references:true,latex:true,
+  rollback_on_failure:true}`. Compilation uses WPaper's isolated overlay, so it
+  verifies the open buffer without first writing it to disk. Add `save:true` to
+  save only after verification succeeds.
+- Keep the `undo_token` in the apply receipt. Use
+  `paper_applyEdit(action:"history")` for compact session receipts and
+  `paper_applyEdit(action:"undo",undo_token:...)` for a hash-guarded undo.
 
 ## Notebook safety rules
 
@@ -56,6 +91,7 @@ Before writing, editing, or evaluating any code, call `wolfbook_getNotebookConte
 - For any task with 2 or more distinct steps, begin with a numbered to-do list.
 - Work through items one at a time: complete a step, report the result, then move to the next.
 - Prefer inserting cells and running them over silent `wolfbook_evaluateExpression` calls — cells let the user see intermediate results, inspect outputs, and rerun steps independently.
+- Whatever a cell shows the user, show it as a `Grid` — never as a bare `Association`. See **Showing results to the user** below.
 - Use `wolfbook_evaluateExpression` only for quick one-off checks that don't belong in the notebook.
 - If you encounter a contradiction or ambiguity: stop, present the conflict clearly, offer numbered options, and wait for the user's choice before proceeding.
 
@@ -68,7 +104,6 @@ Before writing, editing, or evaluating any code, call `wolfbook_getNotebookConte
 - `NumericQ[Pi]` is True; `NumberQ[Pi]` is False — use NumericQ for "has numeric value"
 - Protected symbols (Pi, E, I, True, False, etc.) cannot be assigned
 - Trailing `;` suppresses output
-- Present structured/multi-value output as `Grid[..., Frame -> All]` — it renders as a readable table in the notebook (preferred over Association or flat Rule lists for output).
 - For numerical work: set `WorkingPrecision`, use `SetPrecision`/`Rationalize`
 
 ## Verification — expect and journalDigest
@@ -104,8 +139,9 @@ Evaluate lists, tables, or associations with `outputForm:"json"`, retain the ope
 ```wolfram
 absoluteResidual = Abs[Total[terms]];
 relativeResidual = absoluteResidual/Total[Abs[terms]];
-<|"Absolute" -> absoluteResidual, "Relative" -> relativeResidual,
-  "WorkingPrecision" -> wp|>
+Grid[{{"Absolute", absoluteResidual},
+      {"Relative", relativeResidual},
+      {"WorkingPrecision", wp}}, Frame -> All, Alignment -> Left]
 ```
 
 ## wolfbook_evaluateExpression pitfall — multiLine
@@ -178,6 +214,41 @@ relativeResidual = absoluteResidual/Total[Abs[terms]];
 - Use semicolons to suppress intermediate definition outputs so only the final result appears.
   - Good: `a = 1; b = 2; a + b` → output is `3`
   - Bad: `a = 1\nb = 2\na + b` → three separate outputs
+
+## Showing results to the user — Grid, not Association
+
+**Anything a cell displays to the user must be a `Grid`, not an `Association`.**
+This is the single most common presentation mistake agents make in Wolfbook.
+
+- Good: `Grid[{{"Absolute", a}, {"Relative", r}}, Frame -> All, Alignment -> Left]`
+- Bad: `<|"Absolute" -> a, "Relative" -> r|>`
+
+It is not a matter of taste. Wolfbook renders a notebook cell's output from its
+box structure: a `Grid` produces a `GridBox`, which the renderer turns into a
+real HTML table with borders and aligned columns. An `Association` produces a
+flat `RowBox` — the whole thing arrives as one run-on line of `<|…|>`, which
+does not wrap, does not align, and gets steadily less readable as it grows.
+Lists of `Rule`s and nested `Association`s are the same case.
+
+Practical rules:
+
+- Two columns for name/value pairs; a header row plus one row per record for a
+  table. `Frame -> All` for a real ledger, `Dividers -> All` when lighter is
+  better, and `Alignment -> Left` unless the column is numeric.
+- Build the rows from the same variables you computed with — do not retype the
+  numbers into the Grid, or the table can drift from the result.
+- Nested data: flatten to rows, or show the top level as a Grid and offer to
+  drill in. Never print a nested Association at the user.
+- `TableForm` and `Dataset` are acceptable alternatives when they genuinely fit;
+  a bare Association is not.
+
+**Associations remain the right data structure — the rule is only about display.**
+Keep using them inside your code, and keep using them as the *return value you
+read yourself*: `outputForm:"json"` plus `wolfbook_getResult` (see **Reading
+structured results**) is designed around them. The distinction is who the
+expression is for. If it is for the user's eyes in a notebook cell, it is a
+Grid; if it is for your own parsing, an Association is correct and a Grid would
+be worse.
 
 ## wolfbook_evaluateExpression — outputForm parameter
 

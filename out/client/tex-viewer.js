@@ -39,6 +39,7 @@ const state = {
     workerDead: false,
     workerError: '',
     openInFlight: false,
+    openSeq: 0,
     openError: '',
     pageCount: 0,
     scale: 1.25,
@@ -49,8 +50,12 @@ const state = {
     followMode: 'scroll',     // 'off' | 'mark' | 'scroll'
     editStack: null,          // {items, index} — the footer's worklist
     pinHighlight: false,
-    fullscreen: false,
+    fullscreen: false,        // compatibility: any focused layout is true
+    layoutMode: 'all',        // all (editor + viewer) | viewer
     generation: null,
+    restoreViewNext: true,    // fresh panel or a different paper, not a live recompile
+    tracePaused: false,       // source is newer than the PDF currently painted
+    sourceDirty: false,       // source exists only in editor memory, independently of PDF freshness
     labels: null,             // {generation, items} — the label overlay, cached
     labelsOn: false,          // Shift is down
     sections: null,           // {generation, items, pageWidth} — the fold controls
@@ -60,8 +65,9 @@ const state = {
     labelsAsked: null,        // the generation we have already asked for
     review: null,             // {pending, groups, census, focus} — the agent's changes
     reviewGroup: 'section',   // how the list is collated: 'section' | 'arrival'
-    hints: { left: { pages: 3, chip: 3 }, dwellMs: HINT_DWELL_DEFAULT },
-    hintText: '',             // the page hint, kept when the attribute is taken away
+    comments: { items: [], errors: [] },
+    commentViewApplied: false,
+    hints: { left: { chip: 3 }, dwellMs: HINT_DWELL_DEFAULT },
     tour: null,               // {index,total,id,title,say,doIt,done,point} — the tour card
     mma: null,                // the open computation card: {blockId, cells, rects, pos}
 };
@@ -70,12 +76,10 @@ const el = (id) => document.getElementById(id);
 
 // --- HINTS ARE FOR LEARNING, NOT FOR LIVING WITH ---------------------------
 //
-// The two long tooltips — what a click does on the page, and what clicking a
-// label badge copies — teach the panel's gestures once and are in the way ever
-// after: they cover the very text they are describing. So each has a BUDGET of
-// showings per session (the extension keeps the count, so it survives closing
-// and reopening the paper and resets when the window does), and when it is
-// spent the `title` is taken off the element altogether.
+// The label-badge tooltip teaches its local copy gesture a few times and is in
+// the way thereafter. General page gestures live in the guide; attaching that
+// long explanation to the whole PDF surface made it appear whenever the reader
+// paused over the paper.
 //
 // A "showing" is a dwell long enough for the browser to have drawn the tooltip
 // — there is no event for a native title appearing, and counting hovers that
@@ -115,14 +119,16 @@ function stripHint(id) {
 }
 
 function applyHints() {
-    const pages = el('pages');
-    if (pages) {
-        if (!state.hintText) state.hintText = pages.getAttribute('title') || '';
-        armHint(pages, 'pages', state.hintText);
-    }
     if (hintsLeft('chip') <= 0) stripHint('chip');
 }
 const pagesEl = () => el('pages');
+
+/** Give keys to the paper after a deliberate click, without scroll-jumping. */
+function focusPaperForKeys() {
+    const p = pagesEl();
+    if (!p) return;
+    try { p.focus({ preventScroll: true }); } catch (_) { try { p.focus(); } catch (_) {} }
+}
 
 // --- theme -------------------------------------------------------------------
 //
@@ -146,7 +152,7 @@ function applyTheme(dark, pages) {
     const b = el('pagetheme');
     if (b) {
         const onDark = state.pageTheme === 'dark';
-        b.textContent = onDark ? '☾' : '☀';
+        setToolIcon(b, onDark ? 'moon' : 'sun');
         b.title = onDark
             ? 'Pages are darkened — click for white paper' +
               (state.setting === 'auto' ? ' (following the theme)' : '')
@@ -176,6 +182,50 @@ function status(text, kind = '') {
     const s = el('status');
     s.textContent = text;
     s.className = kind;
+}
+
+/** Pause correspondence while the source and painted PDF are different. */
+function setTraceState(msg) {
+    state.tracePaused = !!(msg && msg.paused);
+    if (state.tracePaused) clearPaperTypingTarget(true, 'trace paused');
+    const lag = el('tracelag');
+    if (lag) {
+        lag.hidden = !state.tracePaused;
+        lag.classList.toggle('compiling', state.tracePaused && !!msg.compiling);
+        const source = msg && msg.source === 'mini-editor' ? 'mini-editor' : 'editor';
+        const label = lag.querySelector('.lagtext');
+        if (label) label.textContent = msg && msg.compiling
+            ? `updating from ${source}…` : `page behind ${source}`;
+        lag.title = state.tracePaused
+            ? (msg && msg.compiling
+                ? `Tracing is paused until the page catches up with the ${source}.`
+                : `The page is behind the ${source}; tracing will resume after it is compiled.`)
+            : '';
+    }
+    if (!state.tracePaused) return;
+    // Old geometry must disappear at the same moment the lag is detected. A
+    // later selection event is intentionally ignored by the extension until
+    // the matching generation is visible.
+    state.highlight = null;
+    paintHighlight();
+    clearSelectionOverlay();
+    el('where').textContent = '';
+}
+
+/** Keep unsaved source visible even after a live compile has caught the PDF up. */
+function setSourceDirty(msg) {
+    const dirty = !!(msg && msg.dirty);
+    const count = dirty ? Math.max(1, Number(msg.count) || 1) : 0;
+    state.sourceDirty = dirty;
+    const badge = el('sourceunsaved');
+    if (!badge) return;
+    badge.hidden = !dirty;
+    const label = badge.querySelector('.dirtytext');
+    if (label) label.textContent = count > 1 ? `${count} sources unsaved` : 'Unsaved source';
+    const files = msg && Array.isArray(msg.files) ? msg.files.filter(Boolean) : [];
+    badge.title = dirty
+        ? `Source changes are not saved to disk${files.length ? `: ${files.join(', ')}` : ''}. Click to save.`
+        : '';
 }
 
 // --- loading ----------------------------------------------------------------
@@ -265,10 +315,13 @@ async function loadPdfjs(base) {
 }
 
 async function openDocument(msg) {
-    const pdfjs = await loadPdfjs(msg.base);
-    state.openInFlight = true;
+    clearPaperTypingTarget(true, 'document opened');
+    const openSeq = ++state.openSeq;
+    state.openInFlight = openSeq;
     state.openError = '';
     status('loading…');
+    const pdfjs = await loadPdfjs(msg.base);
+    if (openSeq !== state.openSeq) return;
     // PER-OPEN timing, distinct from the module-level marks above: those
     // measure cold start and are reported once, which meant a LIVE rebuild —
     // the thing that happens hundreds of times in a session — was never timed
@@ -297,16 +350,56 @@ async function openDocument(msg) {
             isEvalSupported: false,
         });
         const prev = state.doc;
+        const restoreSession = !prev || state.restoreViewNext;
         mark('bytes decoded');
         omark('decode');
         const anchor = scrollAnchor();
-        state.doc = await task.promise;
+        const nextDoc = await task.promise;
+        // Two quick compiles can parse out of order. Only the newest request
+        // may become the document; otherwise an older PDF can finish last and
+        // silently replace the page after the review already moved on.
+        if (openSeq !== state.openSeq) {
+            try { await nextDoc.destroy(); } catch (_) { /* superseded */ }
+            return;
+        }
+        state.doc = nextDoc;
         mark('document parsed');
         omark('parse');
+        // A fresh webview starts at 125%. Restore the saved magnification
+        // before sizing even the placeholders, so the page never flashes at
+        // one scale and then jumps to another. Live recompiles keep the scale
+        // already in the DOM instead.
+        if (restoreSession && msg.restoreView) {
+            if (Number.isFinite(msg.restoreView.scale)) {
+                state.scale = Math.max(0.25, Math.min(6, Number(msg.restoreView.scale)));
+            }
+            state.fitMode = msg.restoreView.fit === true;
+            document.body.classList.toggle('fitted', state.fitMode);
+            updateFitControl();
+            if (state.fitMode) {
+                const first = await state.doc.getPage(1);
+                const main = document.querySelector('main');
+                const cs = getComputedStyle(main);
+                const pad = parseFloat(cs.paddingLeft || 0) + parseFloat(cs.paddingRight || 0);
+                const base = first.getViewport({ scale: 1 });
+                const avail = main.clientWidth - pad;
+                if (avail > 0 && base.width > 0) {
+                    state.scale = Math.max(0.25, Math.min(6, avail / base.width));
+                }
+            }
+            syncChipScale();
+            el('zoom').textContent = `${Math.round(state.scale * 100)}%`;
+        }
+        state.restoreViewNext = false;
         const samePagination = msg.live && state.pageCount === state.doc.numPages
             && pagesEl().children.length === state.doc.numPages;
         state.pageCount = state.doc.numPages;
         state.generation = msg.generation;
+        // Review rectangles belong to the page geometry that was visible
+        // before this open. Even when a restarted extension reuses the same
+        // numeric generation, do not paint those rectangles onto the new
+        // canvases. The extension re-places the review after `opened`.
+        if (state.review) state.review = { ...state.review, generation: null };
         // Which pages were on screen BEFORE the swap: those are the ones worth
         // repainting immediately. The rest keep their old canvas until the
         // reader scrolls to them, which is both smooth and cheap.
@@ -343,8 +436,11 @@ async function openDocument(msg) {
             // Repaint what is actually in view first, then the rest of what
             // had been rendered, so the visible part updates soonest.
             const vis = visiblePages();
-            await Promise.all(vis.map(renderPage));
-            restoreAnchor(anchor);
+            const semanticPage = Number(msg.semanticReveal && msg.semanticReveal.page);
+            const first = Number.isFinite(semanticPage) && semanticPage >= 1 && semanticPage <= state.pageCount
+                ? [...new Set([...vis, semanticPage])] : vis;
+            await Promise.all(first.map(renderPage));
+            if (!(await restoreSemanticReveal(msg.semanticReveal, anchor))) restoreAnchor(anchor);
             omark('visible');
             // Awaited so the rest of the repaint can be timed too. These pages
             // are off screen, so waiting for them costs the reader nothing.
@@ -365,7 +461,10 @@ async function openDocument(msg) {
             await placeholders;
             const keep = anchor && anchor.page >= 1 && anchor.page <= state.pageCount
                 ? anchor : null;
-            if (keep) {
+            if (await restoreSemanticReveal(msg.semanticReveal, keep)) {
+                // The paragraph, equation or heading under the reader is the
+                // address. A physical page number is only its fallback.
+            } else if (keep) {
                 renderAround(keep.page);
                 restoreAnchor(keep);
             } else if (msg.revealPage) {
@@ -377,7 +476,16 @@ async function openDocument(msg) {
                 // place while they wait.
                 renderAround(msg.revealPage);
                 if (Number.isFinite(msg.revealFrac)) {
-                    restoreAnchor({ page: msg.revealPage, frac: msg.revealFrac });
+                    restoreAnchor({
+                        page: msg.revealPage,
+                        frac: msg.revealFrac,
+                        left: msg.revealLeft,
+                        xFrac: msg.revealXFrac,
+                        // Fit is a semantic zoom mode. If the panel width
+                        // changed, its new scale changes pixel offsets; the
+                        // page/fraction address remains exact in the paper.
+                        exactTop: state.fitMode ? undefined : msg.revealTop,
+                    });
                     if (msg.revealRects) {
                         state.highlight = { page: msg.revealPage, rects: msg.revealRects, flag: 'target' };
                         paintHighlight();
@@ -400,7 +508,10 @@ async function openDocument(msg) {
             marks: openMarks,
         });
         // Now that the pages are the new ones, ask for the highlight again.
-        vscode.postMessage({ type: 'opened', generation: msg.generation });
+        if (openSeq !== state.openSeq) return;
+        vscode.postMessage({
+            type: 'opened', generation: msg.generation, pdfHash: msg.pdfHash || null,
+        });
         // …and hand over the glyphs, so the extension can align them against
         // the source. Deliberately not awaited: it is not on any critical path.
         sendTextLayer(msg.generation).catch(() => { /* the old path still works */ });
@@ -419,10 +530,11 @@ async function openDocument(msg) {
             vscode.postMessage({ type: 'timing', marks, worker: state.workerHow });
         }
     } catch (e) {
+        if (openSeq !== state.openSeq) return;
         state.openError = e && e.message ? e.message : String(e);
         status(`could not open the PDF: ${state.openError}`, 'err');
     } finally {
-        state.openInFlight = false;
+        if (openSeq === state.openSeq) state.openInFlight = false;
     }
 }
 
@@ -539,7 +651,19 @@ function scrollAnchor() {
     const top = main.scrollTop;
     for (const w of pagesEl().children) {
         if (w.offsetTop + w.offsetHeight > top) {
-            return { page: Number(w.dataset.page), frac: (top - w.offsetTop) / Math.max(1, w.offsetHeight) };
+            const pageWidth = Math.max(1, w.offsetWidth);
+            return {
+                page: Number(w.dataset.page),
+                frac: (top - w.offsetTop) / Math.max(1, w.offsetHeight),
+                top,
+                left: main.scrollLeft,
+                // The point in the PAPER at the viewport's horizontal centre.
+                // Unlike raw scrollLeft this survives a zoom or a separator
+                // drag which changes both the page and viewport widths.
+                xFrac: Math.max(0, Math.min(1,
+                    (main.scrollLeft + main.clientWidth / 2 - w.offsetLeft) / pageWidth)),
+                generation: Number(state.generation),
+            };
         }
     }
     return null;
@@ -550,8 +674,120 @@ function restoreAnchor(a) {
     const main = document.querySelector('main');
     const w = pagesEl().querySelector(`.page[data-page="${a.page}"]`);
     if (!main || !w) return;
-    main.scrollTop = w.offsetTop + a.frac * w.offsetHeight;
+    main.scrollTop = Number.isFinite(a.exactTop)
+        ? a.exactTop : w.offsetTop + a.frac * w.offsetHeight;
+    if (Number.isFinite(a.xFrac)) {
+        main.scrollLeft = Math.max(0, w.offsetLeft +
+            Math.max(0, Math.min(1, a.xFrac)) * w.offsetWidth - main.clientWidth / 2);
+    } else if (Number.isFinite(a.left)) main.scrollLeft = a.left;
 }
+
+/**
+ * Put a semantic source cell back at the same height in the viewport.
+ *
+ * This is intentionally separate from highlights: a background recompile is
+ * not a selection gesture, and preserving a reader's place must not leave an
+ * amber mark behind. The rect is only a coordinate in the newly rendered PDF.
+ */
+async function restoreSemanticReveal(reveal, fallback) {
+    if (!reveal) return false;
+    const page = Number(reveal.page);
+    if (!Number.isFinite(page) || page < 1 || page > state.pageCount) return false;
+    const rect = (reveal.rects || []).find(r => Number(r.page) === page);
+    if (!rect) return false;
+    await renderPage(page);
+    const v = rectToViewport(page, rect);
+    const main = document.querySelector('main');
+    const wrap = pagesEl().querySelector(`.page[data-page="${page}"]`);
+    if (!v || !main || !wrap) return false;
+    const fraction = Number.isFinite(reveal.viewportFrac)
+        ? Math.max(0.08, Math.min(0.92, Number(reveal.viewportFrac))) : 0.35;
+    main.scrollTop = Math.max(0,
+        wrap.offsetTop + v.y + Math.max(0, v.h || 0) / 2 - main.clientHeight * fraction);
+    if (fallback && Number.isFinite(fallback.xFrac)) {
+        main.scrollLeft = Math.max(0, wrap.offsetLeft +
+            Math.max(0, Math.min(1, fallback.xFrac)) * wrap.offsetWidth - main.clientWidth / 2);
+    } else if (fallback && Number.isFinite(fallback.left)) main.scrollLeft = fallback.left;
+    renderAround(page);
+    paintPageNow();
+    return true;
+}
+
+/**
+ * A rendered point on real ink near the upper-middle of the viewport.
+ *
+ * The point crosses the webview boundary as PDF coordinates. The extension
+ * can therefore resolve it through the render map that belongs to precisely
+ * this generation, remember the source cell, then locate that cell again in
+ * the replacement generation even when pages were inserted above it.
+ */
+function semanticViewPoint() {
+    const main = document.querySelector('main');
+    if (!main || !state.rendered.size) return null;
+    const mr = main.getBoundingClientRect();
+    const wantedY = mr.top + main.clientHeight * 0.35;
+    let best = null;
+    for (const wrap of pagesEl().children) {
+        const page = Number(wrap.dataset.page);
+        if (!state.rendered.has(page)) continue;
+        const wr = wrap.getBoundingClientRect();
+        if (wr.bottom < mr.top || wr.top > mr.bottom) continue;
+        const items = textCache.get(page) || [];
+        for (const it of items) {
+            const y = wr.top + it.y + it.h / 2;
+            const distance = Math.abs(y - wantedY);
+            if (!best || distance < best.distance) {
+                best = { page, vx: it.x + Math.max(1, it.w) / 2,
+                    vy: it.y + it.h / 2, clientY: y, distance };
+            }
+        }
+        // A rendered page without a text cache is still a useful fallback
+        // (figures and the instant before text extraction completes).
+        if (!items.length) {
+            const vy = Math.max(0, Math.min(wr.height, wantedY - wr.top));
+            const distance = Math.abs(wr.top + vy - wantedY);
+            if (!best || distance < best.distance) {
+                best = { page, vx: wr.width / 2, vy, clientY: wr.top + vy, distance };
+            }
+        }
+    }
+    if (!best) return null;
+    const bp = fromViewport(best.page, best.vx, best.vy);
+    if (!bp) return null;
+    return {
+        focusPage: best.page,
+        focusXBp: bp.xBp,
+        focusYTopBp: bp.yTopBp,
+        focusViewportFrac: Math.max(0, Math.min(1,
+            (best.clientY - mr.top) / Math.max(1, main.clientHeight))),
+    };
+}
+
+function viewSnapshot() {
+    const a = scrollAnchor();
+    if (!a) return null;
+    return { ...a, ...semanticViewPoint(), scale: state.scale, fit: !!state.fitMode };
+}
+
+let viewSaveTimer = null;
+function saveViewNow() {
+    clearTimeout(viewSaveTimer);
+    viewSaveTimer = null;
+    const snap = viewSnapshot();
+    if (!snap) return;
+    vscode.postMessage({ type: 'viewstate', ...snap });
+    // VS Code supplies this to the serializer after a window reload. The
+    // extension's workspace record remains authoritative when the webview
+    // itself has been discarded.
+    try { vscode.setState(snap); } catch (_) { /* older host */ }
+}
+
+function saveViewSoon(delay = 250) {
+    clearTimeout(viewSaveTimer);
+    viewSaveTimer = setTimeout(saveViewNow, Math.max(0, delay));
+}
+
+window.addEventListener('pagehide', saveViewNow);
 
 /**
  * One placeholder per page, sized correctly up front so the scrollbar is
@@ -656,6 +892,12 @@ async function renderPage(n) {
         if (state.highlight && state.highlight.page === n) paintHighlight();
         if (state.selection) paintSelection(state.selection);
         if (state.diff) paintDiff();
+        // THE REVIEW MOVES WITH THE PAGE TOO. It was the one overlay missing
+        // from this list, so its boxes kept the pixel coordinates they were
+        // given while every other mark followed the re-render — visibly adrift
+        // after any zoom, and after every live rebuild.
+        if (state.review) paintReview();
+        if (state.comments) paintCommentMarkers();
         if (state.labels && labelsVisible()) paintLabels().catch(() => {});
         if (state.sections) paintSections();
         if (state.moveCaret) paintMoveCaret(state.moveCaret);
@@ -689,7 +931,13 @@ async function paintLinks(n) {
 
     const doc = state.doc;
     let anns = [];
-    try { anns = await doc.getAnnotations({ intent: 'display' }, n); }
+    // Annotations belong to PDFPageProxy, not PDFDocumentProxy. Calling this
+    // on `doc` throws; the intentionally quiet catch below then made every
+    // hyperref rectangle disappear while the blue printed text remained.
+    try {
+        const page = await doc.getPage(n);
+        anns = await page.getAnnotations({ intent: 'display' });
+    }
     catch (_) { anns = []; }
     // Awaiting gave the paper time to change underneath us.
     if (state.doc !== doc || state.rendered.get(n) !== r) return;
@@ -716,11 +964,78 @@ async function paintLinks(n) {
             el2.title = url;
         } else {
             el2.href = '#';
-            el2.title = 'Go to it in the paper';
+            // The visible hover is the thing this reference points at. Keep
+            // the navigation promise for assistive technology without also
+            // raising a native text tooltip over the rendered preview.
+            el2.setAttribute('aria-label', 'Go to it in the paper');
             el2._dest = a.dest;
+            el2.addEventListener('mouseenter', () => showPdfLinkPreview(el2));
+            el2.addEventListener('mouseleave', () => hidePdfLinkPreview(el2));
         }
         wrap.appendChild(el2);
     }
+}
+
+// The PDF knows that a printed number is clickable, while the source model
+// knows WHAT that number names. Meet the two at the ink they share. This keeps
+// a hover over `(11)` honest even when several references occur on one line:
+// only the model reference whose printed ink overlaps this annotation wins.
+let hoveredPdfLink = null;
+
+function boxesOverlap(a, b, pad = 0) {
+    return a.x < b.x + b.w + pad && b.x < a.x + a.w + pad &&
+        a.y < b.y + b.h + pad && b.y < a.y + a.h + pad;
+}
+
+async function previewChipForPdfLink(anchor) {
+    if (!anchor || !state.labels || state.labels.generation !== state.generation) return null;
+    const wrap = anchor.closest('.page');
+    const page = Number(wrap && wrap.dataset.page);
+    if (!(page > 0)) return null;
+    const link = {
+        x: anchor.offsetLeft, y: anchor.offsetTop,
+        w: anchor.offsetWidth, h: anchor.offsetHeight,
+    };
+    const candidates = (state.labels.items || []).filter(c =>
+        c && c.role === 'ref' && c.target && c.target.length && c.find &&
+        (c.find.rects || []).some(r => {
+            if (r.page !== page) return false;
+            const v = rectToViewport(page, r);
+            return v && boxesOverlap(link, v, 3);
+        }));
+    if (!candidates.length) return null;
+    const hits = await Promise.all(candidates.map(async c => ({
+        chip: c,
+        ink: await inkMatching(c.find, page),
+    })));
+    const exact = hits.find(({ ink }) => ink && boxesOverlap(link, ink, 3));
+    // With one reference on the row the row itself is unambiguous even when
+    // pdf.js split the parentheses in a shape `inkMatching` cannot recognise.
+    // With two, silence is preferable to previewing the wrong equation.
+    return exact ? exact.chip : (candidates.length === 1 ? candidates[0] : null);
+}
+
+async function showPdfLinkPreview(anchor) {
+    hoveredPdfLink = anchor;
+    hideChipPreview();
+    if (!state.labels || state.labels.generation !== state.generation) {
+        // Label data is normally lazy because the Shift overlay is optional.
+        // A reference hover needs the same target map without making the
+        // overlay visible, so ask once and resume when the reply arrives.
+        if (state.labelsAsked !== state.generation) {
+            state.labelsAsked = state.generation;
+            vscode.postMessage({ type: 'labelsWanted', value: true });
+        }
+        return;
+    }
+    const chip = await previewChipForPdfLink(anchor);
+    if (hoveredPdfLink !== anchor || !anchor.isConnected || !chip) return;
+    await showChipPreview(chip, anchor);
+}
+
+function hidePdfLinkPreview(anchor) {
+    if (hoveredPdfLink === anchor) hoveredPdfLink = null;
+    hideChipPreview();
 }
 
 /**
@@ -737,7 +1052,7 @@ async function followPdfLink(el2) {
     try {
         const d = typeof dest === 'string' ? await state.doc.getDestination(dest) : dest;
         if (!Array.isArray(d) || !d.length) return;
-        const idx = await state.doc.getPageIndex(d[0]);
+        const idx = Number.isInteger(d[0]) ? d[0] : await state.doc.getPageIndex(d[0]);
         const page = idx + 1;
         await renderPage(page);
         const wrap = pagesEl().querySelector(`.page[data-page="${page}"]`);
@@ -746,7 +1061,15 @@ async function followPdfLink(el2) {
         // A destination carries a POSITION, and using it is the difference
         // between landing on the equation and landing on the page it is on.
         let top = wrap.offsetTop;
-        const yInPdf = d.length > 3 && typeof d[3] === 'number' ? d[3] : null;
+        const mode = d[1] && d[1].name;
+        // PDF destinations have mode-specific coordinates: XYZ stores top at
+        // [3], FitH/FitBH at [2], and FitR at [5]. Hyperref-generated tables
+        // of contents commonly use XYZ, while other classes choose FitH.
+        const yInPdf = mode === 'FitH' || mode === 'FitBH'
+            ? (typeof d[2] === 'number' ? d[2] : null)
+            : mode === 'FitR'
+                ? (typeof d[5] === 'number' ? d[5] : null)
+                : (d.length > 3 && typeof d[3] === 'number' ? d[3] : null);
         if (r && yInPdf != null) {
             try {
                 const v = r.viewport.convertToViewportPoint(0, yInPdf);
@@ -1596,6 +1919,10 @@ function renderReview() {
     const panel = el('reviewlist');
     const r = state.review;
     document.body.classList.toggle('reviewing', !!(r && r.pending));
+    if (el('reviewfeedbackbutton')) {
+        const n = state.comments && state.comments.items ? state.comments.items.length : 0;
+        el('reviewfeedbackbutton').textContent = `Comments${n ? ' · ' + n : ''}`;
+    }
     if (!panel) return;
     if (!r || !r.pending) { panel.innerHTML = ''; renderReviewDiff(); paintReview(); return; }
 
@@ -1652,7 +1979,7 @@ function renderReview() {
                 `title="Agree to every change in this section">\u2713 Keep section</button></div>`);
         } else {
             const writes = g.writes > 1 ? ` · ${g.writes} writes` : '';
-            parts.push(`<div class="grp"><span>${esc(ago(g.lastAt || g.at))} · ${esc(g.source)}${writes} · ` +
+            parts.push(`<div class="grp"><span>${esc(new Date(g.at).toLocaleString())} · ${esc(ago(g.lastAt || g.at))} · ${esc(g.author?.name || 'External / unknown')}${g.author?.sessionId ? ' · ' + esc(g.author.sessionId.slice(0, 6)) : ''} · ${esc(g.source)}${writes} · ` +
                 `${g.count} change${g.count === 1 ? '' : 's'}</span><span class="sp"></span>` +
                 `<button data-batch="${esc(g.id)}">Keep batch</button></div>`);
         }
@@ -1672,7 +1999,7 @@ function renderReview() {
                 `<span class="v ${esc(h.verb)}">${h.verb === 'add' ? '+' : h.verb === 'del' ? '\u2212' : '~'}</span>` +
                 `<span class="name" title="${esc(name)}">${esc(name)}</span>` +
                 `<span class="meta">${esc(size)}</span>` +
-                `<span class="where">${esc(where)}</span>` +
+                `<span class="where">${esc(where)}<br><small>${esc(h.author?.name || 'External / unknown')} · ${esc(new Date(h.at).toLocaleTimeString())}</small></span>` +
                 // A change the reader has typed inside cannot be UNDONE — that
                 // would throw their own words away — but it can still be kept,
                 // and withholding both left it in the list with no way out.
@@ -1747,6 +2074,7 @@ function renderReviewDiff() {
     // for the band on the page. Reported: "hard to find in the viewer".
     const acts = '<span class="sp"></span><span class="rd-acts">' +
         '<button class="keep" data-keep="' + esc(h.id) + '" title="Agree to this change">\u2713 Keep</button>' +
+        '<button data-keep-comment="' + esc(h.id) + '" title="Accept this change and save a question or comment for the agent">Accept + comment…</button>' +
         (h.editedByYou
             ? '<button class="undo" disabled title="You typed inside this change — undoing it would throw your own words away">\u21ba Undo</button>'
             : '<button class="undo" data-undo="' + esc(h.id) + '" title="Put this back the way it was">\u21ba Undo</button>') +
@@ -1768,26 +2096,153 @@ function renderReviewDiff() {
     pane.scrollTop = 0;
 }
 
+let reviewContourSequence = 0;
+
+/**
+ * Draw one outline around a focused change on one page.
+ *
+ * pdf.js gives a Range as several rectangles (often several on the SAME
+ * printed line).  Stroke those rectangles independently and the paper turns
+ * into graph paper.  First envelope fragments on a line, then close the tiny
+ * leading between consecutive lines.  The SVG filter outlines the UNION of
+ * those tiles, so shared edges simply do not exist in the result.
+ */
+function paintReviewContour(wrap, fragments) {
+    if (!wrap || !fragments.length) return;
+    const sorted = fragments.slice().sort((a, b) => a.y - b.y || a.x - b.x);
+    const rows = [];
+    for (const box of sorted) {
+        const h = Math.max(2, box.h);
+        const row = rows[rows.length - 1];
+        const sameLine = row && Math.abs(box.y - row.y) <= Math.max(2, Math.min(h, row.h) * .45);
+        if (sameLine) {
+            const right = Math.max(row.x + row.w, box.x + box.w);
+            const bottom = Math.max(row.y + row.h, box.y + h);
+            row.x = Math.min(row.x, box.x);
+            row.y = Math.min(row.y, box.y);
+            row.w = right - row.x;
+            row.h = bottom - row.y;
+        } else {
+            rows.push({ x: box.x, y: box.y, w: Math.max(2, box.w), h });
+        }
+    }
+    for (let i = 0; i + 1 < rows.length; i++) {
+        const row = rows[i];
+        const next = rows[i + 1];
+        const gap = next.y - (row.y + row.h);
+        // Join ordinary typeset leading, but preserve a genuine vertical gap
+        // between disconnected portions of a change.
+        if (gap >= 0 && gap <= Math.max(row.h, next.h) * .65) {
+            row.h = next.y - row.y + .25;
+        }
+    }
+
+    const ns = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(ns, 'svg');
+    svg.classList.add('rcontour');
+    svg.setAttribute('viewBox', `0 0 ${wrap.clientWidth} ${wrap.clientHeight}`);
+    svg.setAttribute('aria-hidden', 'true');
+
+    const defs = document.createElementNS(ns, 'defs');
+    const filter = document.createElementNS(ns, 'filter');
+    const filterId = `review-contour-${++reviewContourSequence}`;
+    filter.id = filterId;
+    filter.setAttribute('x', '-5%');
+    filter.setAttribute('y', '-5%');
+    filter.setAttribute('width', '110%');
+    filter.setAttribute('height', '110%');
+    filter.setAttribute('color-interpolation-filters', 'sRGB');
+
+    const grow = document.createElementNS(ns, 'feMorphology');
+    grow.setAttribute('in', 'SourceAlpha');
+    grow.setAttribute('operator', 'dilate');
+    grow.setAttribute('radius', '1.5');
+    grow.setAttribute('result', 'expanded');
+    const edge = document.createElementNS(ns, 'feComposite');
+    edge.setAttribute('in', 'expanded');
+    edge.setAttribute('in2', 'SourceAlpha');
+    edge.setAttribute('operator', 'out');
+    edge.setAttribute('result', 'edge');
+    const paint = document.createElementNS(ns, 'feFlood');
+    const focusColour = getComputedStyle(document.documentElement)
+        .getPropertyValue('--vscode-focusBorder').trim() || '#1688e8';
+    paint.setAttribute('flood-color', focusColour);
+    paint.setAttribute('result', 'paint');
+    const colourEdge = document.createElementNS(ns, 'feComposite');
+    colourEdge.setAttribute('in', 'paint');
+    colourEdge.setAttribute('in2', 'edge');
+    colourEdge.setAttribute('operator', 'in');
+    filter.append(grow, edge, paint, colourEdge);
+    defs.appendChild(filter);
+    svg.appendChild(defs);
+
+    const tiles = document.createElementNS(ns, 'g');
+    tiles.setAttribute('filter', `url(#${filterId})`);
+    for (const row of rows) {
+        const tile = document.createElementNS(ns, 'rect');
+        tile.setAttribute('x', String(row.x));
+        tile.setAttribute('y', String(row.y));
+        tile.setAttribute('width', String(row.w));
+        tile.setAttribute('height', String(row.h));
+        tile.setAttribute('fill', '#000');
+        tiles.appendChild(tile);
+    }
+    svg.appendChild(tiles);
+    wrap.appendChild(svg);
+}
+
+/**
+ * Does this placement describe the pages currently on screen?
+ *
+ * Rects are measured against one compile's render map. The extension re-places
+ * them when a new generation lands, but the new PDF is on screen before that
+ * answer arrives — and a box drawn from the previous render marks whatever now
+ * happens to sit at those coordinates, which is worse than marking nothing.
+ *
+ * Unknown placement is suppressed too: during an external edit the list can
+ * already describe the new source while no corresponding render exists yet.
+ */
+function reviewPlacementCurrent() {
+    const r = state.review;
+    if (!r) return true;
+    // Unknown is not a render. During an external edit the list is current but
+    // there is deliberately no trustworthy page placement yet.
+    if (r.generation == null || state.generation == null) return false;
+    return String(r.generation) === String(state.generation);
+}
+
 /** The pending changes, marked where they print. */
 function paintReview() {
-    for (const el of document.querySelectorAll('.rband, .rchip')) el.remove();
+    for (const el of document.querySelectorAll('.rband, .rcontour, .rchip')) el.remove();
     const r = state.review;
     if (!r || !r.pending) return;
+    // The list, the diff pane and the counts are all still true — it is only
+    // the placement that has gone out of date, and only until the re-placed
+    // payload arrives a moment later.
+    if (!reviewPlacementCurrent()) return;
     for (const h of reviewHunks()) {
+        const focusedByPage = new Map();
         for (const rect of (h.rects || [])) {
             const wrap = pagesEl().querySelector(`.page[data-page="${rect.page}"]`);
             if (!wrap || !state.rendered.has(rect.page)) continue;
             const v = rectToViewport(rect.page, rect);
             if (!v) continue;
+            const width = rect.caret ? Math.max(v.w, 24) : v.w;
+            const height = rect.caret ? 2 : v.h;
             const band = document.createElement('div');
             band.className = `rband ${h.verb}${h.id === r.focus ? ' on' : ''}`;
             band.style.left = `${v.x}px`;
             band.style.top = `${v.y}px`;
-            band.style.width = `${rect.caret ? Math.max(v.w, 24) : v.w}px`;
+            band.style.width = `${width}px`;
             band.style.height = `${rect.caret ? 0 : v.h}px`;
             band.title = `${h.name || `line ${h.startLine}`} — ${h.verb}`;
             wrap.appendChild(band);
+            if (h.id === r.focus) {
+                if (!focusedByPage.has(rect.page)) focusedByPage.set(rect.page, { wrap, fragments: [] });
+                focusedByPage.get(rect.page).fragments.push({ x: v.x, y: v.y, w: width, h: height });
+            }
         }
+        for (const { wrap, fragments } of focusedByPage.values()) paintReviewContour(wrap, fragments);
         // THE CHIP IS FOR THE FOCUSED CHANGE ONLY. One per change turns a
         // reviewed page into a wall of buttons — the same lesson the label
         // overlay taught.
@@ -1809,6 +2264,960 @@ function paintReview() {
 }
 
 const reviewAct = (action, extra) => vscode.postMessage({ type: 'reviewAction', action, ...extra });
+if (el('reviewhistory')) el('reviewhistory').onclick = () => reviewAct('history');
+
+// ===========================================================================
+// SHARED PAPER COMMENTS
+// ===========================================================================
+
+let commentArmed = false;
+let commentTarget = null;
+let commentWidth = 320;
+let activeCommentCellId = null;
+let commentPopoverAnchor = null;
+let commentHoverRequest = 0;
+let lastComposedTarget = null;
+let commentTargetPending = false;
+let commentTargetTimer = null;
+let commentTargetPlacement = null; // disposable PDF rect for an unsaved draft
+let commentLastDirection = 0;       // -1/1 after using ‹/›; 0 after a direct open
+let pendingCommentDelete = null;    // continue from the deleted thread
+const commentTimers = new Map();
+
+function makeToolIcon(id) {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.classList.add('tool-icon');
+    svg.setAttribute('aria-hidden', 'true');
+    const use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
+    use.setAttribute('href', `#ti-${id}`);
+    svg.appendChild(use);
+    return svg;
+}
+
+function setToolIcon(button, id) {
+    const use = button && button.querySelector('svg use');
+    if (use) use.setAttribute('href', `#ti-${id}`);
+}
+
+function commentPost(action, extra = {}) {
+    vscode.postMessage({ type: 'commentAction', action, ...extra });
+}
+
+function setCommentArmed(value) {
+    commentArmed = !!value;
+    document.body.classList.toggle('comment-arming', commentArmed);
+    const add = el('commentadd');
+    const hint = el('commenthint');
+    if (add) {
+        add.setAttribute('aria-pressed', String(commentArmed));
+        add.title = commentArmed ? 'Cancel adding a comment' : 'Comment on another paragraph';
+    }
+    if (hint) {
+        hint.hidden = !commentArmed;
+        hint.textContent = 'Click the paragraph or equation you want to comment on.';
+    }
+}
+
+function commentWidthLimit() {
+    return Math.max(260, Math.min(520, window.innerWidth * .78));
+}
+
+function setCommentWidth(width, notify = true) {
+    commentWidth = Math.round(Math.max(260, Math.min(commentWidthLimit(), Number(width) || 320)));
+    document.documentElement.style.setProperty('--comment-width', `${commentWidth}px`);
+    if (notify) vscode.postMessage({ type: 'commentView', open: commentsOpen(), width: commentWidth });
+}
+
+function commentsOpen() { return document.body.classList.contains('comments-open'); }
+
+function commentThreadOpen() { return document.body.classList.contains('comment-thread-open'); }
+
+function closeCommentsDropdown() {
+    const menu = el('commentsdropdown');
+    const button = el('commentsmenu');
+    if (menu) menu.hidden = true;
+    if (button) button.setAttribute('aria-expanded', 'false');
+}
+
+function positionCommentsDropdown() {
+    const menu = el('commentsdropdown');
+    const button = el('commentsmenu');
+    if (!menu || !button || menu.hidden) return;
+    const r = button.getBoundingClientRect();
+    const width = menu.offsetWidth || 330;
+    menu.style.top = `${Math.min(window.innerHeight - 8, r.bottom + 5)}px`;
+    menu.style.left = `${Math.max(8, Math.min(window.innerWidth - width - 8, r.right - width))}px`;
+}
+
+function openCommentFromMenu(item) {
+    closeCommentsDropdown();
+    commentLastDirection = 0;
+    openCommentThread(item.cellId, null, true, 0);
+    requestAnimationFrame(() => {
+        const textarea = document.querySelector(`.cp-text[data-comment="${CSS.escape(item.id)}"]`);
+        const card = textarea && textarea.closest('.cp-card');
+        if (card) card.scrollIntoView({ block: 'nearest' });
+    });
+}
+
+function commentAuthorName(item) {
+    const author = item && (item.author || (item.revision && item.revision.author));
+    const name = author && String(author.name || '').trim();
+    if (name) return name;
+    return item && item.source === 'revision' ? 'Agent or reviewer' : 'Unknown author';
+}
+
+function commentAge(value) {
+    const date = value ? new Date(value) : null;
+    if (!date || Number.isNaN(date.getTime())) return 'time unknown';
+    const seconds = Math.max(0, Math.floor((Date.now() - date.getTime()) / 1000));
+    if (seconds < 45) return 'just now';
+    if (seconds < 3600) return `${Math.max(1, Math.floor(seconds / 60))} min ago`;
+    if (seconds < 86400) return `${Math.floor(seconds / 3600)} h ago`;
+    if (seconds < 604800) return `${Math.floor(seconds / 86400)} d ago`;
+    return date.toLocaleDateString([], {
+        month: 'short', day: 'numeric',
+        ...(date.getFullYear() === new Date().getFullYear() ? {} : { year: 'numeric' }),
+    });
+}
+
+function requestCommentDelete(item) {
+    if (!item) return;
+    if (commentThreadOpen() && item.cellId === activeCommentCellId) {
+        const threadItems = (state.comments.items || []).filter(x => x.cellId === item.cellId);
+        const threads = commentThreads();
+        const at = threads.findIndex(([cellId]) => cellId === activeCommentCellId);
+        let fallbackCellId = activeCommentCellId;
+        if (threadItems.length === 1 && at >= 0) {
+            const preferred = commentLastDirection < 0 ? at - 1 : at + 1;
+            const alternate = commentLastDirection < 0 ? at + 1 : at - 1;
+            fallbackCellId = (threads[preferred] || threads[alternate] || [null])[0];
+        }
+        pendingCommentDelete = {
+            id: item.id,
+            fallbackCellId,
+            index: Math.max(0, at),
+        };
+    }
+    commentPost('delete', { file: item.file, id: item.id });
+}
+
+function renderCommentsDropdown() {
+    const menu = el('commentsdropdown');
+    if (!menu) return;
+    menu.replaceChildren();
+    const items = state.comments.items || [];
+    if (!items.length) {
+        const empty = document.createElement('div');
+        empty.className = 'comment-menu-empty';
+        empty.textContent = 'No comments in this paper';
+        menu.appendChild(empty);
+    } else {
+        for (const item of items) {
+            const row = document.createElement('div');
+            row.className = 'comment-menu-row'; row.setAttribute('role', 'none');
+            const open = document.createElement('button');
+            open.type = 'button'; open.className = 'comment-menu-item'; open.setAttribute('role', 'menuitem');
+            const where = document.createElement('span'); where.className = 'comment-menu-where';
+            where.textContent = item.detached || item.unplaced
+                ? `${friendlyCommentKind(item.kind)} · location changed`
+                : `${friendlyCommentKind(item.kind)} · ${friendlyCommentLines(item)}`;
+            const preview = document.createElement('span'); preview.className = 'comment-menu-text';
+            preview.textContent = String(item.text || '').replace(/\s+/g, ' ').trim() || '(empty comment)';
+            const meta = document.createElement('span'); meta.className = 'comment-menu-meta';
+            const addedAt = item.source === 'revision' && item.revision && item.revision.at
+                ? item.revision.at : item.createdAt;
+            meta.textContent = `by ${commentAuthorName(item)} · ${commentAge(addedAt)}`;
+            open.append(where, preview, meta);
+            open.onclick = (event) => { event.stopPropagation(); openCommentFromMenu(item); };
+            const del = document.createElement('button');
+            del.type = 'button'; del.className = 'comment-menu-delete'; del.setAttribute('role', 'menuitem');
+            del.title = `Delete comment by ${commentAuthorName(item)}`;
+            del.setAttribute('aria-label', del.title); del.appendChild(makeToolIcon('trash'));
+            del.onclick = (event) => { event.stopPropagation(); requestCommentDelete(item); };
+            row.append(open, del);
+            menu.appendChild(row);
+        }
+    }
+    const actions = document.createElement('div');
+    actions.className = 'comment-menu-actions';
+    actions.setAttribute('role', 'group');
+    actions.setAttribute('aria-label', 'All comment actions');
+    const addAction = (action, label, icon, danger = false) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.dataset.commentAction = action;
+        button.setAttribute('role', 'menuitem');
+        button.className = danger ? 'danger' : '';
+        button.disabled = !items.length;
+        button.innerHTML = `<svg class="tool-icon" aria-hidden="true"><use href="#ti-${icon}"/></svg><span>${label}</span>`;
+        button.onclick = (event) => {
+            event.stopPropagation();
+            closeCommentsDropdown();
+            if (action === 'copy') commentPost('copy', { drafts: commentDrafts() });
+            else commentPost('clear');
+        };
+        actions.appendChild(button);
+    };
+    addAction('copy', 'Copy all', 'copy');
+    addAction('clear', 'Delete all', 'trash', true);
+    menu.appendChild(actions);
+}
+
+function setCommentsDropdown(value) {
+    const menu = el('commentsdropdown');
+    const button = el('commentsmenu');
+    if (!menu || !button || !commentsOpen()) return;
+    const open = value == null ? menu.hidden : !!value;
+    if (!open) { closeCommentsDropdown(); return; }
+    renderCommentsDropdown();
+    menu.hidden = false;
+    button.setAttribute('aria-expanded', 'true');
+    requestAnimationFrame(positionCommentsDropdown);
+}
+
+function closeCommentThread(cancelDraft = true) {
+    document.body.classList.remove('comment-thread-open');
+    el('commentactions').hidden = true;
+    if (cancelDraft && commentTarget) commentPost('cancelDraft');
+    clearTimeout(commentTargetTimer);
+    commentTargetTimer = null;
+    commentTargetPending = false;
+    if (commentPopoverAnchor) commentPopoverAnchor.classList.remove('pending');
+    commentTarget = null;
+    commentTargetPlacement = null;
+    activeCommentCellId = null;
+    commentPopoverAnchor = null;
+    el('commentcomposer').hidden = true;
+    paintCommentMarkers();
+}
+
+function setCommentsOpen(value, notify = true) {
+    const open = !!value;
+    if (notify) state.commentViewApplied = true;
+    document.body.classList.toggle('comments-open', open);
+    const button = el('commentsbutton');
+    button.setAttribute('aria-pressed', String(open));
+    button.setAttribute('aria-label', open ? 'Hide comments' : 'Show comments');
+    button.title = open
+        ? 'Comments are shown — ⌘-click (Ctrl-click on Windows/Linux) text to add one; click here to hide'
+        : 'Show comments';
+    setToolIcon(button, open ? 'comment-on' : 'comment');
+    if (!open) {
+        closeCommentsDropdown();
+        setCommentArmed(false);
+        closeCommentThread(true);
+        for (const marker of document.querySelectorAll('.comment-marker')) marker.remove();
+    }
+    if (notify) vscode.postMessage({ type: 'commentView', open, width: commentWidth });
+    if (open) paintCommentMarkers();
+    // Fit reserves only the slim marker rail.  The active card floats, so it
+    // never permanently takes a third of the paper away.
+    if (state.fitMode) setTimeout(() => fitWidth(), 30);
+}
+
+function commentDrafts() {
+    return (state.comments.items || []).map(item => {
+        const ta = document.querySelector(`.cp-text[data-comment="${CSS.escape(item.id)}"]`);
+        return { file: item.file, id: item.id, text: ta ? ta.value : item.text };
+    });
+}
+
+function saveCommentSoon(item, textarea, now = false) {
+    clearTimeout(commentTimers.get(item.id));
+    const save = () => {
+        commentTimers.delete(item.id);
+        item.text = textarea.value;
+        commentPost('update', { file: item.file, id: item.id, text: textarea.value });
+    };
+    if (now) save();
+    else commentTimers.set(item.id, setTimeout(save, 350));
+}
+
+function commentGroups() {
+    const groups = new Map();
+    for (const item of state.comments.items || []) {
+        const id = item.cellId || item.id;
+        if (!groups.has(id)) groups.set(id, []);
+        groups.get(id).push(item);
+    }
+    return groups;
+}
+
+function commentThreads() { return [...commentGroups().entries()]; }
+
+function activeCommentRects() {
+    if ((commentTarget || commentTargetPending) && commentTargetPlacement) {
+        return commentTargetPlacement.rects || [];
+    }
+    const items = activeCommentCellId && commentGroups().get(activeCommentCellId) || [];
+    const placed = items.find(item => Array.isArray(item.rects) && item.rects.length);
+    return placed ? placed.rects : [];
+}
+
+/** Bring the active annotation back to the reading position it belongs to. */
+async function revealActiveComment(smooth = true) {
+    const rects = activeCommentRects();
+    const first = rects[0];
+    if (!first) {
+        status('this comment no longer has a position on the current page', 'warn');
+        return;
+    }
+    try { await renderPage(first.page); } catch (_) { /* use an existing page if present */ }
+    paintCommentMarkers();
+    const wrap = pagesEl().querySelector(`.page[data-page="${first.page}"]`);
+    const box = wrap && rectToViewport(first.page, first);
+    const main = document.querySelector('main');
+    if (!wrap || !box || !main) return;
+    main.scrollTo({
+        top: Math.max(0, wrap.offsetTop + box.y - main.clientHeight * .34),
+        behavior: smooth ? 'smooth' : 'auto',
+    });
+    // Keep the card attached to its bubble while the smooth scroll advances.
+    requestAnimationFrame(() => placeCommentPopover(commentPopoverAnchor, false));
+}
+
+function stepCommentThread(delta) {
+    const threads = commentThreads();
+    if (!threads.length || commentTarget || commentTargetPending) return;
+    let at = threads.findIndex(([cellId]) => cellId === activeCommentCellId);
+    if (at < 0) at = delta > 0 ? -1 : threads.length;
+    const next = Math.max(0, Math.min(threads.length - 1, at + delta));
+    openCommentThread(threads[next][0], null, true, delta);
+}
+
+function placeCommentPopover(anchor = commentPopoverAnchor, clamp = true) {
+    const panel = el('commentpanel');
+    const reader = el('reader');
+    if (!panel || !reader || !commentThreadOpen()) return;
+    const rr = reader.getBoundingClientRect();
+    let top = 12;
+    if (anchor && anchor.isConnected) {
+        const ar = anchor.getBoundingClientRect();
+        top = ar.top - rr.top - 8;
+    }
+    if (clamp) {
+        const maxTop = Math.max(8, reader.clientHeight - panel.offsetHeight - 8);
+        top = Math.max(8, Math.min(maxTop, top));
+    }
+    panel.style.top = `${top}px`;
+}
+
+function paintOneCommentAnchor(rect) {
+    const page = rect && pagesEl().querySelector(`.page[data-page="${rect.page}"]`);
+    const box = page && rectToViewport(rect.page, rect);
+    if (!page || !box) return;
+    const wash = document.createElement('div');
+    wash.className = 'comment-anchor';
+    wash.style.left = `${box.x}px`; wash.style.top = `${box.y}px`;
+    wash.style.width = `${box.w}px`; wash.style.height = `${Math.max(box.h, 2)}px`;
+    page.appendChild(wash);
+}
+
+/**
+ * Use the physical page margin when it is visible. If zoom or Fit clips that
+ * edge, pin the bubble just inside the visible reader edge instead. The marker
+ * remains a child of its page, so vertical scrolling still carries it with the
+ * paragraph; only its horizontal position is viewport-aware.
+ */
+function positionCommentMarkerX(marker, wrap) {
+    const main = document.querySelector('main');
+    if (!marker || !wrap || !main) return;
+    const mr = main.getBoundingClientRect();
+    const pr = wrap.getBoundingClientRect();
+    const width = marker.offsetWidth || 25;
+    const visibleRight = mr.left + main.clientWidth;
+    const outsideLeft = pr.right + 8;
+    const canUseMargin = outsideLeft + width <= visibleRight - 4;
+    const x = canUseMargin ? wrap.clientWidth + 8
+        : Math.max(8, Math.min(wrap.clientWidth - width - 8,
+            visibleRight - pr.left - width - 8));
+    marker.style.left = `${x}px`;
+    marker.style.right = 'auto';
+    marker.classList.toggle('inset', !canUseMargin);
+}
+
+function positionCommentMarkersX() {
+    for (const marker of document.querySelectorAll('.comment-marker')) {
+        positionCommentMarkerX(marker, marker.closest('.page'));
+    }
+}
+
+function paintCommentMarkers() {
+    for (const node of document.querySelectorAll('.comment-marker:not(.add), .comment-anchor')) node.remove();
+    if (!commentsOpen() || !state.doc) return;
+    if (state.comments.generation != null && state.generation != null &&
+        String(state.comments.generation) !== String(state.generation)) return;
+
+    const occupied = new Map();
+    for (const [cellId, items] of commentGroups()) {
+        const placed = items.find(item => Array.isArray(item.rects) && item.rects.length);
+        const first = placed && placed.rects[0];
+        if (!first) continue;
+        const wrap = pagesEl().querySelector(`.page[data-page="${first.page}"]`);
+        const v = wrap && rectToViewport(first.page, first);
+        if (!wrap || !v || !state.rendered.has(first.page)) continue;
+
+        const marker = document.createElement('button');
+        marker.type = 'button';
+        marker.className = `comment-marker${cellId === activeCommentCellId ? ' on' : ''}`;
+        marker.dataset.commentCell = cellId;
+        marker.setAttribute('aria-label', `${items.length} comment${items.length === 1 ? '' : 's'} on this paragraph`);
+        marker.title = `${items.length} comment${items.length === 1 ? '' : 's'} · ${items[0].excerpt || 'open thread'}`;
+        marker.appendChild(makeToolIcon('comment'));
+        if (items.length > 1) {
+            const count = document.createElement('span');
+            count.className = 'cm-count';
+            count.textContent = String(items.length);
+            marker.appendChild(count);
+        }
+        const pageSlots = occupied.get(first.page) || [];
+        let top = Math.max(2, v.y + Math.min(v.h, 18) / 2 - 12.5);
+        while (pageSlots.some(y => Math.abs(y - top) < 29)) top += 29;
+        const lastSlot = Math.max(2, wrap.clientHeight - 27);
+        if (top > lastSlot) {
+            top = lastSlot;
+            while (top > 2 && pageSlots.some(y => Math.abs(y - top) < 29)) top -= 29;
+        }
+        pageSlots.push(top);
+        occupied.set(first.page, pageSlots);
+        marker.style.top = `${top}px`;
+        marker.onclick = (event) => {
+            event.preventDefault(); event.stopPropagation();
+            openCommentThread(cellId, marker);
+        };
+        wrap.appendChild(marker);
+        positionCommentMarkerX(marker, wrap);
+        if (cellId === activeCommentCellId) commentPopoverAnchor = marker;
+
+        if (cellId === activeCommentCellId) {
+            for (const rect of placed.rects) paintOneCommentAnchor(rect);
+        }
+    }
+
+    // A new comment has no durable cell yet, but the reader still deserves to
+    // see exactly what the composer is attached to.
+    if ((commentTarget || commentTargetPending) && commentTargetPlacement) {
+        for (const rect of commentTargetPlacement.rects || []) paintOneCommentAnchor(rect);
+    }
+
+    // A detached/unplaced comment remains available in the Comments dropdown
+    // and is labelled "location changed" there. It must NOT be drawn at the
+    // top of an arbitrary visible page: that looks like a valid attachment to
+    // the first paragraph and was especially misleading for headings.
+}
+
+function friendlyCommentKind(kind) {
+    const value = String(kind || 'paragraph').toLowerCase();
+    const names = {
+        'display-equation': 'Equation',
+        'section-heading': 'Section',
+        figure: 'Figure', table: 'Table', theorem: 'Theorem',
+        paragraph: 'Paragraph', abstract: 'Abstract', titlepage: 'Title page', list: 'List',
+        tabular: 'Table', verbatim: 'Code', environment: 'Passage',
+    };
+    return names[value] || value.replace(/[-_]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
+function friendlyCommentLines(item) {
+    const first = Math.max(1, Number(item && item.line) || 1);
+    const last = Math.max(first, Number(item && item.endLine) || first);
+    const number = value => value.toLocaleString();
+    return first === last ? `line ${number(first)}` : `lines ${number(first)}–${number(last)}`;
+}
+
+function friendlyCommentTime(value, edited) {
+    const date = value ? new Date(value) : null;
+    if (!date || Number.isNaN(date.getTime())) return edited ? 'Edited' : 'Saved';
+    const now = new Date();
+    const day = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    const time = date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    const prefix = edited ? 'Edited ' : '';
+    if (day === today) return `${prefix}today at ${time}`;
+    if (day === today - 86400000) return `${prefix}yesterday at ${time}`;
+    const options = { month: 'short', day: 'numeric' };
+    if (date.getFullYear() !== now.getFullYear()) options.year = 'numeric';
+    return `${prefix}${date.toLocaleDateString([], options)} at ${time}`;
+}
+
+function plainCommentLatex(source) {
+    let text = String(source || '');
+    text = text.replace(/(^|[^\\])%.*$/gm, '$1');
+    text = text.replace(/\\(?:label|index)\s*\{[^{}]*\}/g, '');
+    text = text.replace(/\\(?:cite\w*|ref|eqref|autoref)\s*\{([^{}]*)\}/g, '[$1]');
+    // Peel the common one-argument prose commands a few times. This is only a
+    // quiet quotation, never a source transform, so uncertain constructs stay
+    // visible instead of being interpreted.
+    for (let i = 0; i < 3; i++) {
+        text = text.replace(/\\(?:emph|textbf|textit|textrm|textsf|texttt|mbox)\s*\{([^{}]*)\}/g, '$1');
+    }
+    return text.replace(/\\(?:begin|end)\s*\{[^{}]*\}/g, '')
+        .replace(/\\[A-Za-z@]+\*?(?:\s*\[[^\]]*\])?/g, '')
+        .replace(/[{}]/g, '').replace(/~/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function commentPreviewParts(subject) {
+    const source = String(subject && (subject.sourcePreview || subject.excerpt) || '').trim();
+    if (!source) return [];
+    const kind = String(subject && subject.kind || '').toLowerCase();
+    const env = source.match(/\\begin\s*\{(equation\*?|align\*?|alignat\*?|gather\*?|multline\*?|displaymath)\}([\s\S]*?)(?:\\end\s*\{\1\}|$)/i);
+    if (env) {
+        let math = env[2].replace(/\\label\s*\{[^{}]*\}/g, '').trim();
+        if (/^(align|alignat)/i.test(env[1])) math = `\\begin{aligned}${math}\\end{aligned}`;
+        else if (/^gather/i.test(env[1])) math = `\\begin{gathered}${math}\\end{gathered}`;
+        return [{ math, display: true }];
+    }
+    const delimited = /\\\[([\s\S]*?)\\\]|\\\(([\s\S]*?)\\\)|\$\$([\s\S]*?)\$\$|\$((?:\\.|[^$\\])*)\$/g;
+    const parts = [];
+    let at = 0; let match;
+    while ((match = delimited.exec(source)) !== null) {
+        const prose = plainCommentLatex(source.slice(at, match.index));
+        if (prose) parts.push({ text: prose });
+        const math = match[1] ?? match[2] ?? match[3] ?? match[4] ?? '';
+        parts.push({ math: math.trim(), display: match[1] != null || match[3] != null });
+        at = match.index + match[0].length;
+    }
+    const tail = plainCommentLatex(source.slice(at));
+    if (tail) parts.push({ text: tail });
+    if (!parts.length && /equation|math|align|gather|multline/.test(kind)) {
+        return [{ math: source.replace(/\\label\s*\{[^{}]*\}/g, '').trim(), display: true }];
+    }
+    return parts;
+}
+
+let commentKatexState = null;
+async function commentKatex() {
+    await ensureKatexCss();
+    if (!commentKatexState) commentKatexState = import('./katex.mjs')
+        .then(module => module.default || module).catch(() => null);
+    return commentKatexState;
+}
+
+async function renderCommentExcerpt(subject) {
+    const node = el('commentexcerpt');
+    const context = el('commentcontext');
+    if (!node || !context) return;
+    const parts = commentPreviewParts(subject);
+    context.hidden = !subject || !parts.length;
+    node.replaceChildren();
+    if (!subject || !parts.length) return;
+    const key = `${subject.cellId || subject.id || ''}:${subject.sourcePreview || subject.excerpt || ''}`;
+    node.dataset.previewKey = key;
+    const katex = parts.some(part => part.math != null) ? await commentKatex() : null;
+    if (node.dataset.previewKey !== key) return;
+    for (const part of parts) {
+        if (part.text != null) {
+            const span = document.createElement('span'); span.className = 'cp-plain';
+            span.textContent = part.text; node.appendChild(span);
+            continue;
+        }
+        const math = document.createElement(part.display ? 'div' : 'span');
+        math.className = part.display ? 'cp-math' : 'cp-inline-math';
+        if (katex && typeof katex.render === 'function') {
+            try {
+                katex.render(part.math, math, {
+                    displayMode: !!part.display, throwOnError: false,
+                    strict: 'ignore', trust: false, output: 'html',
+                });
+            } catch (_) {
+                math.className += ' cp-render-fallback'; math.textContent = part.math;
+            }
+        } else {
+            math.className += ' cp-render-fallback'; math.textContent = part.math;
+        }
+        node.appendChild(math);
+    }
+}
+
+function renderCommentThread() {
+    const groups = commentGroups();
+    const items = activeCommentCellId ? (groups.get(activeCommentCellId) || []) : [];
+    if (!commentTarget && activeCommentCellId && !items.length) {
+        closeCommentThread(false);
+        return;
+    }
+
+    const title = document.querySelector('#commentpanel .cp-title');
+    const subtitle = el('commenttarget');
+    if (commentTargetPending) {
+        if (title) title.textContent = 'New comment';
+        if (subtitle) subtitle.textContent = 'Finding the paragraph…';
+        el('commentheading').disabled = !commentTargetPlacement;
+        el('commentprev').disabled = true;
+        el('commentnext').disabled = true;
+        el('commentcontext').hidden = true;
+        el('commentcomposer').hidden = true;
+        el('commenterrors').textContent = '';
+        const list = el('commentlist');
+        list.innerHTML = '<div class="cp-empty cp-locating"><span class="cp-spinner" aria-hidden="true"></span>Locating it in the source…</div>';
+        requestAnimationFrame(() => placeCommentPopover());
+        return;
+    }
+    const subject = items[0] || commentTarget;
+    const threads = commentThreads();
+    const threadIndex = threads.findIndex(([cellId]) => cellId === activeCommentCellId);
+    const navigating = !commentTarget && !commentTargetPending && threadIndex >= 0;
+    el('commentprev').disabled = !navigating || threadIndex <= 0;
+    el('commentnext').disabled = !navigating || threadIndex >= threads.length - 1;
+    el('commentheading').disabled = !subject || !activeCommentRects().length;
+    if (title) title.textContent = commentTarget ? 'New comment'
+        : `${items.length} comment${items.length === 1 ? '' : 's'}`;
+    if (subtitle && subject) {
+        const kind = friendlyCommentKind(subject.kind);
+        subtitle.textContent = subject.detached ? `${kind} · location changed`
+            : `${kind} · ${friendlyCommentLines(subject)}`;
+        subtitle.title = String(subject.file || '').split(/[\\/]/).pop();
+    }
+    const location = el('commentlocation');
+    if (location && subject) {
+        const section = Array.isArray(subject.sectionPath) && subject.sectionPath.length
+            ? subject.sectionPath[subject.sectionPath.length - 1] : '';
+        location.textContent = subject.detached ? `Last known ${friendlyCommentKind(subject.kind).toLowerCase()}`
+            : section ? `In ${section}` : `On this ${friendlyCommentKind(subject.kind).toLowerCase()}`;
+        location.title = String(subject.file || '').split(/[\\/]/).pop();
+    }
+    renderCommentExcerpt(subject);
+    el('commentcomposer').hidden = !commentTarget;
+
+    const errors = el('commenterrors');
+    errors.textContent = (state.comments.errors || []).map(e =>
+        `${String(e.file || '').split(/[\\/]/).pop()}: ${e.message}`).join('\n');
+
+    const active = document.activeElement && document.activeElement.classList &&
+        document.activeElement.classList.contains('cp-text') ? document.activeElement : null;
+    const activeId = active && active.dataset.comment;
+    const activeStart = active && active.selectionStart;
+    const activeEnd = active && active.selectionEnd;
+    if (active) {
+        const item = items.find(x => x.id === activeId);
+        if (item) item.text = active.value;
+    }
+
+    const list = el('commentlist');
+    list.innerHTML = '';
+    for (const item of items) {
+        const card = document.createElement('div');
+        card.className = `cp-card${item.detached ? ' detached' : ''}`;
+        const head = document.createElement('div');
+        head.className = 'cp-card-head';
+        const place = document.createElement('span');
+        place.className = 'cp-place';
+        place.textContent = item.source === 'revision' ? 'Revision note' : 'Comment';
+        head.appendChild(place);
+        if (item.source === 'revision') {
+            const revision = document.createElement('span');
+            revision.className = 'cp-revision'; revision.textContent = 'revision';
+            revision.title = 'Collected while reviewing an external or agent change';
+            head.appendChild(revision);
+        }
+        const del = document.createElement('button');
+        del.className = 'cp-delete'; del.title = 'Delete comment';
+        del.setAttribute('aria-label', del.title); del.appendChild(makeToolIcon('trash'));
+        del.onclick = () => requestCommentDelete(item);
+        head.appendChild(del); card.appendChild(head);
+        const ta = document.createElement('textarea');
+        ta.className = 'cp-text'; ta.rows = 3; ta.dataset.comment = item.id;
+        ta.setAttribute('aria-label', 'Comment text'); ta.value = item.text || '';
+        ta.oninput = () => { item.text = ta.value; saveCommentSoon(item, ta); };
+        ta.onblur = () => saveCommentSoon(item, ta, true);
+        card.appendChild(ta);
+        const foot = document.createElement('div'); foot.className = 'cp-foot';
+        const when = document.createElement('span');
+        when.textContent = friendlyCommentTime(item.updatedAt || item.createdAt,
+            !!(item.updatedAt && item.createdAt && item.updatedAt !== item.createdAt));
+        const space = document.createElement('span'); space.className = 'sp';
+        const saved = document.createElement('span'); saved.className = 'cp-saved';
+        saved.textContent = 'Saved with paper'; saved.title = String(item.sidecar || '').split(/[\\/]/).pop();
+        foot.append(when, space, saved); card.appendChild(foot);
+        list.appendChild(card);
+    }
+    if (activeId) {
+        const again = list.querySelector(`.cp-text[data-comment="${CSS.escape(activeId)}"]`);
+        if (again) {
+            again.focus();
+            try { again.setSelectionRange(activeStart, activeEnd); } catch (_) { /* fine */ }
+        }
+    }
+    requestAnimationFrame(() => placeCommentPopover());
+}
+
+function renderComments(msg) {
+    if (msg) state.comments = {
+        items: msg.items || [], errors: msg.errors || [], generation: msg.generation,
+    };
+    const items = state.comments.items || [];
+    let revealAfterDelete = false;
+    if (pendingCommentDelete && !items.some(item => item.id === pendingCommentDelete.id)) {
+        const threads = commentThreads();
+        const activeStillExists = threads.some(([cellId]) => cellId === activeCommentCellId);
+        if (!activeStillExists) {
+            const wanted = threads.find(([cellId]) => cellId === pendingCommentDelete.fallbackCellId)
+                || threads[Math.min(pendingCommentDelete.index, Math.max(0, threads.length - 1))];
+            if (wanted) {
+                activeCommentCellId = wanted[0];
+                commentPopoverAnchor = null;
+                document.body.classList.add('comment-thread-open');
+                revealAfterDelete = true;
+            } else {
+                closeCommentThread(false);
+            }
+        }
+        pendingCommentDelete = null;
+    }
+    const badge = el('commentscount');
+    badge.textContent = String(items.length);
+    badge.hidden = items.length === 0;
+    el('commentcopy').disabled = items.length === 0;
+    el('commentclear').disabled = items.length === 0;
+
+    if (!state.commentViewApplied && msg) {
+        state.commentViewApplied = true;
+        if (msg.view && Number.isFinite(msg.view.width)) setCommentWidth(msg.view.width, false);
+        if (msg.view && msg.view.open) setCommentsOpen(true, false);
+    }
+    if (el('reviewfeedbackbutton')) {
+        el('reviewfeedbackbutton').textContent = `Comments${items.length ? ' · ' + items.length : ''}`;
+    }
+    renderCommentsDropdown();
+
+    if (lastComposedTarget) {
+        const found = items.find(item => item.file === lastComposedTarget.file &&
+            item.line <= lastComposedTarget.line && item.endLine >= lastComposedTarget.line);
+        if (found) {
+            activeCommentCellId = found.cellId;
+            commentTargetPlacement = null;
+            lastComposedTarget = null;
+            for (const marker of document.querySelectorAll('.comment-marker.add')) marker.remove();
+            document.body.classList.add('comment-thread-open');
+        }
+    }
+    paintCommentMarkers();
+    if (commentThreadOpen()) renderCommentThread();
+    if (revealAfterDelete) revealActiveComment(true);
+}
+
+function openCommentThread(cellId, marker, reveal = true, direction = 0) {
+    commentPost('cancelDraft');
+    commentLastDirection = direction < 0 ? -1 : direction > 0 ? 1 : 0;
+    commentTarget = null;
+    commentTargetPlacement = null;
+    activeCommentCellId = cellId;
+    commentPopoverAnchor = marker || null;
+    document.body.classList.add('comment-thread-open');
+    el('commentactions').hidden = true;
+    paintCommentMarkers();
+    renderCommentThread();
+    if (reveal) revealActiveComment(true);
+}
+
+function commentRowPayload(n, row) {
+    if (!row) return null;
+    const a = fromViewport(n, row.x, row.y);
+    const b = fromViewport(n, row.x + row.w, row.y + row.h);
+    if (!a || !b) return null;
+    return {
+        x: Math.min(a.xBp, b.xBp), y: Math.min(a.yTopBp, b.yTopBp),
+        w: Math.abs(b.xBp - a.xBp), h: Math.abs(b.yTopBp - a.yTopBp),
+    };
+}
+
+/**
+ * Find the printed text box represented by an annotation gesture and choose a
+ * point INSIDE it. The comment rail is deliberately outside the paper, so its
+ * button's own screen x can never be a meaningful SyncTeX coordinate.
+ */
+async function commentAnchorAt(n, x, y) {
+    let rows = [];
+    try { rows = await textItems(n); } catch (_) { rows = []; }
+    let row = null; let distance = Infinity;
+    for (const candidate of rows) {
+        const dx = x < candidate.x ? candidate.x - x
+            : (x > candidate.x + candidate.w ? x - (candidate.x + candidate.w) : 0);
+        const dy = y < candidate.y ? candidate.y - y
+            : (y > candidate.y + candidate.h ? y - (candidate.y + candidate.h) : 0);
+        const d = Math.hypot(dx, dy * 3);
+        if (d < distance) { distance = d; row = candidate; }
+    }
+    if (!row) return null;
+    const inset = Math.min(2, Math.max(0, row.w / 4));
+    const anchorX = Math.max(row.x + inset, Math.min(row.x + row.w - inset, x));
+    const anchorY = row.y + row.h / 2;
+    const pt = fromViewport(n, anchorX, anchorY);
+    return pt ? { row, distance, pt } : null;
+}
+
+function requestCommentTarget(n, pt, marker, row) {
+    if (state.tracePaused) {
+        status('wait for the page to catch up before adding a comment', 'warn');
+        return;
+    }
+    clearTimeout(commentTargetTimer);
+    commentTarget = null;
+    activeCommentCellId = null;
+    commentTargetPending = true;
+    const rowRect = commentRowPayload(n, row);
+    commentTargetPlacement = rowRect ? { rects: [{ page: n, ...rowRect }] } : null;
+    commentPopoverAnchor = marker || null;
+    if (marker) marker.classList.add('pending');
+    document.body.classList.add('comment-thread-open');
+    paintCommentMarkers();
+    renderCommentThread();
+    // Comment attachment needs the semantic object at a PDF point; it does
+    // not need the slower word/glyph disambiguation used for source editing.
+    // Sending the coordinates immediately also makes a click feel immediate.
+    vscode.postMessage({
+        type: 'click', page: n, xBp: pt.xBp, yTopBp: pt.yTopBp,
+        commentTarget: true, commentRow: rowRect,
+    });
+    commentTargetTimer = setTimeout(() => {
+        if (!commentTargetPending) return;
+        closeCommentThread(false);
+        status('could not locate that paragraph — try the + again', 'warn');
+    }, 5000);
+}
+
+function showCommentTarget(target, reason) {
+    clearTimeout(commentTargetTimer);
+    commentTargetTimer = null;
+    commentTargetPending = false;
+    if (commentPopoverAnchor) commentPopoverAnchor.classList.remove('pending');
+    commentTarget = target || null;
+    setCommentArmed(false);
+    if (!target) {
+        closeCommentThread(false);
+        status(reason || 'that paragraph could not be located', 'warn');
+        return;
+    }
+    setCommentsOpen(true);
+    activeCommentCellId = null;
+    document.body.classList.add('comment-thread-open');
+    const file = String(target.file || '').split(/[\\/]/).pop();
+    el('commenttarget').textContent = `${file}:${target.line}${target.endLine > target.line ? '–' + target.endLine : ''} · ${target.kind || 'paragraph'}`;
+    el('commenttarget').title = target.excerpt || '';
+    el('commentdraft').value = '';
+    el('commentcomposer').hidden = false;
+    renderCommentThread();
+    el('commentdraft').focus();
+}
+
+el('commentsbutton').onclick = () => setCommentsOpen(!commentsOpen());
+el('commentsmenu').onclick = (event) => {
+    event.preventDefault(); event.stopPropagation();
+    setCommentsDropdown();
+};
+el('commentheading').onclick = () => revealActiveComment(true);
+el('commentprev').onclick = () => stepCommentThread(-1);
+el('commentnext').onclick = () => stepCommentThread(1);
+if (el('reviewfeedbackbutton')) {
+    el('reviewfeedbackbutton').onclick = () => {
+        setCommentsOpen(true);
+        const first = (state.comments.items || [])[0];
+        if (first) openCommentThread(first.cellId);
+        else setCommentArmed(true);
+    };
+}
+el('commentclose').onclick = () => closeCommentThread(true);
+el('commentadd').onclick = () => {
+    closeCommentThread(true);
+    setCommentsOpen(true);
+    setCommentArmed(true);
+};
+el('commentmore').onclick = (event) => {
+    event.stopPropagation();
+    el('commentactions').hidden = !el('commentactions').hidden;
+};
+el('commentcancel').onclick = () => {
+    closeCommentThread(true);
+};
+el('commentsave').onclick = () => {
+    const text = el('commentdraft').value.trim();
+    if (!commentTarget || !text) { el('commentdraft').focus(); return; }
+    lastComposedTarget = { file: commentTarget.file, line: commentTarget.line };
+    commentPost('add', { targetId: commentTarget.id, text });
+};
+el('commentdraft').addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); el('commentcancel').click(); }
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); el('commentsave').click(); }
+});
+el('commentcopy').onclick = () => commentPost('copy', { drafts: commentDrafts() });
+el('commentclear').onclick = () => commentPost('clear');
+document.addEventListener('click', (event) => {
+    if (!event.target.closest || !event.target.closest('#commentactions, #commentmore')) {
+        el('commentactions').hidden = true;
+    }
+    if (!event.target.closest || !event.target.closest('#commentsdropdown, #commentsmenu')) {
+        closeCommentsDropdown();
+    }
+});
+window.addEventListener('resize', positionCommentsDropdown);
+
+// The focused conversation stays easy to resize even though it no longer
+// consumes layout width. Pointer capture keeps the sash under a fast hand.
+{
+    const grip = el('commentgrip');
+    grip.ondblclick = () => setCommentWidth(320);
+    grip.onpointerdown = (e) => {
+        e.preventDefault();
+        const startX = e.clientX;
+        const startWidth = el('commentpanel').getBoundingClientRect().width || commentWidth;
+        document.body.classList.add('comment-sizing');
+        try { grip.setPointerCapture(e.pointerId); } catch (_) { /* fine */ }
+        const move = (ev) => {
+            setCommentWidth(startWidth + startX - ev.clientX, false);
+        };
+        const up = (ev) => {
+            document.body.classList.remove('comment-sizing');
+            grip.removeEventListener('pointermove', move);
+            grip.removeEventListener('pointerup', up);
+            grip.removeEventListener('pointercancel', up);
+            try { grip.releasePointerCapture(ev.pointerId); } catch (_) { /* fine */ }
+            setCommentWidth(commentWidth, true);
+            placeCommentPopover();
+        };
+        grip.addEventListener('pointermove', move);
+        grip.addEventListener('pointerup', up);
+        grip.addEventListener('pointercancel', up);
+    };
+}
+
+// Google Docs' minimized mode is the right default for a reader: a quiet plus
+// appears beside the line under the pointer, then becomes the thread marker
+// once the comment is posted.  The semantic attachment still happens in the
+// extension, so the visual affordance cannot weaken the cell-ID guarantee.
+let commentHoverFrame = 0;
+pagesEl().addEventListener('pointermove', (event) => {
+    if (!commentsOpen() || commentArmed || event.target.closest('.comment-marker')) return;
+    const wrap = event.target.closest('.page');
+    if (!wrap || !state.rendered.has(Number(wrap.dataset.page))) return;
+    const cx = event.clientX; const cy = event.clientY;
+    cancelAnimationFrame(commentHoverFrame);
+    commentHoverFrame = requestAnimationFrame(async () => {
+        const request = ++commentHoverRequest;
+        const n = Number(wrap.dataset.page);
+        const r = wrap.getBoundingClientRect();
+        const x = cx - r.left; const y = cy - r.top;
+        const anchor = await commentAnchorAt(n, x, y);
+        if (request !== commentHoverRequest || !commentsOpen()) return;
+        for (const old of document.querySelectorAll('.comment-marker.add')) old.remove();
+        if (!anchor || anchor.distance > Math.max(80, anchor.row.h * 8)) return;
+        const nearest = anchor.row;
+        const top = Math.max(2, Math.min(wrap.clientHeight - 27, nearest.y + nearest.h / 2 - 12.5));
+        const occupied = [...wrap.querySelectorAll('.comment-marker:not(.add)')]
+            .some(node => Math.abs(parseFloat(node.style.top || 0) - top) < 24);
+        if (occupied) return;
+        const marker = document.createElement('button');
+        marker.type = 'button'; marker.className = 'comment-marker add';
+        marker.style.top = `${top}px`; marker.title = 'Add a comment to this paragraph';
+        marker.setAttribute('aria-label', marker.title); marker.appendChild(makeToolIcon('comment-plus'));
+        marker.onclick = (ev) => {
+            ev.preventDefault(); ev.stopPropagation();
+            requestCommentTarget(n, anchor.pt, marker, nearest);
+        };
+        wrap.appendChild(marker);
+        positionCommentMarkerX(marker, wrap);
+    });
+});
 
 // EVERY OVERLAY THAT TAKES THE POINTER STOPS THE PRESS IN THE CAPTURE PHASE.
 // Without it the press reaches the page, `sendClick` resolves the word under
@@ -1817,7 +3226,7 @@ const reviewAct = (action, extra) => vscode.postMessage({ type: 'reviewAction', 
 // bar have each paid for.
 for (const evt of ['pointerdown', 'mousedown']) {
     document.addEventListener(evt, (e) => {
-        if (e.target.closest && e.target.closest('.rchip, #reviewpanel, #reviewbar')) {
+        if (e.target.closest && e.target.closest('.rchip, #reviewpanel, #reviewbar, #commentpanel, .comment-marker')) {
             e.stopPropagation();
         }
     }, true);
@@ -1825,6 +3234,8 @@ for (const evt of ['pointerdown', 'mousedown']) {
 document.addEventListener('click', (e) => {
     const t = e.target;
     if (!t || !t.closest) return;
+    const keepComment = t.closest('[data-keep-comment]');
+    if (keepComment) { e.preventDefault(); e.stopPropagation(); reviewAct('keepComment', { id: keepComment.dataset.keepComment }); return; }
     const keep = t.closest('[data-keep]');
     if (keep) { e.preventDefault(); e.stopPropagation(); reviewAct('keep', { id: keep.dataset.keep }); return; }
     const undo = t.closest('[data-undo]');
@@ -2312,7 +3723,7 @@ function hintLabels() {
 let previewSeq = 0;
 async function showChipPreview(chip, anchor) {
     const my = ++previewSeq;
-    hideChipPreview();
+    for (const el of document.querySelectorAll('.lbcprev')) el.remove();
     if (!chip || !chip.target || !chip.target.length) return;
     const page = chip.target[0].page;
     let shot = null;
@@ -2328,20 +3739,39 @@ async function showChipPreview(chip, anchor) {
     img.src = shot.dataUrl;
     // Shown at the size it PRINTS, capped so a full-width display does not
     // cover the page it was called from.
-    img.style.width = `${Math.min(shot.w || 200, 320)}px`;
+    const previewWidth = Math.min(shot.w || 200, 320);
+    img.style.width = `${previewWidth}px`;
+    // Give the card a measurable width before the data-URL image decodes.
+    // Measuring offsetWidth with only an unloaded image made it look like zero,
+    // so a reference at the end of a line left the preview hanging off-screen.
+    card.style.width = `${previewWidth}px`;
     card.appendChild(img);
     const host = anchor.closest('.page') || wrap;
     host.appendChild(card);
 
-    // Beside the badge, flipped when there is no room — never over it.
+    // Beside the badge, shifted left when there is no room — never outside the
+    // part of the paper the reader can actually see. The visible bound is the
+    // intersection of the page and <main>, so this also works when a zoomed
+    // page is wider than the viewport or the comments rail is open.
     const top = anchor.offsetTop + anchor.offsetHeight + 4;
-    card.style.left = `${Math.max(2, Math.min(anchor.offsetLeft,
-        host.clientWidth - card.offsetWidth - 2))}px`;
+    const main = document.querySelector('main');
+    const hr = host.getBoundingClientRect();
+    const mr = main && main.getBoundingClientRect();
+    const visibleLeft = mr ? Math.max(2, mr.left - hr.left + 6) : 2;
+    const visibleRight = mr ? Math.min(host.clientWidth - 2, mr.right - hr.left - 6)
+        : host.clientWidth - 2;
+    const maxLeft = Math.max(visibleLeft, visibleRight - card.offsetWidth);
+    const anchorLeft = anchor.getBoundingClientRect().left - hr.left;
+    card.style.left = `${Math.max(visibleLeft, Math.min(anchorLeft, maxLeft))}px`;
     card.style.top = `${top + card.offsetHeight > host.clientHeight
         ? Math.max(2, anchor.offsetTop - card.offsetHeight - 4) : top}px`;
 }
 
 function hideChipPreview() {
+    // Cancel an in-flight crop as well as removing one already shown. Without
+    // this, a quick mouse-out can be followed by a late preview appearing with
+    // no pointer anywhere near its reference.
+    previewSeq++;
     for (const el of document.querySelectorAll('.lbcprev')) el.remove();
 }
 
@@ -2900,7 +4330,7 @@ async function revealHighlight({ smooth = true, tries = 2 } = {}) {
 
 // --- interaction -------------------------------------------------------------
 
-pagesEl().addEventListener('click', (ev) => {
+pagesEl().addEventListener('click', async (ev) => {
     if (state.swallowClick) return;               // the tail of a shift-drag
     const wrap = ev.target.closest('.page');
     if (!wrap) return;
@@ -2919,6 +4349,34 @@ pagesEl().addEventListener('click', (ev) => {
             page: n, xBp: pt.xBp, yTopBp: pt.yTopBp,
         });
         setArmInsert(false);
+        return;
+    }
+    // COMMENTS OPEN + COMMAND-CLICK: the shortest path from reading to a
+    // note. This intentionally takes precedence over the older Cmd-click
+    // selection-widening gesture only while comments are visible. Clicking
+    // directly on ink is required, so an accidental modified click in page
+    // whitespace does not attach to a surprising paragraph.
+    if (commentsOpen() && (ev.metaKey || ev.ctrlKey) && !ev.shiftKey && !ev.altKey) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        const anchor = await commentAnchorAt(
+            n, ev.clientX - r.left, ev.clientY - r.top);
+        if (!anchor || anchor.distance > Math.max(12, anchor.row.h * .8)) {
+            status('⌘-click directly on paragraph or equation text to add a comment', 'warn');
+            return;
+        }
+        requestCommentTarget(n, anchor.pt, null, anchor.row);
+        return;
+    }
+    // COMMENT PICKING IS ITS OWN MODE. Resolve the same semantic point as an
+    // ordinary click, but do not move the source caret or change a selection.
+    if (commentArmed) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        const anchor = await commentAnchorAt(
+            n, ev.clientX - r.left, ev.clientY - r.top);
+        requestCommentTarget(n, anchor ? anchor.pt : pt, null, anchor && anchor.row);
+        setCommentArmed(false);
         return;
     }
     // A ring where the click landed, so it is obvious what was asked about
@@ -3066,6 +4524,7 @@ pagesEl().addEventListener('mousedown', (ev) => {
     const r = wrap.getBoundingClientRect();
     const pt = fromViewport(n, ev.clientX - r.left, ev.clientY - r.top);
     if (!pt) return;
+    focusPaperForKeys();
     ev.preventDefault();
     if (state.selection && inPaintedSelection(ev)) {
         dragMove = { moved: false, last: 0 };
@@ -3076,6 +4535,14 @@ pagesEl().addEventListener('mousedown', (ev) => {
         for (const el of document.querySelectorAll('.selact')) el.remove();
         hideChipPreview();
         return;
+    }
+    // A new insertion point replaces an old selection, just as a click in a
+    // text editor does. Clear it on the press so a key typed immediately after
+    // the click cannot accidentally replace the old range while pdf.js is
+    // still resolving the new point.
+    if (state.selection) {
+        clearSelectionOverlay();
+        vscode.postMessage({ type: 'selectionClear' });
     }
     // A PRESS IS NOT YET A DRAG.
     //
@@ -3285,11 +4752,33 @@ pagesEl().addEventListener('contextmenu', (ev) => {
 // Wired once, for the life of the panel — see the selectionchange comment in
 // the card setup.
 let wiredSelectionChange = false;
+let deferredEditSelect = null;
+let pendingPaperTyping = null;
 
 function closeEditCard(notify = true) {
     for (const c of document.querySelectorAll('.editcard')) c.remove();
     if (state.edit && notify) vscode.postMessage({ type: 'editClose', editId: state.edit.id });
     state.edit = null;
+    deferredEditSelect = null;
+}
+
+/** Persist the mini-editor's caret and hand-chosen page position. */
+function postEditView() {
+    const e = state.edit;
+    if (!e) return;
+    const ta = document.querySelector('.editcard textarea');
+    const start = ta ? ta.selectionStart : (Number(e.caretStart) || 0);
+    const end = ta ? ta.selectionEnd : (Number(e.caretEnd) || Number(e.caretStart) || 0);
+    const direction = start !== end && ((ta && ta.selectionDirection === 'backward') ||
+        (!ta && e.caretDirection === 'backward'))
+        ? 'backward' : 'forward';
+    e.caretDirection = direction;
+    vscode.postMessage({
+        type: 'editView', editId: e.id,
+        start, end, direction,
+        pos: e.pos || null,
+        page: e.page,
+    });
 }
 
 // --- LaTeX syntax highlighting ----------------------------------------------
@@ -3446,6 +4935,7 @@ function makeDraggable(card, handle, session) {
             handle.removeEventListener('pointerup', up);
             handle.removeEventListener('pointercancel', up);
             try { handle.releasePointerCapture(ev.pointerId); } catch (_) { /* fine */ }
+            if (sess.get() === state.edit) postEditView();
         };
         handle.addEventListener('pointermove', move);
         handle.addEventListener('pointerup', up);
@@ -3457,6 +4947,7 @@ function makeDraggable(card, handle, session) {
         const e = sess.get();
         if (e) e.pos = null;
         sess.repaint();
+        if (e === state.edit) postEditView();
     });
 }
 
@@ -3494,8 +4985,7 @@ function buildEditCard(e) {
         btn('›', 'Next block (⌥↓)', () => step(1)),
         btn('↗', 'Open this range in the editor', () =>
             vscode.postMessage({ type: 'editReveal', editId: e.id })),
-        btn('save', 'Save the file (⌘S)', () =>
-            vscode.postMessage({ type: 'editSave', editId: e.id })),
+        btn('save', 'Save the file (⌘S)', () => saveCurrent()),
         btn('✕', 'Close (Esc)', () => closeEditCard()));
     makeDraggable(card, head);
 
@@ -3509,9 +4999,34 @@ function buildEditCard(e) {
     const ta = document.createElement('textarea');
     ta.spellcheck = false;
     ta.value = e.text || '';
+    const caretStart = Math.max(0, Math.min(Number(e.caretStart) || 0, ta.value.length));
+    const caretEnd = Math.max(caretStart, Math.min(Number(e.caretEnd) || caretStart, ta.value.length));
+    const caretDirection = e.caretDirection === 'backward' && caretStart !== caretEnd
+        ? 'backward' : 'forward';
+    e.caretDirection = caretDirection;
+    try { ta.setSelectionRange(caretStart, caretEnd, caretDirection); }
+    catch (_) { /* a usable card matters more */ }
+    e._caretSent = `${caretStart}:${caretEnd}:${caretDirection}`;
     box.append(pre, ta);
     let debounce = null;
+    // One ordered operation shared by the card button, the textarea shortcut,
+    // and ⌘S/Ctrl+S while keyboard focus is anywhere else on the paper.
+    // Clearing the pending change is essential: otherwise it arrives after the
+    // save and immediately makes the just-saved document dirty again.
+    function saveCurrent() {
+        clearTimeout(debounce);
+        debounce = null;
+        vscode.postMessage({ type: 'editSave', editId: e.id, text: ta.value });
+    }
+    e._saveCurrent = saveCurrent;
+    // Crossing a block boundary should be possible from the keyboard, but a
+    // single stray arrow at the edge must never throw the reader into another
+    // paragraph. The first outward press arms the edge; a second DISTINCT
+    // press steps. Auto-repeat is deliberately excluded, so holding an arrow
+    // cannot race through the document.
+    let boundaryArm = null;
     ta.addEventListener('input', () => {
+        boundaryArm = null;
         state.edit.text = ta.value;               // survives zoom/generation rebuilds
         state.edit.sel = null;                    // the located range is stale once typed over
         clearTimeout(debounce);
@@ -3549,7 +5064,11 @@ function buildEditCard(e) {
         caretLastSent = Date.now();
         if (!state.edit) return;
         const a = ta.selectionStart; const b = ta.selectionEnd;
-        const key = `${a}:${b}`;
+        // selectionStart/End are ordered bounds. selectionDirection is the
+        // missing third coordinate: it says which edge Shift+Arrow moves.
+        const direction = a !== b && ta.selectionDirection === 'backward'
+            ? 'backward' : 'forward';
+        const key = `${a}:${b}:${direction}`;
         // A repaint is not a movement — and neither is a range the PAGE just
         // put here. `_caretSent` is kept on the session rather than in this
         // closure so that selectInEditCard can prime it: without that the
@@ -3557,6 +5076,7 @@ function buildEditCard(e) {
         // posted straight back as though the reader had moved.
         if (key === state.edit._caretSent) return;
         state.edit._caretSent = key;
+        state.edit.caretDirection = direction;
         // THE BOX AROUND THE LOCATED WORD IS AN ANSWER TO ONE QUESTION, and
         // moving the caret asks a different one. It used to stay drawn for the
         // life of the card, so a word clicked once stayed marked however far
@@ -3567,7 +5087,10 @@ function buildEditCard(e) {
             state.edit.sel = null;
             syncHighlight(card);
         }
-        vscode.postMessage({ type: 'editCaret', editId: e.id, start: a, end: b });
+        vscode.postMessage({
+            type: 'editCaret', editId: e.id, start: a, end: b, direction,
+            pos: state.edit.pos || null,
+        });
     };
     const sendCaret = () => {
         clearTimeout(caretT);
@@ -3615,10 +5138,30 @@ function buildEditCard(e) {
             if (openTa && document.activeElement === openTa) sess._sendCaret();
         });
     }
+    ta.addEventListener('pointerdown', () => { boundaryArm = null; });
     ta.addEventListener('keydown', (ev) => {
-        ev.stopPropagation();                     // Esc here must not exit full screen
-        if (ev.altKey && (ev.key === 'ArrowUp' || ev.key === 'ArrowDown')) {
+        // DO NOT stop every key here. In a VS Code webview the native
+        // copy/cut/paste commands travel through the host; swallowing Cmd/Ctrl
+        // C, X or V at the textarea boundary makes all three appear broken.
+        // The page-level handlers already ignore textarea targets. Only the
+        // shortcuts which this card actually owns are stopped below.
+        if ((ev.metaKey || ev.ctrlKey) && ev.altKey && ev.key === 'Enter') {
+            boundaryArm = null;
             ev.preventDefault();
+            ev.stopPropagation();
+            clearTimeout(debounce);
+            // Carry the current block in the SAME request as commit so saving
+            // it cannot race the Git command. Explicit push only pushes commits.
+            vscode.postMessage({
+                type: ev.shiftKey ? 'gitPush' : 'gitCommit',
+                editId: e.id, text: ta.value,
+            });
+            return;
+        }
+        if (ev.altKey && (ev.key === 'ArrowUp' || ev.key === 'ArrowDown')) {
+            boundaryArm = null;
+            ev.preventDefault();
+            ev.stopPropagation();
             clearTimeout(debounce);
             // Flush first: stepping replaces the session, and an unsent edit
             // belonging to the OLD block would be applied to the new one.
@@ -3626,18 +5169,49 @@ function buildEditCard(e) {
             step(ev.key === 'ArrowUp' ? -1 : 1);
             return;
         }
-        if (ev.key === 'Escape') { ev.preventDefault(); closeEditCard(); }
+        const plainHorizontal = !ev.altKey && !ev.metaKey && !ev.ctrlKey && !ev.shiftKey &&
+            (ev.key === 'ArrowLeft' || ev.key === 'ArrowRight');
+        const collapsed = ta.selectionStart === ta.selectionEnd;
+        const outward = plainHorizontal && collapsed &&
+            ((ev.key === 'ArrowLeft' && ta.selectionStart === 0) ||
+             (ev.key === 'ArrowRight' && ta.selectionEnd === ta.value.length));
+        if (outward) {
+            ev.preventDefault();
+            ev.stopPropagation();
+            // A held key emits repeat=true keydowns. It may sit at the edge,
+            // but it neither arms nor triggers cross-block navigation.
+            if (ev.repeat) return;
+            const here = `${ev.key}:${ta.selectionStart}:${ta.selectionEnd}`;
+            if (boundaryArm === here) {
+                boundaryArm = null;
+                clearTimeout(debounce);
+                vscode.postMessage({ type: 'editChange', editId: e.id, text: ta.value });
+                step(ev.key === 'ArrowLeft' ? -1 : 1);
+            } else {
+                boundaryArm = here;
+            }
+            return;
+        }
+        boundaryArm = null;
+        if (ev.key === 'Escape') {
+            ev.preventDefault();
+            ev.stopPropagation();
+            closeEditCard();
+        }
         else if ((ev.metaKey || ev.ctrlKey) && (ev.key === 's' || ev.key === 'Enter')) {
             ev.preventDefault();
-            clearTimeout(debounce);
-            vscode.postMessage({ type: 'editChange', editId: e.id, text: ta.value });
-            vscode.postMessage({ type: 'editSave', editId: e.id });
+            ev.stopPropagation();
+            // One message, one ordered operation in the extension: first put
+            // this exact block text into the document, then save the complete
+            // backing file. Two independent messages could race and save the
+            // file before the pending mini-editor change reached it.
+            saveCurrent();
         }
     });
 
     const hint = document.createElement('div');
     hint.className = 'ec-hint';
-    hint.textContent = 'drag the title to move · ⌥↑/⌥↓ previous/next block · click the page to jump here · ⌘S saves · Esc closes';
+    hint.textContent = 'drag title · ←←/→→ previous/next · ⌘S save · ⌘⌥↵ commit · ⇧⌘⌥↵ push · Esc close';
 
     card.append(head, box, hint);
     return card;
@@ -4140,7 +5714,13 @@ function selectInEditCard(msg) {
     const e = state.edit;
     if (!e || e.id !== msg.editId) return;
     const card = document.querySelector('.editcard');
-    if (!card) return;
+    if (!card) {
+        // editOpen may still be awaiting the page render while this later
+        // message arrives. Keep the exact caret instead of losing the first
+        // character typed from the page to an async paint race.
+        deferredEditSelect = msg;
+        return;
+    }
     const ta = card.querySelector('textarea');
     // THE MARKED WORD AND THE CARET ARE TWO ANSWERS.
     //
@@ -4153,12 +5733,15 @@ function selectInEditCard(msg) {
     const caret = Number.isFinite(msg.caret) ? msg.caret : null;
     const taFrom = caret == null ? msg.start : caret;
     const taTo = caret == null ? msg.end : caret;
+    const direction = caret == null && taFrom !== taTo && msg.direction === 'backward'
+        ? 'backward' : 'forward';
+    e.caretDirection = direction;
     // Claim this position before setting it: setSelectionRange fires `select`,
     // and an un-primed card would post it back as the reader's own movement.
     // It must claim what the TEXTAREA will report, not what is marked.
-    e._caretSent = `${taFrom}:${taTo}`;
+    e._caretSent = `${taFrom}:${taTo}:${direction}`;
     syncHighlight(card);
-    try { ta.setSelectionRange(taFrom, taTo); } catch (_) { /* out of range */ }
+    try { ta.setSelectionRange(taFrom, taTo, direction); } catch (_) { /* out of range */ }
     // preventScroll for the same reason as opening: the reveal below is
     // minimal, a focus-scroll is not.
     if (msg.focus) { try { ta.focus({ preventScroll: true }); } catch (_) { ta.focus(); } }
@@ -4167,6 +5750,25 @@ function selectInEditCard(msg) {
     // the layer is the only element that can be revealed.
     const mark = card.querySelector('.ec-sel');
     if (mark && mark.scrollIntoView) mark.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    postEditView();
+
+    // A printable key pressed on the paper opened this card. Insert every key
+    // accumulated while the extension resolved the click and built the card,
+    // at the caret it just returned — never at textarea's default position.
+    if (pendingPaperTyping && msg.typingRequest === pendingPaperTyping.id) {
+        const text = pendingPaperTyping.text;
+        if (pendingPaperTyping.timer) clearTimeout(pendingPaperTyping.timer);
+        pendingPaperTyping = null;
+        if (text) {
+            try { ta.setRangeText(text, ta.selectionStart, ta.selectionEnd, 'end'); }
+            catch (_) {
+                const a = ta.selectionStart; const b = ta.selectionEnd;
+                ta.value = ta.value.slice(0, a) + text + ta.value.slice(b);
+                try { ta.setSelectionRange(a + text.length, a + text.length); } catch (_) {}
+            }
+            ta.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+    }
 }
 
 /**
@@ -4175,10 +5777,36 @@ function selectInEditCard(msg) {
  * Both readings go every time: only the extension knows whether what was
  * clicked is maths, because only it has the document model.
  */
+let paperTypingTarget = null;
+let paperTypingResolving = null;
+let paperTargetSeq = 0;
+let typingRequestSeq = 0;
+let paperTypingClearedBy = '';
+
+function clearPaperTypingTarget(clearPending = false, reason = '') {
+    paperTargetSeq++;
+    paperTypingClearedBy = reason;
+    paperTypingTarget = null;
+    paperTypingResolving = null;
+    if (clearPending) {
+        if (pendingPaperTyping && pendingPaperTyping.timer) clearTimeout(pendingPaperTyping.timer);
+        pendingPaperTyping = null;
+    }
+}
+
 function sendClick(n, pt, cx, cy, extra, type = 'click') {
-    const base = { type, page: n, xBp: pt.xBp, yTopBp: pt.yTopBp, ...extra };
-    Promise.all([wordAtPoint(n, cx, cy, false), wordAtPoint(n, cx, cy, true)])
-        .then(([hit, g]) => vscode.postMessage({
+    if (state.tracePaused) return;
+    const base = {
+        type, page: n, xBp: pt.xBp, yTopBp: pt.yTopBp,
+        generation: state.generation, ...extra,
+    };
+    const ordinary = type === 'click' && !extra.pick && !extra.widen &&
+        !extra.shrink && !extra.takeMe && !extra.commentTarget;
+    if (type === 'click' && !ordinary) clearPaperTypingTarget(false, 'selection gesture');
+    if (ordinary && pendingPaperTyping) clearPaperTypingTarget(true, 'new paper click');
+    const seq = ordinary ? ++paperTargetSeq : 0;
+    const resolved = Promise.all([wordAtPoint(n, cx, cy, false), wordAtPoint(n, cx, cy, true)])
+        .then(([hit, g]) => ({
             ...base,
             // A FAR word is not a hit — it is the answer to "what is nearest",
             // kept apart so it can never outrank a real one.
@@ -4196,12 +5824,53 @@ function sendClick(n, pt, cx, cy, extra, type = 'click') {
             glyphAt: g ? g.at : undefined,
             glyphContext: g ? g.context : undefined,
         }))
-        .catch(() => vscode.postMessage(base));
+        .catch(() => base);
+    if (ordinary) {
+        paperTypingTarget = null;
+        paperTypingResolving = resolved;
+    }
+    resolved.then((msg) => {
+        if (ordinary && seq === paperTargetSeq) {
+            paperTypingTarget = msg;
+            paperTypingResolving = null;
+            paperTypingClearedBy = '';
+        }
+        vscode.postMessage(msg);
+    });
 }
 
 el('zoomin').addEventListener('click', () => setScale(state.scale * 1.25));
 el('zoomout').addEventListener('click', () => setScale(state.scale / 1.25));
-el('fit').addEventListener('click', () => fitWidth());
+// A single click is the familiar one-shot "fit now". A double-click makes it
+// a visible, persistent regime which follows the editor/viewer separator.
+// Delay the single click just enough to distinguish the browser's click,
+// click, dblclick sequence, avoiding three complete PDF renders.
+let fitClickTimer = null;
+function updateFitControl() {
+    const button = el('fit');
+    if (!button) return;
+    button.setAttribute('aria-pressed', String(!!state.fitMode));
+    button.title = state.fitMode
+        ? 'Responsive Fit on — double-click to stop following viewer width'
+        : 'Fit page width (⌘0) · double-click to keep fitted while resizing';
+    button.setAttribute('aria-label', button.title);
+}
+el('fit').addEventListener('click', () => {
+    clearTimeout(fitClickTimer);
+    fitClickTimer = setTimeout(() => fitWidth({ sticky: state.fitMode }), 220);
+});
+el('fit').addEventListener('dblclick', (ev) => {
+    ev.preventDefault();
+    clearTimeout(fitClickTimer);
+    fitClickTimer = null;
+    const on = !state.fitMode;
+    state.fitMode = on;
+    updateFitControl();
+    if (on) fitWidth({ sticky: true });
+    else saveViewSoon(0);
+    vscode.postMessage({ type: 'fitMode', value: on });
+});
+updateFitControl();
 // ===========================================================================
 // THE FOOTER WORKLIST
 // ===========================================================================
@@ -4330,18 +5999,9 @@ function setFollowMode(mode, tell = true) {
     const b = el('follow');
     if (b) {
         b.dataset.mode = state.followMode;
-        // On a narrow bar the words go and a glyph speaks instead: barred for
-        // off, a ringed dot for a mark that stays put, up-down arrows for a
-        // page that moves itself. The title says it in words either way.
-        const GLYPH = { off: '⊘', mark: '◎', scroll: '⇕' };
-        b.textContent = '';
-        const icon = document.createElement('span');
-        icon.className = 'ticon';
-        icon.textContent = GLYPH[state.followMode] || '⇕';
-        const lbl = document.createElement('span');
-        lbl.className = 'tlbl';
-        lbl.textContent = `follow: ${state.followMode}`;
-        b.append(icon, lbl);
+        setToolIcon(b, `follow-${state.followMode}`);
+        const lbl = b.querySelector('.tlbl');
+        if (lbl) lbl.textContent = `follow: ${state.followMode}`;
         b.title = state.followMode === 'off'
             ? 'The page ignores the editor cursor — click to cycle'
             : state.followMode === 'mark'
@@ -4365,7 +6025,23 @@ el('follow').addEventListener('click', () => {
     setFollowMode(FOLLOW_MODES[(FOLLOW_MODES.indexOf(state.followMode) + 1) % FOLLOW_MODES.length]);
 });
 el('recompile').addEventListener('click', () => vscode.postMessage({ type: 'recompile' }));
+el('sourceunsaved').addEventListener('click', () => vscode.postMessage({ type: 'saveSource' }));
 el('addmma').addEventListener('click', () => setArmInsert(armMode !== 'insert', 'insert'));
+
+// SAVE BELONGS TO THE DOCUMENT, NOT TO THE TEXTAREA WHICH HAPPENS TO HAVE FOCUS.
+// If a mini-editor is open, use its exact same ordered apply+save operation;
+// otherwise save all dirty TeX buffers belonging to this paper. This listener
+// deliberately ignores other inputs (comments, search) whose own text must not
+// be mistaken for LaTeX source.
+window.addEventListener('keydown', (e) => {
+    const key = String(e.key || '').toLowerCase();
+    if (key !== 's' || !(e.metaKey || e.ctrlKey) || e.altKey) return;
+    const t = e.target;
+    if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.isContentEditable)) return;
+    e.preventDefault();
+    if (state.edit && typeof state.edit._saveCurrent === 'function') state.edit._saveCurrent();
+    else vscode.postMessage({ type: 'saveSource' });
+});
 
 // ⌘V ON THE PAGE ASKS WHERE.
 //
@@ -4393,6 +6069,78 @@ window.addEventListener('keydown', (e) => {
     setNav(!navVisible());
 });
 
+// STANDARD EDITING KEYS ACT ON A PAGE SELECTION.
+//
+// The action bar and the keyboard deliberately share one extension message,
+// so cut still obeys the important "copy must succeed before delete" rule and
+// paste still uses VS Code's clipboard rather than browser permissions.
+window.addEventListener('keydown', (e) => {
+    const t = e.target;
+    if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.isContentEditable)) return;
+    if (!state.selection || state.selection.pendingStart) return;
+    const command = (e.metaKey || e.ctrlKey) && !e.altKey;
+    const key = String(e.key || '').toLowerCase();
+    let action = null;
+    if (command && key === 'c') action = 'copy';
+    else if (command && key === 'x') action = 'cut';
+    else if (command && key === 'v') action = 'paste';
+    else if (!e.metaKey && !e.ctrlKey && !e.altKey &&
+        (e.key === 'Delete' || e.key === 'Backspace')) action = 'delete';
+    else if (!e.metaKey && !e.ctrlKey && !e.altKey && !e.isComposing &&
+        (e.key.length === 1 || e.key === 'Enter')) action = 'replace';
+    if (!action) return;
+    e.preventDefault();
+    clearPaperTypingTarget(false, 'selection action');
+    vscode.postMessage({
+        type: 'selectionAction', action,
+        ...(action === 'replace' ? { text: e.key === 'Enter' ? '\n' : e.key } : {}),
+    });
+});
+
+// TYPE WHERE YOU CLICKED.
+//
+// A paper click is resolved asynchronously through pdf.js's text layer. The
+// first key therefore waits for that exact resolved point, asks for the normal
+// mini-editor, and buffers any following keys until editSelect returns the
+// source caret. Nothing is written against a guessed line or textarea offset.
+window.addEventListener('keydown', (e) => {
+    const t = e.target;
+    if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.isContentEditable)) return;
+    if (e.defaultPrevented || state.tracePaused ||
+        (state.selection && !state.selection.pendingStart)) return;
+    const printable = !e.metaKey && !e.ctrlKey && !e.altKey && !e.isComposing &&
+        (e.key.length === 1 || e.key === 'Enter');
+    if (!printable) {
+        // A correction made while the card is opening edits the buffer rather
+        // than disappearing into the page.
+        if (pendingPaperTyping && !e.metaKey && !e.ctrlKey && !e.altKey && e.key === 'Backspace') {
+            e.preventDefault();
+            pendingPaperTyping.text = pendingPaperTyping.text.slice(0, -1);
+        }
+        return;
+    }
+    if (!pendingPaperTyping && !paperTypingTarget && !paperTypingResolving) return;
+    e.preventDefault();
+    const text = e.key === 'Enter' ? '\n' : e.key;
+    if (pendingPaperTyping) {
+        pendingPaperTyping.text += text;
+        return;
+    }
+    const request = { id: ++typingRequestSeq, text, timer: null };
+    pendingPaperTyping = request;
+    request.timer = setTimeout(() => {
+        if (pendingPaperTyping !== request) return;
+        pendingPaperTyping = null;
+        status('Could not locate that point in the LaTeX source — click and try again', 'warn');
+    }, 8000);
+    const target = paperTypingTarget;
+    const resolving = paperTypingResolving;
+    Promise.resolve(target || resolving).then((at) => {
+        if (!at || pendingPaperTyping !== request) return;
+        vscode.postMessage({ ...at, type: 'editHere', typingRequest: request.id });
+    });
+});
+
 window.addEventListener('keydown', (e) => {
     if (e.key !== 'v' || !(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey) return;
     const t = e.target;
@@ -4401,14 +6149,24 @@ window.addEventListener('keydown', (e) => {
     e.preventDefault();
     setArmInsert(true, 'paste');
 });
+function updatePinControl(checked) {
+    const control = el('pincontrol');
+    if (!control) return;
+    const text = checked
+        ? 'Highlight pinned — click to let it fade normally'
+        : 'Pin the current source highlight so it stays visible instead of fading';
+    control.title = text;
+    control.setAttribute('aria-label', text);
+}
 el('pin').addEventListener('change', (e) => {
     state.pinHighlight = e.target.checked;
+    updatePinControl(state.pinHighlight);
     paintHighlight();
 });
+updatePinControl(false);
 // Report where the reader is, so closing and reopening the panel — which is
 // the only way to hide a webview — puts them back rather than at page one.
 {
-    let t = null;
     const main = document.querySelector('main');
     if (main) {
         let lastLeft = main.scrollLeft;
@@ -4423,36 +6181,43 @@ el('pin').addEventListener('change', (e) => {
             // Cheap enough to do on every scroll event: it walks the page
             // elements and touches one text node.
             paintPageNow();
-            clearTimeout(t);
-            t = setTimeout(() => {
-                const a = scrollAnchor();
-                if (a) {
-                    vscode.postMessage({ type: 'viewstate', page: a.page, frac: a.frac });
-                    // VS Code hands this back to a panel it restores after a
-                    // reload. The extension's own copy is the authority — this
-                    // is what makes the place survive even when the extension
-                    // is the thing that was restarted.
-                    try { vscode.setState({ page: a.page, frac: a.frac }); } catch (_) { /* older host */ }
-                }
-            }, 300);
+            positionCommentMarkersX();
+            // The conversation card is visually a bubble attached to its
+            // paragraph. Follow that page child as it scrolls, rather than
+            // remaining pinned to the window after its context has gone.
+            if (commentThreadOpen()) placeCommentPopover(commentPopoverAnchor, false);
+            saveViewSoon(300);
         }, { passive: true });
     }
 }
 
 // The visible band changes with the panel, so the card is re-fitted with it.
-let _resizeT = null;
+let _resizeFrame = null;
+function responsiveFit() {
+    if (!state.fitMode || _resizeFrame != null) return;
+    _resizeFrame = requestAnimationFrame(() => {
+        _resizeFrame = null;
+        // Stretch the existing canvases while the separator is moving; the
+        // zoom machinery performs one crisp PDF render after movement settles.
+        fitWidth({ sticky: true, live: true });
+    });
+}
 window.addEventListener('resize', () => {
     if (state.edit) paintEditCard();
     if (state.mma) paintMmaCard();
+    positionCommentMarkersX();
+    if (commentThreadOpen()) placeCommentPopover();
     // Fit is a mode: a panel that changes width re-fits to it.
-    if (state.fitMode) {
-        clearTimeout(_resizeT);
-        _resizeT = setTimeout(() => { fitWidth(); }, 120);
-    }
+    responsiveFit();
 });
+// VS Code normally resizes the whole webview, but observing the actual reader
+// also covers changes caused by in-view chrome without relying on a window
+// resize event.
+try { new ResizeObserver(responsiveFit).observe(document.querySelector('main')); }
+catch (_) { /* window resize remains the fallback */ }
 
 el('full').addEventListener('click', () => {
-    vscode.postMessage({ type: 'fullscreen', value: !state.fullscreen });
+    vscode.postMessage({ type: 'layoutCycle' });
 });
 
 // THE SUN/MOON IS AN OVERRIDE, AND SAYS SO BY BECOMING ONE.
@@ -4536,10 +6301,26 @@ window.addEventListener('keydown', (e) => {
         e.preventDefault();
         return;
     }
+    if (commentArmed) {
+        setCommentArmed(false);
+        commentPost('cancelDraft');
+        e.preventDefault();
+        return;
+    }
     // Arming is the newest thing the reader turned on, so it is the next
     // thing Esc turns off — and it must not also clear their selection.
     if (armMode) {
         setArmInsert(false);
+        e.preventDefault();
+        return;
+    }
+    if (commentThreadOpen()) {
+        closeCommentThread(true);
+        e.preventDefault();
+        return;
+    }
+    if (commentsOpen()) {
+        setCommentsOpen(false);
         e.preventDefault();
         return;
     }
@@ -4562,7 +6343,7 @@ window.addEventListener('keydown', (e) => {
     }
     if (state.fullscreen) {
         e.preventDefault();
-        vscode.postMessage({ type: 'fullscreen', value: false });
+        vscode.postMessage({ type: 'layoutMode', mode: 'all' });
     }
 });
 
@@ -4591,7 +6372,9 @@ window.addEventListener('keydown', (e) => {
 });
 window.addEventListener('keyup', (e) => { if (e.key === 'Shift') hideLabels(); });
 window.addEventListener('blur', hideLabels);
-document.addEventListener('visibilitychange', () => { if (document.hidden) hideLabels(); });
+document.addEventListener('visibilitychange', () => {
+    if (document.hidden) { hideLabels(); saveViewNow(); }
+});
 
 // A KEY EVENT NEEDS FOCUS; A MOUSE EVENT DOES NOT.
 //
@@ -4681,9 +6464,10 @@ function zoomSettled() {
 }
 
 function setScale(s, anchor, keepFit, { live = false } = {}) {
-    if (!keepFit && state.fitMode) {
+    if (!keepFit) {
         state.fitMode = false;
         document.body.classList.remove('fitted');
+        updateFitControl();
     }
     const was = state.scale;
     state.scale = Math.max(0.25, Math.min(6, s));
@@ -4708,8 +6492,9 @@ function setScale(s, anchor, keepFit, { live = false } = {}) {
             // fraction under the viewport that was there before the resize.
             if (anchor) restoreAnchor(anchor);
             observeVisible();
+            saveViewSoon(0);
         });
-    }
+    } else saveViewSoon(0);
 }
 
 // Pinch and Ctrl/Cmd+wheel zoom, anchored so the page does not jump. macOS
@@ -4739,22 +6524,27 @@ window.addEventListener('keydown', (e) => {
  * Now the horizontal padding is dropped while fitted and the width is measured,
  * so there is nothing left over.
  *
- * It is also a MODE, not a one-off: resizing the panel re-fits, which is what
- * anyone who pressed Fit expects. Any manual zoom leaves the mode.
+ * A click is one fit. A double-click sets `sticky`, making it a responsive
+ * mode which follows the viewer field. Any manual zoom leaves that mode.
  */
-function fitWidth() {
+function fitWidth({ sticky = state.fitMode, live = false } = {}) {
     if (!state.doc) return;
-    state.fitMode = true;
+    state.fitMode = !!sticky;
     document.body.classList.add('fitted');
+    updateFitControl();
+    const anchor = scrollAnchor();
     return state.doc.getPage(1).then((p) => {
         const main = document.querySelector('main');
         const cs = getComputedStyle(main);
         const pad = parseFloat(cs.paddingLeft || 0) + parseFloat(cs.paddingRight || 0);
         // clientWidth already excludes a vertical scrollbar, so what is left
         // after the padding is exactly what a page may occupy.
+        // Fit remains genuinely edge-to-edge. In this mode comment bubbles
+        // move just inside the sheet instead of buying themselves an outer
+        // rail and silently shrinking the paper.
         const avail = main.clientWidth - pad;
         const base = p.getViewport({ scale: 1 });
-        if (avail > 0) setScale(avail / base.width, scrollAnchor(), true);
+        if (avail > 0) setScale(avail / base.width, anchor, true, { live });
     });
 }
 
@@ -4825,13 +6615,21 @@ window.addEventListener('message', async (ev) => {
     const msg = ev.data || {};
     switch (msg.type) {
         case 'open': await openDocument(msg); break;
+        case 'requestViewState': {
+            const snap = viewSnapshot();
+            if (snap) vscode.postMessage({ type: 'viewstate', requestId: msg.requestId, ...snap });
+            else vscode.postMessage({ type: 'viewstate', requestId: msg.requestId, unavailable: true });
+            break;
+        }
         case 'viewerProbe': await probeViewer(msg); break;
         case 'fullscreen':
-            state.fullscreen = !!msg.value;
-            el('full').textContent = state.fullscreen ? '⤡' : '⛶';
-            el('full').title = state.fullscreen
-                ? 'Leave full screen (Esc)'
-                : 'Full screen (Esc to leave, double-click a word to go there and edit)';
+            state.layoutMode = msg.mode === 'viewer' || msg.value ? 'viewer' : 'all';
+            state.fullscreen = state.layoutMode !== 'all';
+            setToolIcon(el('full'), state.layoutMode === 'all' ? 'layout-focus' : 'layout');
+            el('full').title = state.layoutMode === 'all'
+                ? 'Show WPaper only'
+                : 'Show editor + WPaper';
+            el('full').setAttribute('aria-label', el('full').title);
             document.body.classList.toggle('fullscreen', state.fullscreen);
             if (state.fullscreen) window.focus();
             break;
@@ -4900,6 +6698,9 @@ window.addEventListener('message', async (ev) => {
             state.labels = { generation: msg.generation, items: msg.items || [] };
             state.labelFormat = msg.format || 'command';
             if (labelsVisible()) { paintLabels().catch(() => {}); if (state.labelsOn) hintLabels(); }
+            if (hoveredPdfLink && hoveredPdfLink.isConnected) {
+                showPdfLinkPreview(hoveredPdfLink).catch(() => {});
+            }
             break;
         case 'moveCaret':
             state.moveCaret = msg.rects && msg.rects.length ? msg : null;
@@ -4914,6 +6715,8 @@ window.addEventListener('message', async (ev) => {
             break;
         }
         case 'status': status(msg.text, msg.kind || ''); break;
+        case 'traceState': setTraceState(msg); break;
+        case 'sourceDirty': setSourceDirty(msg); break;
         case 'setFollow': setFollowMode(msg.mode || (msg.value ? 'scroll' : 'off'), false); break;
         case 'editOpen': {
             // A card the reader has MOVED keeps its place while they step from
@@ -4925,13 +6728,28 @@ window.addEventListener('message', async (ev) => {
             state.edit = {
                 id: msg.editId, text: msg.text || '', label: msg.label,
                 file: msg.file, startLine: msg.startLine, endLine: msg.endLine,
-                rects: msg.rects || [], page: (msg.rects && msg.rects[0] && msg.rects[0].page) || 1,
-                pos: keepPos || null,
+                rects: msg.rects || [], page: (msg.rects && msg.rects[0] && msg.rects[0].page)
+                    || Number(msg.page) || 1,
+                pos: keepPos || msg.pos || null,
+                caretStart: Number.isFinite(msg.caretStart) ? msg.caretStart : 0,
+                caretEnd: Number.isFinite(msg.caretEnd) ? msg.caretEnd
+                    : (Number.isFinite(msg.caretStart) ? msg.caretStart : 0),
+                caretDirection: msg.caretDirection === 'backward' ? 'backward' : 'forward',
             };
             const page = state.edit.rects.length
                 ? state.edit.rects[state.edit.rects.length - 1].page : state.edit.page;
             await renderPage(page);
-            paintEditCard(true);
+            // Restoration must not disturb the exact saved scroll position.
+            // A newly requested card still reveals and focuses itself.
+            // Typing from the paper focuses only after editSelect supplies the
+            // exact source caret; focusing here exposes textarea offset zero.
+            paintEditCard(!msg.restored && !msg.typingRequest);
+            postEditView();
+            if (deferredEditSelect && deferredEditSelect.editId === state.edit.id) {
+                const pending = deferredEditSelect;
+                deferredEditSelect = null;
+                selectInEditCard(pending);
+            }
             break;
         }
         case 'editUpdate': {
@@ -5018,9 +6836,25 @@ window.addEventListener('message', async (ev) => {
             break;
         case 'blank':
             // The paper changed. Nothing on screen belongs to the new one.
+            // Also supersede an asynchronous pdf.js open. Without this, an old
+            // paper that finished parsing after `blank` could put itself back.
+            state.openSeq++;
+            state.openInFlight = false;
             clearPages();
             state.generation = null;
+            state.restoreViewNext = true;
+            setTraceState({ paused: false });
+            setSourceDirty({ dirty: false });
+            clearPaperTypingTarget(true, 'paper blanked');
             closeEditCard(false);
+            state.commentViewApplied = false;
+            commentTarget = null;
+            setCommentArmed(false);
+            document.body.classList.remove('comments-open');
+            document.body.classList.remove('comment-thread-open');
+            el('commentsbutton').setAttribute('aria-pressed', 'false');
+            el('commentcomposer').hidden = true;
+            renderComments({ items: [], errors: [] });
             break;
         case 'mmaAnchor':
             if (state.mma && state.mma.blockId === msg.blockId) {
@@ -5089,6 +6923,17 @@ window.addEventListener('message', async (ev) => {
             renderEditNav();
             if (state.tour) placeTourRing(state.tour.point);
             break;
+        case 'comments':
+            renderComments(msg);
+            break;
+        case 'commentTarget':
+            showCommentTarget(msg.target, msg.reason);
+            break;
+        case 'commentComposed':
+            commentTarget = null;
+            el('commentdraft').value = '';
+            el('commentcomposer').hidden = true;
+            break;
         case 'tour':
             state.tour = msg.step || null;
             renderTour();
@@ -5100,6 +6945,15 @@ window.addEventListener('message', async (ev) => {
             if (state.review) {
                 state.review.focus = msg.id;
                 renderReview();
+                // Never navigate with coordinates from another PDF. The host
+                // retains the click and sends it again after `opened` and a
+                // fresh placement payload agree on one generation.
+                if (msg.generation == null || state.generation == null ||
+                    String(msg.generation) !== String(state.generation) ||
+                    !reviewPlacementCurrent()) {
+                    paintReview();
+                    break;
+                }
                 if (msg.page) {
                     renderAround(msg.page);
                     await renderPage(msg.page);
@@ -5184,4 +7038,14 @@ function forgetPagesForTest() {
     textCache.clear();
 }
 
-window.__wbTexViewerTest = { fitToolbar, dropRenderedForTest, renderPage, probeViewer, snapToInk, itemWords, prefixWidths, textItems, wordKey, foldGlyphs, wordAtPoint, highlightLatex, fromViewport, rectToViewport, forgetPagesForTest };
+window.__wbTexViewerTest = { fitToolbar, dropRenderedForTest, renderPage, probeViewer, snapToInk, itemWords, prefixWidths, textItems, wordKey, foldGlyphs, wordAtPoint, highlightLatex, fromViewport, rectToViewport, forgetPagesForTest,
+    paperTypingState: () => ({
+        target: paperTypingTarget && { page: paperTypingTarget.page, word: paperTypingTarget.word },
+        resolving: !!paperTypingResolving,
+        pending: pendingPaperTyping && { id: pendingPaperTyping.id, text: pendingPaperTyping.text },
+        selection: !!state.selection,
+        tracePaused: !!state.tracePaused,
+        clearedBy: paperTypingClearedBy,
+        seq: paperTargetSeq,
+    }),
+};

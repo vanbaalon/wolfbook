@@ -15,7 +15,9 @@
 const fs   = require('fs');
 const os   = require('os');
 const path = require('path');
-const { spawn } = require('child_process');
+const supervisor = require('./subprocessSupervisor');
+
+const flights = new Map();
 
 // ---------------------------------------------------------------------------
 // Kernel discovery (no vscode — mirrors find-kernel.js's app scan)
@@ -115,12 +117,12 @@ function asciiJson(obj) {
  * @returns {Promise<{ok:boolean, unavailable?:boolean, error?:string,
  *                    results:Array<{index:number, code:string}>}>}
  */
-async function refineCells(payloads, opts) {
+async function refineCellsOnce(payloads, opts) {
     opts = opts || {};
     const list = (payloads || []).filter(p => p && typeof p.boxSource === 'string' && p.boxSource);
     if (!list.length) return { ok: true, results: [] };
 
-    const runner = findRunner(opts.kernelPath);
+    const runner = opts.runner || findRunner(opts.kernelPath);
     const tmpDir  = fs.mkdtempSync(path.join(os.tmpdir(), 'wb-nbimport-'));
     const inFile  = path.join(tmpDir, 'payload.json');
     const outFile = path.join(tmpDir, 'result.json');
@@ -137,46 +139,59 @@ async function refineCells(payloads, opts) {
     }
 
     return new Promise((resolve) => {
+        const subject = opts.notebook ? ` for ${opts.notebook}` : '';
         let child;
         try {
-            child = spawn(runner.cmd, runner.args.concat([wlFile]), {
+            child = supervisor.spawn(runner.cmd, runner.args.concat([wlFile]), {
                 env: Object.assign({}, process.env, { WB_NB_IN: inFile, WB_NB_OUT: outFile }),
                 stdio: ['ignore', 'pipe', 'pipe'],
-            });
+            }, { stage: 'refine', notebook: opts.notebook, key: opts.key });
         } catch (e) {
             cleanup();
             resolve({ ok: false, unavailable: true, error: String(e.message || e), results: [] });
             return;
         }
 
-        let stderr = '';
+        let stdout = '', stderr = '';
         let settled = false;
-        const finish = (res) => { if (settled) return; settled = true; cleanup(); resolve(res); };
+        let requestedResult = null;
+        let abortListener = null;
+        const finish = (res) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            if (opts.signal && abortListener) opts.signal.removeEventListener?.('abort', abortListener);
+            cleanup();
+            resolve(res);
+        };
+        const stop = (res) => {
+            if (settled || requestedResult) return;
+            requestedResult = res;
+            clearTimeout(timer);
+            supervisor.terminate(child).then(() => finish(res));
+        };
 
         const timer = setTimeout(() => {
-            try { child.kill('SIGKILL'); } catch (_) {}
-            finish({ ok: false, error: 'kernel timed out', results: [] });
+            stop({ ok: false, error: `kernel refinement${subject} timed out after ${opts.timeoutMs || 120000} ms`, results: [] });
         }, opts.timeoutMs || 120000);
 
         if (opts.signal) {
-            opts.signal.addEventListener?.('abort', () => {
-                try { child.kill('SIGKILL'); } catch (_) {}
-                clearTimeout(timer);
-                finish({ ok: false, error: 'cancelled', results: [] });
-            }, { once: true });
+            abortListener = () => stop({ ok: false, error: `kernel refinement${subject} cancelled`, results: [] });
+            if (opts.signal.aborted) abortListener();
+            else opts.signal.addEventListener?.('abort', abortListener, { once: true });
         }
 
-        child.stderr.on('data', d => { stderr += String(d); });
+        child.stdout.on('data', d => { stdout = (stdout + String(d)).slice(-65536); });
+        child.stderr.on('data', d => { stderr = (stderr + String(d)).slice(-65536); });
         child.on('error', (e) => {
-            clearTimeout(timer);
             finish({ ok: false, unavailable: true, error: String(e.message || e), results: [] });
         });
         child.on('close', () => {
-            clearTimeout(timer);
+            if (requestedResult) { finish(requestedResult); return; }
             let parsed = null;
             try { parsed = JSON.parse(fs.readFileSync(outFile, 'utf8')); } catch (_) { /* handled below */ }
             if (!parsed || !Array.isArray(parsed.results)) {
-                finish({ ok: false, error: (stderr.trim().split('\n').pop() || 'kernel produced no result'), results: [] });
+                finish({ ok: false, error: (stderr.trim().split('\n').pop() || stdout.trim().split('\n').pop() || 'kernel produced no result'), results: [] });
                 return;
             }
             const results = parsed.results
@@ -185,6 +200,23 @@ async function refineCells(payloads, opts) {
             finish({ ok: true, results });
         });
     });
+}
+
+/** Coalesce duplicate refinement requests for the same notebook. */
+function refineCells(payloads, opts = {}) {
+    const key = opts.key ? `refine:${opts.key}` : null;
+    if (key && flights.has(key)) return flights.get(key);
+    const promise = refineCellsOnce(payloads, opts);
+    if (key) {
+        flights.set(key, promise);
+        const forget = () => { if (flights.get(key) === promise) flights.delete(key); };
+        promise.then(forget, forget);
+    }
+    return promise;
+}
+
+function cancel(key) {
+    return supervisor.terminateKey(key);
 }
 
 /** True when some Wolfram runner appears to exist on this machine. */
@@ -197,4 +229,4 @@ function kernelAvailable(explicitKernelPath) {
     return true;
 }
 
-module.exports = { refineCells, kernelAvailable, findRunner };
+module.exports = { refineCells, kernelAvailable, findRunner, cancel, dispose: supervisor.dispose };

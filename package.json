@@ -3,7 +3,7 @@
   "displayName": "Wolfbook — Mathematica & Wolfram Language Notebooks",
   "description": "Mathematica-style Wolfram Language notebooks and WPaper LaTeX editing in VS Code, with live kernels, compiled-paper navigation, rich output, debugging and agent tools.",
   "publisher": "wolfbook",
-  "version": "2.9.3",
+  "version": "2.10.0",
   "engines": {
     "vscode": "^1.95.0"
   },
@@ -229,7 +229,7 @@
         "wolfbook.mcp.canonicalOutputProjection": {
           "scope": "window",
           "type": "boolean",
-          "default": false,
+          "default": true,
           "markdownDescription": "Preview the versioned canonical notebook projection through MCP: source, plain/LaTeX previews, and MIME/hash manifests without persisted renderer HTML. Does not change .wb files. Requires reload.",
           "order": 3
         },
@@ -243,14 +243,14 @@
         "wolfbook.mcp.boundedResults": {
           "scope": "window",
           "type": "boolean",
-          "default": false,
+          "default": true,
           "markdownDescription": "Replace large MCP text responses with a preview and expiring result handle retrievable through wolfbook_getResult. Requires reload.",
           "order": 5
         },
         "wolfbook.mcp.resultHandleThreshold": {
           "scope": "window",
           "type": "integer",
-          "default": 24000,
+          "default": 12000,
           "minimum": 4096,
           "maximum": 1000000,
           "markdownDescription": "Character threshold for bounded MCP result envelopes.",
@@ -260,13 +260,14 @@
           "scope": "window",
           "type": "string",
           "enum": [
+            "economy",
             "notebook",
             "slides",
             "paper",
             "full"
           ],
           "default": "full",
-          "markdownDescription": "Which tool families the MCP server advertises in tools/list. `notebook` hides the wolfslide_* family and agent extras (paper_* stays visible); `slides` hides most notebook tools and all paper_* tools; `paper` advertises only the WPaper paper_* family; `full` advertises everything. Hidden tools still work when called by name. Requires reload.",
+          "markdownDescription": "Which tool families the MCP server advertises in tools/list. `economy` exposes the smallest complete notebook/kernel workflow with compact schemas; `notebook` hides the wolfslide_* family and agent extras (paper_* stays visible); `slides` hides most notebook tools and all paper_* tools; `paper` advertises only the WPaper paper_* family; `full` advertises everything. Hidden tools still work when called by name. Requires reload.",
           "order": 7
         },
         "wolfbook.mcp.exposeDeprecatedTools": {
@@ -536,7 +537,7 @@
           "type": "object",
           "default": {},
           "scope": "window",
-          "markdownDescription": "Per-user notebook appearance keyed by notebook URI. Wolfbook writes this to the local VS Code user settings, never to the shared `.wb` file.",
+          "markdownDescription": "Legacy per-user notebook appearance map. Wolfbook now migrates these values into workspaceState so multiple notebooks persist locally without modifying the shared `.wb` file.",
           "additionalProperties": {
             "type": "object",
             "properties": {
@@ -552,9 +553,9 @@
         },
         "wolfbook.kernels.experimentalIsolation": {
           "type": "boolean",
-          "default": false,
+          "default": true,
           "scope": "window",
-          "markdownDescription": "Allow explicit per-notebook Wolfram kernels in this VS Code window. Kernel slots and notebook bindings are restored after reload; definitions are never copied between kernels.",
+          "markdownDescription": "Legacy compatibility setting. Explicit private kernels are now available by default; kernel slots and notebook bindings are restored after reload, and definitions are never copied between kernels.",
           "order": 7
         },
         "wolfbook.kernels.maximum": {
@@ -563,7 +564,7 @@
           "minimum": 1,
           "maximum": 8,
           "scope": "window",
-          "markdownDescription": "Maximum live Wolfram kernels in one window when experimental isolation is enabled. Each kernel consumes a separate Wolfram process/license seat.",
+          "markdownDescription": "Maximum live Wolfram kernels in one window. Each kernel consumes a separate Wolfram process/license seat.",
           "order": 8
         },
         "wolfbook.oberon.enabled": {
@@ -1125,12 +1126,12 @@
             "zen"
           ],
           "enumDescriptions": [
-            "Maximise the WPaper view within the VS Code window.",
-            "Maximise it and put the window itself into full screen.",
-            "Use Zen Mode, which also hides the status bar and tabs."
+            "Maximise WPaper within the VS Code window for the viewer-only step.",
+            "Also put the VS Code window into operating-system full screen for the viewer-only step.",
+            "Use Zen Mode for the viewer-only step, hiding the status bar and tabs too."
           ],
           "default": "maximize",
-          "description": "What the WPaper view’s full-screen button does. Esc always leaves, and whatever was toggled on is toggled back off."
+          "description": "How the viewer-only step of WPaper’s three-state layout cycle is displayed. The button cycles through viewer only, viewer + agent panel, and editor + viewer + agents; Esc restores the complete layout."
         },
         "wolfbook.tex.lockViewerGroup": {
           "type": "boolean",
@@ -1140,7 +1141,7 @@
         "wolfbook.tex.viewerFollowsTex": {
           "type": "boolean",
           "default": true,
-          "description": "Close the WPaper view when you switch to a file that is not a .tex, and bring it back — at the same place — when you return to one."
+          "description": "Close the WPaper view when the editor group beside it switches to a file that is not a .tex, and bring it back — at the same place — when you return to one. Panels, terminals and agent sessions never close it."
         },
         "wolfbook.tex.pageTheme": {
           "type": "string",
@@ -1197,7 +1198,7 @@
         "wolfbook.keybindings.tex": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "Enable Wolfbook's keyboard shortcuts in `.tex` files — smart paste, and Alt+[ / Alt+] to step through an agent's changes.\n\nThese are additionally gated on the **WPaper viewer being open** for the paper, so a `.tex` file you are simply editing keeps your own bindings either way. Turn this off to disable them entirely."
+          "markdownDescription": "Enable Wolfbook's keyboard shortcuts in `.tex` files — smart paste, Alt+[ / Alt+] to step through an agent's changes, Ctrl/Cmd+Alt+Enter to commit, and Ctrl/Cmd+Shift+Alt+Enter to push.\n\nPaper-view gestures are gated on the **WPaper viewer being open**; Git commit/push remains available in an ordinary `.tex` editor. Turn this off to disable them entirely."
         }
       }
     },
@@ -1274,7 +1275,7 @@
       },
       {
         "command": "wolfbook.configureClaude",
-        "title": "Wolfbook: Configure Claude Desktop MCP"
+        "title": "Wolfbook: Configure Claude and Codex Agents"
       },
       {
         "command": "wolfbook.openActivityMonitor",
@@ -1644,6 +1645,32 @@
         "category": "Wolfbook"
       },
       {
+        "command": "wolfbook.tex.commitChanges",
+        "title": "WPaper: Commit Changes",
+        "category": "Wolfbook",
+        "icon": "$(git-commit)"
+      },
+      {
+        "command": "wolfbook.tex.pushChanges",
+        "title": "WPaper: Push Local Commits",
+        "category": "Wolfbook",
+        "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "wolfbook.tex.chooseCommitPushMode",
+        "title": "WPaper: Choose Commit/Push Behaviour",
+        "category": "Wolfbook"
+      },
+      {
+        "command": "wolfbook.tex.configureOverleaf",
+        "title": "WPaper: Configure Overleaf Git Sync",
+        "category": "Wolfbook",
+        "icon": {
+          "light": "./icons/overleaf-light.svg",
+          "dark": "./icons/overleaf-dark.svg"
+        }
+      },
+      {
         "command": "wolfbook.tex.showLog",
         "title": "Show WPaper Compile Log",
         "category": "Wolfbook"
@@ -1969,6 +1996,11 @@
           "command": "wolfbook.tex.openViewer",
           "when": "resourceExtname == .tex",
           "group": "navigation@1"
+        },
+        {
+          "command": "wolfbook.tex.configureOverleaf",
+          "when": "resourceExtname == .tex",
+          "group": "navigation@2"
         }
       ]
     },
@@ -1978,6 +2010,18 @@
         "key": "ctrl+v",
         "mac": "cmd+v",
         "when": "(editorTextFocus && !editorReadonly && resourceExtname == .tex && !editorHasMultipleSelections) && wolfbook.keysTex && wolfbook.texViewerOpen"
+      },
+      {
+        "command": "wolfbook.tex.commitChanges",
+        "key": "ctrl+alt+enter",
+        "mac": "cmd+alt+enter",
+        "when": "editorTextFocus && resourceExtname == .tex && wolfbook.keysTex"
+      },
+      {
+        "command": "wolfbook.tex.pushChanges",
+        "key": "ctrl+shift+alt+enter",
+        "mac": "cmd+shift+alt+enter",
+        "when": "editorTextFocus && resourceExtname == .tex && wolfbook.keysTex"
       },
       {
         "command": "wolfbook.saveNbCopyAsWb",
@@ -2323,7 +2367,7 @@
           "x-application/wolfram-language-html"
         ],
         "dependencies": [],
-        "requiresMessaging": "optional"
+        "requiresMessaging": "always"
       }
     ],
     "chatParticipants": [
@@ -2645,6 +2689,30 @@
                 "canonical"
               ],
               "description": "Optional MCP-facing output view. canonical returns versioned source, compact previews, and MIME/hash manifests without persisted render HTML; it never changes the notebook file."
+            },
+            "since_revision": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Return only cells changed after this notebook revision. If the in-memory delta history is unavailable, returns bounded full context with an explicit delta warning."
+            },
+            "if_revision": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Return not_modified when this equals the current notebook revision."
+            },
+            "cell_ids": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Optional stable cell IDs to include."
+            },
+            "cell_numbers": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              },
+              "description": "Optional 1-based cell numbers to include."
             }
           }
         }
@@ -2653,7 +2721,7 @@
         "name": "wolfbook_evaluateExpression",
         "displayName": "Wolfbook: Evaluate Expression",
         "toolReferenceName": "wolfbookEval",
-        "modelDescription": "Evaluates a Wolfram Language expression in the active notebook's live kernel and returns the result as InputForm text. CRITICAL — multi-expression pitfall: passing multiple lines WITHOUT semicolons in single-expression mode (multiLine:false) causes the kernel to interpret newline-separated subexpressions as Times[...] multiplication, NOT as sequential statements — always use explicit semicolons (;) between statements, or set multiLine:true. Set multiLine:true to evaluate each non-empty line as a separate, independent expression — results are labeled Out[1]=, Out[2]=, etc.; lines ending with ; are evaluated silently. State accumulates across lines. Use outputForm to control the result format. Default timeout is 30 s. For intentionally long work use wait_mode:'async', a caption, and retain the returned operation ID.",
+        "modelDescription": "Primary Mathematica/Wolfram Language evaluation path inside VS Code. Use this instead of launching wolframscript, WolframKernel, or a separate Mathematica process so evaluation shares the active notebook's live kernel state. Returns the result as InputForm text. CRITICAL — multi-expression pitfall: passing multiple lines WITHOUT semicolons in single-expression mode (multiLine:false) causes the kernel to interpret newline-separated subexpressions as Times[...] multiplication, NOT as sequential statements — always use explicit semicolons (;) between statements, or set multiLine:true. Set multiLine:true to evaluate each non-empty line as a separate, independent expression — results are labeled Out[1]=, Out[2]=, etc.; lines ending with ; are evaluated silently. State accumulates across lines. Use outputForm to control the result format. Default timeout is 30 s. For intentionally long work use wait_mode:'async', a caption, and retain the returned operation ID.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
@@ -2877,6 +2945,11 @@
               "type": "string",
               "description": "Target notebook filename or absolute path. Omit to use the session target."
             },
+            "expected_notebook_revision": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Reject the insertion if the notebook revision changed since it was read."
+            },
             "caption": {
               "type": "string",
               "maxLength": 160,
@@ -3027,6 +3100,15 @@
             "expected_source_hash": {
               "type": "string",
               "description": "Reject unless current source SHA-256 matches."
+            },
+            "notebook": {
+              "type": "string",
+              "description": "Target notebook filename or absolute path. Omit to use the session target."
+            },
+            "expected_notebook_revision": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Reject the edit if the notebook revision changed since it was read."
             }
           }
         }
@@ -3168,6 +3250,15 @@
             },
             "expected_source_hash": {
               "type": "string"
+            },
+            "notebook": {
+              "type": "string",
+              "description": "Target notebook filename or absolute path. Omit to use the session target."
+            },
+            "expected_notebook_revision": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Reject deletion if the notebook revision changed since it was read."
             }
           }
         }
@@ -3185,6 +3276,13 @@
               "type": "string",
               "description": "The text or regex pattern to search for (case-insensitive)."
             },
+            "queries": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Several text or regex patterns to search in one notebook scan. Use query or queries."
+            },
             "regex": {
               "type": "boolean",
               "description": "If true, treat query as a regular expression. Default: false (plain text search)."
@@ -3200,11 +3298,19 @@
             "includeOutput": {
               "type": "boolean",
               "description": "If true (default), also search cell outputs, not just source code."
+            },
+            "notebook": {
+              "type": "string",
+              "description": "Notebook filename or absolute path."
+            },
+            "limit": {
+              "type": "number",
+              "minimum": 1,
+              "maximum": 500,
+              "description": "Maximum matches returned per query (default 100)."
             }
           },
-          "required": [
-            "query"
-          ]
+          "required": []
         }
       },
       {
@@ -3713,7 +3819,7 @@
         "displayName": "Wolfbook: Kernel Manager",
         "toolReferenceName": "wolfbookKernels",
         "canBeReferencedInPrompt": true,
-        "modelDescription": "Lists explicit kernel identities and notebook bindings. With experimental isolation enabled, can create a bounded isolated kernel, bind/unbind a notebook locally, or stop a non-default idle kernel. Bindings never modify the .wb file.",
+        "modelDescription": "Lists explicit kernel identities and notebook bindings. Can create a bounded private kernel, bind/unbind a notebook locally, or stop a non-default idle kernel. Bindings never modify the .wb file; creating a kernel requires explicit resource-cost acknowledgement.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -3901,7 +4007,7 @@
         "displayName": "Wolfbook: File Operations",
         "toolReferenceName": "wolfbookFileOps",
         "canBeReferencedInPrompt": true,
-        "modelDescription": "File system operations on the local machine. action='read': read the text contents of the file at 'path' (required). action='write': write 'content' string to 'path' (required, creates or overwrites). action='list': list files and subdirectories under directory 'path' (optional, defaults to workspace root); use 'ext' to filter by extension (e.g. '.wl'), 'depth' to control recursion depth (default 4, max 8). All paths should be absolute.",
+        "modelDescription": "File system operations for non-notebook workspace files. Never write .wb, .evsnb, .vsnb, or .nb notebooks with this tool or another generic file tool; use Wolfbook cell tools so notebook structure and live editor state remain valid. action='read': read the text contents of the file at 'path' (required). action='write': write 'content' string to 'path' (required, creates or overwrites). action='list': list files and subdirectories under directory 'path' (optional, defaults to workspace root); use 'ext' to filter by extension (e.g. '.wl'), 'depth' to control recursion depth (default 4, max 8). All paths should be absolute.",
         "inputSchema": {
           "type": "object",
           "required": [
@@ -3940,7 +4046,7 @@
         "name": "wolfbook_runTerminal",
         "displayName": "Wolfbook: Run Terminal Command",
         "toolReferenceName": "wolfbookTerminal",
-        "modelDescription": "Runs a shell command and returns stdout/stderr. Use for project-level tasks like builds, tests, scripts, and LaTeX compilation. Keep commands scoped to the workspace.",
+        "modelDescription": "Runs a shell command and returns stdout/stderr. Use for project-level tasks like builds, tests, scripts, and LaTeX compilation. Do not use it to launch wolframscript, WolframKernel, or Mathematica for ordinary Wolfram Language evaluation inside VS Code; use wolfbook_evaluateExpression or notebook cell tools so kernel state remains shared and visible. A direct/headless Wolfram process is appropriate only when the user explicitly requests it or Wolfbook is unavailable. Keep commands scoped to the workspace.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
@@ -4837,6 +4943,10 @@
             "cellNumber": {
               "type": "number",
               "description": "1-based cell number. Use cellId when available."
+            },
+            "notebook": {
+              "type": "string",
+              "description": "Notebook filename or absolute path."
             }
           }
         }
@@ -4865,6 +4975,10 @@
             "endCell": {
               "type": "number",
               "description": "Range: last cell to check (inclusive, 1-based). Defaults to last cell."
+            },
+            "notebook": {
+              "type": "string",
+              "description": "Notebook filename or absolute path."
             }
           }
         }
@@ -5501,7 +5615,7 @@
         "name": "paper_getOutline",
         "displayName": "WPaper: Outline",
         "toolReferenceName": "paperOutline",
-        "modelDescription": "Structural outline of a LaTeX paper: nested sections, per-kind object counts, managed Mathematica block states, and parse warnings. Start here before any other paper_* call. Set include_project for the root file and the \\\\input/\\\\include graph. Read-only.",
+        "modelDescription": "Compact progressive orientation for a LaTeX paper. Defaults to counts, warnings, and top-level headings; use mode=tree for deeper headings or mode=objects for a paginated semantic inventory. Set include_project for a compact root/file graph. Read-only.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
@@ -5513,6 +5627,43 @@
             "include_project": {
               "type": "boolean",
               "description": "Also resolve the root file and walk the \\\\input/\\\\include graph."
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "summary",
+                "tree",
+                "objects"
+              ],
+              "description": "summary (default), nested heading tree, or paginated semantic objects."
+            },
+            "max_depth": {
+              "type": "number",
+              "description": "Maximum child depth for summary/tree."
+            },
+            "include_identity": {
+              "type": "boolean",
+              "description": "Include objectId and stableKey on outline nodes; off by default."
+            },
+            "offset": {
+              "type": "number",
+              "description": "Zero-based offset for mode=objects."
+            },
+            "limit": {
+              "type": "number",
+              "description": "Page size for mode=objects (default 50, maximum 200)."
+            },
+            "selector": {
+              "type": "string",
+              "description": "Restrict the outline/inventory to one section by label, stableKey, or title substring."
+            },
+            "from_line": {
+              "type": "number",
+              "description": "Restrict headings/objects to this 1-based line or later."
+            },
+            "to_line": {
+              "type": "number",
+              "description": "Restrict headings/objects to this 1-based line or earlier."
             }
           }
         }
@@ -5541,6 +5692,10 @@
             "max_chars": {
               "type": "number",
               "description": "Truncate the returned text (default 4000)."
+            },
+            "reveal": {
+              "type": "boolean",
+              "description": "Open the file and reveal/select this object in the editor."
             }
           },
           "required": [
@@ -5592,6 +5747,10 @@
             "name": {
               "type": "string",
               "description": "A label or citation key. Omit for a whole-file report."
+            },
+            "include_project": {
+              "type": "boolean",
+              "description": "Resolve the root and audit declarations/references across the complete include graph."
             }
           }
         }
@@ -5600,7 +5759,7 @@
         "name": "paper_search",
         "displayName": "WPaper: Search Objects",
         "toolReferenceName": "paperSearchObjects",
-        "modelDescription": "Search the objects of the OPEN LaTeX paper by text, returning matching equations/paragraphs/figures with excerpts and their stableKeys. This searches the user's own document; for published literature use wolfbook_paperSearch instead. Read-only.",
+        "modelDescription": "Search semantic objects in the user's LaTeX paper. Pass one query, or `queries` to batch text, regex, and label-prefix searches in one cached parse. Filter by object kind, section path, or line range. For published literature use wolfbook_paperSearch instead. Read-only.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
@@ -5627,11 +5786,74 @@
             "limit": {
               "type": "number",
               "description": "Maximum hits (default 25)."
+            },
+            "within_section": {
+              "type": "string",
+              "description": "Restrict matches to section paths containing this text."
+            },
+            "from_line": {
+              "type": "number",
+              "description": "Restrict matches to objects starting at or after this 1-based line."
+            },
+            "to_line": {
+              "type": "number",
+              "description": "Restrict matches to objects starting at or before this 1-based line."
+            },
+            "limit_per_query": {
+              "type": "number",
+              "description": "Maximum matches for each batched query."
+            },
+            "max_depth": {
+              "type": "number",
+              "description": "Maximum section-path depth of returned objects."
+            },
+            "queries": {
+              "type": "array",
+              "description": "Several searches evaluated in one parse/index pass.",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  },
+                  "query": {
+                    "type": "string"
+                  },
+                  "label_prefix": {
+                    "type": "string"
+                  },
+                  "regex": {
+                    "type": "boolean"
+                  },
+                  "kinds": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "within_section": {
+                    "type": "string"
+                  },
+                  "from_line": {
+                    "type": "number"
+                  },
+                  "to_line": {
+                    "type": "number"
+                  },
+                  "max_depth": {
+                    "type": "number"
+                  },
+                  "limit": {
+                    "type": "number"
+                  }
+                }
+              }
+            },
+            "include_project": {
+              "type": "boolean",
+              "description": "Search all files in the resolved LaTeX include graph, using open unsaved buffers when present."
             }
-          },
-          "required": [
-            "query"
-          ]
+          }
         }
       },
       {
@@ -5665,7 +5887,7 @@
         "name": "paper_previewEdit",
         "displayName": "WPaper: Preview Edit",
         "toolReferenceName": "paperPreviewEdit",
-        "modelDescription": "Show what replacing one object's source would do, WITHOUT writing anything: the before/after text, the line delta, and any parse warnings the change would introduce. Returns the sourceHash to pass to paper_applyEdit. Read-only.",
+        "modelDescription": "Preview one replacement or an atomic `edits` transaction without writing. Supports replace, insert_before/after, append_to_section, delete, move_before/after, wrap, and rename_label. Returns one combined bounded diff, parse/reference deltas, predicted document hash, and a transaction_id for paper_applyEdit.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
@@ -5697,19 +5919,119 @@
             "expected_source_prefix": {
               "type": "string",
               "description": "Reject unless the current source starts with this."
+            },
+            "expected_document_hash": {
+              "type": "string",
+              "description": "Reject unless the complete current document has this SHA-256."
+            },
+            "edits": {
+              "type": "array",
+              "description": "Atomic semantic edits. All are previewed together or the transaction is rejected.",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "operation": {
+                    "type": "string",
+                    "enum": [
+                      "replace",
+                      "insert_before",
+                      "insert_after",
+                      "append_to_section",
+                      "delete",
+                      "move_before",
+                      "move_after",
+                      "wrap",
+                      "rename_label"
+                    ]
+                  },
+                  "selector": {
+                    "type": "string"
+                  },
+                  "target_selector": {
+                    "type": "string"
+                  },
+                  "end_selector": {
+                    "type": "string"
+                  },
+                  "new_text": {
+                    "type": "string"
+                  },
+                  "old": {
+                    "type": "string"
+                  },
+                  "new": {
+                    "type": "string"
+                  },
+                  "environment": {
+                    "type": "string"
+                  },
+                  "prefix": {
+                    "type": "string"
+                  },
+                  "suffix": {
+                    "type": "string"
+                  },
+                  "expected_source_hash": {
+                    "type": "string"
+                  },
+                  "expected_declaration_hash": {
+                    "type": "string"
+                  },
+                  "expected_object_id": {
+                    "type": "string"
+                  },
+                  "expected_stable_key": {
+                    "type": "string"
+                  },
+                  "expected_source_prefix": {
+                    "type": "string"
+                  },
+                  "update_internal_references": {
+                    "type": "boolean"
+                  },
+                  "allow_referenced": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            },
+            "verify": {
+              "type": "object",
+              "description": "Verification defaults saved with the preview transaction.",
+              "properties": {
+                "parse": {
+                  "type": "boolean"
+                },
+                "references": {
+                  "type": "boolean"
+                },
+                "latex": {
+                  "type": "boolean"
+                },
+                "engine": {
+                  "type": "string",
+                  "enum": [
+                    "pdflatex",
+                    "lualatex",
+                    "xelatex"
+                  ]
+                },
+                "timeout_ms": {
+                  "type": "number"
+                },
+                "rollback_on_failure": {
+                  "type": "boolean"
+                }
+              }
             }
-          },
-          "required": [
-            "selector",
-            "new_text"
-          ]
+          }
         }
       },
       {
         "name": "paper_applyEdit",
         "displayName": "WPaper: Apply Edit",
         "toolReferenceName": "paperApplyEdit",
-        "modelDescription": "Replace one object's source in a .tex file via WorkspaceEdit, so the change is undoable with Cmd-Z. ALWAYS pass expected_source_hash from paper_getObject or paper_previewEdit: a stale edit is then rejected with a structured conflict naming the current hash, instead of overwriting a change you did not see. The file must be open in the editor.",
+        "modelDescription": "Apply a paper_previewEdit transaction_id atomically in one undoable WorkspaceEdit, or submit guarded semantic edits directly. Optional verification combines parsing, reference audit, isolated LaTeX compilation, PDF receipt, save, and rollback-on-failure. Also supports action=history and action=undo with the returned undo_token. The file must be open.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
@@ -5742,15 +6064,136 @@
               "type": "string",
               "description": "Reject unless the current source starts with this."
             },
+            "transaction_id": {
+              "type": "string",
+              "description": "Transaction returned by paper_previewEdit. Preferred for atomic apply."
+            },
+            "action": {
+              "type": "string",
+              "enum": [
+                "apply",
+                "history",
+                "undo"
+              ],
+              "description": "Default apply; history returns recent semantic receipts; undo requires undo_token."
+            },
+            "undo_token": {
+              "type": "string",
+              "description": "Guarded undo token returned by a prior successful apply."
+            },
+            "limit": {
+              "type": "number",
+              "description": "History entries to return (default 10)."
+            },
+            "expected_document_hash": {
+              "type": "string",
+              "description": "Reject a direct transaction unless the complete document has this SHA-256."
+            },
+            "edits": {
+              "type": "array",
+              "description": "Direct atomic semantic edits; previewing first and applying transaction_id is safer.",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "operation": {
+                    "type": "string",
+                    "enum": [
+                      "replace",
+                      "insert_before",
+                      "insert_after",
+                      "append_to_section",
+                      "delete",
+                      "move_before",
+                      "move_after",
+                      "wrap",
+                      "rename_label"
+                    ]
+                  },
+                  "selector": {
+                    "type": "string"
+                  },
+                  "target_selector": {
+                    "type": "string"
+                  },
+                  "end_selector": {
+                    "type": "string"
+                  },
+                  "new_text": {
+                    "type": "string"
+                  },
+                  "old": {
+                    "type": "string"
+                  },
+                  "new": {
+                    "type": "string"
+                  },
+                  "environment": {
+                    "type": "string"
+                  },
+                  "prefix": {
+                    "type": "string"
+                  },
+                  "suffix": {
+                    "type": "string"
+                  },
+                  "expected_source_hash": {
+                    "type": "string"
+                  },
+                  "expected_declaration_hash": {
+                    "type": "string"
+                  },
+                  "expected_object_id": {
+                    "type": "string"
+                  },
+                  "expected_stable_key": {
+                    "type": "string"
+                  },
+                  "expected_source_prefix": {
+                    "type": "string"
+                  },
+                  "update_internal_references": {
+                    "type": "boolean"
+                  },
+                  "allow_referenced": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            },
+            "verify": {
+              "type": "object",
+              "description": "Post-apply verification. Set rollback_on_failure to restore the exact prior buffer when any requested check fails.",
+              "properties": {
+                "parse": {
+                  "type": "boolean"
+                },
+                "references": {
+                  "type": "boolean"
+                },
+                "latex": {
+                  "type": "boolean"
+                },
+                "engine": {
+                  "type": "string",
+                  "enum": [
+                    "pdflatex",
+                    "lualatex",
+                    "xelatex"
+                  ]
+                },
+                "timeout_ms": {
+                  "type": "number"
+                },
+                "rollback_on_failure": {
+                  "type": "boolean"
+                }
+              }
+            },
             "save": {
               "type": "boolean",
               "description": "Save the document after applying."
             }
-          },
-          "required": [
-            "selector",
-            "new_text"
-          ]
+          }
         }
       }
     ],
@@ -6414,7 +6857,8 @@
   },
   "scripts": {
     "vscode:prepublish": "echo 'Skipping compile - using existing build'",
-    "clean": "rm -rf out  && rm -rf node_modules",
+    "clean": "node -e \"console.log('No disposable build output: out/ contains maintained source.')\"",
+    "test:unit": "node out/extension/kernel/tests/run-all.js",
     "compile": "tsc -b  && webpack --mode production",
     "lint": "eslint src --ext ts",
     "watch": "concurrently \"tsc -b --watch\" \"webpack --mode development --watch\"",

@@ -75,13 +75,79 @@ Wolfbook acts as an MCP server, exposing the same tools that GitHub Copilot uses
 Wolfbook provides a one-click setup command that writes the correct configuration automatically.
 
 1. Ensure Wolfbook is installed and a `.wb` notebook is open in VS Code with the kernel running
-2. Open the Command Palette (`⌘⇧P` / `Ctrl+Shift+P`) and run **"Wolfbook: Configure Claude Desktop MCP"**
-3. Wolfbook writes the connection config to Claude's settings directory and shows a confirmation toast
-4. Restart Claude Code (or Claude Desktop) — it will discover Wolfbook tools automatically
+2. Open the Command Palette (`⌘⇧P` / `Ctrl+Shift+P`) and run **"Wolfbook: Configure Claude and Codex Agents"**
+3. Wolfbook writes a user-scoped Claude Code connection, configures Claude Desktop and Codex, and installs the personal `wolfbook` skills
+4. Restart the agent if `/wolfbook` (Claude Code) or `$wolfbook` (Codex) does not appear immediately
 
-The command sets up a stdio bridge so Claude connects to whichever Wolfbook MCP server is running in the current VS Code window.
+The user-scoped connection works regardless of which nested repository Claude Code starts in. The stdio bridge connects it to the running Wolfbook server, which routes among all participating VS Code windows and notebooks. Claude Desktop receives the same routing guidance from the MCP handshake even though it has no local skill directory.
 
 > **MCP toggle**: If you want to disable external agent connections entirely, set `wolfbook.mcpEnabled: false` in your settings and reload the window.
+
+### Economy mode for smaller models
+
+Wolfbook also exposes a compact, per-connection MCP surface. It keeps the basic
+`wolfbook_*` notebook and kernel workflow (open/read/search/edit/insert/delete,
+run/evaluate, inspect outputs and symbols, validate, save, status, long results,
+and kernel control) while omitting slides, papers, Fairy/Gold/team tools,
+debugging, terminal/file utilities, package search, LaTeX, and deprecated names.
+The normal MCP endpoint is unchanged, so full and economy clients can connect at
+the same time without changing a VS Code setting or reloading the window.
+
+For an HTTP/SSE client, register the economy endpoint under a distinct name:
+
+```json
+{
+  "mcpServers": {
+    "wolfbook-economy": {
+      "url": "http://127.0.0.1:27182/sse/economy"
+    }
+  }
+}
+```
+
+For a stdio client such as Codex or Claude Code, use the same bridge path as the
+normal Wolfbook entry and add `--profile=economy`:
+
+```json
+{
+  "mcpServers": {
+    "wolfbook-economy": {
+      "command": "/path/to/node",
+      "args": ["/path/to/stdio-bridge.js", "--profile=economy"]
+    }
+  }
+}
+```
+
+Use either the full entry or the economy entry in a small-model client, rather
+than enabling both there. The Control Room Health tab shows both live endpoint
+forms and labels each connected session with its active tool profile.
+
+### Compact response and notebook contract
+
+MCP responses include a short text summary plus canonical `structuredContent`
+with `ok`, `state`, `code`, `target`, `notebookRevision`, `operation`,
+`result`, `warnings`, and `nextAction` where applicable. Large responses are
+bounded by default and return a `result_handle`; retrieve only the needed slice
+with `wolfbook_getResult`.
+
+Notebook tools accept an explicit `notebook` path or filename. An explicit
+notebook outranks the sticky session target and does not change it. If the same
+basename is open in more than one window, pass an absolute path or `client_id`.
+
+For efficient repeated work:
+
+- pass `if_revision` to `wolfbook_getNotebookContext` to avoid retransferring an
+  unchanged notebook;
+- pass `since_revision` for a changed-cell delta;
+- use `cell_ids` or `cell_numbers` for a selective canonical read;
+- pass several anchors as `queries` to `wolfbook_searchCells`;
+- pass `expected_notebook_revision` to insert, edit, and delete operations to
+  reject stale mutations.
+
+Edit-and-evaluate responses report the committed notebook edit separately from
+the evaluation state. Slow operations return a handle after a short fast path;
+use `wolfbook_waitEvaluation` for terminal or meaningful-progress updates.
 
 ### Example Claude Code session
 
@@ -98,6 +164,14 @@ expression via wolfbookEval, and reports back.
 
 ---
 
+## Using with Codex
+
+Wolfbook configures `[mcp_servers.wolfbook]` in `~/.codex/config.toml` and installs the shared skill at `~/.agents/skills/wolfbook/`. Codex can select it automatically for Mathematica/Wolfram Language work, or you can invoke it explicitly with `$wolfbook`.
+
+Run **"Wolfbook: Configure Claude and Codex Agents"** to repair either entry after a manual configuration change. Extension upgrades repair the versioned bridge path automatically.
+
+---
+
 ## Using with Antigravity
 
 [Antigravity](https://antigravity.ai) is an AI-native fork of VS Code. Wolfbook integrates with its agent tool system directly.
@@ -105,14 +179,14 @@ expression via wolfbookEval, and reports back.
 ### Setup
 
 1. Open the Command Palette and run **"Wolfbook: Configure Antigravity MCP"**
-2. Wolfbook writes both an MCP config entry and installs a dedicated skill file
+2. Wolfbook writes both an MCP config entry and installs a dedicated skill at `~/.gemini/antigravity/skills/wolfbook/`
 3. Restart Antigravity — the Wolfbook tools appear in its agent tool panel automatically
 
 ---
 
 GitHub Copilot in Agent mode uses the same MCP tools. See [AI Integration](ai-integration.md) for the full Copilot-specific guide.
 
-The key difference: Copilot is accessed via the VS Code chat panel (`⌃⌘I`), while Claude Code and Codex are accessed via the terminal or their own interfaces.
+The key difference: Copilot is accessed via the VS Code chat panel (`⌃⌘I`), while Claude Code and Codex are accessed via the terminal or their own interfaces. Every MCP client also receives a server-level instruction telling it to prefer Wolfbook over launching a separate `wolframscript` or `WolframKernel` process for ordinary VS Code work.
 
 ---
 

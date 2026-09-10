@@ -978,6 +978,17 @@ window.addEventListener('message', e => {
         return;
     }
 
+    if (msg.cmd === 'navigateToSlide') {
+        const target = Number(msg.slideIndex);
+        if (deck?.slides?.length && Number.isFinite(target)) {
+            selectSlide(target);
+            if (msg.blockId) {
+                requestAnimationFrame(() => selectBlock(msg.blockId));
+            }
+        }
+        return;
+    }
+
     if (msg.cmd === 'aiPlan') {
         if (msg.id === _aiPendingReq) { _aiPendingReq = null; _onAiPlan(msg.plan, msg.warnings); }
         return;

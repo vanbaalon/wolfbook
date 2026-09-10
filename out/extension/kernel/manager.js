@@ -56,6 +56,11 @@ class KernelManager {
             workerPort: options.workerPort || null, createdAt: Date.now(), executable: null,
             slotKey: options.slotKey || (options.remote ? `remote:${options.ownerClientId || 'unknown'}:${id}` : `slot-${crypto.randomUUID()}`),
         };
+        const storageRoot = this.context?.globalStorageUri?.fsPath;
+        if (storageRoot && controller.operations?.setPersistence) {
+            const slotHash = crypto.createHash('sha256').update(entry.slotKey).digest('hex').slice(0, 24);
+            controller.operations.setPersistence(path.join(storageRoot, 'kernel-operations', `${slotHash}.json`));
+        }
         Object.defineProperty(entry, 'metadata', { enumerable: true, get: () => controller.kernelMetadata || null });
         controller.kernelIdentity = { kernel_id: id, label: entry.label, is_default: entry.isDefault };
         if (controller._controller) controller._controller.label = `Wolfram ${entry.label}`;
@@ -139,7 +144,6 @@ class KernelManager {
     resolveController(spec = {}) { return this.resolve(spec).controller; }
 
     async create(options = {}) {
-        if (!this.experimental && !options.restore) throw new Error('Additional kernels require wolfbook.kernels.experimentalIsolation.');
         if (!this._factory) throw new Error('Kernel factory is unavailable.');
         const localCount = [...this._entries.values()].filter(entry => !entry.remote).length;
         if (localCount >= this.maximum) throw new Error(`Kernel limit reached (${this.maximum}).`);

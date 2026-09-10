@@ -32,12 +32,16 @@ const { TexViewer, VIEW_TYPE: TEX_VIEW_TYPE } = require('./texViewer');
 const { DiskWatch, VERDICT } = require('./diskGuard');
 const { ReviewUi } = require('./reviewUi');
 const texVersions = require('./texVersions');
+const { GitWorkflow } = require('./gitWorkflow');
 const {
     PASTE_MIMES, imagePathFor, figureSnippet, insideFloat, hasGraphicx, findImageItem,
 } = require('./texPaste');
 const { refAt, resolveRef, hoverMarkdown } = require('./refIntel');
-const { readAuxLabels, readTocNumbers, normalizeTocTitle, sectionTitleSource} = require('./auxLabels');
+const {
+    readAuxLabels, readTocNumbers, sectionNumbersForObjects,
+} = require('./auxLabels');
 const { readClipboardImage } = require('./texClipboard');
+const { decideFollow } = require('./viewerFollow');
 
 const TEX_SELECTOR = [
     { language: 'latex', scheme: 'file' },
@@ -147,6 +151,7 @@ function symbolKinds() {
         tabular: K.Struct ?? 22,
         theorem: K.Interface ?? 10,
         abstract: K.Constant ?? 13,
+        titlepage: K.Module ?? 1,
         verbatim: K.String ?? 14,
         list: K.Array ?? 17,
         environment: K.Object ?? 18,
@@ -1132,6 +1137,35 @@ function registerTexSupport(context, deps = {}) {
     context.subscriptions.push(status.item);
 
     const viewer = new TexViewer(context, coord, projection, deps);
+    const gitWorkflow = new GitWorkflow(vscode, context);
+
+    // COMMIT FROM WHERE THE READER IS. With focus in the source editor the
+    // active document names the repository; with focus in WPaper (including
+    // its mini-editor), the viewer's root does. A workspace-only fallback lets
+    // an empty/new paper initialise its folder too.
+    const gitTarget = () => {
+        const doc = vscode.window.activeTextEditor && vscode.window.activeTextEditor.document;
+        if (isTex(doc)) return doc.uri.fsPath;
+        if (viewer.root) return viewer.root;
+        const folder = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders[0];
+        return folder && folder.uri && path.join(folder.uri.fsPath, 'paper.tex');
+    };
+    const withGitTarget = async (fn) => {
+        const file = gitTarget();
+        if (!file) {
+            vscode.window.showWarningMessage('Open a .tex file or workspace folder first.');
+            return;
+        }
+        await fn(file);
+    };
+    reg('wolfbook.tex.commitChanges', () =>
+        withGitTarget(file => gitWorkflow.commit(file)));
+    reg('wolfbook.tex.pushChanges', () =>
+        withGitTarget(file => gitWorkflow.push(file)));
+    reg('wolfbook.tex.chooseCommitPushMode', () =>
+        withGitTarget(file => gitWorkflow.choosePushMode(file)));
+    reg('wolfbook.tex.configureOverleaf', () =>
+        withGitTarget(file => gitWorkflow.configureOverleaf(file)));
 
     // WHAT THE AGENT CHANGED, WAITING FOR A VERDICT (tex/reviewUi.js). The
     // review owns the status bar item, the editor decorations, the CodeLens and
@@ -1184,20 +1218,16 @@ function registerTexSupport(context, deps = {}) {
         try {
             if (gen && gen.outDir) {
                 const nodefs = require('fs');
-                const { byTitle } = readTocNumbers(gen.outDir, gen.root || file, {
+                const deps = {
                     readFile: (f) => nodefs.readFileSync(f, 'utf8'),
                     exists: (f) => { try { return nodefs.existsSync(f); } catch (_) { return false; } },
-                });
-                if (byTitle.size) {
-                    const doc = vscode.workspace.textDocuments.find(d => d.uri.fsPath === file);
-                    const model = doc ? projection.get(doc).model : null;
-                    for (const o of (model && model.objects) || []) {
-                        if (o.kind !== 'section-heading') continue;
-                        const n = byTitle.get(normalizeTocTitle(sectionTitleSource(o.text)));
-                        if (!n) continue;
-                        byKey.set(o.stableKey || `s${o.sourceRange.startLine}`, n);
-                    }
-                }
+                };
+                const toc = readTocNumbers(gen.outDir, gen.root || file, deps);
+                const aux = readAuxLabels(gen.outDir, gen.root || file, deps);
+                const doc = vscode.workspace.textDocuments.find(d => d.uri.fsPath === file);
+                const model = doc ? projection.get(doc).model : null;
+                for (const [key, number] of sectionNumbersForObjects(
+                    (model && model.objects) || [], toc, aux)) byKey.set(key, number);
             }
         } catch (_) { /* a number is a nicety; never fail the review for one */ }
         numberCache.set(file, { stamp, byKey });
@@ -1236,7 +1266,17 @@ function registerTexSupport(context, deps = {}) {
         mapView: (file) => {
             const st = coord.roots.get(coord.rootFor({ uri: { fsPath: file } }) || file) ||
                 coord.roots.get(file);
-            const base = st ? viewer._compareMap(st, file) : {};
+            const base = viewer._reviewMap(st, file);
+            // WHICH RENDER THESE RECTS DESCRIBE. Placement is only true of the
+            // pages it was measured against, and the panel paints over pages
+            // that may already have moved on — so the answer travels with the
+            // answer, and the webview refuses to draw a placement that does not
+            // describe what it is showing.
+            // While sourceAhead is true, `st.map` still describes the previous
+            // source/PDF pair. It remains useful for identifying an enclosing
+            // section, but it must not place the newly changed text on those
+            // old pages. The review stays fully usable as a list until the
+            // compile installs an honest map.
             return { ...base, sectionAt: (line) => sectionAt(file, line) };
         },
     });
@@ -1285,6 +1325,13 @@ function registerTexSupport(context, deps = {}) {
         // The pages just moved; an open comparison must be re-placed against
         // the new render or its marks point at whatever now sits there.
         try { viewer.refreshComparison(); } catch (_) { /* never break the paint */ }
+        // AND SO MUST AN OPEN REVIEW — the same trap, one surface further on.
+        // The comparison was re-placed here from the start and the review was
+        // not, so every review outlived the render it was measured against: a
+        // change is located when it arrives, the live rebuild that follows
+        // reflows the page, and the boxes stay at the old coordinates. What
+        // the reader saw was highlighting that had slid off its own text.
+        try { review.refreshPlacement(); } catch (_) { /* never break the paint */ }
     };
 
 /**
@@ -1353,8 +1400,20 @@ async function offerReload(doc, diskText, output) {
     // needs the text from before the write.
     const lastSeen = new Map();
     const rememberText = (fsPath, text) => {
-        if (typeof text === 'string') lastSeen.set(fsPath, text);
+        if (typeof text !== 'string') return;
+        const saved = review._observed?.get(fsPath);
+        if (!lastSeen.has(fsPath) && typeof saved === 'string' && saved !== text) {
+            review.noteAgentChange({ file: fsPath, baseText: saved, source: 'external/reopen' }).catch(e => output.appendLine(e.message));
+        }
+        lastSeen.set(fsPath, text);
+        review.observe?.(fsPath, text);
     };
+    context.subscriptions.push(coord.onDidChange(() => {
+        for (const st of coord.roots.values()) for (const file of st.files || []) {
+            if (lastSeen.has(file) || !/\.tex$/i.test(file)) continue;
+            try { rememberText(file, fs.readFileSync(file, 'utf8')); } catch (_) { /* retry on open */ }
+        }
+    }));
     for (const d of vscode.workspace.textDocuments) {
         if (isTex(d)) rememberText(d.uri.fsPath, d.getText());
     }
@@ -1363,6 +1422,39 @@ async function offerReload(doc, diskText, output) {
         vscode.workspace.onDidSaveTextDocument((d) => { if (isTex(d)) rememberText(d.uri.fsPath, d.getText()); }),
     );
     {
+        // A CHANGE THAT ARRIVES ON DISK MUST REBUILD, EXACTLY LIKE A KEYSTROKE.
+        //
+        // `coord.invalidate` marks the paper as behind — which is what raises
+        // the "page behind editor" badge — and that was ALL that happened for a
+        // write that did not come through a VS Code buffer: an agent editing
+        // the .tex, a `git checkout`, a Dropbox sync, a shell heredoc. The
+        // badge went up and nothing was ever queued to take it down, so the
+        // page sat behind the file indefinitely and the reader had to press
+        // Compile by hand. Reported as exactly that.
+        //
+        // Two different events were driving the flag and the work, and only the
+        // keystroke path (onDidChangeTextDocument) fired both. This is the
+        // missing half. It is scoped to the paper the Page view is actually
+        // showing: a build of a real paper is expensive, and a branch switch
+        // touching fifty files must not start fifty of them.
+        const rebuildAfterExternal = (fsPath) => {
+            if (!viewer.isOpen || !viewer.isOpen() || !viewer.root) return;
+            const like = { uri: { fsPath } };
+            let root = null;
+            try { root = coord.rootFor(like); } catch (_) { return; }
+            if (root !== viewer.root) return;
+            // Reloading a clean TextDocument can make VS Code expose its group
+            // even though WPaper is in viewer-only mode. Reassert the saved
+            // layout after that reload burst settles; this is independent of
+            // whether live compiling itself is enabled.
+            try { viewer.preserveViewerLayoutAfterExternalChange?.(); } catch (_) { /* layout is optional */ }
+            // scheduleLive, not build: it is debounced per root, it obeys
+            // `liveRender` and `compile: off`, and it arms the authoritative
+            // pass behind itself. A buffer reload that also reaches
+            // onDidChangeTextDocument therefore coalesces into this one timer
+            // rather than compiling twice.
+            try { coord.scheduleLive(like); } catch (_) { /* the next edit will */ }
+        };
         const watcher = vscode.workspace.createFileSystemWatcher('**/*.{tex,bib}');
         const onExternal = async (uri) => {
             const fsPath = uri.fsPath;
@@ -1370,7 +1462,19 @@ async function offerReload(doc, diskText, output) {
                 .find(d => d.uri.fsPath === fsPath && !d.isClosed);
             let diskText = null;
             try { diskText = fs.readFileSync(fsPath, 'utf8'); } catch (_) { diskText = null; }
-            if (!doc) { diskWatch.accept(fsPath, diskText); coord.invalidate(fsPath); return; }
+            if (!doc) {
+                const before = lastSeen.get(fsPath) ?? review._observed?.get(fsPath);
+                if (/\.tex$/i.test(fsPath) && typeof before === 'string' && diskText != null && before !== diskText) {
+                    await review.noteAgentChange({ file: fsPath, baseText: before, source: 'disk' });
+                }
+                if (diskText != null) rememberText(fsPath, diskText);
+                diskWatch.accept(fsPath, diskText);
+                coord.invalidate(fsPath);
+                // No buffer means no reload event either, so this path is the
+                // only thing that can ask for the rebuild.
+                if (diskText != null) rebuildAfterExternal(fsPath);
+                return;
+            }
             // OUR OWN REBASE IS NOT SOMEBODY ELSE'S EDIT. Merging a disk change
             // into a dirty buffer reloads that buffer, and the events from it
             // would otherwise arrive here as a fresh external change and start
@@ -1380,8 +1484,9 @@ async function offerReload(doc, diskText, output) {
             const { verdict, repeat } = diskWatch.classify(fsPath, {
                 diskText, docText: doc.getText(), isDirty: doc.isDirty,
             });
-            if (verdict === VERDICT.UNCHANGED) return;
+            if (verdict === VERDICT.UNCHANGED && lastSeen.get(fsPath) === diskText) return;
             coord.invalidate(fsPath);
+            if (verdict !== VERDICT.DELETED) rebuildAfterExternal(fsPath);
             const before = lastSeen.get(fsPath);
             rememberText(fsPath, verdict === VERDICT.CONFLICT ? doc.getText() : diskText);
 
@@ -1397,7 +1502,7 @@ async function offerReload(doc, diskText, output) {
                 // list instead of replacing it. `before` is only used when the
                 // session is opened — that is what stops an arriving batch from
                 // agreeing to the one before it.
-                if (verdict !== VERDICT.DELETED && before && diskText && before !== diskText) {
+                if (verdict !== VERDICT.DELETED && typeof before === 'string' && typeof diskText === 'string' && before !== diskText) {
                     await review.noteAgentChange({ file: fsPath, baseText: before, source: 'disk' });
                 }
                 return;
@@ -1476,40 +1581,22 @@ async function offerReload(doc, diskText, output) {
     }
 
 
-    // --- THE PAPER FOLLOWS WHATEVER TAB IS IN FRONT -------------------------
+    // --- THE PAPER FOLLOWS THE GROUP IT SITS BESIDE -------------------------
     //
-    // This used to hang off `onDidChangeActiveTextEditor` alone, which fires
-    // only for TEXT editors — so switching to a notebook, an image, a settings
-    // page or any other non-text tab never reached the hide logic and the paper
-    // just stayed there. The handler also had to bail on `undefined`, because
-    // focus moving INTO the webview reports exactly the same thing as focus
-    // moving away from every editor.
+    // First this hung off `onDidChangeActiveTextEditor` alone, which fires only
+    // for TEXT editors, so switching to a notebook or a settings page never
+    // reached the hide logic. Then it followed the ACTIVE tab, which fixed that
+    // and broke something worse: agent sessions open as editor tabs, so
+    // clicking one made a non-viewer webview the active tab and the paper went
+    // away while the reader was still in their .tex.
     //
-    // The tab groups answer both questions directly: what is actually in front,
-    // and is it OUR panel. Older hosts without the API keep the old behaviour.
-    const activeTabKind = () => {
-        const groups = vscode.window.tabGroups;
-        if (!groups || !Array.isArray(groups.all)) return null;
-        const group = groups.all.find(g => g.isActive) || groups.activeTabGroup;
-        const tab = group && group.activeTab;
-        if (!tab || !tab.input) return 'other';
-        const input = tab.input;
-        // Reading the viewType by duck-typing rather than instanceof: the Tab*
-        // input classes are not present in every host, and a missing global
-        // would throw here on every tab change.
-        if (typeof input.viewType === 'string') {
-            return input.viewType.includes(TEX_VIEW_TYPE) ? 'viewer' : 'other';
-        }
-        if (input.uri && typeof input.uri.fsPath === 'string') {
-            return /\.tex$/i.test(input.uri.fsPath) ? { tex: input.uri } : 'other';
-        }
-        return 'other';
-    };
-
+    // The decision is now local to the pairing — the group the paper sits in,
+    // and its neighbour — and needs a real file of the wrong type to hide. See
+    // viewerFollow.js for why, and tests/tex-follow.test.js for the cases.
     const followActiveTab = () => {
         if (!cfg().get('viewerFollowsTex', true)) return;
-        const kind = activeTabKind();
-        if (kind === null) {
+        const d = decideFollow(vscode.window.tabGroups, { viewType: TEX_VIEW_TYPE });
+        if (d.action === 'legacy') {
             // No tab API: the old rule, which at least never hides the paper
             // the moment the reader clicks on it.
             const ed = vscode.window.activeTextEditor;
@@ -1518,27 +1605,39 @@ async function offerReload(doc, diskText, output) {
             else if (viewer.isOpen()) viewer.autoHide().catch(() => {});
             return;
         }
-        if (kind === 'viewer') return;                 // the reader is IN the paper
-        if (kind === 'other') {
-            if (viewer.isOpen()) viewer.autoHide().catch(() => {});
+        if (d.action === 'none') return;
+        if (d.action === 'hide') {
+            if (!viewer.isOpen()) return;
+            output.appendLine(`page view: hiding — ${d.reason}`);
+            viewer.autoHide().catch(() => {});
             return;
         }
-        vscode.workspace.openTextDocument(kind.tex)
-            .then(d => viewer.autoRestore(d))
+        vscode.workspace.openTextDocument(d.uri)
+            .then(doc => viewer.autoRestore(doc))
             .catch(() => {});
     };
 
+    // Tab changes arrive in bursts — opening one tab closes a preview, moving a
+    // group re-reports every tab in it — and hiding is a real dispose that
+    // costs a reload to undo. Judging only the settled arrangement keeps a
+    // transient mid-burst state from throwing the paper away.
+    let followTimer = null;
+    const followSoon = () => {
+        if (followTimer) clearTimeout(followTimer);
+        followTimer = setTimeout(() => { followTimer = null; followActiveTab(); }, 150);
+    };
+    context.subscriptions.push({ dispose: () => { if (followTimer) clearTimeout(followTimer); } });
+
     if (vscode.window.tabGroups && vscode.window.tabGroups.onDidChangeTabs) {
         context.subscriptions.push(
-            vscode.window.tabGroups.onDidChangeTabs(() => followActiveTab()),
+            vscode.window.tabGroups.onDidChangeTabs(() => followSoon()),
         );
     }
     if (vscode.window.tabGroups && vscode.window.tabGroups.onDidChangeTabGroups) {
         context.subscriptions.push(
-            vscode.window.tabGroups.onDidChangeTabGroups(() => followActiveTab()),
+            vscode.window.tabGroups.onDidChangeTabGroups(() => followSoon()),
         );
     }
-
     // A window reload restores the panel; without a serializer it comes back as
     // an empty shell the extension knows nothing about.
     if (vscode.window.registerWebviewPanelSerializer) {
@@ -1556,7 +1655,7 @@ async function offerReload(doc, diskText, output) {
         coord.onDidChange(paintRender),
         vscode.window.onDidChangeActiveTextEditor(() => {
             paintRender();
-            followActiveTab();
+            followSoon();
         }),
         vscode.window.onDidChangeTextEditorSelection((e) => {
             if (!isTex(e.textEditor.document)) return;
@@ -1565,9 +1664,13 @@ async function offerReload(doc, diskText, output) {
         }),
         vscode.workspace.onDidChangeTextDocument((e) => {
             if (!isTex(e.document)) return;
-            // Feed the edit to the map so answers degrade to
-            // `probably-current` with a known shift rather than going blank.
+            // Keep translating line positions for gutters and diagnostics;
+            // the page tracer itself pauses below until the new PDF arrives.
             coord.noteChange(e);
+            // The compiled page is now behind even when the edit changed no
+            // line count. Clear its old trace immediately; the matching build
+            // will explicitly resume it after the new page is visible.
+            viewer.noteSourceChanged(e.document);
             status.update();
             // Keep the page view up with the buffer, not with the file: a
             // rebuild is queued from the unsaved text once typing pauses.
@@ -1575,6 +1678,7 @@ async function offerReload(doc, diskText, output) {
         }),
         vscode.workspace.onDidSaveTextDocument(async (doc) => {
             if (!isTex(doc)) return;
+            viewer.noteSourceSaved(doc);
             const mode = cfg().get('compile', 'onSave');
             if (mode !== 'onSave') return;
             // AUTHORITATIVE: a live build may have stopped after one pass, and
@@ -1599,7 +1703,10 @@ async function offerReload(doc, diskText, output) {
         if (!isTex(doc)) { vscode.window.showWarningMessage('Open a .tex file first.'); return; }
         const st = await coord.build(doc, { force: true });
         paintRender();
-        if (st.lastError) {
+        // Dependency failures already produced the richer, once-per-session
+        // setup notification from RenderCoordinator. Do not immediately put a
+        // second generic "Compile failed" dialog on top of it.
+        if (st.lastError && !st.dependencyIssue) {
             const pick = await vscode.window.showErrorMessage(
                 `Compile failed: ${st.lastError}`, 'Show log');
             if (pick === 'Show log') output.show(true);

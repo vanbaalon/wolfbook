@@ -122,6 +122,13 @@ class ReviewUi {
         this._toasting = new Set();
         this._agentWriting = new Map();   // file -> when the tool started writing
         this._merging = new Set();        // files whose buffer we are rebasing right now
+        this._placeTimer = null;          // coalesces re-placement across one compile
+        this._archived = new Map();
+        this._observed = new Map();
+        this._store = null;
+        this._hidden = new Set();
+        this._buffers = new Map();
+        this._userWriting = new Map();
 
         // A SURFACE MUST NEVER BE ABLE TO BREAK WHAT IT REPORTS ON. Hosts
         // differ in what they expose (a test stub has no status bar at all),
@@ -140,6 +147,7 @@ class ReviewUi {
     }
 
     dispose() {
+        if (this._placeTimer) { clearTimeout(this._placeTimer); this._placeTimer = null; }
         for (const d of this._disposables) { try { d.dispose(); } catch (_) { /* going away */ } }
         if (this._decor) for (const t of Object.values(this._decor)) { try { t.dispose(); } catch (_) { /* idem */ } }
     }
@@ -157,10 +165,56 @@ class ReviewUi {
             const v = cfg && cfg.get('groupWindowSeconds', 60);
             if (Number.isFinite(v) && v >= 0) seconds = v;
         } catch (_) { /* no configuration in this host */ }
-        return new ReviewSession({ file, baseText, groupWindowMs: seconds * 1000 });
+        const session = new ReviewSession({ file, baseText, groupWindowMs: seconds * 1000 });
+        const previous = this._archived.get(file);
+        if (previous) { session.feedback = previous.feedback.slice(); session.feedbackDraft = previous.feedbackDraft; session.arrivals = previous.arrivals.slice(); }
+        return session;
     }
 
     sessionFor(file) { return this.sessions.get(file) || null; }
+
+    persist(file, session = this.sessions.get(file) || this._archived.get(file)) {
+        if (!this._store) return;
+        try { this._store.save({ file, observed: this._observed.get(file), session: session?.serialize() || null }); }
+        catch (error) { this.say('Review could not be saved: ' + error.message, 'err'); }
+    }
+    observe(file, text) {
+        if (typeof text !== 'string') return;
+        this._observed.set(file, text); this.persist(file);
+    }
+    async keepWithComment(file, id, comment) {
+        const session = this.sessions.get(file);
+        if (!session?.hunks.some(h => h.id === id)) return;
+        if (comment == null) comment = await vscode.window.showInputBox({
+            title: 'Accept with comment', prompt: 'Question or feedback for the agent (saved locally; not sent)',
+            placeHolder: 'Why is this assumption needed?' });
+        if (comment == null || !String(comment).trim()) return;
+        if (!session.addFeedback(id, String(comment).trim())) return;
+        const saved = session.feedback[session.feedback.length - 1];
+        this.persist(file, session);
+        // Review feedback is an annotation on the paper, not a private review
+        // transcript. Feed it into the viewer's shared .timeline.comments
+        // sidecar before the hunk is accepted and disappears from the review.
+        if (saved && this.viewer && typeof this.viewer.addRevisionComment === 'function') {
+            await this.viewer.addRevisionComment(saved);
+        }
+        return this.keep(file, id);
+    }
+    async exportFeedback(file) {
+        const s = this.sessions.get(file) || this._archived.get(file);
+        const text = s?.feedbackDraft ?? (s?.feedback || []).map(c => `### ${c.file}:${c.line}${c.name ? ' — ' + c.name : ''}\n` +
+            `Accepted with comment at ${new Date(c.at).toISOString()} · ${c.author?.name || 'external/unknown'}${c.author?.sessionId ? ' · ' + c.author.sessionId : ''}\n` +
+            `Change ID: ${c.id} (line number at review time)\n\n${c.comment}\n`).join('\n');
+        const document = await vscode.workspace.openTextDocument({ language: 'markdown', content: text || 'No review comments yet.' });
+        await vscode.window.showTextDocument(document, { preview: false });
+    }
+    async exportHistory(file) {
+        const s = this.sessions.get(file) || this._archived.get(file);
+        const text = (s?.arrivals || []).map((a, i) => `# External arrival ${i + 1} · ${new Date(a.at).toISOString()}\n` +
+            `Source: ${a.source} · ${a.author?.name || 'unknown author'}\n\nBEFORE\n${a.before}\n\nAFTER\n${a.after}\n`).join('\n');
+        const document = await vscode.workspace.openTextDocument({ language: 'plaintext', content: text || 'No external arrivals recorded yet.' });
+        await vscode.window.showTextDocument(document, { preview: false });
+    }
 
     /**
      * An agent changed the paper. `baseText` is what the file held BEFORE the
@@ -171,13 +225,18 @@ class ReviewUi {
     async noteAgentChange(o = {}) {
         const file = o.file;
         if (!file) return null;
+        this._hidden.delete(file);
         let s = this.sessions.get(file);
         if (!s) {
             if (typeof o.baseText !== 'string') return null;
             s = this._newSession(file, o.baseText);
             this.sessions.set(file, s);
         }
-        s.noteBatch({ source: o.source || 'disk', note: o.note || '' });
+        s.noteBatch({ source: o.source || 'disk', note: o.note || '', author: o.author || null });
+        let current;
+        const doc = (vscode.workspace.textDocuments || []).find(d => d.uri.fsPath === file);
+        try { current = doc?.isDirty ? doc.getText() : fs.readFileSync(file, 'utf8'); } catch (_) { current = doc?.getText(); }
+        if (typeof current === 'string') s.recordArrival({ text: current, source: o.source || 'disk', author: o.author || null });
         await this.refresh(file, { announce: true });
         this.output.appendLine(`review: ${o.source || 'disk'} changed ${path.basename(file)} — ` +
             `${s.pendingCount} change${s.pendingCount === 1 ? '' : 's'} waiting`);
@@ -242,6 +301,8 @@ class ReviewUi {
                 source: o.source || 'disk',
                 note: merge.conflicts.length ? 'merged with your unsaved edits' : '',
             });
+            this.sessions.get(file).recordArrival({ text: o.theirs, source: o.source || 'disk', author: o.author || null });
+            this.persist(file);
 
             const ok = await this._rebaseBuffer(doc, merge.text);
             if (!ok) {
@@ -364,6 +425,8 @@ class ReviewUi {
         // A session that has never shown one is simply waiting for the buffer
         // to catch up, and throwing it away is what lost the change.
         if (s.hunks.length) s._everHad = true;
+        this.persist(file, s);
+        this._archived.set(file, s);
         if (s.isEmpty && s._everHad) this.sessions.delete(file);
         this.paint(file);
         this.updateStatus();
@@ -372,13 +435,40 @@ class ReviewUi {
         if (opts.announce) this.announce(file);
     }
 
+    /**
+     * Re-place every open review against the render that is on screen NOW.
+     *
+     * Rects are measured through the render map of whatever compile existed
+     * when the change was located. A live rebuild lands a second or two later,
+     * the page reflows, and nothing asked the question again — so the boxes
+     * kept the coordinates of a page that no longer exists, and the reader saw
+     * highlighting sitting beside the text it belongs to instead of on it.
+     *
+     * The comparison surface has been re-placed on every render since it was
+     * written (`viewer.refreshComparison`); this is the same move for the
+     * review. Coalesced, because a single compile fires several coordinator
+     * events — one for the run starting, one for the generation landing, one
+     * for the authoritative pass — and re-diffing on each is work for nothing.
+     */
+    refreshPlacement() {
+        if (!this.sessions.size) return;
+        if (this._placeTimer) return;
+        this._placeTimer = setTimeout(() => {
+            this._placeTimer = null;
+            for (const file of [...this.sessions.keys()]) {
+                this.refresh(file).catch(() => { /* a placement is never fatal */ });
+            }
+        }, 60);
+    }
+
     /** Close a review without deciding anything: the changes simply stay. */
     close(file) {
-        this.sessions.delete(file);
+        this._hidden.add(file);
         this.focused.delete(file);
+        this.persist(file);
         this.paint(file);
         this.updateStatus();
-        this.push(file);
+        if (this.viewer?.showReview) this.viewer.showReview(null);
         this._lensEmitter.fire();
     }
 
@@ -421,7 +511,8 @@ class ReviewUi {
     push(file) {
         if (!this.viewer || !this.viewer.showReview) return;
         if (this.viewer.root && file && this.viewer.root !== file) return;
-        const s = file ? this.sessions.get(file) : null;
+        if (this._hidden.has(file)) { this.viewer.showReview(null); return; }
+        const s = file ? (this.sessions.get(file) || this._archived.get(file)) : null;
         this.viewer.showReview(s ? s.payload({ focus: this.focused.get(file) || null }) : null);
     }
 
@@ -434,7 +525,7 @@ class ReviewUi {
         if (!editors.length) return;
         const s = this.sessions.get(file);
         const d = this.decor;
-        if (!s || s.isEmpty) {
+        if (!s || s.isEmpty || this._hidden.has(file)) {
             for (const e of editors) {
                 for (const t of [d.add, d.change, d.del, d.word, d.focus]) {
                     try { e.setDecorations(t, []); } catch (_) { /* editor going away */ }
@@ -516,15 +607,15 @@ class ReviewUi {
         const ids = s.hunks.map(h => h.id);
         const at = ids.indexOf(id);
         if (at < 0) return null;
-        return { at, ids };
+        return { at, ids, page: s.hunks[at] && s.hunks[at].page };
     }
 
     /**
-     * Move to the next undecided change.
+     * Move to the next NEARBY undecided change.
      *
-     * Reviewing is a WORKLIST: deciding one and then having to point at the
-     * next is a click nobody needs, and it is the click that makes a long
-     * review feel long. Asked for exactly that way.
+     * Reviewing is a worklist while changes remain in the reader's current
+     * neighbourhood. Crossing the paper is navigation, not convenience, so a
+     * distant next item waits for an explicit previous/next gesture.
      */
     async _advanceAfter(file, plan) {
         if (!plan) return;
@@ -534,7 +625,21 @@ class ReviewUi {
         if (!left.length) return;
         // The one that took its place, else the one before it.
         const next = left[Math.min(plan.at, left.length - 1)];
-        if (next) await this.show(file, next);
+        const nextHunk = s.hunks.find(h => h.id === next);
+        const fromPage = Number(plan.page);
+        const toPage = Number(nextHunk && nextHunk.page);
+        // Auto-advance is convenience, not permission to navigate across the
+        // paper. Staying in the local neighbourhood keeps a run of nearby
+        // corrections flowing; a distant or currently unplaced correction is
+        // left for an explicit ‹/› gesture.
+        if (next && Number.isFinite(fromPage) && fromPage > 0 &&
+            Number.isFinite(toPage) && toPage > 0 && Math.abs(toPage - fromPage) <= 1) {
+            await this.show(file, next);
+            return;
+        }
+        this.focused.delete(file);
+        this.paint(file);
+        this.push(file);
     }
 
     async keep(file, id) {
@@ -643,7 +748,7 @@ class ReviewUi {
         this.focused.set(file, id);
         this.paint(file);
         this.push(file);
-        if (this.viewer && this.viewer.focusReviewHunk) this.viewer.focusReviewHunk(h);
+        if (this.viewer && this.viewer.focusReviewHunk) this.viewer.focusReviewHunk(h, s.generation);
         try {
             const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
             const line = Math.max(0, Math.min(h.ourRange.startLine - 1, doc.lineCount - 1));
@@ -690,6 +795,26 @@ class ReviewUi {
     }
 
     register(context) {
+        for (const doc of vscode.workspace.textDocuments || []) {
+            if (/\.tex$/i.test(doc.uri.fsPath)) this._buffers.set(doc.uri.fsPath, doc.getText());
+        }
+        if (vscode.workspace.onDidOpenTextDocument) context.subscriptions.push(vscode.workspace.onDidOpenTextDocument(doc => {
+            if (/\.tex$/i.test(doc.uri.fsPath)) this._buffers.set(doc.uri.fsPath, doc.getText());
+        }));
+        if (context.globalStorageUri?.fsPath) {
+            try {
+                const { ReviewStore } = require('./reviewStore');
+                this._store = new ReviewStore(path.join(context.globalStorageUri.fsPath, 'paper-reviews'));
+                for (const record of this._store.load()) {
+                    if (typeof record.observed === 'string') this._observed.set(record.file, record.observed);
+                    if (!record.session) continue;
+                    const s = ReviewSession.restore(record.session);
+                    this._archived.set(record.file, s);
+                    if (!s.isEmpty) this.sessions.set(record.file, s);
+                }
+                if (this._store.errors.length) this.say(`${this._store.errors.length} saved review record(s) could not be read; originals were preserved.`, 'err');
+            } catch (error) { this.say('Saved review could not be restored: ' + error.message, 'err'); }
+        }
         const reg = (id, fn) => context.subscriptions.push(vscode.commands.registerCommand(id, fn));
         const withFile = (fn) => async (file, id) => {
             const f = typeof file === 'string' ? file : this.activeFile();
@@ -697,6 +822,7 @@ class ReviewUi {
             await fn(f, id);
         };
         reg(CMD.OPEN, withFile(async (f) => {
+            this._hidden.delete(f); this.paint(f);
             if (this.viewer && this.viewer.openReview) await this.viewer.openReview();
             this.push(f);
         }));
@@ -713,8 +839,19 @@ class ReviewUi {
         // — except inside a pending change, which it flags instead.
         context.subscriptions.push(vscode.workspace.onDidChangeTextDocument((e) => {
             const file = e.document.uri.fsPath;
+            if (!/\.tex$/i.test(file)) return;
+            const previous = this._buffers.get(file);
+            this._buffers.set(file, e.document.getText());
             const s = this.sessions.get(file);
-            if (!s || !e.contentChanges.length) return;
+            if (!e.contentChanges.length) return;
+            const userBusy = Date.now() - (this._userWriting.get(file) || 0) < 5000;
+            const inEditor = vscode.window.activeTextEditor?.document === e.document;
+            const unannouncedExternal = !inEditor && !userBusy && !this._agentWriting.has(file) && !this._applying && e.document.isDirty;
+            if (unannouncedExternal && typeof previous === 'string') {
+                this.noteAgentChange({ file, baseText: previous, source: 'external/buffer' }).catch(error => this.say(error.message, 'err'));
+                return;
+            }
+            if (!s) return;
             // A RELOAD IS NOT THE READER TYPING. When an agent writes the file
             // and VS Code refreshes a clean buffer, this event describes the
             // agent's change — mirroring it into the baseline would agree to it
@@ -742,6 +879,11 @@ class ReviewUi {
         // it goes through a WorkspaceEdit on the open buffer. Without this the
         // tool the agent is told to use is the one whose edits cannot be seen.
         context.subscriptions.push(bus.onAgentEdit(async (ev) => {
+            if (ev.origin === 'user') {
+                if (ev.phase === 'begin') this._userWriting.set(ev.file, Date.now());
+                else this._userWriting.delete(ev.file);
+                return;
+            }
             try {
                 if (ev.phase === 'begin') {
                     // The tool edits the OPEN BUFFER, so the change event it
@@ -758,7 +900,7 @@ class ReviewUi {
                 }
                 await this.noteAgentChange({
                     file: ev.file, baseText: ev.baseText,
-                    source: ev.source || 'paper_applyEdit', note: ev.note || '',
+                    source: ev.source || 'paper_applyEdit', note: ev.note || '', author: ev.author || null,
                 });
             } catch (e) { this.output.appendLine(`review: ${e.message}`); }
             finally { if (ev.phase !== 'begin') this._agentWriting.delete(ev.file); }

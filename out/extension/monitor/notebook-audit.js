@@ -3,6 +3,8 @@
 const path = require('path');
 const crypto = require('crypto');
 const { getActivityContext } = require('./activity');
+const { findMutationIntent } = require('./mutation-intent');
+const { seedNotebook, recordNotebookRevision, forgetNotebook } = require('./notebook-revisions');
 
 function cellId(cell) {
     const metadata = cell?.metadata || {};
@@ -24,15 +26,17 @@ function registerNotebookAudit(vscode, context, monitor, clientInfo = {}) {
     const snapshots = new Map();
     const isWolfbook = doc => doc?.notebookType === 'extended-wolfram-notebook' || /\.(wb|evsnb|vsnb)$/i.test(doc?.uri?.fsPath || '');
     const key = (doc, cell) => `${doc.uri.toString()}::${cellId(cell)}`;
-    const seed = doc => { if (isWolfbook(doc)) for (const cell of doc.getCells()) snapshots.set(key(doc, cell), cell.document.getText()); };
+    const seed = doc => { if (isWolfbook(doc)) { seedNotebook(doc); for (const cell of doc.getCells()) snapshots.set(key(doc, cell), cell.document.getText()); } };
     for (const doc of vscode.workspace.notebookDocuments || []) seed(doc);
 
     const record = (type, doc, payload, extra = {}) => {
-        const activity = getActivityContext() || {};
+        const activity = getActivityContext() || findMutationIntent(doc.uri.fsPath) || {};
         monitor.record({ type, source: activity.source || 'vscode', clientId: clientInfo.clientId,
             workspace: clientInfo.workspace, notebook: doc.uri.fsPath, state: extra.state || null,
-            operationId: activity.operationId, agentSessionId: activity.agentSessionId, agentName: activity.agentName,
-            payload: { file: path.basename(doc.uri.fsPath), dirty: doc.isDirty, ...payload } });
+            traceId: activity.traceId, operationId: activity.operationId,
+            agentSessionId: activity.agentSessionId, agentName: activity.agentName,
+            payload: { file: path.basename(doc.uri.fsPath), dirty: doc.isDirty,
+                initiatingTool: activity.tool || null, ...payload } });
     };
 
     context.subscriptions.push(vscode.workspace.onDidOpenNotebookDocument(doc => {
@@ -41,14 +45,17 @@ function registerNotebookAudit(vscode, context, monitor, clientInfo = {}) {
     context.subscriptions.push(vscode.workspace.onDidCloseNotebookDocument(doc => {
         if (!isWolfbook(doc)) return; record('notebook.closed', doc, { cellCount: doc.cellCount });
         for (const item of [...snapshots.keys()]) if (item.startsWith(`${doc.uri.toString()}::`)) snapshots.delete(item);
+        forgetNotebook(doc);
     }));
     context.subscriptions.push(vscode.workspace.onDidChangeNotebookDocument(event => {
         const doc = event.notebook; if (!isWolfbook(doc)) return;
+        const changedIds = [];
         for (const change of event.cellChanges || []) {
             if (!change.document) continue;
             const cell = change.cell, id = cellId(cell), current = cell.document.getText();
             const previous = snapshots.get(key(doc, cell)); snapshots.set(key(doc, cell), current);
             if (previous === undefined || previous === current) continue;
+            changedIds.push(id);
             record('notebook.cell.edited', doc, { action: 'edit', cellId: id, cellNumber: (cell.index ?? 0) + 1,
                 kind: cell.kind === 1 ? 'markdown' : 'code', language: cell.document.languageId,
                 beforeHash: hash(previous), afterHash: hash(current), diff: compactDiff(previous, current) });
@@ -57,20 +64,28 @@ function registerNotebookAudit(vscode, context, monitor, clientInfo = {}) {
             for (const removed of change.removedCells || []) {
                 const id = cellId(removed), previous = snapshots.get(key(doc, removed)) ?? removed.document?.getText?.() ?? '';
                 snapshots.delete(key(doc, removed));
+                changedIds.push(id);
                 record('notebook.cell.deleted', doc, { action: 'delete', cellId: id, cellNumber: (removed.index ?? change.range?.start ?? 0) + 1,
                     kind: removed.kind === 1 ? 'markdown' : 'code', beforeHash: hash(previous), previous: String(previous).slice(0, 12000) });
             }
             let index = change.range?.start ?? 0;
             for (const added of change.addedCells || []) {
                 const source = added.document?.getText?.() || ''; snapshots.set(key(doc, added), source);
+                changedIds.push(cellId(added));
                 record('notebook.cell.inserted', doc, { action: 'insert', cellId: cellId(added), cellNumber: ++index,
                     kind: added.kind === 1 ? 'markdown' : 'code', language: added.document?.languageId, afterHash: hash(source), source: source.slice(0, 12000) });
             }
         }
+        recordNotebookRevision(doc, changedIds);
     }));
     if (typeof vscode.workspace.onDidSaveNotebookDocument === 'function') {
         context.subscriptions.push(vscode.workspace.onDidSaveNotebookDocument(doc => {
-            if (isWolfbook(doc)) record('notebook.saved', doc, { cellCount: doc.cellCount, savedAt: new Date().toISOString() }, { state: 'completed' });
+            if (isWolfbook(doc)) {
+                const activity = getActivityContext() || findMutationIntent(doc.uri.fsPath) || {};
+                const explicit = activity.tool === 'wolfbook_saveNotebook' || activity.tool === 'wolfbook_getNotebookContext';
+                record('notebook.saved', doc, { cellCount: doc.cellCount, savedAt: new Date().toISOString(),
+                    persistedBy: explicit ? 'explicit' : 'autosave' }, { state: 'completed' });
+            }
         }));
     }
 }

@@ -28,7 +28,6 @@ const FORMAT_OPTIONS = [
 ];
 
 let _currentFormat = 'WLLatex';
-let _statusBarItem = null;
 let _watchPanel    = null;   // WatchPanelProvider instance (set by register())
 let _inFlight      = false;
 let _editorResultDecoration = null;
@@ -108,41 +107,6 @@ async function evaluateEditorExpression(getController) {
     editor.setDecorations(_editorResultDecoration, decorations);
 }
 
-// ── Status bar ──────────────────────────────────────────────────────────
-
-function _createStatusBar(context) {
-    _statusBarItem = vscode.window.createStatusBarItem(
-        'wolfbook-eval-selection-format',
-        vscode.StatusBarAlignment.Right,
-        99
-    );
-    _statusBarItem.command = 'wolfbook.evaluateSelectionFormat';
-    _updateStatusBar();
-    context.subscriptions.push(_statusBarItem);
-
-    // Only show when a wolfram notebook is active
-    context.subscriptions.push(vscode.window.onDidChangeActiveTextEditor(() => _updateStatusBarVisibility()));
-    context.subscriptions.push(vscode.window.onDidChangeActiveNotebookEditor(() => _updateStatusBarVisibility()));
-    _updateStatusBarVisibility();
-}
-
-function _updateStatusBar() {
-    const opt = FORMAT_OPTIONS.find(o => o.value === _currentFormat) || FORMAT_OPTIONS[0];
-    _statusBarItem.text = '⚡ ' + opt.value;
-    _statusBarItem.tooltip = 'Eval-Selection format: ' + opt.description + '\nClick to change';
-}
-
-function _updateStatusBarVisibility() {
-    const nbEditor = vscode.window.activeNotebookEditor;
-    const textEditor = vscode.window.activeTextEditor;
-    const isWolframFile = textEditor && textEditor.document.languageId === 'wolfram';
-    if ((nbEditor && nbEditor.notebook.notebookType === 'extended-wolfram-notebook') || isWolframFile) {
-        _statusBarItem.show();
-    } else {
-        _statusBarItem.hide();
-    }
-}
-
 // ── Format picker command ───────────────────────────────────────────────
 
 async function _pickFormat() {
@@ -152,7 +116,6 @@ async function _pickFormat() {
     );
     if (picked) {
         _currentFormat = picked.value;
-        _updateStatusBar();
         scrollLog('[eval-sel] format set:', _currentFormat);
     }
 }
@@ -532,7 +495,6 @@ async function docLookup(ctrl, symbolName, watchPanel, fallbackMd) {
 
 function register(context, getController, watchPanel) {
     _watchPanel = watchPanel;
-    _createStatusBar(context);
     _editorResultDecoration = vscode.window.createTextEditorDecorationType({
         after: {
             color: new vscode.ThemeColor('editorCodeLens.foreground'),

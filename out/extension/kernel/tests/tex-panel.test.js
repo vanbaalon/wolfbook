@@ -71,6 +71,28 @@ test('the panel INLINES the shell rather than keeping its own copy', () => {
     assert.ok(html.includes('<header>'), 'including the toolbar');
 });
 
+test('general page gestures live in the guide, not a page-wide tooltip', () => {
+    const shell = fs.readFileSync(SHELL, 'utf8');
+    const js = fs.readFileSync(CLIENT_JS, 'utf8');
+    const pages = /<div id="pages"([^>]*)>/.exec(shell);
+    assert.ok(pages, 'the PDF surface exists');
+    assert.ok(!/\btitle=/.test(pages[1]), 'hovering anywhere on the paper shows no long hint');
+    assert.ok(!/armHint\(pages/.test(js), 'the client does not restore that hint later');
+});
+
+test('the layout control advertises and sends its two-state toggle', () => {
+    const shell = fs.readFileSync(SHELL, 'utf8');
+    const js = fs.readFileSync(CLIENT_JS, 'utf8');
+    assert.ok(/id="full"[^>]*title="Show WPaper only"[^>]*aria-label="Show WPaper only"/.test(shell),
+        'the toolbar states the next of the two layouts');
+    assert.ok(/el\('full'\)\.addEventListener\('click',[\s\S]{0,120}type: 'layoutCycle'/.test(js),
+        'the button asks the extension to advance, rather than guessing state locally');
+    assert.ok(/Show editor \+ WPaper/.test(js),
+        'the focused state offers the editor-and-viewer layout');
+    assert.ok(!/viewerAgents/.test(js) && !/layout-agents/.test(shell),
+        'the retired agent-panel layout is absent from the toolbar client');
+});
+
 test('every id the client script looks up exists in the shell', () => {
     const shell = fs.readFileSync(SHELL, 'utf8');
     const js = fs.readFileSync(CLIENT_JS, 'utf8');
@@ -113,6 +135,36 @@ test('the highlight is a wash with a fade, not a red box', () => {
     assert.ok(/@keyframes hlfade/.test(shell), 'the fade is defined');
     assert.ok(/\.hl\.pinned\s*\{[^}]*animation:\s*none/.test(shell),
         'pinning stops the fade');
+});
+
+test('a focused review change has one exterior contour, not boxes around its rows', () => {
+    const shell = fs.readFileSync(SHELL, 'utf8');
+    const js = fs.readFileSync(CLIENT_JS, 'utf8');
+    const focusedBand = /\.rband\.on\s*\{([^}]*)\}/.exec(shell);
+    assert.ok(focusedBand, 'the focused-band rule exists');
+    assert.ok(/outline:\s*none/.test(focusedBand[1]), 'individual PDF fragments have no outline');
+    assert.ok(/\.rcontour\s*\{/.test(shell), 'the page has a dedicated exterior contour');
+    assert.ok(/function paintReviewContour\(/.test(js), 'review rectangles are combined');
+    assert.ok(/createElementNS\(ns, 'feMorphology'\)/.test(js), 'the outline is made from their union');
+    assert.ok(/\.rband, \.rcontour, \.rchip/.test(js), 'the contour is cleared with the review');
+});
+
+test('a stale page has a compact tracing-paused indicator', () => {
+    const shell = fs.readFileSync(SHELL, 'utf8');
+    const js = fs.readFileSync(CLIENT_JS, 'utf8');
+    assert.ok(/id="tracelag" hidden/.test(shell), 'the indicator starts out of the way');
+    assert.ok(/#tracelag\.compiling::before/.test(shell), 'an in-progress update gets a small spinner');
+    assert.ok(/case 'traceState': setTraceState\(msg\)/.test(js), 'the lag state reaches the indicator');
+    assert.ok(/if \(state\.tracePaused\) return;/.test(js), 'stale pages do not resolve clicks');
+});
+
+test('unsaved source has its own persistent save control in the viewer', () => {
+    const shell = fs.readFileSync(SHELL, 'utf8');
+    const js = fs.readFileSync(CLIENT_JS, 'utf8');
+    assert.ok(/id="sourceunsaved" hidden/.test(shell), 'saved papers do not spend toolbar space');
+    assert.ok(/Unsaved source/.test(shell), 'the visible state says what is unsaved');
+    assert.ok(/case 'sourceDirty': setSourceDirty\(msg\)/.test(js), 'disk state has its own message');
+    assert.ok(/postMessage\(\{ type: 'saveSource' \}\)/.test(js), 'the badge itself saves the source');
 });
 
 test('THE MINI-EDITOR SELECTION IS NOT OPAQUE — an opaque one erases the code', () => {
@@ -241,6 +293,124 @@ test('the mini-editor card is draggable by its title, and steps between blocks',
         'dragging the header must not select its text');
     assert.ok(/type: 'editStep'/.test(js), 'the card posts block steps');
     assert.ok(/altKey && \(ev\.key === 'ArrowUp'/.test(js), 'and ⌥↑/⌥↓ do it from the keyboard');
+});
+
+test('two explicit outward arrows step across a mini-editor boundary', () => {
+    const js = fs.readFileSync(CLIENT_JS, 'utf8');
+    const from = js.indexOf("ta.addEventListener('keydown', (ev) => {",
+        js.indexOf('function buildEditCard('));
+    const body = js.slice(from, from + 3200);
+    assert.ok(/let boundaryArm = null/.test(js), 'the first boundary press only arms navigation');
+    assert.ok(/ev\.key === 'ArrowLeft' && ta\.selectionStart === 0/.test(body),
+        'left is considered only at the first character');
+    assert.ok(/ev\.key === 'ArrowRight' && ta\.selectionEnd === ta\.value\.length/.test(body),
+        'right is considered only after the last character');
+    assert.ok(/if \(ev\.repeat\) return/.test(body),
+        'holding an arrow cannot step through paragraphs');
+    assert.ok(/if \(boundaryArm === here\)/.test(body) &&
+        /step\(ev\.key === 'ArrowLeft' \? -1 : 1\)/.test(body),
+    'only the second matching physical press steps previous/next');
+    assert.ok(/boundaryArm = null;\s*\n\s*if \(ev\.key === 'Escape'\)/.test(body),
+        'any other key cancels the armed boundary');
+});
+
+test('Ctrl+S sends the current mini-editor text in the save operation', () => {
+    const js = fs.readFileSync(CLIENT_JS, 'utf8');
+    const from = js.indexOf("else if ((ev.metaKey || ev.ctrlKey)",
+        js.indexOf('function buildEditCard('));
+    const branch = js.slice(from, from + 700);
+    assert.ok(/saveCurrent\(\)/.test(branch),
+        'the textarea shortcut uses the shared ordered save operation');
+    const shared = js.slice(js.indexOf('function saveCurrent()'),
+        js.indexOf('function saveCurrent()') + 500);
+    assert.ok(/type: 'editSave', editId: e\.id, text: ta\.value/.test(shared),
+        'save carries the exact textarea value instead of racing a pending edit message');
+    assert.ok(!/type: 'editChange'/.test(branch),
+        'Ctrl+S does not split apply and save into independently scheduled messages');
+});
+
+test('Ctrl+S on the paper saves through the same mini-editor operation', () => {
+    const js = fs.readFileSync(CLIENT_JS, 'utf8');
+    const marker = '// SAVE BELONGS TO THE DOCUMENT';
+    const branch = js.slice(js.indexOf(marker), js.indexOf(marker) + 1500);
+    assert.ok(/state\.edit\._saveCurrent\(\)/.test(branch),
+        'an open card supplies its current text even when focus is on the page');
+    assert.ok(/type: 'saveSource'/.test(branch),
+        'without a card the viewer saves the paper source buffers');
+    assert.ok(/e\.preventDefault\(\)/.test(branch),
+        'the webview does not let the browser consume the save gesture');
+    assert.ok(/clearTimeout\(debounce\)/.test(js) && /text: ta\.value/.test(js),
+        'the shared card operation cancels a pending edit and carries exact current text');
+});
+
+test('the mini-editor leaves native copy cut and paste intact', () => {
+    const js = fs.readFileSync(CLIENT_JS, 'utf8');
+    const from = js.indexOf("ta.addEventListener('keydown', (ev) => {",
+        js.indexOf('function buildEditCard('));
+    const body = js.slice(from, from + 3600);
+    const firstBranch = body.indexOf("if ((ev.metaKey || ev.ctrlKey) && ev.altKey");
+    assert.ok(firstBranch > 0, 'the mini-editor keyboard handler was found');
+    assert.ok(!/ev\.stopPropagation\(\)/.test(body.slice(0, firstBranch)),
+        'ordinary textarea shortcuts reach VS Code native clipboard handling');
+    assert.ok(!/key === ['\"]c['\"]|key === ['\"]x['\"]|key === ['\"]v['\"]/.test(body),
+        'the card does not reinterpret clipboard shortcuts as page actions');
+    assert.ok(/ev\.preventDefault\(\);\s*\n\s*ev\.stopPropagation\(\)/.test(body),
+        'card-owned shortcuts remain contained');
+});
+
+test('typing on the paper opens the mini-editor at the resolved click', () => {
+    const shell = fs.readFileSync(SHELL, 'utf8');
+    const js = fs.readFileSync(CLIENT_JS, 'utf8');
+    assert.ok(/id="pages" tabindex="-1"/.test(shell),
+        'the paper has an explicit keyboard focus target');
+    assert.ok(/focusPaperForKeys\(\);\s*\n\s*ev\.preventDefault\(\)/.test(js),
+        'a page press focuses it even though drag selection prevents default focus');
+    assert.ok(/pendingPaperTyping\.text \+= text/.test(js),
+        'keystrokes are buffered while the mini-editor opens');
+    assert.ok(/type: 'editHere', typingRequest: request\.id/.test(js),
+        'typing asks for the ordinary point-resolved mini-editor');
+    assert.ok(/msg\.typingRequest === pendingPaperTyping\.id/.test(js) &&
+        /ta\.setRangeText\(text, ta\.selectionStart, ta\.selectionEnd, 'end'\)/.test(js),
+        'the buffered text is inserted only after the exact card caret returns');
+});
+
+test('page selections use standard copy cut paste delete and typing keys', () => {
+    const js = fs.readFileSync(CLIENT_JS, 'utf8');
+    assert.ok(/command && key === 'c'\) action = 'copy'/.test(js));
+    assert.ok(/command && key === 'x'\) action = 'cut'/.test(js));
+    assert.ok(/command && key === 'v'\) action = 'paste'/.test(js));
+    assert.ok(/e\.key === 'Delete' \|\| e\.key === 'Backspace'\)\) action = 'delete'/.test(js));
+    assert.ok(/action = 'replace'/.test(js),
+        'ordinary typing replaces a selected fragment as it does in an editor');
+    assert.ok(/type: 'selectionAction', action/.test(js),
+        'all keys reuse the action bar protocol');
+});
+
+test('the webview reports the complete restorable WPaper session', () => {
+    const shell = fs.readFileSync(SHELL, 'utf8');
+    const js = fs.readFileSync(CLIENT_JS, 'utf8');
+    assert.ok(/top,\s*left:\s*main\.scrollLeft/.test(js),
+        'the literal vertical and horizontal scroll offsets travel');
+    assert.ok(/scale:\s*state\.scale,\s*fit:\s*!!state\.fitMode/.test(js),
+        'magnification and fit mode travel with the page address');
+    assert.ok(/xFrac:[\s\S]{0,180}main\.scrollLeft \+ main\.clientWidth \/ 2 - w\.offsetLeft/.test(js) &&
+        /a\.xFrac[\s\S]{0,220}w\.offsetWidth - main\.clientWidth \/ 2/.test(js),
+        'separator resizing preserves the paper-relative horizontal position, not a stale pixel offset');
+    assert.ok(/#pages \{[\s\S]{0,180}width:max-content; min-width:100%/.test(shell),
+        'an oversized centred page grows the scroll strip instead of acquiring an unreachable negative edge');
+    assert.ok(/id="fit"[\s\S]{0,180}double-click to keep fitted/.test(shell) &&
+        /el\('fit'\)\.addEventListener\('dblclick'[\s\S]*type: 'fitMode'/.test(js),
+        'Fit exposes a discoverable double-click responsive regime');
+    assert.ok(/#fit\[aria-pressed="true"\][\s\S]{0,300}vscode-focusBorder[\s\S]{0,180}box-shadow:inset/.test(shell),
+        'responsive Fit remains unmistakably highlighted after the pointer leaves');
+    assert.ok(/function responsiveFit\(\)[\s\S]*requestAnimationFrame[\s\S]*live: true[\s\S]*ResizeObserver\(responsiveFit\)/.test(js),
+        'responsive Fit tracks the actual reader width with a live preview during separator drags');
+    assert.ok(/type:\s*'editView'/.test(js),
+        'the mini-editor reports its caret and dragged position');
+    assert.ok(/paintEditCard\(!msg\.restored && !msg\.typingRequest\)/.test(js),
+        'restoring the card does not scroll away from the saved reading place');
+    assert.ok(/restoreSession && msg\.restoreView/.test(js) && /state\.restoreViewNext = true/.test(js),
+        'saved magnification is applied to a fresh viewer or paper switch, not over a live recompile');
 });
 
 test('a click ships WHERE the repeated words are, not just how many', () => {

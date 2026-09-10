@@ -10,6 +10,8 @@ const serializer = fs.readFileSync(path.join(root, 'serializer.js'), 'utf8');
 const notebookSettings = fs.readFileSync(path.join(root, 'notebook-settings.js'), 'utf8');
 assert(pkg.contributes.languageModelTools.some(t => t.name === 'wolfbook_kernelManager'));
 assert(pkg.contributes.configuration.properties['wolfbook.kernels.experimentalIsolation']);
+assert.strictEqual(pkg.contributes.notebookRenderer[0].requiresMessaging, 'always',
+    'per-editor backgrounds require a guaranteed renderer messaging channel');
 assert(extension.includes("require('./kernel/manager')"));
 assert(extension.includes("require('./kernel/label-registry')"));
 assert(extension.includes('_syncRemoteKernelControllers'));
@@ -22,7 +24,9 @@ assert(server.includes('current_binding'));
 assert(server.includes('kernel_label'));
 assert(!serializer.includes('kernel_id'), 'kernel identity must not enter the notebook serializer');
 assert(notebookSettings.includes("_APPEARANCE_KEY = 'notebook.appearanceByUri'"));
-assert(notebookSettings.includes("vscode.ConfigurationTarget.Global"));
+assert(notebookSettings.includes("_APPEARANCE_STATE_KEY = 'wolfbook.notebookAppearanceByUri.v2'"));
+assert(notebookSettings.includes('workspaceState'),
+    'per-notebook appearance must survive extension-host reload in workspaceState');
 assert(notebookSettings.includes('const _NOTEBOOK_COLOR_TARGET = vscode.ConfigurationTarget.Workspace'),
     'rendered notebook colours must be workspace-scoped so VS Code windows cannot race');
 assert(!notebookSettings.includes('wolframSettings: updatedSettings'), 'appearance must not be written wholesale into notebook metadata');

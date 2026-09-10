@@ -81,12 +81,19 @@ t('there are .tex bindings to check', () => {
     assert.ok(TEX.length >= 3, `expected the tex bindings, found ${TEX.length}`);
 });
 
-t('every .tex binding except the one that OPENS the viewer requires it to be open', () => {
+t('paper-editing bindings require WPaper; open and explicit Git actions do not', () => {
     // Opening the viewer is the reader saying "this paper is mine to work on",
-    // and that is exactly when the shortcuts should exist. A .tex file being
-    // merely edited keeps the reader's own bindings.
+    // and that is exactly when intrusive editing shortcuts should exist. The
+    // Git keys are explicit, high-modifier repository actions requested for
+    // the ordinary editor too; requiring an unrelated viewer would make them
+    // mysteriously disappear.
+    const allowedWithoutViewer = new Set([
+        'wolfbook.tex.openViewer',
+        'wolfbook.tex.commitChanges',
+        'wolfbook.tex.pushChanges',
+    ]);
     const offenders = TEX
-        .filter(k => k.command !== 'wolfbook.tex.openViewer')
+        .filter(k => !allowedWithoutViewer.has(k.command))
         .filter(k => !/wolfbook\.texViewerOpen/.test(when(k)))
         .map(label);
     assert.deepStrictEqual(offenders, [],

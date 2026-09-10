@@ -221,7 +221,11 @@ function _renderMarkdown(text) {
                            : `<code class="math-raw">$${_esc(latex)}$</code>`;
         }
         try {
-            const rendered = _prerenderLatex(latex.trim(), display);
+            // Keep exported Markdown consistent with the live notebook
+            // renderer. The bundled pre-renderer also knows this macro, but
+            // expanding here keeps old/fallback pre-renderers compatible.
+            const normalizedLatex = latex.trim().replace(/\\ii(?![A-Za-z])/g, '\\mathrm{i}');
+            const rendered = _prerenderLatex(normalizedLatex, display);
             return display ? `<div class="katex-display-block">${rendered}</div>` : rendered;
         } catch (_) {
             return `<span class="math-error">[LaTeX error: ${_esc(latex)}]</span>`;

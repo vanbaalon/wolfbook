@@ -16,6 +16,7 @@
 
 /** The lower bound on the debounce: below this, a pause is not a pause. */
 const FLOOR_MS = 300;
+const MAX_LIVE_WAIT_MS = 3000;
 
 /**
  * How long to wait after the last keystroke before rebuilding.
@@ -34,6 +35,22 @@ function nextLiveDelayMs({ lastMs, ceilingMs, floorMs = FLOOR_MS, k = 1 } = {}) 
     // Math.min LAST: a ceiling below the floor must still win, or a reader who
     // sets liveRenderDelayMs to 200 gets 300 and the setting looks broken.
     return Math.min(ceiling, Math.max(floorMs, Math.round(k * Number(lastMs))));
+}
+
+/**
+ * Bound a trailing debounce by a deadline measured from the FIRST edit.
+ *
+ * Resetting an ordinary debounce on every keystroke is right for short bursts,
+ * but an agent or a fast typist can keep one alive indefinitely. The viewer is
+ * already marked "page behind editor" during that interval, so it must get a
+ * chance to catch up at least once every few seconds even if edits continue.
+ */
+function liveDeadlineDelayMs({ waitMs, firstAtMs, nowMs, maxWaitMs = MAX_LIVE_WAIT_MS } = {}) {
+    const wait = Math.max(0, Number(waitMs) || 0);
+    const first = Number(firstAtMs);
+    const now = Number(nowMs);
+    if (!Number.isFinite(first) || !Number.isFinite(now)) return Math.min(wait, maxWaitMs);
+    return Math.min(wait, Math.max(0, Number(maxWaitMs) - (now - first)));
 }
 
 /**
@@ -173,7 +190,9 @@ function authoritativeDelayMs({ configuredMs = 4000, liveDelayMs = 900 } = {}) {
 
 module.exports = {
     FLOOR_MS,
+    MAX_LIVE_WAIT_MS,
     nextLiveDelayMs,
+    liveDeadlineDelayMs,
     cooldownDelayMs,
     blendLiveMs,
     shipDecision,

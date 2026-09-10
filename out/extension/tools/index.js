@@ -15,6 +15,9 @@ const { CELL_STATE, stateLabel, stateRemedy, isConfirmed } = require('./cell-sta
 const { SelfTestTool } = require('./self-test');
 const { projectNotebook, ContentAddressedRenderCache } = require('../claude-mcp/output-projection');
 const { resolveJsonPath, describeJson } = require('../kernel/json-path');
+const { captureMcpFileTarget } = require('../monitor/recent-mcp-files');
+const { beginMutationIntent, endMutationIntent } = require('../monitor/mutation-intent');
+const { changedSince } = require('../monitor/notebook-revisions');
 
 // Wire up the BTL (box-to-LaTeX) C++ addon so cleanPrintLine can convert BoxData → LaTeX.
 // Uses the same platform-aware loading strategy as output/renderer.js.
@@ -58,7 +61,7 @@ const {
     normalizeToolContent,
     normalizeMarkdownMath, prepareCellContent, _canonCellId, splitWLIntoStatements,
     checkMarkdownKaTeX, _katexWarnings, _katexWarningsForCells,
-    _isCollabMode, _ensureCollabEditor, flashCell,
+    _isCollabMode, _ensureCollabEditor, flashCell, notifyAgentNotebookEvent,
     _snapshotViewport, _restoreViewport,
     buildTranscript, getCellToolId, _ensureCellToolId,
     formatCellRef, resolveCellIndex, resolveInsertIndex,
@@ -69,6 +72,32 @@ const {
 } = require('./shared');
 const trackedEvaluate = trackedKernelEvaluate;
 const kernelScopedInput = options => ({ ...(options?.input || {}), _kernelOnly: true });
+
+function notebookRevisionConflict(notebook, input = {}) {
+    const expected = input.expected_notebook_revision;
+    if (expected == null) return null;
+    const actual = Number(notebook?.version || 0);
+    if (Number(expected) === actual) return null;
+    return {
+        ok: false, state: 'conflict', code: 'notebook-revision-conflict', retryable: true,
+        expected_notebook_revision: Number(expected), current_notebook_revision: actual,
+        notebook: notebook?.uri?.fsPath || null,
+        remedy: 'Read compact notebook context again, then retry with the current revision.'
+    };
+}
+
+function revisionConflictResult(notebook, input) {
+    const conflict = notebookRevisionConflict(notebook, input);
+    return conflict ? new vscode.LanguageModelToolResult([
+        new vscode.LanguageModelTextPart(JSON.stringify(conflict, null, 2))
+    ]) : null;
+}
+
+function jsonToolResult(value) {
+    return new vscode.LanguageModelToolResult([
+        new vscode.LanguageModelTextPart(JSON.stringify(value, null, 2))
+    ]);
+}
 // Operation-first controller resolution: an operation id already identifies its
 // kernel (each controller has its own OperationRegistry), so look the id up
 // across ALL kernels in this window before demanding kernel_id.  Falls back to
@@ -327,7 +356,7 @@ class NewNotebookTool {
         const uri = vscode.Uri.file(nbPath);
         try {
             const doc = await this._openWithTimeout(uri, waitMs);
-            await vscode.window.showNotebookDocument(doc, { preserveFocus: false, viewColumn: vscode.ViewColumn.Active });
+            await vscode.window.showNotebookDocument(doc, { preserveFocus: true, viewColumn: vscode.ViewColumn.Active });
             const ed = await this._waitUntilVisible(uri, waitMs);
             if (!ed) {
                 return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
@@ -362,6 +391,13 @@ class NewNotebookTool {
             // Reuse the shared resolver so Copilot/in-editor targeting hooks see
             // the new active notebook too.
             try { await resolveNotebookEditor(nbPath, { skipConfirm: true }); } catch (_) {}
+
+            // Creating/selecting a notebook changes the agent target, not the
+            // user's editor focus. Offer an explicit way to open or follow it.
+            void notifyAgentNotebookEvent({
+                notebook: ed.notebook,
+                kind: existed ? 'switched' : 'created',
+            });
 
             // Optional: evaluate the initial code cells through the evidence-gated
             // pipeline.  Default OFF — stated explicitly in the response so nobody
@@ -492,7 +528,7 @@ class GetNotebookContextTool {
                 ]);
             }
             // Explicit switch action — user already expressed intent, skip confirmation
-            const editor = await resolveNotebookEditor(notebook, { skipConfirm: true });
+            const editor = await resolveNotebookEditor(notebook, { skipConfirm: true, preserveFocus: true });
             if (!editor) {
                 const available = [..._allNotebookUris().keys()].map(p => p.split('/').pop()).join(', ');
                 return new vscode.LanguageModelToolResult([
@@ -501,6 +537,7 @@ class GetNotebookContextTool {
                     )
                 ]);
             }
+            void notifyAgentNotebookEvent({ notebook: editor.notebook, kind: 'switched' });
             return new vscode.LanguageModelToolResult([
                 new vscode.LanguageModelTextPart(
                     `Switched to **${editor.notebook.uri.fsPath.split('/').pop()}** ${this._kernelInfo(editor.notebook.uri.fsPath)} (${editor.notebook.cellCount} cells). All tools now target this notebook.`
@@ -545,7 +582,17 @@ class GetNotebookContextTool {
         }
         const startCell = options.input?.startCell;
         const endCell   = options.input?.endCell;
-        if (options.input?.output_projection === 'canonical' || options.input?._mcpProjection === true) {
+        const hasRevisionRequest = options.input?.since_revision != null || options.input?.if_revision != null ||
+            Array.isArray(options.input?.cell_ids) || Array.isArray(options.input?.cell_numbers);
+        if (options.input?.output_projection === 'canonical' || options.input?._mcpProjection === true || hasRevisionRequest) {
+            const currentRevision = Number(notebook.version || 0);
+            if (options.input?.if_revision != null && Number(options.input.if_revision) === currentRevision) {
+                return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(JSON.stringify({
+                    projection: 'wolfbook.mcp.notebook', projection_version: 1,
+                    notebook: notebook.uri.fsPath, notebook_revision: currentRevision,
+                    not_modified: true, cell_count: notebook.cellCount, cells: []
+                }, null, 2))]);
+            }
             const cache = new ContentAddressedRenderCache(
                 this._context?.globalStorageUri?.fsPath ? path.join(this._context.globalStorageUri.fsPath, 'mcp-render-cache-v1') : null,
                 options.input?._mcpCache === true
@@ -560,6 +607,23 @@ class GetNotebookContextTool {
                 const status = ctrl?.arbiter?.status(ctrl) || {};
                 return { kernel_id: ctrl?.kernelIdentity?.kernel_id || null, kernel_label: ctrl?.kernelIdentity?.label || null, lifecycle: status.lifecycle || 'offline' };
             })();
+            const selectedIds = new Set((options.input?.cell_ids || []).map(String));
+            const selectedNumbers = new Set((options.input?.cell_numbers || []).map(Number));
+            if (selectedIds.size || selectedNumbers.size) {
+                projection.cells = projection.cells.filter(cell =>
+                    selectedIds.has(String(cell.cell_id)) || selectedNumbers.has(Number(cell.cell_number)));
+                projection.selection = { cell_ids: [...selectedIds], cell_numbers: [...selectedNumbers] };
+            }
+            if (options.input?.since_revision != null) {
+                const delta = changedSince(notebook, options.input.since_revision);
+                projection.delta = { since_revision: Number(options.input.since_revision), ...delta };
+                if (delta.available) {
+                    const changed = new Set(delta.cellIds || []);
+                    projection.cells = projection.cells.filter(cell => changed.has(String(cell.cell_id)));
+                } else {
+                    projection.delta.full_context_returned = true;
+                }
+            }
             return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(JSON.stringify(projection, null, 2))]);
         }
 
@@ -724,6 +788,16 @@ function _captureStructuredResult(controller, operationId, value, label) {
     } catch (_) {}
 }
 
+function _captureFullTextResult(controller, operationId, value, label) {
+    if (!operationId || typeof value !== 'string') return;
+    const op = controller.operations?.get?.(operationId);
+    if (!op) return;
+    const entry = label ? `${label}= ${value}` : value;
+    const combined = op.fullResult ? `${op.fullResult}\n${entry}` : entry;
+    op.fullResult = combined.slice(0, 8 * 1024 * 1024);
+    op.fullResultTruncated = combined.length > op.fullResult.length;
+}
+
 class EvaluateExpressionTool {
     constructor(getController) {
         // getController() returns the live WolframNotebookKernel instance
@@ -762,6 +836,7 @@ class EvaluateExpressionTool {
             owner: 'mcp', kind: 'scratch-evaluation',
             caption: options.input?.caption || `Evaluate: ${expression.slice(0, 100)}`,
             policyOverride: options.input?.busyPolicy,
+            source: expression,
             sourcePreview: expression.slice(0, 160),
         });
         if (claim.result) return claim.result;
@@ -854,6 +929,7 @@ class EvaluateExpressionTool {
                         val = parsedAssert.value;
                         const jsonInfo = _stripJsonFallback(val);
                         val = jsonInfo.value;
+                        _captureFullTextResult(controller, options.input?._operationId, val, label);
                         if (outputForm === 'json' && !jsonInfo.jsonFellBack) {
                             _captureStructuredResult(controller, options.input?._operationId, val, label);
                         }
@@ -969,6 +1045,7 @@ class EvaluateExpressionTool {
                 val = parsedAssert.value;
                 const jsonInfo = _stripJsonFallback(val);
                 val = jsonInfo.value;
+                _captureFullTextResult(controller, options.input?._operationId, val);
                 if (outputForm === 'json' && !jsonInfo.jsonFellBack) {
                     _captureStructuredResult(controller, options.input?._operationId, val);
                 }
@@ -1209,6 +1286,8 @@ class InsertCellsTool {
         }
 
         const notebook = editor.notebook;
+        const revisionConflict = revisionConflictResult(notebook, options.input || {});
+        if (revisionConflict) return revisionConflict;
         // Support both `cells` array and shorthand top-level `kind`+`content`
         let cells = options.input?.cells;
         // Handle case where cells arrives as a JSON string (MCP serialization artifact)
@@ -1271,12 +1350,9 @@ class InsertCellsTool {
 
         await vscode.workspace.applyEdit(edit);
 
-        // Reveal the inserted block and flash the first inserted cell.
-        // In collab mode: flash in the *right* editor only, skip selection on left.
-        // Non-collab: skip selection + flash entirely.
-        if (_isCollabMode()) {
-            await flashCell(editor, insertIdx);
-        }
+        // Follow mode reveals it; otherwise an off-screen notebook gets one
+        // non-blocking invitation to follow the agent.
+        await flashCell(editor, insertIdx);
 
         // Restore left editor scroll position — the insert scrolled it to the new cell.
         // Evaluation is silent so no further scroll will happen.
@@ -1316,6 +1392,7 @@ class InsertCellsTool {
         // ── evaluate option: run all inserted code cells through the notebook ──
         // Default true for code cells (pass evaluate:false to suppress)
         const evaluate = options.input?.evaluate !== false;
+        let evaluationOutcome = { state: evaluate ? 'not-started' : 'not-requested' };
         if (evaluate) {
             const hasCodeCells = cells.some(c => (c.kind || c.type || 'code') !== 'markdown');
             if (hasCodeCells) {
@@ -1327,19 +1404,33 @@ class InsertCellsTool {
                 const _ctrl = this._getController?.({ ...(options?.input || {}), notebook: notebook.uri.fsPath });
                 if (!_ctrl || typeof _ctrl.execute !== 'function') {
                     lines.push('\n[evaluate] No controller available — cells inserted but not evaluated.');
+                    evaluationOutcome = { state: 'not-started', code: 'controller-unavailable' };
                 } else if (_ctrl.kernelStatusString !== 'resolved') {
                     lines.push('\n[evaluate] Kernel is not running — cells inserted but not evaluated.');
+                    evaluationOutcome = { state: 'not-started', code: 'kernel-offline' };
                 } else {
+                    const firstCodeOffset = cells.findIndex(c => (c.kind || c.type || 'code') !== 'markdown');
+                    const firstCodeIndex = insertIdx + firstCodeOffset;
+                    const firstCodeCell = notebook.cellAt(firstCodeIndex);
+                    const firstCodeSource = preparedTexts[firstCodeOffset] || '';
                     const claim = await acquireKernelForAgent(_ctrl, {
                         operationId: options.input?._operationId,
                         owner: 'mcp', kind: 'insert-and-evaluate',
                         caption: options.input?.caption || `Evaluate ${cells.length} inserted cell(s)`,
                         notebook: notebook.uri.fsPath,
+                        cellId: getCellToolId(firstCodeCell),
+                        cellNumber: firstCodeIndex + 1,
+                        source: firstCodeSource,
+                        sourcePreview: firstCodeSource.slice(0, 160),
                         policy: options.input?.busyPolicy
                     });
                     if (!claim.lease) {
                         lines.push('\n[evaluate] Cells were inserted, but evaluation was not started because the kernel is busy. Use wolfbook_kernelStatus, then retry explicitly.');
-                        return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(lines.join('\n'))]);
+                        return jsonToolResult({ ok: true, state: 'completed-with-warning',
+                            message: `Inserted ${cells.length} cell(s); evaluation was not started because the kernel is busy.`,
+                            notebook: notebook.uri.fsPath, notebook_revision: Number(notebook.version || 0),
+                            edit: { state: 'committed', action: 'insert', first_cell: firstNew, last_cell: lastNew },
+                            evaluation: { state: 'not-started', code: 'kernel-busy' }, details: lines.join('\n') });
                     }
                     try {
                         for (let i = 0; i < cells.length; i++) {
@@ -1392,12 +1483,24 @@ class InsertCellsTool {
 
                     if (evalResults.length) {
                         lines.push('\n[evaluate]\n' + evalResults.join('\n'));
+                        evaluationOutcome = {
+                            state: evalResults.some(line => /⛔|✗|timeout|NOT evaluated/i.test(line)) ? 'failed' : 'completed',
+                            operation_id: claim.lease.operationId, details: evalResults,
+                        };
                     }
                 }
             }
         }
 
-        return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(lines.join('\n'))]);
+        return jsonToolResult({ ok: true,
+            state: evaluationOutcome.state === 'failed' ? 'completed-with-warning' : 'completed',
+            message: `Inserted ${cells.length} cell(s); evaluation ${evaluationOutcome.state}.`,
+            notebook: notebook.uri.fsPath, notebook_revision: Number(notebook.version || 0),
+            edit: { state: 'committed', action: 'insert', first_cell: firstNew, last_cell: lastNew,
+                cell_ids: cells.map((_, i) => getCellToolId(notebook.cellAt(insertIdx + i))) },
+            evaluation: evaluationOutcome,
+            warnings: evaluationOutcome.state === 'failed' ? ['Cells were inserted, but evaluation did not complete successfully.'] : [],
+            details: lines.join('\n') });
     }
 }
 
@@ -1422,6 +1525,8 @@ class DeleteCellTool {
         if (!editor) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart('No active notebook editor.')]);
 
         const notebook = editor.notebook;
+        const revisionConflict = revisionConflictResult(notebook, options.input || {});
+        if (revisionConflict) return revisionConflict;
 
         // Accept single/multiple refs by either number or cellId
         const refs = [];
@@ -1505,9 +1610,11 @@ class DeleteCellTool {
         if (deleted.length === 1) {
             const d = deleted[0];
             const preview = d.source.trim().slice(0, 100).replace(/\n/g, '\u21b5');
-            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
-                `Deleted ${d.kindStr} Cell ${d.cellNumber} (CellId: ${d.cellId}; kind: ${d.kindStr}; first line: ${JSON.stringify(d.source.split('\n')[0].slice(0, 200))})${recovery}. Notebook now has ${totalAfter} cell(s).\nContent: ${preview}${d.source.trim().length > 100 ? '\u2026' : ''}`
-            )]);
+            return jsonToolResult({ ok: true, state: 'completed', message: `Deleted Cell ${d.cellNumber}.`,
+                notebook: notebookPath, notebook_revision: Number(notebook.version || 0),
+                edit: { state: 'committed', action: 'delete', deleted: [{ cell_number: d.cellNumber,
+                    cell_id: d.cellId, kind: d.kindStr, preview }] },
+                recovery_path: saveToRecovery ? recoveryPath : null, remaining_cell_count: totalAfter });
         }
 
         // Multi-cell summary
@@ -1516,7 +1623,13 @@ class DeleteCellTool {
             const preview = d.source.trim().slice(0, 100).replace(/\n/g, '\u21b5');
             lines.push(`- Cell ${d.cellNumber} (CellId: ${d.cellId}; kind: ${d.kindStr}; first line: ${JSON.stringify(d.source.split('\n')[0].slice(0, 200))}): ${preview}${d.source.trim().length > 100 ? '\u2026' : ''}`);
         }
-        return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(lines.join('\n'))]);
+        return jsonToolResult({ ok: true, state: 'completed', message: `Deleted ${deleted.length} cells.`,
+            notebook: notebookPath, notebook_revision: Number(notebook.version || 0),
+            edit: { state: 'committed', action: 'delete', deleted: deleted.map(d => ({
+                cell_number: d.cellNumber, cell_id: d.cellId, kind: d.kindStr,
+                preview: d.source.trim().slice(0, 100).replace(/\n/g, '\u21b5') })) },
+            recovery_path: saveToRecovery ? recoveryPath : null,
+            remaining_cell_count: totalAfter, details: lines.join('\n') });
     }
 }
 
@@ -1662,6 +1775,8 @@ class EditCellTool {
     async invoke(options, token) {
         const editor = await resolveNotebookEditor(options.input?.notebook, { skipConfirm: true });
         if (!editor) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart('No active notebook editor.')]);
+        const revisionConflict = revisionConflictResult(editor.notebook, options.input || {});
+        if (revisionConflict) return revisionConflict;
 
         // ── Batch mode: cells array ───────────────────────────────────────────────
         if (Array.isArray(options.input?.cells)) {
@@ -1766,6 +1881,7 @@ class EditCellTool {
                 const edit = new vscode.WorkspaceEdit();
                 edit.set(cellDoc.uri, [new vscode.TextEdit(fullRange, newContent)]);
                 await vscode.workspace.applyEdit(edit);
+                await flashCell(editor, idx);
                 appendEventLog(`✏️ EDIT CELL ${cellNumber} [batch]`,
                     newContent.trim().length > 200 ? newContent.trim().slice(0, 200) + '…' : newContent.trim() || '*(empty)*');
 
@@ -1904,13 +2020,8 @@ class EditCellTool {
         edit.set(cellDoc.uri, [new vscode.TextEdit(fullRange, newContent)]);
         await vscode.workspace.applyEdit(edit);
 
-        // In collab mode skip selection — prevents right-column editor stealing focus.
-        // ── Viewport guard: save scroll position before any mutation.
-        if (!_isCollabMode()) {
-            // Skip selection + flash in non-collab mode — viewport guard restores later.
-        } else {
-            await flashCell(editor, idx);
-        }
+        await flashCell(editor, idx);
+        // ── Viewport guard: save scroll position before any evaluation.
         const _vpSnapshot = _snapshotViewport(notebook);
 
         const editedMsg = `Edited Cell ${cellNumber} (${mutationIdentityText(notebook.cellAt(idx))}) of ${notebook.cellCount} in ${notebook.uri.fsPath.split('/').pop()}.${_diffSummary}`;
@@ -1921,18 +2032,24 @@ class EditCellTool {
         if (evaluate && cell.kind !== vscode.NotebookCellKind.Markup && newContent.trim()) {
             const controller = this._getController?.({ ...(options?.input || {}), notebook: notebook.uri.fsPath });
             if (!controller || !controller.session || controller.kernelStatusString !== 'resolved') {
-                return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
-                    editedMsg + '\n[evaluate] Kernel is not running.'
-                )]);
+                return jsonToolResult({ ok: true, state: 'completed-with-warning',
+                    message: `Edited Cell ${cellNumber}; evaluation was not started because the kernel is offline.`,
+                    notebook: notebook.uri.fsPath, notebook_revision: Number(notebook.version || 0),
+                    edit: { state: 'committed', cell_id: cellId, cell_number: cellNumber },
+                    evaluation: { state: 'not-started', code: 'kernel-offline' }, details: editedMsg });
             }
             const claim = await acquireKernelForAgent(controller, {
                 operationId: options.input?._operationId,
                 owner: 'mcp', kind: 'edit-and-evaluate',
                 caption: options.input?.caption || `Edit and evaluate Cell ${cellNumber}`,
                 notebook: notebook.uri.fsPath, cellId, cellNumber,
-                sourcePreview: newContent.slice(0, 160), policy: options.input?.busyPolicy
+                source: newContent, sourcePreview: newContent.slice(0, 160), policy: options.input?.busyPolicy
             });
-            if (!claim.lease) return claim.error;
+            if (!claim.lease) return jsonToolResult({ ok: true, state: 'completed-with-warning',
+                message: `Edited Cell ${cellNumber}; evaluation was not started because the kernel is busy.`,
+                notebook: notebook.uri.fsPath, notebook_revision: Number(notebook.version || 0),
+                edit: { state: 'committed', cell_id: cellId, cell_number: cellNumber },
+                evaluation: { state: 'not-started', code: 'kernel-busy' } });
             const timeoutSec = Number(options.input?.timeoutSeconds) || 15;
             try {
                 const pipeline = await runCellViaPipeline(controller, editor, idx, {
@@ -1948,23 +2065,40 @@ class EditCellTool {
                         : (pipeline.plain || `(${stateLabel(CELL_STATE.EVALUATED_NO_OUTPUT)})`));
                 appendEvalLog(newContent, evalOut.trim());
                 _restoreViewport(_vpSnapshot);
-                return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
-                    editedMsg + '\n\n[evaluate]\n' + evalOut.trim()
-                )]);
+                const evalState = pipeline.state === CELL_STATE.TIMEOUT ? 'running'
+                    : !isConfirmed(pipeline.state) ? 'unconfirmed'
+                    : (pipeline.provenance?.status || 'completed');
+                const evaluationFailed = ['failed', 'aborted', 'stale', 'unconfirmed'].includes(evalState);
+                return jsonToolResult({ ok: true,
+                    state: evalState === 'running' ? 'running' : (evaluationFailed ? 'completed-with-warning' : 'completed'),
+                    message: `Edited Cell ${cellNumber}; evaluation ${evalState}.`,
+                    notebook: notebook.uri.fsPath, notebook_revision: Number(notebook.version || 0),
+                    edit: { state: 'committed', cell_id: cellId, cell_number: cellNumber },
+                    evaluation: { state: evalState, operation_id: claim.lease.operationId, output: evalOut.trim() },
+                    warnings: evaluationFailed ? ['The edit is committed; retry evaluation without repeating the edit.'] : [],
+                    details: editedMsg });
             } catch (err) {
                 const errMsg = isKernelConnectionError(err.message) ? KERNEL_CRASH_MSG : `Error: ${err.message}`;
                 appendEvalLog(newContent, errMsg);
                 _restoreViewport(_vpSnapshot);
-                return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(editedMsg + '\n[evaluate] ' + errMsg)]);
+                return jsonToolResult({ ok: true, state: 'completed-with-warning', code: 'evaluation-failed-after-edit',
+                    message: `Edited Cell ${cellNumber}; evaluation failed.`,
+                    notebook: notebook.uri.fsPath, notebook_revision: Number(notebook.version || 0),
+                    edit: { state: 'committed', cell_id: cellId, cell_number: cellNumber },
+                    evaluation: { state: 'failed', operation_id: claim.lease.operationId, error: errMsg },
+                    warnings: ['The edit is committed; retry evaluation without repeating the edit.'],
+                    details: editedMsg });
             } finally {
                 releaseKernelForAgent(controller, claim.lease, { state: 'finished' });
             }
         }
 
         _restoreViewport(_vpSnapshot);
-        return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
-            editedMsg + _katexWarnings(cell.kind === vscode.NotebookCellKind.Markup ? newContent : null)
-        )]);
+        return jsonToolResult({ ok: true, state: 'completed', message: `Edited Cell ${cellNumber}.`,
+            notebook: notebook.uri.fsPath, notebook_revision: Number(notebook.version || 0),
+            edit: { state: 'committed', cell_id: cellId, cell_number: cellNumber },
+            evaluation: { state: 'not-requested' },
+            details: editedMsg + _katexWarnings(cell.kind === vscode.NotebookCellKind.Markup ? newContent : null) });
     }
 }
 
@@ -2057,7 +2191,7 @@ class RunCellTool {
                 if (useSilent) {
                     pipeline = await runCellViaPipeline(_ctrl, editor, idx, {
                         timeoutMs: Math.min(deadline - Date.now(), 300000), token,
-                        snapshotViewport: _snapshotViewport, getCellId: getCellToolId,
+                        snapshotViewport: _snapshotViewport, flashCell, getCellId: getCellToolId,
                     });
                 } else {
                     const prevEndTime = cell.executionSummary?.timing?.endTime ?? 0;
@@ -2082,6 +2216,7 @@ class RunCellTool {
                     }
                 }
 
+                if (!pipeline) await flashCell(editor, idx);
                 const updatedCell = pipeline?.cell || notebook.cellAt(idx);
                 codeCount++;
 
@@ -2201,6 +2336,7 @@ class RunCellTool {
         // The error sentinel output (wolfram-html-html + vnd.code.notebook.error) is a
         // hidden output whose text/plain item holds all kernel messages (warnings, errors).
         // Regular outputs (results, Print[], graphics) are the non-sentinel ones.
+        if (!pipeline) await flashCell(editor, idx);
         const updatedCell = pipeline?.cell || notebook.cellAt(idx);
         const committed = pipeline || readCommittedOutputs(updatedCell);
         const outs = committed.outputs;
@@ -2537,7 +2673,11 @@ class OperationStatusTool {
         }
         const waitSeconds = Math.max(0, Math.min(300, Number(options.input?.wait_seconds) || 0));
         if (waitSeconds && controller?.operations) {
-            await controller.operations.wait(id, waitSeconds * 1000);
+            if (options.input?.after_sequence != null && controller.operations.waitForChange) {
+                await controller.operations.waitForChange(id, options.input.after_sequence, waitSeconds * 1000);
+            } else {
+                await controller.operations.wait(id, waitSeconds * 1000);
+            }
         }
         const snapshot = controller?.operations?.snapshot(id, {
             includeProgress: options.input?.include_progress !== false,
@@ -2560,14 +2700,30 @@ class SaveNotebookTool {
                 'This document cannot be saved in place. Use Save As and choose .wb, .evsnb, or .vsnb.'
             )]);
         }
+        const priorDirty = !!notebook.isDirty;
+        let previousBytes = null;
+        let previousStat = null;
+        try {
+            previousBytes = await fs.promises.readFile(filePath);
+            previousStat = await fs.promises.stat(filePath);
+        } catch (_) {}
+        const previousSha256 = previousBytes
+            ? crypto.createHash('sha256').update(previousBytes).digest('hex') : null;
         const saved = await notebook.save();
         if (!saved) throw new Error(`VS Code did not save ${filePath}`);
         const bytes = await fs.promises.readFile(filePath);
         const stat = await fs.promises.stat(filePath);
+        const currentSha256 = crypto.createHash('sha256').update(bytes).digest('hex');
+        const writePerformed = priorDirty && (
+            previousSha256 !== currentSha256 || !previousStat || previousStat.mtimeMs !== stat.mtimeMs
+        );
         const result = {
             path: path.resolve(filePath), bytes: bytes.length,
-            mtime: stat.mtime.toISOString(), sha256: crypto.createHash('sha256').update(bytes).digest('hex'),
-            dirty: notebook.isDirty, version: notebook.version,
+            mtime: stat.mtime.toISOString(), sha256: currentSha256,
+            previous_sha256: previousSha256, prior_dirty: priorDirty,
+            write_performed: writePerformed,
+            persisted_by: writePerformed ? 'explicit' : 'already-current',
+            dirty: notebook.isDirty, notebook_revision: Number(notebook.version || 0),
         };
         return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(JSON.stringify(result, null, 2))]);
     }
@@ -3476,7 +3632,8 @@ class MoveCellTool {
 
 class SearchCellsTool {
     async prepareInvocation(options, _token) {
-        return { invocationMessage: `Search cells for "${options.input?.query || ''}"` };
+        const queries = Array.isArray(options.input?.queries) ? options.input.queries : [options.input?.query || ''];
+        return { invocationMessage: `Search cells for ${queries.length} quer${queries.length === 1 ? 'y' : 'ies'}` };
     }
 
     async invoke(options, _token) {
@@ -3484,22 +3641,26 @@ class SearchCellsTool {
         const notebook = await resolveNotebookDocument(options.input?.notebook);
         if (!notebook) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(noEditorMsg(options.input?.notebook))]);
 
-        const query = options.input?.query;
-        if (!query) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart('query parameter is required.')]);
+        const queries = (Array.isArray(options.input?.queries) ? options.input.queries : [options.input?.query])
+            .map(value => String(value || '').trim()).filter(Boolean);
+        if (!queries.length) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart('query or queries parameter is required.')]);
 
         const isRegex    = options.input?.regex === true;
         const kindFilter = options.input?.kind; // 'code', 'markdown', or undefined for both
         const includeOutput = options.input?.includeOutput !== false;
 
-        let re;
-        try {
-            re = isRegex ? new RegExp(query, 'i') : new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
-        } catch (e) {
-            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(`Invalid regex: ${e.message}`)]);
+        const compiled = [];
+        for (const query of queries) {
+            try {
+                compiled.push({ query, re: isRegex ? new RegExp(query, 'i') : new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') });
+            } catch (e) {
+                return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(`Invalid regex ${JSON.stringify(query)}: ${e.message}`)]);
+            }
         }
 
         const decoder = new util.TextDecoder();
-        const matches = [];
+        const grouped = compiled.map(({ query }) => ({ query, matches: [] }));
+        const limit = Math.max(1, Math.min(500, Number(options.input?.limit) || 100));
 
         for (let i = 0; i < notebook.cellCount; i++) {
             const cell   = notebook.cellAt(i);
@@ -3510,34 +3671,36 @@ class SearchCellsTool {
             if (kindFilter && cellKind !== kindFilter) continue;
 
             const src = cell.document.getText();
-            let matchedIn = [];
-            if (re.test(src)) matchedIn.push('source');
-
-            // Search outputs for code cells
+            let outputText = '';
             if (isCode && includeOutput) {
                 for (const output of cell.outputs) {
                     const plainItem = output.items.find(it => it.mime === 'text/plain');
                     if (plainItem) {
-                        try {
-                            const txt = decoder.decode(plainItem.data);
-                            if (re.test(txt)) { matchedIn.push('output'); break; }
-                        } catch (_) {}
+                        try { outputText += `\n${decoder.decode(plainItem.data)}`; } catch (_) {}
                     }
                 }
             }
-
-            if (matchedIn.length > 0) {
-                const preview = src.trim().slice(0, 120).replace(/\n/g, '\u21B5');
-                const cellId = getCellToolId(cell);
-                matches.push(`Cell ${cellNo} [${cellKind}] (CellId: ${cellId}; ${matchedIn.join('+')}) — ${preview}${src.trim().length > 120 ? '\u2026' : ''}`);
+            for (let q = 0; q < compiled.length; q++) {
+                if (grouped[q].matches.length >= limit) continue;
+                const matchedIn = [];
+                compiled[q].re.lastIndex = 0;
+                if (compiled[q].re.test(src)) matchedIn.push('source');
+                compiled[q].re.lastIndex = 0;
+                if (outputText && compiled[q].re.test(outputText)) matchedIn.push('output');
+                if (matchedIn.length) grouped[q].matches.push({
+                    cell_number: cellNo, cell_id: getCellToolId(cell), kind: cellKind,
+                    matched_in: matchedIn,
+                    preview: src.trim().slice(0, 160).replace(/\n/g, '\u21B5'),
+                });
             }
         }
 
-        if (matches.length === 0) {
-            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(`No cells match "${query}".`)]);
-        }
-        const header = `Found ${matches.length} cell(s) matching "${query}":`;
-        return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart([header, ...matches].join('\n'))]);
+        const result = {
+            ok: true, notebook: notebook.uri.fsPath, notebook_revision: Number(notebook.version || 0),
+            query_count: grouped.length, match_count: grouped.reduce((n, group) => n + group.matches.length, 0),
+            limit_per_query: limit, groups: grouped,
+        };
+        return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(JSON.stringify(result, null, 2))]);
     }
 }
 
@@ -3815,7 +3978,7 @@ class RunTerminalTool {
     }
 
     async invoke(options, _token) {
-        const { execSync } = require('child_process');
+        const { exec } = require('child_process');
         const command = options.input?.command;
         if (!command) return new vscode.LanguageModelToolResult([
             new vscode.LanguageModelTextPart('command is required.')]);
@@ -3824,13 +3987,22 @@ class RunTerminalTool {
         const wsRoot = wsf && wsf.length > 0 ? wsf[0].uri.fsPath : (process.env.HOME || '/');
         const cwd = options.input?.cwd || wsRoot;
         try {
-            const output = execSync(command, {
+            const output = await new Promise((resolve, reject) => {
+                let cancellation;
+                const child = exec(command, {
                 cwd,
                 timeout: timeoutMs,
                 maxBuffer: 512 * 1024,
                 encoding: 'utf8',
-                shell: '/bin/zsh',
+                shell: process.platform === 'win32' ? (process.env.ComSpec || 'cmd.exe') : (process.env.SHELL || '/bin/sh'),
                 env: { ...process.env }
+                }, (error, stdout, stderr) => {
+                    cancellation?.dispose?.();
+                    if (error) { error.stdout = stdout; error.stderr = stderr; reject(error); }
+                    else resolve(stdout || stderr);
+                });
+                cancellation = _token?.onCancellationRequested?.(() => child.kill());
+                if (_token?.isCancellationRequested) child.kill();
             });
             return new vscode.LanguageModelToolResult([
                 new vscode.LanguageModelTextPart(output || '(no output)')]);
@@ -4981,6 +5153,7 @@ function registerTools(context, getController, debugCtrl, getAskPanel) {
                     'wolfbook_runCell', 'wolfbook_runCells'
                 ]);
                 const input = options?.input || {};
+                const mcpFileTarget = captureMcpFileTarget(name, input);
                 const editEvaluates = name !== 'wolfbook_editCell' || (Array.isArray(input.cells)
                     ? input.cells.some(cell => cell?.evaluate === true || (cell?.evaluate == null && input.evaluate !== false))
                     : input.evaluate === true);
@@ -4989,6 +5162,17 @@ function registerTools(context, getController, debugCtrl, getAskPanel) {
                 const controller = shouldTrackOperation ? getController?.(input) : null;
                 let operation = null;
                 if (controller?.operations) {
+                    const operationSource = (() => {
+                        const input = options?.input || {};
+                        if (typeof input.expression === 'string') return input.expression;
+                        if (typeof input.content === 'string') return input.content;
+                        if (Array.isArray(input.cells)) {
+                            const parts = input.cells.map(cell => cell?.content ?? cell?.value)
+                                .filter(value => typeof value === 'string');
+                            return parts.length ? parts.join('\n\n') : null;
+                        }
+                        return null;
+                    })();
                     operation = controller.operations.create({
                         id: options?.input?._operationId,
                         tool: name, owner: 'mcp', caption: options?.input?.caption,
@@ -4998,7 +5182,11 @@ function registerTools(context, getController, debugCtrl, getAskPanel) {
                         kernelLabel: controller.kernelIdentity?.label || null,
                         cellId: options?.input?.cellId,
                         cellNumber: options?.input?.cellNumber,
+                        source: operationSource,
                         background: options?.input?.wait_mode === 'async',
+                        agentSessionId: options?.input?._activityContext?.agentSessionId,
+                        agentName: options?.input?._activityContext?.agentName,
+                        traceId: options?.input?._activityContext?.traceId || options?.input?._operationId,
                     });
                     controller.operations.start(operation.id);
                     options = { ...options, input: { ...(options?.input || {}), _operationId: operation.id } };
@@ -5030,7 +5218,8 @@ function registerTools(context, getController, debugCtrl, getAskPanel) {
                         const status = controller.arbiter?.status(controller);
                         const ownsKernel = status?.activeOperation?.operationId === operation.id;
                         if (ownsKernel && status.busy) { setTimeout(finish, 250); return; }
-                        let fullResult = (completedResult?.content || [])
+                        const operationRecord = controller.operations.get(operation.id);
+                        let fullResult = operationRecord?.fullResult || (completedResult?.content || [])
                             .map(part => String(part?.value ?? part?.text ?? '')).join('\n').slice(0, 1048576);
                         if (/timed out|still running/i.test(fullResult)) {
                             const completedCells = controller.operations.get(operation.id)?.cells || [];
@@ -5045,10 +5234,28 @@ function registerTools(context, getController, debugCtrl, getAskPanel) {
                     finish();
                 };
 
+                const invokeWithMutationIntent = async () => {
+                    const ac = options?.input?._activityContext || {};
+                    let intentNotebook = mcpFileTarget?.kind === 'notebook' ? mcpFileTarget.path : null;
+                    if (!intentNotebook && (name === 'wolfbook_saveNotebook' ||
+                        (name === 'wolfbook_getNotebookContext' && options?.input?.action === 'save'))) {
+                        try { intentNotebook = (await resolveNotebookDocument(options?.input?.notebook))?.uri?.fsPath || null; }
+                        catch (_) {}
+                    }
+                    const intent = intentNotebook ? beginMutationIntent({
+                        notebook: intentNotebook, tool: name,
+                        operationId: options?.input?._operationId || ac.operationId,
+                        traceId: ac.traceId, agentSessionId: ac.agentSessionId,
+                        agentName: ac.agentName, source: ac.source || 'mcp',
+                    }) : null;
+                    try { return await _origInvoke(options, token); }
+                    finally { endMutationIntent(intent); }
+                };
+
                 if (operation && options?.input?.wait_mode === 'async') {
                     let backgroundResult;
                     let backgroundOk = true;
-                    Promise.resolve().then(() => _origInvoke(options, token)).then(result => {
+                    Promise.resolve().then(() => invokeWithMutationIntent()).then(result => {
                         backgroundResult = result;
                         settleOperationResult(result);
                     }).catch(err => {
@@ -5059,6 +5266,7 @@ function registerTools(context, getController, debugCtrl, getAskPanel) {
                             if (_kEventBus.listenerCount('toolUsage') > 0) {
                                 _kEventBus.emit('toolUsage', {
                                     tool: name, args: options?.input ?? null,
+                                    target: mcpFileTarget,
                                     result: _summariseToolResult(backgroundResult), background: true,
                                     ok: backgroundOk, durationMs: Date.now() - startedAt, ts: Date.now(),
                                 });
@@ -5074,7 +5282,7 @@ function registerTools(context, getController, debugCtrl, getAskPanel) {
                 let result;
                 let ok = true;
                 try {
-                    result = await _origInvoke(options, token);
+                    result = await invokeWithMutationIntent();
                     if (operation) {
                         settleOperationResult(result);
                         if (result?.__wolfbookBusy) return result;
@@ -5094,6 +5302,7 @@ function registerTools(context, getController, debugCtrl, getAskPanel) {
                             _kEventBus.emit('toolUsage', {
                                 tool: name,
                                 args: options?.input ?? null,
+                                target: mcpFileTarget,
                                 result: _summariseToolResult(result),
                                 ok,
                                 durationMs: Date.now() - startedAt,
