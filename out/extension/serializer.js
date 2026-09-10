@@ -29,6 +29,15 @@ class VSNBContentSerializer {
         let notebook;
         const text = decoder.decode(data);
 
+        // File > New File creates a zero-byte document before Wolfbook's
+        // serializer ever sees it. That is a valid new notebook, not damaged
+        // JSON. Keep this narrowly scoped to blank input: malformed non-empty
+        // files must still take the guarded parse path below and remain
+        // untouched on failure.
+        if (!text.trim()) {
+            return { cells: [], metadata: {} };
+        }
+
         // A Mathematica .nb is not JSON — convert it to the wolfbook cell model
         // on the fly. deserializeNotebook receives no URI, so this has to be a
         // content sniff rather than an extension check.

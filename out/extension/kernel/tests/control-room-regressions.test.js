@@ -33,6 +33,12 @@ const context = { exports: {}, require: name => {
 vm.runInNewContext(fs.readFileSync(require.resolve('../../serializer'), 'utf8'), context);
 (async () => {
     const serializer = new context.exports.VSNBContentSerializer();
+    for (const blank of ['', '   \n\t']) {
+        const empty = await serializer.deserializeNotebook(Buffer.from(blank));
+        assert.ok(Array.isArray(empty.cells));
+        assert.equal(empty.cells.length, 0);
+        assert.equal(JSON.stringify(empty.metadata), '{}');
+    }
     await assert.rejects(serializer.deserializeNotebook(Buffer.from('invalid')), /Cannot read notebook/);
     await assert.rejects(serializer.serializeNotebook({ cells: [{ kind: 2, outputs: [{}] }] }), /Cannot save notebook/);
     const bytes = new TextEncoder().encode('42');
