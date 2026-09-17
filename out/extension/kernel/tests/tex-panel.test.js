@@ -155,7 +155,8 @@ test('a stale page has a compact tracing-paused indicator', () => {
     assert.ok(/id="tracelag" hidden/.test(shell), 'the indicator starts out of the way');
     assert.ok(/#tracelag\.compiling::before/.test(shell), 'an in-progress update gets a small spinner');
     assert.ok(/case 'traceState': setTraceState\(msg\)/.test(js), 'the lag state reaches the indicator');
-    assert.ok(/if \(state\.tracePaused\) return;/.test(js), 'stale pages do not resolve clicks');
+    assert.ok(/if \(state\.tracePaused\) \{\s*vscode.postMessage\(\{ type: 'traceRetry'[^\n]*\n\s*return;/.test(js),
+        'stale pages request recovery without resolving old click coordinates');
 });
 
 test('unsaved source has its own persistent save control in the viewer', () => {
@@ -165,6 +166,8 @@ test('unsaved source has its own persistent save control in the viewer', () => {
     assert.ok(/Unsaved source/.test(shell), 'the visible state says what is unsaved');
     assert.ok(/case 'sourceDirty': setSourceDirty\(msg\)/.test(js), 'disk state has its own message');
     assert.ok(/postMessage\(\{ type: 'saveSource' \}\)/.test(js), 'the badge itself saves the source');
+    assert.ok(/save automatically after 3 seconds without typing/.test(js),
+        'its tooltip explains the idle save and still offers an immediate click');
 });
 
 test('THE MINI-EDITOR SELECTION IS NOT OPAQUE — an opaque one erases the code', () => {
@@ -325,8 +328,23 @@ test('Ctrl+S sends the current mini-editor text in the save operation', () => {
         js.indexOf('function saveCurrent()') + 500);
     assert.ok(/type: 'editSave', editId: e\.id, text: ta\.value/.test(shared),
         'save carries the exact textarea value instead of racing a pending edit message');
+    assert.ok(/caret: caretSnapshot\(\)/.test(shared),
+        'save carries the caret from that same textarea snapshot');
     assert.ok(!/type: 'editChange'/.test(branch),
         'Ctrl+S does not split apply and save into independently scheduled messages');
+});
+
+test('a mini-editor deletion cannot send new offsets against old text', () => {
+    const js = fs.readFileSync(CLIENT_JS, 'utf8');
+    const from = js.indexOf("ta.addEventListener('input', () => {",
+        js.indexOf('function buildEditCard('));
+    const body = js.slice(from, from + 3600);
+    assert.ok(/type: 'editChange', editId: e\.id, text: ta\.value, caret/.test(body),
+        'the changed text and its caret are one ordered host message');
+    assert.ok(/if \(debounce\) return/.test(body),
+        'caret-only messages wait while changed text is still debounced');
+    assert.ok(/state\.edit\._caretSent = `\$\{caret\.start\}:\$\{caret\.end\}:\$\{caret\.direction\}`/.test(body),
+        'the bundled caret is claimed so the textarea does not echo it');
 });
 
 test('Ctrl+S on the paper saves through the same mini-editor operation', () => {
@@ -455,6 +473,119 @@ test('a change click can prove the PDF worker and loaded viewer are alive', () =
     assert.ok(/async function probeViewer\(/.test(js), 'the viewer has a health probe');
     assert.ok(/getPageIndex\(page\.ref\)/.test(js), 'the probe makes a real worker round-trip');
     assert.ok(/case 'viewerProbe':\s*await probeViewer\(msg\)/.test(js), 'the probe is on the message wire');
+});
+
+test('split-paragraph mini editor stays below the fragment on the clicked page', () => {
+    const js = fs.readFileSync(CLIENT_JS, 'utf8');
+    const start = js.indexOf('function editCardPage(');
+    const end = js.indexOf('\nfunction paintEditCard(', start);
+    const context = require('vm').createContext({});
+    require('vm').runInContext(js.slice(start, end), context);
+    const rects = [{ page: 3, y: 700 }, { page: 4, y: 70 }];
+    assert.equal(context.editCardPage({ rects, page: 3 }), 3);
+    assert.equal(context.editCardPage({ rects, page: 4 }), 4);
+    assert.equal(context.editCardPage({ rects, page: 2 }), 4, 'reflow drops obsolete page anchor');
+    assert.equal(context.editCardPage({ rects: [], page: 3 }), 3);
+    assert.equal(context.editCardPage({ rects }), 4, 'stepping without a click keeps its old fallback');
+});
+
+test('recompiled paragraph geometry cannot move or replace the active editor', () => {
+    const js = fs.readFileSync(CLIENT_JS, 'utf8');
+    const style = { left: '80px', top: '450px', width: '600px' };
+    const card = { dataset: { edit: '1' }, style: { ...style }, remove() { throw Error('editor removed'); } };
+    const wrap = { clientWidth: 800, clientHeight: 1000,
+        getBoundingClientRect: () => ({ left: 0, right: 800 }), querySelector: () => card };
+    const state = { edit: { id: 1, page: 2, fixedGeometry: style,
+        rects: [{ page: 3, x: 10, y: 100, w: 400, h: 50 }] }, rendered: new Map([[2, {}]]) };
+    const context = require('vm').createContext({ state,
+        document: { querySelectorAll: () => [card], querySelector: () => wrap },
+        pagesEl: () => ({ querySelector: selector => { assert.match(selector, /page="2"/); return wrap; } }),
+        rectToViewport: () => { throw Error('other page must not reposition card'); },
+    });
+    const start = js.indexOf('function editCardPage('), end = js.indexOf('\nfunction revealEditCard(', start);
+    require('vm').runInContext(js.slice(start, end), context);
+    context.paintEditCard();
+    assert.deepEqual(card.style, style);
+});
+
+test('compile edge glow follows real compile state and does not intercept or move the page', () => {
+    const js = fs.readFileSync(CLIENT_JS, 'utf8');
+    const html = fs.readFileSync(SHELL, 'utf8');
+    let active = false;
+    const reader = { classList: { toggle(name, value) {
+        assert.equal(name, 'is-compiling'); active = value;
+    } } };
+    const vm = require('vm');
+    const ctx = vm.createContext({ el: id => id === 'reader' ? reader : null });
+    const start = js.indexOf('function setCompileState(');
+    vm.runInContext(js.slice(start, js.indexOf('\n}', start) + 2), ctx);
+    ctx.setCompileState({ compiling: true }); assert.equal(active, true);
+    ctx.setCompileState({ compiling: false }); assert.equal(active, false);
+    ctx.setCompileState(null); assert.equal(active, false);
+    assert.match(js, /case 'compileState': setCompileState\(msg\)/);
+    assert.match(html, /#reader::after\s*\{[^}]*position:absolute;[^}]*pointer-events:none;/);
+    assert.match(html, /compile-edge-glow 3\.6s ease-in-out infinite/);
+    assert.match(html, /prefers-reduced-motion: reduce\)\s*\{\s*#reader\.is-compiling::after\s*\{ animation:none;/);
+    const host = fs.readFileSync(path.join(EXT, 'out/extension/tex/texViewer.js'), 'utf8');
+    assert.match(host, /type: 'compileState', compiling: !!\(st && st\.compiling\)/);
+});
+
+test('paused click, right-click and double-click request recovery instead of silently disappearing', () => {
+    const js = fs.readFileSync(CLIENT_JS, 'utf8');
+    const start = js.indexOf('function sendClick(');
+    const end = js.indexOf("\nel('zoomin')", start);
+    const sent = [];
+    const ctx = require('vm').createContext({ state:{tracePaused:true,generation:7},
+        vscode:{postMessage:m=>sent.push(m)} });
+    require('vm').runInContext(js.slice(start,end), ctx);
+    for (const [extra,type] of [[{},'click'],[{},'editHere'],[{takeMe:true},'click']]) {
+        ctx.sendClick(1,{xBp:10,yTopBp:20},10,20,extra,type);
+    }
+    assert.equal(sent.length,3);
+    assert.ok(sent.every(m => m.type === 'traceRetry' && m.generation === 7));
+});
+
+test('compile replay cannot recreate or touch the live mini-editor session', () => {
+    const js = fs.readFileSync(CLIENT_JS, 'utf8');
+    const start = js.indexOf("case 'editOpen': {");
+    const end = js.indexOf('            // A card the reader has MOVED',start);
+    const ta = { value:'still typing a long sentence',selectionStart:27,selectionEnd:27,scrollTop:60 };
+    const edit = { id:42,text:ta.value };
+    const ctx = require('vm').createContext({ state:{edit},msg:{type:'editOpen',editId:42,text:'old text',caretStart:3},
+        document:{querySelector:()=>ta}, closeEditCard:()=>{throw Error('must not recreate editor');} });
+    require('vm').runInContext('switch(msg.type){'+js.slice(start,end)+
+        'throw Error("reached destructive card recreation");}}',ctx);
+    assert.equal(ctx.state.edit,edit);
+    assert.equal(ta.value,'still typing a long sentence');
+    assert.equal(ta.selectionStart,27);
+    assert.equal(ta.scrollTop,60);
+});
+
+test('mini-editor text refresh preserves caret, backward selection and scroll across repeated updates', () => {
+    const js = fs.readFileSync(CLIENT_JS, 'utf8');
+    const start = js.indexOf('function updateEditTextPreservingCaret(');
+    const end = js.indexOf('\n/** Put the caret', start);
+    const ctx = require('vm').createContext({});
+    require('vm').runInContext(js.slice(start,end),ctx);
+    const ta = { value:'A long sentence being typed.', selectionStart:20, selectionEnd:20,
+        selectionDirection:'forward', scrollTop:70, scrollLeft:12,
+        setRangeText(text,a,b) { this.value=this.value.slice(0,a)+text+this.value.slice(b); },
+        setSelectionRange(a,b,d) { this.selectionStart=a;this.selectionEnd=b;this.selectionDirection=d; } };
+    for (let i=0;i<15;i++) {
+        ta.value=ta.value.slice(0,ta.selectionStart)+'x'+ta.value.slice(ta.selectionStart);
+        ta.selectionStart++;ta.selectionEnd++;
+        const caret=ta.selectionStart;
+        ctx.updateEditTextPreservingCaret(ta,ta.value);
+        assert.equal(ta.selectionStart,caret,'compile with unchanged text cannot rewind typing');
+    }
+    ta.selectionStart=4;ta.selectionEnd=10;ta.selectionDirection='backward';
+    ctx.updateEditTextPreservingCaret(ta,'prefix '+ta.value);
+    assert.equal(ta.selectionStart,11);assert.equal(ta.selectionEnd,17);
+    assert.equal(ta.selectionDirection,'backward');
+    assert.equal(ta.scrollTop,70);assert.equal(ta.scrollLeft,12);
+    assert.match(js,/state\.edit\.text = ta\.value;[^\n]*\n\s*caretSnapshot\(\)/,
+        'typing immediately saves local caret before compile replies');
+    assert.match(js,/e\.caretStart = start;\s*e\.caretEnd = end;/);
 });
 
 console.log('the Page view panel (markup, CSP, one-copy rule)\n');

@@ -150,7 +150,21 @@ function _redactLicenseText(text) {
  * documented -licenseinfo option exits non-zero when no valid licence exists.
  */
 function probeKernelLicense(kernelPath,
-                            { timeoutMs = LICENSE_PROBE_TIMEOUT_MS, spawnFn = spawn } = {}) {
+                            { timeoutMs = LICENSE_PROBE_TIMEOUT_MS, spawnFn = spawn,
+                              platform = process.platform, existsFn = fs.existsSync } = {}) {
+    // Windows WSTP/GUI launchers may exit successfully without stdout. Probe
+    // a console sibling from the SAME installation; never change WSTP's path
+    // or search PATH (which could verify an unrelated installation).
+    let probePath = kernelPath;
+    if (platform === 'win32') {
+        const p = path.win32;
+        if (/^(WolframKernel|MathKernel)\.exe$/i.test(p.basename(kernelPath))) {
+            for (const name of ['wolfram.exe', 'math.exe']) {
+                const candidate = p.join(p.dirname(kernelPath), name);
+                if (existsFn(candidate)) { probePath = candidate; break; }
+            }
+        }
+    }
     return new Promise((resolve) => {
         const started = Date.now();
         let out = '', done = false, timedOut = false;
@@ -160,11 +174,11 @@ function probeKernelLicense(kernelPath,
             // A successful response contains the user's licence identifier.
             // Wolfbook only needs the exit status, so do not retain it at all.
             const safeOutput = r.ok ? '' : _redactLicenseText(out);
-            resolve({ ...r, output: safeOutput, durationMs: Date.now() - started });
+            resolve({ ...r, probePath, output: safeOutput, durationMs: Date.now() - started });
         };
         let child;
         try {
-            child = spawnFn(kernelPath, ['-licenseinfo'], { stdio: ['ignore', 'pipe', 'pipe'] });
+            child = spawnFn(probePath, ['-licenseinfo'], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
         } catch (e) {
             return finish({ ok: false, timedOut: false, exitCode: null,
                             spawnError: String(e.message || e) });
@@ -194,15 +208,23 @@ function probeKernelLicense(kernelPath,
             clearTimeout(timer);
             // Wolfram documents a non-zero status (and normally 0/0/0 fields)
             // when no valid licence is available.
-            const fields = out.trim().split(/\s+/);
-            const looksLikeInfo = fields.length >= 3;
+            // Do not interpret arbitrary diagnostic words as licence fields.
+            // A clean exit with absent/new-format output is inconclusive, NOT
+            // evidence of an invalid licence. Permit normal kernel startup.
+            const info = out.split(/\r?\n/).map(s => s.trim()).find(s =>
+                /^\S+\s+(?:\d+|Infinity)\s+(?:\d+|Infinity)$/.test(s));
+            const fields = info ? info.split(/\s+/) : [];
+            const looksLikeInfo = fields.length === 3;
             const zeroInfo = looksLikeInfo && fields.slice(0, 3).every(v => v === '0');
             // Field 3 is the number of currently available kernel processes.
             // Avoid entering blocking WSTP startup when it is exactly zero.
             // "Infinity" and positive integers are both healthy.
             const noSeats = looksLikeInfo && fields[2] === '0' && !zeroInfo;
-            finish({ ok: code === 0 && looksLikeInfo && !zeroInfo && !noSeats,
-                     reason: noSeats ? 'no-seats' : zeroInfo ? 'no-valid-license' : null,
+            const licenseError = !looksLikeInfo && classifyKernelOutput(out);
+            const ok = code === 0 && !zeroInfo && !noSeats && !licenseError;
+            finish({ ok, verified: ok && looksLikeInfo,
+                     reason: noSeats ? 'no-seats' : zeroInfo ? 'no-valid-license'
+                         : licenseError ? licenseError.sub : ok && !looksLikeInfo ? 'unconfirmed-output' : null,
                      timedOut, exitCode: code, spawnError: null });
         });
     });
@@ -322,6 +344,7 @@ async function diagnoseKernelLaunch(kernelPath, opts = {}) {
         const r = opts.licensePreflight;
         push(`license preflight: ok=false timedOut=${r.timedOut} exit=${r.exitCode} ` +
              `spawnError=${r.spawnError || 'none'} (${r.durationMs} ms)`);
+        if (r.probePath) push(`probe executable: ${r.probePath}`);
         if (r.output && r.output.trim()) {
             push('── licence-check output (secrets redacted) ─────────');
             for (const line of r.output.trim().split(/\r?\n/).slice(0, 20)) push('  ' + line);
@@ -350,13 +373,18 @@ async function diagnoseKernelLaunch(kernelPath, opts = {}) {
         }
         if (r.timedOut) {
             return { cause: 'license', sub: 'license-check-timeout',
-                     summary: 'Wolfram did not finish its licence check in time. It may be waiting for activation or an unavailable MathLM server. Open Mathematica/Wolfram to repair or verify the licence, then try again.',
+                     summary: 'Wolfram did not finish its licence check in time; this does not establish that the licence is invalid. Startup was stopped to prevent a blocking WSTP connection. Check activation/MathLM connectivity and the probe executable, then retry.',
                      detailLines: detail, mathPassCandidates: mathpass };
         }
         if (r.spawnError) {
             return { cause: 'kernel-crash',
                      summary: `The kernel binary could not be started for its licence check: ${r.spawnError}`,
                      detailLines: detail };
+        }
+        if (r.reason !== 'no-valid-license') {
+            return { cause: 'unknown', sub: 'license-check-failed',
+                     summary: `The licence probe exited with code ${r.exitCode} without a recognised licensing result. This does not establish an invalid licence. Startup was stopped to prevent a blocking WSTP connection; check the probe executable and its diagnostics.`,
+                     detailLines: detail, mathPassCandidates: mathpass };
         }
         return { cause: 'license', sub: 'license-invalid',
                  summary: `Wolfram's licence check failed (exit code ${r.exitCode}). Open Mathematica/Wolfram to repair activation or MathPass, then try again.`,

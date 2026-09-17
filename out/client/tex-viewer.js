@@ -184,6 +184,12 @@ function status(text, kind = '') {
     s.className = kind;
 }
 
+/** Compile feedback is independent of trace lag and never changes layout. */
+function setCompileState(msg) {
+    const reader = el('reader');
+    if (reader) reader.classList.toggle('is-compiling', !!(msg && msg.compiling));
+}
+
 /** Pause correspondence while the source and painted PDF are different. */
 function setTraceState(msg) {
     state.tracePaused = !!(msg && msg.paused);
@@ -224,7 +230,8 @@ function setSourceDirty(msg) {
     if (label) label.textContent = count > 1 ? `${count} sources unsaved` : 'Unsaved source';
     const files = msg && Array.isArray(msg.files) ? msg.files.filter(Boolean) : [];
     badge.title = dirty
-        ? `Source changes are not saved to disk${files.length ? `: ${files.join(', ')}` : ''}. Click to save.`
+        ? `Source changes are not saved to disk${files.length ? `: ${files.join(', ')}` : ''}. ` +
+            'They save automatically after 3 seconds without typing; click to save now.'
         : '';
 }
 
@@ -315,6 +322,9 @@ async function loadPdfjs(base) {
 }
 
 async function openDocument(msg) {
+    const navigationEpoch = state.navigationEpoch || 0;
+    hideChipPreview();
+    hoveredPdfLink = null;
     clearPaperTypingTarget(true, 'document opened');
     const openSeq = ++state.openSeq;
     state.openInFlight = openSeq;
@@ -353,7 +363,7 @@ async function openDocument(msg) {
         const restoreSession = !prev || state.restoreViewNext;
         mark('bytes decoded');
         omark('decode');
-        const anchor = scrollAnchor();
+        let anchor = scrollAnchor();
         const nextDoc = await task.promise;
         // Two quick compiles can parse out of order. Only the newest request
         // may become the document; otherwise an older PDF can finish last and
@@ -362,7 +372,16 @@ async function openDocument(msg) {
             try { await nextDoc.destroy(); } catch (_) { /* superseded */ }
             return;
         }
+        if (state.navigationOwner === 'viewer') anchor = scrollAnchor();
+        const editingInPlace = !!(prev && !restoreSession && state.edit);
+        if (editingInPlace) {
+            // Freeze the existing DOM card before any new geometry arrives.
+            // It must retain focus, selection, textarea scroll and IME state.
+            pinEditCard();
+        }
         state.doc = nextDoc;
+        if ((state.navigationEpoch || 0) === navigationEpoch) state.navigationOwner = msg.navigationOwner || 'editor';
+        state.bookmarks = Array.isArray(msg.bookmarks) ? msg.bookmarks : [];
         mark('document parsed');
         omark('parse');
         // A fresh webview starts at 125%. Restore the saved magnification
@@ -391,8 +410,8 @@ async function openDocument(msg) {
             el('zoom').textContent = `${Math.round(state.scale * 100)}%`;
         }
         state.restoreViewNext = false;
-        const samePagination = msg.live && state.pageCount === state.doc.numPages
-            && pagesEl().children.length === state.doc.numPages;
+        const samePagination = editingInPlace || (msg.live && state.pageCount === state.doc.numPages
+            && pagesEl().children.length === state.doc.numPages);
         state.pageCount = state.doc.numPages;
         state.generation = msg.generation;
         // Review rectangles belong to the page geometry that was visible
@@ -408,6 +427,7 @@ async function openDocument(msg) {
         state.pending.clear();
         textCache.clear();
         let placeholders = null;
+        if (editingInPlace) await buildPagePlaceholders(true);
         if (!samePagination) {
             pagesEl().innerHTML = '';
             placeholders = buildPagePlaceholders();
@@ -440,7 +460,7 @@ async function openDocument(msg) {
             const first = Number.isFinite(semanticPage) && semanticPage >= 1 && semanticPage <= state.pageCount
                 ? [...new Set([...vis, semanticPage])] : vis;
             await Promise.all(first.map(renderPage));
-            if (!(await restoreSemanticReveal(msg.semanticReveal, anchor))) restoreAnchor(anchor);
+            if (!editingInPlace && state.navigationOwner !== 'viewer' && !(await restoreSemanticReveal(msg.semanticReveal, anchor))) restoreAnchor(anchor);
             omark('visible');
             // Awaited so the rest of the repaint can be timed too. These pages
             // are off screen, so waiting for them costs the reader nothing.
@@ -690,12 +710,14 @@ function restoreAnchor(a) {
  * amber mark behind. The rect is only a coordinate in the newly rendered PDF.
  */
 async function restoreSemanticReveal(reveal, fallback) {
+    if (state.navigationOwner === 'viewer') return false;
     if (!reveal) return false;
     const page = Number(reveal.page);
     if (!Number.isFinite(page) || page < 1 || page > state.pageCount) return false;
     const rect = (reveal.rects || []).find(r => Number(r.page) === page);
     if (!rect) return false;
     await renderPage(page);
+    if (state.navigationOwner === 'viewer') return false;
     const v = rectToViewport(page, rect);
     const main = document.querySelector('main');
     const wrap = pagesEl().querySelector(`.page[data-page="${page}"]`);
@@ -766,7 +788,7 @@ function semanticViewPoint() {
 function viewSnapshot() {
     const a = scrollAnchor();
     if (!a) return null;
-    return { ...a, ...semanticViewPoint(), scale: state.scale, fit: !!state.fitMode };
+    return { ...a, ...semanticViewPoint(), scale: state.scale, fit: !!state.fitMode, bookmarks: state.bookmarks || [] };
 }
 
 let viewSaveTimer = null;
@@ -793,9 +815,19 @@ window.addEventListener('pagehide', saveViewNow);
  * One placeholder per page, sized correctly up front so the scrollbar is
  * honest and lazy rendering does not make the document jump under the reader.
  */
-function buildPagePlaceholders() {
+function buildPagePlaceholders(preserve = false) {
+    if (preserve) {
+        // Keep the scroll extent while editing even if the PDF loses pages,
+        // but never leave obsolete page content visible as current output.
+        for (const w of pagesEl().children) {
+            if (Number(w.dataset.page) <= state.pageCount) continue;
+            for (const child of [...w.children]) if (!child.classList.contains('editcard')) child.remove();
+            w.dataset.retired = 'true';
+        }
+    }
     const frag = document.createDocumentFragment();
     for (let n = 1; n <= state.pageCount; n++) {
+        if (preserve && pagesEl().querySelector(`.page[data-page="${n}"]`)) continue;
         const wrap = document.createElement('div');
         wrap.className = 'page';
         wrap.dataset.page = String(n);
@@ -812,6 +844,7 @@ function buildPagePlaceholders() {
     return state.doc.getPage(1).then((p) => {
         const vp = p.getViewport({ scale: state.scale });
         for (const w of pagesEl().children) {
+            if (preserve && w.style.height) continue;
             w.style.width = `${Math.floor(vp.width)}px`;
             w.style.height = `${Math.floor(vp.height)}px`;
         }
@@ -831,6 +864,7 @@ function observeVisible() {
 }
 
 async function renderPage(n) {
+    if (!state.doc || n < 1 || n > state.pageCount) return;
     if (state.rendered.has(n)) return;
     // AN IN-FLIGHT RENDER IS SOMETHING TO WAIT FOR, NOT TO WALK PAST.
     //
@@ -877,8 +911,11 @@ async function renderPage(n) {
         const wrap = pagesEl().querySelector(`.page[data-page="${n}"]`);
         if (!wrap) return;
 
-        wrap.style.width = `${Math.floor(vp.width)}px`;
-        wrap.style.height = `${Math.floor(vp.height)}px`;
+        if (!state.edit?.fixedGeometry || !wrap.style.height) {
+            wrap.style.width = `${Math.floor(vp.width)}px`;
+            wrap.style.height = `${Math.floor(vp.height)}px`;
+        }
+        delete wrap.dataset.retired;
         // SWAP, DON'T CLEAR-THEN-DRAW. During a live recompile the previous
         // page is already on screen; removing it first and painting the new
         // one a few hundred milliseconds later is a white flash on every
@@ -904,6 +941,7 @@ async function renderPage(n) {
         if (state.edit) paintEditCard();
         if (state.mma) paintMmaCard();
         paintLinks(n).catch(() => { /* a paper without links is the common case */ });
+        paintBookmarks();
     })().finally(() => state.pending.delete(n));
     state.pending.set(n, job);
     return job;
@@ -971,8 +1009,16 @@ async function paintLinks(n) {
             el2._dest = a.dest;
             el2.addEventListener('mouseenter', () => showPdfLinkPreview(el2));
             el2.addEventListener('mouseleave', () => hidePdfLinkPreview(el2));
+            el2.addEventListener('focus', () => showPdfLinkPreview(el2));
+            el2.addEventListener('blur', () => hidePdfLinkPreview(el2));
         }
         wrap.appendChild(el2);
+    }
+    // Recompilation replaces link nodes. Resume a stationary pointer against
+    // the NEW annotation, never carry an old source/PDF rectangle forward.
+    if (pdfHoverPoint) {
+        const link = document.elementFromPoint(pdfHoverPoint.x, pdfHoverPoint.y)?.closest('.pdflink');
+        if (link?._dest && link.closest('.page') === wrap) showPdfLinkPreview(link);
     }
 }
 
@@ -981,43 +1027,118 @@ async function paintLinks(n) {
 // a hover over `(11)` honest even when several references occur on one line:
 // only the model reference whose printed ink overlaps this annotation wins.
 let hoveredPdfLink = null;
+let pdfHoverPoint = null;
+window.addEventListener('pointermove', e => { pdfHoverPoint = { x: e.clientX, y: e.clientY }; }, { passive: true });
+let pdfHoverTimer = null;
+let pdfCloseTimer = null;
+let pdfPreviewDocument = null;
+let pdfPreviewLabels = null;
+const pdfPreviewCache = new Map();
 
-function boxesOverlap(a, b, pad = 0) {
-    return a.x < b.x + b.w + pad && b.x < a.x + a.w + pad &&
-        a.y < b.y + b.h + pad && b.y < a.y + a.h + pad;
-}
-
-async function previewChipForPdfLink(anchor) {
-    if (!anchor || !state.labels || state.labels.generation !== state.generation) return null;
-    const wrap = anchor.closest('.page');
-    const page = Number(wrap && wrap.dataset.page);
-    if (!(page > 0)) return null;
-    const link = {
-        x: anchor.offsetLeft, y: anchor.offsetTop,
-        w: anchor.offsetWidth, h: anchor.offsetHeight,
-    };
-    const candidates = (state.labels.items || []).filter(c =>
-        c && c.role === 'ref' && c.target && c.target.length && c.find &&
-        (c.find.rects || []).some(r => {
-            if (r.page !== page) return false;
-            const v = rectToViewport(page, r);
-            return v && boxesOverlap(link, v, 3);
-        }));
-    if (!candidates.length) return null;
-    const hits = await Promise.all(candidates.map(async c => ({
-        chip: c,
-        ink: await inkMatching(c.find, page),
-    })));
-    const exact = hits.find(({ ink }) => ink && boxesOverlap(link, ink, 3));
-    // With one reference on the row the row itself is unambiguous even when
-    // pdf.js split the parentheses in a shape `inkMatching` cannot recognise.
-    // With two, silence is preferable to previewing the wrong equation.
-    return exact ? exact.chip : (candidates.length === 1 ? candidates[0] : null);
+// PDF annotations identify the target even when the whole paragraph is one
+// text item. Never infer identity from a nearby number when a destination exists.
+async function destinationPreview(dest) {
+    const doc = state.doc;
+    const generation = state.generation;
+    if (!doc) return null;
+    if (pdfPreviewDocument !== doc || pdfPreviewLabels !== state.labels) {
+        pdfPreviewCache.clear(); pdfPreviewDocument = doc; pdfPreviewLabels = state.labels;
+    }
+    const key = JSON.stringify([generation, dest]);
+    if (pdfPreviewCache.has(key)) return pdfPreviewCache.get(key);
+    const job = (async () => {
+        const d = typeof dest === 'string' ? await doc.getDestination(dest) : dest;
+        if (!Array.isArray(d) || !d.length) throw new Error('Destination unavailable');
+        const page = (Number.isInteger(d[0]) ? d[0] : await doc.getPageIndex(d[0])) + 1;
+        const p = await doc.getPage(page);
+        const vp = p.getViewport({ scale: 1 });
+        const entries = state.labels?.generation === generation ? (state.labels.destinations || []) : [];
+        const matches = typeof dest === 'string' ? entries.filter(c => c.destination === dest) : [];
+        // Aliases may share an anchor; only use bounds when all owners agree.
+        const identities = new Set(matches.map(c => JSON.stringify(c.target)));
+        const target = identities.size === 1 ? matches[0] : null;
+        let rects = (target?.target || []).filter(r => r.page === page &&
+            [r.x, r.y, r.w, r.h].every(Number.isFinite) && r.w > 0 && r.h > 0);
+        let fallback = !rects.length;
+        const heading = target?.kind === 'section-heading';
+        const citation = typeof dest === 'string' && /^cite[.:]/i.test(dest);
+        if (fallback || heading) {
+            const mode = d[1]?.name;
+            const top = mode === 'FitH' || mode === 'FitBH' ? d[2] : mode === 'FitR' ? d[5] : d[3];
+            const y = Number.isFinite(top) ? vp.convertToViewportPoint(0, top)[1] : 0;
+            rects = [{ page, x: 0, y: Math.max(0, Math.min(vp.height - 1, y - 8)), w: vp.width,
+                h: Math.min(heading ? 150 : 190, vp.height - Math.max(0, Math.min(vp.height - 1, y - 8))) }];
+        }
+        if (citation) {
+            // Bibliography entries usually have no source-label bounds. Use
+            // the PDF's citation anchors, not a fixed 190pt page excerpt.
+            try {
+                const cacheKey = 'citation-destinations';
+                if (!pdfPreviewCache.has(cacheKey)) pdfPreviewCache.set(cacheKey, doc.getDestinations());
+                const destinations = await pdfPreviewCache.get(cacheKey);
+                const y = vp.convertToViewportPoint(0, d[3])[1];
+                let bottom = vp.height - 32;
+                for (const [name, next] of Object.entries(destinations || {})) {
+                    if (!/^cite[.:]/i.test(name) || !Array.isArray(next) || !Number.isFinite(next[3])) continue;
+                    const samePage = JSON.stringify(next[0]) === JSON.stringify(d[0]);
+                    if (!samePage) continue;
+                    const nextY = vp.convertToViewportPoint(0, next[3])[1];
+                    if (nextY > y + 2) bottom = Math.min(bottom, nextY);
+                }
+                const text = await p.getTextContent();
+                const ink = text.items.filter(it => it.str?.trim() && it.transform).map(it => {
+                    const [x, baseline] = vp.convertToViewportPoint(it.transform[4], it.transform[5]);
+                    const h = Math.hypot(it.transform[2], it.transform[3]) || it.height || 10;
+                    return {x,y:baseline-h,w:it.width || 0,h};
+                }).filter(r => r.y + r.h > y && r.y + r.h <= bottom && r.w > 0);
+                if (ink.length) {
+                    const x = Math.min(...ink.map(r=>r.x)), top = Math.min(...ink.map(r=>r.y));
+                    rects = [{page,x,y:top,w:Math.max(...ink.map(r=>r.x+r.w))-x,
+                        h:Math.max(...ink.map(r=>r.y+r.h))-top}];
+                    fallback = false;
+                }
+            } catch (_) { /* keep the explicitly labelled excerpt if no bounds are available */ }
+        }
+        const multipage = new Set((target?.target || []).map(r => r.page)).size > 1;
+        const unresolvedEquation = fallback && (target?.kind === 'display-equation' ||
+            (typeof dest === 'string' && /^equation[.:]/i.test(dest)));
+        const title = target ? `${target.title || target.name}${target.printed ? ' · ' + target.printed : ''}` : citation ? 'Citation' : 'Reference target';
+        let shot = null;
+        const width = Math.max(...rects.map(r => r.x + r.w)) - Math.min(...rects.map(r => r.x));
+        const height = Math.max(...rects.map(r => r.y + r.h)) - Math.min(...rects.map(r => r.y));
+        const scale = Math.min(2, 1800 / Math.max(1, width + 8, height + 8));
+        if (!unresolvedEquation) {
+            try { shot = await cropFragment({ id: 'destination', rects, scale, pad: 4 }); } catch (_) {}
+        }
+        if (state.doc !== doc || state.generation !== generation) return null;
+        const kindName = { 'display-equation': 'Equation', figure: 'Figure', table: 'Table', tabular: 'Table', 'section-heading': 'Section' }[target?.kind];
+        const caption = kindName && target.printed ? `${kindName} ${target.printed}` : title;
+        return { shot, title, citation, heading: unresolvedEquation ? 'Equation preview' : `${caption}${fallback ? ' · excerpt' : multipage ? ' · first page' : ''}`,
+            note: `${unresolvedEquation ? 'Exact equation bounds unavailable' : fallback ? 'Destination-page excerpt' : heading ? 'Heading and opening excerpt' : multipage ? 'First target page' : 'Target preview'} · p.${page}` };
+    })();
+    pdfPreviewCache.set(key, job);
+    if (pdfPreviewCache.size > 64) pdfPreviewCache.delete(pdfPreviewCache.keys().next().value);
+    try { return await job; } catch (error) { pdfPreviewCache.delete(key); throw error; }
 }
 
 async function showPdfLinkPreview(anchor) {
+    clearTimeout(pdfCloseTimer);
     hoveredPdfLink = anchor;
     hideChipPreview();
+    clearTimeout(pdfHoverTimer);
+    const seq = previewSeq;
+    const doc = state.doc;
+    pdfHoverTimer = setTimeout(async () => {
+        let preview;
+        let deadline;
+        try { preview = await Promise.race([destinationPreview(anchor._dest), new Promise((_, reject) => {
+            deadline = setTimeout(() => reject(new Error('Preview timed out')), 1800);
+        })]); }
+        catch (_) { preview = { title: 'Reference target', note: 'Preview unavailable — click the link to navigate' }; }
+        finally { clearTimeout(deadline); }
+        if (seq !== previewSeq || hoveredPdfLink !== anchor || state.doc !== doc || !anchor.isConnected || !preview) return;
+        showDestinationCard(preview, anchor);
+    }, 140);
     if (!state.labels || state.labels.generation !== state.generation) {
         // Label data is normally lazy because the Shift overlay is optional.
         // A reference hover needs the same target map without making the
@@ -1026,17 +1147,78 @@ async function showPdfLinkPreview(anchor) {
             state.labelsAsked = state.generation;
             vscode.postMessage({ type: 'labelsWanted', value: true });
         }
-        return;
     }
-    const chip = await previewChipForPdfLink(anchor);
-    if (hoveredPdfLink !== anchor || !anchor.isConnected || !chip) return;
-    await showChipPreview(chip, anchor);
 }
 
 function hidePdfLinkPreview(anchor) {
-    if (hoveredPdfLink === anchor) hoveredPdfLink = null;
-    hideChipPreview();
+    clearTimeout(pdfHoverTimer);
+    clearTimeout(pdfCloseTimer);
+    pdfCloseTimer = setTimeout(() => {
+        if (hoveredPdfLink === anchor) hoveredPdfLink = null;
+        hideChipPreview();
+    }, 180);
 }
+
+function dismissPreviewsOnScroll() {
+    clearTimeout(pdfHoverTimer);
+    clearTimeout(pdfCloseTimer);
+    hoveredPdfLink = null;
+    // Rendering newly visible pages must not reopen a preview beneath a
+    // stationary pointer. A fresh pointer movement establishes a new target.
+    pdfHoverPoint = null;
+    hideChipPreview(); // also invalidates pending asynchronous crops
+}
+
+function showDestinationCard(preview, anchor) {
+    const card = document.createElement('div');
+    card.className = 'lbcprev destination-preview';
+    card.setAttribute('role', 'dialog');
+    card.setAttribute('aria-label', 'Reference preview');
+    card.addEventListener('mouseenter', () => clearTimeout(pdfCloseTimer));
+    card.addEventListener('mouseleave', () => hidePdfLinkPreview(anchor));
+    card.addEventListener('focusin', () => clearTimeout(pdfCloseTimer));
+    card.addEventListener('focusout', () => hidePdfLinkPreview(anchor));
+    const header = document.createElement('div'); header.className = 'destination-preview-header';
+    const title = document.createElement('span'); title.textContent = preview.heading || preview.title;
+    title.title = `${preview.title} · ${preview.note || ''}`;
+    header.appendChild(title); card.appendChild(header);
+    // PDF crop dimensions are in points, independent of the raster scale.
+    // Never stretch a short equation to fill the card; reserve its exact size
+    // before decoding so positioning does not jump when the image arrives.
+    const naturalW = Math.max(1, preview.shot?.w || 280);
+    const naturalH = Math.max(1, preview.shot?.h || 60);
+    const fit = Math.min(preview.citation ? Math.max(1.4, state.scale || 1) : 1,
+        (preview.citation ? 680 : 380) / naturalW, Math.max(1, window.innerWidth - 44) / naturalW,
+        Math.max(1, window.innerHeight * .55) / naturalH);
+    card.style.width = `${Math.max(180, naturalW * fit + 20)}px`;
+    if (preview.shot?.dataUrl) {
+        const img = document.createElement('img'); img.src = preview.shot.dataUrl;
+        img.style.width = `${naturalW * fit}px`; img.style.height = `${naturalH * fit}px`;
+        img.alt = preview.title; card.appendChild(img);
+    } else {
+        const note = document.createElement('small');
+        note.textContent = 'Preview unavailable'; card.appendChild(note);
+    }
+    const open = document.createElement('button');
+    open.type = 'button'; open.title = 'Open target'; open.setAttribute('aria-label', 'Open target');
+    const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    icon.setAttribute('viewBox', '0 0 24 24'); icon.setAttribute('aria-hidden', 'true');
+    const stroke = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    stroke.setAttribute('d', 'M14 5h5v5M19 5l-9 9M19 14v4a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h4');
+    icon.appendChild(stroke); open.appendChild(icon);
+    open.addEventListener('click', () => { hidePdfLinkPreview(anchor); if (preview.onOpen) preview.onOpen(); else followPdfLink(anchor); });
+    header.appendChild(open);
+    document.body.appendChild(card);
+    const ar = anchor.getBoundingClientRect();
+    const w = card.offsetWidth, h = card.offsetHeight;
+    card.style.left = `${Math.max(8, Math.min(ar.left, window.innerWidth - w - 8))}px`;
+    const below = ar.bottom + 8;
+    card.style.top = `${Math.max(8, Math.min(below + h <= window.innerHeight - 8 ? below : ar.top - h - 8, window.innerHeight - h - 8))}px`;
+}
+
+window.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { hoveredPdfLink = null; clearTimeout(pdfHoverTimer); hideChipPreview(); }
+});
 
 /**
  * Follow a link the reader clicked.
@@ -1051,7 +1233,7 @@ async function followPdfLink(el2) {
     if (!dest) return;
     try {
         const d = typeof dest === 'string' ? await state.doc.getDestination(dest) : dest;
-        if (!Array.isArray(d) || !d.length) return;
+        if (!Array.isArray(d) || !d.length) throw new Error('Destination unavailable');
         const idx = Number.isInteger(d[0]) ? d[0] : await state.doc.getPageIndex(d[0]);
         const page = idx + 1;
         await renderPage(page);
@@ -2213,6 +2395,7 @@ function reviewPlacementCurrent() {
 
 /** The pending changes, marked where they print. */
 function paintReview() {
+    paintBookmarks();
     for (const el of document.querySelectorAll('.rband, .rcontour, .rchip')) el.remove();
     const r = state.review;
     if (!r || !r.pending) return;
@@ -2455,11 +2638,13 @@ function renderCommentsDropdown() {
             event.stopPropagation();
             closeCommentsDropdown();
             if (action === 'copy') commentPost('copy', { drafts: commentDrafts() });
+            else if (action === 'copyClear') commentPost('copyClear', { drafts: commentDrafts() });
             else commentPost('clear');
         };
         actions.appendChild(button);
     };
     addAction('copy', 'Copy all', 'copy');
+    addAction('copyClear', 'Copy and delete all', 'copy');
     addAction('clear', 'Delete all', 'trash', true);
     menu.appendChild(actions);
 }
@@ -3967,6 +4152,7 @@ function inkRows(items) {
 }
 
 async function paintSelection(span) {
+    const navigationEpoch = state.navigationEpoch || 0;
     for (const el of document.querySelectorAll('.selfill, .selbrk, .selact')) el.remove();
     state.selection = span || null;
     // A PENDING START HAS NO ROWS BY DEFINITION — it is one end of a selection
@@ -3978,6 +4164,7 @@ async function paintSelection(span) {
     for (const r of ((span.start && span.start.rects) || [])) await renderPage(r.page);
 
     const edge = async (anchor, side) => {
+        if (anchor?.exactEdge) return { ...anchor.exactEdge, word: false };
         if (!anchor || !anchor.rects || !anchor.rects.length) return null;
         const rowEdge = () => {
             const r = anchor.rects[side === 'start' ? 0 : anchor.rects.length - 1];
@@ -4080,11 +4267,18 @@ async function paintSelection(span) {
         const items = await textItems(p);
         const rows = inkRows(items);
         for (const r of rows) {
-            const mid = r.y + r.h / 2;
-            if (p === from.page && mid < startPx.y - 1) continue;
-            if (p === to.page && mid > endPx.y + endPx.h + 1) continue;
-            const isFirst = p === from.page && mid < startPx.y + startPx.h + 1;
-            const isLast = p === to.page && mid > endPx.y - 1;
+            // PDF text rows use em boxes; exact endpoints use ink boxes.
+            // An accent lifts the row's top without lifting its letters. A
+            // midpoint test then drops the entire prose row at larger zooms,
+            // leaving a subscript '+' as the first painted selection band.
+            if (p === from.page && r.y + r.h <= startPx.y) continue;
+            if (p === to.page && r.y >= endPx.y + endPx.h) continue;
+            // The same overlap rule must govern horizontal clipping. A
+            // subscript endpoint lies below the main row's midpoint, but it
+            // still ends that row's selection; otherwise the fill runs into
+            // all subsequent expressions on the same equation line.
+            const isFirst = p === from.page && r.y < startPx.y + startPx.h;
+            const isLast = p === to.page && r.y + r.h > endPx.y;
             // AN END THAT IS THE LINE'S OWN EDGE SNAPS TO THE INK. The row
             // rectangle cannot be trusted for it — measured, the first row of a
             // paragraph had its SyncTeX left edge 28 bp inside the first word,
@@ -4155,7 +4349,8 @@ async function paintSelection(span) {
     state.selShape = parts.slice();
     paintSelectionActions();
 
-    if (span.reveal !== false && from) {
+    if (span.reveal !== false && from && !state.edit && !['review', 'viewer'].includes(state.navigationOwner) &&
+        navigationEpoch === (state.navigationEpoch || 0)) {
         state.highlight = null;
         const wrap = pagesEl().querySelector(`.page[data-page="${from.page}"]`);
         const main = document.querySelector('main');
@@ -4276,7 +4471,10 @@ function goToPage(n, rects, { smooth = true } = {}) {
  * comfortable middle band of the viewport — then put it there.
  */
 async function revealHighlight({ smooth = true, tries = 2 } = {}) {
+    // Viewport ownership suppresses scrolling, never the caret's repaint.
     paintHighlight();
+    if (['review', 'viewer'].includes(state.navigationOwner) || state.edit) return;
+    const navigationEpoch = state.navigationEpoch || 0;
     let h = state.highlight;
     const main = document.querySelector('main');
     if (!h || !main || !h.rects || !h.rects.length) return;
@@ -4314,6 +4512,7 @@ async function revealHighlight({ smooth = true, tries = 2 } = {}) {
         await new Promise((r) => requestAnimationFrame(() => r()));
         return revealHighlight({ smooth, tries: tries - 1 });
     }
+    if (state.edit || ['review', 'viewer'].includes(state.navigationOwner) || navigationEpoch !== (state.navigationEpoch || 0)) return;
     const top = wrap.offsetTop + (v ? v.y : 0);
     const height = v ? Math.max(v.h, 8) : Math.min(wrap.offsetHeight, 200);
 
@@ -4329,6 +4528,216 @@ async function revealHighlight({ smooth = true, tries = 2 } = {}) {
 }
 
 // --- interaction -------------------------------------------------------------
+
+// Bookmarks belong to the paper's saved reading session, not its TeX source.
+let bookmarkPaintFrame = null;
+let bookmarkPreviewToken = 0;
+const bookmarkSvg = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v17l-6-4-6 4Z"/></svg>';
+
+function bookmarkSection(b) {
+    if (b.automatic) return b.section || '';
+    const sections = state.sections?.generation === state.generation ? state.sections.items || [] : [];
+    const before = sections.map(s => ({ ...s, page: s.startPage ?? s.page, y: s.startY ?? s.y }))
+        .filter(s => s.kind === 'section' && s.page &&
+        (s.page < b.page || (s.page === b.page && s.y <= b.y + 3)))
+        .sort((a, c) => c.page - a.page || c.y - a.y);
+    const s = before[0];
+    return s ? (s.number ? `§ ${s.number}` : s.title) : b.section || '';
+}
+
+function bookmarkLabel(b) {
+    return `${bookmarkSection(b) || 'Bookmark'} · p.${b.page}${b.approximate ? ' · saved position' : ''}`;
+}
+
+function bookmarkCompactLabel(b) {
+    return `${bookmarkSection(b) || 'Bookmark'} · p.${b.page}${b.approximate ? ' ≈' : ''}`;
+}
+
+function bookmarkScreenY(b) {
+    const wrap = pagesEl().querySelector(`.page[data-page="${b.page}"]`);
+    if (!wrap) return null;
+    const v = rectToViewport(b.page, { x: b.x, y: b.y, w: 1, h: 1 });
+    const y = v ? v.y : b.y * wrap.offsetHeight / (b.height || 842);
+    return wrap.getBoundingClientRect().top + y;
+}
+
+// One nearest heading on each side, at ANY of these depths. These are derived
+// navigation links, never persisted as personal bookmarks or given delete buttons.
+function nearbySectionBookmarks(items, bounds, screenY) {
+    const candidates = items.filter(s => s.kind === 'section' && s.page > 0 && Number.isFinite(s.y) &&
+        (s.headingType ? ['chapter', 'section', 'subsection', 'subsubsection'].includes(s.headingType)
+            : s.level >= 1 && s.level <= 4)).map(s => ({
+                id: `section:${s.key || `${s.file}:${s.line}`}`, automatic: true,
+                page: s.page, x: s.x || 0, y: s.y,
+                section: s.number ? `${s.headingType === 'chapter' ? 'Ch.' : '§'} ${s.number}` : s.title || 'Heading',
+                title: s.title || '',
+            })).map(b => ({ b, y: screenY(b) })).filter(c => Number.isFinite(c.y));
+    return {
+        above: candidates.filter(c => c.y < bounds.top).sort((a, b) => b.y - a.y)[0]?.b || null,
+        below: candidates.filter(c => c.y > bounds.bottom).sort((a, b) => a.y - b.y)[0]?.b || null,
+    };
+}
+
+function revisionEdgeLinks(hunks) {
+    return hunks.flatMap(h => {
+        const r = h.rects?.find(r => r.page > 0 && Number.isFinite(r.x) && Number.isFinite(r.y));
+        if (!r) return [];
+        return [{ id: `revision:${h.id}`, revisionId: h.id, automatic: true,
+            page: r.page, x: r.x, y: r.y,
+            section: `Δ ${bookmarkSection({ page: r.page, y: r.y }) || 'Change'}`,
+            title: h.name || h.verb || 'Pending revision' }];
+    });
+}
+
+async function gotoBookmark(b) {
+    if (!state.doc || b.page > state.pageCount) { status('This bookmark’s page is no longer in the paper', 'warn'); return; }
+    hideChipPreview(); bookmarkPreviewToken++;
+    await renderPage(b.page);
+    const wrap = pagesEl().querySelector(`.page[data-page="${b.page}"]`);
+    const main = document.querySelector('main');
+    const v = rectToViewport(b.page, { x: b.x, y: b.y, w: 1, h: 1 });
+    if (wrap && main && v) {
+        main.scrollTo({ top: Math.max(0, main.scrollTop + wrap.getBoundingClientRect().top + v.y -
+            main.getBoundingClientRect().top - main.clientHeight * .35), behavior: 'smooth' });
+        status(bookmarkLabel(b));
+    }
+}
+
+async function previewBookmark(b, anchor) {
+    const token = ++bookmarkPreviewToken, doc = state.doc, generation = state.generation;
+    hideChipPreview(); clearTimeout(pdfCloseTimer);
+    const previewEpoch = previewSeq;
+    await new Promise(resolve => setTimeout(resolve, 140));
+    if (token !== bookmarkPreviewToken || !doc || !anchor.isConnected) return;
+    let shot;
+    try {
+        const p = await doc.getPage(b.page), vp = p.getViewport({ scale: 1 });
+        const y = Math.max(0, Math.min(vp.height - 1, b.y - 35));
+        const pt = vp.convertToPdfPoint(b.x, b.y);
+        anchor._dest = [b.page - 1, { name: 'XYZ' }, pt[0], pt[1]];
+        shot = await cropFragment({ id: 'bookmark', rects: [{ page: b.page, x: 0, y,
+            w: vp.width, h: Math.min(160, vp.height - y) }], scale: 2, pad: 0 });
+    } catch (_) {}
+    if (token !== bookmarkPreviewToken || previewEpoch !== previewSeq || state.doc !== doc || state.generation !== generation || !anchor.isConnected) return;
+    showDestinationCard({ shot, title: bookmarkLabel(b), heading: bookmarkLabel(b),
+        note: b.revisionId ? `Pending revision · ${b.title}` : 'Bookmarked passage',
+        onOpen: b.revisionId ? () => reviewAct('show', { id: b.revisionId }) : null }, anchor);
+}
+
+function removeBookmark(id) {
+    state.bookmarks = (state.bookmarks || []).filter(b => b.id !== id);
+    bookmarkPreviewToken++; hideChipPreview(); saveViewNow(); paintBookmarks();
+    status('Bookmark removed');
+}
+
+function bookmarkControl(b, edge) {
+    const current = () => (state.bookmarks || []).find(saved => saved.id === b.id) || b;
+    const group = document.createElement('span'); group.className = (edge ? 'bookmark-pill' : 'bookmark-marker') +
+        (b.revisionId ? ' bookmark-revision' : b.automatic ? ' bookmark-auto' : '');
+    group.dataset.bookmark = b.id;
+    const button = document.createElement('button'); button.type = 'button';
+    button.innerHTML = b.revisionId ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 16-1 4 4-1L20 7l-3-3ZM14 7l3 3"/></svg>' : b.automatic ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14M5 12h10M5 19h14"/></svg>' : bookmarkSvg;
+    button.setAttribute('aria-label', bookmarkLabel(b));
+    button.title = `${bookmarkLabel(b)}${b.title ? ' — ' + b.title : ''}${b.revisionId ? ' (pending revision)' : b.automatic ? ' (automatic heading link)' : ''}`;
+    if (edge) { const label = document.createElement('span'); label.textContent = bookmarkCompactLabel(b); button.appendChild(label); }
+    button.addEventListener('click', () => b.revisionId ? reviewAct('show', { id: b.revisionId }) : gotoBookmark(current()));
+    button.addEventListener('mouseenter', () => previewBookmark(current(), button));
+    button.addEventListener('focus', () => previewBookmark(current(), button));
+    for (const name of ['mouseleave', 'blur']) button.addEventListener(name, () => {
+        bookmarkPreviewToken++; hidePdfLinkPreview(button);
+    });
+    const del = document.createElement('button'); del.type = 'button'; del.className = 'bookmark-delete';
+    del.textContent = '×'; del.title = 'Remove bookmark'; del.setAttribute('aria-label', `Remove ${bookmarkLabel(b)}`);
+    del.addEventListener('click', () => removeBookmark(b.id));
+    group.appendChild(button);
+    if (!b.automatic) group.appendChild(del);
+    for (const event of ['click', 'mousedown', 'pointerdown']) group.addEventListener(event, e => e.stopPropagation());
+    return group;
+}
+
+function paintBookmarks() {
+    if (bookmarkPaintFrame) return;
+    bookmarkPaintFrame = requestAnimationFrame(() => {
+        bookmarkPaintFrame = null;
+        const main = document.querySelector('main'); if (!main) return;
+        const bounds = main.getBoundingClientRect();
+        const bookmarks = [...(state.bookmarks || [])].sort((a, b) => a.page - b.page || a.y - b.y);
+        const ids = new Set(bookmarks.map(b => b.id));
+        for (const mark of pagesEl().querySelectorAll('.bookmark-marker')) {
+            const b = bookmarks.find(b => b.id === mark.dataset.bookmark);
+            if (!ids.has(mark.dataset.bookmark) || b.page !== Number(mark.closest('.page')?.dataset.page)) mark.remove();
+        }
+        const above = [], below = [];
+        const nearest = nearbySectionBookmarks(state.sections?.generation === state.generation ? state.sections.items || [] : [],
+            bounds, bookmarkScreenY);
+        const revisionLinks = reviewPlacementCurrent() ? revisionEdgeLinks(reviewHunks()) : [];
+        for (const b of bookmarks) {
+            const wrap = pagesEl().querySelector(`.page[data-page="${b.page}"]`);
+            if (!wrap) { below.push(b); continue; }
+            const v = rectToViewport(b.page, { x: b.x, y: b.y, w: 1, h: 1 });
+            const y = v ? v.y : b.y * wrap.offsetHeight / (b.height || 842);
+            const screenY = wrap.getBoundingClientRect().top + y;
+            if (screenY < bounds.top + 35) above.push(b);
+            else if (screenY > bounds.bottom - 35) below.push(b);
+            let mark = [...wrap.querySelectorAll('.bookmark-marker')].find(n => n.dataset.bookmark === b.id);
+            if (!mark) { mark = bookmarkControl(b, false); wrap.appendChild(mark); }
+            mark.style.top = `${Math.max(0, y - 12)}px`;
+        }
+        for (const [edge, list] of [['above', above], ['below', below]]) {
+            let rail = document.getElementById(`bookmark-${edge}`);
+            if (!rail) {
+                rail = document.createElement('nav'); rail.id = `bookmark-${edge}`;
+                rail.className = 'bookmark-rail'; rail.setAttribute('aria-label', `Bookmarks ${edge} the view`);
+                document.body.appendChild(rail);
+            }
+            const automatic = nearest[edge];
+            const revisions = revisionLinks.filter(b => {
+                const y = bookmarkScreenY(b);
+                return y != null && (edge === 'above' ? y < bounds.top : y > bounds.bottom);
+            }).sort((a, b) => a.page - b.page || a.y - b.y);
+            const displayed = [...(automatic ? [automatic] : []), ...revisions, ...list];
+            rail.hidden = !displayed.length;
+            rail.style.left = `${bounds.left}px`; rail.style.maxWidth = `${Math.max(0, bounds.width)}px`;
+            rail.style.top = edge === 'above' ? `${bounds.top}px` : 'auto';
+            rail.style.bottom = edge === 'below' ? `${window.innerHeight - bounds.bottom}px` : 'auto';
+            const key = displayed.map(b => `${b.id}:${b.page}:${b.x}:${b.y}:${bookmarkLabel(b)}`).join('|');
+            if (rail.dataset.items !== key) {
+                rail.replaceChildren(); rail.dataset.items = key;
+                const count = document.createElement('span'); count.className = 'bookmark-direction';
+                count.textContent = `${edge === 'above' ? '↑' : '↓'}${list.length ? ' ' + list.length : ''}`;
+                count.title = `${list.length} saved bookmarks · ${revisions.length} revisions ${edge}${automatic ? ' · nearest heading' : ''}`;
+                rail.appendChild(count);
+                for (const b of displayed) rail.appendChild(bookmarkControl(b, true));
+            }
+        }
+    });
+}
+
+function bookmarkGesture(ev) {
+    return ev.button === 0 && ev.shiftKey && !ev.ctrlKey && !ev.metaKey && !ev.altKey &&
+        !ev.target.closest('button, a, input, textarea, .lbc, .wpa, .selact, .selbrk, .bookmark-marker');
+}
+pagesEl().addEventListener('mousedown', ev => {
+    if (bookmarkGesture(ev)) { ev.preventDefault(); ev.stopImmediatePropagation(); }
+}, true);
+pagesEl().addEventListener('click', ev => {
+    if (!bookmarkGesture(ev)) return;
+    const wrap = ev.target.closest('.page'); if (!wrap) return;
+    const page = Number(wrap.dataset.page), box = wrap.getBoundingClientRect();
+    const pt = fromViewport(page, ev.clientX - box.left, ev.clientY - box.top); if (!pt) return;
+    ev.preventDefault(); ev.stopImmediatePropagation();
+    const bookmarks = state.bookmarks || [];
+    const existing = bookmarks.find(b => b.page === page && Math.abs(b.y - pt.yTopBp) < 10);
+    if (existing) { status('This passage is already bookmarked'); return; }
+    if (bookmarks.length >= 200) { status('This paper has 200 bookmarks. Remove one before adding another.', 'warn'); return; }
+    const b = { id: `bm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, page,
+        x: pt.xBp, y: pt.yTopBp, height: state.rendered.get(page)?.viewport.height / state.scale,
+        at: Date.now(), generation: state.generation };
+    b.section = bookmarkSection(b); state.bookmarks = [...bookmarks, b];
+    saveViewNow(); paintBookmarks(); status(`Bookmarked · ${bookmarkLabel(b)}`);
+    vscode.postMessage({ type: 'bookmarkAdded' });
+}, true);
+window.addEventListener('resize', paintBookmarks);
 
 pagesEl().addEventListener('click', async (ev) => {
     if (state.swallowClick) return;               // the tail of a shift-drag
@@ -4759,6 +5168,7 @@ function closeEditCard(notify = true) {
     for (const c of document.querySelectorAll('.editcard')) c.remove();
     if (state.edit && notify) vscode.postMessage({ type: 'editClose', editId: state.edit.id });
     state.edit = null;
+    for (const w of pagesEl().querySelectorAll('.page[data-retired]')) w.remove();
     deferredEditSelect = null;
 }
 
@@ -4772,6 +5182,8 @@ function postEditView() {
     const direction = start !== end && ((ta && ta.selectionDirection === 'backward') ||
         (!ta && e.caretDirection === 'backward'))
         ? 'backward' : 'forward';
+    e.caretStart = start;
+    e.caretEnd = end;
     e.caretDirection = direction;
     vscode.postMessage({
         type: 'editView', editId: e.id,
@@ -4928,7 +5340,7 @@ function makeDraggable(card, handle, session) {
             card.style.left = `${left}px`;
             card.style.top = `${top}px`;
             const e = sess.get();
-            if (e) e.pos = { fx: left / W, fy: top / H };
+            if (e) { e.fixedGeometry = null; e.pos = { fx: left / W, fy: top / H }; }
         };
         const up = () => {
             handle.removeEventListener('pointermove', move);
@@ -4945,7 +5357,7 @@ function makeDraggable(card, handle, session) {
     handle.addEventListener('dblclick', (ev) => {
         if (ev.target.closest('button')) return;
         const e = sess.get();
-        if (e) e.pos = null;
+        if (e) { e.pos = null; e.fixedGeometry = null; }
         sess.repaint();
         if (e === state.edit) postEditView();
     });
@@ -5009,6 +5421,20 @@ function buildEditCard(e) {
     e._caretSent = `${caretStart}:${caretEnd}:${caretDirection}`;
     box.append(pre, ta);
     let debounce = null;
+    const caretSnapshot = () => {
+        const start = ta.selectionStart;
+        const end = ta.selectionEnd;
+        e.caretStart = start;
+        e.caretEnd = end;
+        e.caretDirection = start !== end && ta.selectionDirection === 'backward' ? 'backward' : 'forward';
+        return {
+            start,
+            end,
+            direction: start !== end && ta.selectionDirection === 'backward'
+                ? 'backward' : 'forward',
+            pos: state.edit && state.edit.pos || null,
+        };
+    };
     // One ordered operation shared by the card button, the textarea shortcut,
     // and ⌘S/Ctrl+S while keyboard focus is anywhere else on the paper.
     // Clearing the pending change is essential: otherwise it arrives after the
@@ -5016,7 +5442,10 @@ function buildEditCard(e) {
     function saveCurrent() {
         clearTimeout(debounce);
         debounce = null;
-        vscode.postMessage({ type: 'editSave', editId: e.id, text: ta.value });
+        vscode.postMessage({
+            type: 'editSave', editId: e.id, text: ta.value,
+            caret: caretSnapshot(),
+        });
     }
     e._saveCurrent = saveCurrent;
     // Crossing a block boundary should be possible from the keyboard, but a
@@ -5028,10 +5457,20 @@ function buildEditCard(e) {
     ta.addEventListener('input', () => {
         boundaryArm = null;
         state.edit.text = ta.value;               // survives zoom/generation rebuilds
+        caretSnapshot();                         // capture before host/compile replies
         state.edit.sel = null;                    // the located range is stale once typed over
         clearTimeout(debounce);
         debounce = setTimeout(() => {
-            vscode.postMessage({ type: 'editChange', editId: e.id, text: ta.value });
+            debounce = null;
+            const caret = caretSnapshot();
+            // The textarea and TextDocument must advance as one state. After
+            // a deletion these offsets describe the NEW text; posting them as
+            // a separate, earlier editCaret made the host resolve them against
+            // the OLD text and select a different fragment on the page.
+            state.edit._caretSent = `${caret.start}:${caret.end}:${caret.direction}`;
+            vscode.postMessage({
+                type: 'editChange', editId: e.id, text: ta.value, caret,
+            });
         }, 250);
         syncHighlight(card);
         sendCaret();
@@ -5061,13 +5500,18 @@ function buildEditCard(e) {
     let caretT = null;
     let caretLastSent = 0;
     const flushCaret = () => {
+        // An input changed the coordinate system but its debounced document
+        // update has not gone out yet. The debounce callback sends the latest
+        // caret bundled with that text; never send new offsets against the old
+        // document in the meantime.
+        if (debounce) return;
         caretLastSent = Date.now();
         if (!state.edit) return;
-        const a = ta.selectionStart; const b = ta.selectionEnd;
+        const caret = caretSnapshot();
+        const a = caret.start; const b = caret.end;
         // selectionStart/End are ordered bounds. selectionDirection is the
         // missing third coordinate: it says which edge Shift+Arrow moves.
-        const direction = a !== b && ta.selectionDirection === 'backward'
-            ? 'backward' : 'forward';
+        const direction = caret.direction;
         const key = `${a}:${b}:${direction}`;
         // A repaint is not a movement — and neither is a range the PAGE just
         // put here. `_caretSent` is kept on the session rather than in this
@@ -5089,7 +5533,7 @@ function buildEditCard(e) {
         }
         vscode.postMessage({
             type: 'editCaret', editId: e.id, start: a, end: b, direction,
-            pos: state.edit.pos || null,
+            pos: caret.pos,
         });
     };
     const sendCaret = () => {
@@ -5608,6 +6052,24 @@ function paintMmaCard(focus = false) {
 }
 
 /** Place (or re-place) the card under its block's rendered rows. */
+function pinEditCard() {
+    const card = document.querySelector('.editcard'), wrap = card?.parentElement;
+    if (!state.edit || !card || !wrap) return;
+    state.edit.page = Number(wrap.dataset.page);
+    state.edit.pos = { fx: (parseFloat(card.style.left) || 0) / Math.max(1, wrap.clientWidth),
+        fy: (parseFloat(card.style.top) || 0) / Math.max(1, wrap.clientHeight) };
+    state.edit.fixedGeometry = { left: card.style.left, top: card.style.top, width: card.style.width };
+}
+
+function editCardPage(e) {
+    if (e.fixedGeometry && Number(e.page) > 0) return Number(e.page);
+    const rects = e.rects || [];
+    // A paragraph may span pages: place beneath the clicked fragment, not
+    // beneath its final line on another page. Old/reflowed anchors fall back.
+    if (Number(e.page) > 0 && (!rects.length || rects.some(r => r.page === Number(e.page)))) return Number(e.page);
+    return rects.length ? rects[rects.length - 1].page : 1;
+}
+
 function paintEditCard(focus = false) {
     const e = state.edit;
     for (const c of document.querySelectorAll('.editcard')) {
@@ -5615,7 +6077,7 @@ function paintEditCard(focus = false) {
     }
     if (!e) return;
     const rects = e.rects && e.rects.length ? e.rects : null;
-    const page = rects ? rects[rects.length - 1].page : e.page;
+    const page = editCardPage(e);
     const wrap = pagesEl().querySelector(`.page[data-page="${page}"]`);
     if (!wrap || !state.rendered.has(page)) return;
 
@@ -5660,7 +6122,9 @@ function paintEditCard(focus = false) {
     const hi = Math.max(lo, Math.min(W - cw, visRight - cw - 14));
     const x = Math.max(lo, Math.min(left == null ? 32 : left, hi));
     card.style.width = `${cw}px`;
-    if (e.pos) {
+    if (e.fixedGeometry) {
+        Object.assign(card.style, e.fixedGeometry);
+    } else if (e.pos) {
         // MOVED BY HAND — the reader's placement outranks the block's. Clamped
         // to the page it lives on, so a resize or a zoom cannot leave it
         // stranded off the edge with nothing left to grab.
@@ -5709,6 +6173,21 @@ function revealEditCard(card) {
     if (Math.abs(delta) > 1) main.scrollTo({ top: main.scrollTop + delta, behavior: 'smooth' });
 }
 
+/** Apply only changed text; assigning .value resets native caret/selection. */
+function updateEditTextPreservingCaret(ta, text) {
+    const before = ta.value;
+    if (before === text) return;
+    let start = 0, oldEnd = before.length, newEnd = text.length;
+    while (start < oldEnd && start < newEnd && before[start] === text[start]) start++;
+    while (oldEnd > start && newEnd > start && before[oldEnd - 1] === text[newEnd - 1]) { oldEnd--; newEnd--; }
+    const a = ta.selectionStart, b = ta.selectionEnd, direction = ta.selectionDirection;
+    const top = ta.scrollTop, left = ta.scrollLeft;
+    const map = p => p <= start ? p : p >= oldEnd ? p + newEnd - oldEnd : Math.min(p, newEnd);
+    ta.setRangeText(text.slice(start, newEnd), start, oldEnd, 'preserve');
+    ta.setSelectionRange(map(a), map(b), direction);
+    ta.scrollTop = top; ta.scrollLeft = left;
+}
+
 /** Put the caret on a range of the open block, and show where it landed. */
 function selectInEditCard(msg) {
     const e = state.edit;
@@ -5723,6 +6202,9 @@ function selectInEditCard(msg) {
     }
     const ta = card.querySelector('textarea');
     // THE MARKED WORD AND THE CARET ARE TWO ANSWERS.
+    // While typing here, passive editor/compile echoes describe an older
+    // caret. Only an explicit paper click may replace this local selection.
+    if (document.activeElement === ta && !msg.focus && !Number.isFinite(msg.typingRequest)) return;
     //
     // A textarea's caret, like the editor's, can only sit at one END of a
     // selection — so selecting the word cannot also say where in it the reader
@@ -5749,7 +6231,9 @@ function selectInEditCard(msg) {
     // scrolls itself (it is laid out at full content height), so the mark in
     // the layer is the only element that can be revealed.
     const mark = card.querySelector('.ec-sel');
-    if (mark && mark.scrollIntoView) mark.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    if ((msg.focus || Number.isFinite(msg.typingRequest)) && mark && mark.scrollIntoView) {
+        mark.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    }
     postEditView();
 
     // A printable key pressed on the paper opened this card. Insert every key
@@ -5795,7 +6279,10 @@ function clearPaperTypingTarget(clearPending = false, reason = '') {
 }
 
 function sendClick(n, pt, cx, cy, extra, type = 'click') {
-    if (state.tracePaused) return;
+    if (state.tracePaused) {
+        vscode.postMessage({ type: 'traceRetry', generation: state.generation });
+        return;
+    }
     const base = {
         type, page: n, xBp: pt.xBp, yTopBp: pt.yTopBp,
         generation: state.generation, ...extra,
@@ -6166,11 +6653,32 @@ el('pin').addEventListener('change', (e) => {
 updatePinControl(false);
 // Report where the reader is, so closing and reopening the panel — which is
 // the only way to hide a webview — puts them back rather than at page one.
+function claimViewerNavigation() {
+    state.navigationEpoch = (state.navigationEpoch || 0) + 1;
+    if (state.navigationOwner === 'viewer') return;
+    state.navigationOwner = 'viewer';
+    vscode.postMessage({ type: 'viewerNavigation' });
+}
 {
     const main = document.querySelector('main');
     if (main) {
+        // Scroll events also come from our own scrollTo/restore calls. Claim
+        // navigation from input gestures, never from those programmatic moves.
+        main.addEventListener('wheel', e => {
+            if (e.deltaX || e.deltaY) dismissPreviewsOnScroll();
+            if (!e.ctrlKey && (e.deltaX || e.deltaY)) claimViewerNavigation();
+        }, { passive: true });
+        main.addEventListener('touchmove', claimViewerNavigation, { passive: true });
+        main.addEventListener('pointerdown', e => {
+            if (e.target === main && e.button === 0) claimViewerNavigation();
+        });
+        main.addEventListener('keydown', e => {
+            if (!e.target.closest('input, textarea, button, [contenteditable="true"]') &&
+                ['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(e.key)) claimViewerNavigation();
+        });
         let lastLeft = main.scrollLeft;
         main.addEventListener('scroll', () => {
+            dismissPreviewsOnScroll();
             // Only the HORIZONTAL scroll moves the card: it is a child of the
             // page, so it follows vertically on its own, but its width was
             // computed from the visible band and that band has just moved.
@@ -6181,6 +6689,7 @@ updatePinControl(false);
             // Cheap enough to do on every scroll event: it walks the page
             // elements and touches one text node.
             paintPageNow();
+            paintBookmarks();
             positionCommentMarkersX();
             // The conversation card is visually a bubble attached to its
             // paragraph. Follow that page child as it scrolls, rather than
@@ -6690,12 +7199,14 @@ window.addEventListener('message', async (ev) => {
         case 'sections':
             state.sections = { generation: msg.generation, items: msg.items || [], pageWidth: msg.pageWidth };
             paintSections();
+            paintBookmarks();
             // Folding from the contents changes the contents; leaving the old
             // list up would show a section as open that has just been folded.
             if (navVisible()) renderNav();
             break;
         case 'labels':
-            state.labels = { generation: msg.generation, items: msg.items || [] };
+            if (msg.generation !== state.generation) break;
+            state.labels = { generation: msg.generation, items: msg.items || [], destinations: msg.destinations || [] };
             state.labelFormat = msg.format || 'command';
             if (labelsVisible()) { paintLabels().catch(() => {}); if (state.labelsOn) hintLabels(); }
             if (hoveredPdfLink && hoveredPdfLink.isConnected) {
@@ -6715,10 +7226,15 @@ window.addEventListener('message', async (ev) => {
             break;
         }
         case 'status': status(msg.text, msg.kind || ''); break;
+        case 'compileState': setCompileState(msg); break;
         case 'traceState': setTraceState(msg); break;
         case 'sourceDirty': setSourceDirty(msg); break;
         case 'setFollow': setFollowMode(msg.mode || (msg.value ? 'scroll' : 'off'), false); break;
         case 'editOpen': {
+            // A compile/restore replay for the SAME session is not a request
+            // for a new editor. Keep its DOM, undo history, composition, value,
+            // caret and scroll exactly as they are, including unsent typing.
+            if (state.edit?.id === msg.editId && document.querySelector('.editcard textarea')) break;
             // A card the reader has MOVED keeps its place while they step from
             // block to block — the whole point of moving it was to choose where
             // to look. A right-click, which says "edit this one, here", pins it
@@ -6728,16 +7244,15 @@ window.addEventListener('message', async (ev) => {
             state.edit = {
                 id: msg.editId, text: msg.text || '', label: msg.label,
                 file: msg.file, startLine: msg.startLine, endLine: msg.endLine,
-                rects: msg.rects || [], page: (msg.rects && msg.rects[0] && msg.rects[0].page)
-                    || Number(msg.page) || 1,
+                rects: msg.rects || [], page: Number(msg.page) ||
+                    (msg.rects?.length ? msg.rects[msg.rects.length - 1].page : 1),
                 pos: keepPos || msg.pos || null,
                 caretStart: Number.isFinite(msg.caretStart) ? msg.caretStart : 0,
                 caretEnd: Number.isFinite(msg.caretEnd) ? msg.caretEnd
                     : (Number.isFinite(msg.caretStart) ? msg.caretStart : 0),
                 caretDirection: msg.caretDirection === 'backward' ? 'backward' : 'forward',
             };
-            const page = state.edit.rects.length
-                ? state.edit.rects[state.edit.rects.length - 1].page : state.edit.page;
+            const page = editCardPage(state.edit);
             await renderPage(page);
             // Restoration must not disturb the exact saved scroll position.
             // A newly requested card still reveals and focuses itself.
@@ -6760,11 +7275,9 @@ window.addEventListener('message', async (ev) => {
             const card = document.querySelector('.editcard');
             const ta = card && card.querySelector('textarea');
             if (ta && ta.value !== msg.text) {
-                // The change came from the text editor. Keep the caret where it
-                // was, clamped — the reader is not typing here at this moment.
-                const at = ta.selectionStart;
-                ta.value = msg.text;
-                try { ta.selectionStart = ta.selectionEnd = Math.min(at, msg.text.length); } catch (_) { /* fine */ }
+                updateEditTextPreservingCaret(ta, msg.text);
+                e.caretStart = ta.selectionStart; e.caretEnd = ta.selectionEnd;
+                e.caretDirection = ta.selectionDirection;
                 e.sel = null;
                 syncHighlight(card);
             }
@@ -6894,6 +7407,7 @@ window.addEventListener('message', async (ev) => {
         }
         case 'editAnchor':
             if (state.edit && state.edit.id === msg.editId) {
+                pinEditCard();
                 state.edit.rects = msg.rects || state.edit.rects;
                 paintEditCard();
             }
@@ -6941,7 +7455,13 @@ window.addEventListener('message', async (ev) => {
         case 'reviewOpen':
             if (state.review) { document.body.classList.add('reviewing'); renderReview(); }
             break;
+        case 'navigationOwner':
+            state.navigationEpoch = (state.navigationEpoch || 0) + 1;
+            state.navigationOwner = ['review', 'viewer'].includes(msg.owner) ? msg.owner : 'editor';
+            break;
         case 'reviewFocus':
+            const reviewNavigationEpoch = state.navigationEpoch = (state.navigationEpoch || 0) + 1;
+            state.navigationOwner = 'review';
             if (state.review) {
                 state.review.focus = msg.id;
                 renderReview();
@@ -6957,6 +7477,7 @@ window.addEventListener('message', async (ev) => {
                 if (msg.page) {
                     renderAround(msg.page);
                     await renderPage(msg.page);
+                    if (state.navigationOwner !== 'review' || state.navigationEpoch !== reviewNavigationEpoch) break;
                     const wrap = pagesEl().querySelector(`.page[data-page="${msg.page}"]`);
                     const main = document.querySelector('main');
                     if (wrap && main) {

@@ -9,6 +9,7 @@
 //
 //   keystroke -> debounce (nextLiveDelayMs)
 //             -> compile, possibly capped to one pass (readPassLimit)
+//             -> retry the exact glyph map after the source changes
 //             -> ship to the webview only if the ink moved (shipDecision)
 //             -> re-parse SyncTeX only if its bytes moved (synctexUnchanged)
 //             -> once the typing really stops, a full rebuild
@@ -90,6 +91,39 @@ function blendLiveMs(prev, sample, alpha = 0.4) {
     if (!(s > 0)) return prev ?? null;
     if (prev == null || !(Number(prev) > 0)) return s;
     return Math.round((1 - alpha) * Number(prev) + alpha * s);
+}
+
+/**
+ * Should this build ask LuaLaTeX for the exact glyph map?
+ *
+ * A paper can be temporarily invalid in the middle of typing. Remembering one
+ * such failure as a document-wide boolean permanently downgraded every later
+ * generation to SyncTeX: the red caret disappeared and review geometry became
+ * approximate, even after the source was fixed and Compile was pressed.
+ *
+ * Backoff is therefore scoped to the exact source snapshot that failed. The
+ * next edit retries automatically, and an explicit Compile (`force`) retries
+ * even that same snapshot. An explicitly selected lualatex map engine remains
+ * unconditional, as requested by the setting.
+ */
+function shouldUseGlyphMap({ mapEngine = 'auto', luaOk = false, force = false,
+    snapshot = null, refusedSnapshot = null } = {}) {
+    if (mapEngine === 'lualatex') return true;
+    if (mapEngine !== 'auto' || !luaOk) return false;
+    return !!force || !refusedSnapshot || refusedSnapshot !== snapshot;
+}
+
+/**
+ * Which source snapshot, if any, has proved that it needs the fallback map.
+ *
+ * A failed exact build followed by a failed fallback proves only that the
+ * source was temporarily uncompilable; it must not poison future attempts.
+ */
+function glyphMapBackoff({ snapshot = null, primary = null, fallback = null } = {}) {
+    if (!snapshot || !primary) return null;
+    if (primary.ok && primary.engine === 'lualatex' && !primary.glyphMapPath) return snapshot;
+    if (!primary.ok && fallback && fallback.ok) return snapshot;
+    return null;
 }
 
 /**
@@ -195,6 +229,8 @@ module.exports = {
     liveDeadlineDelayMs,
     cooldownDelayMs,
     blendLiveMs,
+    shouldUseGlyphMap,
+    glyphMapBackoff,
     shipDecision,
     synctexUnchanged,
     readPassLimit,

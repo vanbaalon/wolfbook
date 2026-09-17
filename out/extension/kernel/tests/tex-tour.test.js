@@ -43,7 +43,7 @@ test('A PAPER WITH NOTHING TO SHOW IS NEVER ASKED TO LOOK AT IT', () => {
     // not offered, and the count on the card shrinks with it.
     const all = stepsFor(WITH_LABELS).map(s => s.id);
     const bare = stepsFor(BARE).map(s => s.id);
-    assert.deepStrictEqual(all, ['click', 'widen', 'cursor', 'contents', 'compare', 'pageTheme', 'fit',
+    assert.deepStrictEqual(all, ['click', 'widen', 'cursor', 'contents', 'compare', 'bookmarks', 'pageTheme', 'fit',
         'labels', 'tag', 'comments', 'commentAt', 'fold', 'sectionAction', 'edit',
         'computation', 'takeMe', 'follow', 'layout', 'review']);
     for (const id of ['labels', 'tag', 'fold', 'contents', 'sectionAction']) {
@@ -53,7 +53,7 @@ test('A PAPER WITH NOTHING TO SHOW IS NEVER ASKED TO LOOK AT IT', () => {
     // there — so it survives the bare case, and so does deciding how much the
     // page follows you.
     assert.deepStrictEqual(bare,
-        ['click', 'widen', 'cursor', 'compare', 'pageTheme', 'fit', 'comments', 'commentAt',
+        ['click', 'widen', 'cursor', 'compare', 'bookmarks', 'pageTheme', 'fit', 'comments', 'commentAt',
             'edit', 'computation', 'takeMe', 'follow', 'layout', 'review'],
         'what is left is what any paper can do');
     assert.strictEqual(stepAt({ at: 0 }, BARE).total, bare.length,

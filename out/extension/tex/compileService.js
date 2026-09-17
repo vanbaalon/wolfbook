@@ -152,6 +152,27 @@ function defaultOutDir(root) {
     return path.join(os.tmpdir(), 'wolfbook-tex', key);
 }
 
+/** Preserve resolved labels if an interrupted/invalid live build truncates its aux files. */
+function snapshotReferenceAux(outDir) {
+    const files = new Map();
+    const walk = dir => {
+        let entries;
+        try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (_) { return; }
+        for (const entry of entries) {
+            // Only our scratch output, never symlinks into the user's project
+            // or the disposable tree of unsaved source buffers.
+            if (entry.isSymbolicLink() || entry.name === '_wblive') continue;
+            const file = path.join(dir, entry.name);
+            if (entry.isDirectory()) walk(file);
+            else if (entry.isFile() && entry.name.endsWith('.aux')) {
+                try { files.set(file, fs.readFileSync(file)); } catch (_) { /* not reusable */ }
+            }
+        }
+    };
+    walk(outDir);
+    return files;
+}
+
 /** Every directory the project uses, mirrored EMPTY into the out dir. */
 function mirrorSkeleton(projectDir, outDir, maxDirs = 400) {
     let made = 0;
@@ -490,6 +511,10 @@ async function _compileLocked(o, ctx) {
         compileRoot,
     ];
 
+    // TeX truncates .aux at startup. A half-typed command or cancellation
+    // must not erase every previously resolved reference for the next pass.
+    // compile() owns the outDir gate until restoration below completes.
+    const referenceAux = snapshotReferenceAux(outDir);
     const logLines = [];
     const run = await spawnCollect('latexmk', args, {
         cwd: outDir,               // <- the overlay: cwd is NEVER the project
@@ -506,6 +531,13 @@ async function _compileLocked(o, ctx) {
     let logText = '';
     try { logText = fs.readFileSync(logPath, 'utf8'); } catch (_) { logText = run.stdout; }
     const parsed = parseLog(logText, { file: root });
+    let referenceAuxRestored = false;
+    if (run.cancelled || run.timedOut || parsed.errors > 0 || parsed.stopped) {
+        for (const [file, bytes] of referenceAux) {
+            try { fs.writeFileSync(file, bytes); referenceAuxRestored = true; }
+            catch (_) { /* keep the original compile failure diagnostic */ }
+        }
+    }
     const manager = inferManager(`${run.stdout}\n${run.stderr}\n${logText}`);
     const dependencyIssue = missingTexFileIssue(parsed.diagnostics, {
         platform: process.platform, manager,
@@ -618,6 +650,7 @@ async function _compileLocked(o, ctx) {
         maxPasses,
         passesLimited,
         rerunWanted,
+        referenceAuxRestored,
         rcUnsupported,
         ms: Date.now() - t0,
         queuedMs: t0 - queuedAt,

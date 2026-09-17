@@ -173,11 +173,12 @@ function visibleProjection(src, opts = {}) {
             // \bx is \boldsymbol{x}, which prints x. Without expanding it the
             // projection of a real paper's maths is nearly empty, so nothing
             // matches and every click falls back to "the whole equation".
-            // Everything the expansion produces is mapped to the CALL, so the
-            // selection lands on `\bx` — the thing the writer would edit.
+            // Generated symbols map to the command (`\bx`); substituted
+            // arguments retain their own independently selectable offsets.
             if (macros && macros.has(name) && depth < 8) {
                 const def = macros.get(name);
                 const args = [];
+                const argOffsets = [];
                 let j = i;
                 for (let a = 0; a < (def.params || 0); a++) {
                     while (j < n && /\s/.test(src[j])) j++;
@@ -185,15 +186,56 @@ function visibleProjection(src, opts = {}) {
                     const close = matchBrace(src, j);
                     if (close < 0) break;
                     args.push(src.slice(j + 1, close));
+                    argOffsets.push(j + 1);
                     j = close + 1;
                 }
-                const body = String(def.body || '').replace(/#(\d)/g, (_, d) => args[+d - 1] ?? '');
+                if (def.revisionArguments) {
+                    // Recognised two-argument revision wrapper: old text is
+                    // struck through, new text coloured, both remain visible.
+                    // Keep argument offsets, not the whole macro-call span.
+                    for (let a = 0; a < args.length; a++) {
+                        const inner = visibleProjection(args[a], { macros, depth: depth + 1, inMath });
+                        for (let k = 0; k < inner.text.length; k++) push(inner.text[k], argOffsets[a] + inner.map[k], inMath, argOffsets[a] + inner.end[k]);
+                    }
+                    i = j;
+                    continue;
+                }
+                // Preserve the provenance of substituted arguments. Mapping
+                // every expanded glyph to the entire call makes selecting one
+                // filename inside a formatting macro select the whole note.
+                const origins = [];
+                let body = '';
+                const definition = String(def.body || '');
+                for (let b = 0; b < definition.length; b++) {
+                    const parameter = definition[b] === '#' && /[1-9]/.test(definition[b + 1] || '')
+                        ? Number(definition[b + 1]) - 1 : -1;
+                    if (parameter >= 0) {
+                        const argument = args[parameter] || '';
+                        for (let a = 0; a < argument.length; a++) {
+                            body += argument[a];
+                            origins.push(argOffsets[parameter] + a);
+                        }
+                        b++;
+                    } else {
+                        body += definition[b];
+                        origins.push(null);
+                    }
+                }
                 const inner = visibleProjection(body, { inMath, macros, depth: depth + 1 });
                 // The span ends at the last consumed ARGUMENT — or, with none,
                 // at the command itself: the regex ate any trailing space, and
                 // a selection that includes it looks sloppy.
                 const to = args.length ? j : callStart + 1 + name.length;
-                for (let k = 0; k < inner.text.length; k++) push(inner.text[k], callStart, inMath, to);
+                for (let k = 0; k < inner.text.length; k++) {
+                    const from = origins[inner.map[k]], last = origins[inner.end[k] - 1];
+                    if (from != null && last != null && last >= from) {
+                        push(inner.text[k], from, inner.math[k], last + 1);
+                    } else {
+                        // Generated decorations belong to the command, not to
+                        // every independently selectable argument character.
+                        push(inner.text[k], callStart, inner.math[k], args.length ? callStart + 1 + name.length : to);
+                    }
+                }
                 i = j;
                 continue;
             }
@@ -541,6 +583,19 @@ const norm = (w) => {
 function collectMacros(src) {
     const out = new Map();
     const text = String(src || '');
+    // xparse revision wrappers used by collaborative papers. Recognise this
+    // precise conditional idiom, not arbitrary TeX programs or hidden args.
+    const revision = /\\(?:New|Renew|Provide)DocumentCommand\s*\{\\([A-Za-z@]+)\}\s*\{m\s*m\}\s*\{/g;
+    let rm;
+    while ((rm = revision.exec(text))) {
+        const close = matchBrace(text, revision.lastIndex - 1);
+        if (close < 0) continue;
+        const body = text.slice(revision.lastIndex, close).replace(/%[^\n]*/g, '').replace(/\s+/g, '');
+        if (/^\\tl_if_blank:nTF\{#1\}\{\\textcolor\{[^{}]+\}\{#2\}\}\{\\tl_if_blank:nTF\{#2\}\{\\sout\{#1\}\}\{\\sout\{#1\}~?\\textcolor\{[^{}]+\}\{#2\}\}\}$/.test(body)) {
+            out.set(rm[1], { params: 2, revisionArguments: true });
+        }
+        revision.lastIndex = close + 1;
+    }
     // \newcommand{\name}[n][opt]{body} and \renewcommand / \providecommand,
     // with or without the braces around the name.
     const re = /\\(?:re|provide)?newcommand\*?\s*\{?\s*\\([A-Za-z@]+)\s*\}?\s*(?:\[(\d+)\])?\s*(?:\[[^\]]*\]\s*)?\{/g;

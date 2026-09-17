@@ -365,6 +365,33 @@ test('the CodeLens carries Keep, Undo and Show — and drops Undo where it would
     assert.ok(after.some(t => /you have edited this/.test(t)), after.join(' | '));
 });
 
+test('rapid reader typing, deletion and multi-cursor edits are accepted before the review debounce', async () => {
+    const { ui } = makeUi();
+    await ui.noteAgentChange({ file: FILE, baseText: BASE });
+    const s = ui.sessionFor(FILE);
+    const apply = changes => {
+        let text = DOC.getText();
+        for (const c of [...changes].sort((a,b) => b.rangeOffset-a.rangeOffset)) {
+            text = text.slice(0,c.rangeOffset)+c.text+text.slice(c.rangeOffset+c.rangeLength);
+        }
+        DOC._setText(text); DOC.isDirty = true;
+        for (const fn of changeHandlers) fn({ document: DOC, contentChanges: changes });
+        assert.equal(s.pendingCount, 1, 'only the original agent change is pending');
+        assert.equal(s.baseText, text.replace('both allowed sectors in the strip.', 'both allowed sectors here.'));
+    };
+    const at = DOC.getText().indexOf('A second paragraph');
+    for (let i=0;i<12;i++) apply([{ rangeOffset:at+i, rangeLength:0, text:'Reader text '[i] }]);
+    apply([{ rangeOffset:at+3, rangeLength:5, text:'' }]);
+    apply([
+        { rangeOffset:at, rangeLength:0, text:'First ' },
+        { rangeOffset:DOC.getText().indexOf('nobody'), rangeLength:6, text:'the reader' },
+    ]);
+    clearTimeout(ui._debounce);
+    await ui.refresh(FILE);
+    assert.equal(s.pendingCount, 1);
+    assert.ok(s.undo(s.hunks[0].id).ok, 'the untouched agent edit remains reviewable');
+});
+
 test('AN EDIT FROM THE MCP TOOL IS REVIEWABLE — the bus carries it', async () => {
     const { ui } = makeUi();
     busMod.announceAgentEdit({ file: FILE, baseText: BASE, source: 'paper_applyEdit', note: 'eq:x' });

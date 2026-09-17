@@ -1418,8 +1418,16 @@ async function offerReload(doc, diskText, output) {
         if (isTex(d)) rememberText(d.uri.fsPath, d.getText());
     }
     context.subscriptions.push(
+        vscode.workspace.onWillSaveTextDocument((e) => {
+            if (isTex(e.document)) diskWatch.noteSaving(e.document.uri.fsPath, e.document.getText());
+        }),
         vscode.workspace.onDidOpenTextDocument((d) => { if (isTex(d)) rememberText(d.uri.fsPath, d.getText()); }),
-        vscode.workspace.onDidSaveTextDocument((d) => { if (isTex(d)) rememberText(d.uri.fsPath, d.getText()); }),
+        vscode.workspace.onDidSaveTextDocument((d) => {
+            if (isTex(d)) {
+                diskWatch.noteSaving(d.uri.fsPath, d.getText());
+                rememberText(d.uri.fsPath, d.getText());
+            }
+        }),
     );
     {
         // A CHANGE THAT ARRIVES ON DISK MUST REBUILD, EXACTLY LIKE A KEYSTROKE.
@@ -1481,6 +1489,16 @@ async function offerReload(doc, diskText, output) {
             // the whole thing again.
             if (review.isMerging && review.isMerging(fsPath)) return;
 
+            // A delayed notification for our save can arrive AFTER another
+            // keystroke makes the buffer dirty again. Compare with the saved
+            // snapshot, not with that newer buffer. No external review, rebase
+            // or navigation should run for our own write or an mtime-only echo.
+            if (diskText != null && (diskText === lastSeen.get(fsPath) || diskWatch.isOwnSave(fsPath, diskText))) {
+                rememberText(fsPath, diskText);
+                diskWatch.accept(fsPath, diskText);
+                return;
+            }
+
             const { verdict, repeat } = diskWatch.classify(fsPath, {
                 diskText, docText: doc.getText(), isDirty: doc.isDirty,
             });
@@ -1488,7 +1506,7 @@ async function offerReload(doc, diskText, output) {
             coord.invalidate(fsPath);
             if (verdict !== VERDICT.DELETED) rebuildAfterExternal(fsPath);
             const before = lastSeen.get(fsPath);
-            rememberText(fsPath, verdict === VERDICT.CONFLICT ? doc.getText() : diskText);
+            if (diskText != null) rememberText(fsPath, diskText);
 
             if (verdict !== VERDICT.CONFLICT) {
                 output.appendLine(`${path.basename(fsPath)} changed on disk` +
@@ -1660,7 +1678,10 @@ async function offerReload(doc, diskText, output) {
         vscode.window.onDidChangeTextEditorSelection((e) => {
             if (!isTex(e.textEditor.document)) return;
             status.update();
-            viewer.syncFromEditor(e.textEditor);
+            viewer.syncFromEditor(e.textEditor, {
+                userCursorGesture: !viewer.panel?.active && e.textEditor === vscode.window.activeTextEditor &&
+                    [vscode.TextEditorSelectionChangeKind.Keyboard, vscode.TextEditorSelectionChangeKind.Mouse].includes(e.kind),
+            });
         }),
         vscode.workspace.onDidChangeTextDocument((e) => {
             if (!isTex(e.document)) return;
@@ -1830,6 +1851,12 @@ async function offerReload(doc, diskText, output) {
         }
         const d = await vscode.workspace.openTextDocument(vscode.Uri.file(p));
         await vscode.window.showTextDocument(d, { preview: false });
+    });
+
+    reg('wolfbook.tex.copyFilePath', async () => {
+        if (!viewer.root) return;
+        await vscode.env.clipboard.writeText(viewer.root);
+        vscode.window.setStatusBarMessage('Copied WPaper source file path', 2500);
     });
 
     reg('wolfbook.tex.openViewer', async () => {

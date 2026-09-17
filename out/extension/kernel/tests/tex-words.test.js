@@ -265,6 +265,30 @@ test('a macro with an argument substitutes it', () => {
     assert.ok(got.includes('ψ'), `the argument is printed: ${JSON.stringify(got)}`);
 });
 
+test('nested formatting macros preserve exact filename argument offsets', () => {
+    const macros = collectMacros(String.raw`\newcommand{\src}[1]{[notes: \fmt{#1}]}\newcommand{\fmt}[1]{\textsf{#1}}`);
+    const source = String.raw`\src{SoVMainNikolay.tex}`;
+    const p = visibleProjection(source, { macros });
+    const at = p.text.indexOf('SoVMainNikolay.tex');
+    assert.ok(at >= 0);
+    for (let i = 0; i < 17; i++) {
+        assert.equal(p.map[at + i], source.indexOf('SoVMainNikolay.tex') + i);
+        assert.equal(p.end[at + i], p.map[at + i] + 1);
+    }
+    assert.ok(p.end[0] <= source.indexOf('{'), 'generated prefix does not overlap the argument');
+});
+
+test('reordered and repeated macro arguments retain their own source identity', () => {
+    const macros = collectMacros(String.raw`\newcommand{\pair}[2]{#2:#1:#2}`);
+    const source = String.raw`\pair{ab}{xy}`;
+    const p = visibleProjection(source, { macros });
+    assert.equal(p.text, 'xy:ab:xy');
+    for (const [rendered, original] of [[0, 'xy'], [3, 'ab'], [6, 'xy']]) {
+        assert.equal(p.map[rendered], source.indexOf(original));
+        assert.equal(p.end[rendered + 1], source.indexOf(original) + 2);
+    }
+});
+
 test('a self-referential macro cannot spin', () => {
     const m = collectMacros('\\newcommand{\\loop}{\\loop x}');
     assert.strictEqual(m.has('loop'), false, 'it is dropped rather than expanded');

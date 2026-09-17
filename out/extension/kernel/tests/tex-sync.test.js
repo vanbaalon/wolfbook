@@ -283,6 +283,53 @@ test('typing pauses tracing until the matching page is visible', async () => {
         'tracing returns after the page catches up');
 });
 
+test('identical-PDF acknowledgement after repeated recompiles does not strand viewer interaction', async () => {
+    const v = makeViewer(null);
+    const st = v.coord.roots.get(FILE);
+    v.shownGeneration = 1; v.shownPdfHash = 'same-pdf';
+    v._resumeTracing = async () => {};
+    v._restoreEditSession = async () => {};
+    v._postEditAnchor = async () => {};
+    v._postSections = async () => {};
+    v._pushComments = () => {};
+    v._replayReviewFocus = () => {};
+    for (const generation of [2, 3, 20]) {
+        st.generation = { generation, pdfHash: 'same-pdf' };
+        st.sourceAhead = false;
+        v._setTracePaused(true);
+        await v._onMessage({ type:'opened', generation:1, pdfHash:'same-pdf' });
+        assert.equal(v._tracePaused, false, 'unchanged visible ink uses the fresh source map');
+    }
+    st.sourceAhead = true;
+    await v._onMessage({ type:'opened', generation:1, pdfHash:'same-pdf' });
+    assert.equal(v._tracePaused, true, 'unsynced source must still block stale editing');
+    st.sourceAhead = false;
+    st.generation.pdfHash = 'different-pdf';
+    assert.equal(v._displayMatchesSource(st), false);
+    v.shownGeneration = 21;
+    v._openedGeneration = 21;
+    await v._onMessage({ type:'opened', generation:1, pdfHash:'same-pdf' });
+    assert.equal(v._openedGeneration, 21, 'late acknowledgement cannot overwrite a newer display');
+});
+
+test('a paused viewer click repairs the pause state but never edits stale source', async () => {
+    const v = makeViewer(null);
+    const st = v.coord.roots.get(FILE);
+    v._openedGeneration = 1;
+    v._openedPdfHash = 'same-pdf';
+    st.generation = { generation:2, pdfHash:'same-pdf' };
+    v._setTracePaused(true);
+    let refreshes = 0;
+    v.refresh = async () => { refreshes++; };
+    await v._onMessage({ type:'traceRetry', generation:1 });
+    assert.equal(refreshes, 1);
+    assert.equal(v._tracePaused, false);
+    st.sourceAhead = true;
+    await v._onMessage({ type:'traceRetry', generation:1 });
+    assert.equal(v._tracePaused, true);
+    assert.ok(v.posted.some(p => p.type === 'status' && /Updating the PDF/.test(p.text)));
+});
+
 test('typing in the card names the mini-editor in the lag indicator', async () => {
     const v = makeViewer(null);
     v._miniApplyingFile = FILE;
@@ -383,6 +430,43 @@ test('UNSAVED SOURCE STAYS DISTINCT FROM PAGE LAG AND THE BADGE SAVES EVERY INCL
         assert.ok(clean && !clean.dirty && clean.count === 0);
         assert.ok(v.posted.some(p => p.type === 'status' && /saved 2 sources/.test(p.text)));
     } finally {
+        stub.workspace.textDocuments = oldDocs;
+    }
+});
+
+test('UNSAVED PAPER AUTO-SAVES THREE SECONDS AFTER THE LAST CHANGE', async () => {
+    const v = makeViewer(null);
+    const oldDocs = stub.workspace.textDocuments;
+    let saves = 0;
+    const dirty = { ...makeDoc(), isDirty: true };
+    dirty.save = async () => { saves++; dirty.isDirty = false; return true; };
+    stub.workspace.textDocuments = [dirty];
+
+    const timers = [];
+    const cancelled = new Set();
+    v._sourceSaveSetTimeout = (fn, ms) => {
+        const timer = { fn, ms, unref() {} };
+        timers.push(timer);
+        return timer;
+    };
+    v._sourceSaveClearTimeout = (timer) => { cancelled.add(timer); };
+    try {
+        v.noteSourceChanged(dirty);
+        v.noteSourceChanged(dirty);                 // more typing resets the idle window
+        assert.strictEqual(timers.length, 2);
+        assert.strictEqual(timers[0].ms, 3000, 'the save waits for three quiet seconds');
+        assert.ok(cancelled.has(timers[0]), 'the first edit timer was cancelled by the second');
+
+        await timers[0].fn();
+        assert.strictEqual(saves, 0, 'a superseded timer cannot save early');
+        await timers[1].fn();
+        assert.strictEqual(saves, 1, 'the latest idle timer saves the dirty paper');
+        assert.ok(v.posted.some(p => p.type === 'sourceDirty' && !p.dirty),
+            'the red unsaved badge is cleared');
+        assert.ok(!v.posted.some(p => p.type === 'status' && /^saved /.test(p.text)),
+            'routine automatic saves do not interrupt the reader with success messages');
+    } finally {
+        v._clearSourceSaveTimer();
         stub.workspace.textDocuments = oldDocs;
     }
 });
@@ -828,33 +912,27 @@ test('a selection inside ONE line still names both ends', () => {
     assert.ok(m.span.end.word, 'and the far end names a word too');
 });
 
-test('ONE WORD IS MARKED, NOT BRACKETED', () => {
-    // Brackets around a single word, plus a wash across the sliver between
-    // them, say nothing the amber marker did not — and unlike the marker they
-    // stay on the page.
+test('an explicit one-word editor selection remains a highlighted range', () => {
+    // Explicit editor selections persist even when they contain no whitespace.
     const v = makeViewer(null, null);
     const st = v.coord.roots.get(FILE);
     st.map.lineRows = (f, n) => (n === 5 ? [{ page: 1, x: 100, y: 100, w: 300, h: 13 }] : []);
     const at = LINES[4].indexOf('transformed');
     v.syncFromEditor(rangeAt(5, at, 5, at + 11));
-    assert.ok(!v.posted.find(p => p.type === 'selection' && p.span), 'no span');
-    const cleared = v.posted.find(p => p.type === 'selection' && p.span === null);
-    assert.ok(cleared, 'and any overlay already on the page is cleared first');
-    const h = v.posted.find(p => p.type === 'highlight');
-    assert.ok(h, 'the word gets the marker a click would have given it');
-    assert.strictEqual(h.word, 'transformed');
-    assert.ok(h.searchRects && h.searchRects.length, 'searched in the widened row');
-    assert.ok(!v._lastSelection, 'with no bracket to take hold of afterwards');
+    assert.ok(v.posted.find(p => p.type === 'selection' && p.span), 'persistent span');
+    assert.equal(v._lastSelection.start.character, at);
+    assert.equal(v._lastSelection.end.character, at + 11);
 });
 
-test('a PARTIAL word is marked too — the whole word it is part of', () => {
+test('a partial-word editor selection retains its exact source range', () => {
     const v = makeViewer(null, null);
     const st = v.coord.roots.get(FILE);
     st.map.lineRows = (f, n) => (n === 5 ? [{ page: 1, x: 100, y: 100, w: 300, h: 13 }] : []);
     const at = LINES[4].indexOf('transformed');
     v.syncFromEditor(rangeAt(5, at + 2, 5, at + 6));
-    const h = v.posted.find(p => p.type === 'highlight');
-    assert.ok(h && h.word === 'transformed', 'the word the fragment belongs to');
+    assert.ok(v.posted.find(p => p.type === 'selection' && p.span));
+    assert.equal(v._lastSelection.start.character, at + 2);
+    assert.equal(v._lastSelection.end.character, at + 6);
 });
 
 test('THE REPORTED BUG: a click marks the word, it does not select a range', async () => {
@@ -1206,6 +1284,8 @@ test('picking the ends in the WRONG order still makes a forward range', async ()
     await v._jumpToSource({ page: 1, xBp: 100, yTopBp: 100, word: 'transformed', rowFraction: 0.2, pick: true });
     assert.ok(selected.start.line < selected.end.line, 'the earlier position is the start');
     assert.strictEqual(selected.start.line, 4);
+    assert.strictEqual(selected.start.character, LINES[4].indexOf('transformed'),
+        'backward selection includes the word under the pointer, not only what follows it');
 });
 
 test('THE REPORTED BUG: a line with no rows of its own borrows the row its ink is in', () => {
@@ -1226,9 +1306,9 @@ test('THE REPORTED BUG: a line with no rows of its own borrows the row its ink i
     const at = LINES[12].indexOf('unmistakable');
     v.posted.length = 0;
     v.syncFromEditor(rangeAt(13, at, 13, at + 12));
-    const h = v.posted.find(p => p.type === 'highlight');
-    assert.ok(h && h.word === 'unmistakable', 'the word is marked');
-    assert.ok(h.rects.length, 'in a region to search');
+    const span = v.posted.find(p => p.type === 'selection' && p.span)?.span;
+    assert.ok(span, 'the selected word remains a range');
+    assert.ok(span.start.rects.length, 'in a region to search');
 });
 
 test('a span whose lines print no rows of their own is still painted', () => {
@@ -1400,7 +1480,7 @@ test('the mini-editor round trip: open, type, no echo, editor change flows back'
         assert.ok(hl, 'a caret in the card answers on the page');
 
         // With the file open in a VISIBLE editor the selection is mirrored
-        // there instead, and that editor's own event drives the page — two
+        // there too, without depending on its programmatic event — two
         // halves of one document must not disagree about where the reader is.
         const seen = [];
         stub.window.visibleTextEditors = [{
@@ -1414,8 +1494,8 @@ test('the mini-editor round trip: open, type, no echo, editor change flows back'
         assert.strictEqual(seen.length, 1, 'the visible editor was told');
         assert.strictEqual(mdoc.offsetAt(seen[0].start), base + 2, 'from the block start');
         assert.strictEqual(mdoc.offsetAt(seen[0].end), base + 6, 'as a RANGE, not a caret');
-        assert.ok(!v.posted.find(p => p.type === 'selection'),
-            'and the page is not told twice — that editor answers for it');
+        assert.ok(v.posted.find(p => p.type === 'selection' && p.span),
+            'the page receives the selection directly even with a visible source editor');
         stub.window.visibleTextEditors = [];
 
         // An offset past the end of the block cannot address anything outside
@@ -3316,6 +3396,159 @@ const clipOf = () => {
     return box;
 };
 
+test('mini-editor selection of an xparse revision comment covers all its ink, not the preceding zero', async () => {
+    const { collectMacros, visibleProjection } = require('../../tex/texWords');
+    const definition = String.raw`\NewDocumentCommand{\cb}{m m}{
+      \tl_if_blank:nTF {#1} {\textcolor{cyan}{#2}}{
+        \tl_if_blank:nTF {#2} {\sout{#1}}{\sout{#1}~\textcolor{cyan}{#2}}}}
+    `;
+    const comment = '.CB: maybe this is too fast, first time talking about inhomogeneity here. Although I am not sure how to make smoother.';
+    const source = '0 \\cb{}{' + comment + '}. This restriction';
+    const macros = collectMacros(definition);
+    const projection = visibleProjection(source, { macros, inMath: false });
+    assert.ok(projection.text.includes(comment), 'revision text must not disappear from alignment');
+    const items = [...projection.text].map((str, i) => ({ str, page: 1,
+        x: 50 + (i % 55) * 6, y: 100 + Math.floor(i / 55) * 14, w: 6, h: 10,
+        baseline: 110 + Math.floor(i / 55) * 14 })).filter(g => g.str.trim());
+    const am = buildObjectMap({ lines: [source], startLine: 1, endLine: 1, inMath: false, macros, items });
+    am.exact = true;
+    const { v, doc, file } = moveViewer(source);
+    const st = v.coord.roots.get(file); st.map.exact = true;
+    v._alignMap = () => am;
+    v._selectionAnchor = () => ({ rects: [], word: '0' }); // old fallback is deliberately wrong
+    v._edit = { id: 10, file, startOffset: 0, endOffset: source.length, lastText: source };
+    v._rememberEditState = () => {};
+    v.followMode = 'scroll';
+    v._reviewNavigation = { owner: 'viewer', cursor: 'prior-position' };
+    const start = source.indexOf('\\cb'), end = source.indexOf('}. This') + 1;
+    const previousEditors = stub.window.visibleTextEditors;
+    stub.window.visibleTextEditors = [{ document: doc }];
+    try { await v._onEditCaret({ editId: 10, start, end }); }
+    finally { stub.window.visibleTextEditors = previousEditors; }
+    assert.equal(v._reviewNavigation, null, 'real mini-editor selection resumes tracing after manual scrolling');
+    const span = v.posted.filter(p => p.type === 'selection' && p.span).at(-1).span;
+    const first = items.find(g => g.str === '.');
+    const commentEnd = projection.text.indexOf(comment) + comment.length - 1;
+    const lastX = 50 + (commentEnd % 55) * 6;
+    assert.equal(span.start.exactEdge.x, first.x, 'opening bracket excludes 0 and macro syntax');
+    assert.equal(span.end.exactEdge.x, lastX + 6, 'closing bracket reaches the last comment character');
+    assert.ok(span.rows.length >= 3, 'all wrapped rows are selected');
+    assert.equal(v._lastSelection.start.character, start);
+    assert.equal(v._lastSelection.end.character, end);
+});
+
+test('mini-editor filename and single-letter selections remain painted inside a notes macro', async () => {
+    const {collectMacros,visibleProjection}=require('../../tex/texWords');
+    const macros=collectMacros(String.raw`\newcommand{\src}[1]{[notes: #1]}`);
+    const source=String.raw`The paper. \src{preamble of SoVMainNikolay.tex; sec:J1-sov-is-Qplus}`;
+    const projection=visibleProjection(source,{macros,inMath:false});
+    const items=[...projection.text].map((str,i)=>({str,page:1,x:50+i*6,y:100,w:6,h:10,baseline:110})).filter(g=>g.str.trim());
+    const am=buildObjectMap({lines:[source],startLine:1,endLine:1,inMath:false,macros,items});am.exact=true;
+    const {v,doc,file}=moveViewer(source);
+    const st=v.coord.roots.get(file);st.map.exact=true;
+    v._alignMap=()=>am;v._rememberEditState=()=>{};
+    v._edit={id:'filename',file,startOffset:0,endOffset:source.length,lastText:source};
+    const start=source.indexOf('SoVMainNikolay.tex');
+    for(const length of [17,1,5]) {
+        v.posted.length=0;
+        await v._onEditCaret({editId:'filename',start,end:start+length},{forceSync:true});
+        assert.ok(!v.posted.some(p=>p.type==='editSelect'), 'compile replay paints PDF without echoing a selection back into the textarea');
+        const span=v.posted.find(p=>p.type==='selection'&&p.span)?.span;
+        assert.ok(span,'an explicit nonempty mini-editor selection must not become a caret');
+        assert.equal(v._lastSelection.start.character,start);
+        assert.equal(v._lastSelection.end.character,start+length);
+        assert.ok(Math.abs(span.end.exactEdge.x-span.start.exactEdge.x-length*6)<0.01,'paint exactly the selected characters: '+JSON.stringify({length,span}));
+    }
+});
+
+test('dragging the start bracket left across inline math reaches the first word of prose', async () => {
+    const source = String.raw`An important operator for us is $\hat{\mathbb{Q}}_{+}$, defined through an integral kernel action as`;
+    const { visibleProjection } = require('../../tex/texWords');
+    const projection = visibleProjection(source, { inMath: false });
+    const items = [...projection.text].map((str, i) => ({ str, page: 1,
+        x: 50 + i * 6, y: 100, w: 6, h: 10, baseline: 110 })).filter(g => g.str.trim());
+    const am = buildObjectMap({ lines: [source], startLine: 1, endLine: 1, inMath: false, items });
+    am.exact = true;
+    const { v, doc, file } = moveViewer(source);
+    const st = v.coord.roots.get(file); st.map.exact = true;
+    v._alignMap = () => am;
+    v._resolvePoint = () => ({ file, line: 1, flag: FLAG.FRESH });
+    v._fsActions = {}; // full-view mode: no source editor required
+    v._lastSelection = { file, start: new Position(0, source.indexOf('+')), end: new Position(0, source.length) };
+    v._adjustSelection({ end: 'start' });
+    for (const word of ['us', 'operator', 'important', 'An']) {
+        const x = items.find(g => g.x === 50 + projection.text.indexOf(word) * 6).x + 1;
+        await v._jumpToSource({ page: 1, xBp: x, yTopBp: 105, word, pick: true, live: true });
+        assert.equal(v._lastSelection.start.character, source.indexOf(word), `left edge includes ${word}`);
+        assert.equal(v._lastSelection.end.character, source.length, 'the opposite bracket stays fixed');
+    }
+    const span = v.posted.filter(p => p.type === 'selection' && p.span).at(-1).span;
+    assert.equal(span.start.exactEdge.x, 50, 'painted bracket reaches An, not the inline plus');
+    // Adjust within ONE word: retaining brackets (rather than replacing them
+    // with a transient word marker) is essential for another drag step.
+    const wordStart = source.indexOf('important');
+    v._lastSelection = { file, start: new Position(0, wordStart), end: new Position(0, wordStart + 9) };
+    v._adjustSelection({ end: 'start' });
+    for (const offset of [1, 2, 3, 4]) {
+        const i = am.tokens.findIndex(t => t.startCol === wordStart + offset);
+        const g = am.glyphs[am.srcToRen[i]];
+        await v._jumpToSource({ page:1, xBp:g.x+1, yTopBp:105, word:'important', pick:true, live:true });
+        assert.equal(v._lastSelection.start.character, wordStart+offset, 'drag advances one letter, not a whole word');
+        assert.ok(v.posted.filter(p => p.type==='selection').at(-1).span, 'single-word fragments keep their drag brackets');
+    }
+    const plus = source.indexOf('+');
+    v._lastSelection = { file, start:new Position(0,0), end:new Position(0,plus+1) };
+    v._adjustSelection({ end:'start' });
+    const t = am.tokens.findIndex(t => t.startCol === plus), g = am.glyphs[am.srcToRen[t]];
+    await v._jumpToSource({page:1,xBp:g.x+1,yTopBp:105,glyph:'+',pick:true,live:true});
+    assert.equal(v._lastSelection.start.character,plus,'selecting + does not expand to the surrounding expression');
+    assert.equal(v._lastSelection.end.character,plus+1);
+});
+
+test('section cut/delete guard the actual edit, never an empty permission probe', async () => {
+    for (const action of ['cut', 'delete']) {
+        const { v, doc, file } = moveViewer('\\section{First}\nBody.\n\\section{Next}\nKeep me.');
+        const clip = clipOf();
+        v._sectionControls = () => [{ key: 'first', file, headStart: 1, spanEnd: 2, title: 'First' }];
+        const apply = stub.workspace.applyEdit;
+        let writes = 0;
+        stub.workspace.applyEdit = async we => {
+            assert.ok(we.ops.length, 'VS Code must receive a real edit');
+            writes++;
+            return apply(we);
+        };
+        await v._onAnchorAction({ key: 'first', action });
+        assert.equal(writes, 1);
+        assert.equal(doc.getText(), '\\section{Next}\nKeep me.');
+        if (action === 'cut') assert.equal(clip.text, '\\section{First}\nBody.\n');
+    }
+});
+
+test('section cut does not delete if clipboard fails or source changes during copy', async () => {
+    for (const mode of ['failure', 'changed']) {
+        const { v, doc, file } = moveViewer('\\section{First}\nBody.\n\\section{Next}');
+        const before = doc.getText();
+        v._sectionControls = () => [{ key: 'first', file, headStart: 1, spanEnd: 2 }];
+        stub.env.clipboard.writeText = async () => {
+            if (mode === 'failure') throw new Error('clipboard unavailable');
+            doc.version++;
+        };
+        await v._onAnchorAction({ key: 'first', action: 'cut' });
+        assert.equal(doc.getText(), before);
+    }
+});
+
+test('section delete refuses a range made stale during confirmation', async () => {
+    const { v, doc, file } = moveViewer('\\section{First}\nOne\nTwo\nThree\n\\section{Next}');
+    const before = doc.getText(), warn = stub.window.showWarningMessage;
+    v._sectionControls = () => [{ key: 'first', file, headStart: 1, spanEnd: 4 }];
+    stub.window.showWarningMessage = async () => { doc.version++; return 'Delete'; };
+    try {
+        await v._onAnchorAction({ key: 'first', action: 'delete' });
+        assert.equal(doc.getText(), before);
+    } finally { stub.window.showWarningMessage = warn; }
+});
+
 test('copy puts the selected LaTeX on the clipboard and changes nothing', async () => {
     const { v, doc } = moveViewer(MOVE_SRC);
     const clip = clipOf();
@@ -3351,6 +3584,29 @@ test('A CUT THAT CANNOT COPY DELETES NOTHING', async () => {
     assert.ok(st && /nothing was cut/.test(st.text), `and it says so: ${st && st.text}`);
 });
 
+test('copy and delete comments clears only the successfully copied unchanged snapshot', async () => {
+    const oldWarning = stub.window.showWarningMessage, oldWrite = stub.env.clipboard.writeText;
+    try {
+        for (const mode of ['success', 'failure', 'changed', 'cancel']) {
+            const {v,file} = moveViewer('A paragraph.');
+            let items = [{id:'c1',file,text:'Original comment',startLine:1,endLine:1}], cleared = false, copied = '';
+            v._commentFiles = () => [file]; v._commentObjects = () => [];
+            v._pushComments = () => {};
+            v.comments = {list:()=>({items}),clear:()=>{cleared=true;return 1;}};
+            stub.window.showWarningMessage = async () => mode === 'cancel' ? undefined : 'Copy and delete all';
+            stub.env.clipboard.writeText = async text => {
+                if (mode === 'failure') throw Error('Clipboard unavailable');
+                copied = text;
+                if (mode === 'changed') items = [...items,{id:'c2',file,text:'Arrived while copying'}];
+            };
+            await v._onCommentAction({action:'copyClear',drafts:[{id:'c1',file,text:'Latest draft'}]});
+            assert.equal(cleared,mode==='success',`${mode}: never delete uncopied comments`);
+            if(mode==='success') assert.ok(copied.includes('Latest draft'));
+            if(mode==='cancel') assert.equal(copied,'');
+        }
+    } finally {stub.window.showWarningMessage=oldWarning;stub.env.clipboard.writeText=oldWrite;}
+});
+
 test('delete removes it and takes the selection off the page', async () => {
     const { v, doc } = moveViewer(MOVE_SRC);
     clipOf();
@@ -3361,6 +3617,33 @@ test('delete removes it and takes the selection off the page', async () => {
     assert.strictEqual(v._lastSelection, null, 'nothing is selected any more');
     assert.ok(v.posted.some(p => p.type === 'selection' && p.span === null),
         'and the overlay was cleared');
+    assert.equal(v._deletionAnchor.line, 3, 'remember the start of the deleted range, not the old cursor');
+    const st = v.coord.roots.get(v.root);
+    st.sourceAhead = true;
+    assert.equal(v._deletionPlacement(), null, 'never locate against the pre-delete PDF');
+    st.sourceAhead = false;
+    st.map.lineRows = (_file, line) => line === 3 ? [{page:2,x:80,y:130,w:200,h:12}] : [];
+    assert.equal(v._deletionPlacement().page, 2, 're-pagination follows the surviving deletion seam');
+    assert.equal(v._deletionPlacement().rects[0].y, 130);
+    let replay = 0;
+    v.syncFromEditor = () => replay++;
+    await v._resumeTracing({instant:true});
+    assert.equal(replay, 0, 'opened/text-layer replay cannot restore an unrelated editor cursor');
+    v._claimViewerNavigation();
+    assert.equal(v._deletionAnchor, null, 'manual scrolling wins over the deletion anchor');
+});
+
+test('deletion anchor preserves its source column on a wrapped line and yields to real editor navigation', () => {
+    const {v,doc,file} = moveViewer('A long source line wrapped across pages');
+    const st = v.coord.roots.get(file); st.map.exact = true;
+    v._deletionAnchor = {root:v.root,file,doc,line:1,column:20};
+    v._reviewNavigation = {owner:'edit',cursor:'old'};
+    v._alignMap = () => ({tokens:[{line:1,endCol:2},{line:1,endCol:21}],srcToRen:[0,1],
+        glyphs:[{page:1,x:50,y:100,w:5,h:10},{page:2,x:80,y:200,w:5,h:10}]});
+    assert.equal(v._deletionPlacement().page,2,'target the deletion column, not the beginning of its long source line');
+    v._noteEditorNavigation({document:doc,selection:{anchor:new Position(0,4),active:new Position(0,4)}},true);
+    assert.equal(v._deletionAnchor,null);
+    assert.equal(v._reviewNavigation,null);
 });
 
 test('paste replaces the selection and leaves the new text selected', async () => {

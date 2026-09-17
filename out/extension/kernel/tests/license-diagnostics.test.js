@@ -46,6 +46,36 @@ async function main() {
     });
     assert.equal(preflightGood.ok, true);
     assert.equal(preflightGood.output, '', 'successful licence identifiers must not be retained');
+    assert.equal(preflightGood.verified, true);
+    for (const output of ['', 'new output format', 'warning words 0 extra words']) {
+        const r = await probeKernelLicense('/mock/WolframKernel', { spawnFn: fakeSpawn(output, 0) });
+        assert.equal(r.ok, true, 'clean exit with unknown output must not block work');
+        assert.equal(r.verified, false);
+        assert.equal(r.reason, 'unconfirmed-output');
+    }
+    const zero = await probeKernelLicense('/mock/WolframKernel', { spawnFn: fakeSpawn('0\t0\t0', 0) });
+    assert.equal(zero.ok, false);
+    const explicit = await probeKernelLicense('/mock/WolframKernel', { spawnFn: fakeSpawn('No valid password found.', 0) });
+    assert.equal(explicit.ok, false, 'explicit failure is not ignored even on exit zero');
+    for (const code of [1, null]) {
+        const r = await probeKernelLicense('/mock/WolframKernel', { spawnFn: fakeSpawn('', code) });
+        assert.equal(r.ok, false, 'failed or signal-terminated probe retains startup protection');
+    }
+    const kernel = 'C:\\Program Files\\Wolfram\\WolframKernel.exe';
+    for (const sibling of ['wolfram.exe', 'math.exe', null]) {
+        let launched;
+        const r = await probeKernelLicense(kernel, {
+            platform: 'win32', existsFn: p => sibling != null && p.endsWith('\\' + sibling),
+            spawnFn: (command, args, opts) => {
+                launched = command;
+                assert.equal(opts.windowsHide, true);
+                return fakeSpawn('', 0)(command, args);
+            },
+        });
+        assert.equal(launched, sibling ? kernel.replace('WolframKernel.exe', sibling) : kernel);
+        assert.equal(r.ok, true);
+        assert.equal(r.probePath, launched);
+    }
 
     const noSeats = await probeKernelLicense('/mock/WolframKernel', {
         spawnFn: fakeSpawn('L1234-5678\t4\t0\n', 0),
@@ -101,6 +131,11 @@ async function main() {
     assert.equal(timeout.cause, 'license');
     assert.equal(timeout.sub, 'license-check-timeout');
     assert.match(timeout.summary, /MathLM|activation/);
+    const unknown = await diagnoseKernelLaunch(process.execPath, {
+        licensePreflight: { ok: false, exitCode: 2, output: 'unsupported option', durationMs: 1 },
+    });
+    assert.equal(unknown.cause, 'unknown');
+    assert.equal(unknown.sub, 'license-check-failed');
 
     const candidates = findMathPassCandidates(process.execPath);
     assert.ok(candidates.length >= 4);

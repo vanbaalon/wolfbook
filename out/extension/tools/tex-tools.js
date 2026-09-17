@@ -1100,9 +1100,10 @@ class PaperApplyEditTool {
 
         return withDocument(input, async (r) => {
             if (!r.doc) {
-                return errPart(`${r.fsPath} is not open in the editor. ` +
-                    'paper_applyEdit goes through WorkspaceEdit so the change is undoable ' +
-                    'and participates in normal VS Code save semantics; open the file first.');
+                // Open a buffer in THIS host, never via the OS or a different
+                // window. Refresh source before stale-hash validation below.
+                r.doc = await vscode.workspace.openTextDocument(r.uri);
+                r.text = r.doc.getText();
             }
             let tx;
             let beforeProjection;

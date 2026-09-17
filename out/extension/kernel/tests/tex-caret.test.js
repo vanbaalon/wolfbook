@@ -670,6 +670,13 @@ at('a visible source editor receives that same backward selection', async () => 
     self._edit = { id: 'e1', file: '/x.tex', startOffset: 100, endOffset: 200 };
     self.panel = {};
     self._rememberEditState = () => {};
+    const deliveries = [];
+    self._post = () => {};
+    self._reviewNavigation = { owner: 'viewer', cursor: 'previous-cursor' };
+    self.syncFromEditor = (editor, options) => {
+        self._noteEditorNavigation(editor, options.userCursorGesture);
+        deliveries.push({ selection: editor.selection, options });
+    };
     let selected = null;
     const open = {
         document: doc,
@@ -684,7 +691,47 @@ at('a visible source editor receives that same backward selection', async () => 
     assert.strictEqual(selected.end.character, 132);
     assert.strictEqual(selected.anchor.character, 132);
     assert.strictEqual(selected.active.character, 120);
+    assert.equal(deliveries.length, 1, 'mini-editor selection reaches the viewer without waiting for a VS Code event');
+    assert.equal(deliveries[0].selection.active.character, 120);
+    assert.equal(deliveries[0].options.preserveView, true, 'selection painting does not move the viewport');
+    assert.equal(self._reviewNavigation, null, 'mini-editor gesture releases the manual-navigation trace lock');
+    await self._onEditCaret({ editId: 'e1', start: 25, end: 25 });
+    assert.equal(deliveries.length, 2, 'subsequent collapsed caret also reaches the viewer');
+    assert.equal(deliveries[1].selection.active.character, 125);
+    self._reviewNavigation = { owner: 'viewer', cursor: 'reading-elsewhere' };
+    await self._onEditCaret({ editId: 'e1', start: 25, end: 25 }, { forceSync: true });
+    assert.ok(self._reviewNavigation, 'compile replay is not a new user gesture');
     stubVscode.window.visibleTextEditors = [];
+});
+
+at('A CARET AFTER DELETE WAITS FOR THE NEW DOCUMENT COORDINATES', async () => {
+    const doc = flatDoc();
+    const self = Object.create(TexViewer.prototype);
+    const edit = { id: 'e1', file: '/x.tex', startOffset: 100, endOffset: 200 };
+    self._edit = edit;
+    self.panel = {};
+    self._rememberEditState = () => {};
+    let release;
+    self._editApplyQueue = new Promise(resolve => { release = resolve; });
+    let seen = null;
+    self.syncFromEditor = (e) => { seen = e; };
+    stubVscode.workspace.openTextDocument = async () => doc;
+    stubVscode.window.visibleTextEditors = [];
+
+    const answer = TexViewer.prototype._onEditCaret.call(self,
+        { editId: 'e1', start: 20, end: 32 });
+    await Promise.resolve();
+    assert.strictEqual(seen, null, 'the old document must not answer first');
+
+    // The preceding edit deleted 15 characters before this block. Its tracked
+    // start moves before the same relative textarea offsets are interpreted.
+    edit.startOffset = 85;
+    edit.endOffset = 185;
+    release(true);
+    await answer;
+    assert.strictEqual(seen.selection.start.character, 105,
+        'the selection starts in the rebased document, not at stale offset 120');
+    assert.strictEqual(seen.selection.end.character, 117);
 });
 
 t('the card marks the WORD while its textarea holds only the caret', () => {
@@ -693,7 +740,7 @@ t('the card marks the WORD while its textarea holds only the caret', () => {
     const client = fs.readFileSync(
         path.join(__dirname, '..', '..', '..', 'client', 'tex-viewer.js'), 'utf8');
     const i = client.indexOf('function selectInEditCard(');
-    const body = client.slice(i, i + 1800);
+    const body = client.slice(i, i + 2400);
     assert.ok(/e\.sel = \{ start: msg\.start, end: msg\.end \}/.test(body),
         'the highlight layer keeps the WORD — it reads e.sel, not the textarea');
     assert.ok(/setSelectionRange\(taFrom, taTo, direction\)/.test(body),
@@ -707,6 +754,36 @@ t('the card marks the WORD while its textarea holds only the caret', () => {
         'the card must read which textarea edge the reader is moving');
     assert.ok(/start: a, end: b, direction/.test(client),
         'and must send that edge direction with every caret update');
+});
+
+t('continuous mini-editor typing rejects delayed passive caret echoes but accepts an explicit paper click', () => {
+    const fs = require('fs'), path = require('path'), vm = require('vm');
+    const client = fs.readFileSync(path.join(__dirname, '..', '..', '..', 'client', 'tex-viewer.js'), 'utf8');
+    const start = client.indexOf('function selectInEditCard(');
+    const end = client.indexOf('\n/**', start);
+    let selections = 0;
+    const ta = { value: 'start', selectionStart: 5, selectionEnd: 5,
+        setSelectionRange(a, b) { selections++; this.selectionStart = a; this.selectionEnd = b; }, focus() {} };
+    let scrolls = 0;
+    const card = { querySelector: s => s === 'textarea' ? ta : s === '.ec-sel' ? {scrollIntoView(){scrolls++;}} : null };
+    const document = { activeElement: ta, querySelector: () => card };
+    const state = { edit: { id: 1 } };
+    const ctx = vm.createContext({ document, state, pendingPaperTyping: null,
+        syncHighlight() {}, postEditView() {} });
+    vm.runInContext(client.slice(start, end), ctx);
+    for (let n = 0; n < 20; n++) {
+        ta.value += 'x'; ta.selectionStart = ta.selectionEnd = ta.value.length;
+        ctx.selectInEditCard({ editId: 1, start: ta.value.length - 3, end: ta.value.length - 3, focus: false });
+        assert.equal(ta.selectionStart, ta.value.length, 'compile/cursor replay cannot rewind typing');
+    }
+    assert.equal(selections, 0);
+    ctx.selectInEditCard({ editId: 1, start: 2, end: 4, focus: true });
+    assert.equal(ta.selectionStart, 2); assert.equal(ta.selectionEnd, 4);
+    assert.equal(scrolls, 1, 'explicit navigation may reveal the selection');
+    document.activeElement = null;
+    ctx.selectInEditCard({ editId: 1, start: 6, end: 6, focus: false });
+    assert.equal(ta.selectionStart, 6, 'focused source-editor sync still works when card is inactive');
+    assert.equal(scrolls, 1, 'passive compile/editor replay must not scroll the paper');
 });
 
 (async () => {

@@ -62,7 +62,17 @@
 
   /* --- pages --- */
   #reader { flex:1 1 auto; min-height:0; display:flex; position:relative; overflow:hidden; }
-  main { flex:1 1 auto; min-width:0; overflow:auto; padding:20px 16px;
+  /* A quiet edge light; overlay only, so pages and the mini-editor stay still. */
+  #reader::after { content:""; position:absolute; inset:0; pointer-events:none;
+    z-index:2000; opacity:0;
+    box-shadow:inset 0 0 14px 2px rgba(0,110,255,.58),
+      inset 0 0 6px 1px rgba(0,100,255,.65), inset 0 0 2px rgba(30,135,255,.9); }
+  #reader.is-compiling::after { animation:compile-edge-glow 3.6s ease-in-out infinite; }
+  @keyframes compile-edge-glow { 0%,100% { opacity:.4; } 50% { opacity:.85; } }
+  @media (prefers-reduced-motion: reduce) {
+    #reader.is-compiling::after { animation:none; opacity:.5; }
+  }
+  main { flex:1 1 auto; min-width:0; overflow:auto; overflow-anchor:none; padding:20px 16px;
          scrollbar-gutter: stable;
          background: var(--vscode-editorPane-background, var(--vscode-editor-background)); }
   /* Fit means edge to edge: the horizontal padding would otherwise inset the
@@ -493,6 +503,57 @@
          border:1px solid var(--vscode-editorWidget-border, rgba(0,0,0,.25));
          box-shadow: 0 4px 14px rgba(0,0,0,.34); }
   .lbcprev img { display:block; max-width:320px; height:auto; border-radius:2px; }
+  .destination-preview { position:fixed; z-index:100; max-width:calc(100vw - 24px);
+         pointer-events:auto;
+         box-sizing:border-box; max-height:calc(100vh - 16px); overflow:hidden;
+         color:#20242a; padding:8px 9px 10px; font:12px/1.4 system-ui;
+         border:1px solid rgba(30,45,65,.12); border-radius:9px;
+         box-shadow:0 6px 24px rgba(20,30,45,.16), 0 1px 4px rgba(20,30,45,.08); }
+  .destination-preview-header { display:flex; align-items:center; gap:8px; margin-bottom:6px; }
+  .destination-preview-header span { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis;
+         white-space:nowrap; font-weight:500; color:#596575; }
+  .destination-preview img { max-width:100%; object-fit:contain; margin:0 auto; }
+  .destination-preview small { display:block; color:#58616c; padding:6px 0; }
+  .destination-preview button { flex:none; display:grid; place-items:center; width:26px; height:26px;
+         cursor:pointer; border:0; border-radius:5px; padding:4px; background:transparent; color:#63758b; }
+  .destination-preview button:hover { color:#245ca0; background:#edf3fa; }
+  .destination-preview button:focus-visible { outline:2px solid #397ac0; outline-offset:1px; }
+  .destination-preview button svg { width:17px; height:17px; fill:none; stroke:currentColor;
+         stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; }
+  /* Personal reading ribbons: warm and quiet, separate from source/review marks. */
+  .bookmark-marker { position:absolute; left:7px; z-index:10; display:flex; align-items:center; }
+  .bookmark-marker button, .bookmark-pill button { border:0; background:transparent; color:#a96810;
+         display:flex; align-items:center; justify-content:center; gap:5px; cursor:pointer;
+         min-width:25px; height:28px; padding:3px 5px; border-radius:6px; font:11px/1.2 system-ui; }
+  .bookmark-marker svg, .bookmark-pill svg { width:17px; height:20px; flex:none;
+         fill:#ffc65c; stroke:#bb7b1d; stroke-width:1.4; stroke-linejoin:round; }
+  .bookmark-marker .bookmark-delete { opacity:0; width:20px; min-width:20px; font-size:17px; }
+  .bookmark-marker:hover .bookmark-delete, .bookmark-marker:focus-within .bookmark-delete { opacity:1; }
+  .bookmark-marker button:hover, .bookmark-pill button:hover { background:#ffe3a7; }
+  .bookmark-marker button:focus-visible, .bookmark-pill button:focus-visible { outline:2px solid #d19431; outline-offset:1px; }
+  .bookmark-rail { position:fixed; z-index:30; display:flex; align-items:center; gap:3px;
+         box-sizing:border-box; padding:2px 4px; overflow-x:auto; border-radius:7px;
+         background:rgba(255,253,248,.97); color:#895d22; border:1px solid rgba(183,126,34,.20);
+         box-shadow:0 3px 12px rgba(62,43,12,.12); scrollbar-width:thin; }
+  .bookmark-rail[hidden] { display:none; }
+  #bookmark-above { border-top:0; border-left:0; border-radius:0 0 7px 0; }
+  #bookmark-below { border-bottom:0; border-left:0; border-radius:0 7px 0 0; }
+  .bookmark-direction { font:600 10px system-ui; padding:0 3px; white-space:nowrap; }
+  .bookmark-pill { display:flex; align-items:center; flex:none; border-radius:6px; background:rgba(241,181,66,.12); }
+  .bookmark-pill button { height:22px; min-width:20px; gap:3px; padding:2px 4px; font-size:10px; }
+  .bookmark-pill svg { width:12px; height:15px; }
+  .bookmark-pill button span { max-width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .bookmark-pill .bookmark-delete { font-size:13px; min-width:16px; padding:0 2px; color:#9d7944; }
+  .bookmark-auto { background:#e9f1fc; }
+  .bookmark-auto button { color:#386392; }
+  .bookmark-auto svg { fill:none; stroke:#527eaf; stroke-width:1.8; stroke-linecap:round; }
+  .bookmark-auto button:hover { background:#d8e8fb; }
+  .bookmark-auto button:focus-visible { outline-color:#527eaf; }
+  .bookmark-revision { background:#e5f3e8; }
+  .bookmark-revision button { color:#386d48; }
+  .bookmark-revision svg { fill:none; stroke:#538564; stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; }
+  .bookmark-revision button:hover { background:#cfe8d6; }
+  .bookmark-revision button:focus-visible { outline-color:#538564; }
   /* A \ref to a label that does not exist. The editor already says so with a
      squiggle; the page should not quietly draw it as though it resolved. */
   /* The reference itself, underlined where it prints: the badge names it in the
@@ -718,30 +779,31 @@
   .comment-menu-empty { padding:14px 12px; text-align:center;
              color:var(--vscode-descriptionForeground, #999); }
   .comment-menu-row { display:grid; grid-template-columns:minmax(0, 1fr) 27px;
-             align-items:center; border-radius:6px; }
-  .comment-menu-row:hover { background:var(--vscode-list-hoverBackground,
-             rgba(128,128,128,.12)); }
+             align-items:center; border-radius:6px; background:#fff; color:#202124;
+             margin-bottom:4px; border:1px solid #e1e4e8; }
+  .comment-menu-row:hover { background:#f3f7fc; }
   #commentsdropdown .comment-menu-item { display:grid;
              grid-template-areas:'where' 'text' 'meta'; gap:2px; width:100%;
              height:auto; min-height:52px; padding:7px 8px; text-align:left;
-             justify-content:stretch; border-radius:6px; background:transparent; }
+             justify-content:stretch; border-radius:6px; background:transparent;
+             color:#202124; border:0; box-shadow:none; }
   .comment-menu-where { grid-area:where; min-width:0; overflow:hidden;
              text-overflow:ellipsis; white-space:nowrap; font-size:10.5px; font-weight:600; }
   .comment-menu-text { grid-area:text; min-width:0; overflow:hidden;
              text-overflow:ellipsis; white-space:nowrap;
-             color:var(--vscode-descriptionForeground, #aaa); font-size:10.5px; }
+             color:#454b54; font-size:10.5px; }
   .comment-menu-meta { grid-area:meta; min-width:0; overflow:hidden;
              text-overflow:ellipsis; white-space:nowrap;
-             color:var(--vscode-descriptionForeground, #999); font-size:9.5px;
+             color:#626b76; font-size:9.5px;
              font-variant-numeric:tabular-nums; }
   #commentsdropdown .comment-menu-delete { width:25px; height:25px; padding:5px;
-             border:0; border-radius:5px; color:var(--vscode-descriptionForeground, #999);
+             border:0; border-radius:5px; color:#626b76;
              background:transparent; opacity:.62; cursor:pointer; }
   #commentsdropdown .comment-menu-delete:hover { color:var(--vscode-errorForeground, #f48771);
              background:color-mix(in srgb, var(--vscode-errorForeground, #f48771) 12%, transparent);
              opacity:1; }
   .comment-menu-delete .tool-icon { width:13px; height:13px; }
-  .comment-menu-actions { display:flex; gap:4px; padding:6px 2px 1px;
+  .comment-menu-actions { display:flex; flex-wrap:wrap; gap:4px; padding:6px 2px 1px;
              margin-top:4px; border-top:1px solid var(--vscode-menu-separatorBackground,
              var(--vscode-panel-border, rgba(128,128,128,.22))); }
   .comment-menu-actions button { flex:1; min-width:0; display:flex; align-items:center;
@@ -752,29 +814,30 @@
              background:var(--vscode-list-hoverBackground, rgba(128,128,128,.18)); }
   .comment-menu-actions button.danger {
              color:var(--vscode-errorForeground, #f48771); }
+  .comment-menu-actions button[data-comment-action="copyClear"] {
+             flex-basis:100%; order:1;
+             background:var(--vscode-button-secondaryBackground, #30343b); }
   .comment-menu-actions button:disabled { opacity:.38; cursor:default; }
   .comment-menu-actions .tool-icon { width:13px; height:13px; }
   /* Markers live just outside the page, like a proof-reader's margin.  They
      are part of the page, not a second scrolling surface, so they follow their
      paragraph through zooming and scrolling without consuming reading width. */
-  .comment-marker { position:absolute; left:calc(100% + 8px); width:25px; height:25px;
+  .comment-marker { position:absolute; left:calc(100% + 8px); min-width:24px; height:24px; box-sizing:border-box;
              z-index:28; display:none; align-items:center; justify-content:center;
-             padding:0; border:1px solid color-mix(in srgb,
-             var(--vscode-textLink-foreground, #3794ff) 55%, transparent);
-             border-radius:13px; color:var(--vscode-textLink-foreground, #3794ff);
-             background:var(--vscode-editorWidget-background, #fff); cursor:pointer;
-             box-shadow:0 2px 8px rgba(0,0,0,.20); transition:transform .12s ease,
+             padding:0 5px; gap:4px; border:1px solid #cad8e8;
+             border-radius:6px; color:#527599;
+             background:#f0f5fb; cursor:pointer;
+             box-shadow:0 1px 3px rgba(35,58,87,.10); transition:
              background .12s ease, opacity .12s ease; }
   body.comments-open .comment-marker { display:inline-flex; }
-  .comment-marker:hover, .comment-marker.on { transform:scale(1.08);
-             background:var(--vscode-button-background, #0e639c);
-             color:var(--vscode-button-foreground, #fff); border-color:transparent; }
+  .comment-marker:hover { background:#e0edfc; color:#315f90; border-color:#aac4e0; }
+  .comment-marker.on { background:#dcebf9; color:#245b90; border-color:#84afd5;
+             box-shadow:inset 2px 0 #527eaf; }
   .comment-marker .tool-icon { width:13px; height:13px; }
-  .comment-marker .cm-count { position:absolute; right:-5px; top:-5px; min-width:14px;
-             height:14px; padding:0 3px; box-sizing:border-box; border-radius:8px;
+  .comment-marker .cm-count { min-width:8px;
+             height:14px; padding:0; box-sizing:border-box;
              display:flex; align-items:center; justify-content:center; font-size:8.5px;
-             font-weight:650; line-height:1; color:var(--vscode-badge-foreground, #fff);
-             background:var(--vscode-badge-background, #4d4d4d); }
+             font-weight:600; line-height:1; color:inherit; }
   /* This node exists only for the row currently being offered. Keep it
      visible while the pointer crosses the small gap from paper to rail. */
   .comment-marker.add { opacity:.82; border-style:dashed; box-shadow:none; }

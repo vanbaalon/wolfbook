@@ -460,6 +460,8 @@ class WolframMCPServer {
                         port:      info.port,
                         pid:       info.pid,
                         notebooks: info.notebooks || [],
+                        paperFiles: info.paperFiles || [],
+                        workspaceRoots: info.workspaceRoots || [],
                         kernels:   info.kernels || [],
                         generation: info.generation || null,
                         registeredAt: Number(info.registeredAt || Date.now()),
@@ -776,6 +778,7 @@ class WolframMCPServer {
 
                 // ── Extract & strip client_id routing hint ───────────────────
                 const args = rawArgs ? { ...rawArgs } : {};
+                if (name.startsWith('paper_')) return this._dispatchPaper(name, args, sessionId);
                 const targetClientId = args.client_id || null;
                 delete args.client_id;
 
@@ -1642,6 +1645,73 @@ class WolframMCPServer {
         return matches;
     }
 
+    async _dispatchPaper(name, args) {
+        const started = Date.now();
+        const { paperWindowInfo, selectPaperClient } = require('./paper-routing');
+        this._pruneWorkers();
+        const clients = [
+            { clientId: this._ownClientId, ...paperWindowInfo() },
+            ...[...this._workers].map(([clientId, w]) => ({ clientId, ...w })),
+        ].filter(c => c.clientId);
+        const fail = (code, extra = {}) => {
+            const data = { ok: false, code, ...extra };
+            return { isError: true, structuredContent: data, content: [{ type: 'text', text: JSON.stringify(data) }] };
+        };
+        // Ownership is routing metadata only. Actual hashes/buffer versions
+        // remain guarded by the transaction store in the owning extension host.
+        this._paperOwners ||= new Map();
+        for (const [id, entry] of this._paperOwners) if (Date.now() - entry.at > 3600000) this._paperOwners.delete(id);
+        const token = args.transaction_id || args.undo_token;
+        const owner = token && this._paperOwners.get(token);
+        if (owner && args.client_id && args.client_id !== owner.clientId) {
+            return fail('transaction-client-mismatch', { client_id: owner.clientId, remedy: 'Apply through the owning client, or omit client_id.' });
+        }
+        const selected = selectPaperClient(clients, args.file, owner?.clientId || args.client_id);
+        if (selected.length !== 1) return fail(owner ? 'transaction-client-unavailable' : args.client_id ? 'unknown-client' : 'ambiguous-paper-client', {
+            candidates: (selected.length ? selected : clients).map(c => ({ client_id: c.clientId, workspaceRoots: c.workspaceRoots || [], paperFiles: c.paperFiles || [] })),
+            remedy: 'Pass an explicit client_id and file. No notebook target was used.',
+        });
+        const client = selected[0];
+        delete args.client_id;
+        delete args.notebook;
+        delete args.kernel_id;
+        if (args._activityContext) Object.assign(args._activityContext, {
+            clientId: client.clientId, workspace: this._workspaceForClient(client.clientId), notebook: null, kernelId: null,
+        });
+        const routingMs = Date.now() - started, dispatchStart = Date.now();
+        let result;
+        if (client.clientId !== this._ownClientId) result = await this._invokeWorker(client.port, name, args);
+        else {
+            const tool = this._tools.get(name);
+            if (!tool) return fail('unknown-paper-tool');
+            setMcpCallActive(true);
+            try {
+                const value = await runWithActivityContext(args._activityContext, () => tool.invoke({ input: args, skipConfirm: true }, {
+                    isCancellationRequested: false, onCancellationRequested: () => ({ dispose() {} }),
+                }));
+                result = { isError: false, content: (value?.content || []).map(p => ({ type: 'text', text: String(p.value ?? p.text ?? '') })) };
+            } catch (e) { return fail('paper-call-failed', { message: e.message }); }
+            finally { setMcpCallActive(false); }
+        }
+        let data = result.structuredContent;
+        if (!data) {
+            for (const part of result.content || []) {
+                try { data = JSON.parse(part.text); break; } catch (_) { /* plain text */ }
+            }
+        }
+        if (data && typeof data === 'object' && !Array.isArray(data)) {
+            for (const id of [data.transaction_id, data.undo_token, data.undoToken].filter(Boolean)) {
+                this._paperOwners.set(id, { clientId: client.clientId, at: Date.now() });
+            }
+            while (this._paperOwners.size > 2000) this._paperOwners.delete(this._paperOwners.keys().next().value);
+        }
+        const routing = { client_id: client.clientId, file: args.file || null,
+            reason: owner ? 'transaction owner' : 'paper file/client',
+            timing: { routingMs, dispatchRoundTripMs: Date.now() - dispatchStart } };
+        return { ...result, structuredContent: { ...(data && typeof data === 'object' ? data : {}), routing },
+            content: [...(result.content || []), { type: 'text', text: JSON.stringify({ routing }) }] };
+    }
+
     /** Build structured client list (used by /workers endpoint and wolfbook_list_clients). */
     _buildClientList() {
         this._pruneWorkers();
@@ -1660,6 +1730,7 @@ class WolframMCPServer {
                 workspace: this._ownWorkspace || this._workspaceFromClientId(this._ownClientId),
                 role:      'primary',
                 notebooks: dedupe(this._ownNotebooks),
+                ...require('./paper-routing').paperWindowInfo(),
                 kernels: this._getOwnKernels?.() || [],
                 pid:       process.pid,
                 generation: this._ownRegistrationGeneration,
@@ -1673,6 +1744,8 @@ class WolframMCPServer {
                 role:      'worker',
                 workerPort: info.port,
                 notebooks: dedupe(info.notebooks),
+                paperFiles: info.paperFiles || [],
+                workspaceRoots: info.workspaceRoots || [],
                 kernels: info.kernels || [],
                 pid:       info.pid,
                 generation: info.generation || null,

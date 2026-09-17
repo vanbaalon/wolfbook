@@ -265,6 +265,28 @@ async function main() {
             return JSON.stringify(out);
         };
 
+        await test('a half-typed failed build cannot erase existing references from the next live pass', async () => {
+            const source = '\\documentclass{article}\n\\begin{document}\n' +
+                '\\section{First}\\label{sec:first}\nSee \\ref{sec:first}. Original text.\n\\end{document}\n';
+            const { dir, root } = mkProject('preserve-labels.tex', source);
+            const first = await compile({ root, timeoutMs: 120000 });
+            assert.equal(first.ok, true);
+            const aux = path.join(first.outDir, 'preserve-labels.aux');
+            const goodAux = fs.readFileSync(aux, 'utf8');
+            assert.ok(goodAux.includes('sec:first'));
+            const bad = source.replace('\\section{First}', '\\input{missing-wb-regression-file}\n\\section{First}');
+            const broken = await compile({ root, overlay: new Map([[root, bad]]), maxPasses: 1, timeoutMs: 120000 });
+            assert.ok(broken.errors > 0);
+            assert.equal(broken.referenceAuxRestored, true);
+            assert.equal(fs.readFileSync(aux, 'utf8'), goodAux);
+            const repaired = await compile({ root, overlay: new Map([[root, source.replace('Original', 'Repaired')]]), maxPasses: 1, timeoutMs: 120000 });
+            assert.equal(repaired.errors, 0);
+            assert.equal(repaired.rerunWanted, false, 'unchanged labels need no second pass');
+            assert.ok(!/Reference .*undefined/.test(fs.readFileSync(repaired.logPath, 'utf8')));
+            fs.rmSync(dir, { recursive: true, force: true });
+            fs.rmSync(first.outDir, { recursive: true, force: true });
+        });
+
         await test('A BROKEN REFERENCE NEVER ASKS FOR A RECOMPILE', async () => {
             // The worry, and it is the right one: do not recompile for ever
             // because a \ref points at a label that is not there. Measured

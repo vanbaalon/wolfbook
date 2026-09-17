@@ -863,10 +863,18 @@ class ReviewUi {
             const writing = this._agentWriting.get(file);
             const agentBusy = writing != null && Date.now() - writing < 5000;
             if (!this._applying && !agentBusy && e.document.isDirty) {
-                for (const c of e.contentChanges) {
+                // Offsets describe the buffer immediately BEFORE this event,
+                // not the last debounced paint. Rapid typing otherwise compares
+                // keystrokes against an increasingly stale snapshot and turns
+                // the reader's text into apparent external changes.
+                if (typeof previous === 'string' && s._lastText !== previous) s.update({ currentText: previous });
+                // Multi-cursor edits share pre-event coordinates. Work from
+                // right to left so advancing the baseline preserves them.
+                for (const c of [...e.contentChanges].sort((a, b) => b.rangeOffset - a.rangeOffset)) {
                     try { s.noteReaderEdit({ offset: c.rangeOffset, length: c.rangeLength, text: c.text }); }
                     catch (_) { /* an unmirrorable edit is not fatal */ }
                 }
+                s.update({ currentText: e.document.getText() });
             }
             clearTimeout(this._debounce);
             this._debounce = setTimeout(() => { this.refresh(file); }, 250);

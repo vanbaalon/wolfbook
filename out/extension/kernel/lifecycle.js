@@ -497,7 +497,7 @@ async function launchKernel(self, WstpSession) {
         return;
     }
     devLog(LOG_CHANNELS.KERNEL,
-        `[launchKernel] licence preflight passed (${_licensePreflight.durationMs} ms)`);
+        `[launchKernel] licence preflight ${_licensePreflight.verified ? 'verified' : 'clean exit; licence fields unconfirmed, continuing'} (${_licensePreflight.durationMs} ms)`);
 
     try {
         devLog(LOG_CHANNELS.KERNEL, '[launchKernel] creating WstpSession…');

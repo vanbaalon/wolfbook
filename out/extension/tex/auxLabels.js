@@ -126,7 +126,9 @@ function parseAux(text) {
         // the same name with a `@cref` suffix; the bare name is the one a
         // `\ref` resolves through, so the first wins and the rest are ignored.
         if (/@cref$/.test(name) || labels.has(name)) continue;
-        labels.set(name, { printed: looksPrintable(printed) ? printed : '', page });
+        const entry = { printed: looksPrintable(printed) ? printed : '', page };
+        if (parts[3]) entry.destination = parts[3].trim();
+        labels.set(name, entry);
     }
     return { labels, cites, inputs };
 }

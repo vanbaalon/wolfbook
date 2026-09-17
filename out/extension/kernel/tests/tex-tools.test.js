@@ -71,6 +71,7 @@ function texStub(docs) {
             fs: { readFile: async () => { throw new Error('ENOENT'); } },
             onDidOpenTextDocument: () => ({ dispose() {} }),
             onDidSaveTextDocument: () => ({ dispose() {} }),
+            onWillSaveTextDocument: () => ({ dispose() {} }),
             onDidCloseTextDocument: () => ({ dispose() {} }),
             onDidChangeTextDocument: () => ({ dispose() {} }),
         },
@@ -584,7 +585,23 @@ async function main() {
         assert.strictEqual(doc.getText(), PAPER, 'nothing was written');
     });
 
-    await test('paper_applyEdit refuses a file that is not open, and explains why', async () => {
+    await test('paper_applyEdit opens a disk-only source in its own host before guarded apply', async () => {
+        const docs = [], doc = makeTextDoc('/proj/paper.tex', PAPER);
+        const stub = texStub(docs);
+        stub.workspace.fs.readFile = async () => Buffer.from(PAPER);
+        let opened = 0;
+        stub.workspace.openTextDocument = async uri => { assert.equal(uri.fsPath, doc.uri.fsPath); opened++; docs.push(doc); return doc; };
+        const T = freshRequire('../../tools/tex-tools', stub);
+        const preview = json(await new T.PaperPreviewEditTool().invoke({ input: {
+            file: doc.uri.fsPath, selector: 'eq:dispersion', new_text: '\\begin{equation}x=2\\end{equation}',
+        } }));
+        assert.ok(preview.transaction_id);
+        const applied = json(await new T.PaperApplyEditTool().invoke({ input: { transaction_id: preview.transaction_id } }));
+        assert.equal(opened, 1);
+        assert.equal(applied.applied, true);
+    });
+
+    await test('paper_applyEdit refuses a missing file', async () => {
         const T = freshRequire('../../tools/tex-tools', texStub([]));
         const t = text(await new T.PaperApplyEditTool().invoke({
             input: { file: '/proj/absent.tex', selector: 'x', new_text: 'y' },

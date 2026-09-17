@@ -26,7 +26,7 @@ const { GlyphMap } = require('./glyphMap');
 const { findRoot, buildGraph } = require('./texProject');
 const {
     nextLiveDelayMs, liveDeadlineDelayMs, cooldownDelayMs, blendLiveMs, synctexUnchanged,
-    generationSatisfies, authoritativeDelayMs,
+    generationSatisfies, authoritativeDelayMs, shouldUseGlyphMap, glyphMapBackoff,
 } = require('./livePolicy');
 const { foldForCompile, MARK: COLLAPSE_MARK } = require('./collapse');
 const { formatDependencyHelp } = require('./dependencyHelp');
@@ -171,14 +171,20 @@ class RenderCoordinator {
         return m.size ? m : null;
     }
 
+    /** Reopening a stale viewer has no edit event to arm the live timer. */
+    ensureLiveRefresh(doc) {
+        const root = this.rootFor(doc);
+        const st = this.roots.get(root);
+        // Do not postpone existing work, duplicate an active build, or retry
+        // a failed compile on every UI refresh. A new edit/manual Compile can
+        // retry errors through the ordinary paths.
+        if (!st || !st.sourceAhead || st.compiling || st.lastError || this._liveTimers.has(root)) return;
+        this.scheduleLive(doc, 3000);
+    }
+
     /**
-     * Recompile a little after the typing stops.
-     *
-     * The delay is the whole design. Compiling per keystroke queues runs that
-     * are obsolete before they finish, and every one of them costs a
-     * process-group kill; waiting for a pause means the compile that runs is
-     * the one whose result the user still wants to see. It is also what keeps
-     * the viewer calm: at most one swap per pause, never a flicker per letter.
+     * Recompile after typing pauses. Debouncing avoids obsolete queued builds
+     * and keeps the viewer to at most one swap per pause.
      */
     scheduleLive(doc, delayMs) {
         const cfg = vscode.workspace.getConfiguration('wolfbook.tex');
@@ -395,12 +401,16 @@ class RenderCoordinator {
         // approximate geometry until the source happened to change.
         const cfg0 = vscode.workspace.getConfiguration('wolfbook.tex');
         const mapEngine = cfg0.get('mapEngine', 'auto');
-        let wantGlyphMap = false;
-        if (mapEngine === 'lualatex') wantGlyphMap = true;
-        else if (mapEngine === 'auto') {
+        if (mapEngine === 'auto') {
             if (this._luaOk == null) this._luaOk = await probeLualatex();
-            wantGlyphMap = !!this._luaOk && !st.glyphMapRefused;
         }
+        const wantGlyphMap = shouldUseGlyphMap({
+            mapEngine,
+            luaOk: !!this._luaOk,
+            force,
+            snapshot,
+            refusedSnapshot: st.glyphMapRefused,
+        });
         const mapIsStale = wantGlyphMap && st.map && !st.map.exact;
         if (!force && !mapIsStale && this.isCurrent(st, snapshot, { authoritative: wantFull }) && st.map) {
             // The reader may have typed and undone back to the exact compiled
@@ -543,22 +553,32 @@ class RenderCoordinator {
                 this._capOk = false;
                 gen = await compile({ ...primaryOpts, maxPasses: null });
             }
+            const glyphPrimary = wantGlyphMap ? gen : null;
+            let glyphFallback = null;
             // lualatex could not build this document at all (no PDF): rebuild
-            // with the engine the user configured and remember the refusal for
-            // this document so the live loop does not pay twice per keystroke.
+            // with the engine the user configured. Only a SUCCESSFUL fallback
+            // proves that this particular source snapshot needs it. A failure
+            // in both engines is usually a half-typed construct and must never
+            // disable the exact map for the rest of the session.
             if (wantGlyphMap && !gen.ok && !gen.cancelled && !ac.signal.aborted &&
                 primaryOpts.engine !== compileOpts.engine) {
-                this.log(`  lualatex produced no PDF (${gen.stopReason || 'unknown reason'}) — rebuilding with ${compileOpts.engine}; the render map will be approximate`);
-                st.glyphMapRefused = true;
-                gen = await compile({ ...compileOpts, maxPasses: null });
+                this.log(`  lualatex produced no PDF (${gen.stopReason || 'unknown reason'}) — trying ${compileOpts.engine}`);
+                glyphFallback = await compile({ ...compileOpts, maxPasses: null });
+                gen = glyphFallback;
             }
             if (ac.signal.aborted) { this.log('  cancelled'); return st; }
-            // lualatex built the document but the hook emitted no map: remember
-            // it for this document, or the "not exact → rebuild" rule above
-            // would recompile on every pause.
-            if (wantGlyphMap && gen.ok && gen.engine === 'lualatex' && !gen.glyphMapPath) {
-                st.glyphMapRefused = true;
-                this.log('  the wbmap hook produced no glyph map — staying on the SyncTeX map for this document');
+            const refusedSnapshot = glyphMapBackoff({
+                snapshot, primary: glyphPrimary, fallback: glyphFallback,
+            });
+            if (refusedSnapshot) {
+                st.glyphMapRefused = refusedSnapshot;
+                if (glyphPrimary && glyphPrimary.ok) {
+                    this.log('  the wbmap hook produced no glyph map — using SyncTeX until the source changes or Compile is pressed');
+                } else {
+                    this.log(`  ${compileOpts.engine} succeeded — using its approximate map until the source changes or Compile is pressed`);
+                }
+            } else if (glyphPrimary && glyphPrimary.ok && glyphPrimary.glyphMapPath) {
+                st.glyphMapRefused = null;
             }
             const prevGen = st.generation;
             // prevMap and map may now SHARE one parsed SyncTeX doc. That is

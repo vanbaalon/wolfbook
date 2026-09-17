@@ -15,7 +15,7 @@ const test = (name, fn) => Promise.resolve().then(fn)
 
 const {
     nextLiveDelayMs, liveDeadlineDelayMs, cooldownDelayMs, blendLiveMs, shipDecision, synctexUnchanged,
-    readPassLimit, generationSatisfies, authoritativeDelayMs,
+    readPassLimit, generationSatisfies, authoritativeDelayMs, shouldUseGlyphMap, glyphMapBackoff,
 } = require('../../tex/livePolicy');
 const { needsRerun } = require('../../tex/texLog');
 
@@ -103,6 +103,45 @@ async function main() {
         assert.strictEqual(blendLiveMs(null, 900), 900);
         assert.strictEqual(blendLiveMs(500, 0), 500, 'a zero sample keeps the estimate');
         assert.strictEqual(blendLiveMs(null, 0), null);
+    });
+
+    // --- exact-map recovery ------------------------------------------------
+
+    await test('A TEMPORARY LATEX FAILURE CANNOT PERMANENTLY REMOVE THE RED CARET', () => {
+        const broken = 'hash-of-half-typed-source';
+        assert.strictEqual(shouldUseGlyphMap({
+            mapEngine: 'auto', luaOk: true, snapshot: broken, refusedSnapshot: broken,
+        }), false, 'do not pay twice for the same failed snapshot');
+        assert.strictEqual(shouldUseGlyphMap({
+            mapEngine: 'auto', luaOk: true, snapshot: 'hash-after-fix', refusedSnapshot: broken,
+        }), true, 'the next source edit retries the exact glyph map');
+        assert.strictEqual(shouldUseGlyphMap({
+            mapEngine: 'auto', luaOk: true, force: true,
+            snapshot: broken, refusedSnapshot: broken,
+        }), true, 'Compile is an explicit recovery path even without another edit');
+    });
+
+    await test('an uncompilable intermediate edit does not create a glyph-map refusal', () => {
+        const snapshot = 'broken';
+        assert.strictEqual(glyphMapBackoff({
+            snapshot,
+            primary: { ok: false, engine: 'lualatex' },
+            fallback: { ok: false, engine: 'pdflatex' },
+        }), null, 'both engines failing proves only that the source is currently invalid');
+        assert.strictEqual(glyphMapBackoff({
+            snapshot,
+            primary: { ok: false, engine: 'lualatex' },
+            fallback: { ok: true, engine: 'pdflatex' },
+        }), snapshot, 'a successful fallback is scoped to precisely this source');
+    });
+
+    await test('a successful exact map clears the need for approximation', () => {
+        assert.strictEqual(glyphMapBackoff({
+            snapshot: 'fixed',
+            primary: { ok: true, engine: 'lualatex', glyphMapPath: '/tmp/paper.wbmap' },
+        }), null);
+        assert.strictEqual(shouldUseGlyphMap({ mapEngine: 'lualatex', luaOk: false }), true,
+            'an explicit lualatex setting is never silently downgraded');
     });
 
     // --- shipping ----------------------------------------------------------

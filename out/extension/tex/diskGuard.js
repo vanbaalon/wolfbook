@@ -103,6 +103,23 @@ function checkWritable({ diskText, baseText, isDirty = false, willSave = false }
 class DiskWatch {
     constructor() {
         this._seen = new Map();      // path -> hash of the disk content last acted on
+        this._saving = new Map();    // exact snapshots awaiting save notifications
+    }
+
+    noteSaving(file, text) {
+        const now = Date.now();
+        const entries = (this._saving.get(file) || []).filter(e => now - e.at < 30000);
+        entries.push({ hash: hashText(text), at: now });
+        this._saving.set(file, entries.slice(-8));
+    }
+
+    isOwnSave(file, text) {
+        if (typeof text !== 'string') return false;
+        const now = Date.now(), hash = hashText(text);
+        const entries = (this._saving.get(file) || []).filter(e => now - e.at < 30000);
+        if (entries.length) this._saving.set(file, entries);
+        else this._saving.delete(file);
+        return entries.some(e => e.hash === hash);
     }
 
     /** Note the content we consider current for a path, without prompting. */
@@ -111,8 +128,8 @@ class DiskWatch {
         else this._seen.set(file, hashText(text));
     }
 
-    forget(file) { this._seen.delete(file); }
-    dispose() { this._seen.clear(); }
+    forget(file) { this._seen.delete(file); this._saving.delete(file); }
+    dispose() { this._seen.clear(); this._saving.clear(); }
 
     /**
      * @returns {{verdict: string, repeat: boolean}} `repeat` is true when this

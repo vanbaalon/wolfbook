@@ -146,6 +146,9 @@ try {
         'the dropdown names and opens individual comments');
     assert.match(client, /comment-menu-actions[\s\S]*addAction\('copy', 'Copy all', 'copy'\)[\s\S]*addAction\('clear', 'Delete all', 'trash', true\)/,
         'the dropdown offers compact copy-all and delete-all actions');
+    assert.match(client, /addAction\('copyClear', 'Copy and delete all', 'copy'\)/);
+    assert.match(shell, /\.comment-menu-row\s*\{[^}]*background:#fff; color:#202124;/,
+        'dropdown comment cards stay white and legible in dark VS Code themes');
     assert.match(client, /comment-menu-meta[\s\S]*commentAuthorName\(item\)[\s\S]*commentAge\(addedAt\)/,
         'each dropdown entry names its author and relative age');
     assert.match(client, /comment-menu-delete[\s\S]*requestCommentDelete\(item\)/,
@@ -207,10 +210,10 @@ try {
         'the stable machine id does not leak into the human-facing comment card');
     assert.match(client, /const page = await doc\.getPage\(n\);[\s\S]*page\.getAnnotations/,
         'PDF links read annotations from their page proxy');
-    assert.match(client, /function previewChipForPdfLink[\s\S]*inkMatching\(c\.find, page\)/,
-        'hovering a printed PDF reference resolves the model target at the same ink');
-    assert.match(client, /mouseenter[\s\S]*showPdfLinkPreview[\s\S]*showChipPreview\(chip, anchor\)/,
-        'an in-text reference shows the same rendered miniature as a label badge');
+    assert.match(client, /function destinationPreview[\s\S]*doc\.getDestination\(dest\)/,
+        'hover resolves the PDF destination independently of text item segmentation');
+    assert.match(client, /mouseenter[\s\S]*showPdfLinkPreview[\s\S]*showDestinationCard\(preview, anchor\)/,
+        'an in-text reference shows a destination-based rendered miniature');
     assert.match(client, /const previewWidth =[\s\S]*card\.style\.width =[\s\S]*visibleRight - card\.offsetWidth/,
         'a reference at the end of a line shifts its miniature inside the visible paper area');
     assert.match(client, /aria-label', 'Go to it in the paper'/,

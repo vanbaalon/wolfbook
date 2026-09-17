@@ -155,6 +155,23 @@ test('a live compile writes the overlay, NEVER the .tex', () => {
     });
 });
 
+test('save snapshots distinguish delayed own-save notifications from external writes', () => {
+    const watch = new DiskWatch();
+    watch.noteSaving('/paper.tex', 'saved sentence');
+    assert.equal(watch.isOwnSave('/paper.tex', 'saved sentence'), true);
+    assert.equal(watch.isOwnSave('/paper.tex', 'external sentence'), false);
+    assert.equal(watch.isOwnSave('/other.tex', 'saved sentence'), false);
+    watch.noteSaving('/paper.tex', 'saved sentence extended');
+    assert.equal(watch.isOwnSave('/paper.tex', 'saved sentence'), true, 'overlapping save events are retained');
+    const oldNow = Date.now;
+    const then = oldNow();
+    try {
+        Date.now = () => then + 31000;
+        assert.equal(watch.isOwnSave('/paper.tex', 'saved sentence'), false, 'failed save intent expires');
+    } finally { Date.now = oldNow; }
+    watch.dispose();
+});
+
 console.log('not losing somebody else\'s work\n');
 results.forEach(r => console.log(r));
 console.log(`\n${pass} passed, ${fail} failed`);

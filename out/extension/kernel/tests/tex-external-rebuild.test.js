@@ -42,6 +42,7 @@ fs.writeFileSync(OTHER, '\\documentclass{article}\n\\begin{document}\nx\n\\end{d
 const { makeVscodeStub } = require('./_stub-vscode.js');
 const stub = makeVscodeStub();
 const watchers = [];
+const willSaveHandlers = [];
 const noDispose = { dispose() {} };
 const evt = () => () => noDispose;
 
@@ -118,7 +119,7 @@ Object.assign(stub.workspace, {
     onDidOpenTextDocument: evt(),
     onDidCloseTextDocument: evt(),
     onDidChangeConfiguration: evt(),
-    onWillSaveTextDocument: evt(),
+    onWillSaveTextDocument: fn => { willSaveHandlers.push(fn); return noDispose; },
     onDidRenameFiles: evt(),
     applyEdit: async () => true,
     openTextDocument: async () => ({ uri: { fsPath: ROOT }, getText: () => '', isDirty: false }),
@@ -185,6 +186,48 @@ const fire = async (fsPath) => {
 };
 
 // --- the cases -------------------------------------------------------------
+
+test('reopening a behind viewer arms one rebuild without postponing pending work', async () => {
+    const st = { sourceAhead: true, compiling: false, lastError: null };
+    const timers = new Map(), calls = [];
+    const coord = { roots: new Map([[ROOT, st]]), rootFor: () => ROOT, _liveTimers: timers,
+        scheduleLive: (doc, delay) => { calls.push([doc.uri.fsPath, delay]); timers.set(ROOT, true); } };
+    const ensure = () => renderUi.RenderCoordinator.prototype.ensureLiveRefresh.call(coord, { uri: { fsPath: ROOT } });
+    ensure(); ensure();
+    assert.deepStrictEqual(calls, [[ROOT, 3000]]);
+    timers.clear(); st.compiling = true; ensure();
+    st.compiling = false; st.lastError = 'invalid TeX'; ensure();
+    st.lastError = null; st.sourceAhead = false; ensure();
+    assert.equal(calls.length, 1, 'no duplicate compile, error retry loop, or current-page rebuild');
+    // Exercise refresh itself: the stale badge and recovery must share a path.
+    const viewer = Object.create(TexViewer.prototype);
+    viewer.panel = {}; viewer.coord = { roots: coord.roots, ensureLiveRefresh: ensure };
+    viewer._post = () => {}; viewer._setTracePaused = () => {};
+    st.sourceAhead = true;
+    await viewer.refresh();
+    assert.equal(calls.length, 2, 'refresh on reopen/switch triggers recovery without any edit event');
+});
+
+test('save then type then watcher is not an external change or navigation request', async () => {
+    const priorDocs = stub.workspace.textDocuments;
+    viewerRoot = ROOT;
+    let text = 'Saved by the mini-editor.\n';
+    const doc = { uri:{fsPath:CHILD,scheme:'file'}, languageId:'latex',isDirty:true,isClosed:false,getText:()=>text };
+    stub.workspace.textDocuments = [doc];
+    try {
+        for (const fn of willSaveHandlers) await fn({document:doc,waitUntil:()=>{}});
+        fs.writeFileSync(CHILD,text);
+        text += 'More typing before the watcher arrives.';
+        const n = scheduled.length, g = guarded.length;
+        await fire(CHILD);
+        assert.equal(scheduled.length,n,'our save cannot queue an external rebuild');
+        assert.equal(guarded.length,g,'our save cannot trigger layout restoration');
+        assert.ok(doc.getText().endsWith('arrives.'),'unsaved typing remains intact');
+        fs.writeFileSync(CHILD,'A genuinely external rewrite.\n');
+        await fire(CHILD);
+        assert.ok(scheduled.includes(CHILD),'different disk contents still enter external-change handling: '+JSON.stringify(scheduled));
+    } finally { stub.workspace.textDocuments = priorDocs; viewerRoot = ROOT; }
+});
 
 test('the watcher for .tex/.bib is actually registered', () => {
     assert.ok(texWatcher, `no .tex watcher among ${watchers.map(w => w.pattern).join(', ') || 'none'}`);

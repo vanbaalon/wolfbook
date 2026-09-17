@@ -1806,6 +1806,9 @@ async function activate(context) {
     context.subscriptions.push(
         { dispose: () => { if (_topologyRecordTimer) clearTimeout(_topologyRecordTimer); } },
         kernelManager.onDidChange(_syncNotebooks),
+        vscode.workspace.onDidOpenTextDocument(d => { if (/\.tex$/i.test(d.uri.fsPath)) _syncNotebooks(); }),
+        vscode.workspace.onDidCloseTextDocument(d => { if (/\.tex$/i.test(d.uri.fsPath)) _syncNotebooks(); }),
+        vscode.workspace.onDidChangeWorkspaceFolders(() => _syncNotebooks()),
         vscode.workspace.onDidOpenNotebookDocument(() => _syncNotebooks()),
         vscode.workspace.onDidCloseNotebookDocument((closedNotebook) => {
             _syncNotebooks();

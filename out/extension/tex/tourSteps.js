@@ -55,6 +55,13 @@ const STEPS = [
         satisfy: (e) => e.type === 'compare',
     },
     {
+        id: 'bookmarks',
+        title: 'Leave a ribbon, keep your place',
+        say: 'Shift-click bare paper to bookmark a passage. Amber ribbons are yours; compact blue links automatically point to the nearest chapter or section heading above and below the view. Hover or focus for a thumbnail, section and page; click to return. The small × removes a personal bookmark. ≈ means its saved position could not be matched exactly after edits. Drag still selects text.',
+        doIt: 'Shift-click a passage you would like to return to.',
+        satisfy: e => e.type === 'bookmarkAdded',
+    },
+    {
         id: 'pageTheme',
         title: 'Choose the paper, not the editor',
         say: 'The page may stay white in a dark editor, or be softened for dark reading. Fit remains edge-to-edge; comment bubbles move inside the sheet when there is no outer margin.',
