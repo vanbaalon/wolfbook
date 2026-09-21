@@ -1383,7 +1383,10 @@ class TexViewer {
         // (renderUi._armAuthoritative), but a reader looking at `??` with
         // nothing said cannot tell a lagging reference from a broken one —
         // which is the whole difficulty of the reported bug.
-        if (st.generation.rerunWanted || st.generation.passesLimited) {
+        if (st.generation.runner === 'wlatex') {
+            this._post({ type:'status', kind:'warn',
+                text:'WLaTeX preview — layout may differ from the final PDF; Save or Compile builds with the configured compiler.' });
+        } else if (st.generation.rerunWanted || st.generation.passesLimited) {
             this._post({
                 type: 'status', kind: '',
                 text: 'cross-references are one pass behind — refreshing in the background',

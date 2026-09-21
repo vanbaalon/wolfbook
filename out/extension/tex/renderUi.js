@@ -700,7 +700,8 @@ class RenderCoordinator {
             this.log(`  ${gen.ok ? 'ok' : 'FAILED'} · ${gen.pageCount ?? '?'} pages · ` +
                 `${gen.errors} error(s) · ${gen.warnings} warning(s) · ` +
                 `${gen.passes ?? '?'} pass(es)${gen.passesLimited ? ' (capped)' : ''}` +
-                `${gen.rerunWanted ? ' (cross-references one pass behind)' : ''} · ` +
+                `${gen.runner === 'wlatex' ? ' (native preview; authoritative build pending)'
+                    : gen.rerunWanted ? ' (cross-references one pass behind)' : ''} · ` +
                 `${gen.ms} ms${gen.queuedMs ? ` (+${gen.queuedMs} ms queued)` : ''} · ` +
                 `${Date.now() - t0} ms total`);
             if (!gen.ok && gen.stopReason) this.log(`  stopped: ${gen.stopReason}`);

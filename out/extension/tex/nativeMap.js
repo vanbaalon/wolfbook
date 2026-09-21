@@ -82,7 +82,9 @@ class NativeMap extends RenderMap {
     get displaced() {
         return this.available && this._hasDisplaced;
     }
-    _baseFlag() { return !this.available ? FLAG.UNMAPPED : this.displaced ? FLAG.PROBABLY_CURRENT : FLAG.FRESH; }
+    // Exact provenance describes this preview's geometry, not parity with
+    // the authoritative compiler. No parity receipt is admitted yet.
+    _baseFlag() { return this.available ? FLAG.PROBABLY_CURRENT : FLAG.UNMAPPED; }
     // The coordinator still calls these legacy notifications. Never approximate
     // native positions with line deltas; replace this map after worker refresh.
     noteEdit() { this._invalidated = true; }
@@ -193,7 +195,7 @@ class NativeMap extends RenderMap {
         const origin = glyph.hit.mapped_origins.find(o => o.source.file === glyph.hit.preferred_source.file &&
             o.source.location.start.line === location.start.line && o.source.location.start.column_utf16 === location.start.column_utf16 &&
             o.source.location.end.line === location.end.line && o.source.location.end.column_utf16 === location.end.column_utf16);
-        return { flag: exact ? FLAG.FRESH : FLAG.PROBABLY_CURRENT, file: glyph.file,
+        return { flag: FLAG.PROBABLY_CURRENT, file: glyph.file,
             line: location.start.line, column: location.start.column_utf16, sourceRange: location,
             generationLine: exact ? origin?.span.line : undefined,
             box: { page, xBp: glyph.x, yTopBp: glyph.y, wBp: glyph.w, hBp: glyph.boxHeight, kind: 'native', line: glyph.line },

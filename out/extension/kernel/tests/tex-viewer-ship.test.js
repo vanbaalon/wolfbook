@@ -80,6 +80,14 @@ async function main() {
         assert.strictEqual(v.shownPdfHash, 'HASH-A');
     });
 
+    await test('native preview status does not claim one-pass reference lag or background work', async () => {
+        const { v, posted } = makeViewer({ ...baseGen, runner:'wlatex', rerunWanted:true });
+        await v.refresh();
+        const statuses = posted.filter(m => m.type === 'status').map(m => m.text);
+        assert.ok(statuses.some(text => /WLaTeX preview/.test(text) && /Save or Compile/.test(text)));
+        assert.ok(!statuses.some(text => /one pass behind|refreshing in the background/.test(text)));
+    });
+
     await test('a fresh viewer receives its exact saved view state', async () => {
         const { v, posted } = makeViewer({ ...baseGen });
         v._viewState = {

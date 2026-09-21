@@ -346,3 +346,24 @@ viewer-shipping tests pass. The real session-reconstruction verifier also checks
 unique display IDs and admission of the changed recovered PDF. Evidence:
 `/tmp/wpaper-native-generation-verification.json`. Full live UI acceptance and
 separate four-platform release verification remain open.
+
+## 2026-09-20 — distinguish native previews from authoritative output
+
+Native map answers now report `probably-current` while available. No verified
+parity receipt with the configured authoritative compiler is admitted yet, so
+native previews cannot claim `fresh`. This does not weaken the independent
+`exact` source-span property: verified source tokens and glyph geometry still
+support native navigation, typing and selection. Invalid views remain unmapped.
+
+The viewer identifies WLaTeX output as a preview whose layout may differ from the
+final PDF and points to Save/Compile for the configured compiler. It no longer
+uses `rerunWanted` to claim native references are exactly one pass behind or that
+background work is necessarily running. Build logs similarly identify a pending
+authoritative build without inventing a pass count.
+
+Validation: 12 native-map tests, 47 native-policy tests and ten viewer-shipping
+tests pass. The real native PDF verifier still passes inverse navigation,
+mini-editor, range, Shift-pick and widen/shrink checks with the changed flags.
+Evidence: `/tmp/wpaper-native-honesty-verification.json`. This implements
+conservative preview status, not the cross-engine parity gate: per-document
+parity measurement, live UI acceptance and four-platform releases remain open.

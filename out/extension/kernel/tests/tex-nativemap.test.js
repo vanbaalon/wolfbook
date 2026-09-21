@@ -163,3 +163,17 @@ test('native ranges respect UTF-16 boundaries and CRLF line positions', async ()
     await assert.rejects(map.forwardRange(file, { line:1, column_utf16:1 }, { line:1, column_utf16:3 }), /Invalid/);
     await assert.rejects(map.forwardRange(file, { line:1, column_utf16:4 }, { line:2, column_utf16:1 }), /Invalid/);
 });
+
+
+test('unqualified native previews retain exact provenance without claiming authoritative freshness', () => {
+    const { map, invalidate } = fixture();
+    const glyph = map.glyphsForLine(file, 4)[0];
+    const hit = map.renderToSource(1, glyph.x + glyph.w / 2, glyph.y + glyph.boxHeight / 2);
+    assert.equal(hit.exact, true);
+    assert.equal(hit.sourceRange.accuracy, 'Exact');
+    assert.equal(hit.flag, 'probably-current');
+    assert.equal(map.sourceToRender(file, 4).flag, 'probably-current');
+    assert.equal(map.pageOccupancy(1).flag, 'probably-current');
+    invalidate();
+    assert.equal(map.sourceToRender(file, 4).flag, 'unmapped');
+});
