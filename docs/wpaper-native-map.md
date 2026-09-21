@@ -782,3 +782,20 @@ pages are evicted and extracted again if later restored. All 63 native-policy
 checks pass (`/tmp/wpaper-text-cache-admission.log`). These verify the existing
 cache implementation; they do not add engine capabilities or close the broader
 release/latency/visual gates.
+
+## 2026-09-21 — visible interaction acceptance remains unverified
+
+A fresh desktop-automation attempt can list running applications and identify
+VS Code, but both the initial app-state request and a longer retry time out.
+The retry reached the terminal tool result `Sky Computer Use request timed out`;
+there is no remaining live UI request. No screenshot, physical click or pointer
+sequence was obtained. Extension-host/webview checks remain valid evidence for
+the scenarios they exercise, but do not establish visible interaction acceptance.
+
+The native engine repository is still clean at a0710b8. Its public SDK contract
+still exposes full builds and point queries, and the missing-file-overlay
+acceptance gate remains INCOMPLETE. The existing Track A/Track B ownership split
+has not changed. Completing the goal still requires engine-side incremental
+execution/convergence and SDK work, separate native distributions and execution
+on the four target platforms, and real visual/pointer acceptance. WPaper's new
+byte-range delivery and page-content reuse do not substitute for those gates.
