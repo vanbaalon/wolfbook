@@ -1024,3 +1024,46 @@ test('host ignores stale PDF text rather than replacing the displayed generation
     TexViewer.prototype._onTextLayer.call(viewer,{ generation:7,page:1,items:[] });
     assert.equal(viewer._text.pages.size,1);
 });
+
+test('failed PDF text extraction is not cached as a successful empty page', async () => {
+    const f=textSweepFixture();
+    const healthy=f.state.doc;
+    f.state.doc={ getPage:async page => {
+        if (page===1) throw Error('temporary PDF read failure');
+        return healthy.getPage(page);
+    } };
+    await f.run(1);
+    assert.equal(f.posts.find(m=>m.type==='textLayer' && m.page===1).items.length,0);
+    f.state.generation=2; f.state.doc=f.makeDoc('recovered');
+    await f.run(2);
+    assert.deepEqual(f.reads,['old:2','recovered:1']);
+    assert.equal(f.posts.find(m=>m.type==='textLayer' && m.generation===2 && m.page===1).items[0].str,'recovered page 1');
+    assert.deepEqual(Array.from(f.posts.at(-1).reusedPages),[2]);
+});
+
+test('unqualified page hashes and changed page indices cannot reuse native text', async () => {
+    for (const hashes of [['invalid','invalid'],['a'.repeat(63),'b'.repeat(65)]]) {
+        const f=textSweepFixture(); f.state.nativePageHashes=hashes;
+        await f.run(1);
+        f.state.generation=2; f.state.doc=f.makeDoc('new');
+        await f.run(2);
+        assert.deepEqual(f.reads,['old:1','old:2','new:1','new:2']);
+        assert.deepEqual(Array.from(f.posts.at(-1).reusedPages),[]);
+    }
+    const f=textSweepFixture(); await f.run(1);
+    f.state.generation=2; f.state.doc=f.makeDoc('reordered');
+    f.state.nativePageHashes=['b'.repeat(64),'a'.repeat(64)];
+    await f.run(2);
+    assert.deepEqual(f.reads.slice(-2),['reordered:1','reordered:2']);
+    assert.deepEqual(Array.from(f.posts.at(-1).reusedPages),[]);
+});
+
+test('removing native pages evicts their text instead of reusing it if the page later returns', async () => {
+    const f=textSweepFixture(); await f.run(1);
+    f.state.generation=2; f.state.doc=f.makeDoc('short'); f.state.pageCount=1;
+    f.state.nativePageHashes=['a'.repeat(64)]; await f.run(2);
+    f.state.generation=3; f.state.doc=f.makeDoc('restored'); f.state.pageCount=2;
+    f.state.nativePageHashes=['a'.repeat(64),'b'.repeat(64)]; await f.run(3);
+    assert.deepEqual(f.reads,['old:1','old:2','restored:2']);
+    assert.deepEqual(Array.from(f.posts.at(-1).reusedPages),[1]);
+});

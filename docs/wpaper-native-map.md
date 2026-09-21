@@ -772,3 +772,13 @@ prior rendering, range-resource cleanup and crash recovery checks. Evidence:
 
 This reduces repeated extraction; it neither skips required label data nor
 claims changed-page-only PDF transfer or reference-paper latency acceptance.
+
+## 2026-09-21 — native text-cache admission regressions
+
+Three additional tests exercise cache failure/recovery boundaries: a failed PDF
+read is re-extracted on the next document rather than retained as an empty page;
+malformed hashes and pages moved to another index do not reuse text; removed
+pages are evicted and extracted again if later restored. All 63 native-policy
+checks pass (`/tmp/wpaper-text-cache-admission.log`). These verify the existing
+cache implementation; they do not add engine capabilities or close the broader
+release/latency/visual gates.
