@@ -669,3 +669,27 @@ The real CRLF/native acceptance scenario passes on macOS ARM64:
 unexpected-process-exit recovery path. Incremental compilation, per-page
 transport, visual/pointer acceptance and four-platform native release testing
 remain outstanding.
+
+## 2026-09-21 — project-file lifecycle acceptance gate
+
+Run `node out/extension/tex/verifyNativeFiles.cjs /absolute/WLaTeX/install`
+with the same native format environment as the other real-producer verifiers.
+It builds a project, renames an included file while retaining a stale host
+include graph, deletes that file, submits its unsaved overlay, and checks
+recovery, mapping, saved bytes and immutable prior PDFs.
+
+The macOS ARM64 run proves native discovery handles the rename, cached source
+bytes do not resurrect a deleted dependency, the missing include rejects without
+a compiler timeout, and a recreated dependency compiles/maps its unsaved text
+without saving it. However, the full gate currently returns **INCOMPLETE** and
+exit code 1: the SDK/compiler rejects overlays for paths absent from its captured
+on-disk project. Evidence: `/tmp/wpaper-native-file-lifecycle-final.log`.
+
+The rejected case is retained as a required assertion, not skipped or called
+supported. After the SDK accepts missing-file overlays, this same verifier must
+return PASS without recreating that file on disk. The restriction is in Track
+A's `crates/lab/src/native_compile.rs` freeze function (the normal lab compiler
+has the same restriction). Resolving it requires admitting safe project-relative
+new files into the frozen image while preserving path validation, size limits,
+source binding and unsaved-buffer semantics. No SDK/native-engine files were
+changed across the documented ownership boundary.
