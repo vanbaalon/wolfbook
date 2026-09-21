@@ -13,7 +13,7 @@ async function main() {
     await fs.mkdir(folder);
     await fs.writeFile(path.join(run, 'acceptance-mode.json'), JSON.stringify({ mode }));
     await fs.mkdir(path.join(profile,'User'), { recursive:true });
-    await fs.writeFile(path.join(folder,'paper.tex'), '\\documentclass{article}\n\\begin{document}\nAlpha Beta. Gamma Delta.\n\\end{document}\n');
+    await fs.writeFile(path.join(folder,'paper.tex'), '\\documentclass{article}\n\\begin{document}\nAlpha Beta. Gamma Delta.\n\\newpage\nSecond page.\n\\end{document}\n');
     // wlatexDirectory has machine scope, so configure the isolated user profile,
     // not workspace settings (which VS Code correctly ignores for this key).
     await fs.writeFile(path.join(profile,'User/settings.json'), JSON.stringify({

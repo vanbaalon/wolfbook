@@ -897,3 +897,22 @@ test('native conflict UI preserves the newest local draft against queued source 
     assert.equal(textarea.value, 'Latest local draft');
     assert.equal(context.state.edit.text, 'Latest local draft');
 });
+
+
+test('native canvas reuse requires matching page identities, scale and display density', () => {
+    const vm = require('node:vm');
+    const js = fs.readFileSync(path.resolve(__dirname, '../../../client/tex-viewer.js'), 'utf8');
+    const start = js.indexOf('function reusableNativePages(');
+    const context = vm.createContext({});
+    vm.runInContext(js.slice(start, js.indexOf('\n}\n',start) + 2), context);
+    const a = 'a'.repeat(64), b = 'b'.repeat(64), c = 'c'.repeat(64);
+    const rendered = new Map([[1,{scale:1.5,dpr:2}], [2,{scale:1.5,dpr:2}]]);
+    const reuse = (old, next, scale=1.5, dpr=2) => [...context.reusableNativePages(old,next,rendered,scale,dpr).keys()];
+    assert.deepEqual(reuse([a,b],[a,c]), [1]);
+    assert.deepEqual(reuse([a,b],[a]), [1]);
+    assert.deepEqual(reuse([a,b],[a,b],2), []);
+    assert.deepEqual(reuse([a,b],[a,b],1.5,1), []);
+    assert.deepEqual(reuse(null,[a,b]), []);
+    assert.deepEqual(reuse([a,b],null), []);
+    assert.deepEqual(reuse(['invalid',b],['invalid',c]), []);
+});

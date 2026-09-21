@@ -1343,6 +1343,9 @@ class TexViewer {
             pdfBase64: data,
             generation: st.generation.generation,
             pdfHash: st.generation.pdfHash || null,
+            nativePageHashes: st.generation.runner === 'wlatex' &&
+                st.generation.nativeReport?.build?.pdf_hash === st.generation.pdfHash
+                ? st.generation.nativeReport.build.pages.map(page => page.pdf_page_hash) : null,
             pages: st.generation.pageCount,
             // WHERE THE READER WAS — the page AND how far down it.
             //

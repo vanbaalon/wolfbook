@@ -582,3 +582,27 @@ submits its old operation, and confirms both that operation and a later full-tex
 write are rejected while current document bytes remain intact. Evidence:
 `/tmp/wpaper-vscode-card-conflict.log`. Physical input/visual acceptance,
 incremental compilation and other-platform native validation remain open.
+
+## 2026-09-21 — reuse unchanged native page canvases
+
+Native open messages now carry per-page PDF hashes only from the SDK report
+paired with that generation's PDF hash. On a live document swap, the webview
+retains an existing canvas only when its page hash, render scale, display density
+and mounted DOM canvas still match. Missing, malformed or mismatched identities
+fall back to ordinary rendering. A new open still invalidates source highlights,
+clears text caches and refreshes PDF links against the new document. Pending
+render cleanup is tied to its own job so an older completion cannot remove a
+newer pending render.
+
+Open timing messages record reused page numbers. The real VS Code check now uses
+a two-page paper, edits page 2 and verifies page 1's existing canvas is retained
+while page 2 is excluded from reuse. It then repeats native source translation,
+mini-editor provenance and conflict checks. Evidence:
+`/tmp/wpaper-vscode-page-reuse.log` (macOS ARM64).
+
+Validation: 56 native-policy, 207 sync, 35 panel and 11 viewer-shipping checks
+pass. Coverage includes page identity pairing, invalid hashes, changed pages,
+scale and density changes, and the ordinary compiler path. This avoids redraws
+of unchanged pages; it still sends a whole PDF through the webview channel.
+Per-page transport, native incremental compilation, full visual/pointer
+acceptance and other-platform native execution remain open.

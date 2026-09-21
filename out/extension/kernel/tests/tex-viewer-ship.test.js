@@ -88,6 +88,17 @@ async function main() {
         assert.ok(!statuses.some(text => /one pass behind|refreshing in the background/.test(text)));
     });
 
+    await test('only PDF-bound native page hashes are sent for canvas reuse', async () => {
+        const hashes = ['a'.repeat(64), 'b'.repeat(64), 'c'.repeat(64)];
+        for (const [runner, paired] of [['wlatex',true], ['wlatex',false], ['latexmk',true]]) {
+            const { v, posted } = makeViewer({ ...baseGen, runner,
+                nativeReport:{ build:{ pdf_hash:paired ? baseGen.pdfHash : 'other',
+                    pages:hashes.map(pdf_page_hash => ({ pdf_page_hash })) } } });
+            await v.refresh();
+            assert.deepStrictEqual(opens(posted)[0].nativePageHashes, runner === 'wlatex' && paired ? hashes : null);
+        }
+    });
+
     await test('a fresh viewer receives its exact saved view state', async () => {
         const { v, posted } = makeViewer({ ...baseGen });
         v._viewState = {

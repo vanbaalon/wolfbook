@@ -29,7 +29,8 @@ exports.run = async function() {
     const context = { extensionUri:vscode.Uri.file(path.resolve(__dirname, '../../..')),
         workspaceState:memento(), globalState:memento(), subscriptions:[] };
     const viewer = new TexViewer(context, coord, projection);
-    let subscription;
+    let subscription, messagesSubscription;
+    const messages = [];
     try {
         const doc = await vscode.workspace.openTextDocument(path.join(folder,'paper.tex'));
         const editor = await vscode.window.showTextDocument(doc);
@@ -47,9 +48,26 @@ exports.run = async function() {
             else assert.ok(!st.nativeUnavailable);
         }
         await viewer.open(doc);
+        messagesSubscription = viewer.panel.webview.onDidReceiveMessage(message => messages.push(message));
         await viewer.refresh({ force:true });
         await until(() => viewer._openedPdfHash === st.generation.pdfHash, 'PDF.js opened acknowledgement');
         assert.equal(viewer._openedGeneration, st.generation.generation);
+        if (mode === 'native') {
+            await until(() => messages.some(message => message.type === 'timing' && message.worker), 'initial page paint');
+            assert.equal(st.generation.pageCount, 2);
+            const firstPageHash = st.generation.nativeReport.build.pages[0].pdf_page_hash;
+            await editor.edit(builder => builder.replace(doc.lineAt(4).range, 'Second page. Second page.'));
+            await coord.build(doc, { quiet:true, live:true });
+            assert.equal(st.generation.nativeReport.build.pages[0].pdf_page_hash, firstPageHash);
+            await viewer.refresh();
+            await until(() => messages.some(message => message.type === 'timing' && message.kind === 'open' &&
+                message.generation === st.generation.generation), 'page reuse report');
+            const opened = messages.find(message => message.type === 'timing' && message.kind === 'open' &&
+                message.generation === st.generation.generation);
+            assert.ok(opened.reusedPages.includes(1), 'unchanged first-page canvas should be retained');
+            assert.ok(!opened.reusedPages.includes(2), 'changed second page must be redrawn');
+            await until(() => viewer._openedGeneration === st.generation.generation, 'changed PDF acknowledgement');
+        }
         subscription = vscode.workspace.onDidChangeTextDocument(event => {
             if (event.document === doc) coord.noteChange(event);
         });
@@ -104,7 +122,7 @@ exports.run = async function() {
         }
         await fs.writeFile(path.join(folder, '../vscode-acceptance.json'), JSON.stringify({
             result:'PASS', vscode:vscode.version, node:process.version,
-            platform:process.platform, arch:process.arch, mode, native_preview:mode === 'native', mini_editor_precise_edit:mode === 'native', mini_editor_conflict_rejected:mode === 'native',
+            platform:process.platform, arch:process.arch, mode, native_preview:mode === 'native', mini_editor_precise_edit:mode === 'native', mini_editor_conflict_rejected:mode === 'native', unchanged_canvas_reused:mode === 'native',
             default_without_wlatex:mode === 'default', unavailable_wlatex_fallback:mode === 'missing',
             conventional_unsaved_rebuild:mode !== 'native',
             real_pdfjs_opened:true, unsaved_source_edit:true, translated_inverse_navigation:mode === 'native',
@@ -116,6 +134,6 @@ exports.run = async function() {
         }, null, 2));
         throw error;
     } finally {
-        subscription?.dispose(); viewer.panel?.dispose(); coord.dispose(); projection.dispose(); output.dispose();
+        subscription?.dispose(); messagesSubscription?.dispose(); viewer.panel?.dispose(); coord.dispose(); projection.dispose(); output.dispose();
     }
 };

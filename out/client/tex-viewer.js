@@ -321,6 +321,17 @@ async function loadPdfjs(base) {
     return mod;
 }
 
+function reusableNativePages(previous, next, rendered, scale, dpr) {
+    const result = new Map();
+    if (!Array.isArray(previous) || !Array.isArray(next)) return result;
+    for (const [page, entry] of rendered) {
+        const hash = next[page - 1];
+        if (typeof hash === 'string' && /^[0-9a-f]{64}$/.test(hash) && hash === previous[page - 1] &&
+            entry.scale === scale && entry.dpr === dpr) result.set(page, entry);
+    }
+    return result;
+}
+
 async function openDocument(msg) {
     const navigationEpoch = state.navigationEpoch || 0;
     hideChipPreview();
@@ -424,6 +435,11 @@ async function openDocument(msg) {
         // repainting immediately. The rest keep their old canvas until the
         // reader scrolls to them, which is both smooth and cheap.
         const wasRendered = samePagination ? [...state.rendered.keys()] : [];
+        const retainedPages = samePagination ? reusableNativePages(state.nativePageHashes,
+            msg.nativePageHashes, state.rendered, state.scale, window.devicePixelRatio || 1) : new Map();
+        state.nativePageHashes = Array.isArray(msg.nativePageHashes) && msg.nativePageHashes.length === state.pageCount
+            ? msg.nativePageHashes : null;
+        if (!state.nativePageHashes) retainedPages.clear();
         state.rendered.clear();
         state.pending.clear();
         textCache.clear();
@@ -433,6 +449,16 @@ async function openDocument(msg) {
             pagesEl().innerHTML = '';
             placeholders = buildPagePlaceholders();
         }
+        if (openSeq !== state.openSeq) return;
+        for (const [page, entry] of retainedPages) {
+            const canvas = pagesEl().querySelector(`.page[data-page="${page}"] canvas`);
+            if (canvas === entry.canvas && entry.scale === state.scale && entry.dpr === (window.devicePixelRatio || 1))
+                state.rendered.set(page, entry);
+            else retainedPages.delete(page);
+        }
+        // The pixels can be retained; link destinations still belong to the
+        // newly loaded PDFDocumentProxy and must be resolved from that document.
+        for (const page of retainedPages.keys()) paintLinks(page).catch(() => {});
         el('pagecount').textContent = String(state.pageCount);
         paintPageNow();
         status(`${state.pageCount} pages · gen ${msg.generation}`, 'ok');
@@ -524,7 +550,7 @@ async function openDocument(msg) {
         // rebuild is quick, and which phase to blame when it is not.
         vscode.postMessage({
             type: 'timing', kind: 'open', generation: msg.generation,
-            live: !!msg.live, pages: state.pageCount,
+            live: !!msg.live, pages: state.pageCount, reusedPages:[...retainedPages.keys()],
             bytes: msg.pdfBase64 ? msg.pdfBase64.length : 0,
             marks: openMarks,
         });
@@ -926,7 +952,7 @@ async function renderPage(n) {
         if (old) wrap.replaceChild(canvas, old);
         else wrap.appendChild(canvas);
         // `page.view` is the CropBox-aware box; the MediaBox is the wrong frame.
-        state.rendered.set(n, { canvas, viewport: vp, view: page.view, rotate: page.rotate });
+        state.rendered.set(n, { canvas, viewport: vp, view: page.view, rotate: page.rotate, scale:vp.scale, dpr });
         if (state.highlight && state.highlight.page === n) paintHighlight();
         if (state.selection) paintSelection(state.selection);
         if (state.diff) paintDiff();
@@ -943,7 +969,7 @@ async function renderPage(n) {
         if (state.mma) paintMmaCard();
         paintLinks(n).catch(() => { /* a paper without links is the common case */ });
         paintBookmarks();
-    })().finally(() => state.pending.delete(n));
+    })().finally(() => { if (state.pending.get(n) === job) state.pending.delete(n); });
     state.pending.set(n, job);
     return job;
 }
