@@ -332,6 +332,8 @@ function reusableNativePages(previous, next, rendered, scale, dpr) {
     return result;
 }
 
+const pdfRanges = new globalThis.WPaperPdfRanges(message => vscode.postMessage(message));
+
 async function openDocument(msg) {
     const navigationEpoch = state.navigationEpoch || 0;
     hideChipPreview();
@@ -341,8 +343,21 @@ async function openDocument(msg) {
     state.openInFlight = openSeq;
     state.openError = '';
     status('loading…');
-    const pdfjs = await loadPdfjs(msg.base);
-    if (openSeq !== state.openSeq) return;
+    let pdfjs;
+    try { pdfjs = await loadPdfjs(msg.base); }
+    catch (error) {
+        if (msg.pdfRange) vscode.postMessage({ type:'pdfRangeRelease',token:msg.pdfRange.token });
+        if (openSeq === state.openSeq) {
+            state.openInFlight=false;
+            state.openError=error.message || String(error);
+            status(`could not load the PDF viewer: ${state.openError}`, 'err');
+        }
+        return;
+    }
+    if (openSeq !== state.openSeq) {
+        if (msg.pdfRange) vscode.postMessage({ type:'pdfRangeRelease',token:msg.pdfRange.token });
+        return;
+    }
     // PER-OPEN timing, distinct from the module-level marks above: those
     // measure cold start and are reported once, which meant a LIVE rebuild —
     // the thing that happens hundreds of times in a session — was never timed
@@ -350,6 +365,7 @@ async function openDocument(msg) {
     const tOpen = now();
     const openMarks = [];
     const omark = (name) => openMarks.push(`${name} ${Math.round(now() - tOpen)}ms`);
+    let rangeTransport;
     try {
         // Bytes, not a URL: the extension reads the file and posts it, which
         // avoids localResourceRoots and the /var -> /private/var symlink that
@@ -358,11 +374,19 @@ async function openDocument(msg) {
         // pdf.js TRANSFERS this array to its worker, detaching it — the
         // Uint8Array is length 0 the moment getDocument is called. So it is
         // decoded fresh per open and never reused.
-        const raw = atob(msg.pdfBase64);
-        const bytes = new Uint8Array(raw.length);
-        for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+        let input;
+        if (msg.pdfRange) {
+            rangeTransport=pdfRanges.create(pdfjs,msg.pdfRange);
+            input={ range:rangeTransport, length:msg.pdfRange.length,
+                rangeChunkSize:65536, disableAutoFetch:true, disableStream:true };
+        } else {
+            const raw=atob(msg.pdfBase64);
+            const bytes=new Uint8Array(raw.length);
+            for (let i=0; i<raw.length; i++) bytes[i]=raw.charCodeAt(i);
+            input={ data:bytes };
+        }
         const task = pdfjs.getDocument({
-            data: bytes,
+            ...input,
             // Required for this corpus: 164 non-embedded base-14 references
             // across 69 real papers. Without it every glyph box moves.
             standardFontDataUrl: `${msg.base}/standard_fonts/`,
@@ -370,12 +394,16 @@ async function openDocument(msg) {
             // will refuse it anyway.
             isEvalSupported: false,
         });
+        if (rangeTransport) rangeTransport.failure.catch(error => {
+            if (openSeq === state.openSeq) status(`could not read the PDF: ${error.message}`, 'err');
+            task.destroy().catch(() => {});
+        });
         const prev = state.doc;
         const restoreSession = !prev || state.restoreViewNext;
         mark('bytes decoded');
         omark('decode');
         let anchor = scrollAnchor();
-        const nextDoc = await task.promise;
+        const nextDoc = await (rangeTransport ? Promise.race([task.promise,rangeTransport.failure]) : task.promise);
         // Two quick compiles can parse out of order. Only the newest request
         // may become the document; otherwise an older PDF can finish last and
         // silently replace the page after the review already moved on.
@@ -551,7 +579,8 @@ async function openDocument(msg) {
         vscode.postMessage({
             type: 'timing', kind: 'open', generation: msg.generation,
             live: !!msg.live, pages: state.pageCount, reusedPages:[...retainedPages.keys()],
-            bytes: msg.pdfBase64 ? msg.pdfBase64.length : 0,
+            bytes: rangeTransport ? rangeTransport.receivedBytes : msg.pdfBase64.length,
+            transport: rangeTransport ? 'range' : 'base64',
             marks: openMarks,
         });
         // Now that the pages are the new ones, ask for the highlight again.
@@ -577,6 +606,7 @@ async function openDocument(msg) {
             vscode.postMessage({ type: 'timing', marks, worker: state.workerHow });
         }
     } catch (e) {
+        rangeTransport?.abort();
         if (openSeq !== state.openSeq) return;
         state.openError = e && e.message ? e.message : String(e);
         status(`could not open the PDF: ${state.openError}`, 'err');
@@ -7192,6 +7222,7 @@ async function cropFragment(msg) {
 window.addEventListener('message', async (ev) => {
     const msg = ev.data || {};
     switch (msg.type) {
+        case 'pdfRange': pdfRanges.receive(msg); break;
         case 'open': await openDocument(msg); break;
         case 'requestViewState': {
             const snap = viewSnapshot();

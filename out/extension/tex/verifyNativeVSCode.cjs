@@ -56,6 +56,7 @@ exports.run = async function() {
         assert.equal(viewer._openedGeneration, st.generation.generation);
         if (mode === 'native') {
             await until(() => messages.some(message => message.type === 'timing' && message.worker), 'initial page paint');
+            assert.equal(messages.find(m => m.type === 'timing' && m.kind === 'open').transport, 'range');
             assert.equal(st.generation.pageCount, 2);
             const firstPageHash = st.generation.nativeReport.build.pages[0].pdf_page_hash;
             await editor.edit(builder => builder.replace(doc.lineAt(4).range, 'Second page. Second page.'));
@@ -138,6 +139,7 @@ exports.run = async function() {
             await viewer.refresh({ force:true });
             await until(() => viewer._openedGeneration === st.generation.generation &&
                 viewer._openedPdfHash === st.generation.pdfHash, 'authoritative handoff');
+            await until(() => viewer._pdfRanges.files.size === 0, 'native PDF handles released on conventional handoff');
             const authoritativeGeneration = st.generation.generation;
             await coord.build(doc, { quiet:true });
             assert.equal(st.generation.runner, 'wlatex', st.lastError || st.nativeUnavailable);
@@ -199,13 +201,19 @@ exports.run = async function() {
                 viewer._openedGeneration === st.generation.generation, 'rebuilt conventional PDF');
             await assert.rejects(fs.access(path.join(folder,'.wlatex')), { code:'ENOENT' });
         }
+        if (mode === 'native') {
+            await until(() => viewer._pdfRanges.files.size === 1, 'only the displayed PDF handle remains');
+            const store=viewer._pdfRanges;
+            viewer.panel.dispose();
+            await until(() => store.files.size === 0, 'PDF handles released on panel disposal');
+        }
         await fs.writeFile(path.join(folder, '../vscode-acceptance.json'), JSON.stringify({
             result:'PASS', vscode:vscode.version, node:process.version,
             platform:process.platform, arch:process.arch, mode, eol, multiline_card_verified:mode === 'native', native_preview:mode === 'native', mini_editor_precise_edit:mode === 'native', mini_editor_conflict_rejected:mode === 'native', unchanged_canvas_reused:mode === 'native',
             default_without_wlatex:mode === 'default', unavailable_wlatex_fallback:mode === 'missing',
             conventional_unsaved_rebuild:mode !== 'native', authoritative_native_handoff:mode === 'native',
             real_pdfjs_opened:true, unsaved_source_edit:true, translated_inverse_navigation:mode === 'native',
-            actual_source_worker_crash_recovered:workerCrashRecovered,
+            actual_source_worker_crash_recovered:workerCrashRecovered, native_pdf_range_transport:mode === 'native', native_pdf_handles_released:mode === 'native',
             pointer_gestures_verified:false, visual_acceptance_verified:false,
         }, null, 2));
     } catch (error) {

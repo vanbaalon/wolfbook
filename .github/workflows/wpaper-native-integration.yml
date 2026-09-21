@@ -5,6 +5,7 @@ on:
     paths:
       - 'out/extension/**'
       - 'out/client/tex-viewer.js'
+      - 'out/client/pdf-ranges.js'
       - '.github/workflows/wpaper-native-integration.yml'
       - 'package.json'
       - '.vscodeignore'
@@ -12,6 +13,7 @@ on:
     paths:
       - 'out/extension/**'
       - 'out/client/tex-viewer.js'
+      - 'out/client/pdf-ranges.js'
       - '.github/workflows/wpaper-native-integration.yml'
       - 'package.json'
       - '.vscodeignore'
@@ -61,4 +63,5 @@ jobs:
           out/extension/kernel/tests/tex-native-cancellation.test.js
           out/extension/kernel/tests/tex-native-policy.test.js
           out/extension/kernel/tests/tex-nativemap.test.js
+          out/extension/kernel/tests/tex-pdf-ranges.test.js
           out/extension/kernel/tests/tex-viewer-ship.test.js

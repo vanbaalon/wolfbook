@@ -716,3 +716,33 @@ measurements, not real-worker latency acceptance. Both versions issue 4,000
 point queries in that case; SDK range batching and incremental engine execution
 remain necessary. Logs: `/tmp/wpaper-native-range-before.log` and
 `/tmp/wpaper-native-range-final-unit.log`.
+
+## 2026-09-21 — native PDF byte-range transport
+
+Native preview messages now carry an opaque PDF descriptor instead of a complete
+base64 PDF. PDF.js requests the byte ranges it needs over the existing webview
+channel. The host pins an admitted PDF with a read-only file handle, checks each
+requested offset/length and never accepts a client-supplied file path. Separate
+builds have separate tokens; out-of-order responses cannot cross documents.
+Conventional builds retain their existing full-PDF delivery path.
+
+The client validates reply coordinates and length, handles read errors/timeouts,
+and releases its token on abort/destruction. The host releases all remaining
+handles on root change or panel disposal. This avoids relying on resource URLs
+and the existing macOS `/var` versus `/private/var` access problem. PDF.js uses
+64 KiB range chunks with automatic prefetch disabled. Larger requested ranges
+are still valid; this is not a maximum-transfer-size guarantee.
+
+Validation: 57 native-policy, 4 transport, 207 sync, 35 panel and 11 viewer-shipping
+checks pass. The four-platform consumer CI now includes transport tests. Real
+VS Code checks pass on macOS ARM64 both in CRLF/native mode and in default mode
+without WLaTeX. Native checks cover PDF.js opening, unchanged-canvas reuse,
+conventional/native handoff, worker crash recovery, and handle release after
+handoff and panel disposal. Evidence: `/tmp/wpaper-pdf-ranges-final-host.log`,
+`/tmp/wpaper-pdf-ranges-default-host.log`, `/tmp/wpaper-pdf-ranges-final-unit.log`.
+
+This closes mandatory whole-PDF transfer in each native open message. It does
+not establish changed-page-only delivery: PDF.js parsing/text extraction can
+still request the entire file. Native incremental execution, semantic per-page
+artifacts/TXDL, reference-paper latency/visual acceptance and other-platform
+native execution remain outstanding. No runtime is bundled in the extension.

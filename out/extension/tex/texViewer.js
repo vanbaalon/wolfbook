@@ -17,6 +17,7 @@ const os = require('os');
 const { execFile } = require('child_process');
 
 const { FLAG } = require('./renderMap');
+const { PdfRangeStore } = require('./pdfRanges');
 const { wireText, documentOffset, wireOffset, documentText } = require('./miniText');
 const {
     wordAtColumn, findWordInLine, collectMacros, isInMath, mathRegions,
@@ -688,6 +689,7 @@ class TexViewer {
             this._openedGeneration = null;
             this._openedPdfHash = null;
             this.shownAnything = false;
+            this._pdfRanges?.close();
             this._text = null;
             this._objMaps.clear();
             this._chips = null;
@@ -816,6 +818,7 @@ class TexViewer {
             // A future panel is a different webview holding nothing.
             this.shownPdfHash = null;
             this.shownAnything = false;
+            this._pdfRanges?.close();
             this._ladder = null;
             this._edit = null;
             this._docListener = null;
@@ -1309,6 +1312,7 @@ class TexViewer {
         // _rememberView resolves it through prevMap after the coordinator has
         // already installed the new one.
         await this._captureReaderView();
+        if (!this.panel) return;
         // In memory if this panel has been showing the paper; from workspace
         // state if it is being opened again, or after a reload.
         const place = this._viewState || this._viewFor(this.root);
@@ -1328,10 +1332,16 @@ class TexViewer {
         // produces a URL the webview silently refuses to fetch: no error, no
         // pages, just an empty panel. Handing pdf.js the bytes removes the
         // whole class of problem (roots, symlinks, sandbox rules) and costs one
-        // copy per compile, which is nothing beside a 17 s LaTeX run.
-        let data = null;
+        // copy per conventional compile. Native artifacts instead expose an
+        // opaque, pinned file handle for PDF.js byte-range requests.
+        let data = null, pdfRange = null;
         const tRead = Date.now();
-        try { data = fs.readFileSync(st.generation.pdfPath).toString('base64'); }
+        try {
+            if (st.generation.runner === 'wlatex') {
+                this._pdfRanges ||= new PdfRangeStore();
+                pdfRange = this._pdfRanges.open(st.generation.pdfPath);
+            } else data = fs.readFileSync(st.generation.pdfPath).toString('base64');
+        }
         catch (e) {
             this._post({ type: 'status', text: `could not read the PDF: ${e.message}`, kind: 'err' });
             return;
@@ -1342,6 +1352,7 @@ class TexViewer {
             base: w.asWebviewUri(vscode.Uri.joinPath(
                 this.context.extensionUri, 'out', 'client', 'pdfjs')).toString(),
             pdfBase64: data,
+            pdfRange,
             generation: st.generation.generation,
             pdfHash: st.generation.pdfHash || null,
             nativePageHashes: st.generation.runner === 'wlatex' &&
@@ -1401,7 +1412,7 @@ class TexViewer {
         // thing this feature could do to a reader.
         this._postSections().catch(() => { /* best effort */ });
         this._log(`sent generation ${st.generation.generation} ` +
-            `(${(data.length / 1398101).toFixed(2)} MB of PDF) in ${Date.now() - t0} ms ` +
+            `(${((pdfRange?.length || data.length * 0.75) / 1048576).toFixed(2)} MB of PDF) in ${Date.now() - t0} ms ` +
             `· read ${readMs} ms`);
     }
 
@@ -3752,6 +3763,10 @@ class TexViewer {
                 }
                 break;
             case 'bookmarkAdded': break; // observed by the guided tour; viewstate persists it
+            case 'pdfRangeRequest':
+                if (this._pdfRanges) this._post(this._pdfRanges.read(m));
+                break;
+            case 'pdfRangeRelease': this._pdfRanges?.release(m.token); break;
             case 'timing': {
                 // The webview is the one place the extension cannot time from
                 // the outside, and a VS Code webview is not the headless
@@ -8642,6 +8657,8 @@ class TexViewer {
         const w = this.panel.webview;
         const script = w.asWebviewUri(vscode.Uri.joinPath(
             this.context.extensionUri, 'out', 'client', 'tex-viewer.js'));
+        const rangesScript = w.asWebviewUri(vscode.Uri.joinPath(
+            this.context.extensionUri, 'out', 'client', 'pdf-ranges.js'));
         const nonce = String(Math.random()).slice(2) + Date.now().toString(36);
         // pdf.js needs `wasm-unsafe-eval` for its own decoders; everything else
         // is locked down. `blob:` covers the worker pdf.js may spin up.
@@ -8666,6 +8683,7 @@ class TexViewer {
 <meta http-equiv="Content-Security-Policy" content="${csp}">
 </head><body>
 ${shell}
+<script nonce="${nonce}" src="${rangesScript}"></script>
 <script nonce="${nonce}" type="module" src="${script}"></script>
 </body></html>`;
     }
