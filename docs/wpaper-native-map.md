@@ -510,3 +510,25 @@ canvas pixels, physical pointer gestures, all platforms or interactive latency.
 Desktop inspection through the computer-use tool timed out, so visual/pointer
 acceptance is explicitly false in the report rather than inferred from the
 extension-host result.
+
+## 2026-09-21 — real-host checks with WLaTeX absent
+
+The isolated VS Code launcher now accepts a third argument: `native` (default),
+`default` or `missing`. The latter two clear the installation setting and remove
+`WLATEX_HOME` from the launched process environment. `default` uses the ordinary
+`auto` map policy; `missing` explicitly opts into WLaTeX with no configured
+installation. These tests assert a conventional generation, no native lane or
+cache, a real PDF.js open acknowledgement, and successful rebuilding of unsaved
+source. The rebuilt acknowledgement must name the new generation even when PDF
+content is unchanged. The missing-install mode additionally checks the fallback
+reason; normal mode must not report a native error.
+
+All three modes pass in fresh VS Code 1.137.0 / Node 24.18.1 sessions on macOS
+ARM64. Final-code evidence: `/tmp/wpaper-vscode-default-final.log`,
+`/tmp/wpaper-vscode-missing-final.log`, `/tmp/wpaper-vscode-native-final.log`.
+Each report names its isolated profile/workspace. Native mode still verifies
+translated inverse selection after an unsaved edit. These checks do not exercise
+physical pointer gestures or prove canvas pixels, native execution on other
+platforms, or incremental compilation. The WLaTeX checkout exists on this host;
+absence tests prove operation without a configured installation, not uninstall
+behavior.

@@ -22,6 +22,7 @@ exports.run = async function() {
     const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     if (!folder || !path.basename(path.dirname(folder)).startsWith('wpaper-ui-'))
         throw Error('Run only in an isolated wpaper-ui-* test directory');
+    const { mode = 'native' } = JSON.parse(await fs.readFile(path.join(folder, '../acceptance-mode.json'),'utf8'));
     const output = vscode.window.createOutputChannel('WPaper native acceptance');
     const projection = new Projection();
     const coord = new RenderCoordinator(projection, output);
@@ -34,8 +35,17 @@ exports.run = async function() {
         const editor = await vscode.window.showTextDocument(doc);
         await coord.build(doc, { quiet:true });
         const st = coord.stateFor(doc);
-        assert.equal(st.generation.runner, 'wlatex', st.lastError || st.nativeUnavailable);
-        assert.equal(st.map.native, true);
+        assert.equal(st.generation.ok, true, st.lastError || st.nativeUnavailable);
+        if (mode === 'native') {
+            assert.equal(st.generation.runner, 'wlatex', st.lastError || st.nativeUnavailable);
+            assert.equal(st.map.native, true);
+        } else {
+            assert.notEqual(st.generation.runner, 'wlatex');
+            assert.ok(!st.nativeLane);
+            assert.ok(!st.map.native && st.map.available);
+            if (mode === 'missing') assert.match(st.nativeUnavailable, /not installed or configured/);
+            else assert.ok(!st.nativeUnavailable);
+        }
         await viewer.open(doc);
         await viewer.refresh({ force:true });
         await until(() => viewer._openedPdfHash === st.generation.pdfHash, 'PDF.js opened acknowledgement');
@@ -44,18 +54,32 @@ exports.run = async function() {
             if (event.document === doc) coord.noteChange(event);
         });
         await editor.edit(builder => builder.insert(new vscode.Position(0,0), '% unsaved UI acceptance\n'));
-        await until(() => st.map.available, 'translated native map');
         assert.equal(doc.isDirty, true);
         assert.equal(st.sourceAhead, true);
-        const rects = await st.map.forwardAt(doc.uri.fsPath, 4, 0);
-        assert.ok(rects?.length);
-        await viewer._jumpToSource({ generation:viewer._openedGeneration,
-            page:rects[0].page, xBp:rects[0].x+rects[0].w/2, yTopBp:rects[0].y+rects[0].h/2 });
-        assert.equal(editor.selection.start.line, 3);
+        if (mode === 'native') {
+            await until(() => st.map.available, 'translated native map');
+            const rects = await st.map.forwardAt(doc.uri.fsPath, 4, 0);
+            assert.ok(rects?.length);
+            await viewer._jumpToSource({ generation:viewer._openedGeneration,
+                page:rects[0].page, xBp:rects[0].x+rects[0].w/2, yTopBp:rects[0].y+rects[0].h/2 });
+            assert.equal(editor.selection.start.line, 3);
+        } else {
+            await coord.build(doc, { quiet:true, authoritative:true });
+            assert.equal(st.generation.ok, true, st.lastError);
+            assert.equal(st.sourceAhead, false);
+            assert.notEqual(st.generation.runner, 'wlatex');
+            assert.ok(!st.nativeLane);
+            await viewer.refresh({ force:true });
+            await until(() => viewer._openedPdfHash === st.generation.pdfHash &&
+                viewer._openedGeneration === st.generation.generation, 'rebuilt conventional PDF');
+            await assert.rejects(fs.access(path.join(folder,'.wlatex')), { code:'ENOENT' });
+        }
         await fs.writeFile(path.join(folder, '../vscode-acceptance.json'), JSON.stringify({
             result:'PASS', vscode:vscode.version, node:process.version,
-            platform:process.platform, arch:process.arch, native_preview:true,
-            real_pdfjs_opened:true, unsaved_source_edit:true, translated_inverse_navigation:true,
+            platform:process.platform, arch:process.arch, mode, native_preview:mode === 'native',
+            default_without_wlatex:mode === 'default', unavailable_wlatex_fallback:mode === 'missing',
+            conventional_unsaved_rebuild:mode !== 'native',
+            real_pdfjs_opened:true, unsaved_source_edit:true, translated_inverse_navigation:mode === 'native',
             pointer_gestures_verified:false, visual_acceptance_verified:false,
         }, null, 2));
     } catch (error) {
