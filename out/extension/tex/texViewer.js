@@ -4952,8 +4952,10 @@ class TexViewer {
             request === this._nativeInverseRequest && m.generation != null &&
             String(m.generation) === String(this._openedGeneration);
         if (!current()) return;
+        if (!m.pick) this._pickAnchor = null;
         const hit = map.renderToSource(m.page, m.xBp, m.yTopBp);
         if (!hit?.file || hit.flag === FLAG.UNMAPPED) {
+            if (!m.live) this._pickAnchor = null;
             this._post({ type:'selection', span:null });
             this._post({ type:'highlight', rects:[] });
             this._post({ type:'status', text:'no source glyph under this point', kind:'warn' });
@@ -4964,7 +4966,8 @@ class TexViewer {
         const location = hit.sourceRange;
         // A displaced range can enclose newly inserted text. It is a navigation
         // seam, never permission to replace that entire range by typing.
-        if (!hit.exact && (Number.isFinite(m.typingRequest) || m.commentTarget)) {
+        if (!hit.exact && (Number.isFinite(m.typingRequest) || m.commentTarget || m.pick)) {
+            if (m.pick) this._pickAnchor = null;
             this._post({ type:'status', text:'This source range changed; rebuild before editing from the page.', kind:'warn' });
             if (m.commentTarget) this._post({ type:'commentTarget', target:null,
                 reason:'The source range changed since this glyph was compiled.' });
@@ -4992,6 +4995,35 @@ class TexViewer {
                 viewColumn:vscode.ViewColumn.One, preserveFocus:!m.takeMe, preview:false });
         if (!current() || doc.version !== version) return;
         this._invertedAt = Date.now();
+        if (m.pick) {
+            const anchor = this._pickAnchor;
+            if (!anchor || anchor.file !== hit.file || anchor.nativeMap !== map || anchor.documentVersion !== version) {
+                this._pickAnchor = { file:hit.file, position:start, endPosition:end,
+                    nativeMap:map, documentVersion:version };
+                this._lastSelection = null;
+                const glyph = hit.glyph;
+                this._post({ type:'selection', span:{ native:true, pendingStart:true, rows:[], lines:1,
+                    start:{ exactEdge:{ page:glyph.page, x:glyph.x, y:glyph.y, h:glyph.boxHeight } } },
+                    reveal:false, label:'selection start — shift-click the other end' });
+                return;
+            }
+            const before = (a,b) => a.line < b.line || a.line === b.line && a.character <= b.character;
+            const from = before(anchor.position, start) ? anchor.position : start;
+            const to = before(anchor.endPosition, end) ? end : anchor.endPosition;
+            const selection = new vscode.Selection(from, to);
+            this._selfRange = { file:hit.file, kind:'drag', sl:from.line, sc:from.character,
+                el:to.line, ec:to.character, at:Date.now() };
+            if (editor) {
+                editor.selection = selection;
+                if (!m.live) editor.revealRange(selection, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+            }
+            this._rememberCursor(doc, selection);
+            this._postEditSelection(doc, selection, false);
+            if (!m.live) this._pickAnchor = null;
+            return this._syncNativeCursor(st, { document:doc, selection },
+                { preserveView:true, nativeAdmission:current },
+                this._nativeCursorRequest = (this._nativeCursorRequest || 0) + 1);
+        }
         this._pickAnchor = null;
         this._ladder = null;
         const caret = !m.takeMe || !hit.exact;
@@ -5025,7 +5057,7 @@ class TexViewer {
             });
             return;
         }
-        if (st.map.native && !m.pick && !m.widen) {
+        if (st.map.native && !m.widen) {
             return this._jumpToNativeSource(st, m, this._nativeInverseRequest);
         }
         if (this._tracePaused || st.sourceAhead) {

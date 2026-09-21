@@ -518,3 +518,65 @@ test('native selection painting preserves glyph gaps and never searches PDF text
     assert.equal(fills[0].style.width, '5px'); assert.equal(fills[0].style.height, '8px');
     assert.equal(fills[1].style.left, '50px');
 });
+
+function pickFixture() {
+    const f = inverseFixture(); const queries = [];
+    f.viewer.followCursor = true;
+    f.viewer.coord.stateFor = () => f.state;
+    f.viewer._syncNativeCursor = TexViewer.prototype._syncNativeCursor;
+    f.viewer._setTracePaused = () => {};
+    f.viewer._log = () => {};
+    f.map.forwardRange = async (file, start, end) => {
+        queries.push([start.column_utf16, end.column_utf16]);
+        return [{ page:1, x:100, y:80, w:5, h:9 }];
+    };
+    f.pick = (column, options={}) => {
+        f.hit.sourceRange.start.column_utf16 = column;
+        f.hit.sourceRange.end.column_utf16 = column + 1;
+        return f.run({ pick:true, ...options });
+    };
+    f.queries = queries; return f;
+}
+
+test('native shift-pick selects both endpoint tokens in either source direction', async () => {
+    for (const columns of [[0,6], [6,0]]) {
+        const f = pickFixture();
+        await f.pick(columns[0]);
+        assert.equal(f.posts.at(-1).span.pendingStart, true);
+        assert.equal(f.queries.length, 0);
+        await f.pick(columns[1]);
+        assert.deepEqual(f.queries, [[0,7]]);
+        assert.equal(f.editor.selection.start.character, 0);
+        assert.equal(f.editor.selection.end.character, 7);
+        assert.equal(f.viewer._pickAnchor, null);
+        assert.equal(f.posts.at(-1).span.native, true);
+    }
+});
+
+test('native live picking keeps its anchor and can shrink before mouse release', async () => {
+    const f = pickFixture(); await f.pick(0);
+    await f.pick(6, { live:true }); assert.ok(f.viewer._pickAnchor);
+    await f.pick(2, { live:false });
+    assert.deepEqual(f.queries, [[0,7], [0,3]]);
+    assert.equal(f.viewer._pickAnchor, null);
+});
+
+test('native picking restarts after a document revision instead of using a stale endpoint', async () => {
+    const f = pickFixture(); await f.pick(0);
+    f.doc.version++; await f.pick(6);
+    assert.equal(f.queries.length, 0);
+    assert.equal(f.viewer._pickAnchor.position.character, 6);
+    assert.equal(f.posts.at(-1).span.pendingStart, true);
+});
+
+test('a displaced native point cannot become a shift-pick endpoint', async () => {
+    const f = pickFixture(); f.hit.exact = false; await f.pick(0);
+    assert.ok(!f.viewer._pickAnchor);
+    assert.equal(f.queries.length, 0);
+});
+
+test('an unmapped plain click abandons a pending native shift-pick', async () => {
+    const f = pickFixture(); await f.pick(0);
+    f.map.renderToSource = () => ({ flag:'unmapped' });
+    await f.run(); assert.equal(f.viewer._pickAnchor, null);
+});

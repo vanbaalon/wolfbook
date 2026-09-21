@@ -238,3 +238,26 @@ not been benchmarked against the product budget. A producer-side batched range
 query remains a potential contract improvement. Native shift-pick/widen gestures,
 full interactive acceptance and separate four-platform releases remain open.
 WLaTeX stays optional, with the ordinary WPaper compiler available without it.
+
+## 2026-09-20 — native Shift-pick selection
+
+Shift-pick now uses native source spans for both endpoints, without client
+word-search hints. The first click publishes only a pending endpoint. Subsequent
+points select the inclusive endpoint tokens in either source direction and use
+`forwardRange` to paint the admitted glyph rectangles. A live drag retains its
+first endpoint and can shrink; release clears it. The mini-editor receives the
+same selected source interval as the source editor.
+
+Endpoints are tied to a source document version and immutable native map. A
+changed revision/map starts a new selection instead of shifting the old endpoint.
+Displaced endpoints are rejected, and an unmapped plain click abandons a pending
+pick. Late range answers retain the existing display/source/request admission.
+
+Validation: 36 native-policy tests, 207 sync tests, 35 panel tests and nine
+viewer-shipping tests pass. The real-PDF verifier picks two surviving glyphs with
+newly inserted source between them: the source interval includes the inserted
+text, while the selection paints only the two actual printed glyphs. Evidence:
+`/tmp/wpaper-native-shift-pick-verification.json`, bound to adapter/viewer hashes.
+High-frequency interaction acceptance and displaced-range latency remain to be
+measured; native widen gestures and separate platform releases are still open.
+WLaTeX remains optional and separately installed.

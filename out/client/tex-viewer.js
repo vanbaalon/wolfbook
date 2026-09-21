@@ -6301,7 +6301,7 @@ function sendClick(n, pt, cx, cy, extra, type = 'click') {
     if (type === 'click' && !ordinary) clearPaperTypingTarget(false, 'selection gesture');
     if (ordinary && pendingPaperTyping) clearPaperTypingTarget(true, 'new paper click');
     const seq = ordinary ? ++paperTargetSeq : 0;
-    const resolved = (state.nativeMapAvailable && !extra.pick && !extra.widen
+    const resolved = (state.nativeMapAvailable && !extra.widen
         ? Promise.resolve([null, null])
         : Promise.all([wordAtPoint(n, cx, cy, false), wordAtPoint(n, cx, cy, true)]))
         .then(([hit, g]) => ({
