@@ -855,6 +855,7 @@ function probeLualatex() {
 }
 
 module.exports = {
+    nextGeneration,
     glyphMapHookPath, probeLualatex,
     probeExecutable, checkToolchain,
     saveGeneration,

@@ -328,3 +328,21 @@ immutability. Local evidence: `/tmp/wpaper-native-recovery-verification.json`.
 The verifier terminates through the SDK's public close contract; unexpected
 process-crash recovery in a live VS Code session remains unverified. WLaTeX stays
 optional and separately installed.
+
+## 2026-09-20 — unique display generations across compiler lanes
+
+Native generations now use the conventional compiler's shared display ID
+allocator. The SDK retains its own strictly increasing, per-session build
+counter. Previously both counters started at 1, so switching compiler lanes or
+reconstructing a worker could reuse the displayed generation number and cause
+`shipDecision` to suppress a changed PDF as "same generation". Shared display
+IDs remove that collision while identical-content suppression still works.
+
+Validation: a new regression executes the actual native lane with a controlled
+SDK boundary, interleaves conventional ID allocation and reconstructs the lane.
+It checks monotonic display IDs, independent SDK IDs and changed/unchanged PDF
+shipping. That test, 47 native-policy tests, 36 compiler tests and nine
+viewer-shipping tests pass. The real session-reconstruction verifier also checks
+unique display IDs and admission of the changed recovered PDF. Evidence:
+`/tmp/wpaper-native-generation-verification.json`. Full live UI acceptance and
+separate four-platform release verification remain open.

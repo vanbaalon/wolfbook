@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const { resolveNativeRuntime } = require('./nativeRuntime');
+const { nextGeneration } = require('./compileService');
 
 class NativeBuildLane {
     constructor(root, directory = '', runtimeOptions) {
@@ -15,6 +16,8 @@ class NativeBuildLane {
         const { labBinary, nativeBinary } = this.runtime;
         this.source = new sdk.NativeSourceSession({ labBinary });
         this.compiler = new sdk.NativeCompiler({ labBinary, nativeBinary, cache: path.join(this.projectDir, '.wlatex/native') });
+        // SDK build IDs belong to this session; display IDs share the
+        // conventional compiler's allocator and survive lane reconstruction.
         this.buildNumber = 0;
         this.version = 0;
         this.edits = Promise.resolve();
@@ -91,7 +94,7 @@ class NativeBuildLane {
         const diagnostics = report.diagnostics.map(d=>({ ...d,
             file: d.file ? path.resolve(this.projectDir,d.file) : null }));
         return { ok:true, runner:'wlatex', engine:'wlatex', root:this.root, projectDir:this.projectDir,
-            generation:this.buildNumber, outDir:report.artifact_directory, pdfPath:report.pdf,
+            generation:nextGeneration(), outDir:report.artifact_directory, pdfPath:report.pdf,
             pdfHash:report.build.pdf_hash, pdfBytes:fs.statSync(report.pdf).size,
             sourceSnapshotHash:o.sourceSnapshotHash, live:!!o.overlay?.size,
             synctexPath:null, synctexHash:null, glyphMapPath:null, glyphMapHash:null,
