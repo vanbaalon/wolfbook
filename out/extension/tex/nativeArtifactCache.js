@@ -67,6 +67,28 @@ class NativeArtifactCache {
                 this.ownedPaths.delete(file);
             } catch (error) { this.lastError=error; } // Retry at the next collection boundary.
         }
+        // A cancelled/failed producer may never return a report. Reclaim its
+        // unleased files too, without depending on the SDK's directory layout.
+        // Only our exclusively owned session directory is traversed. A build
+        // reservation waits for this entire collection before entering the SDK.
+        const sweep=async directory=>{
+            let entries;
+            try { entries=await fs.promises.readdir(directory,{ withFileTypes:true }); }
+            catch (error) { if (error.code!=='ENOENT') this.lastError=error; return; }
+            for (const entry of entries) {
+                const file=path.join(directory,entry.name);
+                if (live.some(other=>contains(other,file))) continue;
+                if (live.some(other=>contains(file,other))) {
+                    // Never follow a link even if an earlier report named a
+                    // descendant. Path validation will reject that replacement.
+                    if (entry.isDirectory() && !entry.isSymbolicLink()) await sweep(file);
+                    continue;
+                }
+                try { await fs.promises.rm(file,{ recursive:true,force:true }); }
+                catch (error) { this.lastError=error; }
+            }
+        };
+        await sweep(this.directory);
         if (this.closed && !this.entries.size) {
             try {
                 await fs.promises.rm(this.directory,{ recursive:true,force:true });

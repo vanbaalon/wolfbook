@@ -895,3 +895,23 @@ the rendered-fidelity acceptance gate. Reproduction, artifact identities,
 observations and limits are recorded in
 [the reference review](wpaper-reference-visual-review.md). No engine files or
 source PDFs were changed.
+
+## 2026-09-21 — reclaim unreported build artifacts
+
+At idle build boundaries, the cache now sweeps its exclusively owned session
+directory for files not protected by a live artifact lease. This also finds
+partial output from cancelled or failed producers that never returned a report;
+previously those files survived until lane shutdown. The sweep uses no SDK
+directory-layout assumptions. It preserves leased directories and files,
+reclaims unleased siblings, does not follow symlinks, and never traverses another
+session's cache. Build reservations await the entire asynchronous sweep.
+Deletion failures remain retryable at the next collection boundary.
+
+Thirteen cache/cancellation/generation tests pass, including new unreported-output
+and temporary-deletion-failure cases. The real VS Code native/CRLF scenario also
+passes with old-PDF retention, worker crash recovery, native/conventional handoff,
+PDF range handles and unchanged page reuse. Evidence:
+`/tmp/wpaper-unreported-cache-host.log` (isolated host
+`wpaper-ui-kZJm9G`). This closes cleanup of unreported artifacts in a running
+session; live-generation eviction remains GC-dependent, hard quotas remain
+unimplemented, and crashed-host session cleanup still requires lifecycle support.

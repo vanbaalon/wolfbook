@@ -129,3 +129,59 @@ test('collection requests arriving during deletion get a follow-up pass', async 
         assert.equal(passes,2);
     } finally { release?.(); await cache.close(); fs.rmSync(parent,{recursive:true,force:true}); }
 });
+
+test('unreported build leftovers are reclaimed while live artifacts and foreign caches survive', async () => {
+    const parent=fs.mkdtempSync(path.join(os.tmpdir(),'native-cache-unreported-'));
+    const cache=new NativeArtifactCache(parent);
+    const foreign=path.join(parent,'other-session'); fs.mkdirSync(foreign);
+    const foreignFile=path.join(foreign,'keep.pdf'); fs.writeFileSync(foreignFile,'foreign');
+    const shared=path.join(cache.directory,'shared'); fs.mkdirSync(shared);
+    const pdf=path.join(shared,'keep.pdf'); fs.writeFileSync(pdf,'live');
+    await cache.begin();
+    const lease=cache.lease({ log:pdf });
+    await cache.end();
+    try {
+        // A run dies before it can return paths; only its cache directory is known.
+        await cache.begin();
+        const incomplete=path.join(cache.directory,'unknown-sdk-layout');
+        fs.mkdirSync(incomplete); fs.writeFileSync(path.join(incomplete,'partial'),'partial');
+        const sibling=path.join(shared,'partial.log'); fs.writeFileSync(sibling,'partial');
+        const link=path.join(cache.directory,'foreign-link');
+        if (process.platform!=='win32') fs.symlinkSync(foreign,link);
+        await cache.collect();
+        assert.ok(fs.existsSync(incomplete),'never sweep an active producer');
+        await cache.end();
+        assert.equal(fs.existsSync(incomplete),false);
+        assert.equal(fs.existsSync(sibling),false,'sweep unleased siblings of a protected file');
+        assert.equal(fs.readFileSync(pdf,'utf8'),'live');
+        assert.equal(fs.readFileSync(foreignFile,'utf8'),'foreign');
+        if (process.platform!=='win32') assert.equal(fs.existsSync(link),false);
+        assert.ok(lease); // Keep the real lease alive through the full collection.
+    } finally {
+        if (cache.busy) await cache.end();
+        await cache.close(); fs.rmSync(parent,{recursive:true,force:true});
+    }
+});
+
+test('failed orphan deletion is retried at the next build boundary', async () => {
+    const parent=fs.mkdtempSync(path.join(os.tmpdir(),'native-cache-retry-'));
+    const cache=new NativeArtifactCache(parent), file=path.join(cache.directory,'partial');
+    const rm=fs.promises.rm; let denied=true;
+    fs.promises.rm=async(target,options)=>{
+        if (target===file && denied) throw Object.assign(Error('temporarily locked'),{ code:'EACCES' });
+        return rm(target,options);
+    };
+    try {
+        await cache.begin(); fs.writeFileSync(file,'partial'); await cache.end();
+        assert.ok(fs.existsSync(file)); assert.equal(cache.lastError.code,'EACCES');
+        denied=false;
+        await cache.begin(); await cache.end();
+        assert.equal(fs.existsSync(file),false);
+        await cache.close(); await cache.close();
+        assert.equal(fs.existsSync(cache.directory),false);
+    } finally {
+        fs.promises.rm=rm;
+        if (cache.busy) await cache.end();
+        await cache.close(); fs.rmSync(parent,{recursive:true,force:true});
+    }
+});
