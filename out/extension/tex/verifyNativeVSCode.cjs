@@ -109,6 +109,30 @@ exports.run = async function() {
             assert.equal(doc.getText(), externalText);
             assert.equal(await viewer._applyEditChange({ editId:card.id, text:oldCardText + 'stale' }), false);
             assert.equal(doc.getText(), externalText);
+            const nativeGeneration = st.generation.generation;
+            await coord.build(doc, { authoritative:true, quiet:true });
+            assert.equal(st.generation.ok, true, st.lastError);
+            assert.notEqual(st.generation.runner, 'wlatex');
+            assert.equal(st.generation.engine, 'pdflatex');
+            assert.ok(!st.map.native);
+            assert.equal(st.sourceAhead, false);
+            assert.ok(st.generation.generation > nativeGeneration);
+            await viewer.refresh({ force:true });
+            await until(() => viewer._openedGeneration === st.generation.generation &&
+                viewer._openedPdfHash === st.generation.pdfHash, 'authoritative handoff');
+            const authoritativeGeneration = st.generation.generation;
+            await coord.build(doc, { quiet:true });
+            assert.equal(st.generation.runner, 'wlatex', st.lastError || st.nativeUnavailable);
+            assert.equal(st.map.native, true);
+            assert.ok(st.generation.generation > authoritativeGeneration);
+            assert.equal(doc.getText(), externalText);
+            assert.equal(doc.isDirty, true, 'handoff must not save the source buffer');
+            await viewer.refresh();
+            await until(() => viewer._openedGeneration === st.generation.generation &&
+                viewer._openedPdfHash === st.generation.pdfHash, 'return to native preview');
+            const returned = messages.find(message => message.type === 'timing' && message.kind === 'open' &&
+                message.generation === st.generation.generation);
+            assert.deepEqual(returned.reusedPages, [], 'conventional canvases have no native page identity');
         } else {
             await coord.build(doc, { quiet:true, authoritative:true });
             assert.equal(st.generation.ok, true, st.lastError);
@@ -124,7 +148,7 @@ exports.run = async function() {
             result:'PASS', vscode:vscode.version, node:process.version,
             platform:process.platform, arch:process.arch, mode, native_preview:mode === 'native', mini_editor_precise_edit:mode === 'native', mini_editor_conflict_rejected:mode === 'native', unchanged_canvas_reused:mode === 'native',
             default_without_wlatex:mode === 'default', unavailable_wlatex_fallback:mode === 'missing',
-            conventional_unsaved_rebuild:mode !== 'native',
+            conventional_unsaved_rebuild:mode !== 'native', authoritative_native_handoff:mode === 'native',
             real_pdfjs_opened:true, unsaved_source_edit:true, translated_inverse_navigation:mode === 'native',
             pointer_gestures_verified:false, visual_acceptance_verified:false,
         }, null, 2));

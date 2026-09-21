@@ -606,3 +606,22 @@ scale and density changes, and the ordinary compiler path. This avoids redraws
 of unchanged pages; it still sends a whole PDF through the webview channel.
 Per-page transport, native incremental compilation, full visual/pointer
 acceptance and other-platform native execution remain open.
+
+## 2026-09-21 — real-host authoritative/native handoff
+
+The VS Code acceptance test now takes its edited native paper through an
+explicit authoritative build with the configured pdfLaTeX compiler, waits for
+the new PDF.js acknowledgement, then rebuilds it as a native preview and waits
+for that acknowledgement. It asserts increasing display generations, the
+correct map type at each stage, unchanged current source bytes and a still-dirty
+editor buffer. The return from a conventional PDF must not reuse canvases under
+native page identities.
+
+The complete native acceptance scenario passes on macOS ARM64, including prior
+page reuse, mini-editor provenance and conflict checks. Evidence:
+`/tmp/wpaper-vscode-engine-handoff.log`. This is service-level orchestration in a
+real extension host/webview, not a physical Save-button test. Incremental engine
+execution, per-page transport, visual/pointer acceptance and four-platform
+native release verification remain open. The native engine/SDK remain assigned
+to Track A by `WLaTeX/docs/work-split.md`; ownership clarification has been
+requested before crossing that boundary.
