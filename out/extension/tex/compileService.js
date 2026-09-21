@@ -784,6 +784,7 @@ function probeInitCode(code, { timeoutMs = 5000 } = {}) {
 }
 
 function saveGeneration(gen) {
+    if (gen?.runner === 'wlatex') return false; // Live worker/view owners cannot be restored from JSON.
     if (!gen || !gen.outDir || !gen.ok) return false;
     if (gen.dependencyIssue) return false;
     // A CAPPED OR UNCONVERGED BUILD IS NOT A BASELINE. Its ink is current but

@@ -4132,6 +4132,7 @@ class TexViewer {
      * characters at all — takes over.
      */
     _resolvePoint(st, m) {
+        if (st.map.native) return st.map.renderToSource(m.page, m.xBp, m.yTopBp);
         const row = st.map.lineAtPoint(m.page, m.xBp, m.yTopBp);
         const box = st.map.renderToSource(m.page, m.xBp, m.yTopBp);
         const dy = (row && row.dy) || 0;

@@ -24,6 +24,7 @@ const {
 const { RenderMap, FLAG } = require('./renderMap');
 const { GlyphMap } = require('./glyphMap');
 const { NativeMap } = require('./nativeMap');
+const { NativeBuildLane } = require('./nativeCompileService');
 const { findRoot, buildGraph } = require('./texProject');
 const {
     nextLiveDelayMs, liveDeadlineDelayMs, cooldownDelayMs, blendLiveMs, synctexUnchanged,
@@ -128,6 +129,7 @@ class RenderCoordinator {
     }
 
     dispose() {
+        for (const s of this.roots.values()) if (s.nativeLane) s.nativeLane.close().catch(() => {});
         for (const s of this.roots.values()) if (s.running) s.running.abort();
         for (const t of this._liveTimers.values()) clearTimeout(t);
         for (const t of this._idleTimers.values()) clearTimeout(t);
@@ -328,6 +330,16 @@ class RenderCoordinator {
         const st = this.stateFor(e.document);
         if (!st) return;
         st.sourceAhead = true;
+        if (st.nativeLane) {
+            const generation = st.generation;
+            if (st.map?.native) st.map.noteEdit();
+            st.nativeLane.noteChange(e.document, e.contentChanges).then(() => st.nativeLane.refresh()).then(view => {
+                if (!view || st.generation !== generation || generation?.nativeSource !== st.nativeLane.source) return;
+                generation.nativeView = view;
+                st.map = makeMap({ generation, model:this._modelFor(st.root), pageSize:this._pageSize(generation) });
+                this._emitter.fire(st);
+            }).catch(error => this.log(`  native mapping: ${error.message}`));
+        }
         if (!st.map) return;
         const file = e.document.uri.fsPath;
         for (const c of e.contentChanges) {
@@ -351,6 +363,8 @@ class RenderCoordinator {
         const st = this.roots.get(root);
         if (!st) return false;
         st.sourceAhead = true;
+        st.nativeLane?.invalidate();
+        if (st.map?.native) st.map.noteEdit();
         this._emitter.fire(st);
         return true;
     }
@@ -404,6 +418,7 @@ class RenderCoordinator {
         // approximate geometry until the source happened to change.
         const cfg0 = vscode.workspace.getConfiguration('wolfbook.tex');
         const mapEngine = cfg0.get('mapEngine', 'auto');
+        const wantNative = mapEngine === 'wlatex' && !wantFull;
         if (mapEngine === 'auto') {
             if (this._luaOk == null) this._luaOk = await probeLualatex();
         }
@@ -414,7 +429,8 @@ class RenderCoordinator {
             snapshot,
             refusedSnapshot: st.glyphMapRefused,
         });
-        const mapIsStale = wantGlyphMap && st.map && !st.map.exact;
+        const mapIsStale = (wantGlyphMap && st.map && !st.map.exact) ||
+            (wantNative && (!st.map?.native || !st.map.available));
         if (!force && !mapIsStale && this.isCurrent(st, snapshot, { authoritative: wantFull }) && st.map) {
             // The reader may have typed and undone back to the exact compiled
             // bytes. No process needs to run, but the viewer still needs the
@@ -436,7 +452,7 @@ class RenderCoordinator {
             const cached = loadGeneration(root, { sourceFiles: st.files, overlay });
             // A cached generation without the glyph map is not the one we want
             // when the engine can emit one: compile instead of reviving it.
-            if (cached && !(wantGlyphMap && !cached.glyphMapPath)) {
+            if (cached && !wantNative && !(wantGlyphMap && !cached.glyphMapPath)) {
                 st.generation = cached;
                 st.map = makeMap({
                     generation: cached,
@@ -511,7 +527,7 @@ class RenderCoordinator {
             // ONE PASS WHILE TYPING. The correction is scheduled, not skipped:
             // a limited generation arms the idle rebuild and never satisfies a
             // save. Capped only when latexmk has been shown to accept the -e.
-            const capWanted = live && !wantFull && cfg.get('liveSinglePass', true);
+            const capWanted = live && !wantFull && !wantNative && cfg.get('liveSinglePass', true);
             if (capWanted && this._capOk === null) {
                 this._capOk = await probeInitCode(MAX_PASSES_CODE(1));
                 if (!this._capOk) this.log('  latexmk refused the pass cap — live builds stay full');
@@ -545,7 +561,23 @@ class RenderCoordinator {
             const primaryOpts = wantGlyphMap
                 ? { ...compileOpts, engine: 'lualatex', glyphMap: true }
                 : compileOpts;
-            let gen = await compile({
+            let gen;
+            if (wantNative) {
+                const directory = cfg.get('wlatexDirectory', '');
+                if (!st.nativeLane || st.nativeLane.directory !== directory) {
+                    if (st.nativeLane) await st.nativeLane.close();
+                    st.nativeLane = new NativeBuildLane(root, directory);
+                }
+                gen = await st.nativeLane.compile(compileOpts);
+                // Register packages discovered outside the editor's include
+                // graph so subsequent dirty buffers and file events reach us.
+                for (const file of gen.nativeCompiledSources.keys()) {
+                    if (!st.files.includes(file)) st.files.push(file);
+                    this.rootOf.set(file, root);
+                }
+                gen.sourceSnapshotHash = snapshotSources(st.files,
+                    new Map([...(overlay || []), ...gen.nativeCompiledSources]));
+            } else gen = await compile({
                 ...primaryOpts,
                 maxPasses: (capWanted && this._capOk) ? 1 : null,
             });
@@ -613,7 +645,7 @@ class RenderCoordinator {
             catch (_) { currentSnapshot = null; }
             st.sourceAhead = !(gen.ok && gen.pdfPath && gen.sourceSnapshotHash &&
                 gen.sourceSnapshotHash === currentSnapshot);
-            if (st.map.exact) this.log('  render map: exact (GlyphMap)');
+            if (st.map.exact) this.log(st.map.native ? '  render map: native provenance' : '  render map: exact (GlyphMap)');
             st.lastError = gen.dependencyIssue?.summary || (gen.ok ? null : (gen.stopReason || 'compile produced no PDF'));
             if (gen.dependencyIssue) this._reportDependencyIssue(gen.dependencyIssue);
             saveGeneration(gen);
@@ -639,17 +671,22 @@ class RenderCoordinator {
                 }));
             }
         } catch (e) {
-            st.lastError = e && e.message ? e.message : String(e);
-            this.log(`  ERROR ${st.lastError}`);
-            // latexmk missing is the common case and deserves a real message.
-            if (/ENOENT/.test(st.lastError)) {
-                st.lastError = 'latexmk not found on PATH — install TeX Live, or set wolfbook.tex.compile to "off"';
+            if (ac.signal.aborted || ['AbortError', 'StaleBuild', 'Cancelled'].includes(e?.name)) {
+                this.log('  Build superseded');
+            } else {
+                st.lastError = e && e.message ? e.message : String(e);
+                this.log(`  ERROR ${st.lastError}`);
+                if (!wantNative && /ENOENT/.test(st.lastError)) {
+                    st.lastError = 'latexmk not found on PATH — install TeX Live, or set wolfbook.tex.compile to "off"';
+                }
             }
         } finally {
             if (progressDone) progressDone();
-            st.compiling = false;
-            st.liveCompiling = false;
-            if (st.running === ac) st.running = null;
+            if (st.running === ac) {
+                st.compiling = false;
+                st.liveCompiling = false;
+                st.running = null;
+            }
             this._emitter.fire(st);
         }
         // Somebody typed while this was running. Go round again — but on the
