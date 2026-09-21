@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { resolveNativeRuntime } = require('./nativeRuntime');
 const { nextGeneration } = require('./compileService');
+const { NativeArtifactCache } = require('./nativeArtifactCache');
 
 class NativeBuildLane {
     constructor(root, directory = '', runtimeOptions) {
@@ -14,8 +15,11 @@ class NativeBuildLane {
         if (!this.runtime) throw Error('WLaTeX is not installed or configured');
         const sdk = require(this.runtime.sdk);
         const { labBinary, nativeBinary } = this.runtime;
-        this.source = new sdk.NativeSourceSession({ labBinary });
-        this.compiler = new sdk.NativeCompiler({ labBinary, nativeBinary, cache: path.join(this.projectDir, '.wlatex/native') });
+        this.artifactCache = new NativeArtifactCache(path.join(this.projectDir, '.wlatex/native'));
+        try {
+            this.compiler = new sdk.NativeCompiler({ labBinary, nativeBinary, cache:this.artifactCache.directory });
+            this.source = new sdk.NativeSourceSession({ labBinary });
+        } catch (error) { this.artifactCache.close(); throw error; }
         // SDK build IDs belong to this session; display IDs share the
         // conventional compiler's allocator and survive lane reconstruction.
         this.buildNumber = 0;
@@ -44,6 +48,13 @@ class NativeBuildLane {
         return this.edits;
     }
     async compile(o) {
+        // No collection while a producer or publication may use shared files.
+        if (this.closed) throw Object.assign(Error('Native build superseded'), { name:'AbortError' });
+        this.artifactCache?.begin();
+        try { return await this._compile(o); }
+        finally { this.artifactCache?.end(); }
+    }
+    async _compile(o) {
         const version = this.version;
         const requireCurrent = () => {
             if (this.closed || version !== this.version || o.signal?.aborted)
@@ -81,6 +92,8 @@ class NativeBuildLane {
         const report = await this.compiler.compile({ main: this.root, root: this.projectDir,
             generation: ++this.buildNumber, signal: o.signal, timeoutMs:o.timeoutMs,
             overlays: Object.fromEntries(texts) });
+        const nativeArtifactLease = this.artifactCache?.lease(report);
+        report.nativeArtifactLease = nativeArtifactLease;
         requireCurrent();
         if (!report.success) throw Error(report.diagnostics.map(d=>d.message).join('\n') || 'Native compilation failed');
         // Native provenance may discover project packages not in WPaper's TeX
@@ -107,7 +120,7 @@ class NativeBuildLane {
         const first = report.build.pages[0];
         const diagnostics = report.diagnostics.map(d=>({ ...d,
             file: d.file ? path.resolve(this.projectDir,d.file) : null }));
-        return { ok:true, runner:'wlatex', engine:'wlatex', root:this.root, projectDir:this.projectDir,
+        return { ok:true, runner:'wlatex', engine:'wlatex', root:this.root, projectDir:this.projectDir, nativeArtifactLease,
             generation:nextGeneration(), outDir:report.artifact_directory, pdfPath:report.pdf,
             pdfHash:report.build.pdf_hash, pdfBytes:fs.statSync(report.pdf).size,
             sourceSnapshotHash:o.sourceSnapshotHash, live:!!o.overlay?.size,
@@ -141,6 +154,7 @@ class NativeBuildLane {
         ]).then(results => {
             const failures = results.filter(result => result.status === 'rejected').map(result => result.reason);
             if (failures.length) throw new AggregateError(failures, 'Native lane shutdown failed');
+            this.artifactCache?.close();
         });
         return this._closing;
     }

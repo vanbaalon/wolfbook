@@ -10,7 +10,7 @@ supersedes the older plan's suggestion to include the engine in the VSIX.
 | --- | --- | --- |
 | WPaper works without WLaTeX | Default and unavailable-runtime modes pass in an isolated real VS Code host; runtime/policy unit tests pass | Repeat native release acceptance on the other target hosts |
 | WLaTeX installs separately | Runtime resolution uses configured external directories; `vsce ls` inventory passes `verifyNativePackage.cjs` | Produce and test separate native installations on all four targets |
-| Ship the integration assets | Packaging inventory contains all seven required host/client files | Run the inventory check for each release; this does not validate every other extension dependency |
+| Ship the integration assets | Packaging inventory contains all eight required host/client files | Run the inventory check for each release; this does not validate every other extension dependency |
 | Four targets | Resolver supports darwin-arm64, darwin-x64, win32-x64, linux-x64; consumer CI matrix exists | Actual native execution is demonstrated only on darwin-arm64; no remote CI success claimed |
 | Engine source mapping | Real native forward/inverse, edited source, ranges, cards, pick and widen/shrink checks pass | Full corpus and physical gesture/visual acceptance remain open |
 | Unsaved source fidelity | Real-host CRLF/multiline edits, conflicts, worker reconstruction preserve dirty buffers and saved files | `verifyNativeFiles.cjs` reports INCOMPLETE for an overlay whose file is absent on disk |
@@ -21,7 +21,7 @@ supersedes the older plan's suggestion to include the engine in the VSIX.
 | Long-lived incremental engine and viewport priority | Source worker is long-lived, but compilation calls the SDK full-build interface | Checkpoint/restore/convergence execution and viewport-prioritized output remain engine work |
 | Reference-paper performance | The 15-page real adapter check samples all pages; earlier full builds took about 66 seconds | Does not meet interactive latency; new transport microchecks do not establish end-to-end latency |
 | Reference fidelity | Engine-side comparison reports exist; source mapping has independent geometry probes | Complete glyph/ink parity acceptance and visual inspection remain separate gates |
-| Cache lifecycle | PDF handles release on replacement, conventional handoff and disposal; page-text cache prunes removed/changed pages | Native build directories still accumulate; artifact eviction/refcounts are not implemented |
+| Cache lifecycle | PDF handles release on replacement, conventional handoff and disposal; page-text cache prunes removed/changed pages | New lane-owned artifacts use GC-triggered lifetime tokens; hard quotas, prompt eviction and crashed-session cleanup remain open |
 | Portable checkpoints and correctness fuzzing | Outside the consumer implementation | Engine plan's complete accounting, portable image, semantic convergence, corpus/fuzzer and timing gates must be audited and completed by their owner |
 | Visible interaction | Real extension-host/PDF.js checks pass for tested service paths | Desktop automation lists VS Code but app-state reads time out; no physical-click or screenshot acceptance obtained |
 

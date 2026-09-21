@@ -62,6 +62,7 @@ jobs:
           out/extension/kernel/tests/tex-native-package.test.js
           out/extension/kernel/tests/tex-native-generation.test.js
           out/extension/kernel/tests/tex-native-cancellation.test.js
+          out/extension/kernel/tests/tex-native-cache.test.js
           out/extension/kernel/tests/tex-native-policy.test.js
           out/extension/kernel/tests/tex-nativemap.test.js
           out/extension/kernel/tests/tex-pdf-ranges.test.js

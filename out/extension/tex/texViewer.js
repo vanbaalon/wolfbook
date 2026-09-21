@@ -1339,7 +1339,7 @@ class TexViewer {
         try {
             if (st.generation.runner === 'wlatex') {
                 this._pdfRanges ||= new PdfRangeStore();
-                pdfRange = this._pdfRanges.open(st.generation.pdfPath);
+                pdfRange = this._pdfRanges.open(st.generation.pdfPath, st.generation.nativeArtifactLease);
             } else data = fs.readFileSync(st.generation.pdfPath).toString('base64');
         }
         catch (e) {

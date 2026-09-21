@@ -813,3 +813,36 @@ CI matrix. Evidence: `/tmp/wpaper-vsix-native-admission.json` and
 [Release gates](wpaper-native-release-gates.md) now distinguish measured
 consumer behavior from missing engine, packaging, performance, cache and visual
 requirements. This audit does not mark the full project complete.
+
+## 2026-09-21 — owned artifact caches and shared lifetime tokens
+
+Each native lane now creates its own cache directory beneath `.wlatex/native`.
+Generations and their public build reports carry a shared `nativeArtifactLease`;
+map copies retain it, and range-loaded PDF handles retain it until release.
+Code that keeps artifact paths beyond a generation's lifetime must also retain
+this token. A finalization registry can reclaim returned artifact/source/log
+paths after their tokens disappear. Shared or enclosing paths still referenced
+by another report are retained. Collection pauses throughout compilation and
+publication, and a successfully closed lane removes its owned directory once
+no leases remain. Old shared cache directories are never swept.
+
+Paths must be descendants of the owned cache and cannot traverse symlinks.
+Cleanup failures retain entries for a later collection attempt. A lane whose
+worker shutdown fails does not authorize cache removal. Returned-report cleanup
+is opportunistic: it depends on normal JavaScript garbage collection, does not
+force GC in the extension, and does not establish a hard disk quota. Partial
+runs with no report are removed only when their lane's owned directory becomes
+reclaimable. Crashed-process leftovers still need a separate startup policy.
+Deletion currently runs synchronously at collection boundaries; large-directory
+cleanup latency is not yet measured or bounded.
+
+Validation: 71 cache/policy/package/transport tests pass, plus five native
+cancellation/generation tests. An isolated test process with explicit GC verifies
+that live generations, shared source paths, active builds and PDF handles protect
+their resources; unrelated directories remain untouched. The real VS Code
+CRLF/native scenario passes with cache isolation, compiler handoff, worker crash
+reconstruction, old-PDF retention, text/canvas reuse and handle release.
+Evidence: `/tmp/wpaper-native-cache-final-unit.log`,
+`/tmp/wpaper-native-cache-unit.log`, `/tmp/wpaper-native-cache-host.log`.
+The package inventory guard now requires eight integration assets, including
+`nativeArtifactCache.js`; see `/tmp/wpaper-vsix-cache-admission.json`.

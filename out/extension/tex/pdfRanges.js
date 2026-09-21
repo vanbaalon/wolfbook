@@ -3,13 +3,13 @@ const fs = require('fs');
 const { randomUUID } = require('crypto');
 class PdfRangeStore {
     constructor() { this.files = new Map(); }
-    open(file) {
+    open(file, artifactLease) {
         const fd = fs.openSync(file, 'r');
         try {
             const stat = fs.fstatSync(fd);
             if (!stat.isFile() || !Number.isSafeInteger(stat.size) || stat.size <= 0) throw Error('Invalid PDF resource');
             const token = randomUUID();
-            this.files.set(token, { fd, length:stat.size });
+            this.files.set(token, { fd, length:stat.size, artifactLease });
             return { token, length:stat.size };
         } catch (error) { fs.closeSync(fd); throw error; }
     }

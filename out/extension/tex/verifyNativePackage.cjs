@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const assert = require('node:assert/strict');
 const required = [
     'out/extension/tex/nativeRuntime.js', 'out/extension/tex/nativeCompileService.js',
-    'out/extension/tex/nativeMap.js', 'out/extension/tex/pdfRanges.js',
+    'out/extension/tex/nativeArtifactCache.js', 'out/extension/tex/nativeMap.js', 'out/extension/tex/pdfRanges.js',
     'out/extension/tex/texViewer.js', 'out/client/tex-viewer.js', 'out/client/pdf-ranges.js',
 ];
 function verifyNativePackage(list) {
