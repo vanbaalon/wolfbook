@@ -1,0 +1,64 @@
+name: WPaper optional native integration
+
+on:
+  pull_request:
+    paths:
+      - 'out/extension/**'
+      - 'out/client/tex-viewer.js'
+      - '.github/workflows/wpaper-native-integration.yml'
+      - 'package.json'
+      - '.vscodeignore'
+  push:
+    paths:
+      - 'out/extension/**'
+      - 'out/client/tex-viewer.js'
+      - '.github/workflows/wpaper-native-integration.yml'
+      - 'package.json'
+      - '.vscodeignore'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    name: WPaper integration (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: darwin-arm64
+            runner: macos-15
+            arch: arm64
+          - target: darwin-x64
+            runner: macos-15-intel
+            arch: x64
+          - target: win32-x64
+            runner: windows-2022
+            arch: x64
+          - target: linux-x64
+            runner: ubuntu-24.04
+            arch: x64
+    env:
+      WPAPER_TEST_TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          architecture: ${{ matrix.arch }}
+      - name: Verify actual platform and architecture
+        run: node -e "require('node:assert/strict').equal(process.platform + '-' + process.arch, process.env.WPAPER_TEST_TARGET)"
+      # These are dependency-free consumer tests. They do not install the native
+      # engine, build a VSIX, or claim native execution on the runner platform.
+      - name: Check optional installation, mapping, lifecycle and viewer shipping
+        run: >-
+          node --test
+          out/extension/kernel/tests/tex-native-runtime.test.js
+          out/extension/kernel/tests/tex-native-generation.test.js
+          out/extension/kernel/tests/tex-native-cancellation.test.js
+          out/extension/kernel/tests/tex-native-policy.test.js
+          out/extension/kernel/tests/tex-nativemap.test.js
+          out/extension/kernel/tests/tex-viewer-ship.test.js

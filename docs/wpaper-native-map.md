@@ -411,3 +411,23 @@ plus an already aborted request. The real session-recovery verifier also passes
 with the final lane (`/tmp/wpaper-native-cancellation-recovery.json`). This avoids
 unnecessary superseded cold builds; it does not close the measured 66-second
 reference build latency or implement incremental native execution.
+
+## 2026-09-20 — four-platform consumer CI
+
+`.github/workflows/wpaper-native-integration.yml` runs dependency-free runtime,
+map, generation, cancellation, coordinator and viewer-shipping checks on the four
+release targets: macOS ARM64, macOS x64, Windows x64 and Linux x64. Each job
+asserts Node's actual platform/architecture before testing. The matrix uses
+GitHub's [documented hosted runner labels](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
+(`macos-15`, `macos-15-intel`, `windows-2022`, `ubuntu-24.04`) and Node 24.
+It triggers for relevant pull requests/pushes and supports manual dispatch.
+
+The tests require no npm dependencies, TeX Live or WLaTeX installation. Local
+validation blocked external Node module loading and passed all 78 assertions
+across the six suites (the Node runner reports 69 tests because the older
+viewer-shipping suite wraps ten assertions in one file test). YAML parsing,
+four-target membership and test-file existence checks also passed.
+
+No workflow was pushed or dispatched. Remote results for the other platforms
+remain unverified. This is WPaper consumer CI, not evidence of native compiler
+execution, separate native release artifacts or installers. Those remain open.
