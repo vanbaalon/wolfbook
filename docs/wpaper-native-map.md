@@ -431,3 +431,20 @@ four-target membership and test-file existence checks also passed.
 No workflow was pushed or dispatched. Remote results for the other platforms
 remain unverified. This is WPaper consumer CI, not evidence of native compiler
 execution, separate native release artifacts or installers. Those remain open.
+
+## 2026-09-21 — await complete native shutdown
+
+Lane shutdown now marks the lane closed and invalidates pending builds
+immediately. Compiler and source-session cleanup are both attempted and awaited,
+including when either operation throws or rejects. Repeated close calls share
+one promise. Only after both finish are failures reported together. This prevents
+retirement from completing early while the other resource is still shutting
+down. Closed lanes reject edits/builds and do not refresh maps.
+
+Validation: 52 native cancellation/generation/policy tests pass. New tests cover
+a synchronous compiler-close failure while source shutdown is delayed,
+idempotent closure, post-close operations and a build waiting on queued edits
+when shutdown starts. The real session-reconstruction verifier also passes:
+`/tmp/wpaper-native-lifecycle-recovery.json`. Native incremental execution,
+reference build latency, full live UI acceptance and separate platform release
+verification remain outstanding.

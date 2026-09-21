@@ -29,6 +29,7 @@ class NativeBuildLane {
     }
     invalidate() { this.version++; }
     noteChange(document, changes) {
+        if (this.closed) return Promise.reject(Error('Native lane is closed'));
         this.version++;
         const file = this.relative(document.uri.fsPath);
         const text = document.getText();
@@ -45,7 +46,7 @@ class NativeBuildLane {
     async compile(o) {
         const version = this.version;
         const requireCurrent = () => {
-            if (version !== this.version || o.signal?.aborted)
+            if (this.closed || version !== this.version || o.signal?.aborted)
                 throw Object.assign(Error('Native build superseded'), { name:'AbortError' });
         };
         requireCurrent();
@@ -123,10 +124,25 @@ class NativeBuildLane {
                 [path.join(this.projectDir, binding.file), snapshot.files[binding.file].text])) };
     }
     async refresh() {
+        if (this.closed) return null;
         await this.edits;
-        if (!this.source.published) return null;
+        if (this.closed || !this.source.published) return null;
         return this.source.readPages(Array.from({length:this.source.published.artifact.page_count},(_,i)=>i+1));
     }
-    async close() { await Promise.all([this.compiler.close(), this.source.close()]); }
+    close() {
+        if (this._closing) return this._closing;
+        this.closed = true;
+        this.version++;
+        // Both resources must finish shutting down even if one rejects. This
+        // also makes repeated disposal/retirement share one completion handle.
+        this._closing = Promise.allSettled([
+            Promise.resolve().then(() => this.compiler.close()),
+            Promise.resolve().then(() => this.source.close()),
+        ]).then(results => {
+            const failures = results.filter(result => result.status === 'rejected').map(result => result.reason);
+            if (failures.length) throw new AggregateError(failures, 'Native lane shutdown failed');
+        });
+        return this._closing;
+    }
 }
 module.exports = { NativeBuildLane };

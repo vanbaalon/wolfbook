@@ -40,3 +40,39 @@ test('an already cancelled native request does not read source files', async () 
     const ac = new AbortController(); ac.abort();
     await assert.rejects(lane.compile({ signal:ac.signal }), { name:'AbortError' });
 });
+
+test('native shutdown waits for both resources after a failure and is idempotent', async () => {
+    const lane = Object.create(NativeBuildLane.prototype);
+    let release, compilerCloses = 0, sourceCloses = 0, settled = false;
+    Object.assign(lane, { version:0,
+        compiler:{ close() { compilerCloses++; throw Error('compiler shutdown failed'); } },
+        source:{ close() { sourceCloses++; return new Promise(resolve => { release = resolve; }); } } });
+    const closing = lane.close();
+    closing.catch(() => { settled = true; });
+    assert.equal(lane.close(), closing);
+    assert.equal(lane.closed, true);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(settled, false);
+    assert.equal(compilerCloses, 1);
+    assert.equal(sourceCloses, 1);
+    release();
+    await assert.rejects(closing, error => error instanceof AggregateError && error.errors.length === 1);
+    await assert.rejects(lane.compile({}), { name:'AbortError' });
+    await assert.rejects(lane.noteChange({}, []), /closed/);
+    assert.equal(await lane.refresh(), null);
+});
+
+test('closing a native lane invalidates work waiting for source synchronization', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'native-close-'));
+    const root = path.join(dir, 'paper.tex'); fs.writeFileSync(root, 'Alpha');
+    const lane = Object.create(NativeBuildLane.prototype);
+    let release;
+    Object.assign(lane, { root, projectDir:dir, version:0,
+        edits:new Promise(resolve => { release = resolve; }),
+        compiler:{ close:async () => {} }, source:{ close:async () => {} } });
+    try {
+        const pending = lane.compile({});
+        await lane.close(); release();
+        await assert.rejects(pending, { name:'AbortError' });
+    } finally { fs.rmSync(dir, { recursive:true, force:true }); }
+});
