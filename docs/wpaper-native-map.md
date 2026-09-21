@@ -70,9 +70,14 @@ refresh translated source locations. Externally changed files invalidate the map
 until the next build. Native generations are not persisted as JSON because their
 worker handles cannot survive an extension restart.
 
-The current viewer still pauses general tracing while source is ahead of the
-PDF. A refreshed worker map does not imply that newly inserted text has printed
-geometry. Full interactive source-ahead tracing, simultaneous authoritative and
+Native editor carets now use asynchronous worker forward queries, including
+when source is ahead of the displayed PDF. The current immutable page view must
+match that PDF's digest, and answers are discarded after cursor, source, map,
+root or display changes. Exact worker membership prevents newly inserted text
+from borrowing an enclosing old source range's glyphs. The client paints the
+returned engine rectangles directly. General range/mini-editor and inverse
+tracing while source is ahead remain incomplete. Full interactive acceptance,
+simultaneous authoritative and
 native views, packaged engine delivery and the reference-paper acceptance remain
 open. Native cold compilation is not native incremental checkpoint execution.
 

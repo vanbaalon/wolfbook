@@ -1224,6 +1224,10 @@ class TexViewer {
                 source: this._traceSource || 'editor',
                 compiling: !!st.compiling,
             });
+            if (st.map?.native && st.map.available &&
+                this._openedPdfHash === st.map.view.artifact.pdf_hash) {
+                await this._resumeTracing({ instant:true, source:this._traceSource, preserveView:true });
+            }
         } else if (st && this._tracePaused && st.generation &&
             (this.shownGeneration === st.generation.generation || this._displayMatchesSource(st))) {
             // The source returned to the bytes already on screen (usually an
@@ -2570,6 +2574,38 @@ class TexViewer {
     }
 
 
+    /** Native cursor geometry is admitted by the worker against current anchors. */
+    async _syncNativeCursor(st, editor, opts, request) {
+        const map = st.map;
+        const doc = editor.document;
+        const version = doc.version;
+        const position = { line:editor.selection.start.line, character:editor.selection.start.character };
+        // A source revision may advance while these same PDF bytes remain on
+        // screen. Only the paired native map may answer against that display.
+        const current = () => this.panel && this.followCursor && this.root === st.root && map.available &&
+            this.coord.stateFor(doc) === st && st.map === map &&
+            this._openedPdfHash === map.view.artifact.pdf_hash &&
+            request === this._nativeCursorRequest && doc.version === version &&
+            editor.selection.start.line === position.line &&
+            editor.selection.start.character === position.character &&
+            editor.selection.end.line === position.line &&
+            editor.selection.end.character === position.character;
+        if (!current()) return;
+        this._post({ type:'selection', span:null });
+        this._post({ type:'highlight', rects:[] });
+        try {
+            const rects = await map.forwardAt(doc.uri.fsPath, position.line + 1, position.character);
+            if (!current() || rects === null) return;
+            this._setTracePaused(false);
+            this._post({ type:'highlight', rects, exact:true,
+                label: rects.length ? `line ${position.line + 1}` : 'no printed source at this cursor',
+                reveal: !opts.preserveView && this._mayScroll() && Date.now() - this._invertedAt >= 1500,
+                instant: !!opts.instant });
+        } catch (error) {
+            if (current()) this._log(`native cursor mapping: ${error.message}`);
+        }
+    }
+
     /** Forward sync: highlight the object under the cursor. */
     /**
      * @param {object} editor
@@ -2580,6 +2616,7 @@ class TexViewer {
      *   place; only a gesture deserves the animation.
      */
     syncFromEditor(editor, opts = {}) {
+        this._nativeCursorRequest = (this._nativeCursorRequest || 0) + 1;
         this._syncInstant = !!opts.instant;
         this._syncPreserveView = !!opts.preserveView;
         if (!this.panel || !editor) return;
@@ -2592,6 +2629,12 @@ class TexViewer {
         this._rememberCursor(doc, editor.selection);
         if (!this.followCursor) return;
         const st = this.coord.stateFor(doc);
+        const nativeCaret = editor.selection?.start && editor.selection?.end &&
+            editor.selection.start.line === editor.selection.end.line &&
+            editor.selection.start.character === editor.selection.end.character;
+        if (st?.map?.native && nativeCaret) {
+            return this._syncNativeCursor(st, editor, opts, this._nativeCursorRequest);
+        }
         // THE PAGE IS A GENERATION, NOT A LIVE MIRROR OF THE BUFFER.
         // Same-line typing used to leave RenderMap._baseFlag() at FRESH, so the
         // old PDF text layer searched for a word that existed only in the new

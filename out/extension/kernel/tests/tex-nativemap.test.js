@@ -101,3 +101,18 @@ test('displaced enclosing ranges do not invent ink on inserted interior lines', 
     assert.deepEqual(map.lineRows(file, 500000), []);
     assert.equal(map.sourceToRender(file, 4).flag, 'probably-current');
 });
+
+
+test('native cursor admission uses worker membership instead of enclosing ranges', async () => {
+    const { map, source, view, invalidate } = fixture();
+    let requested;
+    source.forward = async (...args) => { requested = args; return { hits:[view.pages[0].hits[1]] }; };
+    const rects = await map.forwardAt(file, 4, 1);
+    assert.deepEqual(requested, ['paper.tex', 4, 1]);
+    assert.equal(rects.length, 1);
+    assert.equal(rects[0].x, map.glyphsForLine(file, 4)[1].x);
+    source.forward = async () => ({ hits:[] });
+    assert.deepEqual(await map.forwardAt(file, 4, 2), []);
+    source.forward = async () => { invalidate(); return { hits:[view.pages[0].hits[0]] }; };
+    assert.equal(await map.forwardAt(file, 4, 0), null);
+});

@@ -98,3 +98,73 @@ test('native inverse points preserve source columns without nearest-row heuristi
         lineAtPoint() { throw Error('must not guess a nearby row'); } };
     assert.equal(TexViewer.prototype._resolvePoint({ map }, { page:1, xBp:80, yTopBp:90 }), hit);
 });
+
+
+function cursorFixture() {
+    const posts = [];
+    const rects = [{ page:1, x:72, y:80, w:5, h:9 }];
+    const map = { native:true, available:true, view:{ artifact:{ pdf_hash:'pdf' } },
+        forwardAt:async () => rects };
+    const state = { map, sourceAhead:true };
+    const doc = { uri:{ fsPath:'paper.tex' }, version:1 };
+    // Real VS Code Position exposes getters, not enumerable line fields.
+    const position = { get line() { return 3; }, get character() { return 7; } };
+    const editor = { document:doc, selection:{ start:position, end:position } };
+    const viewer = { panel:{}, followCursor:true, _openedPdfHash:'pdf', _nativeCursorRequest:1,
+        coord:{ stateFor:() => state }, _post:m => posts.push(m), _setTracePaused() {},
+        _mayScroll:() => true, _invertedAt:0, _log() {} };
+    return { viewer, state, map, doc, editor, posts, rects,
+        run:() => TexViewer.prototype._syncNativeCursor.call(viewer, state, editor, {}, 1) };
+}
+
+test('native cursor can trace current anchors against an older displayed PDF', async () => {
+    const f = cursorFixture();
+    f.map.forwardAt = async (file, line, column) => {
+        assert.equal(file, 'paper.tex'); assert.equal(line, 4); assert.equal(column, 7);
+        return f.rects;
+    };
+    await f.run();
+    assert.deepEqual(f.posts.at(-1).rects, f.rects);
+    assert.equal(f.state.sourceAhead, true, 'mapping does not claim PDF is current source');
+});
+
+test('native cursor ignores late answers after cursor, source, map or display changes', async () => {
+    const changes = [
+        f => { f.viewer._nativeCursorRequest++; },
+        f => { f.doc.version++; },
+        f => { f.state.map = {}; },
+        f => { f.viewer._openedPdfHash = 'other'; },
+        f => { f.map.available = false; },
+        f => { f.editor.selection = { start:{ line:9, character:0 }, end:{ line:9, character:0 } }; },
+    ];
+    for (const change of changes) {
+        const f = cursorFixture();
+        let resolve;
+        f.map.forwardAt = () => new Promise(r => { resolve = r; });
+        const pending = f.run();
+        change(f); resolve(f.rects); await pending;
+        assert.ok(!f.posts.some(p => p.rects?.length));
+    }
+});
+
+test('new source with no worker membership clears the old cursor highlight', async () => {
+    const f = cursorFixture(); f.map.forwardAt = async () => [];
+    await f.run();
+    assert.deepEqual(f.posts.at(-1).rects, []);
+    assert.match(f.posts.at(-1).label, /no printed source/);
+});
+
+
+test('forward-sync handler selects native caret queries before the stale-source pause', async () => {
+    const f = cursorFixture();
+    f.doc.uri.fsPath = 'paper.tex';
+    f.viewer._noteEditorNavigation = () => {};
+    f.viewer._rememberCursor = () => {};
+    let called = false;
+    f.viewer._syncNativeCursor = async (state, editor, opts, request) => {
+        called = true; assert.equal(state, f.state); assert.equal(editor, f.editor);
+        assert.equal(request, 2);
+    };
+    await TexViewer.prototype.syncFromEditor.call(f.viewer, f.editor);
+    assert.equal(called, true);
+});

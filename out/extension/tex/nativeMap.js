@@ -33,6 +33,7 @@ class NativeMap extends RenderMap {
         this.projectDir = path.resolve(o.projectDir || o.generation?.projectDir || '.');
         this._invalidated = false;
         this._entries = [];
+        this._byItem = new Map();
         this._hasDisplaced = false;
         this._pages = new Map();
         this._lines = new Map();
@@ -58,6 +59,7 @@ class NativeMap extends RenderMap {
                     d: rect.y + rect.h - rect.baseline };
                 entries.push(entry);
                 this._entries.push(entry);
+                this._byItem.set(entry.i, entry);
                 this._hasDisplaced ||= hit.mapped_origins.some(o => o.source.location.accuracy !== 'Exact');
                 const seen = new Set();
                 for (const origin of hit.mapped_origins || []) {
@@ -89,6 +91,22 @@ class NativeMap extends RenderMap {
     _toCurrentLine(file, line) { return line; }
     glyphsForLine(file, line) {
         return this.available ? this._lines.get(`${path.resolve(file)}\0${line}`) || [] : [];
+    }
+    async forwardAt(file, line, column) {
+        if (!this.available) return null;
+        const relative = path.relative(this.projectDir, path.resolve(file)).split(path.sep).join('/');
+        if (!relative || relative.startsWith('../') || path.isAbsolute(relative)) return null;
+        const answer = await this.source.forward(relative, line, column);
+        // The worker admits the actual anchor, not its translated enclosing
+        // range: newly inserted text must not borrow an old glyph's geometry.
+        if (!this.available) return null;
+        const selected = [];
+        for (const hit of answer.hits) {
+            const entry = this._byItem.get(hit.item_id);
+            if (!entry || entry.page !== hit.item.page) return null;
+            selected.push(entry);
+        }
+        return selected.map(e => ({ page:e.page, x:e.x, y:e.y, w:e.w, h:e.boxHeight }));
     }
     fontOf() { return null; }
     fileOf(fileId) { return typeof fileId === 'string' ? fileId : null; }
