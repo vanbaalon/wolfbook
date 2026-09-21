@@ -63,6 +63,24 @@ exports.run = async function() {
             await viewer._jumpToSource({ generation:viewer._openedGeneration,
                 page:rects[0].page, xBp:rects[0].x+rects[0].w/2, yTopBp:rects[0].y+rects[0].h/2 });
             assert.equal(editor.selection.start.line, 3);
+            const point = { generation:viewer._openedGeneration, page:rects[0].page,
+                xBp:rects[0].x+rects[0].w/2, yTopBp:rects[0].y+rects[0].h/2 };
+            const card = await viewer._openEditSession(point);
+            assert.ok(card?.native);
+            const before = card.lastText;
+            assert.ok(before.startsWith('Alpha'));
+            const text = before.slice(0,1) + 'NEW' + before.slice(1);
+            assert.equal(await viewer._applyEditChange({ editId:card.id, text,
+                operation:{ before, start:1, end:1, text:'NEW' } }), true);
+            await until(() => st.map.available, 'map after precise mini-editor edit');
+            assert.ok(doc.lineAt(3).text.startsWith('ANEWlpha'));
+            assert.ok((await st.map.forwardAt(doc.uri.fsPath, 4, 4))?.length,
+                'unchanged letter must retain its native provenance');
+            assert.deepEqual(await st.map.forwardAt(doc.uri.fsPath, 4, 2), [],
+                'inserted text must not inherit old glyphs');
+            await viewer._onEditCaret({ editId:card.id, start:4, end:5 });
+            assert.equal(editor.selection.start.character, 4);
+            assert.equal(editor.selection.end.character, 5);
         } else {
             await coord.build(doc, { quiet:true, authoritative:true });
             assert.equal(st.generation.ok, true, st.lastError);
@@ -76,7 +94,7 @@ exports.run = async function() {
         }
         await fs.writeFile(path.join(folder, '../vscode-acceptance.json'), JSON.stringify({
             result:'PASS', vscode:vscode.version, node:process.version,
-            platform:process.platform, arch:process.arch, mode, native_preview:mode === 'native',
+            platform:process.platform, arch:process.arch, mode, native_preview:mode === 'native', mini_editor_precise_edit:mode === 'native',
             default_without_wlatex:mode === 'default', unavailable_wlatex_fallback:mode === 'missing',
             conventional_unsaved_rebuild:mode !== 'native',
             real_pdfjs_opened:true, unsaved_source_edit:true, translated_inverse_navigation:mode === 'native',

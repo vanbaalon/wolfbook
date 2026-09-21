@@ -532,3 +532,29 @@ physical pointer gestures or prove canvas pixels, native execution on other
 platforms, or incremental compilation. The WLaTeX checkout exists on this host;
 absence tests prove operation without a configured installation, not uninstall
 behavior.
+
+## 2026-09-21 — precise native mini-editor mutations
+
+Native mini-editor cards now capture the textarea's `beforeinput` selection and
+send each supported input as an explicit source operation. The handler validates
+the prior block text, current document text, UTF-16 boundaries and reconstructed
+result before applying only that range. Ordinary insertions, selected replacements,
+backspace, forward deletion and cut therefore preserve untouched source pieces.
+Repeated text is not aligned or searched to guess which occurrence changed.
+Unsupported or inconsistent browser input falls back to the previous whole-block
+replacement, which conservatively loses provenance for that replaced text.
+Non-native cards retain their existing debounced update policy.
+
+This closes a real gap in the previous native card path: replacing an entire
+block for every keystroke discarded the provenance of all its unchanged text.
+Card offset tracking now also keeps the card's own insertions at either boundary
+inside the block. Restored and stepped native cards carry the operation mode.
+
+Validation: 52 native-policy tests, 207 sync tests and 35 panel tests pass.
+Coverage includes repeated-character insertion positions, Unicode deletion,
+selected paste, unknown/mismatched operations, and card-boundary tracking. The
+real VS Code test opens a card over the older native PDF, inserts `NEW` inside
+`Alpha`, verifies the retained `l` still maps and inserted characters do not,
+and mirrors the card selection into the real editor. Evidence:
+`/tmp/wpaper-vscode-mini-edit.log`. This uses the actual edit handler and VS Code
+WorkspaceEdit; physical browser input/pointer and visual acceptance remain open.

@@ -800,3 +800,52 @@ test('configured compiler timeout reaches native builds and their conventional f
         assert.deepEqual(observedTimeouts.slice(start), [['native',45000], ['conventional',45000]]);
     } finally { configuredTimeout = 180000; nativeFailure = false; f.close(); }
 });
+
+test('native mini-input operations preserve the actual insertion position in repeated text', () => {
+    const vm = require('node:vm');
+    const js = fs.readFileSync(path.resolve(__dirname, '../../../client/tex-viewer.js'), 'utf8');
+    const start = js.indexOf('function miniInputOperation(');
+    const context = vm.createContext({});
+    vm.runInContext(js.slice(start, js.indexOf('\n}\n',start) + 2), context);
+    const cases = [
+        [{ text:'aaaa', start:1, end:1, type:'insertText' }, 'aaaaa', 2, [1,1,'a']],
+        [{ text:'A😀B', start:3, end:3, type:'deleteContentBackward' }, 'AB', 1, [1,3,'']],
+        [{ text:'abc', start:1, end:1, type:'deleteContentForward' }, 'ac', 1, [1,2,'']],
+        [{ text:'abc', start:1, end:2, type:'insertFromPaste' }, 'aXYc', 3, [1,2,'XY']],
+    ];
+    for (const [before, after, caret, expected] of cases) {
+        const op = context.miniInputOperation(before, after, caret);
+        assert.deepEqual([op.start,op.end,op.text], expected);
+    }
+    assert.equal(context.miniInputOperation({ text:'abc', start:3, end:3, type:'historyUndo' }, 'ac', 1), null);
+    assert.equal(context.miniInputOperation({ text:'abc', start:1, end:1, type:'insertText' }, 'unrelated', 3), null);
+});
+
+test('native mini-editor applies verified ranges and retains insertions at card boundaries', async () => {
+    for (const at of [0,1,4,'invalid']) {
+        let text = 'aaaa'; let applied;
+        const doc = { uri:{ fsPath:'/paper.tex' }, positionAt:n => new NativePosition(0,n),
+            getText:range => range ? text.slice(range.start.character, range.end.character) : text };
+        stub.workspace.openTextDocument = async () => doc;
+        stub.WorkspaceEdit = class { replace(uri, range, value) { this.range=range; this.value=value; } };
+        const s = { id:1, native:true, file:'/paper.tex', startOffset:0, endOffset:4, lastText:text };
+        const viewer = { _edit:s, _rememberEditState() {}, _post() {},
+            _applyReaderEdit:async (document, edit) => {
+                applied = edit;
+                const start = edit.range.start.character, end = edit.range.end.character;
+                text = text.slice(0,start)+edit.value+text.slice(end);
+                TexViewer.prototype._onEditDocChange.call(viewer, { document:doc,
+                    contentChanges:[{ rangeOffset:start, rangeLength:end-start, text:edit.value }] });
+                return true;
+            } };
+        const before = text;
+        assert.equal(await TexViewer.prototype._applyEditChangeNow.call(viewer, s, 'aaaaa',
+            { before:at === 'invalid' ? 'outdated' : before, start:at === 'invalid' ? 1 : at,
+                end:at === 'invalid' ? 1 : at, text:'a' }), true);
+        assert.equal(applied.range.start.character, at === 'invalid' ? 0 : at);
+        assert.equal(applied.range.end.character, at === 'invalid' ? 4 : at);
+        assert.equal(s.startOffset, 0);
+        assert.equal(s.endOffset, 5);
+        assert.equal(s.lastText, text);
+    }
+});

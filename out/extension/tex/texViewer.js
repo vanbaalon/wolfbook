@@ -6847,6 +6847,7 @@ class TexViewer {
             const s = {
                 id: ++this._editSeq,
                 file: saved.file,
+                native:!!st.map.native,
                 startOffset,
                 endOffset,
                 lastText: doc.getText(new vscode.Range(a, b)),
@@ -6865,7 +6866,7 @@ class TexViewer {
             const caretEnd = Math.max(caretStart,
                 Math.min(Number(saved.caretEnd) || caretStart, endOffset - startOffset));
             this._post({
-                type: 'editOpen', editId: s.id, label: s.label,
+                type: 'editOpen', native:s.native, editId: s.id, label: s.label,
                 file: path.basename(s.file), startLine: a.line + 1, endLine: b.line + 1,
                 text: s.lastText, rects,
                 page: Number(saved.page) || (rects[0] && rects[0].page) || 1,
@@ -6895,6 +6896,7 @@ class TexViewer {
             block.endLine - 1, (lines[block.endLine - 1] || '').length);
         const s = {
             id: ++this._editSeq,
+            native:!!st.map?.native,
             file,
             startOffset: doc.offsetAt(startPos),
             endOffset: doc.offsetAt(endPos),
@@ -6915,6 +6917,7 @@ class TexViewer {
         }
         this._post({
             type: 'editOpen',
+            native:s.native,
             editId: s.id,
             label: block.label,
             file: path.basename(file),
@@ -6965,6 +6968,7 @@ class TexViewer {
         const endPos = new vscode.Position(endLine - 1, (lines[endLine - 1] || '').length);
         const s = {
             id: ++this._editSeq,
+            native:!!map.native,
             file: hit.file,
             startOffset: doc.offsetAt(startPos),
             endOffset: doc.offsetAt(endPos),
@@ -6977,6 +6981,7 @@ class TexViewer {
         const rects = this._editRects(st, hit.file, startLine, endLine);
         this._post({
             type: 'editOpen',
+            native:s.native,
             editId: s.id,
             label,
             file: path.basename(hit.file),
@@ -7078,7 +7083,7 @@ class TexViewer {
         // starting the next. Serialize edits so Ctrl+S can never overtake a
         // debounce already in flight and write the previous block text.
         const before = this._editApplyQueue || Promise.resolve();
-        const work = before.catch(() => {}).then(() => this._applyEditChangeNow(s, m.text));
+        const work = before.catch(() => {}).then(() => this._applyEditChangeNow(s, m.text, m.operation));
         this._editApplyQueue = work;
         let ok = false;
         try { ok = await work; }
@@ -7092,18 +7097,29 @@ class TexViewer {
         return ok;
     }
 
-    async _applyEditChangeNow(s, text) {
+    async _applyEditChangeNow(s, text, operation) {
         if (text === s.lastText) return true;
         const previousText = s.lastText;
         try {
             const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(s.file));
-            const range = new vscode.Range(
-                doc.positionAt(s.startOffset), doc.positionAt(s.endOffset));
+            let range = new vscode.Range(doc.positionAt(s.startOffset), doc.positionAt(s.endOffset));
+            let replacement = text;
+            const op = operation;
+            const scalarBoundary = offset => !(offset > 0 && offset < previousText.length &&
+                /[\uD800-\uDBFF]/.test(previousText[offset - 1]) && /[\uDC00-\uDFFF]/.test(previousText[offset]));
+            if (s.native && op && op.before === previousText && doc.getText(range) === previousText &&
+                Number.isInteger(op.start) && Number.isInteger(op.end) && op.start >= 0 &&
+                op.end >= op.start && op.end <= previousText.length && typeof op.text === 'string' &&
+                scalarBoundary(op.start) && scalarBoundary(op.end) &&
+                previousText.slice(0,op.start) + op.text + previousText.slice(op.end) === text) {
+                range = new vscode.Range(doc.positionAt(s.startOffset + op.start), doc.positionAt(s.startOffset + op.end));
+                replacement = op.text;
+            }
             // Set BEFORE applying: the change event this edit fires must read
             // as our own echo, not as an update to send back to the card.
             s.lastText = text;
             const we = new vscode.WorkspaceEdit();
-            we.replace(doc.uri, range, text);
+            we.replace(doc.uri, range, replacement);
             // The global document-change listener uses this to name the small
             // lag indicator “mini-editor” rather than “editor”. It is set
             // across applyEdit because that is when VS Code emits the event.
@@ -7137,8 +7153,9 @@ class TexViewer {
             const delta = grew - c.rangeLength;
             const cs = c.rangeOffset;
             const ce = c.rangeOffset + c.rangeLength;
-            if (ce <= s.startOffset) { s.startOffset += delta; s.endOffset += delta; }
-            else if (cs >= s.endOffset) { /* below the block — nothing moves */ }
+            const ownInsertion = this._miniApplyingFile === s.file && cs === ce;
+            if (ce <= s.startOffset && !(ownInsertion && cs === s.startOffset)) { s.startOffset += delta; s.endOffset += delta; }
+            else if (cs >= s.endOffset && !(ownInsertion && cs === s.endOffset)) { /* below the block — nothing moves */ }
             else {
                 s.startOffset = Math.min(s.startOffset, cs);
                 s.endOffset = Math.max(s.endOffset + delta, cs + grew);

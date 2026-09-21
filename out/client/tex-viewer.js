@@ -5463,12 +5463,26 @@ function buildEditCard(e) {
     // press steps. Auto-repeat is deliberately excluded, so holding an arrow
     // cannot race through the document.
     let boundaryArm = null;
+    let beforeInput = null;
+    ta.addEventListener('beforeinput', event => {
+        beforeInput = { text:ta.value, start:ta.selectionStart, end:ta.selectionEnd, type:event.inputType };
+    });
     ta.addEventListener('input', () => {
+        const operation = miniInputOperation(beforeInput, ta.value, ta.selectionStart);
+        beforeInput = null;
         boundaryArm = null;
         state.edit.text = ta.value;               // survives zoom/generation rebuilds
         caretSnapshot();                         // capture before host/compile replies
         state.edit.sel = null;                    // the located range is stale once typed over
         clearTimeout(debounce);
+        if (e.native) {
+            debounce = null;
+            const caret = caretSnapshot();
+            state.edit._caretSent = `${caret.start}:${caret.end}:${caret.direction}`;
+            vscode.postMessage({ type:'editChange', editId:e.id, text:ta.value, caret, operation });
+            syncHighlight(card);
+            return;
+        }
         debounce = setTimeout(() => {
             debounce = null;
             const caret = caretSnapshot();
@@ -6285,6 +6299,21 @@ function clearPaperTypingTarget(clearPending = false, reason = '') {
         if (pendingPaperTyping && pendingPaperTyping.timer) clearTimeout(pendingPaperTyping.timer);
         pendingPaperTyping = null;
     }
+}
+
+// A beforeinput selection identifies the operation; never align repeated text
+// to guess where an insertion occurred. Unsupported browser edits fall back.
+function miniInputOperation(before, after, caret) {
+    if (!before || !/^(insert|deleteContentBackward$|deleteContentForward$|deleteByCut$)/.test(before.type)) return null;
+    let start = before.start, end = before.end;
+    if (start === end && before.type === 'deleteContentBackward') start = caret;
+    if (start === end && before.type === 'deleteContentForward') end += before.text.length - after.length;
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start || end > before.text.length) return null;
+    const length = after.length - before.text.length + end - start;
+    if (length < 0) return null;
+    const text = after.slice(start, start + length);
+    if (before.text.slice(0,start) + text + before.text.slice(end) !== after) return null;
+    return { before:before.text, start, end, text };
 }
 
 function sendClick(n, pt, cx, cy, extra, type = 'click') {
@@ -7257,7 +7286,7 @@ window.addEventListener('message', async (ev) => {
             const keepPos = msg.stepped && state.edit ? state.edit.pos : null;
             closeEditCard(false);                  // one session at a time
             state.edit = {
-                id: msg.editId, text: msg.text || '', label: msg.label,
+                id: msg.editId, text: msg.text || '', label: msg.label, native:!!msg.native,
                 file: msg.file, startLine: msg.startLine, endLine: msg.endLine,
                 rects: msg.rects || [], page: Number(msg.page) ||
                     (msg.rects?.length ? msg.rects[msg.rects.length - 1].page : 1),
