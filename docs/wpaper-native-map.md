@@ -867,3 +867,20 @@ recovery, old artifact retention, PDF handles and reused page content. Evidence:
 GC-dependent eviction timing, a hard disk quota and recovery of crashed-session
 leftovers remain open. Asynchronous deletion does not establish the engine's
 interactive latency or checkpoint-storage acceptance gates.
+
+## 2026-09-21 — retain deferred reclamation paths
+
+Artifact paths now have a persistent cleanup ledger separate from live-generation
+records. Previously a dead generation's parent directory could be protected by
+a live nested artifact, then lose its cleanup record and remain until shutdown.
+The ledger keeps that parent pending until the nested reference expires.
+Collection requests made during an asynchronous deletion trigger a subsequent
+pass instead of being lost, while build reservations still suspend collection.
+
+Eleven cache/lifecycle/generation checks pass, including a real forced-GC child
+process that checks parent-directory reclamation before closing the cache. The
+real native recovery verifier also passes timeout enforcement, session rebuilding,
+unsaved-source preservation, old-PDF immutability and forward mapping. Evidence:
+`/tmp/wpaper-cache-ledger-final-tests.log` and
+`/tmp/wpaper-cache-ledger-recovery.log`. Hard quotas and orphaned-session cleanup
+remain open, alongside the engine and release requirements in the gate audit.

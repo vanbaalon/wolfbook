@@ -31,9 +31,10 @@ test('live generations, shared source paths, active builds and viewer handles pr
             const unrelated=path.join(parent,'unrelated'); fs.mkdirSync(unrelated);
             const cache=new NativeArtifactCache(parent), store=new PdfRangeStore();
             const shared=path.join(cache.directory,'sources'); fs.mkdirSync(shared);
-            const pdf=path.join(cache.directory,'paper.pdf'); fs.writeFileSync(pdf,'PDF bytes');
+            const artifactDir=path.join(cache.directory,'artifacts'); fs.mkdirSync(artifactDir);
+            const pdf=path.join(artifactDir,'paper.pdf'); fs.writeFileSync(pdf,'PDF bytes');
             await cache.begin();
-            const owners={ first:cache.lease({ source_directory:shared,pdf }),second:cache.lease({ source_directory:shared,log:pdf }) };
+            const owners={ first:cache.lease({ source_directory:shared,artifact_directory:artifactDir }),second:cache.lease({ source_directory:shared,log:pdf }) };
             const resource=store.open(pdf,owners.second);
             await cache.end();
             const gc=async()=>{ await new Promise(r=>setImmediate(r)); global.gc(); await new Promise(r=>setImmediate(r)); await cache.collect(); };
@@ -48,6 +49,7 @@ test('live generations, shared source paths, active builds and viewer handles pr
                 await cache.end();
                 for(let i=0;i<30 && fs.existsSync(pdf);i++) await gc();
                 assert.ok(!fs.existsSync(pdf)); assert.ok(!fs.existsSync(shared));
+                assert.ok(!fs.existsSync(artifactDir),'parent lease survives until child reclamation completes');
                 await cache.close(); assert.ok(!fs.existsSync(cache.directory));
                 assert.ok(fs.existsSync(unrelated),'never remove foreign cache directories');
             } finally { store.close(); await cache.close(); fs.rmSync(parent,{recursive:true,force:true}); }
@@ -61,6 +63,7 @@ test('a build waits for asynchronous deletion and cannot register a lease outsid
     const cache=new NativeArtifactCache(parent), file=path.join(cache.directory,'old.log');
     fs.writeFileSync(file,'old');
     cache.entries.set(1,{ reference:{ deref:()=>undefined },paths:[file] });
+    cache.ownedPaths.add(file);
     const rm=fs.promises.rm; let release, started;
     const deleting=new Promise(resolve=>{ started=resolve; });
     fs.promises.rm=async (target,options)=>{
@@ -84,4 +87,45 @@ test('a build waits for asynchronous deletion and cannot register a lease outsid
         if (cache.busy) await cache.end();
         await cache.close(); fs.rmSync(parent,{recursive:true,force:true});
     }
+});
+
+test('a parent retained by a nested report is reclaimed once that report expires', async () => {
+    const parent=fs.mkdtempSync(path.join(os.tmpdir(),'native-cache-shared-'));
+    const cache=new NativeArtifactCache(parent);
+    const folder=path.join(cache.directory,'artifacts'), child=path.join(folder,'paper.pdf');
+    fs.mkdirSync(folder); fs.writeFileSync(child,'PDF');
+    let held=true;
+    // Deterministic liveness lets this test check both collection boundaries.
+    cache.entries.set(1,{ reference:{ deref:()=>undefined },paths:[folder] });
+    cache.entries.set(2,{ reference:{ deref:()=>held ? {} : undefined },paths:[child] });
+    cache.ownedPaths.add(folder); cache.ownedPaths.add(child);
+    try {
+        await cache.collect();
+        assert.ok(fs.existsSync(child));
+        assert.equal(cache.entries.has(1),false);
+        assert.ok(cache.ownedPaths.has(folder),'protected parent remains scheduled for later reclamation');
+        held=false;
+        await cache.collect();
+        assert.equal(fs.existsSync(folder),false,'reclaim without waiting for lane shutdown');
+        assert.equal(cache.ownedPaths.size,0);
+    } finally { await cache.close(); fs.rmSync(parent,{recursive:true,force:true}); }
+});
+
+test('collection requests arriving during deletion get a follow-up pass', async () => {
+    const parent=fs.mkdtempSync(path.join(os.tmpdir(),'native-cache-rerun-'));
+    const cache=new NativeArtifactCache(parent);
+    let release, reached, passes=0;
+    const waiting=new Promise(resolve=>{ reached=resolve; });
+    const original=cache._collect.bind(cache);
+    cache._collect=async()=>{
+        passes++;
+        if (passes===1) { reached(); await new Promise(resolve=>{ release=resolve; }); }
+        return original();
+    };
+    try {
+        const first=cache.collect(); await waiting;
+        const second=cache.collect(); assert.equal(first,second);
+        release(); await second;
+        assert.equal(passes,2);
+    } finally { release?.(); await cache.close(); fs.rmSync(parent,{recursive:true,force:true}); }
 });
