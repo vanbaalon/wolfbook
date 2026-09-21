@@ -1,18 +1,18 @@
-// Development/native sidecar lane for WPaper. The SDK owns freezing, process
+// Native sidecar lane for WPaper. The SDK owns freezing, process
 // cancellation and map admission; this boundary supplies WPaper generations.
 const fs = require('fs');
 const path = require('path');
+const { resolveNativeRuntime } = require('./nativeRuntime');
 
 class NativeBuildLane {
-    constructor(root, directory) {
-        if (!directory || !path.isAbsolute(directory)) throw Error('Set wolfbook.tex.wlatexDirectory to the built WLaTeX checkout');
+    constructor(root, directory = '', runtimeOptions) {
         this.root = root;
-        this.directory = directory;
+        this.directory = directory || process.env.WLATEX_HOME || '';
         this.projectDir = path.dirname(root);
-        const sdk = require(path.join(directory, 'integrations/wpaper'));
-        const suffix = process.platform === 'win32' ? '.exe' : '';
-        const labBinary = path.join(directory, `target/debug/wlatex-lab${suffix}`);
-        const nativeBinary = path.join(directory, `native-lab/target/release/wlatex-native-lab${suffix}`);
+        this.runtime = resolveNativeRuntime(directory, runtimeOptions);
+        if (!this.runtime) throw Error('WLaTeX is not installed or configured');
+        const sdk = require(this.runtime.sdk);
+        const { labBinary, nativeBinary } = this.runtime;
         this.source = new sdk.NativeSourceSession({ labBinary });
         this.compiler = new sdk.NativeCompiler({ labBinary, nativeBinary, cache: path.join(this.projectDir, '.wlatex/native') });
         this.buildNumber = 0;

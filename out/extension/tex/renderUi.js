@@ -417,8 +417,35 @@ class RenderCoordinator {
         // must not count as current: it would keep answering with the old,
         // approximate geometry until the source happened to change.
         const cfg0 = vscode.workspace.getConfiguration('wolfbook.tex');
-        const mapEngine = cfg0.get('mapEngine', 'auto');
-        const wantNative = mapEngine === 'wlatex' && !wantFull;
+        let mapEngine = cfg0.get('mapEngine', 'auto');
+        const nativeDirectory = cfg0.get('wlatexDirectory', '') || process.env.WLATEX_HOME || '';
+        if (force) st.nativeRefusedSnapshot = null;
+        let wantNative = mapEngine === 'wlatex' && !wantFull;
+        if (wantNative && st.nativeRefusedSnapshot === snapshot && st.nativeRefusedDirectory === nativeDirectory) {
+            wantNative = false;
+            mapEngine = 'auto';
+        }
+        if (wantNative) {
+            const directory = nativeDirectory;
+            try {
+                if (!st.nativeLane || st.nativeLane.directory !== directory) {
+                    if (st.nativeLane) await st.nativeLane.close();
+                    st.nativeLane = null;
+                    st.nativeLane = new NativeBuildLane(root, directory);
+                }
+                st.nativeUnavailable = null;
+            } catch (error) {
+                const reason = `WLaTeX unavailable: ${error.message}. Using the normal WPaper compiler.`;
+                if (st.nativeUnavailable !== reason) this.log(reason);
+                st.nativeUnavailable = reason;
+                wantNative = false;
+                mapEngine = 'auto';
+            }
+        }
+        if (cfg0.get('mapEngine', 'auto') !== 'wlatex' && st.nativeLane) {
+            await st.nativeLane.close().catch(error => this.log(`WLaTeX shutdown: ${error.message}`));
+            st.nativeLane = null;
+        }
         if (mapEngine === 'auto') {
             if (this._luaOk == null) this._luaOk = await probeLualatex();
         }
@@ -430,7 +457,7 @@ class RenderCoordinator {
             refusedSnapshot: st.glyphMapRefused,
         });
         const mapIsStale = (wantGlyphMap && st.map && !st.map.exact) ||
-            (wantNative && (!st.map?.native || !st.map.available));
+            (wantNative && (!st.map?.native || !st.map.available)) || (!wantNative && st.map?.native);
         if (!force && !mapIsStale && this.isCurrent(st, snapshot, { authoritative: wantFull }) && st.map) {
             // The reader may have typed and undone back to the exact compiled
             // bytes. No process needs to run, but the viewer still needs the
@@ -563,19 +590,23 @@ class RenderCoordinator {
                 : compileOpts;
             let gen;
             if (wantNative) {
-                const directory = cfg.get('wlatexDirectory', '');
-                if (!st.nativeLane || st.nativeLane.directory !== directory) {
-                    if (st.nativeLane) await st.nativeLane.close();
-                    st.nativeLane = new NativeBuildLane(root, directory);
+                try {
+                    gen = await st.nativeLane.compile(compileOpts);
+                    st.nativeRefusedSnapshot = null;
+                } catch (error) {
+                    if (ac.signal.aborted || ['AbortError', 'StaleBuild'].includes(error?.name)) throw error;
+                    st.nativeRefusedSnapshot = snapshot;
+                    st.nativeRefusedDirectory = nativeDirectory;
+                    this.log(`WLaTeX preview failed: ${error.message}. Trying the configured WPaper compiler.`);
+                    gen = await compile({ ...compileOpts, maxPasses:null });
                 }
-                gen = await st.nativeLane.compile(compileOpts);
                 // Register packages discovered outside the editor's include
                 // graph so subsequent dirty buffers and file events reach us.
-                for (const file of gen.nativeCompiledSources.keys()) {
+                for (const file of gen.nativeCompiledSources?.keys() || []) {
                     if (!st.files.includes(file)) st.files.push(file);
                     this.rootOf.set(file, root);
                 }
-                gen.sourceSnapshotHash = snapshotSources(st.files,
+                if (gen.nativeCompiledSources) gen.sourceSnapshotHash = snapshotSources(st.files,
                     new Map([...(overlay || []), ...gen.nativeCompiledSources]));
             } else gen = await compile({
                 ...primaryOpts,

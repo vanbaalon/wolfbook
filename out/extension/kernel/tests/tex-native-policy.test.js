@@ -7,16 +7,19 @@ const Module = require('node:module');
 const { makeVscodeStub } = require('./_stub-vscode');
 const stub = makeVscodeStub();
 stub.workspace.textDocuments = [];
+let configuredMapEngine = 'wlatex';
+let installed = true, constructorCalls = 0;
 stub.workspace.getConfiguration = () => ({ get: (key, fallback) =>
-    ({ mapEngine: 'wlatex', wlatexDirectory: '/built/wlatex', authoritativeDelayMs: 0 })[key] ?? fallback });
-let nativeCalls = 0, conventionalCalls = 0, cancel = false;
+    ({ mapEngine: configuredMapEngine, wlatexDirectory: '/built/wlatex', authoritativeDelayMs: 0 })[key] ?? fallback });
+let nativeCalls = 0, conventionalCalls = 0, cancel = false, nativeFailure = false;
 const oldLoad = Module._load;
 Module._load = function (req, ...args) {
     if (req === 'vscode') return stub;
     if (req === './nativeCompileService') return { NativeBuildLane: class {
-        constructor() { this.directory = '/built/wlatex'; }
+        constructor() { constructorCalls++; if (!installed) throw Error('runtime missing'); this.directory = '/built/wlatex'; }
         async compile(o) {
             nativeCalls++;
+            if (nativeFailure) throw Error('runtime cannot start');
             if (cancel) throw Object.assign(Error('superseded'), { name: 'AbortError' });
             return { ok:true, runner:'wlatex', generation:nativeCalls, pdfPath:'unused', pdfHash:'native',
                 sourceSnapshotHash:o.sourceSnapshotHash, nativeCompiledSources:new Map(),
@@ -43,6 +46,7 @@ function fixture() {
     const root = path.join(dir, 'paper.tex');
     fs.writeFileSync(root, '\\documentclass{article}');
     const coordinator = new RenderCoordinator({}, { appendLine() {} });
+    coordinator._luaOk = false;
     const state = { root, files:[root], generation:null, map:null };
     coordinator.roots.set(root, state);
     coordinator.rootOf.set(root, root);
@@ -298,4 +302,52 @@ test('native-map client availability only accepts the displayed generation', () 
     assert.equal(context.state.nativeMapAvailable, true);
     context.msg.available = false; vm.runInContext(handler, context);
     assert.equal(context.state.nativeMapAvailable, false);
+});
+
+
+test('WPaper defaults do not require or initialize optional WLaTeX', async () => {
+    const f = fixture(); const before = constructorCalls; const builds = conventionalCalls;
+    configuredMapEngine = 'auto'; installed = false;
+    try {
+        await f.coordinator.build(f.doc, { quiet:true });
+        assert.equal(constructorCalls, before);
+        assert.equal(conventionalCalls, builds + 1);
+        assert.ok(!f.state.lastError);
+    } finally { configuredMapEngine = 'wlatex'; installed = true; f.close(); }
+});
+
+test('an opted-in but unavailable WLaTeX falls back without breaking normal builds', async () => {
+    const f = fixture(); const builds = conventionalCalls; installed = false;
+    try {
+        await f.coordinator.build(f.doc, { quiet:true });
+        assert.equal(conventionalCalls, builds + 1);
+        assert.ok(!f.state.lastError);
+        assert.match(f.state.nativeUnavailable, /normal WPaper compiler/);
+        await f.coordinator.build(f.doc, { quiet:true });
+        assert.equal(conventionalCalls, builds + 1, 'unchanged normal generation is reusable');
+    } finally { installed = true; f.close(); }
+});
+
+test('switching back to normal mode closes the optional worker', async () => {
+    const f = fixture(); let closed = false;
+    f.state.nativeLane = { async close() { closed = true; } };
+    configuredMapEngine = 'auto';
+    try {
+        await f.coordinator.build(f.doc, { quiet:true });
+        assert.equal(closed, true); assert.equal(f.state.nativeLane, null);
+    } finally { configuredMapEngine = 'wlatex'; f.close(); }
+});
+
+
+test('an optional runtime failure falls back once and reuses the successful normal PDF', async () => {
+    const f = fixture(); const builds = conventionalCalls; const previews = nativeCalls;
+    nativeFailure = true;
+    try {
+        await f.coordinator.build(f.doc, { quiet:true });
+        assert.equal(conventionalCalls, builds + 1);
+        assert.ok(!f.state.lastError);
+        await f.coordinator.build(f.doc, { quiet:true });
+        assert.equal(nativeCalls, previews + 1);
+        assert.equal(conventionalCalls, builds + 1);
+    } finally { nativeFailure = false; f.close(); }
 });

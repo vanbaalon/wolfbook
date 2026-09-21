@@ -2,8 +2,10 @@
 
 `out/extension/tex/nativeMap.js` implements the synchronous WPaper render-map
 surface using WLaTeX worker page views. `renderUi.makeMap` selects it when a
-generation carries `nativeView` and `nativeSource`. Select `wolfbook.tex.mapEngine: "wlatex"` and set the machine setting
-`wolfbook.tex.wlatexDirectory` to an absolute, built WLaTeX checkout path. The
+generation carries `nativeView` and `nativeSource`. WLaTeX is an optional, separately installed enhancement. The default `auto`
+policy remains unchanged and does not initialize WLaTeX. To opt in, select
+`wolfbook.tex.mapEngine: "wlatex"` and set `wolfbook.tex.wlatexDirectory` (or
+`WLATEX_HOME`) to an absolute installation or built development-checkout path. The
 coordinator now produces these generations for initial and live previews.
 Explicit Compile, save and idle authoritative builds use the conventional engine
 configured by `wolfbook.tex.engine`; these replace the preview with their PDF
@@ -131,3 +133,36 @@ Git warning is stale: `git rev-parse --show-toplevel` resolves to this nested
 `Extension Development` repository, and `git ls-files` includes both viewer
 sources. Existing native integration commits are tracked here on
 `wslide-field-reports`; no un-ignore, new repository, push or deployment is needed.
+
+
+## 2026-09-20 — optional separate installation
+
+WLaTeX is not bundled into WPaper's VSIX. Normal WPaper installs retain their
+existing compiler and map policy. Even when the reader opts into WLaTeX, a
+missing or invalid installation falls back to the normal automatic map engine.
+A native preview failure tries the configured compiler and avoids retrying that
+failed native snapshot until sources change or Compile is explicitly requested.
+Cancellation never starts a fallback build. Returning to normal map mode closes
+the optional source worker.
+
+`nativeRuntime.js` resolves only the configured installation or `WLATEX_HOME`;
+it does not discover a runtime inside the extension. Development checkouts use
+the existing SDK layout. A separate release installation can declare
+`runtime.json` with schema 1, one of `darwin-arm64`, `darwin-x64`, `win32-x64`,
+`linux-x64`, relative `sdk`, `labBinary`, `nativeBinary` entry points, and a `files`
+array of `{path, sha256}` entries. The loader validates the target and declared
+file checksums before requiring the SDK; traversal and symlink members are
+rejected. The current resource contract is `resources: "external-tex"`, matching
+the current SDK's installed-TeX requirement. This consumer support is not proof
+that separate installers or self-contained resource distributions exist.
+
+Validation covers all four target selections, absent installations, damaged
+files, default-mode independence, optional fallback, cancellation and worker
+shutdown. These are loader/policy tests; native execution across all four
+platforms and the separate release installers remain unverified requirements.
+
+Verification of this optional-install change: 27 runtime/policy tests, 32 live
+policy tests, 36 compiler tests, 207 sync tests and nine viewer-shipping tests
+pass. The real native navigation check also passes through the new external
+runtime resolver using the existing macOS ARM64 development installation.
+No installer, native runtime, push or deployment is produced by this change.

@@ -14,7 +14,8 @@ async function main() {
   assert.ok([1000, 1200].includes(magnification));
   const checkout = path.resolve(__dirname, '../../..');
   const root = path.resolve(process.argv[2]);
-  const { NativeCompiler, NativeSourceSession } = require(path.join(root, 'integrations/wpaper'));
+  const runtime = require('./nativeRuntime').resolveNativeRuntime(root);
+  const { NativeCompiler, NativeSourceSession } = require(runtime.sdk);
   const adapter = path.join(checkout, 'out/extension/tex/nativeMap.js');
   const { NativeMap } = require(adapter);
   const run = await fs.mkdtemp(path.join(os.tmpdir(), 'wpaper-native-navigation-'));
@@ -23,9 +24,9 @@ async function main() {
   const entry = path.join(project, 'paper.tex');
   const text = `\\mag=${magnification}\n\\documentclass{article}\n\\begin{document}\nAlpha\n\\end{document}\n`;
   await fs.writeFile(entry, text);
-  const labBinary = path.join(root, 'target/debug/wlatex-lab');
+  const labBinary = runtime.labBinary;
   const compiler = new NativeCompiler({ labBinary,
-    nativeBinary: path.join(root, 'native-lab/target/release/wlatex-native-lab'), cache: path.join(run, 'cache') });
+    nativeBinary: runtime.nativeBinary, cache: path.join(run, 'cache') });
   const source = new NativeSourceSession({ labBinary });
   try {
     await source.open('paper.tex', text);

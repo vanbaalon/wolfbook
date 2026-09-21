@@ -95,3 +95,6 @@ windows-test-report.txt
 *.bak
 **/*.bak
 .gitignore
+
+# WLaTeX is an optional separate installation, never a bundled VSIX runtime.
+runtime/wlatex/**

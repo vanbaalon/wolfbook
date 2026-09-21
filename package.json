@@ -1086,13 +1086,13 @@
             "off"
           ],
           "default": "auto",
-          "markdownDescription": "How WPaper builds its render map. `auto` (default): when `lualatex` is installed, the WPaper view is compiled with LuaLaTeX plus the wbmap hook, so every printed glyph is mapped to its exact box and source line (exact click-to-source and cursor highlight); a document LuaLaTeX cannot build falls back to `#wolfbook.tex.engine#` with an approximate (SyncTeX) map. `lualatex`: always. `wlatex`: use the locally built WLaTeX native engine for previews; saved/authoritative builds use the configured engine. Requires `#wolfbook.tex.wlatexDirectory#`. `off`: never — use `#wolfbook.tex.engine#` and SyncTeX only."
+          "markdownDescription": "How WPaper builds its render map. `auto` (default): when `lualatex` is installed, the WPaper view is compiled with LuaLaTeX plus the wbmap hook, so every printed glyph is mapped to its exact box and source line (exact click-to-source and cursor highlight); a document LuaLaTeX cannot build falls back to `#wolfbook.tex.engine#` with an approximate (SyncTeX) map. `lualatex`: always. `wlatex`: opt into a separately installed WLaTeX engine for previews; saved/authoritative builds use the configured engine. Configure `#wolfbook.tex.wlatexDirectory#` or WLATEX_HOME. If WLaTeX is unavailable, use the normal automatic map engine. `off`: never — use `#wolfbook.tex.engine#` and SyncTeX only."
         },
         "wolfbook.tex.wlatexDirectory": {
           "type": "string",
           "scope": "machine",
           "default": "",
-          "description": "Absolute path to a built WLaTeX checkout containing the native engine, host binary and WPaper SDK. Used when mapEngine is wlatex."
+          "description": "Optional absolute path to a separate WLaTeX installation or built development checkout. WLATEX_HOME is used when empty. WLaTeX is not bundled with WPaper; if unavailable, WPaper uses its existing compiler."
         },
         "wolfbook.tex.review.groupWindowSeconds": {
           "type": "number",
