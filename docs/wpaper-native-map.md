@@ -393,3 +393,21 @@ Cross-engine endpoint/glyph parity remains owned by the engine's reference
 verifiers and is not inferred from this adapter test. Its SDK has no parity
 comparison API. Full live UI acceptance, incremental compilation, cross-engine
 parity admission and separate four-platform release verification remain open.
+
+## 2026-09-20 — cancel stale work before native compilation
+
+The build lane now checks its captured source revision and abort signal before
+reading sources, after queued edits, around source synchronization/capture,
+while admitting discovered dependencies and around map publication. Previously
+a request superseded while waiting for edits could still synchronize its old
+source snapshot and launch a cold build before the final revision check refused
+it. Stale work now stops before those subsequent operations. SDK process-group
+cancellation remains responsible for interrupting an already running compiler;
+these checks do not cancel an in-flight worker RPC themselves.
+
+Validation: 50 native cancellation/generation/policy tests pass, including abort
+and source-edit interleavings at queued edits, source open, capture and publication,
+plus an already aborted request. The real session-recovery verifier also passes
+with the final lane (`/tmp/wpaper-native-cancellation-recovery.json`). This avoids
+unnecessary superseded cold builds; it does not close the measured 66-second
+reference build latency or implement incremental native execution.

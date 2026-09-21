@@ -44,6 +44,11 @@ class NativeBuildLane {
     }
     async compile(o) {
         const version = this.version;
+        const requireCurrent = () => {
+            if (version !== this.version || o.signal?.aborted)
+                throw Object.assign(Error('Native build superseded'), { name:'AbortError' });
+        };
+        requireCurrent();
         const texts = new Map();
         for (const file of new Set([this.root, ...(o.sourceFiles || [])])) {
             try { texts.set(this.relative(file),
@@ -53,6 +58,7 @@ class NativeBuildLane {
         for (const [file, text] of o.overlay || []) texts.set(this.relative(file), text);
         this.edits = this.edits.catch(() => {});
         await this.edits;
+        requireCurrent();
         // Full synchronization recovers after a missed editor event.
         // Packages discovered by the native engine are not necessarily present
         // in the editor's TeX graph. Refresh them before freezing a new build.
@@ -63,33 +69,40 @@ class NativeBuildLane {
             catch (error) { if (error.code !== 'ENOENT') throw error; }
         }
         for (const [file, text] of texts) {
+            requireCurrent();
             const existing = this.source.files.get(file);
             if (!existing) await this.source.open(file, text);
             else if (existing.text !== text) await this.source.edit(file, 0, existing.text.length, text);
         }
+        requireCurrent();
         let snapshot = await this.source.capture();
+        requireCurrent();
         const report = await this.compiler.compile({ main: this.root, root: this.projectDir,
             generation: ++this.buildNumber, signal: o.signal,
             overlays: Object.fromEntries(texts) });
-        if (version !== this.version || o.signal?.aborted) throw Object.assign(Error('Native build superseded'), { name: 'AbortError' });
+        requireCurrent();
         if (!report.success) throw Error(report.diagnostics.map(d=>d.message).join('\n') || 'Native compilation failed');
         // Native provenance may discover project packages not in WPaper's TeX
         // graph. Open their frozen bytes only if they still match the project.
         for (const binding of report.build.source_bindings) if (!this.source.files.has(binding.file)) {
+            requireCurrent();
             const frozen = fs.readFileSync(path.join(report.source_directory, binding.file), 'utf8');
             const original = path.join(this.projectDir, binding.file);
             const current = o.overlay?.has(original) ? o.overlay.get(original) : fs.readFileSync(original, 'utf8');
             if (frozen !== current) throw Error('Native dependency changed during compilation');
             await this.source.open(binding.file, frozen);
         }
+        requireCurrent();
         const after = await this.source.capture();
         if (version !== this.version || Object.entries(snapshot.files).some(([file,s]) =>
             after.files[file]?.revision !== s.revision || after.files[file]?.digest !== s.digest))
             throw Object.assign(Error('Native build superseded'), { name: 'AbortError' });
         snapshot = after;
+        requireCurrent();
         await this.source.publish(report, snapshot);
+        requireCurrent();
         const nativeView = await this.source.readPages(Array.from({length: report.build.page_count}, (_,i)=>i+1));
-        if (version !== this.version || o.signal?.aborted) throw Object.assign(Error('Native build superseded'), { name: 'AbortError' });
+        requireCurrent();
         const first = report.build.pages[0];
         const diagnostics = report.diagnostics.map(d=>({ ...d,
             file: d.file ? path.resolve(this.projectDir,d.file) : null }));
