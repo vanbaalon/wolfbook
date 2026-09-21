@@ -481,3 +481,32 @@ also forces a one-millisecond SDK timeout, then reconstructs a session and
 successfully builds and publishes a map. Evidence:
 `/tmp/wpaper-native-timeout-verification.json`. This bounds expensive work; it
 does not implement incremental compilation or close the interactive latency gate.
+
+## 2026-09-21 — real VS Code extension-host/webview smoke check
+
+`launchNativeVSCodeCheck.cjs WLATEX_INSTALL CODE_CLI` creates a temporary user
+profile, extension directory and four-line paper, then launches this checkout
+with VS Code's extension test runner. WLaTeX's machine-scoped installation path
+is configured in that isolated user profile; workspace settings cannot supply
+it. The test instantiates the actual coordinator, projection and viewer with
+in-memory view-state storage inside the real extension host. It opens the native
+PDF in the actual webview and waits for PDF.js's opened acknowledgement, makes
+an unsaved editor edit, refreshes the native map, and executes inverse navigation
+against the current displayed generation. Assertions use real VS Code documents
+and selections, not the headless vscode stub.
+
+Run on macOS, with a compatible optional frozen format if available:
+
+```sh
+node out/extension/tex/launchNativeVSCodeCheck.cjs /absolute/WLaTeX "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"
+```
+
+The check passes on VS Code 1.137.0 / Node 24.18.1 / macOS ARM64. Evidence:
+`/tmp/wpaper-native-vscode-check.log`, with the temporary run directory and JSON
+report. The development instances exited after testing. This proves the native
+build, actual PDF.js opening, unsaved source translation and inverse selection
+path together. It does not verify complete extension-command registration,
+canvas pixels, physical pointer gestures, all platforms or interactive latency.
+Desktop inspection through the computer-use tool timed out, so visual/pointer
+acceptance is explicitly false in the report rather than inferred from the
+extension-host result.
