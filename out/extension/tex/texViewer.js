@@ -1211,11 +1211,18 @@ class TexViewer {
              (this._openedPdfHash && st.generation.pdfHash && this._openedPdfHash === st.generation.pdfHash)));
     }
 
+    _postNativeMapState(st) {
+        this._post({ type:'nativeMapState', generation:this._openedGeneration,
+            available:!!(st?.map?.native && st.map.available &&
+                this._openedPdfHash === st.map.view.artifact.pdf_hash) });
+    }
+
     /** Push the current generation's PDF into the webview. */
     async refresh({ force = false } = {}) {
         if (!this.panel || !this.root) return;
         const st = this.coord.roots.get(this.root);
         this._post({ type: 'compileState', compiling: !!(st && st.compiling) });
+        this._postNativeMapState(st);
         if (st && st.sourceAhead) {
             // Restoring/switching papers can discover stale source without
             // an editor-change event. The badge must also schedule recovery.
@@ -3743,6 +3750,7 @@ class TexViewer {
                 this._openedGeneration = m.generation;
                 this._openedPdfHash = m.pdfHash ||
                     (String(this.shownGeneration) === String(m.generation) ? this.shownPdfHash : null);
+                this._postNativeMapState(this.root && this.coord.roots.get(this.root));
                 // The pages just changed underneath the reader. Any ladder was
                 // built against the old source positions, and the old rects
                 // were measured against the old compile, so both are dropped
@@ -4907,7 +4915,78 @@ class TexViewer {
         });
     }
 
+    async _jumpToNativeSource(st, m, request) {
+        const map = st.map;
+        const current = () => this.panel && this.root === st.root &&
+            this.coord.roots.get(this.root) === st && st.map === map && map.available &&
+            this._openedPdfHash === map.view.artifact.pdf_hash &&
+            request === this._nativeInverseRequest && m.generation != null &&
+            String(m.generation) === String(this._openedGeneration);
+        if (!current()) return;
+        const hit = map.renderToSource(m.page, m.xBp, m.yTopBp);
+        if (!hit?.file || hit.flag === FLAG.UNMAPPED) {
+            this._post({ type:'selection', span:null });
+            this._post({ type:'highlight', rects:[] });
+            this._post({ type:'status', text:'no source glyph under this point', kind:'warn' });
+            if (m.commentTarget) this._post({ type:'commentTarget', target:null,
+                reason:'That point has no native source glyph.' });
+            return;
+        }
+        const location = hit.sourceRange;
+        // A displaced range can enclose newly inserted text. It is a navigation
+        // seam, never permission to replace that entire range by typing.
+        if (!hit.exact && (Number.isFinite(m.typingRequest) || m.commentTarget)) {
+            this._post({ type:'status', text:'This source range changed; rebuild before editing from the page.', kind:'warn' });
+            if (m.commentTarget) this._post({ type:'commentTarget', target:null,
+                reason:'The source range changed since this glyph was compiled.' });
+            return;
+        }
+        const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(hit.file));
+        if (!current()) return;
+        const relative = path.relative(map.projectDir, hit.file).split(path.sep).join('/');
+        if (map.source.files.get(relative)?.text !== doc.getText()) return;
+        const version = doc.version;
+        const valid = p => p && Number.isInteger(p.line) && p.line >= 1 && p.line <= doc.lineCount &&
+            Number.isInteger(p.column_utf16) && p.column_utf16 >= 0 &&
+            p.column_utf16 <= doc.lineAt(p.line - 1).text.length;
+        if (!valid(location?.start) || !valid(location?.end)) return;
+        const start = new vscode.Position(location.start.line - 1, location.start.column_utf16);
+        const end = hit.exact
+            ? new vscode.Position(location.end.line - 1, location.end.column_utf16) : start;
+        const range = new vscode.Range(start, end);
+        if (m.commentTarget) { this._postCommentTarget(doc, hit); return; }
+        if (m.takeMe && this._fsActions) await this.setLayoutMode('all');
+        if (!current() || doc.version !== version) return;
+        const editor = this._fsActions
+            ? (vscode.window.visibleTextEditors || []).find(e => e.document.uri.fsPath === hit.file) || null
+            : await vscode.window.showTextDocument(doc, {
+                viewColumn:vscode.ViewColumn.One, preserveFocus:!m.takeMe, preview:false });
+        if (!current() || doc.version !== version) return;
+        this._invertedAt = Date.now();
+        this._pickAnchor = null;
+        this._ladder = null;
+        const caret = !m.takeMe || !hit.exact;
+        const placed = new vscode.Selection(start, caret ? start : end);
+        this._selfRange = { file:hit.file, kind:'click',
+            sl:placed.start.line, sc:placed.start.character, el:placed.end.line, ec:placed.end.character,
+            at:Date.now() };
+        if (editor) {
+            editor.selection = placed;
+            editor.revealRange(range, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+            this._flash?.show(editor, range);
+        }
+        this._rememberCursor(doc, placed);
+        this._postEditSelection(doc, range, !m.takeMe, caret ? start : null, m.typingRequest);
+        const glyph = hit.glyph;
+        this._post({ type:'selection', span:null });
+        this._post({ type:'highlight', exact:true, reveal:false,
+            rects:[{ page:glyph.page, x:glyph.x, y:glyph.y, w:glyph.w, h:glyph.boxHeight }] });
+        this._post({ type:'status', text:`→ line ${start.line + 1}, column ${start.character + 1}` +
+            (hit.exact ? '' : ' · source moved'), kind:'ok' });
+    }
+
     async _jumpToSource(m) {
+        this._nativeInverseRequest = (this._nativeInverseRequest || 0) + 1;
         if (this._deletionAnchor) this._claimViewerNavigation();
         const st = this.root && this.coord.roots.get(this.root);
         if (!st || !st.map || !st.map.available) {
@@ -4916,6 +4995,9 @@ class TexViewer {
                 reason: 'Comments need a compiled page-to-source map.',
             });
             return;
+        }
+        if (st.map.native && !m.pick && !m.widen) {
+            return this._jumpToNativeSource(st, m, this._nativeInverseRequest);
         }
         if (this._tracePaused || st.sourceAhead) {
             this._setTracePaused(true, {

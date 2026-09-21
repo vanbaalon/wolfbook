@@ -75,8 +75,15 @@ when source is ahead of the displayed PDF. The current immutable page view must
 match that PDF's digest, and answers are discarded after cursor, source, map,
 root or display changes. Exact worker membership prevents newly inserted text
 from borrowing an enclosing old source range's glyphs. The client paints the
-returned engine rectangles directly. General range/mini-editor and inverse
-tracing while source is ahead remain incomplete. Full interactive acceptance,
+returned engine rectangles directly. Native plain clicks and take-me navigation now consume the verified source
+range directly, including translated ranges after edits. They require the click's
+display generation, PDF digest, current map and editor bytes to agree. Plain
+clicks place a caret; take-me selects the exact source token. Displaced ranges
+only provide a collapsed navigation seam and cannot drive page typing or comment
+attachment. Focused reading layout is preserved, and an existing mini-editor
+receives the verified caret. Native client clicks bypass text-layer word guesses.
+General range/mini-editor tracing and widened or shift-picked native selections
+while source is ahead remain incomplete. Full interactive acceptance,
 simultaneous authoritative and
 native views, packaged engine delivery and the reference-paper acceptance remain
 open. Native cold compilation is not native incremental checkpoint execution.
@@ -93,3 +100,34 @@ The real-engine build check covers unsaved UTF-16 edits, translated page views,
 changed and removed local packages, immutable old PDFs, and cancellation followed
 by a successful build. The headless coordinator tests execute native versus
 conventional selection, expected cancellation and external invalidation.
+
+## 2026-09-20 — native inverse navigation
+
+Plain and take-me clicks now execute the native source range directly, including
+source-ahead translation. The client exposes native availability only for its
+current displayed generation and skips word/glyph text-layer searches for these
+clicks. The extension rejects stale generations, mismatched source bytes, invalid
+locations and answers overtaken during document/editor opening. The preceding
+selection highlight is cleared. Displaced ranges navigate to a seam rather than
+selecting newly inserted text. Widened and shift-picked selections, complete
+mini-editor tracing and interactive acceptance remain separate work.
+
+Run the real-engine navigation check from this checkout:
+
+```sh
+node out/extension/tex/verifyNativeNavigation.cjs /absolute/path/to/WLaTeX [1200]
+```
+
+It consumes the WLaTeX SDK, creates a temporary project/cache outside either
+checkout, and executes the actual WPaper inverse handler against a native PDF
+and worker map after a source insertion. The report binds adapter/viewer hashes
+and verifies the translated caret as well as Poppler geometry and forward
+membership. This is headless handler verification, not a live VS Code UI test.
+
+Per the newly discovered `WLaTeX/docs/work-split.md`, subsequent WPaper changes
+and evidence scripts stay in this repository. The WLaTeX SDK contract and engine
+implementation remain owned by its implementation track. The coordination note's
+Git warning is stale: `git rev-parse --show-toplevel` resolves to this nested
+`Extension Development` repository, and `git ls-files` includes both viewer
+sources. Existing native integration commits are tracked here on
+`wslide-field-reports`; no un-ignore, new repository, push or deployment is needed.

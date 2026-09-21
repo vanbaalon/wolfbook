@@ -168,3 +168,134 @@ test('forward-sync handler selects native caret queries before the stale-source 
     await TexViewer.prototype.syncFromEditor.call(f.viewer, f.editor);
     assert.equal(called, true);
 });
+
+class NativePosition {
+    constructor(line, character) { this.line = line; this.character = character; }
+}
+class NativeRange {
+    constructor(start, end) { this.start = start; this.end = end; }
+}
+stub.Position = NativePosition;
+stub.Range = NativeRange;
+stub.Selection = NativeRange;
+stub.TextEditorRevealType = { InCenterIfOutsideViewport:0 };
+function inverseFixture() {
+    const root = path.join(os.tmpdir(), 'native-inverse', 'paper.tex');
+    const text = 'Alpha Alpha';
+    const posts = [], cards = [];
+    const doc = { uri:{ fsPath:root }, version:1, lineCount:1,
+        getText:() => text, lineAt:() => ({ text }) };
+    const hit = { file:root, flag:'fresh', exact:true,
+        sourceRange:{ start:{ line:1, column_utf16:6 }, end:{ line:1, column_utf16:7 } },
+        glyph:{ page:1, x:100, y:80, w:5, boxHeight:9 } };
+    const map = { native:true, available:true, projectDir:path.dirname(root),
+        view:{ artifact:{ pdf_hash:'pdf' } },
+        source:{ files:new Map([['paper.tex', { text }]]) }, renderToSource:() => hit };
+    const state = { root, map, sourceAhead:true };
+    const editor = { document:doc, revealRange() {} };
+    stub.workspace.openTextDocument = async () => doc;
+    stub.window.showTextDocument = async () => editor;
+    stub.window.visibleTextEditors = [];
+    const viewer = { root, panel:{}, _openedPdfHash:'pdf', _openedGeneration:1, _nativeInverseRequest:0,
+        coord:{ roots:new Map([[root, state]]) }, _tracePaused:true,
+        _post:m => posts.push(m), _rememberCursor() {},
+        _postEditSelection:(...args) => cards.push(args),
+        _jumpToNativeSource:TexViewer.prototype._jumpToNativeSource };
+    return { viewer, state, map, doc, hit, editor, posts, cards,
+        run:(m={}) => TexViewer.prototype._jumpToSource.call(viewer, { generation:1, page:1, xBp:102, yTopBp:84, ...m }) };
+}
+
+test('native inverse dispatch uses exact repeated-text column even while source is ahead', async () => {
+    const f = inverseFixture(); await f.run();
+    assert.equal(f.editor.selection.start.character, 6);
+    assert.equal(f.editor.selection.end.character, 6);
+    assert.equal(f.cards[0][3].character, 6);
+    assert.equal(f.posts.find(p => p.type === 'highlight').exact, true);
+});
+
+test('native take-me selects only the verified source range', async () => {
+    const f = inverseFixture(); await f.run({ takeMe:true });
+    assert.equal(f.editor.selection.start.character, 6);
+    assert.equal(f.editor.selection.end.character, 7);
+});
+
+test('native displaced ranges navigate to a seam but cannot replace inserted text', async () => {
+    const f = inverseFixture(); f.hit.exact = false; f.hit.sourceRange.end.column_utf16 = 11;
+    await f.run({ takeMe:true });
+    assert.equal(f.editor.selection.start.character, 6);
+    assert.equal(f.editor.selection.end.character, 6);
+    f.editor.selection = null; f.cards.length = 0;
+    await f.run({ typingRequest:1 });
+    assert.equal(f.editor.selection, null);
+    assert.equal(f.cards.length, 0);
+});
+
+test('native inverse refuses mismatched source bytes, invalid locations and wrong PDFs', async () => {
+    for (const change of [
+        f => { f.doc.getText = () => 'different'; },
+        f => { f.hit.sourceRange.start.column_utf16 = 100; },
+        f => { f.viewer._openedPdfHash = 'other'; },
+        f => { f.map.renderToSource = () => ({ flag:'unmapped' }); },
+    ]) {
+        const f = inverseFixture(); change(f); await f.run();
+        assert.equal(f.editor.selection, undefined);
+        assert.equal(f.cards.length, 0);
+    }
+});
+
+test('native inverse drops replies after an asynchronous editor open becomes stale', async () => {
+    for (const change of [
+        f => { f.doc.version++; },
+        f => { f.map.available = false; },
+        f => { f.viewer._nativeInverseRequest++; },
+        f => { f.viewer._openedPdfHash = 'new'; },
+    ]) {
+        const f = inverseFixture();
+        stub.window.showTextDocument = async () => { change(f); return f.editor; };
+        await f.run(); assert.equal(f.editor.selection, undefined);
+    }
+});
+
+test('native inverse preserves focused layout and sends the verified caret to the card', async () => {
+    const f = inverseFixture(); f.viewer._fsActions = {};
+    stub.window.showTextDocument = async () => { throw Error('must not expose source editor'); };
+    await f.run(); assert.equal(f.cards[0][3].character, 6);
+});
+
+
+test('native inverse rejects queued clicks from a different PDF generation', async () => {
+    const f = inverseFixture(); await f.run({ generation:0 });
+    assert.equal(f.editor.selection, undefined);
+});
+
+
+test('native client sends generation-bound clicks without text-layer guesses while paused', async () => {
+    const vm = require('node:vm');
+    const js = fs.readFileSync(path.resolve(__dirname, '../../../client/tex-viewer.js'), 'utf8');
+    const sent = [];
+    const context = vm.createContext({ state:{ tracePaused:true, nativeMapAvailable:true, generation:7 },
+        vscode:{ postMessage:m => sent.push(m) }, pendingPaperTyping:null, paperTargetSeq:0,
+        clearPaperTypingTarget() {}, wordAtPoint() { throw Error('native clicks must not guess text'); } });
+    const start = js.indexOf('function sendClick(');
+    vm.runInContext(js.slice(start, js.indexOf("\nel('zoomin')", start)), context);
+    context.sendClick(1, { xBp:100, yTopBp:80 }, 100, 80, {});
+    await context.paperTypingResolving;
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].type, 'click');
+    assert.equal(sent[0].generation, 7);
+    assert.equal(sent[0].word, undefined);
+});
+
+test('native-map client availability only accepts the displayed generation', () => {
+    const vm = require('node:vm');
+    const js = fs.readFileSync(path.resolve(__dirname, '../../../client/tex-viewer.js'), 'utf8');
+    const start = js.indexOf("case 'nativeMapState':");
+    const handler = 'switch(msg.type){' + js.slice(start, js.indexOf("case 'traceState':", start)) + '}';
+    const context = vm.createContext({ state:{ generation:7, nativeMapAvailable:false },
+        msg:{ type:'nativeMapState', generation:6, available:true } });
+    vm.runInContext(handler, context); assert.equal(context.state.nativeMapAvailable, false);
+    context.msg.generation = 7; vm.runInContext(handler, context);
+    assert.equal(context.state.nativeMapAvailable, true);
+    context.msg.available = false; vm.runInContext(handler, context);
+    assert.equal(context.state.nativeMapAvailable, false);
+});

@@ -414,6 +414,7 @@ async function openDocument(msg) {
             && pagesEl().children.length === state.doc.numPages);
         state.pageCount = state.doc.numPages;
         state.generation = msg.generation;
+        state.nativeMapAvailable = false;
         // Review rectangles belong to the page geometry that was visible
         // before this open. Even when a restarted extension reuses the same
         // numeric generation, do not paint those rectangles onto the new
@@ -3233,7 +3234,7 @@ async function commentAnchorAt(n, x, y) {
 }
 
 function requestCommentTarget(n, pt, marker, row) {
-    if (state.tracePaused) {
+    if (state.tracePaused && !state.nativeMapAvailable) {
         status('wait for the page to catch up before adding a comment', 'warn');
         return;
     }
@@ -3252,7 +3253,7 @@ function requestCommentTarget(n, pt, marker, row) {
     // not need the slower word/glyph disambiguation used for source editing.
     // Sending the coordinates immediately also makes a click feel immediate.
     vscode.postMessage({
-        type: 'click', page: n, xBp: pt.xBp, yTopBp: pt.yTopBp,
+        type: 'click', generation:state.generation, page: n, xBp: pt.xBp, yTopBp: pt.yTopBp,
         commentTarget: true, commentRow: rowRect,
     });
     commentTargetTimer = setTimeout(() => {
@@ -6279,7 +6280,7 @@ function clearPaperTypingTarget(clearPending = false, reason = '') {
 }
 
 function sendClick(n, pt, cx, cy, extra, type = 'click') {
-    if (state.tracePaused) {
+    if (state.tracePaused && !state.nativeMapAvailable) {
         vscode.postMessage({ type: 'traceRetry', generation: state.generation });
         return;
     }
@@ -6292,7 +6293,9 @@ function sendClick(n, pt, cx, cy, extra, type = 'click') {
     if (type === 'click' && !ordinary) clearPaperTypingTarget(false, 'selection gesture');
     if (ordinary && pendingPaperTyping) clearPaperTypingTarget(true, 'new paper click');
     const seq = ordinary ? ++paperTargetSeq : 0;
-    const resolved = Promise.all([wordAtPoint(n, cx, cy, false), wordAtPoint(n, cx, cy, true)])
+    const resolved = (state.nativeMapAvailable && !extra.pick && !extra.widen
+        ? Promise.resolve([null, null])
+        : Promise.all([wordAtPoint(n, cx, cy, false), wordAtPoint(n, cx, cy, true)]))
         .then(([hit, g]) => ({
             ...base,
             // A FAR word is not a hit — it is the answer to "what is nearest",
@@ -7227,6 +7230,10 @@ window.addEventListener('message', async (ev) => {
         }
         case 'status': status(msg.text, msg.kind || ''); break;
         case 'compileState': setCompileState(msg); break;
+        case 'nativeMapState':
+            if (msg.generation != null && String(msg.generation) === String(state.generation))
+                state.nativeMapAvailable = !!msg.available;
+            break;
         case 'traceState': setTraceState(msg); break;
         case 'sourceDirty': setSourceDirty(msg); break;
         case 'setFollow': setFollowMode(msg.mode || (msg.value ? 'scroll' : 'off'), false); break;
@@ -7355,6 +7362,7 @@ window.addEventListener('message', async (ev) => {
             state.openInFlight = false;
             clearPages();
             state.generation = null;
+            state.nativeMapAvailable = false;
             state.restoreViewNext = true;
             setTraceState({ paused: false });
             setSourceDirty({ dirty: false });

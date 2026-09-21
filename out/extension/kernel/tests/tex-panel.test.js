@@ -155,8 +155,8 @@ test('a stale page has a compact tracing-paused indicator', () => {
     assert.ok(/id="tracelag" hidden/.test(shell), 'the indicator starts out of the way');
     assert.ok(/#tracelag\.compiling::before/.test(shell), 'an in-progress update gets a small spinner');
     assert.ok(/case 'traceState': setTraceState\(msg\)/.test(js), 'the lag state reaches the indicator');
-    assert.ok(/if \(state\.tracePaused\) \{\s*vscode.postMessage\(\{ type: 'traceRetry'[^\n]*\n\s*return;/.test(js),
-        'stale pages request recovery without resolving old click coordinates');
+    assert.ok(/if \(state\.tracePaused && !state\.nativeMapAvailable\) \{\s*vscode.postMessage\(\{ type: 'traceRetry'[^\n]*\n\s*return;/.test(js),
+        'stale pages without an admitted native map request recovery');
 });
 
 test('unsaved source has its own persistent save control in the viewer', () => {
