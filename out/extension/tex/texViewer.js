@@ -3840,6 +3840,7 @@ class TexViewer {
                 break;
             case 'textLayer': this._onTextLayer(m); break;
             case 'textLayerDone':
+                if (String(m.generation) !== String(this.shownGeneration)) break;
                 this._log(`text layer complete for generation ${m.generation}: ` +
                     `${m.pages} pages${m.ms != null ? ` in ${m.ms} ms` : ''}`);
                 // `opened` necessarily arrives before the asynchronous text
@@ -4015,6 +4016,7 @@ class TexViewer {
     // glyphs in this paper's display equations.
 
     _onTextLayer(m) {
+        if (String(m.generation) !== String(this.shownGeneration)) return;
         if (!this._text || this._text.generation !== m.generation) {
             this._text = { generation: m.generation, pages: new Map(), symbolFonts: new Set() };
             this._objMaps.clear();      // geometry from a previous compile is gone

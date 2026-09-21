@@ -746,3 +746,29 @@ not establish changed-page-only delivery: PDF.js parsing/text extraction can
 still request the entire file. Native incremental execution, semantic per-page
 artifacts/TXDL, reference-paper latency/visual acceptance and other-platform
 native execution remain outstanding. No runtime is bundled in the extension.
+
+## 2026-09-21 — reuse native page text and reject stale sweeps
+
+The viewer retains extracted text for native pages under their verified page
+hashes. A subsequent PDF reuses only matching same-index pages and extracts
+changed pages normally. Conventional PDFs clear this cache and keep their full
+text sweep. Label/equation overlays still receive the text they require; every
+new generation receives its page messages, including reused text.
+
+Each asynchronous sweep captures one PDF document, page count and hash array.
+It rechecks document identity and generation after extraction and before posting
+completion. A replaced document cannot populate the cache or send stale text,
+even when a force-open uses the same generation. The host independently rejects
+text/completion messages for a generation it has not displayed.
+
+Validation: 60 native-policy, 207 sync and 35 panel checks pass. Tests cover changed
+and unchanged pages, transition to conventional PDFs, replacement during pending
+extraction and stale host messages. Two legacy fixtures now explicitly set the
+shown generation when simulating a new PDF. The real VS Code native/CRLF scenario
+passes and confirms a page-2 edit reuses only page 1's extracted text, alongside
+prior rendering, range-resource cleanup and crash recovery checks. Evidence:
+`/tmp/wpaper-native-text-reuse-final-unit.log` and
+`/tmp/wpaper-native-text-reuse-host.log`.
+
+This reduces repeated extraction; it neither skips required label data nor
+claims changed-page-only PDF transfer or reference-paper latency acceptance.

@@ -2007,6 +2007,7 @@ test('A RESTARTED VIEWER RE-PLACES EVERY REVIEW, EVEN WITHOUT A FOCUSED HUNK', a
 
 test('TEXT-LAYER COMPLETION RESTORES EXACT FORWARD SEARCH AFTER VIEWER RESTART', async () => {
     const v = makeViewer(null, { file: FILE, line: 5, dx: 2 });
+    v.shownGeneration = 1;
     v._openedGeneration = 1;
     v._objMaps.set('stale partial alignment', {});
     let resumed = null;
@@ -2255,6 +2256,7 @@ test('a newer generation clears the old alignment cache', async () => {
         items: [{ str: 'Ψ', x: 100, y: 700, w: 8, h: 10, baseline: 710 }] });
     v.syncFromEditor(editorAt(7, LINES[6].indexOf('\\Psi') + 1));
     assert.ok(v._objMaps.size > 0, 'an alignment was cached');
+    v.shownGeneration = 2; // refresh admits the new PDF before its text arrives
     v._onMessage({ type: 'textLayer', generation: 2, page: 1, items: [] });
     assert.strictEqual(v._objMaps.size, 0, 'and dropped when the pages changed');
     assert.strictEqual(v._text.generation, 2);

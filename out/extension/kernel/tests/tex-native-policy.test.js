@@ -963,3 +963,64 @@ test('native CRLF card edits and bidirectional selections use textarea offsets',
     assert.equal(await TexViewer.prototype._applyEditChangeNow.call(viewer,card,text+'!',null,text),true);
     assert.equal(source,'aa\r\n😀X\r\nYbb\r\ncc!','full-block fallback preserves EOL');
 });
+
+function textSweepFixture() {
+    const vm=require('node:vm');
+    const js=fs.readFileSync(path.resolve(__dirname,'../../../client/tex-viewer.js'),'utf8');
+    const code=js.slice(js.indexOf('const nativeTextPages = new Map();'),js.indexOf('const wordKey ='));
+    const posts=[], reads=[];
+    const makeDoc=label => ({ getPage:async page => {
+        reads.push(`${label}:${page}`);
+        return { getViewport:()=>({ transform:[1,0,0,1,0,0] }), getTextContent:async()=>({ items:[
+            { str:`${label} page ${page}`,transform:[1,0,0,10,0,20],width:10,fontName:'font' } ] }) };
+    } });
+    const state={ generation:1,pageCount:2,nativePageHashes:['a'.repeat(64),'b'.repeat(64)],doc:makeDoc('old') };
+    const context=vm.createContext({ state,vscode:{ postMessage:m=>posts.push(m) },now:()=>0,
+        mul:(_,b)=>b,setTimeout:fn=>fn() });
+    vm.runInContext(code,context);
+    return { state,posts,reads,makeDoc,run:g=>context.sendTextLayer(g) };
+}
+
+test('native text sweeps reuse unchanged pages but re-extract changed and conventional pages', async () => {
+    const f=textSweepFixture();
+    await f.run(1);
+    f.state.generation=2; f.state.doc=f.makeDoc('new');
+    f.state.nativePageHashes=['a'.repeat(64),'c'.repeat(64)];
+    await f.run(2);
+    assert.deepEqual(f.reads,['old:1','old:2','new:2']);
+    const pages=f.posts.filter(m=>m.type==='textLayer' && m.generation===2);
+    assert.equal(pages[0].items[0].str,'old page 1');
+    assert.equal(pages[1].items[0].str,'new page 2');
+    assert.deepEqual(Array.from(f.posts.at(-1).reusedPages),[1]);
+    f.state.generation=3; f.state.doc=f.makeDoc('ordinary'); f.state.nativePageHashes=null;
+    await f.run(3);
+    assert.deepEqual(f.reads.slice(-2),['ordinary:1','ordinary:2']);
+    assert.deepEqual(Array.from(f.posts.at(-1).reusedPages),[]);
+});
+
+test('a text sweep superseded during PDF extraction cannot post or cache its result', async () => {
+    for (const sameGeneration of [false,true]) {
+        const f=textSweepFixture(); let release, started;
+        const pending=new Promise(resolve=>{ started=resolve; });
+        f.state.doc={ getPage:async()=>({ getViewport:()=>({ transform:[] }),getTextContent:()=>{
+            started(); return new Promise(resolve=>{ release=resolve; });
+        } }) };
+        const run=f.run(1); await pending;
+        f.state.doc=f.makeDoc('replacement');
+        f.state.generation=sameGeneration ? 1 : 2;
+        release({ items:[] }); await run;
+        assert.equal(f.posts.length,0);
+        await f.run(f.state.generation);
+        assert.deepEqual(f.reads,['replacement:1','replacement:2']);
+    }
+});
+
+test('host ignores stale PDF text rather than replacing the displayed generation cache', () => {
+    const text={ generation:7,pages:new Map(),symbolFonts:new Set() };
+    const viewer={ shownGeneration:7,_text:text,_objMaps:new Map([['retained',1]]) };
+    TexViewer.prototype._onTextLayer.call(viewer,{ generation:6,page:1,items:[] });
+    assert.equal(viewer._text,text);
+    assert.equal(viewer._objMaps.size,1);
+    TexViewer.prototype._onTextLayer.call(viewer,{ generation:7,page:1,items:[] });
+    assert.equal(viewer._text.pages.size,1);
+});

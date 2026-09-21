@@ -57,6 +57,7 @@ exports.run = async function() {
         if (mode === 'native') {
             await until(() => messages.some(message => message.type === 'timing' && message.worker), 'initial page paint');
             assert.equal(messages.find(m => m.type === 'timing' && m.kind === 'open').transport, 'range');
+            await until(() => messages.some(m => m.type === 'textLayerDone' && m.generation === st.generation.generation), 'initial PDF text sweep');
             assert.equal(st.generation.pageCount, 2);
             const firstPageHash = st.generation.nativeReport.build.pages[0].pdf_page_hash;
             await editor.edit(builder => builder.replace(doc.lineAt(4).range, 'Second page. Second page.'));
@@ -69,6 +70,9 @@ exports.run = async function() {
                 message.generation === st.generation.generation);
             assert.ok(opened.reusedPages.includes(1), 'unchanged first-page canvas should be retained');
             assert.ok(!opened.reusedPages.includes(2), 'changed second page must be redrawn');
+            await until(() => messages.some(m => m.type === 'textLayerDone' && m.generation === st.generation.generation), 'updated PDF text sweep');
+            const sweep=messages.find(m => m.type === 'textLayerDone' && m.generation === st.generation.generation);
+            assert.deepEqual(sweep.reusedPages,[1],'only unchanged first-page text should be reused');
             await until(() => viewer._openedGeneration === st.generation.generation, 'changed PDF acknowledgement');
         }
         subscription = vscode.workspace.onDidChangeTextDocument(event => {
@@ -213,7 +217,7 @@ exports.run = async function() {
             default_without_wlatex:mode === 'default', unavailable_wlatex_fallback:mode === 'missing',
             conventional_unsaved_rebuild:mode !== 'native', authoritative_native_handoff:mode === 'native',
             real_pdfjs_opened:true, unsaved_source_edit:true, translated_inverse_navigation:mode === 'native',
-            actual_source_worker_crash_recovered:workerCrashRecovered, native_pdf_range_transport:mode === 'native', native_pdf_handles_released:mode === 'native',
+            actual_source_worker_crash_recovered:workerCrashRecovered, native_pdf_range_transport:mode === 'native', native_pdf_handles_released:mode === 'native', unchanged_page_text_reused:mode === 'native',
             pointer_gestures_verified:false, visual_acceptance_verified:false,
         }, null, 2));
     } catch (error) {

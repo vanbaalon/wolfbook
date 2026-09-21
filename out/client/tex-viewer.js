@@ -1665,15 +1665,25 @@ function foldGlyphs(s) {
  * of two. Done page by page off the critical path: a click that arrives before
  * the layer does simply uses the older per-line resolution.
  */
+const nativeTextPages = new Map();
 async function sendTextLayer(generation) {
-    if (!state.doc || state.textLayerSent === generation) return;
+    if (!state.doc || (state.textLayerSent === generation && state.textLayerDoc === state.doc)) return;
+    const doc=state.doc, pageCount=state.pageCount, hashes=state.nativePageHashes;
+    const current=() => state.generation === generation && state.doc === doc;
     state.textLayerSent = generation;
-    const tSweep = now();
-    for (let n = 1; n <= state.pageCount; n++) {
-        if (state.generation !== generation) return;      // a newer compile landed
-        let items = [];
-        try {
-            const page = await state.doc.getPage(n);
+    state.textLayerDoc = doc;
+    const tSweep = now(), reusedPages=[];
+    for (const [page,cached] of nativeTextPages)
+        if (!hashes || hashes[page-1] !== cached.hash) nativeTextPages.delete(page);
+    for (let n = 1; n <= pageCount; n++) {
+        if (!current()) return;
+        const hash=hashes?.[n-1];
+        const qualified=typeof hash === 'string' && /^[a-f0-9]{64}$/i.test(hash);
+        const cached=qualified ? nativeTextPages.get(n) : null;
+        let items = [], extracted=false;
+        if (cached?.hash === hash && qualified) { items=cached.items; reusedPages.push(n); }
+        else try {
+            const page = await doc.getPage(n);
             // Scale 1 so viewport units ARE points; `page.view` carries the
             // CropBox offset that separates the two frames.
             const vp = page.getViewport({ scale: 1 });
@@ -1702,14 +1712,18 @@ async function sendTextLayer(generation) {
                     font: it.fontName,
                 });
             }
+            extracted=true;
         } catch (_) { items = []; }
+        if (!current()) return;
+        if (qualified && extracted) nativeTextPages.set(n,{ hash,items });
         vscode.postMessage({ type: 'textLayer', generation, page: n, items });
         // Yield between pages so a 40-page paper cannot stall the first paint.
         await new Promise(r => setTimeout(r, 0));
     }
+    if (!current()) return;
     vscode.postMessage({
-        type: 'textLayerDone', generation, pages: state.pageCount,
-        ms: Math.round(now() - tSweep),
+        type: 'textLayerDone', generation, pages: pageCount,
+        ms: Math.round(now() - tSweep), reusedPages,
     });
 }
 
