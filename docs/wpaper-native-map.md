@@ -884,3 +884,14 @@ unsaved-source preservation, old-PDF immutability and forward mapping. Evidence:
 `/tmp/wpaper-cache-ledger-final-tests.log` and
 `/tmp/wpaper-cache-ledger-recovery.log`. Hard quotas and orphaned-session cleanup
 remain open, alongside the engine and release requirements in the gate audit.
+
+## 2026-09-21 — frozen reference visual inspection
+
+Completed full-page visual comparison of all 15 pages in the frozen native and
+authoritative PDFs, with actual PDF hashes verified. The figures are visibly
+present, but line wrapping and equation spacing differ; both versions retain
+unresolved references on page 14. This closes the coarse inspection task, not
+the rendered-fidelity acceptance gate. Reproduction, artifact identities,
+observations and limits are recorded in
+[the reference review](wpaper-reference-visual-review.md). No engine files or
+source PDFs were changed.
