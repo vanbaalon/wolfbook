@@ -4226,6 +4226,7 @@ async function paintSelection(span) {
     // mark before the second shift-click would claim a range that does not
     // exist yet; the single mark says "from here" and nothing more.
     const to = span.pendingStart ? null : await edge(span.end, 'end');
+    if (span.native && state.selection !== span) return;
     if (span.pendingStart) {
         if (from) {
             const wrap = pagesEl().querySelector(`.page[data-page="${from.page}"]`);
@@ -4261,6 +4262,12 @@ async function paintSelection(span) {
 
     const parts = [];
     const rowsSeen = [];
+    if (span.native) {
+        for (const r of span.rows) {
+            const rect = rectToViewport(r.page, r);
+            if (rect) rowsSeen.push({ page:r.page, ...rect });
+        }
+    } else {
     for (let p = Math.min(from.page, to.page); p <= Math.max(from.page, to.page); p++) {
         const wrap = pagesEl().querySelector(`.page[data-page="${p}"]`);
         if (!wrap || !state.rendered.has(p)) continue;
@@ -4297,6 +4304,7 @@ async function paintSelection(span) {
             rowsSeen.push({ page: p, x: x0, y: r.y, w: x1 - x0, h: r.h });
         }
     }
+    }
     if (!rowsSeen.length) return;
 
     // AND THE BANDS TILE. Row boxes are the ink's own height, so consecutive
@@ -4307,7 +4315,7 @@ async function paintSelection(span) {
     for (let i = 0; i < rowsSeen.length; i++) {
         const b = rowsSeen[i];
         const next = rowsSeen[i + 1];
-        if (next && next.page === b.page && next.y > b.y && next.y - b.y < b.h * 2.2) {
+        if (!span.native && next && next.page === b.page && next.y > b.y && next.y - b.y < b.h * 2.2) {
             b.h = next.y - b.y;
         }
         parts.push(b);

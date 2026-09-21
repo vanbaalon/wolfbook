@@ -108,6 +108,70 @@ class NativeMap extends RenderMap {
         }
         return selected.map(e => ({ page:e.page, x:e.x, y:e.y, w:e.w, h:e.boxHeight }));
     }
+    async forwardRange(file, start, end, { isCurrent = () => true } = {}) {
+        const current = () => this.available && isCurrent();
+        if (!current()) return null;
+        const absolute = path.resolve(file);
+        const relative = path.relative(this.projectDir, absolute).split(path.sep).join('/');
+        const text = this.source.files?.get(relative)?.text;
+        if (typeof text !== 'string') return null;
+        const lines = text.split('\n'), starts = [];
+        let offset = 0;
+        for (const line of lines) { starts.push(offset); offset += line.length + 1; }
+        const at = p => {
+            if (!p || !Number.isInteger(p.line) || p.line < 1 || p.line > lines.length ||
+                !Number.isInteger(p.column_utf16) || p.column_utf16 < 0) return null;
+            const line = lines[p.line - 1];
+            if (p.column_utf16 > line.length - (line.endsWith('\r') ? 1 : 0)) return null;
+            const n = starts[p.line - 1] + p.column_utf16;
+            if (n > 0 && /[\uD800-\uDBFF]/.test(text[n - 1]) && /[\uDC00-\uDFFF]/.test(text[n] || '')) return null;
+            return n;
+        };
+        const a = at(start), b = at(end);
+        if (a === null || b === null || a > b) throw Error('Invalid native source selection');
+        if (a === b) return [];
+        const chosen = new Set(), uncertain = [];
+        for (const entry of this._entries) for (const origin of entry.hit.mapped_origins) {
+            if (path.resolve(this.projectDir, origin.source.file) !== absolute) continue;
+            const loc = origin.source.location, left = at(loc.start), right = at(loc.end);
+            if (left === null || right === null) return null;
+            const lo = Math.max(a, left), hi = Math.min(b, right);
+            if (left === right ? !(a <= left && left < b) : lo >= hi) continue;
+            if (loc.accuracy === 'Exact' && left < right) chosen.add(entry.i);
+            else uncertain.push({ id:entry.i, lo, hi });
+        }
+        // Exact translated ranges are contiguous surviving source. Only
+        // displaced/zero-length origins need worker membership queries. Cache
+        // shared positions, and stop once an item's membership is established.
+        const answers = new Map();
+        const query = async n => {
+            if (!answers.has(n)) {
+                let low = 0, high = starts.length;
+                while (low + 1 < high) {
+                    const mid = (low + high) >> 1;
+                    if (starts[mid] <= n) low = mid; else high = mid;
+                }
+                const answer = await this.source.forward(relative, low + 1, n - starts[low]);
+                answers.set(n, new Set(answer.hits.map(hit => hit.item_id)));
+            }
+            return answers.get(n);
+        };
+        for (const { id, lo, hi } of uncertain) {
+            if (chosen.has(id)) continue;
+            for (let n = lo; n < hi || n === lo; ) {
+                if (!current()) return null;
+                const ids = await query(n);
+                if (!current()) return null;
+                if (ids.has(id)) { chosen.add(id); break; }
+                if (n >= hi) break;
+                n += text[n] === '\r' && text[n + 1] === '\n' ? 2 : text.codePointAt(n) > 0xffff ? 2 : 1;
+            }
+        }
+        if (!current()) return null;
+        return [...chosen].map(id => this._byItem.get(id))
+            .map(e => ({ page:e.page, x:e.x, y:e.y, w:e.w, h:e.boxHeight }))
+            .sort((a,b) => a.page-b.page || a.y-b.y || a.x-b.x);
+    }
     fontOf() { return null; }
     fileOf(fileId) { return typeof fileId === 'string' ? fileId : null; }
     glyphAt(page, x, y) {

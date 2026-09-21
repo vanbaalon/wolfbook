@@ -210,3 +210,31 @@ then verifies inverse and mini-editor caret geometry. Evidence:
 `/tmp/wpaper-native-card-open-verification.json`, bound to viewer/adapter hashes.
 This remains headless handler verification; native range selection and full
 interactive acceptance remain open. WLaTeX stays optional and separate.
+
+## 2026-09-20 — native editor and mini-editor ranges
+
+`NativeMap.forwardRange` now selects output contributors from current source
+ranges. Contiguous exact translations use the worker's mapped origins directly;
+displaced and zero-length origins require actual worker point membership.
+Repeated positions share query results, admitted items are deduplicated, and a
+new selection or source revision cancels the remaining queries. UTF-16 scalar
+boundaries, CRLF positions and half-open range ends are checked. Newly inserted
+interiors cannot inherit an old enclosing span's glyphs.
+
+Both editor and mini-editor selections now use this path, including when source
+is ahead. The client paints the returned glyph rectangles without PDF text-row
+searches or filling gaps between them. Native selection actions retain current
+source bounds and map/version admission; source changes discard those bounds.
+The ordinary compiler's rendering path is unchanged.
+
+Validation: 42 native map/policy tests, 207 sync tests, 35 panel tests and nine
+viewer-shipping tests pass. The real-PDF verifier checks a range consisting only
+of inserted text (no geometry), the full edited word (five surviving glyphs),
+and the actual mini-editor range handler. Evidence:
+`/tmp/wpaper-native-range-verification.json`, bound to adapter/viewer hashes.
+
+Large displaced ranges can still require many point queries; their latency has
+not been benchmarked against the product budget. A producer-side batched range
+query remains a potential contract improvement. Native shift-pick/widen gestures,
+full interactive acceptance and separate four-platform releases remain open.
+WLaTeX stays optional, with the ordinary WPaper compiler available without it.

@@ -477,3 +477,44 @@ test('only the newest of two asynchronous card opens can publish', async () => {
     assert.equal(f.viewer._edit, current);
     assert.equal(f.posts.filter(m => m.type === 'editOpen').length, 1);
 });
+
+test('native source ranges publish only admitted rectangles and retain source action bounds', async () => {
+    const f = cursorFixture();
+    f.doc.uri.fsPath = path.join(os.tmpdir(), 'paper.tex');
+    f.doc.getText = () => 'abc';
+    f.map.projectDir = os.tmpdir();
+    f.map.source = { files:new Map([['paper.tex', { text:'abc' }]]) };
+    f.editor.selection = { start:{ line:0, character:0 }, end:{ line:0, character:2 } };
+    f.map.forwardRange = async (file, start, end, options) => {
+        assert.equal(start.column_utf16, 0); assert.equal(end.column_utf16, 2);
+        assert.equal(options.isCurrent(), true); return f.rects;
+    };
+    f.viewer._postEditSelection = () => {};
+    await f.run();
+    const selected = f.posts.at(-1);
+    assert.equal(selected.type, 'selection'); assert.equal(selected.span.native, true);
+    assert.deepEqual(selected.span.rows, f.rects);
+    assert.equal(f.viewer._lastSelection.end.character, 2);
+});
+
+test('native selection painting preserves glyph gaps and never searches PDF text rows', async () => {
+    const vm = require('node:vm');
+    const js = fs.readFileSync(path.resolve(__dirname, '../../../client/tex-viewer.js'), 'utf8');
+    const painted = [];
+    const context = vm.createContext({ state:{ rendered:new Set([1]), edit:true },
+        document:{ querySelectorAll:() => [], createElement:() => ({ style:{} }) },
+        pagesEl:() => ({ querySelector:() => ({ appendChild:node => painted.push(node) }) }),
+        renderPage:async () => {}, rectToViewport:(page, rect) => rect, markToPx:mark => mark,
+        textItems:() => { throw Error('native selection must not infer text rows'); },
+        paintSelectionActions() {} });
+    const start = js.indexOf('async function paintSelection(');
+    vm.runInContext(js.slice(start, js.indexOf('\n}\n', start) + 2), context);
+    await context.paintSelection({ native:true, reveal:false,
+        rows:[{ page:1, x:10, y:10, w:5, h:8 }, { page:1, x:50, y:20, w:5, h:8 }],
+        start:{ exactEdge:{ page:1, x:10, y:10, h:8 } },
+        end:{ exactEdge:{ page:1, x:55, y:20, h:8 } } });
+    const fills = painted.filter(node => node.className === 'selfill');
+    assert.equal(fills.length, 2);
+    assert.equal(fills[0].style.width, '5px'); assert.equal(fills[0].style.height, '8px');
+    assert.equal(fills[1].style.left, '50px');
+});

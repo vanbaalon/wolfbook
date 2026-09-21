@@ -1991,6 +1991,7 @@ class TexViewer {
         let root = null;
         try { root = this.coord.rootFor(doc); } catch (_) { root = doc.uri.fsPath; }
         if (root !== this.root) return false;
+        if (this._lastSelection?.nativeMap) this._lastSelection = null;
         this._postSourceDirty();
         this._scheduleSourceSave();
         const source = this._miniApplyingFile === doc.uri.fsPath ? 'mini-editor' : 'editor';
@@ -2587,6 +2588,8 @@ class TexViewer {
         const doc = editor.document;
         const version = doc.version;
         const position = { line:editor.selection.start.line, character:editor.selection.start.character };
+        const end = { line:editor.selection.end.line, character:editor.selection.end.character };
+        const ranged = position.line !== end.line || position.character !== end.character;
         // A source revision may advance while these same PDF bytes remain on
         // screen. Only the paired native map may answer against that display.
         const current = () => this.panel && this.followCursor && (!opts.nativeAdmission || opts.nativeAdmission()) &&
@@ -2596,15 +2599,37 @@ class TexViewer {
             request === this._nativeCursorRequest && doc.version === version &&
             editor.selection.start.line === position.line &&
             editor.selection.start.character === position.character &&
-            editor.selection.end.line === position.line &&
-            editor.selection.end.character === position.character;
+            editor.selection.end.line === end.line && editor.selection.end.character === end.character;
         if (!current()) return;
+        this._lastSelection = null;
         this._post({ type:'selection', span:null });
         this._post({ type:'highlight', rects:[] });
         try {
-            const rects = await map.forwardAt(doc.uri.fsPath, position.line + 1, position.character);
+            if (ranged) {
+                const relative = path.relative(map.projectDir, doc.uri.fsPath).split(path.sep).join('/');
+                if (map.source.files.get(relative)?.text !== doc.getText()) return;
+            }
+            const rects = ranged ? await map.forwardRange(doc.uri.fsPath,
+                { line:position.line + 1, column_utf16:position.character },
+                { line:end.line + 1, column_utf16:end.character }, { isCurrent:current })
+                : await map.forwardAt(doc.uri.fsPath, position.line + 1, position.character);
             if (!current() || rects === null) return;
             this._setTracePaused(false);
+            if (ranged) {
+                if (!rects.length) return;
+                this._lastSelection = { file:doc.uri.fsPath, nativeMap:map, documentVersion:version,
+                    start:new vscode.Position(position.line, position.character),
+                    end:new vscode.Position(end.line, end.character) };
+                if (!opts.preserveView) this._postEditSelection(doc, editor.selection, false);
+                const first = rects[0], last = rects[rects.length - 1];
+                this._post({ type:'selection', span:{ native:true, rows:rects,
+                    start:{ exactEdge:{ page:first.page, x:first.x, y:first.y, h:first.h } },
+                    end:{ exactEdge:{ page:last.page, x:last.x + last.w, y:last.y, h:last.h } },
+                    lines:end.line - position.line + 1 },
+                    reveal:!opts.preserveView && this._mayScroll() && Date.now() - this._invertedAt >= 1500,
+                    instant:!!opts.instant, label:`selected lines ${position.line + 1}–${end.line + 1}` });
+                return;
+            }
             this._post({ type:'highlight', rects, exact:true,
                 label: rects.length ? `line ${position.line + 1}` : 'no printed source at this cursor',
                 reveal: !opts.preserveView && this._mayScroll() && Date.now() - this._invertedAt >= 1500,
@@ -2637,10 +2662,7 @@ class TexViewer {
         this._rememberCursor(doc, editor.selection);
         if (!this.followCursor) return;
         const st = this.coord.stateFor(doc);
-        const nativeCaret = editor.selection?.start && editor.selection?.end &&
-            editor.selection.start.line === editor.selection.end.line &&
-            editor.selection.start.character === editor.selection.end.character;
-        if (st?.map?.native && nativeCaret) {
+        if (st?.map?.native && editor.selection?.start && editor.selection?.end) {
             return this._syncNativeCursor(st, editor, opts, this._nativeCursorRequest);
         }
         // THE PAGE IS A GENERATION, NOT A LIVE MIRROR OF THE BUFFER.
@@ -4284,6 +4306,8 @@ class TexViewer {
         if (!sel) return null;
         try {
             const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(sel.file));
+            if (sel.nativeMap && (this._lastSelection !== sel || doc.version !== sel.documentVersion ||
+                !sel.nativeMap.available || this.coord.roots.get(this.root)?.map !== sel.nativeMap)) return null;
             return { doc, range: new vscode.Range(sel.start, sel.end), sel };
         } catch (_) { return null; }
     }
@@ -4747,6 +4771,8 @@ class TexViewer {
         let doc;
         try { doc = await vscode.workspace.openTextDocument(vscode.Uri.file(sel.file)); }
         catch (_) { return; }
+        if (sel.nativeMap && (this._lastSelection !== sel || doc.version !== sel.documentVersion ||
+            !sel.nativeMap.available || st.map !== sel.nativeMap)) return;
         // BEFORE ANYTHING ELSE: what is actually being moved.
         //
         // A cut inside a construct leaves two broken halves — reported as

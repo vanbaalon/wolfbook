@@ -128,12 +128,23 @@ async function main() {
     assert.ok(mini.rects.some(r => Math.abs(r.x - secondGlyph.x) < 0.001));
     assert.equal(mini.exact, true);
     assert.equal(mini.reveal, false);
+    assert.deepEqual(await inserted.forwardRange(entry,
+      { line:5, column_utf16:1 }, { line:5, column_utf16:4 }), []);
+    const all = await inserted.forwardRange(entry,
+      { line:5, column_utf16:0 }, { line:5, column_utf16:8 });
+    assert.equal(all.length, 5);
+    posted.length = 0;
+    await TexViewer.prototype._onEditCaret.call(viewer, { editId:1, start:0, end:8 });
+    const range = posted.findLast(m => m.type === 'selection' && m.span);
+    assert.equal(range.span.native, true);
+    assert.deepEqual(range.span.rows, all);
+    assert.equal(range.reveal, false);
     process.stdout.write(JSON.stringify({ result: 'PASS', run, magnification,
       adapter_sha256: createHash('sha256').update(await fs.readFile(adapter)).digest('hex'),
       viewer_sha256: createHash('sha256').update(await fs.readFile(path.join(checkout, 'out/extension/tex/texViewer.js'))).digest('hex'),
       native_pdf_geometry_checked_with_poppler: true, native_inverse_column_verified: true,
       native_column_map_verified: true, stale_view_invalidated: true, edited_view_translated: true,
-      native_source_ahead_card_open_verified: true, native_mini_editor_handler_verified: true, native_inverse_viewer_handler_verified: true, native_cursor_worker_admission: true, inserted_source_has_no_old_geometry: true }, null, 2) + '\n');
+      native_range_handler_verified: true, native_source_ahead_card_open_verified: true, native_mini_editor_handler_verified: true, native_inverse_viewer_handler_verified: true, native_cursor_worker_admission: true, inserted_source_has_no_old_geometry: true }, null, 2) + '\n');
   } finally { await Promise.all([compiler.close(), source.close()]); }
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

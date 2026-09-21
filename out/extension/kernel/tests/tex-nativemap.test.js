@@ -116,3 +116,50 @@ test('native cursor admission uses worker membership instead of enclosing ranges
     source.forward = async () => { invalidate(); return { hits:[view.pages[0].hits[0]] }; };
     assert.equal(await map.forwardAt(file, 4, 0), null);
 });
+
+test('native exact ranges select contributors without querying every character', async () => {
+    const { map, source } = fixture();
+    source.files = new Map([['paper.tex', { text:'\n\n\nABC' }]]);
+    source.forward = () => { throw Error('exact contiguous ranges need no point queries'); };
+    const selected = await map.forwardRange(file,
+        { line:4, column_utf16:0 }, { line:4, column_utf16:2 });
+    assert.equal(selected.length, 2);
+    assert.deepEqual(await map.forwardRange(file, { line:4, column_utf16:2 }, { line:4, column_utf16:3 }), []);
+});
+
+test('displaced native ranges query membership and do not select inserted interiors', async () => {
+    const { view, source } = fixture();
+    const origin = view.pages[0].hits[0].mapped_origins[0].source;
+    origin.location = { ...location(0, 'Displaced'), end:{ line:4, column_utf16:4 } };
+    // Other entries do not describe this selected source file.
+    view.pages[0].hits = [view.pages[0].hits[0]];
+    source.files = new Map([['paper.tex', { text:'\n\n\nANEW' }]]);
+    source.forward = async (file, line, col) => ({ hits:col === 0 ? view.pages[0].hits : [] });
+    const map = new NativeMap({ generation:{ pdfHash:'paired', projectDir:root }, nativeView:view, nativeSource:source });
+    assert.deepEqual(await map.forwardRange(file, { line:4, column_utf16:1 }, { line:4, column_utf16:4 }), []);
+    assert.equal((await map.forwardRange(file, { line:4, column_utf16:0 }, { line:4, column_utf16:4 })).length, 1);
+});
+
+test('native range admission is cancelled if the selection or source changes during membership queries', async () => {
+    const { view, source, invalidate } = fixture();
+    for (const hit of view.pages[0].hits) for (const origin of hit.mapped_origins)
+        origin.source.location.accuracy = 'Displaced';
+    source.files = new Map([['paper.tex', { text:'\n\n\nABC' }]]);
+    source.forward = async () => { invalidate(); return { hits:view.pages[0].hits }; };
+    const map = new NativeMap({ generation:{ pdfHash:'paired', projectDir:root }, nativeView:view, nativeSource:source });
+    assert.equal(await map.forwardRange(file, { line:4, column_utf16:0 }, { line:4, column_utf16:2 }), null);
+});
+
+test('native ranges respect UTF-16 boundaries and CRLF line positions', async () => {
+    const { view, source } = fixture();
+    const origins = [
+        { start:{ line:1, column_utf16:2 }, end:{ line:1, column_utf16:3 } },
+        { start:{ line:2, column_utf16:0 }, end:{ line:2, column_utf16:1 } },
+    ];
+    for (let i = 0; i < 2; i++) Object.assign(view.pages[0].hits[i].mapped_origins[0].source.location, origins[i]);
+    source.files = new Map([['paper.tex', { text:'😀A\r\nB' }]]);
+    const map = new NativeMap({ generation:{ pdfHash:'paired', projectDir:root }, nativeView:view, nativeSource:source });
+    assert.equal((await map.forwardRange(file, { line:1, column_utf16:2 }, { line:2, column_utf16:1 })).length, 2);
+    await assert.rejects(map.forwardRange(file, { line:1, column_utf16:1 }, { line:1, column_utf16:3 }), /Invalid/);
+    await assert.rejects(map.forwardRange(file, { line:1, column_utf16:4 }, { line:2, column_utf16:1 }), /Invalid/);
+});
