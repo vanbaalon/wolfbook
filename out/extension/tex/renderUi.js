@@ -129,7 +129,13 @@ class RenderCoordinator {
     }
 
     dispose() {
-        for (const s of this.roots.values()) if (s.nativeLane) s.nativeLane.close().catch(() => {});
+        if (this._disposed) return;
+        this._disposed = true;
+        for (const s of this.roots.values()) if (s.nativeLane) {
+            const lane = s.nativeLane;
+            s.nativeLane = null;
+            lane.close().catch(() => {});
+        }
         for (const s of this.roots.values()) if (s.running) s.running.abort();
         for (const t of this._liveTimers.values()) clearTimeout(t);
         for (const t of this._idleTimers.values()) clearTimeout(t);
@@ -401,6 +407,7 @@ class RenderCoordinator {
      * which is cheap (45-80 ms process-group kill, measured).
      */
     async build(doc, { force = false, live = false, authoritative = false, quiet = false } = {}) {
+        if (this._disposed) return;
         const root = this.rootFor(doc);
         // A deliberate save/Compile supersedes the debounce which preceded it.
         // Leaving that timer armed lets it wake during the authoritative build
@@ -412,6 +419,8 @@ class RenderCoordinator {
             this._liveFirst.delete(root);
         }
         const st = this.roots.get(root);
+        const preparation = st.buildPreparation = (st.buildPreparation || 0) + 1;
+        const preparing = () => !this._disposed && this.roots.get(root) === st && st.buildPreparation === preparation;
         const overlay = this.liveOverlay(root);
         // ONE snapshot per build. It used to be computed twice — here and again
         // inside compile() — which reads and hashes every source file twice per
@@ -440,8 +449,8 @@ class RenderCoordinator {
             const directory = nativeDirectory;
             try {
                 if (!st.nativeLane || st.nativeLane.directory !== directory) {
-                    if (st.nativeLane) await st.nativeLane.close();
-                    st.nativeLane = null;
+                    if (st.nativeLane) await this._retireNativeLane(st, st.nativeLane);
+                    if (!preparing()) return st;
                     st.nativeLane = new NativeBuildLane(root, directory);
                 }
                 st.nativeUnavailable = null;
@@ -454,12 +463,13 @@ class RenderCoordinator {
             }
         }
         if (cfg0.get('mapEngine', 'auto') !== 'wlatex' && st.nativeLane) {
-            await st.nativeLane.close().catch(error => this.log(`WLaTeX shutdown: ${error.message}`));
-            st.nativeLane = null;
+            await this._retireNativeLane(st, st.nativeLane);
+            if (!preparing()) return st;
         }
         if (mapEngine === 'auto') {
             if (this._luaOk == null) this._luaOk = await probeLualatex();
         }
+        if (!preparing()) return st;
         const wantGlyphMap = shouldUseGlyphMap({
             mapEngine,
             luaOk: !!this._luaOk,
@@ -732,7 +742,7 @@ class RenderCoordinator {
                 st.liveCompiling = false;
                 st.running = null;
             }
-            this._emitter.fire(st);
+            if (!this._disposed) this._emitter.fire(st);
         }
         // Somebody typed while this was running. Go round again — but on the
         // COOLDOWN, not the ordinary debounce.
@@ -744,7 +754,7 @@ class RenderCoordinator {
         // queue is only ever one deep, but a latexmk running two thirds of the
         // time feels exactly like a queue. The first pause after typing keeps
         // the ceiling and stays responsive; only this path backs off.
-        if (st.liveQueued) {
+        if (st.liveQueued && !this._disposed) {
             st.liveQueued = false;
             const cfg = vscode.workspace.getConfiguration('wolfbook.tex');
             const wait = cooldownDelayMs({

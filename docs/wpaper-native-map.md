@@ -448,3 +448,19 @@ when shutdown starts. The real session-reconstruction verifier also passes:
 `/tmp/wpaper-native-lifecycle-recovery.json`. Native incremental execution,
 reference build latency, full live UI acceptance and separate platform release
 verification remain outstanding.
+
+## 2026-09-21 — prevent obsolete build preparation from creating sessions
+
+The coordinator now tracks preparation ownership before asynchronous runtime
+shutdown and compiler probing. A newer build request supersedes earlier
+preparation, and disposal prevents any waiting preparation from constructing a
+new lane or starting compilation. Retiring a lane detaches only that owner, so
+an old continuation cannot replace a newly created session. Disposal is
+idempotent and prevents build completion from scheduling another live pass or
+notifying the disposed emitter.
+
+Validation: 82 checks across the native CI suites and 32 live-policy checks pass.
+New controlled interleavings verify disposal during runtime replacement and a
+newer build completing before an older shutdown returns. No native SDK or
+engine changes are involved. Incremental compilation, full live UI acceptance,
+remote CI results and separate platform release artifacts remain open.

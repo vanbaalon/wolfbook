@@ -757,3 +757,32 @@ test('mapping failures retire their source session even if shutdown rejects', as
         assert.equal(f.state.nativeLane, null);
     } finally { f.close(); }
 });
+
+test('disposal during native replacement prevents later construction and compilation', async () => {
+    const f = fixture(); let release;
+    const before = constructorCalls, builds = nativeCalls;
+    f.state.nativeLane = { directory:'/old-runtime', close:() => new Promise(resolve => { release = resolve; }) };
+    try {
+        const pending = f.coordinator.build(f.doc, { quiet:true });
+        f.coordinator.dispose(); release(); await pending;
+        assert.equal(constructorCalls, before);
+        assert.equal(nativeCalls, builds);
+        assert.equal(f.state.nativeLane, null);
+        await f.coordinator.build(f.doc, { quiet:true });
+        assert.equal(constructorCalls, before);
+    } finally { f.close(); }
+});
+
+test('an older pending runtime replacement cannot overwrite a newer lane', async () => {
+    const f = fixture(); let release;
+    f.state.nativeLane = { directory:'/old-runtime', close:() => new Promise(resolve => { release = resolve; }) };
+    try {
+        const first = f.coordinator.build(f.doc, { quiet:true });
+        await f.coordinator.build(f.doc, { quiet:true });
+        const replacement = f.state.nativeLane;
+        const before = constructorCalls;
+        release(); await first;
+        assert.equal(f.state.nativeLane, replacement);
+        assert.equal(constructorCalls, before);
+    } finally { f.close(); }
+});
