@@ -367,3 +367,29 @@ mini-editor, range, Shift-pick and widen/shrink checks with the changed flags.
 Evidence: `/tmp/wpaper-native-honesty-verification.json`. This implements
 conservative preview status, not the cross-engine parity gate: per-document
 parity measurement, live UI acceptance and four-platform releases remain open.
+
+## 2026-09-20 — full reference through the WPaper adapter
+
+`verifyNativeProject.cjs WLATEX_INSTALL MAIN_TEX [EXPECTED_PAGES]` copies the
+supplied project to a temporary directory, builds through the actual
+`NativeBuildLane`, inserts an unsaved leading comment and rebuilds. It verifies
+old-view invalidation, new map admission, independent display generations,
+unchanged PDF suppression, no changed/removed SDK pages, preserved saved source
+and old PDF bytes. One exact main-file source point is queried on each mapped
+page. The report records page coverage, item counts, hashes and timings; it does
+not claim every glyph was independently checked.
+
+The frozen 15-page reference passes with 15 mapped pages and 22,363 exact
+main-file items. Source SHA-256:
+`d980e15d5b62076aa4df5f868c71a8d026464d4931a9f373faec6b3afb8c2bc5`.
+Evidence: `/tmp/wpaper-native-reference-adapter.json`. The initial build took
+66,318 ms and the comment-only rebuild 66,315 ms; the 15 sampled forward queries
+took 46.9 ms total. These are single-run observations, not latency percentiles.
+They demonstrate the delivery/map path on the reference and expose the missing
+incremental engine path: this cold-build adapter is not yet an interactive
+compilation solution.
+
+Cross-engine endpoint/glyph parity remains owned by the engine's reference
+verifiers and is not inferred from this adapter test. Its SDK has no parity
+comparison API. Full live UI acceptance, incremental compilation, cross-engine
+parity admission and separate four-platform release verification remain open.
