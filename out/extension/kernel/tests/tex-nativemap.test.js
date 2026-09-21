@@ -177,3 +177,23 @@ test('unqualified native previews retain exact provenance without claiming autho
     invalidate();
     assert.equal(map.sourceToRender(file, 4).flag, 'unmapped');
 });
+
+
+test('failed live queries permanently invalidate cached native source actions', async () => {
+    for (const range of [false, true]) {
+        const { map, view, source } = fixture();
+        const glyph = map.glyphsForLine(file, 4)[0];
+        source.files = new Map([['paper.tex', { text:'\n\n\nABC' }]]);
+        for (const hit of view.pages[0].hits) for (const origin of hit.mapped_origins)
+            origin.source.location.accuracy = 'Displaced';
+        source.forward = async () => { throw Error('source worker exited'); };
+        await assert.rejects(range
+            ? map.forwardRange(file, { line:4,column_utf16:0 }, { line:4,column_utf16:2 })
+            : map.forwardAt(file, 4, 0), /worker exited/);
+        assert.equal(map.available, false);
+        assert.equal(map.renderToSource(1, glyph.x+1, glyph.y+1).flag, 'unmapped');
+        assert.deepEqual(map.glyphsForLine(file,4), []);
+        source.forward = async () => ({ hits:view.pages[0].hits });
+        assert.equal(await map.forwardAt(file,4,0), null, 'only a fresh admitted view can recover');
+    }
+});

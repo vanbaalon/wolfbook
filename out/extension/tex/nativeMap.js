@@ -94,11 +94,20 @@ class NativeMap extends RenderMap {
     glyphsForLine(file, line) {
         return this.available ? this._lines.get(`${path.resolve(file)}\0${line}`) || [] : [];
     }
+    async _forward(file, line, column) {
+        try { return await this.source.forward(file, line, column); }
+        catch (error) {
+            // A failed live query cannot leave cached source actions enabled.
+            // Recovery admits a fresh map; this view stays invalid permanently.
+            this._invalidated = true;
+            throw error;
+        }
+    }
     async forwardAt(file, line, column) {
         if (!this.available) return null;
         const relative = path.relative(this.projectDir, path.resolve(file)).split(path.sep).join('/');
         if (!relative || relative.startsWith('../') || path.isAbsolute(relative)) return null;
-        const answer = await this.source.forward(relative, line, column);
+        const answer = await this._forward(relative, line, column);
         // The worker admits the actual anchor, not its translated enclosing
         // range: newly inserted text must not borrow an old glyph's geometry.
         if (!this.available) return null;
@@ -153,7 +162,7 @@ class NativeMap extends RenderMap {
                     const mid = (low + high) >> 1;
                     if (starts[mid] <= n) low = mid; else high = mid;
                 }
-                const answer = await this.source.forward(relative, low + 1, n - starts[low]);
+                const answer = await this._forward(relative, low + 1, n - starts[low]);
                 answers.set(n, new Set(answer.hits.map(hit => hit.item_id)));
             }
             return answers.get(n);

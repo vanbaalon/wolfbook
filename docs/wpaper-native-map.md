@@ -647,3 +647,25 @@ handoff (`/tmp/wpaper-native-crlf-final-host.log`). This exercised Windows-style
 source text on macOS ARM64, not the Windows native runtime. Physical gestures,
 visual acceptance, other-platform native execution, incremental compilation and
 per-page transport remain outstanding.
+
+## 2026-09-21 — unexpected source-worker crash recovery
+
+A rejected native point/range membership query now invalidates that map before
+propagating the error. Cached inverse hits and source actions cannot continue
+using a view after its live query failed; recovery needs a newly admitted map.
+This does not detect an idle worker's exit before any operation observes it.
+
+The real VS Code acceptance test now identifies the exact source-worker child
+of its isolated extension host and sends SIGKILL. It checks query rejection and
+immediate map invalidation, then edits the unsaved document, waits for lane
+retirement and rebuilds. The replacement session contains the current unsaved
+text, produces a newer display generation, answers forward navigation and opens
+its PDF in PDF.js. The saved source and old PDF remain unchanged. Process killing
+is currently exercised on Unix only; Windows reports the crash check as false.
+
+All 70 native map/policy checks pass, including point and range failure paths.
+The real CRLF/native acceptance scenario passes on macOS ARM64:
+`/tmp/wpaper-native-worker-crash-final.log`. This closes the previously untested
+unexpected-process-exit recovery path. Incremental compilation, per-page
+transport, visual/pointer acceptance and four-platform native release testing
+remain outstanding.

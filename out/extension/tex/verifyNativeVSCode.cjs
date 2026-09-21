@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const vscode = require('vscode');
+const execFile = require('node:util').promisify(require('node:child_process').execFile);
 const { RenderCoordinator } = require('./renderUi');
 const { Projection } = require('./index');
 const { TexViewer } = require('./texViewer');
@@ -30,6 +31,7 @@ exports.run = async function() {
         workspaceState:memento(), globalState:memento(), subscriptions:[] };
     const viewer = new TexViewer(context, coord, projection);
     let subscription, messagesSubscription;
+    let workerCrashRecovered = false;
     const messages = [];
     try {
         const doc = await vscode.workspace.openTextDocument(path.join(folder,'paper.tex'));
@@ -149,6 +151,43 @@ exports.run = async function() {
             const returned = messages.find(message => message.type === 'timing' && message.kind === 'open' &&
                 message.generation === st.generation.generation);
             assert.deepEqual(returned.reusedPages, [], 'conventional canvases have no native page identity');
+            if (process.platform !== 'win32') {
+                // Identify only this isolated host's direct child by its exact
+                // executable/command, without reaching into SDK worker internals.
+                const lane = st.nativeLane, oldMap = st.map, oldGeneration = st.generation;
+                const oldPdf = await fs.readFile(oldGeneration.pdfPath);
+                const diskText = await fs.readFile(doc.uri.fsPath, 'utf8');
+                const { stdout } = await execFile('/bin/ps', ['-axo', 'pid=,ppid=,command=']);
+                const workers = stdout.split('\n').map(line => line.match(/^\s*(\d+)\s+(\d+)\s+(.*)$/))
+                    .filter(m => m && Number(m[2]) === process.pid && m[3] === `${lane.runtime.labBinary} serve`);
+                assert.equal(workers.length, 1, 'identify exactly one source worker owned by this test host');
+                process.kill(Number(workers[0][1]), 'SIGKILL');
+                await assert.rejects(oldMap.forwardAt(doc.uri.fsPath, 4, 0));
+                assert.equal(oldMap.available, false, 'failed query must disable cached source actions');
+                await editor.edit(builder => builder.insert(new vscode.Position(0,0), '% recovery edit\n'));
+                await until(() => st.nativeLane === null, 'failed source lane retirement');
+                assert.equal(oldMap.available, false);
+                assert.equal(st.generation, oldGeneration, 'keep the last PDF while rebuilding the worker');
+                assert.deepEqual(await fs.readFile(oldGeneration.pdfPath), oldPdf);
+                const recoveryText = doc.getText();
+                await coord.build(doc, { quiet:true });
+                assert.equal(st.generation.runner, 'wlatex', st.lastError || st.nativeUnavailable);
+                assert.notEqual(st.nativeLane, lane);
+                assert.notEqual(st.generation.nativeSource, oldGeneration.nativeSource);
+                assert.equal(st.generation.nativeSource.files.get('paper.tex').text, recoveryText);
+                assert.ok(st.generation.generation > oldGeneration.generation);
+                assert.equal(st.map.available, true);
+                assert.ok((await st.map.forwardAt(doc.uri.fsPath, 5, 0))?.length);
+                await viewer.refresh({ force:true });
+                await until(() => viewer._openedGeneration === st.generation.generation &&
+                    viewer._openedPdfHash === st.generation.pdfHash, 'recovered native PDF acknowledgement');
+                assert.equal(doc.isDirty, true);
+                assert.equal(doc.getText(), recoveryText);
+                assert.equal(await fs.readFile(doc.uri.fsPath, 'utf8'), diskText);
+                assert.deepEqual(await fs.readFile(oldGeneration.pdfPath), oldPdf);
+                workerCrashRecovered = true;
+            }
+
         } else {
             await coord.build(doc, { quiet:true, authoritative:true });
             assert.equal(st.generation.ok, true, st.lastError);
@@ -166,6 +205,7 @@ exports.run = async function() {
             default_without_wlatex:mode === 'default', unavailable_wlatex_fallback:mode === 'missing',
             conventional_unsaved_rebuild:mode !== 'native', authoritative_native_handoff:mode === 'native',
             real_pdfjs_opened:true, unsaved_source_edit:true, translated_inverse_navigation:mode === 'native',
+            actual_source_worker_crash_recovered:workerCrashRecovered,
             pointer_gestures_verified:false, visual_acceptance_verified:false,
         }, null, 2));
     } catch (error) {
