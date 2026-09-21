@@ -658,3 +658,46 @@ test('late native widening rectangles cannot repaint after another source gestur
     await pending;
     assert.equal(f.posts.length, count);
 });
+
+test('rapid native picking retains its first endpoint while document opens finish out of order', async () => {
+    for (const order of [[0,1,2], [2,1,0]]) {
+        const f = pickFixture(); const releases = [];
+        // Native page views are immutable; return distinct hits for each event.
+        f.map.renderToSource = () => structuredClone(f.hit);
+        stub.workspace.openTextDocument = () => new Promise(resolve => releases.push(resolve));
+        const requests = [f.pick(0), f.pick(6, { live:true }), f.pick(2)];
+        for (const i of order) releases[i](f.doc);
+        await Promise.all(requests);
+        assert.deepEqual(f.queries, [[0,3]]);
+        assert.equal(f.editor.selection.start.character, 0);
+        assert.equal(f.editor.selection.end.character, 3);
+        assert.equal(f.viewer._pickAnchor, null);
+    }
+});
+
+test('a plain click cancels a native endpoint reserved by a pending document open', async () => {
+    const f = pickFixture(); const releases = [];
+    f.map.renderToSource = () => structuredClone(f.hit);
+    stub.workspace.openTextDocument = () => new Promise(resolve => releases.push(resolve));
+    const first = f.pick(0); const plain = f.run();
+    releases[1](f.doc); await plain;
+    releases[0](f.doc); await first;
+    assert.equal(f.viewer._pickAnchor, null);
+    assert.equal(f.queries.length, 0);
+});
+
+test('rapid native picking also retains its endpoint while source editors are opening', async () => {
+    const f = pickFixture(); const releases = [];
+    f.map.renderToSource = () => structuredClone(f.hit);
+    stub.window.showTextDocument = () => new Promise(resolve => releases.push(resolve));
+    const first = f.pick(0);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(releases.length, 1);
+    const last = f.pick(6);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(releases.length, 2);
+    releases[1](f.editor); await last;
+    releases[0](f.editor); await first;
+    assert.deepEqual(f.queries, [[0,7]]);
+    assert.equal(f.viewer._pickAnchor, null);
+});

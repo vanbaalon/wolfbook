@@ -4973,10 +4973,29 @@ class TexViewer {
                 reason:'The source range changed since this glyph was compiled.' });
             return;
         }
+        const relative = path.relative(map.projectDir, hit.file).split(path.sep).join('/');
+        const sourceText = map.source.files.get(relative)?.text;
+        let firstPick = false;
+        // Reserve the first endpoint before opening an editor. Later pointer
+        // events may supersede this request while the document is still opening,
+        // but must retain the gesture's original source endpoint.
+        if (m.pick && typeof sourceText === 'string') {
+            const lines = sourceText.split(/\r?\n/);
+            const validSeed = p => p && Number.isInteger(p.line) && p.line >= 1 && p.line <= lines.length &&
+                Number.isInteger(p.column_utf16) && p.column_utf16 >= 0 &&
+                p.column_utf16 <= lines[p.line - 1].length;
+            if (!validSeed(location?.start) || !validSeed(location?.end)) return;
+            const anchor = this._pickAnchor;
+            if (!anchor || anchor.file !== hit.file || anchor.nativeMap !== map || anchor.sourceText !== sourceText) {
+                this._pickAnchor = { file:hit.file, nativeMap:map, sourceText,
+                    position:new vscode.Position(location.start.line - 1, location.start.column_utf16),
+                    endPosition:new vscode.Position(location.end.line - 1, location.end.column_utf16) };
+                firstPick = true;
+            }
+        }
         const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(hit.file));
         if (!current()) return;
-        const relative = path.relative(map.projectDir, hit.file).split(path.sep).join('/');
-        if (map.source.files.get(relative)?.text !== doc.getText()) return;
+        if (sourceText !== doc.getText()) return;
         const version = doc.version;
         const valid = p => p && Number.isInteger(p.line) && p.line >= 1 && p.line <= doc.lineCount &&
             Number.isInteger(p.column_utf16) && p.column_utf16 >= 0 &&
@@ -5043,10 +5062,16 @@ class TexViewer {
                 this._nativeCursorRequest = (this._nativeCursorRequest || 0) + 1);
         }
         if (m.pick) {
-            const anchor = this._pickAnchor;
-            if (!anchor || anchor.file !== hit.file || anchor.nativeMap !== map || anchor.documentVersion !== version) {
-                this._pickAnchor = { file:hit.file, position:start, endPosition:end,
-                    nativeMap:map, documentVersion:version };
+            let anchor = this._pickAnchor;
+            if (!anchor || anchor.file !== hit.file || anchor.nativeMap !== map ||
+                anchor.sourceText !== sourceText ||
+                anchor.documentVersion != null && anchor.documentVersion !== version) {
+                anchor = this._pickAnchor = { file:hit.file, position:start, endPosition:end,
+                    nativeMap:map, sourceText, documentVersion:version };
+                firstPick = true;
+            }
+            anchor.documentVersion = version;
+            if (firstPick) {
                 this._lastSelection = null;
                 const glyph = hit.glyph;
                 this._post({ type:'selection', span:{ native:true, pendingStart:true, rows:[], lines:1,

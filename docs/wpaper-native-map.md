@@ -286,3 +286,20 @@ translated token and its single printed glyph. Evidence:
 This is headless handler verification; live interaction acceptance, displaced
 range latency, complete native execution and separate four-platform releases
 remain open. WLaTeX remains optional and is not bundled into WPaper.
+
+## 2026-09-20 — preserve native drag starts during asynchronous opens
+
+Native Shift-pick reserves its first source endpoint before opening the source
+document or editor. A newer pointer event can supersede an older request without
+losing the gesture's starting token. The reservation carries its immutable map,
+file and source text; its bounds are checked against that text, and document
+bytes and version are admitted before selecting. Plain clicks cancel reserved
+endpoints. Older document/editor completions cannot restore a finished pick.
+
+Validation: 44 native-policy tests, 207 sync tests, 35 panel tests and nine
+viewer-shipping tests pass. New tests exercise rapid events with document opens
+resolved in both orders, cancellation during opening and delayed editor opens.
+The existing real native PDF navigation/range/widen check passes with the changed
+viewer (`/tmp/wpaper-native-rapid-verification.json`). Controlled asynchronous
+handler tests close this specific race; they do not establish live UI latency
+or full interactive acceptance. Separate platform releases remain open.
