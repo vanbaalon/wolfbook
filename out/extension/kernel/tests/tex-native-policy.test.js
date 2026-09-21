@@ -701,3 +701,59 @@ test('rapid native picking also retains its endpoint while source editors are op
     assert.deepEqual(f.queries, [[0,7]]);
     assert.equal(f.viewer._pickAnchor, null);
 });
+
+test('failed native workers are retired and reconstructed after sources change', async () => {
+    const f = fixture();
+    try {
+        await f.coordinator.build(f.doc, { quiet:true });
+        const old = f.state.nativeLane;
+        let closed = false;
+        old.close = async () => { closed = true; };
+        old.compile = async () => { throw Error('source worker exited'); };
+        fs.appendFileSync(f.doc.uri.fsPath, '\n% changed');
+        await f.coordinator.build(f.doc, { quiet:true });
+        assert.equal(closed, true);
+        assert.equal(f.state.nativeLane, null);
+        assert.ok(!f.state.lastError);
+        const before = constructorCalls;
+        await f.coordinator.build(f.doc, { quiet:true });
+        assert.equal(constructorCalls, before, 'failed snapshot must not start a restart loop');
+        fs.appendFileSync(f.doc.uri.fsPath, '\n% retry');
+        await f.coordinator.build(f.doc, { quiet:true });
+        assert.equal(constructorCalls, before + 1);
+        assert.notEqual(f.state.nativeLane, old);
+        assert.equal(f.state.generation.runner, 'wlatex');
+    } finally { f.close(); }
+});
+
+test('an old edit completion cannot refresh or retire a replacement native worker', async () => {
+    for (const reject of [false, true]) {
+        const f = fixture(); let finish, oldClosed = false, refreshed = false;
+        const old = { source:{}, noteChange:() => new Promise((resolve, fail) => {
+            finish = reject ? () => fail(Error('old worker exited')) : resolve;
+        }), refresh:async () => { throw Error('retired worker must not refresh'); },
+        close:async () => { oldClosed = true; } };
+        const replacement = { refresh:async () => { refreshed = true; }, close:async () => {} };
+        try {
+            f.state.nativeLane = old;
+            f.coordinator.noteChange({ document:f.doc, contentChanges:[] });
+            f.state.nativeLane = replacement;
+            finish(); await new Promise(resolve => setImmediate(resolve));
+            assert.equal(f.state.nativeLane, replacement);
+            assert.equal(refreshed, false);
+            assert.equal(oldClosed, reject);
+        } finally { f.close(); }
+    }
+});
+
+test('mapping failures retire their source session even if shutdown rejects', async () => {
+    const f = fixture(); let closed = false;
+    try {
+        f.state.nativeLane = { noteChange:async () => { throw Error('worker exited'); },
+            close:async () => { closed = true; throw Error('already dead'); } };
+        f.coordinator.noteChange({ document:f.doc, contentChanges:[] });
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(closed, true);
+        assert.equal(f.state.nativeLane, null);
+    } finally { f.close(); }
+});

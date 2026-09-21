@@ -303,3 +303,28 @@ The existing real native PDF navigation/range/widen check passes with the change
 viewer (`/tmp/wpaper-native-rapid-verification.json`). Controlled asynchronous
 handler tests close this specific race; they do not establish live UI latency
 or full interactive acceptance. Separate platform releases remain open.
+
+## 2026-09-20 — retire failed native workers before retrying
+
+Native build or mapping failures now retire their owning lane. A preview build
+still falls back to the configured compiler, and its refused snapshot prevents
+an immediate restart loop. A subsequent changed snapshot creates a new SDK
+session, reopens current sources and republishes the map. Session shutdown errors
+are logged without preventing fallback. Expected build cancellation keeps its
+existing behavior and does not retire a healthy lane.
+
+Edit/refresh continuations capture the lane that owns their request. A late
+completion cannot refresh a replacement session or install an old page view;
+a late failure closes only the old lane. This also removes a null-lane access
+when switching away from native mode during a pending edit.
+
+Validation: 47 native-policy tests, 32 live-policy tests and 36 compiler tests
+pass. Tests cover failure/fallback, no retry loop for the failed snapshot,
+reconstruction after a changed source, old edit completions and shutdown errors.
+`node out/extension/tex/verifyNativeRecovery.cjs /absolute/path/to/WLaTeX`
+additionally exercises real session termination and reconstruction, old-view
+invalidation, new source/map publication, unsaved-buffer preservation and old PDF
+immutability. Local evidence: `/tmp/wpaper-native-recovery-verification.json`.
+The verifier terminates through the SDK's public close contract; unexpected
+process-crash recovery in a live VS Code session remains unverified. WLaTeX stays
+optional and separately installed.

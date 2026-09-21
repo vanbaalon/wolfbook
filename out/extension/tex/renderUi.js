@@ -325,6 +325,12 @@ class RenderCoordinator {
     stateFor(doc) { return this.roots.get(this.rootFor(doc)) || null; }
     mapFor(doc) { const s = this.stateFor(doc); return s ? s.map : null; }
 
+    async _retireNativeLane(st, lane) {
+        if (st.nativeLane === lane) st.nativeLane = null;
+        try { await lane.close(); }
+        catch (error) { this.log(`WLaTeX shutdown: ${error.message}`); }
+    }
+
     /** Feed an edit through, so the map can translate rather than go stale. */
     noteChange(e) {
         const st = this.stateFor(e.document);
@@ -332,13 +338,18 @@ class RenderCoordinator {
         st.sourceAhead = true;
         if (st.nativeLane) {
             const generation = st.generation;
+            const lane = st.nativeLane;
             if (st.map?.native) st.map.noteEdit();
-            st.nativeLane.noteChange(e.document, e.contentChanges).then(() => st.nativeLane.refresh()).then(view => {
-                if (!view || st.generation !== generation || generation?.nativeSource !== st.nativeLane.source) return;
+            lane.noteChange(e.document, e.contentChanges).then(() =>
+                st.nativeLane === lane ? lane.refresh() : null).then(view => {
+                if (!view || st.nativeLane !== lane || st.generation !== generation || generation?.nativeSource !== lane.source) return;
                 generation.nativeView = view;
                 st.map = makeMap({ generation, model:this._modelFor(st.root), pageSize:this._pageSize(generation) });
                 this._emitter.fire(st);
-            }).catch(error => this.log(`  native mapping: ${error.message}`));
+            }).catch(async error => {
+                this.log(`  native mapping: ${error.message}`);
+                await this._retireNativeLane(st, lane);
+            });
         }
         if (!st.map) return;
         const file = e.document.uri.fsPath;
@@ -590,11 +601,13 @@ class RenderCoordinator {
                 : compileOpts;
             let gen;
             if (wantNative) {
+                const lane = st.nativeLane;
                 try {
-                    gen = await st.nativeLane.compile(compileOpts);
+                    gen = await lane.compile(compileOpts);
                     st.nativeRefusedSnapshot = null;
                 } catch (error) {
                     if (ac.signal.aborted || ['AbortError', 'StaleBuild'].includes(error?.name)) throw error;
+                    await this._retireNativeLane(st, lane);
                     st.nativeRefusedSnapshot = snapshot;
                     st.nativeRefusedDirectory = nativeDirectory;
                     this.log(`WLaTeX preview failed: ${error.message}. Trying the configured WPaper compiler.`);
