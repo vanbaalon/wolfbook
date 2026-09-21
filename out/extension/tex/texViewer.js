@@ -4966,7 +4966,7 @@ class TexViewer {
         const location = hit.sourceRange;
         // A displaced range can enclose newly inserted text. It is a navigation
         // seam, never permission to replace that entire range by typing.
-        if (!hit.exact && (Number.isFinite(m.typingRequest) || m.commentTarget || m.pick)) {
+        if (!hit.exact && (Number.isFinite(m.typingRequest) || m.commentTarget || m.pick || m.widen)) {
             if (m.pick) this._pickAnchor = null;
             this._post({ type:'status', text:'This source range changed; rebuild before editing from the page.', kind:'warn' });
             if (m.commentTarget) this._post({ type:'commentTarget', target:null,
@@ -4995,6 +4995,53 @@ class TexViewer {
                 viewColumn:vscode.ViewColumn.One, preserveFocus:!m.takeMe, preview:false });
         if (!current() || doc.version !== version) return;
         this._invertedAt = Date.now();
+        if (m.widen) {
+            const old = this._ladder;
+            const near = old && old.nativeMap === map && old.documentVersion === version &&
+                old.file === hit.file && old.page === m.page &&
+                Math.hypot(m.xBp - old.xBp, m.yTopBp - old.yBp) < 36;
+            if (near && old.items.length) {
+                old.index = m.shrink ? Math.max(0, old.index - 1)
+                    : Math.min(old.items.length - 1, old.index + 1);
+            } else {
+                const lines = doc.getText().split(/\r?\n/);
+                const model = this._modelFor(doc);
+                let sections = [];
+                try { sections = model ? sectionSpans(model.objects, lines.length, lines.length) : []; }
+                catch (_) { /* source containers still work without headings */ }
+                const seed = { kind:'source', label:'source token',
+                    start:{ line:start.line + 1, col:start.character },
+                    end:{ line:end.line + 1, col:end.character } };
+                const items = [seed];
+                const le = (a,b) => a.line < b.line || a.line === b.line && a.col <= b.col;
+                for (const item of selectionLadder({ lines, model, sections, file:hit.file,
+                    line:start.line + 1, column:start.character,
+                    word:start.line === end.line ? { start:start.character, end:end.character } : null })) {
+                    const prev = items[items.length - 1];
+                    if (le(item.start, prev.start) && le(prev.end, item.end) &&
+                        !(le(prev.start, item.start) && le(item.end, prev.end))) items.push(item);
+                }
+                this._ladder = { page:m.page, xBp:m.xBp, yBp:m.yTopBp, file:hit.file,
+                    nativeMap:map, documentVersion:version, items,
+                    index:m.shrink ? 0 : Math.min(1, items.length - 1) };
+            }
+            const step = this._ladder.items[this._ladder.index];
+            const selection = new vscode.Selection(
+                new vscode.Position(step.start.line - 1, step.start.col),
+                new vscode.Position(step.end.line - 1, step.end.col));
+            this._selfRange = { file:hit.file, kind:'click', sl:selection.start.line,
+                sc:selection.start.character, el:selection.end.line, ec:selection.end.character,
+                at:Date.now() };
+            if (editor) {
+                editor.selection = selection;
+                editor.revealRange(selection, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+            }
+            this._rememberCursor(doc, selection);
+            this._postEditSelection(doc, selection, false);
+            return this._syncNativeCursor(st, { document:doc, selection },
+                { preserveView:true, nativeAdmission:current },
+                this._nativeCursorRequest = (this._nativeCursorRequest || 0) + 1);
+        }
         if (m.pick) {
             const anchor = this._pickAnchor;
             if (!anchor || anchor.file !== hit.file || anchor.nativeMap !== map || anchor.documentVersion !== version) {
@@ -5057,7 +5104,7 @@ class TexViewer {
             });
             return;
         }
-        if (st.map.native && !m.widen) {
+        if (st.map.native) {
             return this._jumpToNativeSource(st, m, this._nativeInverseRequest);
         }
         if (this._tracePaused || st.sourceAhead) {

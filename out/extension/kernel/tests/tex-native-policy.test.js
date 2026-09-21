@@ -288,6 +288,11 @@ test('native client sends generation-bound clicks without text-layer guesses whi
     assert.equal(sent[0].type, 'click');
     assert.equal(sent[0].generation, 7);
     assert.equal(sent[0].word, undefined);
+    context.sendClick(1, { xBp:100, yTopBp:80 }, 100, 80, { widen:true });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(sent.length, 2);
+    assert.equal(sent[1].widen, true);
+    assert.equal(sent[1].word, undefined);
 });
 
 test('native-map client availability only accepts the displayed generation', () => {
@@ -579,4 +584,77 @@ test('an unmapped plain click abandons a pending native shift-pick', async () =>
     const f = pickFixture(); await f.pick(0);
     f.map.renderToSource = () => ({ flag:'unmapped' });
     await f.run(); assert.equal(f.viewer._pickAnchor, null);
+});
+
+function widenFixture(text = 'Alpha. Beta.') {
+    const f = pickFixture();
+    f.doc.getText = () => text;
+    f.doc.lineCount = text.split('\n').length;
+    f.doc.lineAt = n => ({ text:text.split('\n')[n] });
+    f.map.source.files.get('paper.tex').text = text;
+    f.hit.sourceRange.start.column_utf16 = 8;
+    f.hit.sourceRange.end.column_utf16 = 9;
+    f.viewer._modelFor = TexViewer.prototype._modelFor;
+    return f;
+}
+
+test('native widen and shrink traverse current source containers back to the exact token', async () => {
+    const f = widenFixture();
+    await f.run({ widen:true });
+    await f.run({ widen:true });
+    await f.run({ widen:true, shrink:true });
+    await f.run({ widen:true, shrink:true });
+    assert.deepEqual(f.queries, [[7,12], [0,12], [7,12], [8,9]]);
+    assert.equal(f.posts.at(-1).span.native, true);
+    assert.equal(f.cards.at(-1)[1].start.character, 8);
+});
+
+test('native widening discards ladders from earlier documents, maps and click locations', async () => {
+    for (const invalidate of [
+        f => { f.doc.version++; },
+        f => { f.viewer._ladder.nativeMap = {}; },
+        f => { f.viewer._ladder.file = '/other.tex'; },
+        f => { f.viewer._ladder.xBp += 100; },
+    ]) {
+        const f = widenFixture(); await f.run({ widen:true });
+        invalidate(f); await f.run({ widen:true });
+        assert.deepEqual(f.queries, [[7,12], [7,12]]);
+    }
+});
+
+test('native widening requires an exact source point and the displayed PDF generation', async () => {
+    for (const options of [{ displaced:true }, { generation:0 }]) {
+        const f = widenFixture();
+        if (options.displaced) f.hit.exact = false;
+        await f.run({ widen:true, ...options });
+        assert.equal(f.queries.length, 0);
+        assert.equal(f.editor.selection, undefined);
+    }
+});
+
+test('native widening never truncates a verified multiline source seed', async () => {
+    const f = widenFixture('Alpha\nBeta');
+    f.hit.sourceRange.start = { line:1, column_utf16:3 };
+    f.hit.sourceRange.end = { line:2, column_utf16:2 };
+    await f.run({ widen:true });
+    assert.equal(f.editor.selection.start.line, 0);
+    assert.equal(f.editor.selection.start.character, 0);
+    assert.equal(f.editor.selection.end.line, 1);
+    assert.equal(f.editor.selection.end.character, 4);
+    await f.run({ widen:true, shrink:true });
+    assert.equal(f.editor.selection.start.character, 3);
+    assert.equal(f.editor.selection.end.line, 1);
+    assert.equal(f.editor.selection.end.character, 2);
+});
+
+test('late native widening rectangles cannot repaint after another source gesture', async () => {
+    const f = widenFixture(); let release;
+    f.map.forwardRange = () => new Promise(resolve => { release = resolve; });
+    const pending = f.run({ widen:true });
+    while (!release) await Promise.resolve();
+    await f.run();
+    const count = f.posts.length;
+    release([{ page:1, x:1, y:1, w:1, h:1 }]);
+    await pending;
+    assert.equal(f.posts.length, count);
 });

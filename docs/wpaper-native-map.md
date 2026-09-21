@@ -84,8 +84,8 @@ clicks place a caret; take-me selects the exact source token. Displaced ranges
 only provide a collapsed navigation seam and cannot drive page typing or comment
 attachment. Focused reading layout is preserved, and an existing mini-editor
 receives the verified caret. Native client clicks bypass text-layer word guesses.
-General range/mini-editor tracing and widened or shift-picked native selections
-while source is ahead remain incomplete. Full interactive acceptance,
+Native range and mini-editor tracing, Shift-pick and widen/shrink selections
+work against admitted current source while the PDF is older. Full interactive acceptance,
 simultaneous authoritative and
 native views, packaged engine delivery and the reference-paper acceptance remain
 open. Native cold compilation is not native incremental checkpoint execution.
@@ -261,3 +261,28 @@ text, while the selection paints only the two actual printed glyphs. Evidence:
 High-frequency interaction acceptance and displaced-range latency remain to be
 measured; native widen gestures and separate platform releases are still open.
 WLaTeX remains optional and separately installed.
+
+
+## 2026-09-20 — native widen/shrink selection
+
+Native widen gestures now start from the exact worker source span and walk the
+existing sentence, paragraph, math/container and section hierarchy. Shrink walks
+back to the original source token. Every step must contain the preceding range,
+including multiline source tokens. The client skips PDF text-layer guesses for
+these gestures, and the native handler remains available while source is ahead.
+The selected source interval is mirrored to the source editor and mini-editor;
+`forwardRange` paints only admitted output rectangles.
+
+Ladders retain the native map, source document version, file and click location.
+A changed owner starts a fresh ladder. Displaced points and stale display
+requests cannot widen, and a newer source gesture invalidates pending rectangle
+answers.
+
+Validation: 41 native-policy tests, 207 sync tests, 35 panel tests and nine
+viewer-shipping tests pass. The real native PDF verifier widens across inserted
+source, checks the five surviving glyph rectangles, then shrinks to the exact
+translated token and its single printed glyph. Evidence:
+`/tmp/wpaper-native-widen-verification.json`, bound to adapter/viewer hashes.
+This is headless handler verification; live interaction acceptance, displaced
+range latency, complete native execution and separate four-platform releases
+remain open. WLaTeX remains optional and is not bundled into WPaper.
