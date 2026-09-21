@@ -2589,7 +2589,8 @@ class TexViewer {
         const position = { line:editor.selection.start.line, character:editor.selection.start.character };
         // A source revision may advance while these same PDF bytes remain on
         // screen. Only the paired native map may answer against that display.
-        const current = () => this.panel && this.followCursor && this.root === st.root && map.available &&
+        const current = () => this.panel && this.followCursor && (!opts.nativeAdmission || opts.nativeAdmission()) &&
+            this.root === st.root && map.available &&
             this.coord.stateFor(doc) === st && st.map === map &&
             this._openedPdfHash === map.view.artifact.pdf_hash &&
             request === this._nativeCursorRequest && doc.version === version &&
@@ -6856,6 +6857,13 @@ class TexViewer {
      */
     async _onEditCaret(m, opts = {}) {
         if (!this.panel || !m) return;
+        const s = this._edit;
+        if (!s || m.editId !== s.id) return;
+        const request = this._miniCaretRequest = (this._miniCaretRequest || 0) + 1;
+        // Supersede an already-running native answer before waiting for the
+        // new caret's preceding text edit or document open.
+        this._nativeCursorRequest = (this._nativeCursorRequest || 0) + 1;
+        const current = () => this.panel && this._edit === s && request === this._miniCaretRequest;
         // A caret from the mini-editor is expressed in its CURRENT textarea.
         // If its preceding text change is still being applied, resolving the
         // offset now would use the OLD document and permanently move the page
@@ -6864,12 +6872,12 @@ class TexViewer {
         if (pendingEdit) {
             try { await pendingEdit; } catch (_) { /* the current session check below decides */ }
         }
-        const s = this._edit;
-        if (!s || m.editId !== s.id) return;
+        if (!current()) return;
         this._lastEditCaret = { ...m };
         let doc;
         try { doc = await vscode.workspace.openTextDocument(vscode.Uri.file(s.file)); }
         catch (_) { return; }
+        if (!current()) return;
 
         const span = Math.max(0, s.endOffset - s.startOffset);
         const lo = Math.max(0, Math.min(Number(m.start) || 0, span));
@@ -6899,10 +6907,12 @@ class TexViewer {
         // position for a plain caret. Spelled out rather than left to the
         // constructor: the forward sync reads it directly, and a selection
         // without it answers about the wrong end of a range.
-        this.syncFromEditor({
+        const blockStart = s.startOffset, blockEnd = s.endOffset;
+        return this.syncFromEditor({
             document: doc,
             selection: { start: from, end: to, anchor, active, isEmpty: lo === hi },
-        }, { instant: !!opts.instant, preserveView: true, userCursorGesture: !opts.forceSync });
+        }, { instant: !!opts.instant, preserveView: true, userCursorGesture: !opts.forceSync,
+            nativeAdmission: () => current() && s.startOffset === blockStart && s.endOffset === blockEnd });
     }
 
     async _applyEditChange(m) {

@@ -166,3 +166,23 @@ policy tests, 36 compiler tests, 207 sync tests and nine viewer-shipping tests
 pass. The real native navigation check also passes through the new external
 runtime resolver using the existing macOS ARM64 development installation.
 No installer, native runtime, push or deployment is produced by this change.
+
+## 2026-09-20 — mini-editor caret admission
+
+An open mini-editor now has explicit session/request admission through the native
+cursor path. New caret messages supersede older native answers immediately,
+before waiting for their text edits. A document open cannot restore an older
+caret after a later message; closing/replacing the card or moving its block
+invalidates pending answers. The handler awaits direct tracing, preserves the
+PDF viewport and still mirrors a visible editor without exposing a hidden one.
+
+Validation: all 25 native-policy tests and 207 existing sync tests pass. The real
+PDF verifier now executes `_onEditCaret` after inserting source inside a word and
+checks that the translated surviving glyph is highlighted with exact engine
+geometry and no scrolling. Evidence is `/tmp/wpaper-native-mini-verification.json`
+with the viewer/adapter hashes; rerun `verifyNativeNavigation.cjs` to regenerate.
+
+This closes collapsed-caret tracing for an existing native mini-editor. Native
+ranges, widened/shift-picked selections and opening/editing cards while source
+is ahead still need work. WLaTeX remains optional and separately installed; no
+native runtime is copied into the VSIX, and no push or deployment occurred.

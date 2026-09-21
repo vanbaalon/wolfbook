@@ -351,3 +351,65 @@ test('an optional runtime failure falls back once and reuses the successful norm
         assert.equal(conventionalCalls, builds + 1);
     } finally { nativeFailure = false; f.close(); }
 });
+
+function miniFixture() {
+    const f = cursorFixture();
+    f.doc.uri.fsPath = 'paper.tex';
+    f.doc.positionAt = offset => new NativePosition(3, offset);
+    f.viewer._edit = { id:12, file:'paper.tex', startOffset:3, endOffset:11 };
+    f.viewer._rememberEditState = () => {};
+    f.viewer._noteEditorNavigation = () => {};
+    f.viewer._rememberCursor = () => {};
+    f.viewer.syncFromEditor = TexViewer.prototype.syncFromEditor;
+    f.viewer._syncNativeCursor = TexViewer.prototype._syncNativeCursor;
+    stub.workspace.openTextDocument = async () => f.doc;
+    stub.window.visibleTextEditors = [];
+    f.runMini = start => TexViewer.prototype._onEditCaret.call(f.viewer, { editId:12, start, end:start });
+    return f;
+}
+
+test('mini-editor caret uses native worker geometry against the displayed older PDF', async () => {
+    const f = miniFixture();
+    f.map.forwardAt = async (file, line, column) => {
+        assert.equal(file, 'paper.tex'); assert.equal(line, 4); assert.equal(column, 5);
+        return f.rects;
+    };
+    await f.runMini(2);
+    assert.deepEqual(f.posts.at(-1).rects, f.rects);
+    assert.equal(f.posts.at(-1).reveal, false, 'the card does not scroll the PDF');
+});
+
+test('an older mini-editor document open cannot overwrite a newer caret', async () => {
+    const f = miniFixture(); let release; let opens = 0; const columns = [];
+    stub.workspace.openTextDocument = () => ++opens === 1
+        ? new Promise(resolve => { release = resolve; }) : Promise.resolve(f.doc);
+    f.map.forwardAt = async (file, line, column) => { columns.push(column); return f.rects; };
+    const older = f.runMini(1);
+    await f.runMini(4);
+    release(f.doc); await older;
+    assert.deepEqual(columns, [7]);
+    assert.equal(f.viewer._lastEditCaret.start, 4);
+});
+
+test('closing or replacing the card while an edit applies discards its old caret', async () => {
+    const f = miniFixture(); let release; let opens = 0;
+    f.viewer._editApplyQueue = new Promise(resolve => { release = resolve; });
+    stub.workspace.openTextDocument = async () => { opens++; return f.doc; };
+    const pending = f.runMini(1);
+    f.viewer._edit = { id:13, file:'other.tex', startOffset:0, endOffset:5 };
+    release(); await pending;
+    assert.equal(opens, 0);
+    assert.equal(f.posts.length, 0);
+});
+
+test('native mini-editor answers are discarded after card closure or block movement', async () => {
+    for (const change of [f => { f.viewer._edit = null; }, f => { f.viewer._edit.startOffset++; }]) {
+        const f = miniFixture(); let release;
+        f.map.forwardAt = () => new Promise(resolve => { release = resolve; });
+        const pending = f.runMini(1);
+        await Promise.resolve();
+        assert.equal(typeof release, 'function');
+        change(f); release(f.rects); await pending;
+        assert.ok(!f.posts.some(p => p.rects?.length));
+    }
+});

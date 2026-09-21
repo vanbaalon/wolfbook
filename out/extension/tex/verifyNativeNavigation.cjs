@@ -77,7 +77,11 @@ async function main() {
     stub.TextEditorRevealType = { InCenterIfOutsideViewport:0 };
     const editedText = source.files.get('paper.tex').text;
     const doc = { uri:{ fsPath:entry }, version:3, lineCount:editedText.split('\n').length,
-      getText:() => editedText, lineAt:i => ({ text:editedText.split('\n')[i] }) };
+      getText:() => editedText, lineAt:i => ({ text:editedText.split('\n')[i] }),
+      positionAt:offset => {
+        const lines = editedText.slice(0, offset).split('\n');
+        return new stub.Position(lines.length - 1, lines.at(-1).length);
+      } };
     const editor = { document:doc, revealRange() {} };
     stub.workspace.openTextDocument = async () => doc;
     stub.window.showTextDocument = async () => editor;
@@ -87,8 +91,9 @@ async function main() {
     try { ({ TexViewer } = require(path.join(checkout, 'out/extension/tex/texViewer.js'))); }
     finally { Module._load = originalLoad; }
     const state = { root:entry, map:inserted, sourceAhead:true };
-    const viewer = { root:entry, panel:{}, coord:{ roots:new Map([[entry,state]]) },
-      _openedPdfHash:report.build.pdf_hash, _openedGeneration:1, _tracePaused:true, _post() {}, _rememberCursor() {},
+    const posted = [];
+    const viewer = { root:entry, panel:{}, coord:{ roots:new Map([[entry,state]]), stateFor:() => state },
+      _openedPdfHash:report.build.pdf_hash, _openedGeneration:1, _tracePaused:true, _post:m => posted.push(m), _rememberCursor() {},
       _postEditSelection() {}, _jumpToNativeSource:TexViewer.prototype._jumpToNativeSource };
     const secondGlyph = inserted.glyphsForLine(entry, 5).find(g => g.hit.preferred_source?.location.start.column_utf16 === 4);
     assert.ok(secondGlyph, 'surviving second character follows inserted text');
@@ -97,12 +102,28 @@ async function main() {
     assert.equal(editor.selection.start.line, 4);
     assert.equal(editor.selection.start.character, 4);
     assert.equal(editor.selection.end.character, 4);
+    const blockStart = editedText.indexOf('ANEWlpha');
+    assert.ok(blockStart >= 0);
+    viewer.followCursor = true;
+    viewer._edit = { id:1, file:entry, startOffset:blockStart, endOffset:blockStart + 8 };
+    viewer._rememberEditState = () => {};
+    viewer._noteEditorNavigation = () => {};
+    viewer.syncFromEditor = TexViewer.prototype.syncFromEditor;
+    viewer._syncNativeCursor = TexViewer.prototype._syncNativeCursor;
+    viewer._setTracePaused = () => {};
+    viewer._log = () => {};
+    posted.length = 0;
+    await TexViewer.prototype._onEditCaret.call(viewer, { editId:1, start:4, end:4 });
+    const mini = posted.findLast(m => m.type === 'highlight');
+    assert.ok(mini.rects.some(r => Math.abs(r.x - secondGlyph.x) < 0.001));
+    assert.equal(mini.exact, true);
+    assert.equal(mini.reveal, false);
     process.stdout.write(JSON.stringify({ result: 'PASS', run, magnification,
       adapter_sha256: createHash('sha256').update(await fs.readFile(adapter)).digest('hex'),
       viewer_sha256: createHash('sha256').update(await fs.readFile(path.join(checkout, 'out/extension/tex/texViewer.js'))).digest('hex'),
       native_pdf_geometry_checked_with_poppler: true, native_inverse_column_verified: true,
       native_column_map_verified: true, stale_view_invalidated: true, edited_view_translated: true,
-      native_inverse_viewer_handler_verified: true, native_cursor_worker_admission: true, inserted_source_has_no_old_geometry: true }, null, 2) + '\n');
+      native_mini_editor_handler_verified: true, native_inverse_viewer_handler_verified: true, native_cursor_worker_admission: true, inserted_source_has_no_old_geometry: true }, null, 2) + '\n');
   } finally { await Promise.all([compiler.close(), source.close()]); }
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });
