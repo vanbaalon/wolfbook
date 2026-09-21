@@ -799,3 +799,17 @@ has not changed. Completing the goal still requires engine-side incremental
 execution/convergence and SDK work, separate native distributions and execution
 on the four target platforms, and real visual/pointer acceptance. WPaper's new
 byte-range delivery and page-content reuse do not substitute for those gates.
+
+## 2026-09-21 — packaging inventory and release-gate audit
+
+The actual `vsce ls` inventory includes the seven required native-integration
+host/client assets and passes the new `verifyNativePackage.cjs` check: known
+WLaTeX runtime directories/executables and generated `.wlatex` caches are absent.
+No deployment script, package publication or installation was performed. Eight
+runtime/package tests pass; package tests now join the four-platform consumer
+CI matrix. Evidence: `/tmp/wpaper-vsix-native-admission.json` and
+`/tmp/wpaper-package-admission-tests.log`.
+
+[Release gates](wpaper-native-release-gates.md) now distinguish measured
+consumer behavior from missing engine, packaging, performance, cache and visual
+requirements. This audit does not mark the full project complete.

@@ -59,6 +59,7 @@ jobs:
         run: >-
           node --test
           out/extension/kernel/tests/tex-native-runtime.test.js
+          out/extension/kernel/tests/tex-native-package.test.js
           out/extension/kernel/tests/tex-native-generation.test.js
           out/extension/kernel/tests/tex-native-cancellation.test.js
           out/extension/kernel/tests/tex-native-policy.test.js
