@@ -186,3 +186,27 @@ This closes collapsed-caret tracing for an existing native mini-editor. Native
 ranges, widened/shift-picked selections and opening/editing cards while source
 is ahead still need work. WLaTeX remains optional and separately installed; no
 native runtime is copied into the VSIX, and no push or deployment occurred.
+
+## 2026-09-20 — opening cards from an older native PDF
+
+An exact native point can now open the mini-editor against current source even
+while the displayed PDF is older. Admission binds the click generation, PDF
+hash, current map and current editor bytes. A displaced or unmapped point does
+not open a card. Opening captures the source block from the current document,
+so newly inserted source appears in the editor without pretending it already
+has printed geometry. Page typing can reach this path only when the client has
+an admitted native map.
+
+Pending opens are superseded by newer opens, card closure/replacement, newer
+navigation or caret gestures, and map changes. `editHere` performs its following
+inverse selection only if its own open succeeded and that session still owns
+the card. This prevents rejected or older requests from targeting an unrelated
+card. The ordinary compiler path keeps its source-ahead pause.
+
+Validation: 29 native-policy tests, 207 existing sync tests, 35 panel tests and
+nine viewer-shipping tests pass. The real native PDF verifier executes card
+opening after a source insertion, verifies the actual current source block, and
+then verifies inverse and mini-editor caret geometry. Evidence:
+`/tmp/wpaper-native-card-open-verification.json`, bound to viewer/adapter hashes.
+This remains headless handler verification; native range selection and full
+interactive acceptance remain open. WLaTeX stays optional and separate.

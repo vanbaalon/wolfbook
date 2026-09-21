@@ -413,3 +413,67 @@ test('native mini-editor answers are discarded after card closure or block movem
         assert.ok(!f.posts.some(p => p.rects?.length));
     }
 });
+
+
+function openFixture() {
+    const f = inverseFixture();
+    f.hit.line = 1;
+    const text = f.doc.getText();
+    f.doc.offsetAt = pos => pos.character;
+    f.doc.getText = range => range ? text.slice(range.start.character, range.end.character) : text;
+    f.viewer._editSeq = 0;
+    f.viewer._resolvePoint = TexViewer.prototype._resolvePoint;
+    f.viewer._blockAt = () => ({ startLine:1, endLine:1, label:'paragraph' });
+    f.viewer._ensureDocListener = () => {};
+    f.viewer._rememberEditState = () => {};
+    f.viewer._editRects = () => [];
+    f.open = (message={}) => TexViewer.prototype._openEditSession.call(f.viewer,
+        { generation:1, page:1, xBp:102, yTopBp:84, ...message });
+    return f;
+}
+
+test('an exact current native glyph opens a card while source is ahead', async () => {
+    const f = openFixture(); const session = await f.open({ typingRequest:9 });
+    assert.equal(session, f.viewer._edit);
+    assert.equal(session.lastText, 'Alpha Alpha');
+    assert.equal(f.posts.at(-1).type, 'editOpen');
+    assert.equal(f.posts.at(-1).typingRequest, 9);
+});
+
+test('native card opening refuses displaced, stale and mismatched-source points', async () => {
+    for (const change of [
+        f => { f.hit.exact = false; },
+        f => { f.viewer._openedPdfHash = 'other'; },
+        f => { f.doc.getText = () => 'other text'; },
+    ]) {
+        const f = openFixture(); change(f);
+        assert.equal(await f.open(), undefined);
+        assert.ok(!f.posts.some(m => m.type === 'editOpen'));
+    }
+});
+
+test('delayed card opening cannot replace a newer card or follow newer navigation', async () => {
+    for (const change of [
+        f => { f.viewer._edit = { id:99 }; },
+        f => { f.viewer._editOpenRequest++; },
+        f => { f.viewer._nativeInverseRequest++; },
+        f => { f.viewer._miniCaretRequest = 1; },
+        f => { f.map.available = false; },
+    ]) {
+        const f = openFixture(); let release;
+        stub.workspace.openTextDocument = () => new Promise(resolve => { release = resolve; });
+        const pending = f.open(); change(f); release(f.doc);
+        assert.equal(await pending, undefined);
+        assert.ok(!f.posts.some(m => m.type === 'editOpen'));
+    }
+});
+
+test('only the newest of two asynchronous card opens can publish', async () => {
+    const f = openFixture(); const releases = [];
+    stub.workspace.openTextDocument = () => new Promise(resolve => releases.push(resolve));
+    const older = f.open(); const newer = f.open();
+    releases[1](f.doc); const current = await newer;
+    releases[0](f.doc); assert.equal(await older, undefined);
+    assert.equal(f.viewer._edit, current);
+    assert.equal(f.posts.filter(m => m.type === 'editOpen').length, 1);
+});

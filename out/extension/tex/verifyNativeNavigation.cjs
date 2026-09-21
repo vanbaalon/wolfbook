@@ -77,7 +77,9 @@ async function main() {
     stub.TextEditorRevealType = { InCenterIfOutsideViewport:0 };
     const editedText = source.files.get('paper.tex').text;
     const doc = { uri:{ fsPath:entry }, version:3, lineCount:editedText.split('\n').length,
-      getText:() => editedText, lineAt:i => ({ text:editedText.split('\n')[i] }),
+      getText:range => range ? editedText.slice(doc.offsetAt(range.start), doc.offsetAt(range.end)) : editedText,
+      offsetAt:pos => editedText.split('\n').slice(0, pos.line).reduce((n, line) => n + line.length + 1, 0) + pos.character,
+      lineAt:i => ({ text:editedText.split('\n')[i] }),
       positionAt:offset => {
         const lines = editedText.slice(0, offset).split('\n');
         return new stub.Position(lines.length - 1, lines.at(-1).length);
@@ -105,8 +107,16 @@ async function main() {
     const blockStart = editedText.indexOf('ANEWlpha');
     assert.ok(blockStart >= 0);
     viewer.followCursor = true;
-    viewer._edit = { id:1, file:entry, startOffset:blockStart, endOffset:blockStart + 8 };
+    viewer._editSeq = 0;
+    viewer._resolvePoint = TexViewer.prototype._resolvePoint;
+    viewer._blockAt = () => ({ startLine:5, endLine:5, label:'paragraph' });
+    viewer._ensureDocListener = () => {};
     viewer._rememberEditState = () => {};
+    viewer._editRects = () => [];
+    const opened = await TexViewer.prototype._openEditSession.call(viewer, { generation:1, page:1,
+      xBp:secondGlyph.x+secondGlyph.w/2, yTopBp:secondGlyph.y+secondGlyph.boxHeight/2 });
+    assert.equal(opened.startOffset, blockStart);
+    assert.equal(opened.lastText, 'ANEWlpha');
     viewer._noteEditorNavigation = () => {};
     viewer.syncFromEditor = TexViewer.prototype.syncFromEditor;
     viewer._syncNativeCursor = TexViewer.prototype._syncNativeCursor;
@@ -123,7 +133,7 @@ async function main() {
       viewer_sha256: createHash('sha256').update(await fs.readFile(path.join(checkout, 'out/extension/tex/texViewer.js'))).digest('hex'),
       native_pdf_geometry_checked_with_poppler: true, native_inverse_column_verified: true,
       native_column_map_verified: true, stale_view_invalidated: true, edited_view_translated: true,
-      native_mini_editor_handler_verified: true, native_inverse_viewer_handler_verified: true, native_cursor_worker_admission: true, inserted_source_has_no_old_geometry: true }, null, 2) + '\n');
+      native_source_ahead_card_open_verified: true, native_mini_editor_handler_verified: true, native_inverse_viewer_handler_verified: true, native_cursor_worker_admission: true, inserted_source_has_no_old_geometry: true }, null, 2) + '\n');
   } finally { await Promise.all([compiler.close(), source.close()]); }
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

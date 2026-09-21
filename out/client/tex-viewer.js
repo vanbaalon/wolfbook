@@ -6596,7 +6596,7 @@ window.addEventListener('keydown', (e) => {
 window.addEventListener('keydown', (e) => {
     const t = e.target;
     if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.isContentEditable)) return;
-    if (e.defaultPrevented || state.tracePaused ||
+    if (e.defaultPrevented || (state.tracePaused && !state.nativeMapAvailable) ||
         (state.selection && !state.selection.pendingStart)) return;
     const printable = !e.metaKey && !e.ctrlKey && !e.altKey && !e.isComposing &&
         (e.key.length === 1 || e.key === 'Enter');

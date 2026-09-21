@@ -3823,15 +3823,16 @@ class TexViewer {
             case 'diffFocus': await this._focusHunk(m.id); break;
             case 'diffClose': this.closeComparison(); break;
             case 'compare': await this.offerComparison(); break;
-            case 'editHere':
+            case 'editHere': {
                 // Open the block, THEN resolve the click inside it. A
                 // right-click is still a click: it should land the caret on the
                 // symbol under the pointer, in the card and in the editor
                 // alike. The order matters — the jump posts its selection into
                 // whatever card is open, so the card has to exist first.
-                await this._openEditSession(m);
-                await this._jumpToSource(m);
+                const opened = await this._openEditSession(m);
+                if (opened && this._edit === opened) await this._jumpToSource(m);
                 break;
+            }
             case 'selectAdjust': this._adjustSelection(m); break;
             case 'labelsWanted':
                 // Somebody is holding Shift. From here on a new generation
@@ -3893,6 +3894,7 @@ class TexViewer {
                 }
                 break;
             case 'editClose':
+                this._editOpenRequest = (this._editOpenRequest || 0) + 1;
                 this._edit = null;
                 this._lastEditCaret = null;
                 this._rememberEditState();
@@ -6792,15 +6794,35 @@ class TexViewer {
     }
 
     async _openEditSession(m) {
-        const st = this.root && this.coord.roots.get(this.root);
+        const request = this._editOpenRequest = (this._editOpenRequest || 0) + 1;
+        const root = this.root;
+        const previous = this._edit;
+        const navigation = this._nativeInverseRequest;
+        const caretRequest = this._miniCaretRequest;
+        const st = root && this.coord.roots.get(root);
         if (!st || !st.map || !st.map.available) return;
-        if (this._tracePaused || st.sourceAhead) return;
+        const map = st.map;
+        const current = () => this.panel && this.root === root && this.coord.roots.get(root) === st &&
+            st.map === map && map.available && this._edit === previous && request === this._editOpenRequest &&
+            navigation === this._nativeInverseRequest && caretRequest === this._miniCaretRequest &&
+            (map.native ? m.generation != null && String(m.generation) === String(this._openedGeneration) &&
+                this._openedPdfHash === map.view.artifact.pdf_hash : !this._tracePaused && !st.sourceAhead);
+        if (!current()) return;
         const hit = this._resolvePoint(st, m);
+        if (map.native && !hit?.exact) {
+            this._post({ type:'status', text:'This point has no unchanged source range; rebuild before opening an editor.', kind:'warn' });
+            return;
+        }
         if (!hit || hit.flag === FLAG.UNMAPPED || !hit.file) {
             this._post({ type: 'status', text: 'nothing editable there', kind: 'warn' });
             return;
         }
         const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(hit.file));
+        if (!current()) return;
+        if (map.native) {
+            const relative = path.relative(map.projectDir, hit.file).split(path.sep).join('/');
+            if (map.source.files.get(relative)?.text !== doc.getText()) return;
+        }
         const lines = doc.getText().split(/\r?\n/);
         const line = Math.max(1, Math.min(hit.line, lines.length));
 
@@ -6835,6 +6857,7 @@ class TexViewer {
                 : [{ page: m.page, x: m.xBp - 2, y: m.yTopBp - 2, w: 4, h: 4 }],
             typingRequest: Number.isFinite(m.typingRequest) ? m.typingRequest : undefined,
         });
+        return s;
     }
 
     /**
