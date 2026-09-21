@@ -52,6 +52,21 @@ function readInstallation(root, target) {
     }
     return result;
 }
+// The most recently built lab binary of a development checkout. A debug build
+// answers a page view six times slower than a release build (349 ms against
+// 55 ms for three pages of the 200-page book), so whichever profile the
+// developer last built is the one they mean; the debug path remains the
+// fallback when neither has been built so the error names it.
+function newestBuild(location, name) {
+    const candidates = ['release', 'debug'].map(profile => path.join(location, 'target', profile, name));
+    let newest = null, newestTime = -Infinity;
+    for (const file of candidates) {
+        let stat;
+        try { stat = fs.statSync(file); } catch { continue; }
+        if (stat.isFile() && stat.mtimeMs > newestTime) { newest = file; newestTime = stat.mtimeMs; }
+    }
+    return newest || candidates[1];
+}
 function resolveNativeRuntime(directory, options = {}) {
     const location = directory || (options.env || process.env).WLATEX_HOME;
     if (!location) return null;
@@ -63,11 +78,11 @@ function resolveNativeRuntime(directory, options = {}) {
     const suffix = target.startsWith('win32-') ? '.exe' : '';
     const result = { directory:location, target, installed:false, resources:'external-tex',
         sdk:path.join(location, 'integrations/wpaper'),
-        labBinary:path.join(location, `target/debug/wlatex-lab${suffix}`),
+        labBinary:newestBuild(location, `wlatex-lab${suffix}`),
         nativeBinary:path.join(location, `native-lab/target/release/wlatex-native-lab${suffix}`) };
     fs.accessSync(path.join(result.sdk, 'index.cjs'), fs.constants.R_OK);
     for (const file of [result.labBinary, result.nativeBinary])
         fs.accessSync(file, target.startsWith('win32-') ? fs.constants.R_OK : fs.constants.X_OK);
     return result;
 }
-module.exports = { TARGETS, targetFor, readInstallation, resolveNativeRuntime, digest };
+module.exports = { TARGETS, targetFor, readInstallation, resolveNativeRuntime, newestBuild, digest };

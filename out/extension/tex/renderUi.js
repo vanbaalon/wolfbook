@@ -385,17 +385,35 @@ class RenderCoordinator {
             this._emitter.fire(st);
         } catch (error) {
             this.log(`  native mapping: ${error.message}`);
-            await this._retireNativeLane(st, lane);
+            await this._retireNativeLane(st, lane, error.message);
         } finally {
             st.nativeRefreshing = false;
             if (st.nativeRefreshAgain) { st.nativeRefreshAgain = false; this._scheduleNativeRefresh(st, lane, 0); }
         }
     }
 
-    async _retireNativeLane(st, lane) {
+    /**
+     * Give the native lane up for this root. With a reason it is a failure of
+     * the lane itself (worker, protocol, producer), not of the document:
+     * document errors come back as failed generations and never reach here.
+     * A failure is said once per distinct reason, because a silent fallback
+     * to latexmk is exactly what made the lane untrustworthy.
+     */
+    async _retireNativeLane(st, lane, reason = null) {
         if (st.nativeLane === lane) st.nativeLane = null;
         try { await lane.close(); }
         catch (error) { this.log(`WLaTeX shutdown: ${error.message}`); }
+        if (reason) this._noticeNativeLane(`WLaTeX preview stopped: ${reason}. Using the normal WPaper compiler until the next Compile.`);
+    }
+
+    _noticeNativeLane(message) {
+        this._nativeNotices ||= new Set();
+        if (this._nativeNotices.has(message)) return;
+        this._nativeNotices.add(message);
+        const show = 'Show log';
+        Promise.resolve(vscode.window.showWarningMessage(message, show))
+            .then(pick => { if (pick === show) this.output.show(true); })
+            .catch(() => { /* a notice must never break compiling */ });
     }
 
     /** Feed an edit through, so the map can translate rather than go stale. */
@@ -410,7 +428,7 @@ class RenderCoordinator {
                 if (st.nativeLane === lane) this._scheduleNativeRefresh(st, lane);
             }).catch(async error => {
                 this.log(`  native mapping: ${error.message}`);
-                await this._retireNativeLane(st, lane);
+                await this._retireNativeLane(st, lane, error.message);
             });
         }
         if (!st.map) return;
@@ -508,12 +526,16 @@ class RenderCoordinator {
                     if (st.nativeLane) await this._retireNativeLane(st, st.nativeLane);
                     if (!preparing()) return st;
                     st.nativeLane = new NativeBuildLane(root, directory);
+                    const runtime = st.nativeLane.runtime;
+                    if (runtime) this.log(`WLaTeX lane: ${runtime.labBinary}` +
+                        (runtime.installed ? '' : ' (development checkout, newest build)'));
                 }
                 st.nativeUnavailable = null;
             } catch (error) {
                 const reason = `WLaTeX unavailable: ${error.message}. Using the normal WPaper compiler.`;
                 if (st.nativeUnavailable !== reason) this.log(reason);
                 st.nativeUnavailable = reason;
+                this._noticeNativeLane(reason);
                 wantNative = false;
                 mapEngine = 'auto';
             }
@@ -676,10 +698,13 @@ class RenderCoordinator {
                     st.nativeRefusedSnapshot = null;
                 } catch (error) {
                     if (ac.signal.aborted || ['AbortError', 'StaleBuild'].includes(error?.name)) throw error;
-                    await this._retireNativeLane(st, lane);
+                    // A TeX error in the document resolves as a failed
+                    // generation above and keeps the lane; reaching here means
+                    // the producer, worker or installation failed.
+                    this.log(`WLaTeX preview failed: ${error.message}. Trying the configured WPaper compiler.`);
+                    await this._retireNativeLane(st, lane, error.message);
                     st.nativeRefusedSnapshot = snapshot;
                     st.nativeRefusedDirectory = nativeDirectory;
-                    this.log(`WLaTeX preview failed: ${error.message}. Trying the configured WPaper compiler.`);
                     gen = await compile({ ...compileOpts, maxPasses:null });
                 }
                 // Register packages discovered outside the editor's include
@@ -916,12 +941,21 @@ function makeStatusItem(coord, projection) {
         // A live rebuild is not an event the writer asked for, so it must not
         // take over the status item: the position readout stays, and the spin
         // is appended. Falling through here is deliberate.
+        // Say which engine made the page on screen: a native WLaTeX preview
+        // and a latexmk build look the same in the viewer, and the lane can
+        // fall back between builds.
+        const gen = st && st.generation;
+        const nativeGen = !!gen && gen.runner === 'wlatex';
+        const engineIcon = nativeGen ? '$(zap) ' : '';
+        const engineNote = !gen ? '' : nativeGen
+            ? '\n\nRendered by the WLaTeX native preview.'
+            : `\n\nRendered by ${gen.runner || 'latexmk'}${gen.engine ? ` (${gen.engine})` : ''}.`;
         const map = st && st.map;
         if (!map || !map.available) {
-            item.text = '$(circle-slash) no render map';
+            item.text = `${engineIcon}$(circle-slash) no render map`;
             item.tooltip = new vscode.MarkdownString(
                 (st && st.lastError ? `**${st.lastError}**\n\n` : '') +
-                'Click to compile this paper and build the render map.');
+                'Click to compile this paper and build the render map.' + engineNote);
             item.show();
             return;
         }
@@ -949,7 +983,7 @@ function makeStatusItem(coord, projection) {
         }
         const occ = map.pageOccupancy(r.page);
         const bars = '▰'.repeat(occ.bars) + '▱'.repeat(5 - occ.bars);
-        item.text = `${FLAG_ICON[r.flag] || ''} p.${r.page} ${bars}${obj ? ' ' + shortKind(obj) : ''}` + live;
+        item.text = `${engineIcon}${FLAG_ICON[r.flag] || ''} p.${r.page} ${bars}${obj ? ' ' + shortKind(obj) : ''}` + live;
         const md = new vscode.MarkdownString();
         md.appendMarkdown(`**Page ${r.page}** of ${map.pageCount}  ·  ${Math.round(occ.fill * 100)}% full\n\n`);
         if (obj) md.appendMarkdown(`\`${obj.stableKey}\`\n\n`);
@@ -966,6 +1000,7 @@ function makeStatusItem(coord, projection) {
             md.appendMarkdown('\n\nTypeset in a single pass — cross-references and page ' +
                 'numbers may lag until the full rebuild lands. It runs when you pause.');
         }
+        md.appendMarkdown(engineNote);
         md.appendMarkdown('\n\nClick to recompile.');
         item.tooltip = md;
         item.show();

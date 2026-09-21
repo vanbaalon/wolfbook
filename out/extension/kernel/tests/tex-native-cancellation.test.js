@@ -13,7 +13,15 @@ test('superseded native builds stop at source synchronization and publication bo
             const lane = Object.create(NativeBuildLane.prototype);
             const ac = new AbortController(); const calls = [];
             const interrupt = () => { if (cause === 'abort') ac.abort(); else lane.invalidate(); };
-            const step = async name => { calls.push(name); if (boundary === name) interrupt(); };
+            // Once the producer has run, a keystroke no longer supersedes the
+            // build (the map binds to the captured revisions and later edits
+            // are translated); only the host's abort does. The publish step
+            // proves it was reached by failing with its own sentinel.
+            const continues = boundary === 'publish' && cause === 'edit';
+            const step = async name => {
+                calls.push(name);
+                if (boundary === name) { interrupt(); if (continues) throw Error('continued past publish'); }
+            };
             Object.assign(lane, { root, projectDir:dir, buildNumber:0, version:0,
                 edits:boundary === 'queued edits' ? Promise.resolve().then(interrupt) : Promise.resolve(),
                 source:{ files:new Map(), open:async () => step('open'),
@@ -25,7 +33,7 @@ test('superseded native builds stop at source synchronization and publication bo
                     return { success:true, build:{ source_bindings:[] } };
                 } } });
             try {
-                await assert.rejects(lane.compile({ signal:ac.signal }), { name:'AbortError' });
+                await assert.rejects(lane.compile({ signal:ac.signal }), continues ? /continued past publish/ : { name:'AbortError' });
                 if (boundary === 'queued edits') assert.deepEqual(calls, []);
                 else if (boundary === 'publish') assert.ok(calls.includes('compile'));
                 else assert.ok(!calls.includes('compile'), `${boundary} should stop before native compilation`);
@@ -91,7 +99,11 @@ test('source changes during cache cleanup cannot publish an obsolete native gene
         });
         const pending=lane.compile({}); await waiting;
         lane.invalidate(); release();
-        await assert.rejects(pending,{ name:'AbortError' });
+        // Before the build starts, a source change makes its inputs
+        // pointless; after the producer has finished, the generation is
+        // still worth showing and only an abort or a closed lane stops it.
+        if (boundary==='begin') await assert.rejects(pending,{ name:'AbortError' });
+        else assert.deepEqual(await pending,{ ok:true });
         assert.equal(compiled,boundary==='begin' ? 0 : 1);
         assert.equal(ended,1);
     }

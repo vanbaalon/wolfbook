@@ -9,6 +9,18 @@ const { NativeArtifactCache } = require('./nativeArtifactCache');
 // setting must degrade to the default rather than retire the native lane.
 const clampTimeout = ms => Number.isFinite(ms) && ms >= 1 ? Math.min(Math.floor(ms), 3600000) : 120000;
 
+// A failed report is the document's failure when the log holds a TeX error
+// the document raised: an undefined command (placed on its file and line by
+// the producer's file-line-error style), a missing input (LaTeX types that
+// one out with no place, then the forbidden terminal read ends the run), a
+// runaway argument. The producer's own diagnostics carry `producer: true`
+// (a timeout, an output overflow, an exit status); a report with only those,
+// or a timed-out one, is the lane's failure.
+function isDocumentFailure(report) {
+    return !report.timed_out && Array.isArray(report.diagnostics) &&
+        report.diagnostics.some(d => d?.severity === 'error' && !d.producer);
+}
+
 class NativeBuildLane {
     constructor(root, directory = '', runtimeOptions) {
         this.root = root;
@@ -121,7 +133,29 @@ class NativeBuildLane {
         const nativeArtifactLease = this.artifactCache?.lease(report);
         report.nativeArtifactLease = nativeArtifactLease;
         requireCurrent();
-        if (!report.success) throw Error(report.diagnostics.map(d=>d.message).join('\n') || 'Native compilation failed');
+        if (!report.success) {
+            // A document the engine could not typeset is the writer's problem
+            // and the lane's normal business: it comes back as a failed
+            // generation with diagnostics, the last PDF stays on screen and
+            // the next keystroke builds natively again. Only a producer that
+            // stopped without a TeX error (a crash, a timeout, an unreadable
+            // installation) is the lane's problem, and that still throws so
+            // the host can retire it and say so.
+            if (!isDocumentFailure(report)) throw Error(report.diagnostics.map(d=>d.message).join('\n') || 'Native compilation failed');
+            const diagnostics = report.diagnostics.map(d=>({ ...d,
+                file: d.file ? path.resolve(this.projectDir,d.file) : null }));
+            const errors = diagnostics.filter(d=>d.severity==='error');
+            return { ok:false, runner:'wlatex', engine:'wlatex', root:this.root, projectDir:this.projectDir, nativeArtifactLease,
+                generation:nextGeneration(), outDir:null, pdfPath:null, pdfHash:null, pdfBytes:null,
+                sourceSnapshotHash:o.sourceSnapshotHash, live:!!o.overlay?.size,
+                synctexPath:null, synctexHash:null, glyphMapPath:null, glyphMapHash:null,
+                logPath:report.log, pageCount:null, pageSize:null,
+                diagnostics, errors:errors.length, warnings:diagnostics.filter(d=>d.severity==='warning').length,
+                passes:null, passesLimited:false, rerunWanted:false,
+                stopped:true, stopReason:errors[0]?.message || 'Native compilation failed', cancelled:false, timedOut:false,
+                ms:report.elapsed_ms, finishedAt:Date.now(), nativeView:null, nativeSource:null,
+                nativeReport:report, nativeCompiledSources:null };
+        }
         // Native provenance may discover project packages not in WPaper's TeX
         // graph. Open their frozen bytes only if they still match the project.
         for (const binding of report.build.source_bindings) if (!this.source.files.has(binding.file)) {
@@ -201,4 +235,4 @@ class NativeBuildLane {
         return this._closing;
     }
 }
-module.exports = { NativeBuildLane };
+module.exports = { NativeBuildLane, isDocumentFailure };

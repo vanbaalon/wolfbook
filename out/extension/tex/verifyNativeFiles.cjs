@@ -33,9 +33,17 @@ async function main() {
         assert.ok(new NativeMap({ ...second, generation:second }).available);
         await fs.unlink(renamed);
         // A source session still knows the old bytes, but they must not become
-        // compiler overlays when the file has actually disappeared.
-        await assert.rejects(lane.compile({ sourceFiles:[root,chapter], overlay:new Map([[root,changed]]), timeoutMs:30000 }),
-            error => { assert.doesNotMatch(error.message, /timed out/i); return true; });
+        // compiler overlays when the file has actually disappeared. The
+        // missing input is the document's error: the lane reports it as a
+        // failed generation, without a PDF and without retiring itself.
+        const missing = await lane.compile({ sourceFiles:[root,chapter], overlay:new Map([[root,changed]]), timeoutMs:30000 });
+        assert.equal(missing.ok, false);
+        assert.equal(missing.runner, 'wlatex');
+        assert.equal(missing.pdfPath, null);
+        assert.ok(missing.errors >= 1);
+        assert.ok(missing.diagnostics.some(d => d.severity === 'error' && /renamed/.test(d.message)));
+        assert.doesNotMatch(missing.stopReason, /timed out/i);
+        assert.ok(!lane.closed, 'a document error must not close the lane');
         const unsaved = 'Unsaved replacement chapter.\n';
         let recovered, missingOverlayError = null;
         try {
@@ -61,7 +69,7 @@ async function main() {
         assert.ok(recovered.generation > second.generation && second.generation > first.generation);
         console.log(JSON.stringify({ result:missingOverlayError ? 'INCOMPLETE' : 'PASS', missingOverlayError, project, platform:process.platform, arch:process.arch,
             renamed_dependency_discovered:true, stale_graph_did_not_restore_deleted_file:true,
-            missing_dependency_rejected:true, unsaved_missing_file_overlay_supported:!missingOverlayError,
+            missing_dependency_reported_without_retiring:true, unsaved_missing_file_overlay_supported:!missingOverlayError,
             recovered_dependency_mapping:true, saved_source_unchanged:true, old_pdf_immutable:true }, null, 2));
         if (missingOverlayError) process.exitCode = 1;
     } finally { await lane.close(); }
