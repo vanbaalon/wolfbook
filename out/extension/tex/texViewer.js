@@ -17,6 +17,7 @@ const os = require('os');
 const { execFile } = require('child_process');
 
 const { FLAG } = require('./renderMap');
+const { wireText, documentOffset, wireOffset, documentText } = require('./miniText');
 const {
     wordAtColumn, findWordInLine, collectMacros, isInMath, mathRegions,
     locateByContext, visibleWords,
@@ -6865,13 +6866,14 @@ class TexViewer {
                     if (r && r.page) rects = [{ page: r.page, x: 72, y: 72, w: 4, h: 4 }];
                 } catch (_) { /* the card can use its saved page */ }
             }
-            const caretStart = Math.max(0, Math.min(Number(saved.caretStart) || 0, endOffset - startOffset));
+            const caretLength = s.native ? wireText(s.lastText).length : endOffset - startOffset;
+            const caretStart = Math.max(0, Math.min(Number(saved.caretStart) || 0, caretLength));
             const caretEnd = Math.max(caretStart,
-                Math.min(Number(saved.caretEnd) || caretStart, endOffset - startOffset));
+                Math.min(Number(saved.caretEnd) || caretStart, caretLength));
             this._post({
                 type: 'editOpen', native:s.native, editId: s.id, label: s.label,
                 file: path.basename(s.file), startLine: a.line + 1, endLine: b.line + 1,
-                text: s.lastText, rects,
+                text: s.native ? wireText(s.lastText) : s.lastText, rects,
                 page: Number(saved.page) || (rects[0] && rects[0].page) || 1,
                 pos: saved.pos || null,
                 caretStart, caretEnd,
@@ -6926,7 +6928,7 @@ class TexViewer {
             file: path.basename(file),
             startLine: block.startLine,
             endLine: block.endLine,
-            text: s.lastText,
+            text: s.native ? wireText(s.lastText) : s.lastText,
             rects,
             stepped: true,
         });
@@ -6990,7 +6992,7 @@ class TexViewer {
             file: path.basename(hit.file),
             startLine,
             endLine,
-            text: s.lastText,
+            text: s.native ? wireText(s.lastText) : s.lastText,
             // With no printed rows to hang off (a figure, an unmapped block),
             // the click point itself anchors the card.
             page: m.page,
@@ -7043,15 +7045,16 @@ class TexViewer {
         catch (_) { return; }
         if (!current()) return;
 
-        const span = Math.max(0, s.endOffset - s.startOffset);
+        const blockText = s.native ? doc.getText(new vscode.Range(doc.positionAt(s.startOffset), doc.positionAt(s.endOffset))) : '';
+        const span = s.native ? wireText(blockText).length : Math.max(0, s.endOffset - s.startOffset);
         const lo = Math.max(0, Math.min(Number(m.start) || 0, span));
         const hi = Math.max(lo, Math.min(Number(m.end) || lo, span));
         const backward = m.direction === 'backward' && lo !== hi;
         this._rememberEditState({ caretStart: lo, caretEnd: hi,
             caretDirection: backward ? 'backward' : 'forward',
             ...(m.pos && Number.isFinite(m.pos.fx) && Number.isFinite(m.pos.fy) ? { pos: m.pos } : {}) });
-        const from = doc.positionAt(s.startOffset + lo);
-        const to = doc.positionAt(s.startOffset + hi);
+        const from = doc.positionAt(s.startOffset + (s.native ? documentOffset(blockText, lo) : lo));
+        const to = doc.positionAt(s.startOffset + (s.native ? documentOffset(blockText, hi) : hi));
         const anchor = backward ? to : from;
         const active = backward ? from : to;
         const sel = new vscode.Selection(anchor, active);
@@ -7104,34 +7107,40 @@ class TexViewer {
         if (s.native && (this._edit !== s || s.conflict)) return false;
         if (text === s.lastText) return true;
         const previousText = s.lastText;
+        let nextText = text;
         try {
             const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(s.file));
             if (s.native && this._edit !== s) return false;
             let range = new vscode.Range(doc.positionAt(s.startOffset), doc.positionAt(s.endOffset));
             const baseline = beforeText ?? operation?.before;
             if (s.native && (doc.getText(range) !== previousText || s.lastText !== previousText ||
-                typeof baseline === 'string' && baseline !== previousText)) {
+                typeof baseline === 'string' && wireText(baseline) !== wireText(previousText))) {
                 s.conflict = true;
                 this._post({ type:'editConflict', editId:s.id, text });
                 this._post({ type:'status', kind:'warn',
                     text:'Source changed elsewhere. Your card text is preserved; copy it before reopening the card.' });
                 return false;
             }
-            let replacement = text;
+            const previousWire = s.native ? wireText(previousText) : previousText;
+            const nextWire = s.native ? wireText(text) : text;
+            if (s.native && nextWire === previousWire) return true;
+            nextText = s.native ? documentText(text, doc, previousText) : text;
+            let replacement = nextText;
             const op = operation;
-            const scalarBoundary = offset => !(offset > 0 && offset < previousText.length &&
-                /[\uD800-\uDBFF]/.test(previousText[offset - 1]) && /[\uDC00-\uDFFF]/.test(previousText[offset]));
-            if (s.native && op && op.before === previousText && doc.getText(range) === previousText &&
+            const scalarBoundary = offset => !(offset > 0 && offset < previousWire.length &&
+                /[\uD800-\uDBFF]/.test(previousWire[offset - 1]) && /[\uDC00-\uDFFF]/.test(previousWire[offset]));
+            if (s.native && op && typeof op.before === 'string' && wireText(op.before) === previousWire &&
                 Number.isInteger(op.start) && Number.isInteger(op.end) && op.start >= 0 &&
-                op.end >= op.start && op.end <= previousText.length && typeof op.text === 'string' &&
+                op.end >= op.start && op.end <= previousWire.length && typeof op.text === 'string' &&
                 scalarBoundary(op.start) && scalarBoundary(op.end) &&
-                previousText.slice(0,op.start) + op.text + previousText.slice(op.end) === text) {
-                range = new vscode.Range(doc.positionAt(s.startOffset + op.start), doc.positionAt(s.startOffset + op.end));
-                replacement = op.text;
+                previousWire.slice(0,op.start) + wireText(op.text) + previousWire.slice(op.end) === nextWire) {
+                const start = documentOffset(previousText, op.start), end = documentOffset(previousText, op.end);
+                range = new vscode.Range(doc.positionAt(s.startOffset + start), doc.positionAt(s.startOffset + end));
+                replacement = documentText(op.text, doc, previousText);
+                nextText = previousText.slice(0, start) + replacement + previousText.slice(end);
             }
-            // Set BEFORE applying: the change event this edit fires must read
-            // as our own echo, not as an update to send back to the card.
-            s.lastText = text;
+            // Keep raw document text for source admission and change-event echo suppression.
+            s.lastText = nextText;
             const we = new vscode.WorkspaceEdit();
             we.replace(doc.uri, range, replacement);
             // The global document-change listener uses this to name the small
@@ -7145,7 +7154,7 @@ class TexViewer {
             }
             return !!ok;
         } catch (e) {
-            if (s.lastText === text) s.lastText = previousText;
+            if (s.lastText === nextText) s.lastText = previousText;
             this._post({ type: 'status', text: `edit failed: ${e.message}`, kind: 'err' });
             return false;
         } finally {
@@ -7198,7 +7207,7 @@ class TexViewer {
             return;
         }
         this._post({
-            type: 'editUpdate', editId: s.id, text,
+            type: 'editUpdate', editId: s.id, text:s.native ? wireText(text) : text,
             startLine: a.line + 1, endLine: b.line + 1,
         });
     }
@@ -7242,7 +7251,11 @@ class TexViewer {
             const to = doc.positionAt(s.endOffset).line + 1;
             return `outside the card's block (it holds lines ${from}\u2013${to})`;
         }
-        const clamp = (n) => Math.max(0, Math.min(n, s.endOffset) - s.startOffset);
+        const blockText = s.native ? doc.getText(new vscode.Range(doc.positionAt(s.startOffset), doc.positionAt(s.endOffset))) : '';
+        const clamp = (n) => {
+            const raw = Math.max(0, Math.min(n, s.endOffset) - s.startOffset);
+            return s.native ? wireOffset(blockText, raw) : raw;
+        };
         const start = clamp(Math.max(a, s.startOffset));
         const end = clamp(Math.max(b, s.startOffset));
         let direction;

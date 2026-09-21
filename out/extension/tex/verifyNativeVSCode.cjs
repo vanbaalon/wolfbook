@@ -22,7 +22,7 @@ exports.run = async function() {
     const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     if (!folder || !path.basename(path.dirname(folder)).startsWith('wpaper-ui-'))
         throw Error('Run only in an isolated wpaper-ui-* test directory');
-    const { mode = 'native' } = JSON.parse(await fs.readFile(path.join(folder, '../acceptance-mode.json'),'utf8'));
+    const { mode = 'native', eol = 'lf' } = JSON.parse(await fs.readFile(path.join(folder, '../acceptance-mode.json'),'utf8'));
     const output = vscode.window.createOutputChannel('WPaper native acceptance');
     const projection = new Projection();
     const coord = new RenderCoordinator(projection, output);
@@ -99,6 +99,22 @@ exports.run = async function() {
             await viewer._onEditCaret({ editId:card.id, start:4, end:5 });
             assert.equal(editor.selection.start.character, 4);
             assert.equal(editor.selection.end.character, 5);
+            // Simulate textarea LF messages against the actual VS Code CRLF document.
+            const wireBefore = card.lastText.replace(/\r\n?/g, '\n');
+            const multilineText = wireBefore.slice(0,5) + '\nNext ' + wireBefore.slice(5);
+            assert.equal(await viewer._applyEditChange({ editId:card.id, text:multilineText,
+                beforeText:wireBefore, operation:{ before:wireBefore,start:5,end:5,text:'\nNext ' } }),true);
+            assert.equal(doc.eol, eol === 'crlf' ? vscode.EndOfLine.CRLF : vscode.EndOfLine.LF);
+            assert.ok(card.lastText.includes(eol === 'crlf' ? '\r\nNext ' : '\nNext '));
+            await viewer._onEditCaret({ editId:card.id,start:6,end:10 });
+            assert.equal(editor.selection.start.line,4);
+            assert.equal(editor.selection.start.character,0);
+            assert.equal(editor.selection.end.character,4);
+            const rawBefore = card.lastText;
+            const nextWire = rawBefore.replace(/\r\n?/g, '\n');
+            assert.equal(await viewer._applyEditChange({ editId:card.id,text:nextWire.slice(0,10)+'!'+nextWire.slice(10),
+                beforeText:nextWire,operation:{ before:nextWire,start:10,end:10,text:'!' } }),true);
+            assert.ok(doc.lineAt(4).text.startsWith('Next! '));
             const oldCardText = card.lastText;
             await editor.edit(builder => builder.insert(doc.positionAt(card.startOffset + 1), 'EXTERNAL'));
             await until(() => card.lastText !== oldCardText, 'external source update in card');
@@ -146,7 +162,7 @@ exports.run = async function() {
         }
         await fs.writeFile(path.join(folder, '../vscode-acceptance.json'), JSON.stringify({
             result:'PASS', vscode:vscode.version, node:process.version,
-            platform:process.platform, arch:process.arch, mode, native_preview:mode === 'native', mini_editor_precise_edit:mode === 'native', mini_editor_conflict_rejected:mode === 'native', unchanged_canvas_reused:mode === 'native',
+            platform:process.platform, arch:process.arch, mode, eol, multiline_card_verified:mode === 'native', native_preview:mode === 'native', mini_editor_precise_edit:mode === 'native', mini_editor_conflict_rejected:mode === 'native', unchanged_canvas_reused:mode === 'native',
             default_without_wlatex:mode === 'default', unavailable_wlatex_fallback:mode === 'missing',
             conventional_unsaved_rebuild:mode !== 'native', authoritative_native_handoff:mode === 'native',
             real_pdfjs_opened:true, unsaved_source_edit:true, translated_inverse_navigation:mode === 'native',

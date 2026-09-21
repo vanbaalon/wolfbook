@@ -1,19 +1,20 @@
-// node launchNativeVSCodeCheck.cjs WLATEX_INSTALL CODE_CLI [native|default|missing]
+// node launchNativeVSCodeCheck.cjs WLATEX_INSTALL CODE_CLI [native|default|missing] [lf|crlf]
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 async function main() {
-    const [runtime, code, mode = 'native'] = process.argv.slice(2);
+    const [runtime, code, mode = 'native', eol = 'lf'] = process.argv.slice(2);
+    if (!['lf', 'crlf'].includes(eol)) throw Error('Unknown line ending mode');
     if (!['native', 'default', 'missing'].includes(mode)) throw Error('Unknown acceptance mode');
     if (!runtime || !code || !path.isAbsolute(runtime) || !path.isAbsolute(code))
         throw Error('Supply absolute WLaTeX installation and VS Code CLI paths');
     const run = await fs.mkdtemp(path.join(os.tmpdir(), 'wpaper-ui-'));
     const folder = path.join(run,'paper'), profile = path.join(run,'profile');
     await fs.mkdir(folder);
-    await fs.writeFile(path.join(run, 'acceptance-mode.json'), JSON.stringify({ mode }));
+    await fs.writeFile(path.join(run, 'acceptance-mode.json'), JSON.stringify({ mode, eol }));
     await fs.mkdir(path.join(profile,'User'), { recursive:true });
-    await fs.writeFile(path.join(folder,'paper.tex'), '\\documentclass{article}\n\\begin{document}\nAlpha Beta. Gamma Delta.\n\\newpage\nSecond page.\n\\end{document}\n');
+    await fs.writeFile(path.join(folder,'paper.tex'), '\\documentclass{article}\n\\begin{document}\nAlpha Beta. Gamma Delta.\n\\newpage\nSecond page.\n\\end{document}\n'.replace(/\n/g, eol === 'crlf' ? '\r\n' : '\n'));
     // wlatexDirectory has machine scope, so configure the isolated user profile,
     // not workspace settings (which VS Code correctly ignores for this key).
     await fs.writeFile(path.join(profile,'User/settings.json'), JSON.stringify({

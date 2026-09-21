@@ -916,3 +916,50 @@ test('native canvas reuse requires matching page identities, scale and display d
     assert.deepEqual(reuse([a,b],null), []);
     assert.deepEqual(reuse(['invalid',b],['invalid',c]), []);
 });
+
+
+test('native CRLF card edits and bidirectional selections use textarea offsets', async () => {
+    let source = 'aa\r\n😀bb\r\ncc'; const posts = []; let applied;
+    const doc = { uri:{ fsPath:'/crlf.tex' }, eol:2,
+        positionAt:n => new NativePosition(0,n), offsetAt:p => p.character,
+        getText:range => range ? source.slice(range.start.character,range.end.character) : source };
+    stub.workspace.openTextDocument = async () => doc;
+    stub.window.visibleTextEditors = [];
+    stub.WorkspaceEdit = class { replace(uri, range, value) { this.range=range; this.value=value; } };
+    const card = { id:1, native:true, file:doc.uri.fsPath, startOffset:0, endOffset:source.length, lastText:source };
+    let selection;
+    const viewer = { panel:{}, _edit:card, _rememberEditState() {}, _post:m => posts.push(m),
+        syncFromEditor:async e => { selection=e.selection; },
+        _applyReaderEdit:async (_, edit) => {
+            applied=edit;
+            const start=edit.range.start.character, end=edit.range.end.character;
+            source=source.slice(0,start)+edit.value+source.slice(end);
+            TexViewer.prototype._onEditDocChange.call(viewer, { document:doc,
+                contentChanges:[{ rangeOffset:start, rangeLength:end-start, text:edit.value }] });
+            return true;
+        } };
+    const before='aa\n😀bb\ncc', text='aa\n😀X\nYbb\ncc';
+    assert.equal(await TexViewer.prototype._applyEditChangeNow.call(viewer,card,text,
+        { before,start:5,end:5,text:'X\nY' },before),true);
+    assert.equal(applied.range.start.character,6);
+    assert.equal(applied.range.end.character,6);
+    assert.equal(applied.value,'X\r\nY');
+    assert.equal(source,'aa\r\n😀X\r\nYbb\r\ncc');
+    assert.equal(card.lastText,source);
+    assert.equal(card.endOffset,source.length);
+    assert.ok(!posts.some(m => m.type==='editConflict' || m.type==='editUpdate'));
+    await TexViewer.prototype._onEditCaret.call(viewer,{ editId:1,start:7,end:8,direction:'backward' });
+    assert.equal(selection.start.character,9);
+    assert.equal(selection.end.character,10);
+    assert.equal(selection.active.character,9);
+    TexViewer.prototype._postEditSelection.call(viewer,doc,
+        { start:new NativePosition(0,9),end:new NativePosition(0,10) },false,new NativePosition(0,9));
+    const message=posts.findLast(m => m.type==='editSelect');
+    assert.equal(message.start,7); assert.equal(message.end,8); assert.equal(message.caret,7);
+    applied=null;
+    assert.equal(await TexViewer.prototype._applyEditChangeNow.call(viewer,card,text,null,text),true);
+    assert.equal(applied,null,'unchanged LF textarea must not rewrite the CRLF source');
+    assert.equal(card.lastText,source);
+    assert.equal(await TexViewer.prototype._applyEditChangeNow.call(viewer,card,text+'!',null,text),true);
+    assert.equal(source,'aa\r\n😀X\r\nYbb\r\ncc!','full-block fallback preserves EOL');
+});

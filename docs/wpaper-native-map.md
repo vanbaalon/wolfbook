@@ -625,3 +625,25 @@ execution, per-page transport, visual/pointer acceptance and four-platform
 native release verification remain open. The native engine/SDK remain assigned
 to Track A by `WLaTeX/docs/work-split.md`; ownership clarification has been
 requested before crossing that boundary.
+
+## 2026-09-21 — CRLF native mini-editor protocol
+
+Native cards now exchange LF text and UTF-16 textarea offsets explicitly while
+retaining raw document text for source admission. Precise operations convert
+those offsets back to CRLF document offsets; inserted text uses the document's
+line endings. Caret and selection messages convert in both directions, and
+restored card selections clamp to textarea length. An unchanged textarea does
+not rewrite the source merely because its line endings are normalized.
+
+The regression test covers a multiline insertion after an emoji, exact edit
+bounds, backward selection, source-to-card selection, unchanged submission and
+whole-block fallback. The 57 native-policy, 207 sync, 35 panel and 11 shipping
+checks pass (`/tmp/wpaper-crlf-final-tests.log`).
+
+The real VS Code launcher accepts a fourth `lf|crlf` argument. The native CRLF
+scenario passes with multiline insertion, a subsequent edit after the newline,
+caret selection, conflict rejection, PDF.js page reuse and conventional/native
+handoff (`/tmp/wpaper-native-crlf-final-host.log`). This exercised Windows-style
+source text on macOS ARM64, not the Windows native runtime. Physical gestures,
+visual acceptance, other-platform native execution, incremental compilation and
+per-page transport remain outstanding.
