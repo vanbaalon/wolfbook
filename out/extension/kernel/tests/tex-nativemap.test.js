@@ -197,3 +197,71 @@ test('failed live queries permanently invalidate cached native source actions', 
         assert.equal(await map.forwardAt(file,4,0), null, 'only a fresh admitted view can recover');
     }
 });
+
+test('displaced interval sweep matches an independent source-membership oracle', async () => {
+    let seed = 98271;
+    const random = n => { seed = (Math.imul(seed,1664525)+1013904223) >>> 0; return seed % n; };
+    for (let trial=0; trial<80; trial++) {
+        const { view, source } = fixture();
+        const template = view.pages[0].hits[0];
+        const memberships = new Map();
+        view.pages[0].hits = Array.from({ length:24 }, (_,id) => {
+            const hit = structuredClone(template), lo=random(40), hi=lo+random(41-lo);
+            hit.item_id=id;
+            hit.item.geometry.position.x=id*10*SP;
+            const loc = { ...location(lo,'Displaced'), start:{ line:1,column_utf16:lo }, end:{ line:1,column_utf16:hi } };
+            hit.mapped_origins[0].source.location=loc;
+            hit.preferred_source.location=loc;
+            memberships.set(id, new Set(Array.from({ length:random(4) }, () => lo+(hi===lo ? 0 : random(hi-lo)))));
+            return hit;
+        });
+        source.files = new Map([['paper.tex', { text:'x'.repeat(40) }]]);
+        const queried = new Set();
+        source.forward = async (_,line,col) => {
+            assert.equal(line,1);
+            assert.ok(!queried.has(col), 'a source position must be queried at most once');
+            queried.add(col);
+            return { hits:view.pages[0].hits.filter(hit => memberships.get(hit.item_id).has(col)) };
+        };
+        const lo=random(40), hi=lo+1+random(40-lo);
+        const expected = [...memberships].filter(([,points]) => [...points].some(p => lo<=p && p<hi)).map(([id]) => id);
+        const map = new NativeMap({ generation:{ pdfHash:'paired',projectDir:root }, nativeView:view,nativeSource:source });
+        const result = await map.forwardRange(file,{ line:1,column_utf16:lo },{ line:1,column_utf16:hi });
+        const actual = result.map(rect => Math.round((rect.x-72)/(10*SP*72/(72.27*SP)))).sort((a,b)=>a-b);
+        assert.deepEqual(actual,expected,`trial ${trial}, selection ${lo}..${hi}`);
+    }
+});
+
+test('overlapping displaced origins share one scan of a large inserted range', async () => {
+    const { view,source } = fixture();
+    const template = view.pages[0].hits[0];
+    const length=4000, count=300;
+    view.pages[0].hits=Array.from({ length:count }, (_,id) => {
+        const hit=structuredClone(template); hit.item_id=id;
+        hit.mapped_origins[0].source.location={ ...location(0,'Displaced'),
+            start:{ line:1,column_utf16:0 },end:{ line:1,column_utf16:length } };
+        return hit;
+    });
+    source.files=new Map([['paper.tex',{ text:'x'.repeat(length) }]]);
+    let calls=0;
+    source.forward=async (_,line,col) => { calls++; return { hits:col===length-1 ? view.pages[0].hits : [] }; };
+    const map=new NativeMap({ generation:{ pdfHash:'paired',projectDir:root },nativeView:view,nativeSource:source });
+    assert.equal((await map.forwardRange(file,{ line:1,column_utf16:0 },{ line:1,column_utf16:length })).length,count);
+    assert.equal(calls,length);
+});
+
+test('displaced sweep queries scalar boundaries across CRLF lines', async () => {
+    const { view,source } = fixture();
+    view.pages[0].hits=[view.pages[0].hits[0]];
+    view.pages[0].hits[0].mapped_origins[0].source.location={ ...location(0,'Displaced'),
+        start:{ line:1,column_utf16:0 },end:{ line:2,column_utf16:3 } };
+    source.files=new Map([['paper.tex',{ text:'😀\r\nXYZ' }]]);
+    const queries=[];
+    source.forward=async (_,line,col) => {
+        queries.push([line,col]);
+        return { hits:line===2 && col===2 ? view.pages[0].hits : [] };
+    };
+    const map=new NativeMap({ generation:{ pdfHash:'paired',projectDir:root },nativeView:view,nativeSource:source });
+    assert.equal((await map.forwardRange(file,{ line:1,column_utf16:0 },{ line:2,column_utf16:3 })).length,1);
+    assert.deepEqual(queries,[[1,0],[1,2],[2,0],[2,1],[2,2]]);
+});

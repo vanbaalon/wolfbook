@@ -693,3 +693,26 @@ has the same restriction). Resolving it requires admitting safe project-relative
 new files into the frozen image while preserving path validation, size limits,
 source binding and unsaved-buffer semantics. No SDK/native-engine files were
 changed across the documented ownership boundary.
+
+## 2026-09-21 — displaced source-range sweep
+
+Range highlighting now processes uncertain origin intervals in source order,
+admits all matching candidates from each worker answer, and skips already
+queried prefixes. It no longer stores one membership set per source character
+or repeatedly awaits those cached answers for every overlapping origin. Exact
+contiguous origins still need no worker queries. Current-view checks, worker
+failure invalidation, Unicode boundaries and CRLF traversal are preserved.
+
+The independent membership oracle covers 80 seeded generated selections with
+mixed overlapping and zero-length origins. Additional tests cover 300 overlapping
+origins across 4,000 characters and explicit Unicode/CRLF query coordinates.
+All 73 native map/policy tests pass. The real native navigation verifier also
+passes range, Shift-pick, widen/shrink, mini-editor and inserted-source exclusion
+checks (`/tmp/wpaper-native-range-navigation.log`).
+
+An illustrative local run of the same large synthetic test against commit
+196ca4b took 783 ms; the sweep took 11 ms. These are mock-worker host-bookkeeping
+measurements, not real-worker latency acceptance. Both versions issue 4,000
+point queries in that case; SDK range batching and incremental engine execution
+remain necessary. Logs: `/tmp/wpaper-native-range-before.log` and
+`/tmp/wpaper-native-range-final-unit.log`.

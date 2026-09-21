@@ -151,31 +151,33 @@ class NativeMap extends RenderMap {
             if (loc.accuracy === 'Exact' && left < right) chosen.add(entry.i);
             else uncertain.push({ id:entry.i, lo, hi });
         }
-        // Exact translated ranges are contiguous surviving source. Only
-        // displaced/zero-length origins need worker membership queries. Cache
-        // shared positions, and stop once an item's membership is established.
-        const answers = new Map();
-        const query = async n => {
-            if (!answers.has(n)) {
+        // Sweep uncertain intervals in source order. Every point answer admits
+        // all candidate items it contains, and later intervals skip the prefix
+        // already queried. This avoids retaining a set of hits per character or
+        // rescanning the same empty inserted text for every overlapping origin.
+        const candidates = new Set(uncertain.map(origin => origin.id));
+        uncertain.sort((a,b) => a.lo-b.lo || a.hi-b.hi);
+        let scannedUntil = -1;
+        for (const { id, lo, hi } of uncertain) {
+            if (chosen.has(id)) continue;
+            for (let n = Math.max(lo, scannedUntil); n < hi || n === lo; ) {
+                if (!current()) return null;
                 let low = 0, high = starts.length;
                 while (low + 1 < high) {
                     const mid = (low + high) >> 1;
                     if (starts[mid] <= n) low = mid; else high = mid;
                 }
                 const answer = await this._forward(relative, low + 1, n - starts[low]);
-                answers.set(n, new Set(answer.hits.map(hit => hit.item_id)));
-            }
-            return answers.get(n);
-        };
-        for (const { id, lo, hi } of uncertain) {
-            if (chosen.has(id)) continue;
-            for (let n = lo; n < hi || n === lo; ) {
                 if (!current()) return null;
-                const ids = await query(n);
-                if (!current()) return null;
-                if (ids.has(id)) { chosen.add(id); break; }
-                if (n >= hi) break;
+                for (const hit of answer.hits) {
+                    if (!candidates.has(hit.item_id)) continue;
+                    const entry = this._byItem.get(hit.item_id);
+                    if (!entry || entry.page !== hit.item.page) return null;
+                    chosen.add(hit.item_id);
+                }
                 n += text[n] === '\r' && text[n + 1] === '\n' ? 2 : text.codePointAt(n) > 0xffff ? 2 : 1;
+                scannedUntil = n;
+                if (chosen.has(id)) break;
             }
         }
         if (!current()) return null;
