@@ -5390,7 +5390,7 @@ function buildEditCard(e) {
     head.title = 'Drag to move · double-click to re-pin under the block';
     const lines = document.createElement('span');
     lines.className = 'ec-lines';
-    lines.textContent = `${e.file || ''} · ${e.startLine === e.endLine
+    lines.textContent = e.conflict ? 'Source changed — copy edits, then reopen' : `${e.file || ''} · ${e.startLine === e.endLine
         ? 'line ' + e.startLine : 'lines ' + e.startLine + '–' + e.endLine}`;
     const spacer = document.createElement('span');
     spacer.className = 'ec-spacer';
@@ -5468,8 +5468,10 @@ function buildEditCard(e) {
         beforeInput = { text:ta.value, start:ta.selectionStart, end:ta.selectionEnd, type:event.inputType };
     });
     ta.addEventListener('input', () => {
+        const beforeText = beforeInput?.text ?? e.text;
         const operation = miniInputOperation(beforeInput, ta.value, ta.selectionStart);
         beforeInput = null;
+        e._localText = ta.value;
         boundaryArm = null;
         state.edit.text = ta.value;               // survives zoom/generation rebuilds
         caretSnapshot();                         // capture before host/compile replies
@@ -5477,9 +5479,10 @@ function buildEditCard(e) {
         clearTimeout(debounce);
         if (e.native) {
             debounce = null;
+            if (e.conflict) { syncHighlight(card); return; }
             const caret = caretSnapshot();
             state.edit._caretSent = `${caret.start}:${caret.end}:${caret.direction}`;
-            vscode.postMessage({ type:'editChange', editId:e.id, text:ta.value, caret, operation });
+            vscode.postMessage({ type:'editChange', editId:e.id, text:ta.value, caret, operation, beforeText });
             syncHighlight(card);
             return;
         }
@@ -7274,6 +7277,18 @@ window.addEventListener('message', async (ev) => {
         case 'traceState': setTraceState(msg); break;
         case 'sourceDirty': setSourceDirty(msg); break;
         case 'setFollow': setFollowMode(msg.mode || (msg.value ? 'scroll' : 'off'), false); break;
+        case 'editConflict': {
+            if (!state.edit || state.edit.id !== msg.editId) break;
+            if (!state.edit.conflict) {
+                const ta = document.querySelector('.editcard textarea');
+                state.edit.text = state.edit._localText ?? msg.text;
+                if (ta) ta.value = state.edit.text;
+            }
+            state.edit.conflict = true;
+            const label = document.querySelector('.editcard .ec-lines');
+            if (label) label.textContent = 'Source changed — copy edits, then reopen';
+            break;
+        }
         case 'editOpen': {
             // A compile/restore replay for the SAME session is not a request
             // for a new editor. Keep its DOM, undo history, composition, value,
@@ -7313,7 +7328,7 @@ window.addEventListener('message', async (ev) => {
         }
         case 'editUpdate': {
             const e = state.edit;
-            if (!e || e.id !== msg.editId) break;
+            if (!e || e.id !== msg.editId || e.conflict) break;
             e.text = msg.text;
             if (msg.startLine) { e.startLine = msg.startLine; e.endLine = msg.endLine; }
             const card = document.querySelector('.editcard');

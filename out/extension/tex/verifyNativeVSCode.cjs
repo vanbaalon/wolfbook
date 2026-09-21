@@ -81,6 +81,16 @@ exports.run = async function() {
             await viewer._onEditCaret({ editId:card.id, start:4, end:5 });
             assert.equal(editor.selection.start.character, 4);
             assert.equal(editor.selection.end.character, 5);
+            const oldCardText = card.lastText;
+            await editor.edit(builder => builder.insert(doc.positionAt(card.startOffset + 1), 'EXTERNAL'));
+            await until(() => card.lastText !== oldCardText, 'external source update in card');
+            const externalText = doc.getText();
+            assert.equal(await viewer._applyEditChange({ editId:card.id, text:oldCardText + 'stale',
+                operation:{ before:oldCardText, start:oldCardText.length, end:oldCardText.length, text:'stale' } }), false);
+            assert.equal(card.conflict, true);
+            assert.equal(doc.getText(), externalText);
+            assert.equal(await viewer._applyEditChange({ editId:card.id, text:oldCardText + 'stale' }), false);
+            assert.equal(doc.getText(), externalText);
         } else {
             await coord.build(doc, { quiet:true, authoritative:true });
             assert.equal(st.generation.ok, true, st.lastError);
@@ -94,7 +104,7 @@ exports.run = async function() {
         }
         await fs.writeFile(path.join(folder, '../vscode-acceptance.json'), JSON.stringify({
             result:'PASS', vscode:vscode.version, node:process.version,
-            platform:process.platform, arch:process.arch, mode, native_preview:mode === 'native', mini_editor_precise_edit:mode === 'native',
+            platform:process.platform, arch:process.arch, mode, native_preview:mode === 'native', mini_editor_precise_edit:mode === 'native', mini_editor_conflict_rejected:mode === 'native',
             default_without_wlatex:mode === 'default', unavailable_wlatex_fallback:mode === 'missing',
             conventional_unsaved_rebuild:mode !== 'native',
             real_pdfjs_opened:true, unsaved_source_edit:true, translated_inverse_navigation:mode === 'native',

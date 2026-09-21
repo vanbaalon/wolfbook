@@ -558,3 +558,27 @@ real VS Code test opens a card over the older native PDF, inserts `NEW` inside
 and mirrors the card selection into the real editor. Evidence:
 `/tmp/wpaper-vscode-mini-edit.log`. This uses the actual edit handler and VS Code
 WorkspaceEdit; physical browser input/pointer and visual acceptance remain open.
+
+## 2026-09-21 — reject stale native card edits
+
+Native card updates now carry their prior displayed text, including browser
+inputs without a precise range. If that baseline, the current block or the
+session's text changed before application, the handler refuses the write rather
+than falling back to a whole-block replacement. The session becomes conflicted
+and cannot write or save again until reopened. A session closed/replaced while
+its document opens likewise cannot write.
+
+The client retains the latest local draft for copying, displays a persistent
+"Source changed — copy edits, then reopen" label, and ignores later source-text
+updates for that conflicted card. Local typing can continue for recovery/copying
+but is not sent to the source. Reopening creates a new session against current
+source. This is explicit conflict handling, not an automatic merge.
+
+Validation: 55 native-policy, 207 sync, 35 panel and ten viewer-shipping checks
+pass. Tests cover stale operation rejection, later save rejection, closure
+during document opening and protection of the newest local draft against queued
+updates. The real VS Code verifier now changes source outside the native card,
+submits its old operation, and confirms both that operation and a later full-text
+write are rejected while current document bytes remain intact. Evidence:
+`/tmp/wpaper-vscode-card-conflict.log`. Physical input/visual acceptance,
+incremental compilation and other-platform native validation remain open.

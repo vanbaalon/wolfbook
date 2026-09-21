@@ -840,12 +840,60 @@ test('native mini-editor applies verified ranges and retains insertions at card 
             } };
         const before = text;
         assert.equal(await TexViewer.prototype._applyEditChangeNow.call(viewer, s, 'aaaaa',
-            { before:at === 'invalid' ? 'outdated' : before, start:at === 'invalid' ? 1 : at,
-                end:at === 'invalid' ? 1 : at, text:'a' }), true);
+            { before, start:at === 'invalid' ? 99 : at,
+                end:at === 'invalid' ? 99 : at, text:'a' }), true);
         assert.equal(applied.range.start.character, at === 'invalid' ? 0 : at);
         assert.equal(applied.range.end.character, at === 'invalid' ? 4 : at);
         assert.equal(s.startOffset, 0);
         assert.equal(s.endOffset, 5);
         assert.equal(s.lastText, text);
     }
+});
+
+
+test('stale native card operations cannot overwrite external changes or later save the stale block', async () => {
+    const source = 'External'; const posts = []; let writes = 0;
+    const s = { id:1, native:true, file:'/paper.tex', startOffset:0, endOffset:source.length, lastText:source };
+    const doc = { uri:{ fsPath:s.file }, positionAt:n => new NativePosition(0,n), getText:() => source };
+    stub.workspace.openTextDocument = async () => doc;
+    const viewer = { _edit:s, _post:message => posts.push(message), _applyReaderEdit:async () => { writes++; } };
+    assert.equal(await TexViewer.prototype._applyEditChangeNow.call(viewer, s, 'Old draft',
+        { before:'Old', start:3, end:3, text:' draft' }), false);
+    assert.equal(s.conflict, true);
+    assert.equal(posts[0].type, 'editConflict');
+    assert.equal(posts[0].text, 'Old draft');
+    assert.equal(await TexViewer.prototype._applyEditChangeNow.call(viewer, s, 'Old draft'), false);
+    assert.equal(writes, 0);
+    assert.equal(s.lastText, source);
+});
+
+test('native card writes are rejected if their session closes during document opening', async () => {
+    let release; let writes = 0;
+    const s = { native:true, lastText:'old', file:'/paper.tex' };
+    const viewer = { _edit:s, _post() {}, _applyReaderEdit:async () => { writes++; } };
+    stub.workspace.openTextDocument = () => new Promise(resolve => { release = resolve; });
+    const pending = TexViewer.prototype._applyEditChangeNow.call(viewer, s, 'new');
+    viewer._edit = null; release({});
+    assert.equal(await pending, false);
+    assert.equal(writes, 0);
+});
+
+
+test('native conflict UI preserves the newest local draft against queued source updates', () => {
+    const vm = require('node:vm');
+    const js = fs.readFileSync(path.resolve(__dirname, '../../../client/tex-viewer.js'), 'utf8');
+    const conflict = js.slice(js.indexOf("case 'editConflict':"), js.indexOf("case 'editOpen':"));
+    const update = js.slice(js.indexOf("case 'editUpdate':"), js.indexOf("case 'mmaOpen':"));
+    const textarea = { value:'External source' }, label = {};
+    const context = vm.createContext({ state:{ edit:{ id:1, _localText:'Latest local draft' } },
+        document:{ querySelector:selector => selector.endsWith('textarea') ? textarea : label },
+        msg:{ type:'editConflict', editId:1, text:'Older local draft' } });
+    const handler = 'switch(msg.type){' + conflict + update + '}';
+    vm.runInContext(handler, context);
+    assert.equal(textarea.value, 'Latest local draft');
+    assert.match(label.textContent, /Source changed/);
+    context.msg = { type:'editUpdate', editId:1, text:'New external source' };
+    vm.runInContext(handler, context);
+    assert.equal(textarea.value, 'Latest local draft');
+    assert.equal(context.state.edit.text, 'Latest local draft');
 });

@@ -7083,7 +7083,7 @@ class TexViewer {
         // starting the next. Serialize edits so Ctrl+S can never overtake a
         // debounce already in flight and write the previous block text.
         const before = this._editApplyQueue || Promise.resolve();
-        const work = before.catch(() => {}).then(() => this._applyEditChangeNow(s, m.text, m.operation));
+        const work = before.catch(() => {}).then(() => this._applyEditChangeNow(s, m.text, m.operation, m.beforeText));
         this._editApplyQueue = work;
         let ok = false;
         try { ok = await work; }
@@ -7097,12 +7097,23 @@ class TexViewer {
         return ok;
     }
 
-    async _applyEditChangeNow(s, text, operation) {
+    async _applyEditChangeNow(s, text, operation, beforeText) {
+        if (s.native && (this._edit !== s || s.conflict)) return false;
         if (text === s.lastText) return true;
         const previousText = s.lastText;
         try {
             const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(s.file));
+            if (s.native && this._edit !== s) return false;
             let range = new vscode.Range(doc.positionAt(s.startOffset), doc.positionAt(s.endOffset));
+            const baseline = beforeText ?? operation?.before;
+            if (s.native && (doc.getText(range) !== previousText || s.lastText !== previousText ||
+                typeof baseline === 'string' && baseline !== previousText)) {
+                s.conflict = true;
+                this._post({ type:'editConflict', editId:s.id, text });
+                this._post({ type:'status', kind:'warn',
+                    text:'Source changed elsewhere. Your card text is preserved; copy it before reopening the card.' });
+                return false;
+            }
             let replacement = text;
             const op = operation;
             const scalarBoundary = offset => !(offset > 0 && offset < previousText.length &&
