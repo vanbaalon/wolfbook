@@ -846,3 +846,24 @@ Evidence: `/tmp/wpaper-native-cache-final-unit.log`,
 `/tmp/wpaper-native-cache-unit.log`, `/tmp/wpaper-native-cache-host.log`.
 The package inventory guard now requires eight integration assets, including
 `nativeArtifactCache.js`; see `/tmp/wpaper-vsix-cache-admission.json`.
+
+## 2026-09-21 — asynchronous artifact reclamation
+
+Recursive artifact deletion now uses asynchronous filesystem operations. Build
+startup reserves its slot and waits for any collection already in progress;
+leases may be created only within an active build. Collection remains disabled
+while compilation/publication uses shared paths. Lane shutdown awaits the
+applicable cleanup promise. Source-version and cancellation checks bracket both
+cleanup waits, so an edit while deletion is pending cannot admit an obsolete
+generation afterward. This supersedes the synchronous-deletion limitation above.
+
+All 72 cache, cancellation, generation and native-policy checks pass. A controlled
+pending filesystem deletion proves the event loop can run while a build is held
+at the cleanup boundary. Tests cover source changes during both entry and exit
+waits. The real VS Code native/CRLF scenario passes, including worker crash
+recovery, old artifact retention, PDF handles and reused page content. Evidence:
+`/tmp/wpaper-async-cache-final-unit.log` and `/tmp/wpaper-async-cache-host.log`.
+
+GC-dependent eviction timing, a hard disk quota and recovery of crashed-session
+leftovers remain open. Asynchronous deletion does not establish the engine's
+interactive latency or checkpoint-storage acceptance gates.

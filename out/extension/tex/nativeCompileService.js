@@ -48,11 +48,19 @@ class NativeBuildLane {
         return this.edits;
     }
     async compile(o) {
-        // No collection while a producer or publication may use shared files.
-        if (this.closed) throw Object.assign(Error('Native build superseded'), { name:'AbortError' });
-        this.artifactCache?.begin();
-        try { return await this._compile(o); }
-        finally { this.artifactCache?.end(); }
+        const version=this.version;
+        const requireCurrent=()=>{
+            if (this.closed || version!==this.version || o.signal?.aborted)
+                throw Object.assign(Error('Native build superseded'), { name:'AbortError' });
+        };
+        requireCurrent();
+        // Wait for prior deletion before allowing shared-file publication.
+        if (this.artifactCache) await this.artifactCache.begin();
+        let generation;
+        try { requireCurrent(); generation=await this._compile(o); }
+        finally { await this.artifactCache?.end(); }
+        requireCurrent();
+        return generation;
     }
     async _compile(o) {
         const version = this.version;
@@ -92,6 +100,7 @@ class NativeBuildLane {
         const report = await this.compiler.compile({ main: this.root, root: this.projectDir,
             generation: ++this.buildNumber, signal: o.signal, timeoutMs:o.timeoutMs,
             overlays: Object.fromEntries(texts) });
+        if (this.closed) requireCurrent();
         const nativeArtifactLease = this.artifactCache?.lease(report);
         report.nativeArtifactLease = nativeArtifactLease;
         requireCurrent();
@@ -151,10 +160,10 @@ class NativeBuildLane {
         this._closing = Promise.allSettled([
             Promise.resolve().then(() => this.compiler.close()),
             Promise.resolve().then(() => this.source.close()),
-        ]).then(results => {
+        ]).then(async results => {
             const failures = results.filter(result => result.status === 'rejected').map(result => result.reason);
             if (failures.length) throw new AggregateError(failures, 'Native lane shutdown failed');
-            this.artifactCache?.close();
+            await this.artifactCache?.close();
         });
         return this._closing;
     }

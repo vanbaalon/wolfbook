@@ -76,3 +76,23 @@ test('closing a native lane invalidates work waiting for source synchronization'
         await assert.rejects(pending, { name:'AbortError' });
     } finally { fs.rmSync(dir, { recursive:true, force:true }); }
 });
+
+test('source changes during cache cleanup cannot publish an obsolete native generation', async () => {
+    for (const boundary of ['begin','end']) {
+        let release, reached; const waiting=new Promise(resolve=>{ reached=resolve; });
+        let compiled=0, ended=0;
+        const lane=Object.create(NativeBuildLane.prototype);
+        Object.assign(lane,{ version:0,closed:false,
+            artifactCache:{
+                begin:()=>boundary==='begin' ? new Promise(resolve=>{ release=resolve; reached(); }) : Promise.resolve(),
+                end:()=>{ ended++; return boundary==='end' ? new Promise(resolve=>{ release=resolve; reached(); }) : Promise.resolve(); },
+            },
+            _compile:async()=>{ compiled++; return { ok:true }; },
+        });
+        const pending=lane.compile({}); await waiting;
+        lane.invalidate(); release();
+        await assert.rejects(pending,{ name:'AbortError' });
+        assert.equal(compiled,boundary==='begin' ? 0 : 1);
+        assert.equal(ended,1);
+    }
+});

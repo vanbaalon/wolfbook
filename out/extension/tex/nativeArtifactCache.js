@@ -12,6 +12,7 @@ class NativeArtifactCache {
     }
     lease(report) {
         if (this.closed) throw Error('Native artifact cache closed');
+        if (!this.busy) throw Error('Native artifact lease requires an active build');
         const paths=[report.artifact_directory,report.source_directory,report.log].filter(Boolean);
         for (const file of paths) this.checkPath(file);
         const lease=Object.freeze({});
@@ -31,9 +32,22 @@ class NativeArtifactCache {
             catch (error) { if (error.code!=='ENOENT') throw error; }
         }
     }
-    begin() { if (this.closed) throw Error('Native artifact cache closed'); this.busy++; }
-    end() { this.busy--; this.collect(); }
+    async begin() {
+        if (this.closed) throw Error('Native artifact cache closed');
+        // Reserve the build before yielding so another collection cannot start.
+        this.busy++;
+        await this.collecting;
+    }
+    end() { this.busy--; return this.collect(); }
     collect() {
+        if (this.collecting) return this.collecting;
+        if (this.busy) return Promise.resolve();
+        this.collecting=Promise.resolve().then(()=>this._collect()).catch(error=>{
+            this.lastError=error;
+        }).finally(()=>{ this.collecting=null; });
+        return this.collecting;
+    }
+    async _collect() {
         if (this.busy) return;
         const live=[...this.entries.values()].filter(entry=>entry.reference.deref()).flatMap(entry=>entry.paths);
         const contains=(parent,child)=>{ const r=path.relative(parent,child); return !r || (!r.startsWith(`..${path.sep}`) && r!=='..' && !path.isAbsolute(r)); };
@@ -44,18 +58,18 @@ class NativeArtifactCache {
                     this.checkPath(file);
                     // Frozen sources may be content-addressed and shared by reports.
                     if (!live.some(other=>contains(file,other) || contains(other,file)))
-                        fs.rmSync(file,{ recursive:true,force:true });
+                        await fs.promises.rm(file,{ recursive:true,force:true });
                 }
                 this.entries.delete(id);
             } catch (error) { this.lastError=error; } // Retry at the next collection boundary.
         }
         if (this.closed && !this.entries.size) {
             try {
-                fs.rmSync(this.directory,{ recursive:true,force:true });
+                await fs.promises.rm(this.directory,{ recursive:true,force:true });
                 active.delete(this);
             } catch (error) { this.lastError=error; }
         }
     }
-    close() { this.closed=true; this.collect(); }
+    close() { this.closed=true; return this.collect(); }
 }
 module.exports={ NativeArtifactCache };
