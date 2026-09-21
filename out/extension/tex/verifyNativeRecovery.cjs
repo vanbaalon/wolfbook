@@ -19,6 +19,9 @@ async function main() {
     await fs.writeFile(root, original);
     let lane = new NativeBuildLane(root, directory);
     try {
+        await assert.rejects(lane.compile({ timeoutMs:1 }), /timed out/);
+        await lane.close();
+        lane = new NativeBuildLane(root, directory);
         const first = await lane.compile({ sourceFiles:[root], sourceSnapshotHash:'first' });
         const oldMap = new NativeMap({ ...first, generation:first });
         assert.ok(oldMap.available);
@@ -48,7 +51,7 @@ async function main() {
         assert.ok((await map.forwardAt(root, 3, 0)).length > 0);
         process.stdout.write(JSON.stringify({ result:'PASS', project,
             lane_sha256:createHash('sha256').update(await fs.readFile(path.join(__dirname, 'nativeCompileService.js'))).digest('hex'),
-            display_generations_unique_across_sessions:true, recovered_pdf_ships:true,
+            native_timeout_enforced:true, display_generations_unique_across_sessions:true, recovered_pdf_ships:true,
             old_view_invalidated:true, terminated_session_rejected:true,
             new_session_republished:true, unsaved_source_preserved:true,
             old_pdf_immutable:true, recovered_forward_mapping:true }, null, 2) + '\n');

@@ -591,6 +591,7 @@ class RenderCoordinator {
                 force: !!force || wantFull,
                 overlay,
                 signal: ac.signal,
+                timeoutMs: cfg.get('compileTimeoutMs', 180000),
                 // The skeleton only has to be walked when it might have changed.
                 mirror: live ? 'auto' : 'always',
                 engine: cfg.get('engine', 'pdflatex'),

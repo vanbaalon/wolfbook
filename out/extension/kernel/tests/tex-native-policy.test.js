@@ -8,9 +8,11 @@ const { makeVscodeStub } = require('./_stub-vscode');
 const stub = makeVscodeStub();
 stub.workspace.textDocuments = [];
 let configuredMapEngine = 'wlatex';
+let configuredTimeout = 180000;
+const observedTimeouts = [];
 let installed = true, constructorCalls = 0;
 stub.workspace.getConfiguration = () => ({ get: (key, fallback) =>
-    ({ mapEngine: configuredMapEngine, wlatexDirectory: '/built/wlatex', authoritativeDelayMs: 0 })[key] ?? fallback });
+    ({ compileTimeoutMs:configuredTimeout, mapEngine: configuredMapEngine, wlatexDirectory: '/built/wlatex', authoritativeDelayMs: 0 })[key] ?? fallback });
 let nativeCalls = 0, conventionalCalls = 0, cancel = false, nativeFailure = false;
 const oldLoad = Module._load;
 Module._load = function (req, ...args) {
@@ -19,6 +21,7 @@ Module._load = function (req, ...args) {
         constructor() { constructorCalls++; if (!installed) throw Error('runtime missing'); this.directory = '/built/wlatex'; }
         async compile(o) {
             nativeCalls++;
+            observedTimeouts.push(['native', o.timeoutMs]);
             if (nativeFailure) throw Error('runtime cannot start');
             if (cancel) throw Object.assign(Error('superseded'), { name: 'AbortError' });
             return { ok:true, runner:'wlatex', generation:nativeCalls, pdfPath:'unused', pdfHash:'native',
@@ -31,7 +34,7 @@ Module._load = function (req, ...args) {
     const result = oldLoad.call(this, req, ...args);
     if (req === './compileService') return { ...result,
         loadGeneration: () => null, saveGeneration: () => false,
-        compile: async o => { conventionalCalls++; return { ok:true, generation:100,
+        compile: async o => { conventionalCalls++; observedTimeouts.push(['conventional', o.timeoutMs]); return { ok:true, generation:100,
             pdfPath:'unused', sourceSnapshotHash:o.sourceSnapshotHash, pageCount:1, diagnostics:[] }; } };
     return result;
 };
@@ -785,4 +788,15 @@ test('an older pending runtime replacement cannot overwrite a newer lane', async
         assert.equal(f.state.nativeLane, replacement);
         assert.equal(constructorCalls, before);
     } finally { f.close(); }
+});
+
+
+test('configured compiler timeout reaches native builds and their conventional fallback', async () => {
+    const f = fixture();
+    configuredTimeout = 45000; nativeFailure = true;
+    const start = observedTimeouts.length;
+    try {
+        await f.coordinator.build(f.doc, { quiet:true });
+        assert.deepEqual(observedTimeouts.slice(start), [['native',45000], ['conventional',45000]]);
+    } finally { configuredTimeout = 180000; nativeFailure = false; f.close(); }
 });

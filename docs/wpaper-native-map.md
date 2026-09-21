@@ -464,3 +464,20 @@ New controlled interleavings verify disposal during runtime replacement and a
 newer build completing before an older shutdown returns. No native SDK or
 engine changes are involved. Incremental compilation, full live UI acceptance,
 remote CI results and separate platform release artifacts remain open.
+
+## 2026-09-21 — configurable compiler timeout
+
+`wolfbook.tex.compileTimeoutMs` now controls both conventional builds and optional
+native previews. Its default is 180,000 ms, preserving the conventional compiler's
+existing default; settings allow 1,000 through 3,600,000 ms. Each fallback compiler
+receives its own limit. The limit covers the compiler operation, not the lane's
+source synchronization or subsequent map publication. NativeBuildLane now forwards
+a caller-supplied `timeoutMs` to the SDK instead of silently using its default.
+
+Validation: 55 native cancellation/generation/policy checks and 32 live-policy
+checks pass. Tests verify propagation to the actual native adapter's SDK call
+and to both branches of coordinator fallback. The real recovery verifier now
+also forces a one-millisecond SDK timeout, then reconstructs a session and
+successfully builds and publishes a map. Evidence:
+`/tmp/wpaper-native-timeout-verification.json`. This bounds expensive work; it
+does not implement incremental compilation or close the interactive latency gate.

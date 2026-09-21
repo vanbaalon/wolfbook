@@ -1077,6 +1077,13 @@
           "default": "pdflatex",
           "markdownDescription": "Engine passed to `latexmk`. Compiles run **out of tree** in a temp directory, so your project is never written to; a `.latexmkrc` in the project is still honoured."
         },
+        "wolfbook.tex.compileTimeoutMs": {
+          "type": "integer",
+          "default": 180000,
+          "minimum": 1000,
+          "maximum": 3600000,
+          "description": "Maximum compiler run time in milliseconds for a WPaper build, including optional WLaTeX previews. A fallback compiler receives its own time limit. Does not include source synchronization or map loading."
+        },
         "wolfbook.tex.mapEngine": {
           "type": "string",
           "enum": [

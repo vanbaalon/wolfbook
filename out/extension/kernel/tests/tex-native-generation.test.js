@@ -21,6 +21,7 @@ test('native display generations share the conventional allocator across session
                 capture:async () => ({ files:{} }), publish:async () => {}, readPages:async () => ({}) },
             compiler:{ compile:async options => {
                 calls.push(options.generation);
+                assert.equal(options.timeoutMs, 45000);
                 return { success:true, generation:options.generation, pdf, diagnostics:[],
                     build:{ source_bindings:[], page_count:1, pages:[{width_pt:612,height_pt:792}],
                         passes:[], pdf_hash:`pdf-${calls.length}` } };
@@ -29,9 +30,9 @@ test('native display generations share the conventional allocator across session
     };
     try {
         const conventionalBefore = nextGeneration();
-        const first = await createLane().compile({});
+        const first = await createLane().compile({ timeoutMs:45000 });
         const conventionalBetween = nextGeneration();
-        const second = await createLane().compile({});
+        const second = await createLane().compile({ timeoutMs:45000 });
         const conventionalAfter = nextGeneration();
         assert.ok(conventionalBefore < first.generation);
         assert.ok(first.generation < conventionalBetween);

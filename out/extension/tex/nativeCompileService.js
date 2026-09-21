@@ -79,7 +79,7 @@ class NativeBuildLane {
         let snapshot = await this.source.capture();
         requireCurrent();
         const report = await this.compiler.compile({ main: this.root, root: this.projectDir,
-            generation: ++this.buildNumber, signal: o.signal,
+            generation: ++this.buildNumber, signal: o.signal, timeoutMs:o.timeoutMs,
             overlays: Object.fromEntries(texts) });
         requireCurrent();
         if (!report.success) throw Error(report.diagnostics.map(d=>d.message).join('\n') || 'Native compilation failed');
