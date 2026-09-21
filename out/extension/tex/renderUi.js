@@ -23,6 +23,7 @@ const {
 } = require('./compileService');
 const { RenderMap, FLAG } = require('./renderMap');
 const { GlyphMap } = require('./glyphMap');
+const { NativeMap } = require('./nativeMap');
 const { findRoot, buildGraph } = require('./texProject');
 const {
     nextLiveDelayMs, liveDeadlineDelayMs, cooldownDelayMs, blendLiveMs, synctexUnchanged,
@@ -60,6 +61,8 @@ function nodeDeps() {
  */
 function makeMap(o) {
     const gen = o && o.generation;
+    if (gen && gen.nativeView && gen.nativeSource) return new NativeMap({ ...o,
+        nativeView: gen.nativeView, nativeSource: gen.nativeSource, projectDir: gen.projectDir });
     if (gen && (gen.glyphMapPath || o.glyphDoc)) return new GlyphMap(o);
     return new RenderMap(o);
 }
