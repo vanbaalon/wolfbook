@@ -4017,6 +4017,8 @@ class TexViewer {
 
     _onTextLayer(m) {
         if (String(m.generation) !== String(this.shownGeneration)) return;
+        if (this.root && typeof this.coord?.noteRenderedPage === 'function')
+            this.coord.noteRenderedPage(this.root, m.generation, m.page);
         if (!this._text || this._text.generation !== m.generation) {
             this._text = { generation: m.generation, pages: new Map(), symbolFonts: new Set() };
             this._objMaps.clear();      // geometry from a previous compile is gone
@@ -4977,7 +4979,12 @@ class TexViewer {
             String(m.generation) === String(this._openedGeneration);
         if (!current()) return;
         if (!m.pick) this._pickAnchor = null;
-        const hit = map.renderToSource(m.page, m.xBp, m.yTopBp);
+        // The worker resolves overlapping ink by paint order; the local
+        // containment answer is the fallback while it is unavailable.
+        const hit = typeof map.renderToSourceViaWorker === 'function'
+            ? await map.renderToSourceViaWorker(m.page, m.xBp, m.yTopBp)
+            : map.renderToSource(m.page, m.xBp, m.yTopBp);
+        if (!current()) return;
         if (!hit?.file || hit.flag === FLAG.UNMAPPED) {
             if (!m.live) this._pickAnchor = null;
             this._post({ type:'selection', span:null });

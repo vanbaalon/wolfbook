@@ -331,6 +331,67 @@ class RenderCoordinator {
     stateFor(doc) { return this.roots.get(this.rootFor(doc)) || null; }
     mapFor(doc) { const s = this.stateFor(doc); return s ? s.map : null; }
 
+    /**
+     * The viewer reports each page whose text layer it rendered. Those pages
+     * (plus a neighbour each side) are the window a native map materializes;
+     * a page rendered outside the current view asks for a refresh.
+     */
+    noteRenderedPage(root, generation, page) {
+        const st = this.roots.get(root);
+        if (!st || !Number.isInteger(page)) return;
+        if (!st.renderedPages || st.renderedPages.generation !== String(generation))
+            st.renderedPages = { generation: String(generation), pages: new Set() };
+        st.renderedPages.pages.add(page);
+        if (st.nativeLane && st.map?.native && !st.map.hasPage(page)) this._scheduleNativeRefresh(st, st.nativeLane, 0);
+    }
+    _nativeWindow(st) {
+        const pages = new Set();
+        for (const p of st.renderedPages?.pages || []) { pages.add(p - 1); pages.add(p); pages.add(p + 1); }
+        for (const p of st.map?.native ? st.map.materializedPages : []) pages.add(p);
+        return [...pages].filter(p => p >= 1).sort((a, b) => a - b);
+    }
+    /**
+     * Refreshes coalesce: a burst of keystrokes produces one page read after
+     * the burst, never one per character, and at most one read is in flight.
+     * The worker translates every intermediate revision, so nothing is lost.
+     */
+    _scheduleNativeRefresh(st, lane, delayMs = 80) {
+        clearTimeout(st.nativeRefreshTimer);
+        st.nativeRefreshTimer = setTimeout(() => { this._runNativeRefresh(st, lane).catch(() => {}); }, delayMs);
+    }
+    async _runNativeRefresh(st, lane) {
+        if (st.nativeRefreshing) { st.nativeRefreshAgain = true; return; }
+        st.nativeRefreshing = true;
+        try {
+            const generation = st.generation;
+            if (st.nativeLane !== lane || generation?.nativeSource !== lane.source) return;
+            let view;
+            try { view = await lane.refresh(this._nativeWindow(st)); }
+            catch (error) {
+                // A keystroke during pagination invalidates the view; read again
+                // after the burst instead of giving the lane up.
+                if (error?.name === 'StaleBuild') { st.nativeRefreshAgain = true; return; }
+                throw error;
+            }
+            if (!view || st.nativeLane !== lane || st.generation !== generation || generation?.nativeSource !== lane.source) return;
+            // Between a newer build publishing its map and that build
+            // becoming st.generation, the refreshed view belongs to a PDF
+            // that is not displayed yet. The newer build installs its own
+            // map when it lands; building one here would throw and retire
+            // the lane on an ordinary keystroke.
+            if (generation.pdfHash && view.artifact?.pdf_hash !== generation.pdfHash) return;
+            generation.nativeView = view;
+            st.map = makeMap({ generation, model:this._modelFor(st.root), pageSize:this._pageSize(generation) });
+            this._emitter.fire(st);
+        } catch (error) {
+            this.log(`  native mapping: ${error.message}`);
+            await this._retireNativeLane(st, lane);
+        } finally {
+            st.nativeRefreshing = false;
+            if (st.nativeRefreshAgain) { st.nativeRefreshAgain = false; this._scheduleNativeRefresh(st, lane, 0); }
+        }
+    }
+
     async _retireNativeLane(st, lane) {
         if (st.nativeLane === lane) st.nativeLane = null;
         try { await lane.close(); }
@@ -343,15 +404,10 @@ class RenderCoordinator {
         if (!st) return;
         st.sourceAhead = true;
         if (st.nativeLane) {
-            const generation = st.generation;
             const lane = st.nativeLane;
             if (st.map?.native) st.map.noteEdit();
-            lane.noteChange(e.document, e.contentChanges).then(() =>
-                st.nativeLane === lane ? lane.refresh() : null).then(view => {
-                if (!view || st.nativeLane !== lane || st.generation !== generation || generation?.nativeSource !== lane.source) return;
-                generation.nativeView = view;
-                st.map = makeMap({ generation, model:this._modelFor(st.root), pageSize:this._pageSize(generation) });
-                this._emitter.fire(st);
+            lane.noteChange(e.document, e.contentChanges).then(() => {
+                if (st.nativeLane === lane) this._scheduleNativeRefresh(st, lane);
             }).catch(async error => {
                 this.log(`  native mapping: ${error.message}`);
                 await this._retireNativeLane(st, lane);
@@ -592,6 +648,8 @@ class RenderCoordinator {
                 overlay,
                 signal: ac.signal,
                 timeoutMs: cfg.get('compileTimeoutMs', 180000),
+                // Pages the native map materializes first (the viewer's window).
+                nativePages: this._nativeWindow(st),
                 // The skeleton only has to be walked when it might have changed.
                 mirror: live ? 'auto' : 'always',
                 engine: cfg.get('engine', 'pdflatex'),

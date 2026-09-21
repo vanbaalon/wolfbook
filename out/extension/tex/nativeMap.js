@@ -2,7 +2,7 @@
 // Every source position comes from the worker. No token alignment or line shifts.
 const path = require('path');
 const { RenderMap, FLAG } = require('./renderMap');
-const { spToBp } = require('./texGeometry');
+const { spToBp, bpToSp } = require('./texGeometry');
 
 function rectangle(geometry, header) {
     const scale = header.magnification / 1000;
@@ -36,6 +36,7 @@ class NativeMap extends RenderMap {
         this._byItem = new Map();
         this._hasDisplaced = false;
         this._pages = new Map();
+        this._headers = new Map();
         this._lines = new Map();
         this.pageCount = this.view?.artifact?.page_count || 0;
         if (!this.view || !this.source || !this.source.isCurrentView(this.view)) return;
@@ -43,6 +44,7 @@ class NativeMap extends RenderMap {
             throw Error('Native map does not belong to the displayed PDF');
         for (const page of this.view.pages) {
             if (!(page.header.magnification > 0)) throw Error('Invalid native magnification');
+            this._headers.set(page.page, page.header);
             const entries = [];
             for (const hit of page.hits) {
                 const rect = rectangle(hit.item.geometry, page.header);
@@ -78,6 +80,10 @@ class NativeMap extends RenderMap {
         }
     }
     get available() { return !this._invalidated && !!this.source?.isCurrentView(this.view); }
+    /** Whether this view materialized the page (views are windowed). */
+    hasPage(page) { return this._pages.has(page); }
+    /** The pages this view materialized, ascending. */
+    get materializedPages() { return [...this._pages.keys()].sort((a, b) => a - b); }
     get exact() { return this.available; }
     get displaced() {
         return this.available && this._hasDisplaced;
@@ -201,6 +207,28 @@ class NativeMap extends RenderMap {
     renderToSource(page, x, y) {
         const { glyph } = this.glyphAt(page, x, y);
         if (!glyph) return { flag: FLAG.UNMAPPED, reason: 'no native source box contains this point' };
+        return this._sourceOf(glyph, page, x, y);
+    }
+    /**
+     * Point-to-source through the worker's inverse query, so overlapping ink is
+     * resolved by the engine's paint order rather than by the last cached
+     * rectangle. Falls back to the local containment answer when the page is
+     * not materialized or the worker cannot answer.
+     */
+    async renderToSourceViaWorker(page, x, y) {
+        const header = this._headers.get(page);
+        if (!this.available || !header || !this.source?.inverse) return this.renderToSource(page, x, y);
+        const scale = header.magnification / 1000;
+        const xSp = Math.round(bpToSp((x - 72) / scale)), ySp = Math.round(bpToSp((y - 72) / scale));
+        let reply;
+        try { reply = await this.source.inverse(page, xSp, ySp); }
+        catch (_) { return this.renderToSource(page, x, y); }
+        if (!this.available) return { flag: FLAG.UNMAPPED, reason: 'the native map changed during the query' };
+        const glyph = (reply.hits || []).map(h => this._byItem.get(h.item_id)).filter(e => e && e.file).at(-1);
+        if (!glyph) return { flag: FLAG.UNMAPPED, reason: 'no native source glyph under this point' };
+        return this._sourceOf(glyph, page, x, y);
+    }
+    _sourceOf(glyph, page, x, y) {
         const location = glyph.hit.preferred_source.location;
         const exact = location.accuracy === 'Exact';
         const origin = glyph.hit.mapped_origins.find(o => o.source.file === glyph.hit.preferred_source.file &&
