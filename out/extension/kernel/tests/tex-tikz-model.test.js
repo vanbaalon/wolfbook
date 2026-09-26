@@ -114,3 +114,11 @@ test('the preamble gets what the picture needs, once, in a marked block', () => 
     assert.match(apply(own, t.preambleEdits(own, { libraries: ['arrows.meta', 'decorations.pathmorphing'] })),
         /\\usetikzlibrary\{decorations\.pathmorphing\}/);
 });
+
+test('picture units come from x=, y=, scale, xscale and yscale', () => {
+    const units = opts => { const text = `\\begin{tikzpicture}[${opts}]\\draw (0,0);\\end{tikzpicture}`; const p = t.parsePicture(text, 0); return [p.unitX, p.unitY].map(v => +v.toFixed(6)); };
+    assert.deepEqual(units('scale=0.5'), [0.5, 0.5]);
+    assert.deepEqual(units('x=2cm, y=5mm'), [2, 0.5]);
+    assert.deepEqual(units('x={1in}, yscale=2, scale=0.5'), [1.27, 1]);
+    assert.deepEqual(units('x=72.27pt'), [2.54, 1]);
+});

@@ -86,9 +86,10 @@ function plan(op, texts) {
     if (text == null) return fail('the picture\'s file is not open');
     const picture = model.parsePicture(text, op.picture.begin);
     if (!picture) return fail('the picture changed — select it again');
-    const unit = BP_PER_CM * picture.scale;
+    // Big points per picture unit, per axis (`x=`, `y=`, `scale`, `xscale`, `yscale`).
+    const unitX = BP_PER_CM * picture.unitX, unitY = BP_PER_CM * picture.unitY;
     const toUnits = ([x, y]) => {
-        let [u, v] = [x / unit, y / unit];
+        let [u, v] = [x / unitX, y / unitY];
         if (op.snap !== false) [u, v] = [Math.round(u * 10) / 10, Math.round(v * 10) / 10];
         return [u, v];
     };
@@ -156,7 +157,7 @@ function plan(op, texts) {
     case 'move': {
         for (const [k, s] of stmts.entries()) {
             const d = op.deltas?.[k] || [op.dx || 0, op.dy || 0];
-            add(file, [model.moveEdit(s, d[0] / unit, d[1] / unit)]);
+            add(file, [model.moveEdit(s, d[0] / unitX, d[1] / unitY)]);
         }
         select = { file, start: shiftThrough(edits[file] || [], stmts[0].start) };
         selects = stmts.map(st => shiftThrough(edits[file] || [], st.start));
@@ -164,7 +165,7 @@ function plan(op, texts) {
     }
     case 'transform': {
         const [s] = stmts;
-        const c = [op.cx / unit, op.cy / unit];
+        const c = [op.cx / unitX, op.cy / unitY];
         const t = op.kind === 'rotate' ? { kind: 'rotate', degrees: op.degrees, cx: c[0], cy: c[1] }
             : { kind: 'scale', factor: op.factor, cx: c[0], cy: c[1] };
         const next = withTransform(s.text, t);
@@ -182,8 +183,30 @@ function plan(op, texts) {
         add(file, merged);
         break;
     }
+    case 'copy': {
+        // The selected statements' source, for the clipboard.
+        return { edits: {}, select: null, selects: [], clipboard: stmts.map(st => st.text.replace(/\r?\n\s*/g, ' ')).join('\n'), error: null };
+    }
+    case 'paste': {
+        // Statements from the clipboard, renamed so they do not clash; an edge
+        // whose nodes would not exist here is left out.
+        const source = String(op.text || '');
+        const temp = model.parsePicture(`\\begin{tikzpicture}\n${source}\n\\end{tikzpicture}`, 0);
+        if (!temp || !temp.statements.length) return fail('the clipboard holds no TikZ statements');
+        const known = new Set([...model.names(picture), ...temp.statements.map(st => st.name?.value).filter(Boolean)]);
+        const kept = temp.statements.filter(st => st.refs.every(n => known.has(n)));
+        if (!kept.length) return fail('nothing on the clipboard can go in this picture');
+        const lines = model.duplicateLines(picture, kept, (op.dx || 0) / unitX, (op.dy || 0) / unitY);
+        const feynman = kept.some(st => st.kind === 'vertex' || st.kind === 'diagram');
+        const [insert] = model.insertEdits(text, picture, lines, { feynman });
+        add(file, [insert]);
+        if (feynman) needs({ feynman: true });
+        selectInserted(insert, lines[0]);
+        selects = lines.map(l => select.start + insert.text.indexOf(l) - insert.text.indexOf(lines[0]));
+        break;
+    }
     case 'duplicate': {
-        const lines = model.duplicateLines(picture, stmts, (op.dx || 0) / unit, (op.dy || 0) / unit);
+        const lines = model.duplicateLines(picture, stmts, (op.dx || 0) / unitX, (op.dy || 0) / unitY);
         const [insert] = model.insertEdits(text, picture, lines, { feynman: stmts.some(s => s.kind === 'vertex' || s.kind === 'diagram') });
         add(file, [insert]);
         selectInserted(insert, lines[0]);

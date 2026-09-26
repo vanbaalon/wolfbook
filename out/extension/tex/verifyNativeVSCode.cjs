@@ -293,7 +293,7 @@ exports.run = async function() {
                     await host._tikzEdit({ key:Math.random(), ...op });
                     const done = posts.filter(m => m.type === 'tikzEdited').pop();
                     assert.equal(done.ok, true, done.error);
-                    tpages.length = 0;
+                    // The latest display list stays: a page the engine finds unchanged is not delivered again.
                     await preview();
                 };
                 const ref = s => ({ start:s.start, text:s.text });
@@ -334,6 +334,14 @@ exports.run = async function() {
                 // The editor's undo restores the source, gesture by gesture.
                 await edit({ op:'undo' });
                 assert.ok(tdoc.getText().includes('(n2) at (4,2.5)'));
+                // Copy two nodes and their edge; paste renames them and keeps the edge between the copies.
+                ({ pic, picture } = await resolve());
+                const trio = ['n1', 'n2'].map(n => pic.statements.find(st => st.name === n)).concat(pic.statements.filter(st => st.text === '\\draw[->] (n1) -- (n2);'));
+                await host._tikzEdit({ key:'c', op:'copy', picture, refs:trio.map(ref) });
+                assert.equal(posts.filter(m => m.type === 'tikzEdited').pop().ok, true);
+                assert.ok((await vscode.env.clipboard.readText()).includes('(n1) -- (n2)'));
+                await edit({ op:'paste', picture, dx:0, dy:-cm });
+                assert.ok(tdoc.getText().includes('\\draw[->] (n3) -- (n4);'), tdoc.getText());
                 tikzEditVerified = true;
             } finally { pagesSub.dispose(); changesSub.dispose(); }
             await until(() => viewer._pdfRanges.files.size === 1, 'only the displayed PDF handle remains');

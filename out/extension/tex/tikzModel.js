@@ -185,12 +185,21 @@ function parsePicture(text, start) {
     if (begin < 0 || begin > start + 200) return null;
     let i = begin + '\\begin{tikzpicture}'.length;
     while (/\s/.test(m[i] || '')) i++;
-    let scale = 1, options = null;
+    let scale = 1, xscale = 1, yscale = 1, xunit = 1, yunit = 1, options = null;
     if (m[i] === '[') {
         const close = closing(m, i);
         if (close < 0) return null;
         options = { open: i, close, items: splitOptions(text.slice(i + 1, close)) };
-        for (const item of options.items) { const o = option(item); if (o.key === 'scale' && Number(o.value)) scale = Number(o.value); }
+        for (const item of options.items) {
+            const o = option(item), v = Number(o.value);
+            if (o.key === 'scale' && v) scale = v;
+            else if (o.key === 'xscale' && v) xscale = v;
+            else if (o.key === 'yscale' && v) yscale = v;
+            else if ((o.key === 'x' || o.key === 'y') && typeof o.value === 'string') {
+                const cm = lengthCm(o.value);
+                if (cm) { if (o.key === 'x') xunit = cm; else yunit = cm; }
+            }
+        }
         i = close + 1;
     }
     const bodyStart = i;
@@ -220,7 +229,19 @@ function parsePicture(text, start) {
         statements.push(stmt);
         k = stmt.end;
     }
-    return { begin, bodyStart, bodyEnd, end: bodyEnd + '\\end{tikzpicture}'.length, scale, options, feynman, statements };
+    // Centimetres per picture unit along each axis: `x=`/`y=` lengths, times
+    // `scale` and `xscale`/`yscale`. Picture-wide rotations and shifts are
+    // not modelled (a unit vector with a y part is ignored).
+    const unitX = xunit * scale * xscale, unitY = yunit * scale * yscale;
+    return { begin, bodyStart, bodyEnd, end: bodyEnd + '\\end{tikzpicture}'.length, scale, unitX, unitY, options, feynman, statements };
+}
+
+/** A TeX length (`1.5cm`, `8mm`, `20pt`, `1in`, `28bp`) in centimetres, or null. */
+function lengthCm(text) {
+    const m = /^\s*\{?\s*([-+]?(?:\d+\.?\d*|\.\d+))\s*(cm|mm|pt|in|bp)\s*\}?\s*$/.exec(text);
+    if (!m) return null;
+    const per = { cm: 1, mm: 0.1, pt: 2.54 / 72.27, in: 2.54, bp: 2.54 / 72 }[m[2]];
+    return Number(m[1]) * per || null;
 }
 
 /** The statement containing `offset` (for instance a special's source span). */
@@ -423,7 +444,7 @@ function preambleEdits(text, needs) {
 }
 
 module.exports = {
-    num, masked, splitOptions, option, parsePicture, statementAtOffset, names, freshName,
+    num, masked, splitOptions, option, lengthCm, parsePicture, statementAtOffset, names, freshName,
     moveEdit, placeEdit, setOptionEdit, optionListEdit, nameEdit, insertEdits, deleteEdit, dependents, duplicateLines,
     preambleEdits, DYNKIN_STYLES, STYLE_BEGIN, STYLE_END,
 };

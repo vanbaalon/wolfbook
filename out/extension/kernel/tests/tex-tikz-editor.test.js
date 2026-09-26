@@ -128,3 +128,18 @@ test('palette colours are written by name and defined once in the preamble', () 
     const plain = run({ op: 'style', refs: [ref(PAPER, 2)], group: 'color', value: 'red' }).out;
     assert.ok(!plain.includes('definecolor'), 'xcolor names need no definition');
 });
+
+test('copy and paste statements: renamed, placed, edges kept only with their nodes', () => {
+    const copied = ed.plan({ root: FILE, picture: { file: FILE, begin: PAPER.indexOf('\\begin{tikzpicture}') }, op: 'copy',
+        refs: [ref(PAPER, 0), ref(PAPER, 2)] }, { [FILE]: PAPER });
+    assert.equal(copied.clipboard, '\\node[draw] (a) at (0,0) {A};\n\\draw (a) -- (2,0);');
+    const { out, r } = run({ op: 'paste', text: copied.clipboard, dx: CM, dy: 0 });
+    assert.match(out, /  \\node\[draw\] \(a1\) at \(1,0\) \{A\};\n  \\draw \(a1\) -- \(2,0\);\n\\end\{tikzpicture\}/);
+    assert.equal(r.selects.length, 2);
+    // Into a picture without `a`: an edge to a node that is not pasted is left out.
+    const other = '\\begin{tikzpicture}\n  \\draw (0,0) -- (1,1);\n\\end{tikzpicture}\n';
+    const res = ed.plan({ picture: { file: FILE, begin: 0 }, op: 'paste', text: '\\draw (zz) -- (0,0);\n\\draw (0,0) circle (1);' }, { [FILE]: other });
+    const pasted = ed.apply(other, res.edits[FILE]);
+    assert.ok(!pasted.includes('(zz)') && pasted.includes('\\draw (0,0) circle (1);'));
+    assert.match(ed.plan({ picture: { file: FILE, begin: 0 }, op: 'paste', text: 'hello' }, { [FILE]: other }).error, /no TikZ statements/);
+});

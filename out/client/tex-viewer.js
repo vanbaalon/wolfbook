@@ -8294,19 +8294,54 @@ function tikzGeo(page, txdl) {
     return geo;
 }
 
-/** A path op as a Path2D in CSS px, with its bounding box. */
-function tikzPath(op, geo) {
-    const ax = geo.x(op.x), ay = geo.y(op.y), k = geo.perBp;
-    const p = new Path2D();
+/**
+ * The transform each path is drawn under, as the renderer applies it: TXDL
+ * `transform` ops replayed (push/pop, absolute `set`, and `scale`/`rotate`
+ * about their point), as matrices of DVI space. Paths under the identity are
+ * left out.
+ */
+function tikzTransforms(txdl) {
+    const out = new Map();
+    let m = [1, 0, 0, 1, 0, 0];
+    const stack = [];
+    const compose = (p, q) => [p[0] * q[0] + p[2] * q[1], p[1] * q[0] + p[3] * q[1], p[0] * q[2] + p[2] * q[3],
+        p[1] * q[2] + p[3] * q[3], p[0] * q[4] + p[2] * q[5] + p[4], p[1] * q[4] + p[3] * q[5] + p[5]];
+    const about = (x, y, a, b, c, d) => compose(compose([1, 0, 0, 1, x, y], [a, b, c, d, 0, 0]), [1, 0, 0, 1, -x, -y]);
+    for (const op of txdl.ops || []) {
+        if (op.op === 'transform') {
+            if (op.action === 'push') stack.push(m);
+            else if (op.action === 'pop') m = stack.pop() || [1, 0, 0, 1, 0, 0];
+            else if (op.action === 'set' && Array.isArray(op.matrix)) m = op.matrix;
+            else if (op.action === 'scale') m = compose(m, about(op.x, op.y, op.sx, 0, 0, op.sy));
+            else if (op.action === 'rotate') {
+                const r = (op.degrees * Math.PI) / 180, c = Math.cos(r), s = Math.sin(r);
+                m = compose(m, about(op.x, op.y, c, -s, s, c));
+            }
+        } else if (op.op === 'path' && (m[0] !== 1 || m[1] || m[2] || m[3] !== 1 || m[4] || m[5])) out.set(op, m);
+    }
+    return out;
+}
+
+/** A path op as a Path2D in CSS px, with its bounding box (under its transform, when it has one). */
+function tikzPath(op, geo, xf = null) {
+    const k = TIKZ_SP_PER_BP;
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-    const pt = (u, v) => { const x = ax + k * u, y = ay - k * v;
-        x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); return [x, y]; };
+    const pt = (u, v) => {
+        let [sx, sy] = [op.x + k * u, op.y - k * v];
+        if (xf) [sx, sy] = [xf[0] * sx + xf[2] * sy + xf[4], xf[1] * sx + xf[3] * sy + xf[5]];
+        const x = geo.x(sx), y = geo.y(sy);
+        x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); return [x, y];
+    };
+    const p = new Path2D();
     for (const s of op.segments || []) {
         if (s[0] === 'm') p.moveTo(...pt(s[1], s[2]));
         else if (s[0] === 'l') p.lineTo(...pt(s[1], s[2]));
         else if (s[0] === 'c') p.bezierCurveTo(...pt(s[1], s[2]), ...pt(s[3], s[4]), ...pt(s[5], s[6]));
-        else if (s[0] === 're') { const [x, y] = pt(s[1], s[2]); pt(s[1] + s[3], s[2] + s[4]); p.rect(x, y, k * s[3], -k * s[4]); }
-        else if (s[0] === 'h') p.closePath();
+        else if (s[0] === 're') {
+            // A rectangle stays a closed four-sided path, whatever the transform.
+            p.moveTo(...pt(s[1], s[2])); p.lineTo(...pt(s[1] + s[3], s[2])); p.lineTo(...pt(s[1] + s[3], s[2] + s[4]));
+            p.lineTo(...pt(s[1], s[2] + s[4])); p.closePath();
+        } else if (s[0] === 'h') p.closePath();
     }
     return { path: p, box: [x0, y0, x1, y1] };
 }
@@ -8321,7 +8356,7 @@ function tikzModel(page) {
     let model = tikz.pages.get(page);
     if (model && model.txdl === txdl) return model;
     const paths = (txdl.ops || []).filter(op => op.op === 'path' && op.picture && !op.clip);
-    model = { txdl, key: `${page}:${++tikz.seq}`, paths, resolved: false, pictures: new Map(), items: new Map() };
+    model = { txdl, key: `${page}:${++tikz.seq}`, paths, resolved: false, pictures: new Map(), items: new Map(), xf: tikzTransforms(txdl) };
     tikz.pages.set(page, model);
     if (paths.length) {
         vscode.postMessage({ type: 'tikzResolve', key: model.key, page,
@@ -8356,7 +8391,7 @@ function tikzResolved(msg) {
         const it = where && item(where.picture, where.stmt);
         if (!it) continue;
         it.paths.push(op);
-        it.box = tikzUnion(it.box, tikzPath(op, geo).box);
+        it.box = tikzUnion(it.box, tikzPath(op, geo, model.xf.get(op)).box);
         const picture = model.pictures.get(where.picture);
         if (picture.originX == null) { picture.originX = geo.x(op.picture.x); picture.originY = geo.y(op.picture.y); }
     }
@@ -8399,7 +8434,7 @@ function tikzPick(page, x, y) {
     const items = [...model.items.values()];
     for (let i = items.length - 1; i >= 0; i--) {
         for (const op of items[i].paths) {
-            const { path } = tikzPath(op, model.geo);
+            const { path } = tikzPath(op, model.geo, model.xf.get(op));
             if (tikzHitCtx.isPointInStroke(path, x, y)
                 || (op.fill && tikzHitCtx.isPointInPath(path, x, y, op.fill === 'evenodd' ? 'evenodd' : 'nonzero'))) return items[i];
         }
@@ -8451,12 +8486,17 @@ function tikzSvg(tag, attrs, parent) {
     return node;
 }
 
-/** SVG path data of a TXDL path in CSS px. */
-function tikzSvgPath(op, geo) {
-    const ax = geo.x(op.x), ay = geo.y(op.y), k = geo.perBp, P = (u, v) => `${ax + k * u} ${ay - k * v}`;
+/** SVG path data of a TXDL path in CSS px (under its transform). */
+function tikzSvgPath(op, geo, xf = null) {
+    const k = TIKZ_SP_PER_BP;
+    const P = (u, v) => {
+        let [sx, sy] = [op.x + k * u, op.y - k * v];
+        if (xf) [sx, sy] = [xf[0] * sx + xf[2] * sy + xf[4], xf[1] * sx + xf[3] * sy + xf[5]];
+        return `${geo.x(sx)} ${geo.y(sy)}`;
+    };
     return (op.segments || []).map(s => s[0] === 'm' ? `M${P(s[1], s[2])}` : s[0] === 'l' ? `L${P(s[1], s[2])}`
         : s[0] === 'c' ? `C${P(s[1], s[2])} ${P(s[3], s[4])} ${P(s[5], s[6])}`
-        : s[0] === 're' ? `M${P(s[1], s[2])}H${ax + k * (s[1] + s[3])}V${ay - k * (s[2] + s[4])}H${ax + k * s[1]}Z`
+        : s[0] === 're' ? `M${P(s[1], s[2])}L${P(s[1] + s[3], s[2])}L${P(s[1] + s[3], s[2] + s[4])}L${P(s[1], s[2] + s[4])}Z`
         : s[0] === 'h' ? 'Z' : '').join('');
 }
 
@@ -8469,7 +8509,7 @@ function tikzPaint(page) {
     if (!tikz.on || !model?.geo) return;
     const geo = model.geo;
     const mark = (it, cls) => {
-        for (const op of it.paths) tikzSvg('path', { d: tikzSvgPath(op, geo), class: cls }, layer);
+        for (const op of it.paths) tikzSvg('path', { d: tikzSvgPath(op, geo, model.xf.get(op)), class: cls }, layer);
         for (const b of it.glyphs) tikzSvg('rect', { x: b[0] - 1, y: b[1] - 1, width: b[2] - b[0] + 2, height: b[3] - b[1] + 2, class: cls }, layer);
     };
     if (tikz.edgeFrom?.page === page) { const it = model.items.get(tikz.edgeFrom.key); if (it) mark(it, 'tikz-from'); }
@@ -8480,7 +8520,7 @@ function tikzPaint(page) {
     const group = tikzSvg('g', { class: 'tikz-sel' }, layer);
     let box = null;
     for (const it of items) {
-        for (const op of it.paths) tikzSvg('path', { d: tikzSvgPath(op, geo), class: 'tikz-outline' }, group);
+        for (const op of it.paths) tikzSvg('path', { d: tikzSvgPath(op, geo, model.xf.get(op)), class: 'tikz-outline' }, group);
         for (const b of it.glyphs) tikzSvg('rect', { x: b[0] - 1, y: b[1] - 1, width: b[2] - b[0] + 2, height: b[3] - b[1] + 2, class: 'tikz-outline' }, group);
         box = tikzUnion(box, it.box);
     }
@@ -8510,7 +8550,8 @@ function tikzItem(tool) { return tikz.palette?.items.find(i => i.id === tool) ||
 function tikzReadout(page, x, y) {
     const model = tikz.pages.get(page), p = tikzPictureAt(page, x, y, 60);
     if (!p || !model?.geo) return;
-    const [u, v] = tikzToBp(p, model.geo.perBp, x, y).map(c => c / (72 / 2.54) / (p.scale || 1));
+    const [bx, by] = tikzToBp(p, model.geo.perBp, x, y);
+    const [u, v] = [bx / (72 / 2.54) / (p.unitX || p.scale || 1), by / (72 / 2.54) / (p.unitY || p.scale || 1)];
     document.querySelector('#tikzpanel .tz-coords') && (document.querySelector('#tikzpanel .tz-coords').textContent = `x ${u.toFixed(2)}  y ${v.toFixed(2)}`);
 }
 
@@ -8533,7 +8574,7 @@ function tikzPointer(ev) {
         tikzDown(page, layer, x, y, ev);
         return;
     }
-    if (ev.type === 'pointermove') { tikzReadout(page, x, y); tikzMove(page, layer, x, y, ev); return; }
+    if (ev.type === 'pointermove') { tikz.pointer = { page, x, y }; tikzReadout(page, x, y); tikzMove(page, layer, x, y, ev); return; }
     if (ev.type === 'pointerup') tikzUp(page, layer, x, y, ev, model);
 }
 
@@ -8668,9 +8709,11 @@ function tikzDragTransform(d, x, y, ev = {}) {
             for (const h of snap.guidesY) guides.push({ line: [(pic?.box?.[0] ?? 0) - 12, h, (pic?.box?.[2] ?? 0) + 12, h] });
             if (!snap.guidesX.length || !snap.guidesY.length) for (const m of spacing.marks) guides.push({ spacing: m });
             // No guide on an axis: the 1 mm grid of the picture.
-            const grid = model.geo.perBp * (72 / 25.4) * (pic?.scale || 1);
-            if (!snap.guidesX.length && !spacing.adjX && grid > 0) dx = Math.round(dx / grid) * grid;
-            if (!snap.guidesY.length && !spacing.adjY && grid > 0) dy = Math.round(dy / grid) * grid;
+            // A 1 mm grid in picture units: 0.1 unit along each axis.
+            const gridX = model.geo.perBp * (72 / 25.4) * (pic?.unitX || pic?.scale || 1);
+            const gridY = model.geo.perBp * (72 / 25.4) * (pic?.unitY || pic?.scale || 1);
+            if (!snap.guidesX.length && !spacing.adjX && gridX > 0) dx = Math.round(dx / gridX) * gridX;
+            if (!snap.guidesY.length && !spacing.adjY && gridY > 0) dy = Math.round(dy / gridY) * gridY;
         }
         return { svg: `translate(${dx} ${dy})`, none: Math.hypot(dx, dy) < 1, op: 'move', dx, dy, guides };
     }
@@ -8769,6 +8812,7 @@ function tikzSend(edit) {
 
 function tikzEdited(msg) {
     if (!msg.ok) { status(`TikZ: ${msg.error || 'the edit did not apply'}`, 'warn'); return; }
+    if (msg.op === 'copy') { status(`TikZ: copied ${msg.copied} statement${msg.copied === 1 ? '' : 's'}`, 'ok'); return; }
     status(`TikZ: ${msg.op === 'undo' ? 'undone' : msg.op === 'redo' ? 'redone' : 'edited'} — redrawing`, 'ok');
     if (msg.op === 'chain' && msg.created) tikz.chain = { ...(tikz.chain || {}), page: tikz.selection?.page ?? tikz.chain?.page ?? visiblePages()[0], name: msg.created };
     tikz.pending = msg.select ? { file: msg.select.file, starts: msg.selects?.length ? msg.selects : [msg.select.start] } : null;
@@ -8838,20 +8882,36 @@ function tikzDelete() {
     tikzInspector();
 }
 
+/**
+ * Paste TikZ statements from the clipboard into the selected picture, else the
+ * one under the pointer, else the first in view — offset by 5 mm so a copy
+ * does not sit on its original.
+ */
+function tikzPaste() {
+    let pic = null;
+    const items = tikzSelected();
+    if (items.length) pic = tikz.pages.get(tikz.selection.page).pictures.get(items[0].picture);
+    if (!pic && tikz.pointer) pic = tikzPictureAt(tikz.pointer.page, tikz.pointer.x, tikz.pointer.y, 80);
+    if (!pic) for (const page of visiblePages()) { const m = tikz.pages.get(page); if (m?.pictures.size) { pic = [...m.pictures.values()][0]; break; } }
+    if (!pic) { status('TikZ: no picture here to paste into', 'warn'); return; }
+    const off = 72 / 25.4 * 5;
+    tikzSend({ op: 'paste', picture: tikzPicRef(pic), dx: off, dy: -off });
+}
+
 function tikzNudge(dxMm, dyMm) {
     const items = tikzSelected(), sel = tikz.selection, model = sel && tikz.pages.get(sel.page);
     if (!items.length || !model) return;
     const pic = model.pictures.get(items[0].picture);
-    const mm = 72 / 25.4 * (pic.scale || 1);
+    const mmX = 72 / 25.4 * (pic.unitX || pic.scale || 1), mmY = 72 / 25.4 * (pic.unitY || pic.scale || 1);
     // A burst of arrow presses is one edit.
     const n = tikz.nudge && tikz.nudge.key === sel.primary ? tikz.nudge : (tikz.nudge = { key: sel.primary, dx: 0, dy: 0 });
     n.dx += dxMm; n.dy += dyMm;
     const k = model.geo.perBp;
-    sel.group?.setAttribute('transform', `translate(${n.dx * mm * k} ${-n.dy * mm * k})`);
+    sel.group?.setAttribute('transform', `translate(${n.dx * mmX * k} ${-n.dy * mmY * k})`);
     clearTimeout(n.timer);
     n.timer = setTimeout(() => {
         tikz.nudge = null;
-        tikzSend({ op: 'move', picture: tikzPicRef(pic), refs: items.map(tikzRef), dx: n.dx * mm, dy: n.dy * mm, snap: false });
+        tikzSend({ op: 'move', picture: tikzPicRef(pic), refs: items.map(tikzRef), dx: n.dx * mmX, dy: n.dy * mmY, snap: false });
     }, 350);
 }
 
@@ -9233,6 +9293,11 @@ window.addEventListener('keydown', e => {
         else tikzToggle(false);
     } else if (cmd && e.key.toLowerCase() === 'z') { handled(); tikzSend({ op: e.shiftKey ? 'redo' : 'undo' }); }
     else if (cmd && e.key.toLowerCase() === 'd') { handled(); tikzOp('duplicate', { dx: 20, dy: -20 }); }
+    else if (cmd && (e.key.toLowerCase() === 'c' || e.key.toLowerCase() === 'x') && tikz.selection) {
+        handled();
+        tikzOp('copy');
+        if (e.key.toLowerCase() === 'x') setTimeout(tikzDelete, 0);
+    } else if (cmd && e.key.toLowerCase() === 'v') { handled(); tikzPaste(); }
     else if (cmd && e.key.toLowerCase() === 'a') {
         handled();
         const page = tikz.selection?.page ?? visiblePages()[0], model = tikz.pages.get(page);

@@ -1409,7 +1409,7 @@ class TexViewer {
                 const p = found && model.parsePicture(found.doc.getText(), found.offset);
                 if (!p) continue;
                 parsed.set(special, { p, file: found.doc.uri.fsPath, doc: found.doc });
-                reply.pictures[special] = { file: found.doc.uri.fsPath, begin: p.begin, scale: p.scale, feynman: !!p.feynman,
+                reply.pictures[special] = { file: found.doc.uri.fsPath, begin: p.begin, scale: p.scale, unitX: p.unitX, unitY: p.unitY, feynman: !!p.feynman,
                     statements: p.statements.map(s => ({ start: s.start, end: s.end, text: s.text, kind: s.kind,
                         name: s.name?.value || null, at: s.at && s.at.x != null ? { x: s.at.x, y: s.at.y } : null,
                         refs: s.refs, label: !!s.label,
@@ -1496,11 +1496,16 @@ class TexViewer {
                 this._insertTarget = null;
                 this._post({ type:'moveCaret', rects: [] });
             }
+            if (m.op === 'paste') op.text = await vscode.env.clipboard.readText();
             const files = new Set([op.picture?.file, op.file, this.root].filter(Boolean));
             const texts = {};
             for (const f of files) if (this._isInsideProject(f)) texts[f] = (await this._tikzDocument(f)).getText();
             const r = plan(op, texts);
             if (r.error) return done(false, { error: r.error });
+            if (m.op === 'copy') {
+                await vscode.env.clipboard.writeText(r.clipboard);
+                return done(true, { copied: r.clipboard.split('\n').length });
+            }
             const undo = await this._tikzApply(r.edits, `TikZ: ${m.op}`);
             if (!undo) return done(false, { error:'the edit could not be applied' });
             (this._tikzUndoStack ||= []).push(undo);
