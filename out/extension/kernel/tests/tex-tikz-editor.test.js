@@ -104,3 +104,27 @@ test('a new picture from a template goes where it was placed, with its packages'
     assert.ok(out.slice(r.select.start).startsWith('\\begin{tikzcd}'));
     assert.equal(ed.apply(out, ed.inverse(PAPER, r.edits[FILE])), PAPER);
 });
+
+test('the chain tool adds a root and its bond in one step; moves keep every selection', () => {
+    const first = run({ op: 'chain', item: 'dynkin-even', points: [[3 * CM, 0]] });
+    assert.equal(first.r.created, 'r1');
+    const second = run({ op: 'chain', item: 'dynkin-iso', bond: 'dynkin-double', fromName: 'r1', points: [[4 * CM, 0]] }, first.out);
+    assert.match(second.out, /  \\node\[dynkin even\] \(r1\) at \(3,0\) \{\};\n  \\node\[dynkin iso\] \(r2\) at \(4,0\) \{\};\n  \\draw\[dynkin double\] \(r1\) -- \(r2\);\n\\end\{tikzpicture\}/);
+    const { out, r } = run({ op: 'move', refs: [ref(PAPER, 0), ref(PAPER, 1)], dx: CM, dy: 0 });
+    assert.deepEqual(r.selects.map(k => out.slice(k, k + 12)), ['\\node[draw] ', '\\node[draw] ']);
+    assert.ok(out.slice(r.selects[1]).startsWith('\\node[draw] at (3,0) {B};'));
+});
+
+test('palette colours are written by name and defined once in the preamble', () => {
+    const { out } = run({ op: 'style', refs: [ref(PAPER, 2)], group: 'color', value: 'wpTeal' });
+    assert.match(out, /\\definecolor\{wpTeal\}\{HTML\}\{14B8A6\}\n% end of WPaper TikZ styles/);
+    assert.match(out, /\\draw\[color=wpTeal\] \(a\) -- \(2,0\);/);
+    const fill = run({ op: 'style', refs: [ref(out, 0)], group: 'fill', value: 'wpTeal!25' }, out).out;
+    assert.equal(fill.match(/\\definecolor\{wpTeal\}/g).length, 1, 'defined once');
+    assert.match(fill, /\\node\[draw, fill=wpTeal!25\] \(a\)/);
+    const custom = run({ op: 'style', refs: [ref(PAPER, 2)], group: 'color', value: '#12ab34' }).out;
+    assert.match(custom, /\\definecolor\{wpC12AB34\}\{HTML\}\{12AB34\}/);
+    assert.match(custom, /\\draw\[color=wpC12AB34\]/);
+    const plain = run({ op: 'style', refs: [ref(PAPER, 2)], group: 'color', value: 'red' }).out;
+    assert.ok(!plain.includes('definecolor'), 'xcolor names need no definition');
+});

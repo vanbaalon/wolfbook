@@ -94,7 +94,7 @@ function plan(op, texts) {
     };
     const stmts = (op.refs || (op.ref ? [op.ref] : [])).map(r => findStmt(picture, r));
     if (stmts.some(s => !s)) return fail('the source changed — select it again');
-    let select = null, reveal = null;
+    let select = null, reveal = null, selects = null, created = null;
     const selectInserted = (insert, first) => {
         const all = [...(edits[file] || [])];
         const shifted = shiftThrough(all.filter(e => e !== insert), insert.start);
@@ -115,6 +115,21 @@ function plan(op, texts) {
         add(file, [insert]);
         needs(item.needs);
         selectInserted(insert, lines[0]);
+        break;
+    }
+    case 'chain': {
+        // A root of a diagram and the bond from the previous one, in one step
+        // (the super Dynkin chain tool).
+        const root = palette.byId.get(op.item), bond = palette.byId.get(op.bond || 'dynkin-single');
+        if (!root || root.kind !== 'point' || !bond || bond.kind !== 'edge') return fail('unknown chain item');
+        const name = model.freshName(picture, root.prefix || 'r');
+        const lines = [...root.build({ a: toUnits(op.points?.[0] || [0, 0]), name })];
+        if (op.fromName && model.names(picture).has(op.fromName)) lines.push(...bond.build({ from: op.fromName, to: name }));
+        const [insert] = model.insertEdits(text, picture, lines);
+        add(file, [insert]);
+        needs(root.needs);
+        selectInserted(insert, lines[0]);
+        created = name;
         break;
     }
     case 'edge': {
@@ -144,6 +159,7 @@ function plan(op, texts) {
             add(file, [model.moveEdit(s, d[0] / unit, d[1] / unit)]);
         }
         select = { file, start: shiftThrough(edits[file] || [], stmts[0].start) };
+        selects = stmts.map(st => shiftThrough(edits[file] || [], st.start));
         break;
     }
     case 'transform': {
@@ -171,19 +187,24 @@ function plan(op, texts) {
         const [insert] = model.insertEdits(text, picture, lines, { feynman: stmts.some(s => s.kind === 'vertex' || s.kind === 'diagram') });
         add(file, [insert]);
         selectInserted(insert, lines[0]);
+        selects = lines.map(l => select.start + insert.text.indexOf(l) - insert.text.indexOf(lines[0]));
         break;
     }
     case 'style': {
-        const o = palette.styleOption(op.group, op.value);
+        let value = op.value;
+        if (op.group === 'color' || op.group === 'fill') { const c = palette.colorValue(value); value = c.value; needs(c.needs); }
+        const o = palette.styleOption(op.group, value);
         if (!o) return fail('unknown style');
         for (const s of stmts) add(file, [model.setOptionEdit(s, o.key, o.value, o.replaces)]);
         if (op.group === 'arrows' && op.value.includes('Stealth')) needs({ libraries: ['arrows.meta'] });
-        select = { file, start: stmts[0]?.start };
+        select = { file, start: shiftThrough(edits[file] || [], stmts[0]?.start) };
+        selects = stmts.map(st => shiftThrough(edits[file] || [], st.start));
         break;
     }
     case 'option': {
         for (const s of stmts) add(file, [model.setOptionEdit(s, op.key, op.value ?? null)]);
-        select = { file, start: stmts[0]?.start };
+        select = { file, start: shiftThrough(edits[file] || [], stmts[0]?.start) };
+        selects = stmts.map(st => shiftThrough(edits[file] || [], st.start));
         break;
     }
     case 'label': {
@@ -230,7 +251,7 @@ function plan(op, texts) {
         const sorted = [...list].sort((a, b) => a.start - b.start);
         for (let k = 1; k < sorted.length; k++) if (sorted[k].start < sorted[k - 1].end) return fail('overlapping edits');
     }
-    return { edits, select, reveal, error: null };
+    return { edits, select, selects: selects || (select ? [select.start] : []), reveal, created, error: null };
 }
 
 module.exports = { plan, inverse, apply, findStmt, BP_PER_CM };

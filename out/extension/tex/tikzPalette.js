@@ -103,6 +103,45 @@ const STYLE_GROUPS = {
 };
 const COLORS = ['black', 'red', 'blue', 'green!60!black', 'orange', 'violet', 'gray', 'white'];
 
+/**
+ * Curated colour sets for the Style section. A colour is written by name
+ * (`wpIndigo`, fills as tints `wpIndigo!25`) and defined once in the preamble
+ * (`\definecolor{wpIndigo}{HTML}{4F46E5}`). Sources, credited in
+ * ACKNOWLEDGEMENTS.md: the Tailwind CSS palette (Tailwind Labs, MIT), the
+ * Okabe–Ito colour-universal-design palette (M. Okabe and K. Ito, 2002) and
+ * Nord (Arctic Ice Studio / Sven Greb, MIT).
+ */
+const COLOR_SETS = [
+    { id: 'modern', label: 'Modern', colors: [
+        ['wpIndigo', '4F46E5'], ['wpViolet', '7C3AED'], ['wpSky', '0EA5E9'], ['wpTeal', '14B8A6'], ['wpEmerald', '10B981'],
+        ['wpLime', '84CC16'], ['wpAmber', 'F59E0B'], ['wpCoral', 'F97360'], ['wpRose', 'F43F5E'], ['wpFuchsia', 'D946EF'],
+        ['wpSlate', '475569'], ['wpInk', '0F172A']] },
+    { id: 'okabe-ito', label: 'Colour-blind safe (Okabe–Ito)', colors: [
+        ['wpOIOrange', 'E69F00'], ['wpOISky', '56B4E9'], ['wpOIGreen', '009E73'], ['wpOIYellow', 'F0E442'],
+        ['wpOIBlue', '0072B2'], ['wpOIVermilion', 'D55E00'], ['wpOIPurple', 'CC79A7'], ['wpOIBlack', '000000']] },
+    { id: 'nord', label: 'Nord (cool)', colors: [
+        ['wpNordFrost1', '8FBCBB'], ['wpNordFrost2', '88C0D0'], ['wpNordFrost3', '81A1C1'], ['wpNordFrost4', '5E81AC'],
+        ['wpNordRed', 'BF616A'], ['wpNordOrange', 'D08770'], ['wpNordYellow', 'EBCB8B'], ['wpNordGreen', 'A3BE8C'],
+        ['wpNordPurple', 'B48EAD'], ['wpNordNight', '2E3440']] },
+    { id: 'pastel', label: 'Pastel', colors: [
+        ['wpPastelBlue', 'A5C8FF'], ['wpPastelMint', 'A8E6CF'], ['wpPastelLemon', 'FDFD96'], ['wpPastelPeach', 'FFCBA4'],
+        ['wpPastelPink', 'FFB3C6'], ['wpPastelLilac', 'CDB4DB'], ['wpPastelSage', 'B5CDA3'], ['wpPastelSand', 'E9DCC9']] },
+];
+const COLOR_HEX = new Map(COLOR_SETS.flatMap(set => set.colors));
+
+/**
+ * The colour definitions a style value needs: a palette colour (`wpTeal`,
+ * `wpTeal!25`) or a custom one (`#12ab34` becomes `wpC12AB34`). Returns
+ * `{value, needs}` with the value to write.
+ */
+function colorValue(value) {
+    if (value == null) return { value, needs: null };
+    const custom = /^#([0-9a-fA-F]{6})$/.exec(value);
+    if (custom) { const name = `wpC${custom[1].toUpperCase()}`; return { value: name, needs: { colors: [[name, custom[1].toUpperCase()]] } }; }
+    const base = String(value).split('!')[0];
+    return COLOR_HEX.has(base) ? { value, needs: { colors: [[base, COLOR_HEX.get(base)]] } } : { value, needs: null };
+}
+
 /** A Style action as `{key, value, replaces}` for tikzModel.setOptionEdit. */
 function styleOption(group, value) {
     if (group === 'color') return { key: 'color', value, replaces: ['draw'] };
@@ -210,4 +249,4 @@ const TEMPLATES = [
 
 const byId = new Map(ITEMS.map(item => [item.id, item]));
 
-module.exports = { ITEMS, byId, STYLE_GROUPS, COLORS, styleOption, CATALOGUE, catalogueNeeds, TEMPLATES };
+module.exports = { ITEMS, byId, STYLE_GROUPS, COLORS, COLOR_SETS, colorValue, styleOption, CATALOGUE, catalogueNeeds, TEMPLATES };

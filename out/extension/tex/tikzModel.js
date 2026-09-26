@@ -402,8 +402,12 @@ function preambleEdits(text, needs) {
     const lines = [];
     const hasFeynman = loads('tikz-feynman');
     if (needs.feynman && !hasFeynman) lines.push('\\usepackage[compat=1.1.0]{tikz-feynman}', '\\tikzfeynmanset{warn luatex=false}');
-    else if ((needs.tikz || needs.libraries?.length || needs.dynkin) && !loads('tikz') && !hasFeynman && !loads('pgfplots')) lines.push('\\usepackage{tikz}');
+    else if ((needs.tikz || needs.libraries?.length || needs.dynkin || needs.colors?.length) && !loads('tikz') && !hasFeynman && !loads('pgfplots')) lines.push('\\usepackage{tikz}');
     for (const pkg of needs.packages || []) if (!loads(pkg)) lines.push(`\\usepackage{${pkg}}`);
+    // Palette colours, defined once (a paper's own definition wins).
+    for (const [name, hex] of needs.colors || []) {
+        if (!new RegExp(`\\\\(?:define|provide)color\\s*\\{${name}\\}`).test(pre)) lines.push(`\\definecolor{${name}}{HTML}{${hex}}`);
+    }
     const wanted = [...new Set([...(needs.libraries || []), ...(needs.dynkin ? ['arrows.meta', 'decorations.markings'] : [])])]
         .filter(l => !libs.has(l));
     if (wanted.length) lines.push(`\\usetikzlibrary{${wanted.join(',')}}`);

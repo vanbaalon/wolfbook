@@ -270,12 +270,40 @@
   .tikz-stem { stroke:var(--vscode-focusBorder, #3794ff); stroke-width:1; }
   .tikz-preview { fill:none; stroke:var(--vscode-focusBorder, #3794ff); stroke-width:1.5; stroke-dasharray:5 3; }
   .tikz-text { position:absolute; z-index:10; font:13px var(--vscode-font-family, sans-serif); padding:2px 4px; min-width:8em; }
-  #tikzbar { position:fixed; top:44px; left:50%; transform:translateX(-50%); z-index:50; display:flex; gap:2px;
-             padding:3px; border-radius:6px; background:var(--vscode-editorWidget-background, #252526);
-             border:1px solid var(--vscode-editorWidget-border, #454545); box-shadow:0 2px 8px rgba(0,0,0,.35); }
-  #tikzbar[hidden] { display:none; }
-  #tikzbar button { min-width:28px; height:26px; font-size:15px; line-height:1; border-radius:4px; }
-  #tikzbar button[aria-pressed="true"] { background:var(--vscode-toolbar-activeBackground, rgba(99,102,103,.5)); }
+  #tikzpanel { position:fixed; top:44px; right:10px; bottom:10px; width:250px; z-index:50; display:flex; flex-direction:column;
+               border-radius:8px; background:var(--vscode-editorWidget-background, #252526); color:var(--vscode-editorWidget-foreground, inherit);
+               border:1px solid var(--vscode-editorWidget-border, #454545); box-shadow:0 2px 12px rgba(0,0,0,.35); font-size:12px; }
+  #tikzpanel[hidden] { display:none; }
+  #tikzpanel .tz-head { display:flex; align-items:center; gap:6px; padding:6px 8px; border-bottom:1px solid var(--vscode-editorWidget-border, #454545); }
+  #tikzpanel .tz-head strong { flex:1; }
+  #tikzpanel .tz-coords { font-variant-numeric:tabular-nums; opacity:.75; }
+  #tikzpanel .tz-body { overflow:auto; padding:4px 6px 10px; }
+  #tikzpanel .tz-section summary { cursor:pointer; padding:5px 2px; font-weight:600; opacity:.9; }
+  #tikzpanel .tz-grid { display:flex; flex-wrap:wrap; gap:3px; padding:2px 0 6px; align-items:center; }
+  #tikzpanel .tz-btn { width:30px; height:28px; display:inline-flex; align-items:center; justify-content:center; border-radius:4px; padding:0; }
+  #tikzpanel .tz-btn[aria-pressed="true"] { background:var(--vscode-toolbar-activeBackground, rgba(99,102,103,.5)); outline:1px solid var(--vscode-focusBorder, #3794ff); }
+  #tikzpanel .tz-swatch { width:18px; height:18px; border-radius:3px; border:1px solid var(--vscode-editorWidget-border, #777); padding:0; font-size:10px; }
+  #tikzpanel select, #tikzpanel input { font-size:12px; max-width:100%; }
+  #tikzpanel .tz-swatches { display:flex; flex-wrap:wrap; gap:3px; width:100%; }
+  #tikzpanel .tz-swatch { width:20px; height:20px; }
+  #tikzpanel .tz-sublabel { width:100%; opacity:.7; margin-top:3px; }
+  #tikzpanel .tz-picker { width:28px; height:20px; padding:0; border:none; background:none; }
+  #tikzpanel .tz-arrange-row { display:flex; gap:2px; width:100%; }
+  #tikzpanel .tz-catalogue { display:flex; flex-direction:column; max-height:260px; overflow:auto; width:100%; }
+  #tikzpanel .tz-cat-head { font-weight:600; opacity:.7; margin-top:6px; }
+  #tikzpanel .tz-cat-item { text-align:left; padding:2px 4px; background:none; border:none; color:inherit; cursor:pointer; width:100%; }
+  #tikzpanel .tz-cat-item:hover { background:var(--vscode-list-hoverBackground, rgba(128,128,128,.2)); }
+  #tikzpanel .tz-row { display:flex; gap:6px; align-items:center; margin:2px 0; }
+  #tikzpanel .tz-kind { font-weight:600; margin-bottom:4px; width:100%; }
+  #tikzpanel .tz-options { display:flex; flex-wrap:wrap; gap:3px; width:100%; }
+  #tikzpanel .tz-chip { border:1px solid var(--vscode-editorWidget-border, #666); border-radius:10px; padding:0 2px 0 6px; font-family:var(--vscode-editor-font-family, monospace); }
+  #tikzpanel .tz-chip button { background:none; border:none; color:inherit; cursor:pointer; padding:0 3px; }
+  #tikzpanel .tz-actions { display:flex; gap:4px; flex-wrap:wrap; margin-top:6px; }
+  .tikz-from { fill:none; stroke:#e11d48; stroke-width:3; stroke-opacity:.7; }
+  .tikz-guide { stroke:#4f46e5; stroke-width:1; stroke-dasharray:none; pointer-events:none; }
+  .tikz-spacing { stroke:#e11d48; stroke-width:1.5; }
+  .tikz-marquee { fill:rgba(55,148,255,.08); }
+  .tikz-placing main .page { cursor:copy; }
   /* A TeX error of the live preview, on the page it was typeset on. */
   .live-error { position:absolute; left:8px; right:8px; top:8px; z-index:7; cursor:pointer;
              padding:3px 8px; border-radius:3px; font:12px/1.4 var(--vscode-font-family, sans-serif);
@@ -1386,7 +1414,7 @@
   <button id="reviewclose" title="Leave the review; nothing is decided">✕</button>
 </div>
 <div id="reader">
-  <div id="tikzbar" role="toolbar" aria-label="TikZ editing" hidden></div>
+  <aside id="tikzpanel" aria-label="TikZ picture editor" hidden></aside>
   <main><div id="pages" tabindex="-1"></div></main>
   <aside id="commentpanel" aria-label="Paper comments">
     <div id="commentgrip" title="Drag to resize · double-click to reset"></div>

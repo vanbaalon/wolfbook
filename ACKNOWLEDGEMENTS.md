@@ -29,6 +29,13 @@ It writes source for:
   for Lie superalgebras informed the editor's super Dynkin styles (the styles
   are WPaper's own TikZ).
 
+Colour palettes in its Style section (colour values only):
+
+- **Tailwind CSS colours** — Tailwind Labs (MIT), for the "Modern" set.
+- **Okabe–Ito palette** — Masataka Okabe and Kei Ito, *Color Universal
+  Design* (2002/2008), for the colour-blind-safe set.
+- **Nord** — Arctic Ice Studio and Sven Greb (MIT), for the cool "Nord" set.
+
 Inspiration, with no code or data taken:
 
 - **KtikZ** — Florian Hackenberger, Glad Deschrijver, João Carreira and

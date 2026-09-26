@@ -1329,12 +1329,14 @@ class TexViewer {
         return this._jumpToNativeSource(st, m, request, live);
     }
 
-    // --- the TikZ toolbar -----------------------------------------------------
+    // --- the TikZ picture editor ----------------------------------------------
     //
     // The webview draws live pages from TXDL; each TikZ path carries the
     // ordinal of the special that painted it, and the live page map names the
-    // command behind that special (`lane.liveSpecials`). The toolbar edits
-    // that command's text (tikzEdit.js); the live engine redraws the page.
+    // source behind that special (`lane.liveSpecials`). tikzModel.js says which
+    // statement that is (a node, an edge, a feynman vertex…), tikzEditor.js
+    // turns each gesture into edits, and they are applied here as one
+    // WorkspaceEdit — one undo step — whose inverse the editor's own undo keeps.
 
     _tikzLane() {
         const st = this.root ? this.coord.roots?.get(this.root) : null;
@@ -1355,55 +1357,24 @@ class TexViewer {
         if (st && !this._txdlLatest?.size && typeof this.coord._schedulePreview === 'function') {
             this.coord._schedulePreview(this.root, st);
             this._post({ type:'status', text:'TikZ: typesetting the live pages…', kind:'' });
-        } else if (missing.length) {
+        } else {
             this._post({ type:'status', text:'TikZ: no live page yet here — edit the paper once to draw it live', kind:'warn' });
         }
+    }
+
+    /** The palette, catalogue and templates, for the webview to build its panel. */
+    _tikzPalette() {
+        const p = require('./tikzPalette');
+        this._post({ type:'tikzPalette',
+            items: p.ITEMS.map(({ id, label, icon, kind, section, text, feynman }) => ({ id, label, icon, kind, section, text: !!text, feynman: !!feynman })),
+            catalogue: p.CATALOGUE, templates: p.TEMPLATES.map(({ id, label }) => ({ id, label })),
+            styles: p.STYLE_GROUPS, colors: p.COLORS,
+            colorSets: p.COLOR_SETS.map(({ id, label, colors }) => ({ id, label, colors })) });
     }
 
     async _tikzDocument(file) {
         const open = vscode.workspace.textDocuments.find(d => d.uri.fsPath === file);
         return open || vscode.workspace.openTextDocument(vscode.Uri.file(file));
-    }
-
-    /** Commands and pictures behind a page's paths, as `{file, start, end, text}`. */
-    async _tikzResolve(m) {
-        const reply = { type:'tikzResolved', key:m.key, page:m.page, commands:{}, pictures:{}, error:null };
-        try {
-            const { commandRange, picture } = require('./tikzEdit');
-            const lane = this._tikzLane();
-            if (!lane) throw Error('the WLaTeX engine is not running for this paper');
-            const specials = [...new Set(m.specials || [])], pictures = [...new Set(m.pictures || [])];
-            const origins = await lane.liveSpecials(m.page, [...specials, ...pictures]);
-            if (!origins) throw Error('this page has no live source map yet');
-            const locate = async origin => {
-                const at = origin?.invocation;
-                if (!at || !this._isInsideProject(at.file)) return null;
-                const doc = await this._tikzDocument(at.file);
-                const offset = doc.offsetAt(new vscode.Position(at.location.start.line - 1, at.location.start.column_utf16));
-                return { doc, text: doc.getText(), offset, file: at.file };
-            };
-            for (const [i, special] of specials.entries()) {
-                const found = await locate(origins[i]);
-                if (!found) continue;
-                // The span may start inside the command; its name is just before.
-                let start = found.offset;
-                if (found.text[start] !== '\\') {
-                    const back = found.text.slice(Math.max(0, start - 400), start);
-                    const names = [...back.matchAll(/\\(?:draw|fill|filldraw|path|node|shade|shadedraw|clip|pic|coordinate)\b/g)];
-                    if (names.length) start = start - back.length + names.at(-1).index;
-                }
-                const range = commandRange(found.text, start);
-                if (range) reply.commands[special] = { file: found.file, start: range.start, end: range.end,
-                    text: found.text.slice(range.start, range.end), version: found.doc.version };
-            }
-            for (const [i, special] of pictures.entries()) {
-                const found = await locate(origins[specials.length + i]);
-                const p = found && picture(found.text, found.offset);
-                if (p) reply.pictures[special] = { file: found.file, begin: p.begin, bodyEnd: p.bodyEnd, scale: p.scale,
-                    version: found.doc.version };
-            }
-        } catch (error) { reply.error = error.message || String(error); }
-        this._post(reply);
     }
 
     _isInsideProject(file) {
@@ -1412,69 +1383,159 @@ class TexViewer {
         return !!rel && !rel.startsWith('..') && !path.isAbsolute(rel);
     }
 
-    /** Select a command in its editor without taking the focus from the page. */
+    /**
+     * The pictures on a page as statements: which statement each path special
+     * belongs to, each picture's statements (kind, name, coordinates,
+     * references), and the glyph boxes of statements drawn only as text, so a
+     * text node can be picked and aligned like a drawn one.
+     */
+    async _tikzResolve(m) {
+        const reply = { type:'tikzResolved', key:m.key, page:m.page, pictures:{}, paths:{}, glyphs:[], error:null };
+        try {
+            const model = require('./tikzModel');
+            const lane = this._tikzLane();
+            if (!lane) throw Error('the WLaTeX engine is not running for this paper');
+            const specials = [...new Set(m.specials || [])], pictures = [...new Set(m.pictures || [])];
+            const origins = await lane.liveSpecials(m.page, [...specials, ...pictures]);
+            if (!origins) throw Error('this page has no live source map yet');
+            const offsetOf = async at => {
+                if (!at || !this._isInsideProject(at.file)) return null;
+                const doc = await this._tikzDocument(at.file);
+                return { doc, offset: doc.offsetAt(new vscode.Position(at.location.start.line - 1, at.location.start.column_utf16)) };
+            };
+            const parsed = new Map();
+            for (const [i, special] of pictures.entries()) {
+                const found = await offsetOf(origins[specials.length + i]?.invocation);
+                const p = found && model.parsePicture(found.doc.getText(), found.offset);
+                if (!p) continue;
+                parsed.set(special, { p, file: found.doc.uri.fsPath, doc: found.doc });
+                reply.pictures[special] = { file: found.doc.uri.fsPath, begin: p.begin, scale: p.scale, feynman: !!p.feynman,
+                    statements: p.statements.map(s => ({ start: s.start, end: s.end, text: s.text, kind: s.kind,
+                        name: s.name?.value || null, at: s.at && s.at.x != null ? { x: s.at.x, y: s.at.y } : null,
+                        refs: s.refs, label: !!s.label,
+                        options: s.options?.items || [], labelText: s.label ? found.doc.getText().slice(s.label.start, s.label.end) : null })) };
+            }
+            for (const [i, special] of specials.entries()) {
+                const at = origins[i]?.invocation;
+                if (!at) continue;
+                for (const [pic, { p, file }] of parsed) {
+                    if (file !== at.file) continue;
+                    const found = await offsetOf(at);
+                    const s = found && model.statementAtOffset(p, found.offset);
+                    if (s) { reply.paths[special] = { picture: pic, stmt: s.start }; break; }
+                }
+            }
+            // Glyphs of the pictures' statements (node text), from the live map.
+            if (parsed.size && typeof lane.liveView === 'function') {
+                const view = await lane.liveView([m.page]).catch(() => null);
+                for (const hit of view?.pages?.[0]?.hits || []) {
+                    const g = hit.item?.glyph && hit.item.geometry;
+                    const origin = (hit.mapped_origins || []).find(o => o.source?.file);
+                    if (!g || !origin) continue;
+                    const file = path.resolve(lane.projectDir, origin.source.file);
+                    for (const [pic, { p, file: pf, doc }] of parsed) {
+                        if (pf !== file) continue;
+                        const off = doc.offsetAt(new vscode.Position(origin.source.location.start.line - 1, origin.source.location.start.column_utf16));
+                        const s = off >= p.bodyStart && off < p.bodyEnd ? model.statementAtOffset(p, off) : null;
+                        if (s) reply.glyphs.push({ picture: pic, stmt: s.start, x: g.position.x, y: g.position.y - g.height,
+                            w: g.width, h: g.height + g.depth });
+                        break;
+                    }
+                }
+            }
+        } catch (error) { reply.error = error.message || String(error); }
+        this._post(reply);
+    }
+
+    /** Select a range in its editor without taking the focus from the page. */
     async _tikzReveal(m) {
         if (!m || typeof m.file !== 'string' || !this._isInsideProject(m.file)) return;
         const doc = await this._tikzDocument(m.file);
-        const range = new vscode.Range(doc.positionAt(m.start), doc.positionAt(m.end));
+        const range = new vscode.Range(doc.positionAt(m.start), doc.positionAt(m.end ?? m.start));
         const editor = await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.One, preserveFocus: true, preview: false });
         editor.selection = new vscode.Selection(range.start, range.end);
         editor.revealRange(range, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
     }
 
+    /** Apply `edits` ({file: [{start,end,text}]}) as one WorkspaceEdit; returns their inverses, or null. */
+    async _tikzApply(edits, note) {
+        const { inverse } = require('./tikzEditor');
+        const files = Object.keys(edits).filter(f => edits[f]?.length);
+        if (!files.length) return [];
+        const docs = new Map();
+        for (const f of files) {
+            if (!this._isInsideProject(f)) return null;
+            docs.set(f, await this._tikzDocument(f));
+        }
+        const before = new Map([...docs].map(([f, d]) => [f, d.getText()]));
+        const [first] = files;
+        const ok = await this._guardedWrite(docs.get(first), 'wpaper.tikz', note, we => {
+            for (const f of files) {
+                const doc = docs.get(f);
+                for (const e of edits[f]) we.replace(doc.uri, new vscode.Range(doc.positionAt(e.start), doc.positionAt(e.end)), e.text);
+            }
+        });
+        if (!ok) return null;
+        return files.map(f => ({ file: f, version: docs.get(f).version, edits: inverse(before.get(f), edits[f]) }));
+    }
+
     /**
-     * One toolbar gesture, one undo step: a transform of a command, its
-     * removal, or a new command in a picture. The command's text must still be
-     * what the page was resolved against; otherwise nothing changes.
+     * One gesture of the picture editor, one undo step. The statements must
+     * still be what the page was resolved against; otherwise nothing changes.
      */
     async _tikzEdit(m) {
-        const done = (ok, extra = {}) => this._post({ type:'tikzEdited', key:m.key, ok, ...extra });
+        const done = (ok, extra = {}) => this._post({ type:'tikzEdited', key:m.key, op:m.op, ok, ...extra });
         try {
-            const t = require('./tikzEdit');
-            const target = m.command || m.picture;
-            if (!target || !this._isInsideProject(target.file)) return done(false, { error:'not a file of this paper' });
-            const doc = await this._tikzDocument(target.file);
-            const text = doc.getText();
-            const edit = new vscode.WorkspaceEdit();
-            let select = null;
-            if (m.op === 'add') {
-                const p = t.picture(text, m.picture.begin);
-                if (!p || p.bodyEnd !== m.picture.bodyEnd) return done(false, { error:'the picture changed — try again' });
-                const command = t.newCommand(m.shape, m.points || [], { scale:p.scale, snap:m.snap !== false, text:m.text || '' });
-                if (!command) return done(false, { error:'nothing to add' });
-                const lineStart = text.lastIndexOf('\n', p.bodyEnd - 1) + 1;
-                const own = text.slice(lineStart, p.bodyEnd).trim() === '';
-                const prev = text.slice(text.lastIndexOf('\n', lineStart - 2) + 1, lineStart);
-                const indent = own ? (/^[ \t]*/.exec(prev)[0] || '  ') : '';
-                const at = own ? lineStart : p.bodyEnd;
-                const insert = own ? `${indent}${command}\n` : `\n${command}\n`;
-                edit.insert(doc.uri, doc.positionAt(at), insert);
-                select = { file: target.file, start: at + (own ? indent.length : 1) };
-            } else {
-                const c = m.command;
-                if (text.slice(c.start, c.end) !== c.text) return done(false, { error:'the command changed — select it again' });
-                const range = new vscode.Range(doc.positionAt(c.start), doc.positionAt(c.end));
-                if (m.op === 'delete') {
-                    // The whole line when the command is alone on it.
-                    const lineStart = text.lastIndexOf('\n', c.start - 1) + 1;
-                    const lineEnd = text.indexOf('\n', c.end);
-                    const alone = text.slice(lineStart, c.start).trim() === '' && text.slice(c.end, lineEnd < 0 ? text.length : lineEnd).trim() === '';
-                    edit.delete(doc.uri, alone ? new vscode.Range(doc.positionAt(lineStart), doc.positionAt(lineEnd < 0 ? text.length : lineEnd + 1)) : range);
-                } else {
-                    const scale = m.picture?.scale || 1;
-                    const cm = v => t.toCm(v, scale);
-                    const transform = m.op === 'move' ? { kind:'shift', dx:cm(m.dx), dy:cm(m.dy) }
-                        : m.op === 'rotate' ? { kind:'rotate', degrees:m.degrees, cx:cm(m.cx), cy:cm(m.cy) }
-                        : m.op === 'scale' ? { kind:'scale', factor:m.factor, cx:cm(m.cx), cy:cm(m.cy) } : null;
-                    const next = transform && t.withTransform(c.text, transform);
-                    if (!next) return done(false, { error:'this command cannot be transformed' });
-                    edit.replace(doc.uri, range, next);
-                    select = { file: c.file, start: c.start };
-                }
+            if (m.op === 'undo' || m.op === 'redo') return done(await this._tikzUndo(m.op === 'redo'));
+            const { plan } = require('./tikzEditor');
+            const op = { ...m, root: this.root };
+            if (m.op === 'newPicture') {
+                const t = this._insertTarget;
+                if (!t) return done(false, { error:'click in the paper where the picture goes' });
+                op.file = t.file; op.offset = t.offset;
+                this._insertTarget = null;
+                this._post({ type:'moveCaret', rects: [] });
             }
-            const ok = await vscode.workspace.applyEdit(edit);
-            done(ok, { select });
+            const files = new Set([op.picture?.file, op.file, this.root].filter(Boolean));
+            const texts = {};
+            for (const f of files) if (this._isInsideProject(f)) texts[f] = (await this._tikzDocument(f)).getText();
+            const r = plan(op, texts);
+            if (r.error) return done(false, { error: r.error });
+            const undo = await this._tikzApply(r.edits, `TikZ: ${m.op}`);
+            if (!undo) return done(false, { error:'the edit could not be applied' });
+            (this._tikzUndoStack ||= []).push(undo);
+            if (this._tikzUndoStack.length > 200) this._tikzUndoStack.shift();
+            this._tikzRedoStack = [];
+            if (r.reveal) await this._tikzReveal(r.reveal);
+            else if (r.select) {
+                const doc = await this._tikzDocument(r.select.file);
+                const model = require('./tikzModel');
+                const text = doc.getText();
+                const p = op.picture ? model.parsePicture(text, r.select.start) || model.parsePicture(text, op.picture.begin) : null;
+                const s = p && model.statementAtOffset(p, r.select.start);
+                await this._tikzReveal({ file: r.select.file, start: r.select.start, end: s ? s.end : r.select.start });
+            }
+            done(true, { select: r.select, selects: r.selects, created: r.created });
         } catch (error) { done(false, { error: error.message || String(error) }); }
+    }
+
+    /** Undo or redo the editor's last gesture, when nothing else changed the files since. */
+    async _tikzUndo(redo) {
+        const from = redo ? (this._tikzRedoStack ||= []) : (this._tikzUndoStack ||= []);
+        const entry = from.pop();
+        if (!entry) { this._post({ type:'status', text:`TikZ: nothing to ${redo ? 'redo' : 'undo'}`, kind:'warn' }); return false; }
+        for (const part of entry) {
+            const doc = await this._tikzDocument(part.file);
+            if (doc.version !== part.version) {
+                this._post({ type:'status', text:'TikZ: the source changed since — use the editor\'s undo', kind:'warn' });
+                from.length = 0;
+                return false;
+            }
+        }
+        const back = await this._tikzApply(Object.fromEntries(entry.map(p => [p.file, p.edits])), redo ? 'TikZ: redo' : 'TikZ: undo');
+        if (!back) return false;
+        (redo ? (this._tikzUndoStack ||= []) : (this._tikzRedoStack ||= [])).push(back);
+        return true;
     }
 
     /**
@@ -4307,6 +4368,8 @@ class TexViewer {
             case 'tikzResolve': await this._tikzResolve(m); break;
             case 'tikzEdit': await this._tikzEdit(m); break;
             case 'tikzReveal': await this._tikzReveal(m); break;
+            case 'tikzPalette': this._tikzPalette(); break;
+            case 'tikzNewPreview': await this._insertPreview(m, 'picture'); break;
             case 'revealSection':
                 // Reviewing a list of changes means wanting to see where they
                 // are. Same path the worklist uses, so both scroll the same way

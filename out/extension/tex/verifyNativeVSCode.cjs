@@ -277,26 +277,63 @@ exports.run = async function() {
                 overlay:new Map([[tikzFile, tdoc.getText()]]), wait:true });
             try {
                 await preview();
-                const paths = tpages.at(-1).txdl.ops.filter(op => op.op === 'path');
-                assert.equal(paths.length, 1, JSON.stringify(tpages.at(-1).txdl.unsupported));
+                const cm = 72 / 2.54;
                 const posts = [];
                 const host = Object.assign(Object.create(TexViewer.prototype), { root:tikzFile, coord, panel:{}, _post:m => posts.push(m) });
-                await host._tikzResolve({ key:'a', page:1, specials:[paths[0].special], pictures:[paths[0].picture.special] });
-                const resolved = posts.pop();
-                assert.equal(resolved.error, null);
-                const cmd = resolved.commands[paths[0].special];
-                assert.equal(cmd.text, '\\draw[red] (0,0) -- (2,1);');
-                await host._tikzEdit({ key:1, op:'move', command:cmd, picture:resolved.pictures[paths[0].picture.special], dx:72 / 2.54, dy:0 });
-                const edited = posts.pop();
-                assert.equal(edited.ok, true, edited.error);
+                const lastPage = () => tpages.at(-1).txdl.ops.filter(op => op.op === 'path');
+                const resolve = async () => {
+                    const paths = lastPage();
+                    await host._tikzResolve({ key:'k', page:1, specials:paths.map(p => p.special), pictures:[...new Set(paths.map(p => p.picture.special))] });
+                    const r = posts.pop();
+                    assert.equal(r.error, null);
+                    const [pic] = Object.values(r.pictures);
+                    return { r, pic, paths, picture:{ file:pic.file, begin:pic.begin } };
+                };
+                const edit = async op => {
+                    await host._tikzEdit({ key:Math.random(), ...op });
+                    const done = posts.filter(m => m.type === 'tikzEdited').pop();
+                    assert.equal(done.ok, true, done.error);
+                    tpages.length = 0;
+                    await preview();
+                };
+                const ref = s => ({ start:s.start, text:s.text });
+                let { r, pic, picture } = await resolve();
+                const draw = pic.statements[0];
+                assert.equal(draw.text, '\\draw[red] (0,0) -- (2,1);');
+                assert.deepEqual(Object.values(r.paths).map(p => p.stmt), [draw.start], 'the path belongs to the \\draw');
+                // A move of the \draw: a leading shift.
+                await edit({ op:'move', picture, refs:[ref(draw)], dx:cm, dy:0, snap:false });
                 assert.ok(tdoc.getText().includes('\\draw[shift={(1,0)}, red] (0,0) -- (2,1);'), tdoc.getText());
-                tpages.length = 0;
-                await preview();
-                const moved = tpages.at(-1).txdl.ops.find(op => op.op === 'path');
-                const start = (moved.x - moved.picture.x) / 65781.76 + moved.segments[0][1];
-                assert.ok(Math.abs(start - 72 / 2.54) < 0.05, `the path starts ${start} bp right of the picture origin`);
-                await host._tikzResolve({ key:'b', page:1, specials:[moved.special], pictures:[moved.picture.special] });
-                assert.match(posts.pop().commands[moved.special].text, /^\\draw\[shift=/);
+                // Two circle nodes and an arrow edge between them.
+                await edit({ op:'add', item:'circle-node', picture, points:[[0, 2 * cm]] });
+                await edit({ op:'add', item:'circle-node', picture, points:[[3 * cm, 2.5 * cm]] });
+                ({ pic, picture } = await resolve());
+                const [n1, n2] = pic.statements.filter(s => s.kind === 'node');
+                assert.deepEqual([n1.name, n1.at, n2.name, n2.at], ['n1', { x:0, y:2 }, 'n2', { x:3, y:2.5 }]);
+                await edit({ op:'edge', item:'edge-arrow', picture, refs:[ref(n1), ref(n2)] });
+                assert.ok(tdoc.getText().includes('\\draw[->] (n1) -- (n2);'));
+                // Moving a node moves its coordinates, and the live page's edge follows it.
+                // The edge's line (its arrow tip is drawn in a frame of its own), found through the resolver.
+                const edgeEnd = async () => {
+                    const { r: res, pic: p, paths } = await resolve();
+                    const edgeStmt = p.statements.find(st => st.text === '\\draw[->] (n1) -- (n2);');
+                    const line = paths.find(op => res.paths[op.special]?.stmt === edgeStmt.start && op.segments.some(sg => sg[0] === 'l'));
+                    return (line.x - line.picture.x) / 65781.76 + line.segments.filter(sg => sg[0] === 'l').at(-1)[1];
+                };
+                const before = await edgeEnd();
+                ({ pic, picture } = await resolve());
+                await edit({ op:'move', picture, refs:[ref(pic.statements.find(s => s.name === 'n2'))], dx:cm, dy:0, snap:false });
+                assert.ok(tdoc.getText().includes('(n2) at (4,2.5)'));
+                const after = await edgeEnd();
+                assert.ok(Math.abs(after - before - cm) < 0.5, `the edge's end moved ${after - before} bp`);
+                // Align: the second node to the first node's vertical centre.
+                ({ pic, picture } = await resolve());
+                const m2 = pic.statements.find(s => s.name === 'n2');
+                await edit({ op:'move', picture, refs:[ref(m2)], deltas:[[0, -0.5 * cm]], snap:false });
+                assert.ok(tdoc.getText().includes('(n2) at (4,2)'));
+                // The editor's undo restores the source, gesture by gesture.
+                await edit({ op:'undo' });
+                assert.ok(tdoc.getText().includes('(n2) at (4,2.5)'));
                 tikzEditVerified = true;
             } finally { pagesSub.dispose(); changesSub.dispose(); }
             await until(() => viewer._pdfRanges.files.size === 1, 'only the displayed PDF handle remains');
