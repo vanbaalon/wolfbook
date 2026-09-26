@@ -1139,6 +1139,12 @@
           "default": false,
           "description": "With the WLaTeX engine: also write SyncTeX for external PDF viewers (Skim, Zathura, SumatraPDF). Export PDF then saves a .synctex.gz with absolute source paths beside the exported file. WPaper's own viewer does not need it."
         },
+        "wolfbook.tex.shellEscape": {
+          "type": "boolean",
+          "default": false,
+          "scope": "application",
+          "markdownDescription": "With the WLaTeX engine: let papers run shell commands (`\\write18`, as `-shell-escape` does), for packages such as `minted` or TikZ externalization. **The commands run with your rights**, so only turn this on for papers you trust. It is a user setting only (a workspace cannot turn it on), applies in trusted workspaces, and affects the full builds; the live preview never runs commands."
+        },
         "wolfbook.tex.liveSinglePass": {
           "type": "boolean",
           "default": true,

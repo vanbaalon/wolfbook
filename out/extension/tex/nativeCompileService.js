@@ -76,10 +76,18 @@ function artifactParent(projectDir) {
  * external viewers (Export PDF puts it beside the exported file).
  */
 function coldBuildEnv() {
-    let synctex = false;
-    try { synctex = !!require('vscode').workspace.getConfiguration('wolfbook.tex').get('synctex', false); }
-    catch (_) { /* outside VS Code */ }
-    return synctex ? { WLATEX_SYNCTEX: '1' } : {};
+    let synctex = false, shellEscape = false;
+    try {
+        const vscode = require('vscode');
+        const config = vscode.workspace.getConfiguration('wolfbook.tex');
+        synctex = !!config.get('synctex', false);
+        // SHELL ESCAPE RUNS THE PAPER'S COMMANDS WITH THE USER'S RIGHTS, so
+        // only the user's own setting turns it on — never a workspace's
+        // settings file, which travels with a downloaded project — and only
+        // in a trusted workspace. The live preview never runs them.
+        shellEscape = config.inspect('shellEscape')?.globalValue === true && vscode.workspace.isTrusted !== false;
+    } catch (_) { /* outside VS Code */ }
+    return { ...(synctex ? { WLATEX_SYNCTEX: '1' } : {}), ...(shellEscape ? { WLATEX_SHELL_ESCAPE: '1' } : {}) };
 }
 
 class NativeBuildLane {
@@ -567,4 +575,4 @@ class NativeBuildLane {
         return this._closing;
     }
 }
-module.exports = { NativeBuildLane, isDocumentFailure };
+module.exports = { NativeBuildLane, isDocumentFailure, coldBuildEnv };

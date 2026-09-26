@@ -69,3 +69,25 @@ test('a live preview sends only what differs from disk (and what the engine will
     fs.rmSync(root);
     assert.throws(() => lane._interactiveOverlays({ sourceFiles }), /ENOENT/, 'a missing main file is still an error');
 });
+
+test('shell escape comes only from the user\'s own setting, in a trusted workspace', () => {
+    const Module = require('node:module');
+    const { coldBuildEnv } = require('../../tex/nativeCompileService');
+    const resolve = Module._resolveFilename, load = Module._load;
+    let settings = {}, trusted = true;
+    const fake = { workspace: { get isTrusted() { return trusted; }, getConfiguration: () => ({
+        get: (key, fallback) => settings[key]?.effective ?? fallback,
+        inspect: key => settings[key] ? { globalValue: settings[key].global, workspaceValue: settings[key].workspace } : undefined,
+    }) } };
+    Module._load = function (request, ...rest) { return request === 'vscode' ? fake : load.call(this, request, ...rest); };
+    try {
+        assert.deepEqual(coldBuildEnv(), {});
+        settings = { shellEscape: { global: true, effective: true } };
+        assert.deepEqual(coldBuildEnv(), { WLATEX_SHELL_ESCAPE: '1' });
+        settings = { shellEscape: { workspace: true, effective: true } };
+        assert.deepEqual(coldBuildEnv(), {}, 'a workspace settings file cannot turn it on');
+        settings = { shellEscape: { global: true, effective: true }, synctex: { effective: true } };
+        trusted = false;
+        assert.deepEqual(coldBuildEnv(), { WLATEX_SYNCTEX: '1' }, 'not in an untrusted workspace');
+    } finally { Module._load = load; Module._resolveFilename = resolve; }
+});
