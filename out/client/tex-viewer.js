@@ -7604,6 +7604,23 @@ function setScale(s, anchor, keepFit, { live = false } = {}) {
     } else saveViewSoon(0);
 }
 
+// A MOVE TO A SCREEN OF ANOTHER DENSITY. Canvases are sized in device pixels
+// when they are drawn; without this they keep the old density — blurry on a
+// Retina screen, or four times the memory on a plain one — until the next
+// zoom. Same path as a zoom, at the same scale.
+(function watchDensity() {
+    if (!window.matchMedia) return;
+    let mq;
+    try { mq = window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`); } catch (_) { return; }
+    if (!mq || !mq.addEventListener) return;
+    const changed = () => {
+        mq.removeEventListener('change', changed);
+        if (state.doc) setScale(state.scale, scrollAnchor(), true);
+        watchDensity();
+    };
+    mq.addEventListener('change', changed);
+})();
+
 // Pinch and Ctrl/Cmd+wheel zoom, anchored so the page does not jump. macOS
 // trackpad pinches arrive as wheel events with ctrlKey set.
 document.querySelector('main').addEventListener('wheel', (ev) => {

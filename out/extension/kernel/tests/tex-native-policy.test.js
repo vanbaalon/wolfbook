@@ -1246,3 +1246,25 @@ test('live overlays are drawn near the viewport only, and their number is bounde
     assert.deepEqual(JSON.parse(JSON.stringify(txdlEvictions(pages, [cap + 3], cap))), [1, 2, 3]);
     assert.equal(txdlEvictions(pages.slice(0, cap), [1], cap).length, 0);
 });
+
+
+test('a change of screen density redraws the pages at the same scale', () => {
+    const vm = require('node:vm');
+    const js = fs.readFileSync(path.resolve(__dirname, '../../../client/tex-viewer.js'), 'utf8');
+    const start = js.indexOf('(function watchDensity() {');
+    const source = js.slice(start, js.indexOf('})();', start) + 5);
+    const queries = [], calls = [];
+    const window = { devicePixelRatio: 2, matchMedia(query) {
+        const mq = { query, listeners: new Set(), addEventListener(_, fn) { this.listeners.add(fn); },
+            removeEventListener(_, fn) { this.listeners.delete(fn); } };
+        queries.push(mq); return mq; } };
+    const context = vm.createContext({ window, state: { doc: {}, scale: 1.5 },
+        setScale: (...args) => calls.push(args), scrollAnchor: () => 'anchor' });
+    vm.runInContext(source, context);
+    assert.equal(queries[0].query, '(resolution: 2dppx)');
+    window.devicePixelRatio = 1;
+    [...queries[0].listeners][0]();
+    assert.deepEqual(JSON.parse(JSON.stringify(calls)), [[1.5, 'anchor', true]]);
+    assert.equal(queries[0].listeners.size, 0, 'the old query is released');
+    assert.equal(queries[1].query, '(resolution: 1dppx)', 'and the new density is watched');
+});

@@ -222,9 +222,13 @@ class NativeBuildLane {
         const snapshot = await this.source.capture();
         requireCurrent();
         started = true;
+        // The last settled build's auxiliary files seed the first pass: an edit
+        // that moved no reference settles in one pass instead of two. Its
+        // artifacts are still leased by `coldReport`; the producer checks them.
+        const seed = this.coldReport?.build?.settled === true ? this.coldReport.artifact_directory || null : null;
         const report = await this.compiler.compile({ main: this.root, root: this.projectDir,
             generation: ++this.buildNumber, signal: o.signal, timeoutMs:clampTimeout(o.timeoutMs),
-            overlays: Object.fromEntries(texts) });
+            overlays: Object.fromEntries(texts), seed });
         if (this.closed) requireCurrent();
         const nativeArtifactLease = this.artifactCache?.lease(report);
         report.nativeArtifactLease = nativeArtifactLease;
