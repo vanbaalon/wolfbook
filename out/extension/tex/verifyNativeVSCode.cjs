@@ -12,11 +12,11 @@ const memento = () => { const values = new Map(); return {
     get:(key, fallback) => values.has(key) ? values.get(key) : fallback,
     update:async (key, value) => { values.set(key,value); },
 }; };
-async function until(predicate, label) {
+async function until(predicate, label, intervalMs = 50) {
     const deadline = Date.now() + 30000;
     while (!predicate()) {
         if (Date.now() > deadline) throw Error(`Timed out waiting for ${label}`);
-        await new Promise(resolve => setTimeout(resolve, 50));
+        await new Promise(resolve => setTimeout(resolve, intervalMs));
     }
 }
 exports.run = async function() {
@@ -35,6 +35,7 @@ exports.run = async function() {
     let liveClickVerified = false;
     let tikzEditVerified = false;
     const keystrokeToPreviewMs = [];
+    const editAppliedMs = [];
     const messages = [];
     try {
         const doc = await vscode.workspace.openTextDocument(path.join(folder,'paper.tex'));
@@ -115,14 +116,17 @@ exports.run = async function() {
             // uses (live rendering is off in this harness so that it drives
             // the cold builds itself): the time until the host posts the
             // recomputed page to the webview.
+            // Polled every 2 ms: at the default 50 ms the poll was the measurement.
             for (let n = 0; n < 5; n++) {
                 const before = new Map(viewer._previewPages || []);
-                const t0 = Date.now();
+                const t0 = performance.now();
                 await editor.edit(builder => builder.insert(doc.lineAt(liveLine).range.end, ' More.'));
+                editAppliedMs.push(Math.round(performance.now() - t0));
                 coord._schedulePreview(doc.uri.fsPath, st);
                 await until(() => [...(viewer._previewPages || new Map())].some(([p, m]) => before.get(p) !== m),
-                    'preview after a keystroke');
-                keystrokeToPreviewMs.push(Date.now() - t0);
+                    'preview after a keystroke', 2);
+                keystrokeToPreviewMs.push(Math.round(performance.now() - t0));
+                await new Promise(resolve => setTimeout(resolve, 150));
             }
             const median = [...keystrokeToPreviewMs].sort((a, b) => a - b)[2];
             assert.ok(median < 500, `keystroke to preview ${keystrokeToPreviewMs.join(', ')} ms`);
@@ -355,7 +359,7 @@ exports.run = async function() {
             default_without_wlatex:mode === 'default', unavailable_wlatex_fallback:mode === 'missing',
             conventional_unsaved_rebuild:mode !== 'native', authoritative_native_handoff:mode === 'native',
             real_pdfjs_opened:true, unsaved_source_edit:true, translated_inverse_navigation:mode === 'native',
-            actual_source_worker_crash_recovered:workerCrashRecovered, live_page_click_verified:liveClickVerified, keystroke_to_preview_ms:keystrokeToPreviewMs, tikz_toolbar_edit_verified:tikzEditVerified, native_pdf_range_transport:mode === 'native', native_pdf_handles_released:mode === 'native', unchanged_page_text_reused:mode === 'native',
+            actual_source_worker_crash_recovered:workerCrashRecovered, live_page_click_verified:liveClickVerified, keystroke_to_preview_ms:keystrokeToPreviewMs, edit_applied_ms:editAppliedMs, tikz_toolbar_edit_verified:tikzEditVerified, native_pdf_range_transport:mode === 'native', native_pdf_handles_released:mode === 'native', unchanged_page_text_reused:mode === 'native',
             pointer_gestures_verified:false, visual_acceptance_verified:false,
         }, null, 2));
     } catch (error) {

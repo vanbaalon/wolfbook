@@ -1354,3 +1354,30 @@ test('TikZ drags become moves, snapped scales and 15° rotations', async () => {
     assert.equal(drag('rotate', 100, 111).deg, 90);
     assert.equal(drag('rotate', 110, 101).none, true);
 });
+
+test('a keystroke with no preview build running starts one at once; a burst while one runs coalesces', async () => {
+    const f = fixture();
+    try {
+        const { coordinator, state, root } = { ...f, root: f.state.root };
+        state.nativeLane = { interactive: true, close: async () => {}, invalidate() {} };
+        coordinator.liveOverlay = () => new Map();
+        coordinator._nativeWindow = () => [];
+        const started = [];
+        let finish = null;
+        coordinator._runInteractive = () => { started.push(Date.now()); return new Promise(resolve => { finish = resolve; }); };
+        const tick = ms => new Promise(resolve => setTimeout(resolve, ms));
+        assert.equal(coordinator._schedulePreview(root, state), true);
+        await tick(5);
+        assert.equal(started.length, 1, 'idle: the build starts at once, not after the throttle');
+        for (let i = 0; i < 20; i++) { coordinator._schedulePreview(root, state); await tick(1); }
+        assert.equal(started.length, 1, 'while it runs, keystrokes wait');
+        await tick(60);
+        assert.equal(started.length, 2, 'the burst becomes one build after the throttle');
+        finish(); await tick(5);
+        finish(); await tick(5);
+        coordinator._schedulePreview(root, state);
+        await tick(5);
+        assert.equal(started.length, 3, 'idle again: at once');
+        finish();
+    } finally { f.close(); }
+});

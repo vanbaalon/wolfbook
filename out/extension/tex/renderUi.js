@@ -423,13 +423,21 @@ class RenderCoordinator {
         if (!lane || !lane.interactive || this._disposed || st.nativeOff) return false;
         const cfg = vscode.workspace.getConfiguration('wolfbook.tex');
         const throttle = Math.max(0, cfg.get('livePreviewThrottleMs', 30));
+        // LEADING EDGE WHEN IDLE. With no preview build in flight the keystroke
+        // starts one at once (the throttle alone was most of the delay to the
+        // page); keystrokes that arrive while one runs wait out the throttle
+        // and start a single build that supersedes it, so a burst still
+        // coalesces into one build per throttle window.
+        const busy = (this._previewBusy ||= new Map());
         clearTimeout(this._previewTimers.get(root));
         this._previewTimers.set(root, setTimeout(() => {
             this._previewTimers.delete(root);
             if (this._disposed || st.nativeLane !== lane) return;
-            this._runInteractive(st, lane, root, { root, sourceFiles: st.files, overlay: this.liveOverlay(root),
+            const run = this._runInteractive(st, lane, root, { root, sourceFiles: st.files, overlay: this.liveOverlay(root),
                 nativePages: this._nativeWindow(st) }).catch(() => { /* logged inside */ });
-        }, throttle));
+            busy.set(root, run);
+            run.finally(() => { if (busy.get(root) === run) busy.delete(root); });
+        }, busy.has(root) ? throttle : 0));
         return true;
     }
 
