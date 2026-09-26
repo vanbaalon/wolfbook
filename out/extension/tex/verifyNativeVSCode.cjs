@@ -151,7 +151,8 @@ exports.run = async function() {
             assert.ok(doc.lineAt(3).text.startsWith('ANEWlpha'));
             assert.ok((await st.map.forwardAt(doc.uri.fsPath, 4, 4))?.length,
                 'unchanged letter must retain its native provenance');
-            assert.deepEqual(await st.map.forwardAt(doc.uri.fsPath, 4, 2), [],
+            // At most the nearest printed text, flagged approximate.
+            assert.ok((await st.map.forwardAt(doc.uri.fsPath, 4, 2)).every(r => r.approximate === true),
                 'inserted text must not inherit old glyphs');
             await viewer._onEditCaret({ editId:card.id, start:4, end:5 });
             assert.equal(editor.selection.start.character, 4);

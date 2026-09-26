@@ -67,7 +67,9 @@ async function main() {
     const offset = ('% moved\n' + text).indexOf('Alpha') + 1;
     await source.edit('paper.tex', offset, offset, 'NEW');
     const inserted = new NativeMap({ ...options, nativeView: await source.readPages([1]) });
-    assert.deepEqual(await inserted.forwardAt(entry, 5, 2), [], 'inserted text cannot borrow old glyph geometry');
+    // At most the nearest printed text, flagged approximate (the viewer says
+    // so): never the old glyphs' geometry as if it were the new text's.
+    assert.ok((await inserted.forwardAt(entry, 5, 2)).every(r => r.approximate === true), 'inserted text cannot borrow old glyph geometry');
     assert.ok((await inserted.forwardAt(entry, 5, 0)).length > 0, 'surviving source still maps');
     const { makeVscodeStub } = require(path.join(checkout, 'out/extension/kernel/tests/_stub-vscode.js'));
     const stub = makeVscodeStub();

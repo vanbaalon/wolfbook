@@ -70,6 +70,35 @@ function artifactParent(projectDir) {
     return path.join(base, key);
 }
 
+// THE LAST SETTLED BUILD OUTLIVES THE SESSION. Its auxiliary files (and what
+// its BibTeX/biber/index steps last read) are kept beside the session
+// folders, one copy per main file, so the first build after reopening the
+// paper starts from them: it usually settles in one pass instead of three,
+// and runs no tool whose inputs did not change. The producer checks every
+// file against the hashes recorded here and ignores a seed that fails.
+function settledSeedDirectory(projectDir, root) {
+    const key = require('crypto').createHash('sha256').update(path.relative(projectDir, root)).digest('hex').slice(0, 16);
+    return path.join(artifactParent(projectDir), 'settled', key);
+}
+
+/** Copy a settled build's seed (a trimmed build.json and its auxiliary files) into `directory`. */
+function keepSettledSeed(directory, report) {
+    const build = report.build;
+    const staging = `${directory}.tmp-${process.pid}-${Date.now()}`;
+    try {
+        for (const name of Object.keys(build.auxiliary_files)) {
+            if (!SAFE_OVERLAY(name)) throw Error(`unsafe auxiliary name ${name}`);
+            fs.mkdirSync(path.dirname(path.join(staging, name)), { recursive:true });
+            fs.copyFileSync(path.join(report.artifact_directory, name), path.join(staging, name));
+        }
+        fs.mkdirSync(staging, { recursive:true });
+        fs.writeFileSync(path.join(staging, 'build.json'), JSON.stringify({ main_file:build.main_file, settled:true,
+            auxiliary_files:build.auxiliary_files, tool_inputs:build.tool_inputs || {} }));
+        fs.rmSync(directory, { recursive:true, force:true });
+        fs.renameSync(staging, directory);
+    } finally { fs.rmSync(staging, { recursive:true, force:true }); }
+}
+
 /**
  * Producer environment for cold builds, read at every build so the setting
  * applies from the next one. `wolfbook.tex.synctex` writes SyncTeX for
@@ -128,6 +157,9 @@ class NativeBuildLane {
         // The last successful cold report, for the auxiliary texts the
         // interactive lane replays. Null until a cold build has succeeded.
         this.coldReport = null;
+        // The settled build kept from an earlier session (settledSeedDirectory).
+        this.settledSeed = settledSeedDirectory(this.projectDir, root);
+        this._keptSeed = null;
         this.interactiveWarm = false;
         this._warming = null;
         // SDK build IDs belong to this session; display IDs share the
@@ -233,7 +265,9 @@ class NativeBuildLane {
         // The last settled build's auxiliary files seed the first pass: an edit
         // that moved no reference settles in one pass instead of two. Its
         // artifacts are still leased by `coldReport`; the producer checks them.
-        const seed = this.coldReport?.build?.settled === true ? this.coldReport.artifact_directory || null : null;
+        // Before this session has one, the settled build kept from the last.
+        const seed = this.coldReport?.build?.settled === true ? this.coldReport.artifact_directory || null
+            : this._keptSeedFiles() ? this.settledSeed : null;
         const report = await this.compiler.compile({ main: this.root, root: this.projectDir,
             generation: ++this.buildNumber, signal: o.signal, timeoutMs:clampTimeout(o.timeoutMs),
             overlays: Object.fromEntries(texts), seed });
@@ -291,6 +325,14 @@ class NativeBuildLane {
         // preview numbers what the settled build numbered. Recorded only for a
         // build that succeeded, and only once its artifacts exist.
         this.coldReport = report;
+        // Kept for the next session, when it changed (see keepSettledSeed).
+        if (report.build.settled === true) {
+            const kept = JSON.stringify([report.build.auxiliary_files, report.build.tool_inputs || null]);
+            if (kept !== this._keptSeed) {
+                try { keepSettledSeed(this.settledSeed, report); this._keptSeed = kept; }
+                catch (_) { /* the next session starts unseeded, as before */ }
+            }
+        }
         // A document that shipped no pages has no page geometry; the viewer
         // falls back to its default page size instead of the lane crashing.
         const first = report.build.pages[0] || null;
@@ -495,13 +537,25 @@ class NativeBuildLane {
     _auxiliaryTexts() {
         const report = this.coldReport;
         const texts = {};
-        if (!report?.artifact_directory) return texts;
-        for (const name of Object.keys(report.build?.auxiliary_files || {})) {
+        // Until this session's first build lands, the settled build kept from
+        // the last one: the first live pages then already number references.
+        const directory = report?.artifact_directory || (!report && this._keptSeedFiles() ? this.settledSeed : null);
+        const files = report?.artifact_directory ? report.build?.auxiliary_files : this._keptSeedFiles();
+        if (!directory) return texts;
+        for (const name of Object.keys(files || {})) {
             if (!AUXILIARY_FILE.test(name) || !SAFE_OVERLAY(name)) continue;
-            try { texts[name] = fs.readFileSync(path.join(report.artifact_directory, name), 'utf8'); }
+            try { texts[name] = fs.readFileSync(path.join(directory, name), 'utf8'); }
             catch (_) { /* swept or unreadable: the preview reads one fewer */ }
         }
         return texts;
+    }
+
+    /** The auxiliary files of the settled build kept for this main file, or null. */
+    _keptSeedFiles() {
+        try {
+            const build = JSON.parse(fs.readFileSync(path.join(this.settledSeed, 'build.json'), 'utf8'));
+            return build.settled === true && build.main_file === this.relative(this.root) ? build.auxiliary_files || null : null;
+        } catch (_) { return null; }
     }
 
     /**

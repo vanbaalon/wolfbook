@@ -442,6 +442,25 @@ class RenderCoordinator {
     }
 
     /**
+     * FIRST OPEN, PAGES FIRST. A new lane has no PDF to show until its first
+     * full build lands (median 2.2 s, up to 15 s on the arXiv corpus); the
+     * live engine typesets the first page in about half a second. So a live
+     * build runs at once, next to that full build, and its pages are what the
+     * viewer shows first (texViewer's `liveStart`). It waits for the engine
+     * to start, which a keystroke's preview does not.
+     */
+    _previewFirstOpen(root, st) {
+        const lane = st && st.nativeLane;
+        if (!lane || !lane.interactive || this._disposed || st.nativeOff) return;
+        const busy = (this._previewBusy ||= new Map());
+        if (busy.has(root)) return;
+        const run = this._runInteractive(st, lane, root, { root, sourceFiles: st.files, overlay: this.liveOverlay(root),
+            nativePages: this._nativeWindow(st), wait: true }).catch(() => { /* logged inside */ });
+        busy.set(root, run);
+        run.finally(() => { if (busy.get(root) === run) busy.delete(root); });
+    }
+
+    /**
      * One interactive preview build, with its pages pushed to whatever is
      * drawing them. Everything here is contained: it cannot throw, it cannot
      * retire the lane, and it cannot change `st.generation`, `st.map` or any
@@ -760,6 +779,7 @@ class RenderCoordinator {
                     // Start the incremental engine now, so the first keystroke
                     // already previews instead of only asking for the engine.
                     if (typeof st.nativeLane.warmInteractive === 'function') st.nativeLane.warmInteractive();
+                    this._previewFirstOpen(root, st);
                     const runtime = st.nativeLane.runtime;
                     if (runtime) this.log(`WLaTeX lane: ${runtime.labBinary}` +
                         (runtime.installed ? '' : ' (development checkout, newest build)'));

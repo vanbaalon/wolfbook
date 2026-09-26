@@ -1273,6 +1273,16 @@ class TexViewer {
             const msg = { type:'txdlPage', generation:event.generation, page:event.page,
                 changed:true, identity:event.identity || null,
                 txdl:event.txdl, fonts:event.fonts || null, pageSize:event.pageSize || null };
+            // NO PDF ON SCREEN YET (the paper's first build is still running):
+            // the live pages are the first thing shown, at the zoom and place
+            // the reader left the paper at. The webview takes the first of
+            // these and ignores the rest.
+            if (!this.shownAnything) {
+                const place = this._viewState || this._viewFor(this.root);
+                this._post({ type:'liveStart',
+                    restoreView: place ? { scale: place.scale, fit: place.fit === true } : null,
+                    revealPage: place?.page ?? null, revealFrac: place?.frac ?? null });
+            }
             this._post(msg);
             (this._liveOverlays ||= new Map()).set(event.page, event.identity || null);
             (this._previewPages ||= new Map()).set(event.page, msg);
@@ -5609,15 +5619,19 @@ class TexViewer {
         this._nativeInverseRequest = (this._nativeInverseRequest || 0) + 1;
         if (this._deletionAnchor) this._claimViewerNavigation();
         const st = this.root && this.coord.roots.get(this.root);
+        // A LIVE PAGE ANSWERS FROM ITS OWN MAP, whatever state the cold map
+        // is in. Checked after it, a click on a live page just after a
+        // keystroke — while the cold map waits for its debounced re-read — was
+        // dropped without a word.
+        if (st && m.overlay !== undefined && m.overlay !== null) {
+            return this._jumpToLiveSource(st, m, this._nativeInverseRequest);
+        }
         if (!st || !st.map || !st.map.available) {
             if (m.commentTarget) this._post({
                 type: 'commentTarget', target: null,
                 reason: 'Comments need a compiled page-to-source map.',
             });
             return;
-        }
-        if (m.overlay !== undefined && m.overlay !== null) {
-            return this._jumpToLiveSource(st, m, this._nativeInverseRequest);
         }
         if (st.map.native) {
             return this._jumpToNativeSource(st, m, this._nativeInverseRequest);

@@ -523,7 +523,17 @@ async function openDocument(msg) {
             el('zoom').textContent = `${Math.round(state.scale * 100)}%`;
         }
         state.restoreViewNext = false;
-        const samePagination = editingInPlace || (msg.live && state.pageCount === state.doc.numPages
+        // THE FIRST PDF TAKES OVER THE LIVE PAGES (see liveStart) when they
+        // are the same pages at the same size: painted under them, and the
+        // overlays dropped once it is, with the reader's scroll kept.
+        const first = state.liveFirst;
+        state.liveFirst = null;
+        const liveFirstPages = !prev && !!first && Number.isFinite(first.scale)
+            && Math.abs(first.scale - state.scale) <= 1e-3 * first.scale
+            && pagesEl().children.length === state.doc.numPages;
+        if (liveFirstPages) state.scale = first.scale;
+        for (const wrap of pagesEl().querySelectorAll('.page[data-live-first="true"]')) delete wrap.dataset.liveFirst;
+        const samePagination = editingInPlace || liveFirstPages || (msg.live && state.pageCount === state.doc.numPages
             && pagesEl().children.length === state.doc.numPages);
         state.pageCount = state.doc.numPages;
         state.generation = msg.generation;
@@ -1826,6 +1836,91 @@ function dropEmptyLiveExtraPages(count = Infinity) {
     }
 }
 
+// --- live first: pages before the first PDF ---------------------------------
+//
+// A paper opened on the WLaTeX lane has no PDF for the seconds its first full
+// build takes (median 2.2 s, up to 15 s on the arXiv corpus), while the live
+// engine typesets its first page in about half a second. So the live pages
+// are the first thing shown: each gets a page box sized from its own display
+// list, and the first PDF then takes those boxes over the way a live rebuild
+// does — its canvases painted first, the overlays dropped after — instead of
+// starting from blank placeholders.
+
+/** The host says the live engine is typesetting a paper no PDF has shown yet. */
+function liveStart(msg) {
+    if (state.doc || state.liveFirst) return;
+    const view = msg.restoreView || {};
+    if (Number.isFinite(view.scale)) state.scale = Math.max(0.25, Math.min(6, Number(view.scale)));
+    state.fitMode = view.fit === true;
+    document.body.classList.toggle('fitted', state.fitMode);
+    updateFitControl();
+    state.liveFirst = { scale: null, reveal: Number(msg.revealPage) >= 1
+        ? { page: Number(msg.revealPage), frac: Number.isFinite(msg.revealFrac) ? msg.revealFrac : 0 } : null };
+    el('zoom').textContent = `${Math.round(state.scale * 100)}%`;
+    status('typesetting…');
+}
+
+/**
+ * The PDF's paper when the page stream names none (no geometry or hyperref
+ * `papersize` special): WLaTeX's PDF stage defaults to US letter.
+ */
+const LIVE_DEFAULT_PAGE = { widthBp: 612, heightBp: 792 };
+
+/** A page box for a live page shown before any PDF, and boxes for those before it. */
+function ensureLiveFirstPage(page, pageSize) {
+    const first = state.liveFirst;
+    if (!(pageSize?.widthBp > 0 && pageSize?.heightBp > 0)) pageSize = LIVE_DEFAULT_PAGE;
+    if (state.doc || !first) return;
+    if (first.scale == null) {
+        // Fit to width as openDocument will once the PDF is here: the same
+        // width in bp, so the boxes need not change size when it is.
+        if (state.fitMode) {
+            const main = document.querySelector('main');
+            const cs = getComputedStyle(main);
+            const avail = main.clientWidth - (parseFloat(cs.paddingLeft || 0) + parseFloat(cs.paddingRight || 0));
+            if (avail > 0) state.scale = Math.max(0.25, Math.min(6, avail / pageSize.widthBp));
+            syncChipScale();
+            el('zoom').textContent = `${Math.round(state.scale * 100)}%`;
+        }
+        first.scale = state.scale;
+    }
+    const size = wrap => {
+        wrap.style.width = `${Math.floor(pageSize.widthBp * state.scale)}px`;
+        wrap.style.height = `${Math.floor(pageSize.heightBp * state.scale)}px`;
+        wrap.dataset.widthBp = String(pageSize.widthBp);
+        wrap.dataset.heightBp = String(pageSize.heightBp);
+    };
+    const existing = pagesEl().querySelector(`.page[data-page="${page}"]`);
+    if (existing) { if (existing.dataset.liveFirst === 'true') size(existing); return; }
+    for (let n = pagesEl().querySelectorAll('.page').length + 1; n <= page; n++) {
+        const wrap = document.createElement('div');
+        wrap.className = 'page';
+        wrap.dataset.page = String(n);
+        wrap.dataset.liveFirst = 'true';
+        size(wrap);
+        const num = document.createElement('div');
+        num.className = 'pagenum';
+        num.textContent = String(n);
+        wrap.appendChild(num);
+        pagesEl().appendChild(wrap);
+        if (observer) observer.observe(wrap); else observeVisible();
+    }
+    el('pagecount').textContent = String(page);
+    // Where the reader was when the paper was last open, once that page exists.
+    if (first.reveal && page >= first.reveal.page) {
+        restoreAnchor(first.reveal);
+        first.reveal = null;
+    }
+}
+
+/** The live build's page count, before any PDF: boxes past it go. */
+function trimLiveFirstPages(count) {
+    if (state.doc || !state.liveFirst) return;
+    for (const wrap of pagesEl().querySelectorAll('.page[data-live-first="true"]'))
+        if (Number(wrap.dataset.page) > count) wrap.remove();
+    el('pagecount').textContent = String(count);
+}
+
 /** Draw the preview pages that arrived while a PDF was opening. */
 function flushTxdlDeferred() {
     const deferred = state.txdlDeferred;
@@ -1902,6 +1997,9 @@ async function drawTxdlPage(msg, { duringOpen = false, force = false } = {}) {
     if (!txdl) return;
     // `unsupported` is the renderer saying it cannot put every mark of this
     // page on the canvas. The PDF page is then the honest thing to show.
+    // Before the first PDF, the page box comes from the live page itself —
+    // also for a page it cannot draw, which stays blank until the PDF.
+    if (!state.doc && state.liveFirst) ensureLiveFirstPage(page, msg.pageSize);
     if (Array.isArray(txdl.unsupported) && txdl.unsupported.length) { txdlFellBack(page); return; }
     if (page > (state.pageCount || 0)) ensureLiveExtraPage(page);
     const wrap = pagesEl().querySelector(`.page[data-page="${page}"]`);
@@ -2127,6 +2225,12 @@ function followLiveDest(name) {
 function redrawTxdlOverlay(page) {
     const entry = state.txdl && state.txdl.pages.get(page);
     if (!entry) return;
+    // NOT WHILE A PDF OPENS: the open itself drops the overlays older than
+    // it and draws those newer again. Redrawn here, an older one waited out
+    // the open and came back stamped as newer than the PDF, and stayed over
+    // it — the old text on top of the new, answering clicks from a live map
+    // the open had already dropped.
+    if (state.openInFlight) return;
     drawTxdlPage({ generation: entry.generation, page, changed: true,
         txdl: entry.txdl, pageSize: entry.pageSize }).catch(() => {});
 }
@@ -7822,6 +7926,7 @@ window.addEventListener('message', async (ev) => {
         // a page to draw, the end of a build (which is where a document that
         // lost pages drops their overlays), and the answer to an outline
         // request the renderer made.
+        case 'liveStart': liveStart(msg); break;
         case 'txdlPage': await drawTxdlPage(msg); tikzPageChanged(Number(msg.page)); findPageChanged(); break;
         case 'tikzResolved': tikzResolved(msg); break;
         case 'tikzEdited': tikzEdited(msg); break;
@@ -7833,6 +7938,7 @@ window.addEventListener('message', async (ev) => {
                 for (const page of [...(state.txdlPending || new Map()).keys()]) if (page > count) state.txdlPending.delete(page);
                 dropEmptyLiveExtraPages(count);
             }
+            if (Number.isInteger(count) && count >= 1) trimLiveFirstPages(count);
             paintLiveErrors(msg.errors);
             break;
         }
