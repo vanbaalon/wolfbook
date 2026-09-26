@@ -1171,3 +1171,57 @@ test('live overlay pages carry their own hyperlinks and destinations', async () 
     assert.equal(link.removed, true);
     assert.deepEqual(relinked, [3]);
 });
+
+
+test('exported SyncTeX names project inputs by absolute path and is gzipped', () => {
+    const zlib = require('node:zlib');
+    const os = require('node:os');
+    const load = Module._load;
+    Module._load = function (req, ...args) { return req === 'vscode' ? stub : load.call(this, req, ...args); };
+    let exportSynctex;
+    try { ({ exportSynctex } = require('../../tex/index.js')); } finally { Module._load = load; }
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wpaper-synctex-'));
+    try {
+        fs.mkdirSync(path.join(dir, 'ch'));
+        fs.writeFileSync(path.join(dir, 'main.tex'), '');
+        fs.writeFileSync(path.join(dir, 'ch/one.tex'), '');
+        const text = 'SyncTeX Version:1\nInput:1:main.tex\nInput:2:article.cls\nInput:6:ch/one.tex\nInput:7:/abs/x.tex\nOutput:pdf\n';
+        const out = zlib.gunzipSync(exportSynctex(text, dir)).toString('utf8');
+        assert.equal(out, 'SyncTeX Version:1\n' +
+            `Input:1:${path.join(dir, 'main.tex')}\nInput:2:article.cls\n` +
+            `Input:6:${path.join(dir, 'ch/one.tex')}\nInput:7:/abs/x.tex\nOutput:pdf\n`);
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+
+test('live TeX errors are marked on the page they were typeset on', () => {
+    const vm = require('node:vm');
+    const js = fs.readFileSync(path.resolve(__dirname, '../../../client/tex-viewer.js'), 'utf8');
+    const start = js.indexOf('function paintLiveErrors(');
+    const made = [], posted = [];
+    const node = () => { const el = { listeners: {}, removed: false, className: '',
+        addEventListener(type, fn) { el.listeners[type] = fn; }, remove() { el.removed = true; } }; return el; };
+    const wraps = new Map([[2, { appendChild(el) { made.push(el); } }]]);
+    const context = vm.createContext({
+        state: {}, vscode: { postMessage: m => posted.push(m) },
+        document: { createElement: () => node(), querySelectorAll: () => made.filter(el => !el.removed) },
+        pagesEl: () => ({ querySelector: sel => wraps.get(Number(/data-page="(\d+)"/.exec(sel)[1])) || null }),
+    });
+    vm.runInContext(js.slice(start, js.indexOf('\n}\n', start) + 2), context);
+    context.paintLiveErrors([
+        { page: 2, file: '/p/paper.tex', name: 'paper.tex', line: 5, message: 'Undefined control sequence.' },
+        { page: 2, file: '/p/paper.tex', name: 'paper.tex', line: 6, message: 'Missing $ inserted.' },
+        { page: 5, file: '/p/paper.tex', name: 'paper.tex', line: 40, message: 'not on screen' },
+        { page: null, file: null, line: null, message: 'Emergency stop.' },
+    ]);
+    assert.equal(made.length, 1, 'one mark per page that is on screen');
+    assert.equal(made[0].className, 'live-error');
+    assert.equal(made[0].textContent, 'Undefined control sequence. — paper.tex:5 (+1 more on this page)');
+    made[0].listeners.click({ preventDefault() {}, stopPropagation() {} });
+    assert.deepEqual(JSON.parse(JSON.stringify(posted)), [{ type: 'openSourceLine', file: '/p/paper.tex', line: 5 }]);
+    assert.equal(context.state.liveErrors.length, 4, 'kept for a zoom to repaint');
+    // A build without errors clears the marks.
+    context.paintLiveErrors([]);
+    assert.equal(made[0].removed, true);
+    assert.equal(context.state.liveErrors, null);
+});

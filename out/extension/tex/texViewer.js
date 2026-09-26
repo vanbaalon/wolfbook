@@ -1271,7 +1271,8 @@ class TexViewer {
                 this._previewPages?.delete(page);
             }
         this._post({ type:'txdlBuilt', generation:event.generation,
-            pageCount:event.pageCount ?? null, pages:event.pages || [] });
+            pageCount:event.pageCount ?? null, pages:event.pages || [],
+            errors:(event.errors || []).map(e => ({ ...e, name:e.file ? path.basename(e.file) : '' })) });
         // Said in the panel's own status line, and said honestly: the PDF and
         // everything derived from it are still the last cold build's.
         if (event.summary) this._post({ type:'status', kind:'', text:`${event.summary} · preview only` });
@@ -4134,6 +4135,21 @@ class TexViewer {
                     catch (e) { this._post({ type: 'status', text: `could not open it: ${e.message}`, kind: 'err' }); }
                 } else {
                     this._post({ type: 'status', text: 'that link is not a web address', kind: 'warn' });
+                }
+                break;
+            case 'openSourceLine':
+                // A live error mark was clicked: its line, in the editor. Only
+                // files of this paper's project (the message comes from the page).
+                if (m && typeof m.file === 'string' && Number.isInteger(m.line) && m.line > 0 && this.root) {
+                    const rel = path.relative(path.dirname(this.root), m.file);
+                    if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) break;
+                    const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(m.file));
+                    const editor = await vscode.window.showTextDocument(doc, {
+                        viewColumn: vscode.ViewColumn.One, preserveFocus: false, preview: false,
+                    });
+                    const pos = new vscode.Position(Math.max(0, Math.min(m.line - 1, doc.lineCount - 1)), 0);
+                    editor.selection = new vscode.Selection(pos, pos);
+                    editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
                 }
                 break;
             case 'revealSection':

@@ -1134,6 +1134,11 @@
           "maximum": 60000,
           "description": "With the WLaTeX engine: how long typing must pause before the full native build settles the paper (PDF, cross-references, every page's source map). The live page does not wait for it."
         },
+        "wolfbook.tex.synctex": {
+          "type": "boolean",
+          "default": false,
+          "description": "With the WLaTeX engine: also write SyncTeX for external PDF viewers (Skim, Zathura, SumatraPDF). Export PDF then saves a .synctex.gz with absolute source paths beside the exported file. WPaper's own viewer does not need it."
+        },
         "wolfbook.tex.liveSinglePass": {
           "type": "boolean",
           "default": true,

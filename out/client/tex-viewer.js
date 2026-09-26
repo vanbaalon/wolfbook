@@ -509,6 +509,8 @@ async function openDocument(msg) {
         // the extension answers from the cursor's CURRENT position.
         state.highlight = null;
         for (const box of document.querySelectorAll('.hl')) box.remove();
+        // The next live build marks its own errors; the new PDF's are in Problems.
+        paintLiveErrors(null);
         // Same argument for the label chips: every anchor was measured against
         // the render that has just been replaced.
         state.labels = null;
@@ -1013,6 +1015,9 @@ async function renderPage(n) {
         if (state.edit) paintEditCard();
         if (state.mma) paintMmaCard();
         paintLinks(n).catch(() => { /* a paper without links is the common case */ });
+        // A zoom empties the wrappers: the live error marks go back on.
+        if (state.liveErrors && !document.querySelector(`.page[data-page="${n}"] .live-error`)
+            && state.liveErrors.some(e => e.page === n)) paintLiveErrors(state.liveErrors);
         paintBookmarks();
         // A zoom empties every wrapper, so an interactive preview drawn before
         // it has to be placed again against the new geometry.
@@ -1873,6 +1878,41 @@ async function drawTxdlPage(msg, { duringOpen = false } = {}) {
         // Outlines that never arrived (an unresolved font) or figures that
         // could not load would leave holes on an opaque page: keep the PDF.
         if (again && (again.fallback || again.pending > 0 || again.skipped > 0)) txdlFellBack(page);
+    }
+}
+
+/**
+ * TeX errors of the last live build, marked on the page they were typeset on.
+ *
+ * The Problems panel says WHAT went wrong; the page says WHERE it shows —
+ * which is where the reader is looking while they type. One mark per page
+ * (the first error, with a count), replaced by every live build and gone
+ * when a build has none. A click opens the line in the editor.
+ */
+function paintLiveErrors(errors) {
+    state.liveErrors = Array.isArray(errors) && errors.length ? errors : null;
+    for (const old of document.querySelectorAll('.live-error')) old.remove();
+    const byPage = new Map();
+    for (const e of Array.isArray(errors) ? errors : []) {
+        if (!Number.isInteger(e.page) || e.page < 1) continue;
+        if (!byPage.has(e.page)) byPage.set(e.page, []);
+        byPage.get(e.page).push(e);
+    }
+    for (const [page, list] of byPage) {
+        const wrap = pagesEl().querySelector(`.page[data-page="${page}"]`);
+        if (!wrap) continue;
+        const first = list[0];
+        const mark = document.createElement('div');
+        mark.className = 'live-error';
+        mark.textContent = `${first.message}${first.name ? ` — ${first.name}:${first.line}` : ''}` +
+            (list.length > 1 ? ` (+${list.length - 1} more on this page)` : '');
+        mark.title = 'TeX reported this while typesetting this page (live preview). Click to open the line.';
+        mark.addEventListener('click', ev => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            vscode.postMessage({ type: 'openSourceLine', file: first.file, line: first.line });
+        });
+        wrap.appendChild(mark);
     }
 }
 
@@ -7639,6 +7679,7 @@ window.addEventListener('message', async (ev) => {
                 for (const page of [...state.txdl.pages.keys()]) if (page > count) removeTxdlOverlay(page);
                 dropEmptyLiveExtraPages(count);
             }
+            paintLiveErrors(msg.errors);
             break;
         }
         case 'txdlImage': {

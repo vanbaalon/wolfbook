@@ -261,6 +261,13 @@
   .pdflink.ext { border-bottom-color: rgba(180,120,220,.5);
              border-bottom-color: color-mix(in srgb, var(--vscode-charts-purple, #b180d7) 55%, transparent); }
   .wb-dark-pages .pdflink { border-bottom-color: rgba(120,180,255,.5); }
+  /* A TeX error of the live preview, on the page it was typeset on. */
+  .live-error { position:absolute; left:8px; right:8px; top:8px; z-index:7; cursor:pointer;
+             padding:3px 8px; border-radius:3px; font:12px/1.4 var(--vscode-font-family, sans-serif);
+             color:#fff; background: rgba(190,40,40,.88);
+             background: color-mix(in srgb, var(--vscode-errorForeground, #be2828) 88%, transparent);
+             white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .live-error:hover { background: rgba(190,40,40,1); }
 
   .movecaret { position:absolute; pointer-events:none; z-index:8;
          background: var(--vscode-focusBorder, #4a9eff);

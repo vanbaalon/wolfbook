@@ -487,8 +487,12 @@ class RenderCoordinator {
             `${report.pages_reused ?? 0} reused of ${result.pageCount ?? '?'} · ` +
             `${Math.round(report.total_ms ?? (Date.now() - t0))} ms`;
         this.log(`  ${summary}`);
+        // The page each error was typeset on (the engine places it by the log
+        // offset of every page's shipout), so the preview can mark it there.
         this._interactiveEmitter.fire({ kind:'built', root, generation:result.generation,
-            pageCount:result.pageCount, pages:result.pages, report, summary });
+            pageCount:result.pageCount, pages:result.pages, report, summary,
+            errors: errors.filter(e => Number.isInteger(e.page)).slice(0, 20)
+                .map(e => ({ page:e.page, file:e.file, line:e.line, message:e.message })) });
         return result;
     }
 

@@ -70,6 +70,18 @@ function artifactParent(projectDir) {
     return path.join(base, key);
 }
 
+/**
+ * Producer environment for cold builds, read at every build so the setting
+ * applies from the next one. `wolfbook.tex.synctex` writes SyncTeX for
+ * external viewers (Export PDF puts it beside the exported file).
+ */
+function coldBuildEnv() {
+    let synctex = false;
+    try { synctex = !!require('vscode').workspace.getConfiguration('wolfbook.tex').get('synctex', false); }
+    catch (_) { /* outside VS Code */ }
+    return synctex ? { WLATEX_SYNCTEX: '1' } : {};
+}
+
 class NativeBuildLane {
     constructor(root, directory = '', runtimeOptions) {
         this.root = root;
@@ -81,7 +93,7 @@ class NativeBuildLane {
         const { labBinary, nativeBinary } = this.runtime;
         this.artifactCache = new NativeArtifactCache(artifactParent(this.projectDir));
         try {
-            this.compiler = new sdk.NativeCompiler({ labBinary, nativeBinary, cache:this.artifactCache.directory });
+            this.compiler = new sdk.NativeCompiler({ labBinary, nativeBinary, cache:this.artifactCache.directory, env:coldBuildEnv });
             this.source = new sdk.NativeSourceSession({ labBinary });
         } catch (error) { this.artifactCache.close(); throw error; }
         // THE INTERACTIVE LANE IS OPTIONAL AND NEVER LOAD-BEARING.
@@ -277,6 +289,9 @@ class NativeBuildLane {
             pdfHash:report.build.pdf_hash, pdfBytes:fs.statSync(report.pdf).size,
             sourceSnapshotHash:o.sourceSnapshotHash, live:!!o.overlay?.size,
             synctexPath:null, synctexHash:null, glyphMapPath:null, glyphMapHash:null,
+            // Not `synctexPath`: that one feeds the latexmk SyncTeX map. This is
+            // only carried to Export PDF, for external viewers.
+            exportSynctexPath:report.build.synctex ? path.join(report.artifact_directory, report.build.synctex) : null,
             logPath:report.log, pageCount:report.build.page_count,
             pageSize:first ? {widthBp:first.width_pt,heightBp:first.height_pt} : null,
             diagnostics, errors:diagnostics.filter(d=>d.severity==='error').length,

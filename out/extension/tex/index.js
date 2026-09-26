@@ -564,6 +564,21 @@ function bibEntryFor(fsPath, key) {
  *
  * @returns {{dir:string, name:string}|null}
  */
+/**
+ * A WLaTeX `.synctex` made ready to sit beside an exported PDF: inputs that
+ * are project files get absolute paths (the engine names them relative to the
+ * project, and the PDF may be saved anywhere), and the text is gzipped, the
+ * name external viewers look for first.
+ */
+function exportSynctex(text, projectDir) {
+    const named = text.replace(/^Input:(\d+):(.+)$/gm, (line, tag, name) => {
+        if (path.isAbsolute(name)) return line;
+        const file = path.join(projectDir, name);
+        return fs.existsSync(file) ? `Input:${tag}:${file}` : line;
+    });
+    return require('zlib').gzipSync(Buffer.from(named, 'utf8'));
+}
+
 function writeFragmentPng(dataUrl, viewer) {
     try {
         const m = /^data:image\/png;base64,(.+)$/.exec(String(dataUrl || ''));
@@ -1767,7 +1782,10 @@ async function offerReload(doc, diskText, output) {
         if (!isTex(doc)) { vscode.window.showWarningMessage('Open a .tex file first.'); return; }
         let st = coord.stateFor(doc);
         const g0 = st && st.generation;
-        if (!g0 || !g0.ok || !g0.pdfPath || st.sourceAhead || g0.rerunWanted || g0.passesLimited) {
+        // SyncTeX asked for after the last native build was made: build again.
+        const wantSynctex = vscode.workspace.getConfiguration('wolfbook.tex').get('synctex', false);
+        const missingSynctex = wantSynctex && g0 && g0.runner === 'wlatex' && !g0.exportSynctexPath;
+        if (!g0 || !g0.ok || !g0.pdfPath || st.sourceAhead || g0.rerunWanted || g0.passesLimited || missingSynctex) {
             st = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification,
                 title: 'WPaper: building the PDF to export' }, () => coord.build(doc, { authoritative: true, quiet: true }));
         }
@@ -1782,7 +1800,13 @@ async function offerReload(doc, diskText, output) {
             filters: { PDF: ['pdf'] } });
         if (!target) return;
         await fs.promises.copyFile(g.pdfPath, target.fsPath);
-        vscode.window.setStatusBarMessage(`$(pass) Exported ${path.basename(target.fsPath)}`, 5000);
+        let synctexNote = '';
+        if (wantSynctex && g.exportSynctexPath && fs.existsSync(g.exportSynctexPath)) {
+            const out = target.fsPath.replace(/\.pdf$/i, '') + '.synctex.gz';
+            await fs.promises.writeFile(out, exportSynctex(await fs.promises.readFile(g.exportSynctexPath, 'utf8'), g.projectDir));
+            synctexNote = ' with SyncTeX';
+        }
+        vscode.window.setStatusBarMessage(`$(pass) Exported ${path.basename(target.fsPath)}${synctexNote}`, 5000);
     });
 
     reg('wolfbook.tex.compareWith', async () => {
@@ -2016,6 +2040,7 @@ async function offerReload(doc, diskText, output) {
 
 module.exports = {
     registerTexSupport,
+    exportSynctex,
     makePaintRender,
     computeDiagnostics,
     collectBibKeys,
