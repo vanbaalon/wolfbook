@@ -443,19 +443,25 @@ class NativeBuildLane {
      * must not perturb it.
      */
     _interactiveOverlays(o) {
+        // ONLY WHAT DIFFERS FROM DISK. The engine reads the project from disk
+        // itself and rescans it before every build, so an unedited file needs
+        // no copy: sending every file cost a read of each and about half a
+        // megabyte of JSON per keystroke on a long book (3.7 ms of the first
+        // changed page). The exceptions are files the engine will not read
+        // from disk — symlinks and hidden paths — whose text comes from here.
         const texts = new Map();
-        for (const file of new Set([this.root, ...(o.sourceFiles || [])])) {
+        for (const [file, text] of o.overlay || []) if (this.isInside(file)) texts.set(this.relative(file), text);
+        const known = [...this.source.files.keys()].map(file => path.join(this.projectDir, file));
+        for (const file of new Set([this.root, ...(o.sourceFiles || []), ...known])) {
             // Outside the project: the engine cannot read it; TeX reports it missing.
             if (!this.isInside(file)) continue;
-            try { texts.set(this.relative(file),
-                o.overlay?.has(file) ? o.overlay.get(file) : fs.readFileSync(file, 'utf8')); }
-            catch (error) { if (file === this.root || error.code !== 'ENOENT') throw error; }
-        }
-        for (const [file, text] of o.overlay || []) if (this.isInside(file)) texts.set(this.relative(file), text);
-        for (const file of this.source.files.keys()) {
-            if (texts.has(file)) continue;
-            try { texts.set(file, fs.readFileSync(path.join(this.projectDir, file), 'utf8')); }
-            catch (error) { if (error.code !== 'ENOENT') throw error; }
+            const name = this.relative(file);
+            if (texts.has(name)) continue;
+            try {
+                const hidden = name.split(/[\\/]/).some(part => part.startsWith('.'));
+                if (hidden || fs.lstatSync(file).isSymbolicLink()) texts.set(name, fs.readFileSync(file, 'utf8'));
+                else if (file === this.root) fs.accessSync(file);
+            } catch (error) { if (file === this.root || error.code !== 'ENOENT') throw error; }
         }
         return texts;
     }

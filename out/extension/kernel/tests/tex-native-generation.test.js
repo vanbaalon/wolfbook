@@ -46,3 +46,26 @@ test('native display generations share the conventional allocator across session
             gen:second }).reason, 'identical pdf', 'fresh maps do not require resending unchanged pixels');
     } finally { fs.rmSync(directory, { recursive:true, force:true }); }
 });
+
+test('a live preview sends only what differs from disk (and what the engine will not read there)', () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'native-overlays-'));
+    const root = path.join(directory, 'paper.tex');
+    fs.writeFileSync(root, '\\input{a}\\input{.hidden/b}\\input{link}');
+    fs.writeFileSync(path.join(directory, 'a.tex'), 'A');
+    fs.mkdirSync(path.join(directory, '.hidden'));
+    fs.writeFileSync(path.join(directory, '.hidden', 'b.tex'), 'B');
+    fs.writeFileSync(path.join(directory, 'target.tex'), 'T');
+    fs.symlinkSync(path.join(directory, 'target.tex'), path.join(directory, 'link.tex'));
+    const lane = Object.create(NativeBuildLane.prototype);
+    Object.assign(lane, { root, projectDir:directory, source:{ files:new Map([['a.tex', {}]]) } });
+    const sourceFiles = ['a.tex', '.hidden/b.tex', 'link.tex', 'missing.tex'].map(f => path.join(directory, f));
+    // Nothing edited: only the files the engine skips on disk.
+    assert.deepEqual([...lane._interactiveOverlays({ sourceFiles })].sort(),
+        [['.hidden/b.tex', 'B'], ['link.tex', 'T']]);
+    // An unsaved buffer goes as it is in the editor.
+    const overlay = new Map([[path.join(directory, 'a.tex'), 'A edited']]);
+    assert.deepEqual(lane._interactiveOverlays({ sourceFiles, overlay }).get('a.tex'), 'A edited');
+    assert.equal(lane._interactiveOverlays({ sourceFiles, overlay }).has('paper.tex'), false, 'the saved main file is read from disk');
+    fs.rmSync(root);
+    assert.throws(() => lane._interactiveOverlays({ sourceFiles }), /ENOENT/, 'a missing main file is still an error');
+});
