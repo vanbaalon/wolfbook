@@ -7744,7 +7744,9 @@ window.addEventListener('message', async (ev) => {
         // a page to draw, the end of a build (which is where a document that
         // lost pages drops their overlays), and the answer to an outline
         // request the renderer made.
-        case 'txdlPage': await drawTxdlPage(msg); break;
+        case 'txdlPage': await drawTxdlPage(msg); tikzPageChanged(Number(msg.page)); break;
+        case 'tikzResolved': tikzResolved(msg); break;
+        case 'tikzEdited': tikzEdited(msg); break;
         case 'txdlBuilt': {
             const count = Number(msg.pageCount);
             if (Number.isInteger(count) && count >= 0 && state.txdl) {
@@ -8240,3 +8242,420 @@ window.__wbTexViewerTest = { fitToolbar, dropRenderedForTest, renderPage, probeV
         seq: paperTargetSeq,
     }),
 };
+
+// ===========================================================================
+// THE TIKZ TOOLBAR
+// ===========================================================================
+//
+// Live pages draw TikZ pictures from their display lists, and every path says
+// which special painted it; the host resolves that to the `\draw …;` in the
+// paper (tikzResolve). With the toolbar on, a click on a picture selects the
+// command that drew what was clicked (all of its paths), the handles move,
+// scale and rotate it, the shape tools add commands, and each gesture is one
+// source edit (tikzEdit) that the live engine redraws. Geometry goes to the
+// host in big points relative to the picture's origin, y up; the host turns
+// it into TikZ units and options.
+
+const TIKZ_SP_PER_BP = (65536 * 72.27) / 72;
+const TIKZ_SVG = 'http://www.w3.org/2000/svg';
+const tikz = { on: false, tool: 'select', snap: true, pages: new Map(), selection: null, pendingSelect: null,
+    drag: null, seq: 0 };
+let tikzHitCtx = null;
+
+/** The display list a page is drawn from: its overlay, or one waiting off screen. */
+function tikzTxdl(page) {
+    return state.txdl?.pages.get(page)?.txdl || state.txdlPending?.get(page)?.msg?.txdl || null;
+}
+
+/** CSS-px geometry of a page's display list, as drawTxdlPage places it. */
+function tikzGeo(page, txdl) {
+    const box = txdlPageBox(page);
+    if (!box || !(box.widthBp > 0)) return null;
+    const widthPt = box.widthBp * PT_PER_BP, heightPt = box.heightBp * PT_PER_BP;
+    const geo = pageToCss(txdl, box.width / widthPt, { mediaSize: [widthPt, heightPt] });
+    geo.perBp = geo.len(TIKZ_SP_PER_BP);
+    return geo;
+}
+
+/** A path op as a Path2D in CSS px, with its bounding box. */
+function tikzPath(op, geo) {
+    const ax = geo.x(op.x), ay = geo.y(op.y), k = geo.perBp;
+    const p = new Path2D();
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    const pt = (u, v) => { const x = ax + k * u, y = ay - k * v;
+        x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); return [x, y]; };
+    for (const s of op.segments || []) {
+        if (s[0] === 'm') p.moveTo(...pt(s[1], s[2]));
+        else if (s[0] === 'l') p.lineTo(...pt(s[1], s[2]));
+        else if (s[0] === 'c') p.bezierCurveTo(...pt(s[1], s[2]), ...pt(s[3], s[4]), ...pt(s[5], s[6]));
+        else if (s[0] === 're') { const [x, y] = pt(s[1], s[2]); pt(s[1] + s[3], s[2] + s[4]); p.rect(x, y, k * s[3], -k * s[4]); }
+        else if (s[0] === 'h') p.closePath();
+    }
+    return { path: p, box: [x0, y0, x1, y1] };
+}
+
+/** The page's pictures and the commands that drew in them, once resolved. */
+function tikzModel(page) {
+    const txdl = tikzTxdl(page);
+    if (!txdl) return null;
+    let model = tikz.pages.get(page);
+    if (model && model.txdl === txdl) return model;
+    const paths = (txdl.ops || []).filter(op => op.op === 'path' && op.picture && !op.clip);
+    model = { txdl, key: `${page}:${++tikz.seq}`, paths, commands: null, pictures: null };
+    tikz.pages.set(page, model);
+    if (paths.length) {
+        vscode.postMessage({ type: 'tikzResolve', key: model.key, page,
+            specials: [...new Set(paths.map(p => p.special))], pictures: [...new Set(paths.map(p => p.picture.special))] });
+    }
+    return model;
+}
+
+function tikzResolved(msg) {
+    const model = [...tikz.pages.values()].find(m => m.key === msg.key);
+    if (!model) return;
+    if (msg.error) { status(`TikZ: ${msg.error}`, 'warn'); return; }
+    const commands = new Map();
+    for (const op of model.paths) {
+        const c = msg.commands?.[op.special];
+        if (!c) continue;
+        const key = `${c.file}:${c.start}`;
+        if (!commands.has(key)) commands.set(key, { ...c, key, paths: [], picture: op.picture.special });
+        commands.get(key).paths.push(op);
+    }
+    model.commands = commands;
+    model.pictures = new Map(Object.entries(msg.pictures || {}).map(([s, p]) => [Number(s), p]));
+    const page = Number(msg.page);
+    const want = tikz.pendingSelect;
+    if (want) {
+        const hit = [...commands.values()].find(c => c.file === want.file && c.start === want.start);
+        if (hit) { tikz.selection = { page, key: hit.key }; tikz.pendingSelect = null; }
+    } else if (tikz.selection?.page === page && !commands.has(tikz.selection.key)) tikz.selection = null;
+    tikzPaint(page);
+}
+
+/** The command under a point (CSS px in the page), topmost first. */
+function tikzPick(page, x, y) {
+    const model = tikzModel(page), txdl = model?.txdl, geo = txdl && tikzGeo(page, txdl);
+    if (!model?.commands || !geo) return null;
+    tikzHitCtx ||= document.createElement('canvas').getContext('2d');
+    tikzHitCtx.lineWidth = 8;
+    const list = [...model.commands.values()];
+    for (let i = list.length - 1; i >= 0; i--) {
+        for (const op of list[i].paths) {
+            const { path } = tikzPath(op, geo);
+            if (tikzHitCtx.isPointInStroke(path, x, y)
+                || (op.fill && tikzHitCtx.isPointInPath(path, x, y, op.fill === 'evenodd' ? 'evenodd' : 'nonzero')))
+                return list[i];
+        }
+    }
+    return null;
+}
+
+/** The picture a point is in (its paths' extent, with a margin), and its origin in CSS px. */
+function tikzPictureAt(page, x, y) {
+    const model = tikzModel(page), geo = model && tikzGeo(page, model.txdl);
+    if (!model?.pictures || !geo) return null;
+    const boxes = new Map();
+    for (const op of model.paths) {
+        const [x0, y0, x1, y1] = tikzPath(op, geo).box, s = op.picture.special;
+        const b = boxes.get(s) || { box: [Infinity, Infinity, -Infinity, -Infinity], op };
+        b.box = [Math.min(b.box[0], x0), Math.min(b.box[1], y0), Math.max(b.box[2], x1), Math.max(b.box[3], y1)];
+        boxes.set(s, b);
+    }
+    const margin = 24;
+    for (const [special, { box, op }] of boxes) {
+        const picture = model.pictures.get(special);
+        if (picture && x >= box[0] - margin && x <= box[2] + margin && y >= box[1] - margin && y <= box[3] + margin)
+            return { picture, originX: geo.x(op.picture.x), originY: geo.y(op.picture.y), perBp: geo.perBp };
+    }
+    return null;
+}
+
+function tikzLayer(page, create = true) {
+    const wrap = pagesEl().querySelector(`.page[data-page="${page}"]`);
+    if (!wrap) return null;
+    let layer = wrap.querySelector('svg.tikz-layer');
+    if (!layer && create) {
+        layer = document.createElementNS(TIKZ_SVG, 'svg');
+        layer.setAttribute('class', 'tikz-layer');
+        layer.dataset.page = String(page);
+        for (const type of ['pointerdown', 'pointermove', 'pointerup', 'click', 'dblclick'])
+            layer.addEventListener(type, tikzPointer);
+        wrap.appendChild(layer);
+    }
+    return layer;
+}
+
+function tikzSvg(tag, attrs, parent) {
+    const node = document.createElementNS(TIKZ_SVG, tag);
+    for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, String(v));
+    if (parent) parent.appendChild(node);
+    return node;
+}
+
+/** The selection on a page: the command's paths, its box and its handles. */
+function tikzPaint(page) {
+    const layer = tikzLayer(page, tikz.on);
+    if (!layer) return;
+    layer.replaceChildren();
+    const sel = tikz.selection;
+    if (!tikz.on || !sel || sel.page !== page) return;
+    const model = tikz.pages.get(page), cmd = model?.commands?.get(sel.key), geo = cmd && tikzGeo(page, model.txdl);
+    if (!cmd || !geo) return;
+    const group = tikzSvg('g', { class: 'tikz-sel' }, layer);
+    let box = [Infinity, Infinity, -Infinity, -Infinity];
+    const svgPath = op => {
+        const ax = geo.x(op.x), ay = geo.y(op.y), k = geo.perBp, P = (u, v) => `${ax + k * u} ${ay - k * v}`;
+        return (op.segments || []).map(s => s[0] === 'm' ? `M${P(s[1], s[2])}` : s[0] === 'l' ? `L${P(s[1], s[2])}`
+            : s[0] === 'c' ? `C${P(s[1], s[2])} ${P(s[3], s[4])} ${P(s[5], s[6])}`
+            : s[0] === 're' ? `M${P(s[1], s[2])}H${ax + k * (s[1] + s[3])}V${ay - k * (s[2] + s[4])}H${ax + k * s[1]}Z`
+            : s[0] === 'h' ? 'Z' : '').join('');
+    };
+    for (const op of cmd.paths) {
+        tikzSvg('path', { d: svgPath(op), class: 'tikz-outline' }, group);
+        const b = tikzPath(op, geo).box;
+        box = [Math.min(box[0], b[0]), Math.min(box[1], b[1]), Math.max(box[2], b[2]), Math.max(box[3], b[3])];
+    }
+    const pad = 4;
+    const [x0, y0, x1, y1] = [box[0] - pad, box[1] - pad, box[2] + pad, box[3] + pad];
+    tikzSvg('rect', { x: x0, y: y0, width: x1 - x0, height: y1 - y0, class: 'tikz-box', 'data-handle': 'move' }, group);
+    for (const [hx, hy] of [[x0, y0], [x1, y0], [x0, y1], [x1, y1]])
+        tikzSvg('rect', { x: hx - 4, y: hy - 4, width: 8, height: 8, class: 'tikz-handle', 'data-handle': 'scale' }, group);
+    const cx = (x0 + x1) / 2;
+    tikzSvg('line', { x1: cx, y1: y0, x2: cx, y2: y0 - 18, class: 'tikz-stem' }, group);
+    tikzSvg('circle', { cx, cy: y0 - 22, r: 5, class: 'tikz-handle', 'data-handle': 'rotate' }, group);
+    sel.box = [x0, y0, x1, y1];
+    sel.group = group;
+}
+
+function tikzLocal(layer, ev) {
+    const r = layer.getBoundingClientRect();
+    return [ev.clientX - r.left, ev.clientY - r.top];
+}
+
+function tikzPointer(ev) {
+    const layer = ev.currentTarget, page = Number(layer.dataset.page);
+    ev.stopPropagation();
+    if (ev.type === 'click' || ev.type === 'dblclick') { ev.preventDefault(); return; }
+    const [x, y] = tikzLocal(layer, ev);
+    if (ev.type === 'pointerdown') {
+        if (ev.button !== 0) return;
+        ev.preventDefault();
+        layer.setPointerCapture?.(ev.pointerId);
+        tikzModel(page);
+        if (tikz.tool === 'select') {
+            const handle = ev.target?.getAttribute?.('data-handle');
+            const sel = tikz.selection?.page === page ? tikz.selection : null;
+            if (!(handle && sel)) {
+                const cmd = tikzPick(page, x, y);
+                if (!cmd) { tikz.selection = null; tikzPaint(page); return; }
+                tikz.selection = { page, key: cmd.key };
+                vscode.postMessage({ type: 'tikzReveal', file: cmd.file, start: cmd.start, end: cmd.end });
+                tikzPaint(page);
+            }
+            const s = tikz.selection, box = s.box;
+            tikz.drag = { page, kind: handle && sel ? handle : 'move', x0: x, y0: y,
+                cx: (box[0] + box[2]) / 2, cy: (box[1] + box[3]) / 2 };
+            return;
+        }
+        if (tikz.tool === 'text') { tikzTextInput(page, layer, x, y); return; }
+        const frame = tikzPictureAt(page, x, y);
+        if (!frame) { status('TikZ: draw inside a picture (near what it already shows)', 'warn'); return; }
+        tikz.drag = { page, kind: 'create', shape: tikz.tool, x0: x, y0: y, frame };
+        return;
+    }
+    const d = tikz.drag;
+    if (!d || d.page !== page) return;
+    if (ev.type === 'pointermove') {
+        if (d.kind === 'create') {
+            layer.querySelector('.tikz-preview')?.remove();
+            const a = { class: 'tikz-preview' };
+            if (d.shape === 'line') tikzSvg('line', { ...a, x1: d.x0, y1: d.y0, x2: x, y2: y }, layer);
+            else if (d.shape === 'rect') tikzSvg('rect', { ...a, x: Math.min(d.x0, x), y: Math.min(d.y0, y), width: Math.abs(x - d.x0), height: Math.abs(y - d.y0) }, layer);
+            else if (d.shape === 'circle') tikzSvg('circle', { ...a, cx: d.x0, cy: d.y0, r: Math.hypot(x - d.x0, y - d.y0) }, layer);
+            return;
+        }
+        const g = tikz.selection?.group;
+        if (!g) return;
+        g.setAttribute('transform', tikzDragTransform(d, x, y).svg);
+        return;
+    }
+    if (ev.type === 'pointerup') {
+        tikz.drag = null;
+        layer.querySelector('.tikz-preview')?.remove();
+        if (d.kind === 'create') {
+            if (Math.hypot(x - d.x0, y - d.y0) < 4) return;
+            const f = d.frame, toBp = (px, py) => [(px - f.originX) / f.perBp, -(py - f.originY) / f.perBp];
+            tikzSend({ op: 'add', shape: d.shape, picture: f.picture, points: [toBp(d.x0, d.y0), toBp(x, y)] });
+            return;
+        }
+        const t = tikzDragTransform(d, x, y);
+        if (t.none) { tikz.selection?.group?.removeAttribute('transform'); return; }
+        tikzCommit(page, t);
+    }
+}
+
+/** A drag as an SVG transform (for the preview) and as page geometry (for the edit). */
+function tikzDragTransform(d, x, y) {
+    if (d.kind === 'move') {
+        const dx = x - d.x0, dy = y - d.y0;
+        return { svg: `translate(${dx} ${dy})`, none: Math.hypot(dx, dy) < 2, op: 'move', dx, dy };
+    }
+    if (d.kind === 'scale') {
+        const r0 = Math.hypot(d.x0 - d.cx, d.y0 - d.cy) || 1;
+        let f = Math.hypot(x - d.cx, y - d.cy) / r0;
+        if (tikz.snap) f = Math.max(0.05, Math.round(f * 20) / 20);
+        return { svg: `translate(${d.cx} ${d.cy}) scale(${f}) translate(${-d.cx} ${-d.cy})`, none: Math.abs(f - 1) < 0.01, op: 'scale', factor: f };
+    }
+    let deg = ((Math.atan2(y - d.cy, x - d.cx) - Math.atan2(d.y0 - d.cy, d.x0 - d.cx)) * 180) / Math.PI;
+    if (tikz.snap) deg = Math.round(deg / 15) * 15;
+    return { svg: `rotate(${deg} ${d.cx} ${d.cy})`, none: Math.abs(deg) < 0.5, op: 'rotate', deg };
+}
+
+function tikzCommit(page, t) {
+    const sel = tikz.selection, model = tikz.pages.get(page), cmd = model?.commands?.get(sel?.key);
+    const geo = cmd && tikzGeo(page, model.txdl);
+    const pic = cmd && model.pictures.get(cmd.picture);
+    const op = cmd?.paths[0];
+    if (!cmd || !geo || !pic || !op) return;
+    const ox = geo.x(op.picture.x), oy = geo.y(op.picture.y), k = geo.perBp;
+    const center = { cx: (sel.box[0] + sel.box[2]) / 2, cy: (sel.box[1] + sel.box[3]) / 2 };
+    const c = { cx: (center.cx - ox) / k, cy: -(center.cy - oy) / k };
+    const base = { command: cmd, picture: pic };
+    if (t.op === 'move') {
+        let [dx, dy] = [t.dx / k, -t.dy / k];
+        if (tikz.snap) { const g = 72 / 2.54 / 10 * (pic.scale || 1); [dx, dy] = [Math.round(dx / g) * g, Math.round(dy / g) * g]; }
+        tikzSend({ ...base, op: 'move', dx, dy });
+    } else if (t.op === 'scale') tikzSend({ ...base, op: 'scale', factor: t.factor, ...c });
+    else tikzSend({ ...base, op: 'rotate', degrees: -t.deg, ...c });
+}
+
+function tikzSend(edit) {
+    status('TikZ: editing…');
+    vscode.postMessage({ type: 'tikzEdit', key: ++tikz.seq, snap: tikz.snap, ...edit });
+}
+
+function tikzEdited(msg) {
+    if (!msg.ok) { status(`TikZ: ${msg.error || 'the edit did not apply'}`, 'warn'); return; }
+    status('TikZ: edited — redrawing', 'ok');
+    // The command is found again once the live page comes back resolved.
+    tikz.pendingSelect = msg.select || null;
+    if (!msg.select) tikz.selection = null;
+}
+
+/** A node's text, typed where it goes. */
+function tikzTextInput(page, layer, x, y) {
+    const frame = tikzPictureAt(page, x, y);
+    if (!frame) { status('TikZ: put text inside a picture', 'warn'); return; }
+    const wrap = layer.parentElement;
+    wrap.querySelector('.tikz-text')?.remove();
+    const input = document.createElement('input');
+    input.className = 'tikz-text';
+    input.placeholder = 'node text';
+    input.style.left = `${x}px`;
+    input.style.top = `${y - 12}px`;
+    wrap.appendChild(input);
+    input.focus();
+    const at = [(x - frame.originX) / frame.perBp, -(y - frame.originY) / frame.perBp];
+    input.addEventListener('keydown', e => {
+        e.stopPropagation();
+        if (e.key === 'Escape') input.remove();
+        if (e.key === 'Enter') {
+            if (input.value.trim()) tikzSend({ op: 'add', shape: 'node', picture: frame.picture, points: [at], text: input.value });
+            input.remove();
+        }
+    });
+    input.addEventListener('blur', () => setTimeout(() => input.remove(), 0));
+}
+
+function tikzSetTool(tool) {
+    tikz.tool = tool;
+    for (const b of document.querySelectorAll('#tikzbar [data-tool]')) b.setAttribute('aria-pressed', String(b.dataset.tool === tool));
+    document.body.classList.toggle('tikz-drawing', tool !== 'select');
+}
+
+function tikzToggle(on = !tikz.on) {
+    tikz.on = on;
+    el('tikztool')?.setAttribute('aria-pressed', String(on));
+    document.body.classList.toggle('tikz-on', on);
+    const bar = el('tikzbar');
+    if (on && bar && !bar.childElementCount) {
+        const tools = [['select', '⬚', 'Select, move (drag), scale (corners), rotate (top handle)'], ['line', '╱', 'Line'],
+            ['rect', '▭', 'Rectangle'], ['circle', '◯', 'Circle (from its centre)'], ['text', 'T', 'Text node']];
+        for (const [tool, glyph, title] of tools) {
+            const b = document.createElement('button');
+            b.dataset.tool = tool; b.textContent = glyph; b.title = title; b.setAttribute('aria-label', title);
+            b.addEventListener('click', () => tikzSetTool(tool));
+            bar.appendChild(b);
+        }
+        const del = document.createElement('button');
+        del.textContent = '⌫'; del.title = 'Delete the selected command (Delete)';
+        del.addEventListener('click', tikzDelete);
+        const snap = document.createElement('button');
+        snap.dataset.snap = ''; snap.textContent = '#'; snap.title = 'Snap to a 1 mm grid, 15° and 5% steps';
+        snap.setAttribute('aria-pressed', String(tikz.snap));
+        snap.addEventListener('click', () => { tikz.snap = !tikz.snap; snap.setAttribute('aria-pressed', String(tikz.snap)); });
+        const close = document.createElement('button');
+        close.textContent = '✕'; close.title = 'Leave TikZ editing (Esc)';
+        close.addEventListener('click', () => tikzToggle(false));
+        bar.append(del, snap, close);
+        tikzSetTool(tikz.tool);
+    }
+    if (bar) bar.hidden = !on;
+    if (!on) {
+        tikz.selection = null;
+        for (const layer of document.querySelectorAll('svg.tikz-layer')) layer.remove();
+        return;
+    }
+    tikzRefreshVisible();
+}
+
+/** Layers and resolutions for the pages in view; display lists for those without. */
+function tikzRefreshVisible() {
+    if (!tikz.on) return;
+    const missing = [];
+    for (const page of visiblePages()) {
+        if (!tikzTxdl(page)) { missing.push(page); continue; }
+        tikzModel(page);
+        tikzLayer(page);
+        tikzPaint(page);
+    }
+    if (missing.length) vscode.postMessage({ type: 'tikzPages', pages: missing });
+}
+
+/** A new display list for a page: the old selection geometry is gone. */
+function tikzPageChanged(page) {
+    if (!tikz.on) return;
+    tikz.pages.delete(page);
+    if (visiblePages().includes(page)) { tikzModel(page); tikzLayer(page); tikzPaint(page); }
+}
+
+function tikzDelete() {
+    const sel = tikz.selection, cmd = sel && tikz.pages.get(sel.page)?.commands?.get(sel.key);
+    if (!cmd) { status('TikZ: select something to delete', 'warn'); return; }
+    tikz.selection = null;
+    tikzPaint(sel.page);
+    tikzSend({ op: 'delete', command: cmd });
+}
+
+function tikzNudge(dxMm, dyMm) {
+    const sel = tikz.selection, model = sel && tikz.pages.get(sel.page), cmd = model?.commands?.get(sel.key);
+    const pic = cmd && model.pictures.get(cmd.picture);
+    if (!cmd || !pic) return;
+    const mm = 72 / 25.4 * (pic.scale || 1);
+    tikzSend({ command: cmd, picture: pic, op: 'move', dx: dxMm * mm, dy: dyMm * mm });
+}
+
+window.addEventListener('keydown', e => {
+    if (!tikz.on || e.target?.tagName === 'INPUT' || e.target?.tagName === 'TEXTAREA') return;
+    if (e.key === 'Escape') { e.preventDefault(); if (tikz.selection) { const p = tikz.selection.page; tikz.selection = null; tikzPaint(p); } else tikzToggle(false); }
+    else if ((e.key === 'Delete' || e.key === 'Backspace') && tikz.selection) { e.preventDefault(); tikzDelete(); }
+    else if (e.key.startsWith('Arrow') && tikz.selection) {
+        e.preventDefault();
+        const step = e.shiftKey ? 10 : 1;
+        tikzNudge(e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0, e.key === 'ArrowUp' ? step : e.key === 'ArrowDown' ? -step : 0);
+    }
+});
+document.querySelector('main')?.addEventListener('scroll', () => { if (tikz.on) tikzRefreshVisible(); }, { passive: true });
+el('tikztool')?.addEventListener('click', () => tikzToggle());
+window.__wbTikzTest = { tikz, tikzDragTransform, tikzPath, tikzResolved, tikzEdited, tikzModel };

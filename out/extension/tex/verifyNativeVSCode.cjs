@@ -33,6 +33,7 @@ exports.run = async function() {
     let subscription, messagesSubscription;
     let workerCrashRecovered = false;
     let liveClickVerified = false;
+    let tikzEditVerified = false;
     const keystrokeToPreviewMs = [];
     const messages = [];
     try {
@@ -254,6 +255,50 @@ exports.run = async function() {
             await assert.rejects(fs.access(path.join(folder,'.wlatex')), { code:'ENOENT' });
         }
         if (mode === 'native') {
+            // THE TIKZ TOOLBAR, as the webview drives it (tikzResolve,
+            // tikzEdit): a live picture's path resolves through the live page
+            // map to the \draw in the open document, a move edits that command,
+            // and the next live page draws it moved.
+            const nl = eol === 'crlf' ? '\r\n' : '\n';
+            const tikzFile = path.join(folder, 'tikz.tex');
+            await fs.writeFile(tikzFile, ['\\documentclass{article}', '\\usepackage{tikz}', '\\begin{document}',
+                '\\begin{tikzpicture}', '  \\draw[red] (0,0) -- (2,1);', '\\end{tikzpicture}', '\\end{document}', ''].join(nl));
+            const tdoc = await vscode.workspace.openTextDocument(tikzFile);
+            await vscode.window.showTextDocument(tdoc);
+            await coord.build(tdoc, { quiet:true });
+            const tst = coord.stateFor(tdoc);
+            assert.equal(tst.generation.runner, 'wlatex', tst.lastError || tst.nativeUnavailable);
+            const tlane = tst.nativeLane;
+            assert.equal(await tlane.warmInteractive(), true, tlane.interactiveUnavailable);
+            const tpages = [];
+            const pagesSub = coord.onDidInteractive(e => { if (e.kind === 'page' && e.root === tikzFile && e.txdl) tpages.push(e); });
+            const changesSub = vscode.workspace.onDidChangeTextDocument(e => { if (e.document === tdoc) coord.noteChange(e); });
+            const preview = () => coord._runInteractive(tst, tlane, tikzFile, { sourceFiles:[tikzFile],
+                overlay:new Map([[tikzFile, tdoc.getText()]]), wait:true });
+            try {
+                await preview();
+                const paths = tpages.at(-1).txdl.ops.filter(op => op.op === 'path');
+                assert.equal(paths.length, 1, JSON.stringify(tpages.at(-1).txdl.unsupported));
+                const posts = [];
+                const host = Object.assign(Object.create(TexViewer.prototype), { root:tikzFile, coord, panel:{}, _post:m => posts.push(m) });
+                await host._tikzResolve({ key:'a', page:1, specials:[paths[0].special], pictures:[paths[0].picture.special] });
+                const resolved = posts.pop();
+                assert.equal(resolved.error, null);
+                const cmd = resolved.commands[paths[0].special];
+                assert.equal(cmd.text, '\\draw[red] (0,0) -- (2,1);');
+                await host._tikzEdit({ key:1, op:'move', command:cmd, picture:resolved.pictures[paths[0].picture.special], dx:72 / 2.54, dy:0 });
+                const edited = posts.pop();
+                assert.equal(edited.ok, true, edited.error);
+                assert.ok(tdoc.getText().includes('\\draw[shift={(1,0)}, red] (0,0) -- (2,1);'), tdoc.getText());
+                tpages.length = 0;
+                await preview();
+                const moved = tpages.at(-1).txdl.ops.find(op => op.op === 'path');
+                const start = (moved.x - moved.picture.x) / 65781.76 + moved.segments[0][1];
+                assert.ok(Math.abs(start - 72 / 2.54) < 0.05, `the path starts ${start} bp right of the picture origin`);
+                await host._tikzResolve({ key:'b', page:1, specials:[moved.special], pictures:[moved.picture.special] });
+                assert.match(posts.pop().commands[moved.special].text, /^\\draw\[shift=/);
+                tikzEditVerified = true;
+            } finally { pagesSub.dispose(); changesSub.dispose(); }
             await until(() => viewer._pdfRanges.files.size === 1, 'only the displayed PDF handle remains');
             const store=viewer._pdfRanges;
             viewer.panel.dispose();
@@ -265,7 +310,7 @@ exports.run = async function() {
             default_without_wlatex:mode === 'default', unavailable_wlatex_fallback:mode === 'missing',
             conventional_unsaved_rebuild:mode !== 'native', authoritative_native_handoff:mode === 'native',
             real_pdfjs_opened:true, unsaved_source_edit:true, translated_inverse_navigation:mode === 'native',
-            actual_source_worker_crash_recovered:workerCrashRecovered, live_page_click_verified:liveClickVerified, keystroke_to_preview_ms:keystrokeToPreviewMs, native_pdf_range_transport:mode === 'native', native_pdf_handles_released:mode === 'native', unchanged_page_text_reused:mode === 'native',
+            actual_source_worker_crash_recovered:workerCrashRecovered, live_page_click_verified:liveClickVerified, keystroke_to_preview_ms:keystrokeToPreviewMs, tikz_toolbar_edit_verified:tikzEditVerified, native_pdf_range_transport:mode === 'native', native_pdf_handles_released:mode === 'native', unchanged_page_text_reused:mode === 'native',
             pointer_gestures_verified:false, visual_acceptance_verified:false,
         }, null, 2));
     } catch (error) {

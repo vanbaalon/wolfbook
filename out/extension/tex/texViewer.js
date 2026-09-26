@@ -1252,6 +1252,9 @@ class TexViewer {
             this._post(msg);
             (this._liveOverlays ||= new Map()).set(event.page, event.identity || null);
             (this._previewPages ||= new Map()).set(event.page, msg);
+            // Every page's latest display list, for the TikZ toolbar on pages
+            // whose overlay has since given way to the PDF.
+            (this._txdlLatest ||= new Map()).set(event.page, msg);
             return;
         }
         if (event.kind === 'pageMap') {
@@ -1324,6 +1327,154 @@ class TexViewer {
             return;
         }
         return this._jumpToNativeSource(st, m, request, live);
+    }
+
+    // --- the TikZ toolbar -----------------------------------------------------
+    //
+    // The webview draws live pages from TXDL; each TikZ path carries the
+    // ordinal of the special that painted it, and the live page map names the
+    // command behind that special (`lane.liveSpecials`). The toolbar edits
+    // that command's text (tikzEdit.js); the live engine redraws the page.
+
+    _tikzLane() {
+        const st = this.root ? this.coord.roots?.get(this.root) : null;
+        return st?.nativeLane && typeof st.nativeLane.liveSpecials === 'function' ? st.nativeLane : null;
+    }
+
+    /** Display lists for pages the webview has none of (their overlay gave way to the PDF). */
+    async _tikzPages(m) {
+        const pages = Array.isArray(m?.pages) ? m.pages.filter(Number.isInteger) : [];
+        const missing = [];
+        for (const page of pages) {
+            const msg = this._txdlLatest?.get(page);
+            if (msg) this._post({ ...msg, forTikz: true }); else missing.push(page);
+        }
+        if (!missing.length) return;
+        // A lane that has not previewed yet delivers every page on its first build.
+        const st = this.root ? this.coord.roots?.get(this.root) : null;
+        if (st && !this._txdlLatest?.size && typeof this.coord._schedulePreview === 'function') {
+            this.coord._schedulePreview(this.root, st);
+            this._post({ type:'status', text:'TikZ: typesetting the live pages…', kind:'' });
+        } else if (missing.length) {
+            this._post({ type:'status', text:'TikZ: no live page yet here — edit the paper once to draw it live', kind:'warn' });
+        }
+    }
+
+    async _tikzDocument(file) {
+        const open = vscode.workspace.textDocuments.find(d => d.uri.fsPath === file);
+        return open || vscode.workspace.openTextDocument(vscode.Uri.file(file));
+    }
+
+    /** Commands and pictures behind a page's paths, as `{file, start, end, text}`. */
+    async _tikzResolve(m) {
+        const reply = { type:'tikzResolved', key:m.key, page:m.page, commands:{}, pictures:{}, error:null };
+        try {
+            const { commandRange, picture } = require('./tikzEdit');
+            const lane = this._tikzLane();
+            if (!lane) throw Error('the WLaTeX engine is not running for this paper');
+            const specials = [...new Set(m.specials || [])], pictures = [...new Set(m.pictures || [])];
+            const origins = await lane.liveSpecials(m.page, [...specials, ...pictures]);
+            if (!origins) throw Error('this page has no live source map yet');
+            const locate = async origin => {
+                const at = origin?.invocation;
+                if (!at || !this._isInsideProject(at.file)) return null;
+                const doc = await this._tikzDocument(at.file);
+                const offset = doc.offsetAt(new vscode.Position(at.location.start.line - 1, at.location.start.column_utf16));
+                return { doc, text: doc.getText(), offset, file: at.file };
+            };
+            for (const [i, special] of specials.entries()) {
+                const found = await locate(origins[i]);
+                if (!found) continue;
+                // The span may start inside the command; its name is just before.
+                let start = found.offset;
+                if (found.text[start] !== '\\') {
+                    const back = found.text.slice(Math.max(0, start - 400), start);
+                    const names = [...back.matchAll(/\\(?:draw|fill|filldraw|path|node|shade|shadedraw|clip|pic|coordinate)\b/g)];
+                    if (names.length) start = start - back.length + names.at(-1).index;
+                }
+                const range = commandRange(found.text, start);
+                if (range) reply.commands[special] = { file: found.file, start: range.start, end: range.end,
+                    text: found.text.slice(range.start, range.end), version: found.doc.version };
+            }
+            for (const [i, special] of pictures.entries()) {
+                const found = await locate(origins[specials.length + i]);
+                const p = found && picture(found.text, found.offset);
+                if (p) reply.pictures[special] = { file: found.file, begin: p.begin, bodyEnd: p.bodyEnd, scale: p.scale,
+                    version: found.doc.version };
+            }
+        } catch (error) { reply.error = error.message || String(error); }
+        this._post(reply);
+    }
+
+    _isInsideProject(file) {
+        const base = this.root ? path.dirname(this.root) : null;
+        const rel = base ? path.relative(base, file) : '..';
+        return !!rel && !rel.startsWith('..') && !path.isAbsolute(rel);
+    }
+
+    /** Select a command in its editor without taking the focus from the page. */
+    async _tikzReveal(m) {
+        if (!m || typeof m.file !== 'string' || !this._isInsideProject(m.file)) return;
+        const doc = await this._tikzDocument(m.file);
+        const range = new vscode.Range(doc.positionAt(m.start), doc.positionAt(m.end));
+        const editor = await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.One, preserveFocus: true, preview: false });
+        editor.selection = new vscode.Selection(range.start, range.end);
+        editor.revealRange(range, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+    }
+
+    /**
+     * One toolbar gesture, one undo step: a transform of a command, its
+     * removal, or a new command in a picture. The command's text must still be
+     * what the page was resolved against; otherwise nothing changes.
+     */
+    async _tikzEdit(m) {
+        const done = (ok, extra = {}) => this._post({ type:'tikzEdited', key:m.key, ok, ...extra });
+        try {
+            const t = require('./tikzEdit');
+            const target = m.command || m.picture;
+            if (!target || !this._isInsideProject(target.file)) return done(false, { error:'not a file of this paper' });
+            const doc = await this._tikzDocument(target.file);
+            const text = doc.getText();
+            const edit = new vscode.WorkspaceEdit();
+            let select = null;
+            if (m.op === 'add') {
+                const p = t.picture(text, m.picture.begin);
+                if (!p || p.bodyEnd !== m.picture.bodyEnd) return done(false, { error:'the picture changed — try again' });
+                const command = t.newCommand(m.shape, m.points || [], { scale:p.scale, snap:m.snap !== false, text:m.text || '' });
+                if (!command) return done(false, { error:'nothing to add' });
+                const lineStart = text.lastIndexOf('\n', p.bodyEnd - 1) + 1;
+                const own = text.slice(lineStart, p.bodyEnd).trim() === '';
+                const prev = text.slice(text.lastIndexOf('\n', lineStart - 2) + 1, lineStart);
+                const indent = own ? (/^[ \t]*/.exec(prev)[0] || '  ') : '';
+                const at = own ? lineStart : p.bodyEnd;
+                const insert = own ? `${indent}${command}\n` : `\n${command}\n`;
+                edit.insert(doc.uri, doc.positionAt(at), insert);
+                select = { file: target.file, start: at + (own ? indent.length : 1) };
+            } else {
+                const c = m.command;
+                if (text.slice(c.start, c.end) !== c.text) return done(false, { error:'the command changed — select it again' });
+                const range = new vscode.Range(doc.positionAt(c.start), doc.positionAt(c.end));
+                if (m.op === 'delete') {
+                    // The whole line when the command is alone on it.
+                    const lineStart = text.lastIndexOf('\n', c.start - 1) + 1;
+                    const lineEnd = text.indexOf('\n', c.end);
+                    const alone = text.slice(lineStart, c.start).trim() === '' && text.slice(c.end, lineEnd < 0 ? text.length : lineEnd).trim() === '';
+                    edit.delete(doc.uri, alone ? new vscode.Range(doc.positionAt(lineStart), doc.positionAt(lineEnd < 0 ? text.length : lineEnd + 1)) : range);
+                } else {
+                    const scale = m.picture?.scale || 1;
+                    const cm = v => t.toCm(v, scale);
+                    const transform = m.op === 'move' ? { kind:'shift', dx:cm(m.dx), dy:cm(m.dy) }
+                        : m.op === 'rotate' ? { kind:'rotate', degrees:m.degrees, cx:cm(m.cx), cy:cm(m.cy) }
+                        : m.op === 'scale' ? { kind:'scale', factor:m.factor, cx:cm(m.cx), cy:cm(m.cy) } : null;
+                    const next = transform && t.withTransform(c.text, transform);
+                    if (!next) return done(false, { error:'this command cannot be transformed' });
+                    edit.replace(doc.uri, range, next);
+                    select = { file: c.file, start: c.start };
+                }
+            }
+            const ok = await vscode.workspace.applyEdit(edit);
+            done(ok, { select });
+        } catch (error) { done(false, { error: error.message || String(error) }); }
     }
 
     /**
@@ -4152,6 +4303,10 @@ class TexViewer {
                     editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
                 }
                 break;
+            case 'tikzPages': await this._tikzPages(m); break;
+            case 'tikzResolve': await this._tikzResolve(m); break;
+            case 'tikzEdit': await this._tikzEdit(m); break;
+            case 'tikzReveal': await this._tikzReveal(m); break;
             case 'revealSection':
                 // Reviewing a list of changes means wanting to see where they
                 // are. Same path the worklist uses, so both scroll the same way

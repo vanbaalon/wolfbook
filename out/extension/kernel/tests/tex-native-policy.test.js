@@ -1268,3 +1268,80 @@ test('a change of screen density redraws the pages at the same scale', () => {
     assert.equal(queries[0].listeners.size, 0, 'the old query is released');
     assert.equal(queries[1].query, '(resolution: 1dppx)', 'and the new density is watched');
 });
+
+
+test('the TikZ toolbar resolves paths to commands and edits them as one undo step', async () => {
+    const root = '/paper/main.tex';
+    let text = 'A\n\\begin{tikzpicture}[scale=0.5]\n  \\draw[red] (0,0) -- (2,1);\n\\end{tikzpicture}\n';
+    const lineStarts = () => [0, ...[...text].flatMap((c, i) => c === '\n' ? [i + 1] : [])];
+    const doc = { uri: { fsPath: root }, version: 1,
+        getText: () => text,
+        positionAt: offset => ({ offset }),
+        offsetAt: p => lineStarts()[p.line] + p.character };
+    const posts = [], applied = [];
+    const saved = { ...stub.workspace };
+    stub.workspace.textDocuments = [doc];
+    stub.Position = class { constructor(line, character) { this.line = line; this.character = character; } };
+    stub.Range = class { constructor(start, end) { this.start = start; this.end = end; } };
+    stub.WorkspaceEdit = class { constructor() { this.ops = []; }
+        replace(uri, range, value) { this.ops.push(['replace', range.start.offset, range.end.offset, value]); }
+        insert(uri, pos, value) { this.ops.push(['insert', pos.offset, value]); }
+        delete(uri, range) { this.ops.push(['delete', range.start.offset, range.end.offset]); } };
+    stub.workspace.applyEdit = async edit => { applied.push(edit.ops); return true; };
+    const draw = text.indexOf('\\draw'), begin = text.indexOf('\\begin');
+    const at = offset => { const starts = lineStarts(); const line = starts.filter(s => s <= offset).length;
+        return { line, column_utf16: offset - starts[line - 1] }; };
+    const lane = { liveSpecials: async (page, ordinals) => ordinals.map(n => ({ definition: null,
+        invocation: { file: root, location: { start: at(n === 17 ? draw + 6 : begin), end: at(draw) } } })) };
+    const viewer = Object.create(TexViewer.prototype);
+    Object.assign(viewer, { root, panel: {}, coord: { roots: new Map([[root, { nativeLane: lane }]]) }, _post: m => posts.push(m) });
+    try {
+        await viewer._tikzResolve({ key: 'k', page: 1, specials: [17], pictures: [7] });
+        const resolved = posts.pop();
+        assert.equal(resolved.error, null);
+        // The span pointed inside the command; the command is found from its name.
+        assert.equal(resolved.commands[17].text, '\\draw[red] (0,0) -- (2,1);');
+        assert.equal(resolved.pictures[7].scale, 0.5);
+        const cmd = resolved.commands[17], pic = resolved.pictures[7];
+
+        // A move of 1 cm on the page is 2 units in a picture at scale 0.5.
+        const cm = 72 / 2.54;
+        await viewer._tikzEdit({ key: 1, op: 'move', command: cmd, picture: pic, dx: cm, dy: 0 });
+        assert.deepEqual(applied.pop(), [['replace', cmd.start, cmd.end, '\\draw[shift={(2,0)}, red] (0,0) -- (2,1);']]);
+        assert.equal(posts.pop().ok, true);
+
+        // A stale command is refused, nothing applied.
+        await viewer._tikzEdit({ key: 2, op: 'move', command: { ...cmd, text: 'other' }, picture: pic, dx: cm, dy: 0 });
+        assert.equal(applied.length, 0);
+        assert.match(posts.pop().error, /changed/);
+
+        // A new line goes on its own line before \end{tikzpicture}, indented like its neighbour.
+        await viewer._tikzEdit({ key: 3, op: 'add', shape: 'line', picture: pic, points: [[0, 0], [cm, 0]] });
+        const end = text.indexOf('\\end{tikzpicture}');
+        assert.deepEqual(applied.pop(), [['insert', end, '  \\draw (0,0) -- (2,0);\n']]);
+
+        // Deleting a command alone on its line removes the line.
+        await viewer._tikzEdit({ key: 4, op: 'delete', command: cmd });
+        const lineStart = text.lastIndexOf('\n', cmd.start) + 1;
+        assert.deepEqual(applied.pop(), [['delete', lineStart, text.indexOf('\n', cmd.end) + 1]]);
+
+        // Files outside the paper's folder are never edited.
+        await viewer._tikzEdit({ key: 5, op: 'delete', command: { ...cmd, file: '/elsewhere/x.tex' } });
+        assert.equal(applied.length, 0);
+    } finally { Object.assign(stub.workspace, saved); }
+});
+
+test('TikZ drags become moves, snapped scales and 15° rotations', () => {
+    const vm = require('node:vm');
+    const js = fs.readFileSync(path.resolve(__dirname, '../../../client/tex-viewer.js'), 'utf8');
+    const start = js.indexOf('function tikzDragTransform(');
+    const context = vm.createContext({ tikz: { snap: true } });
+    vm.runInContext(js.slice(start, js.indexOf('\n}\n', start) + 2), context);
+    const drag = (kind, x, y) => JSON.parse(JSON.stringify(context.tikzDragTransform({ kind, x0: 110, y0: 100, cx: 100, cy: 100 }, x, y)));
+    assert.deepEqual(drag('move', 130, 90), { svg: 'translate(20 -10)', none: false, op: 'move', dx: 20, dy: -10 });
+    assert.equal(drag('move', 111, 100).none, true, 'a click is not a move');
+    assert.equal(drag('scale', 124, 100).factor, 2.4);
+    // Screen angles run clockwise; the rotation snaps to 15°.
+    assert.equal(drag('rotate', 100, 111).deg, 90);
+    assert.equal(drag('rotate', 110, 101).none, true);
+});

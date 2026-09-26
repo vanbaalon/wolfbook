@@ -496,6 +496,23 @@ class NativeBuildLane {
         return this.source.readPages(pages, { live:true });
     }
 
+    /**
+     * The source of a live page's specials `ordinals` (see the SDK's
+     * `source.specials`), files absolute; null when the page has no live map.
+     * A TikZ path's special names the command that drew it.
+     */
+    async liveSpecials(page, ordinals) {
+        if (this.closed || typeof this.source.specials !== 'function') return null;
+        if (typeof this.session?.ensureLiveMaps === 'function') {
+            const { ready } = await this.session.ensureLiveMaps([page]);
+            if (!ready.includes(page)) return null;
+        }
+        if (this.closed || !this.source.livePublished) return null;
+        const specials = await this.source.specials(page, ordinals, { live:true });
+        const absolute = side => side && { ...side, file: path.resolve(this.projectDir, side.file) };
+        return specials.map(s => s && { definition: absolute(s.definition), invocation: absolute(s.invocation) });
+    }
+
     // The pages a view materializes: the requested window (the pages the
     // viewer has rendered, plus a neighbour each side) clipped to the
     // document, or the first eight pages when nothing is known yet. Reading
