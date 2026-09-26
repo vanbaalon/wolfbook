@@ -101,7 +101,7 @@ function sample(list, n, random) {
 }
 
 /** Inverse search for every prose word of `pages` (Poppler words by page). */
-function inverse(map, pages, pageNumbers, sources, textOf) {
+function inverse(map, pages, pageNumbers, sources, textOf, generatedTextOf = () => null) {
     // `words`, `right` … `unmapped`: prose the writer typed (in a .tex file).
     // `generated`: prose TeX wrote from elsewhere (citation labels, contents
     // entries), `generatedMapped` of it answered with some source.
@@ -137,6 +137,29 @@ function inverse(map, pages, pageNumbers, sources, textOf) {
                 const sourced = entries.some(e => e.file && e.x <= w.x1 && e.x + e.w >= w.x0 && e.y <= w.y1 && e.y + e.boxHeight >= w.y0);
                 if (sourced) out.missed = (out.missed || 0) + 1; else out.unsourced = (out.unsourced || 0) + 1;
                 if (out.examples.length < 12) out.examples.push({ kind: sourced ? 'missed' : 'unsourced', page: n, word: w.text });
+                continue;
+            }
+            if (r.generated) {
+                // Followed from the .bbl or .toc to the .bib record or the
+                // heading. A style prints what the record does not hold ("and",
+                // abbreviations), so the question is whether the click was on
+                // this entry: right when the word is in the record (up to the
+                // next @) or heading line, or in the generated entry it came
+                // from (the .bbl block from its \bibitem, or the .toc line).
+                out.followed = (out.followed || 0) + 1;
+                const lines = textOf(r.file) || (fs.existsSync(r.file) ? fs.readFileSync(r.file, 'utf8').split('\n') : []);
+                let block = lines[r.line - 1] || '';
+                if (/\.bib$/i.test(r.file)) for (let i = r.line; i < lines.length && !/^\s*@/.test(lines[i]); i++) block += '\n' + lines[i];
+                const generatedLines = generatedTextOf(r.generated.file) || [];
+                const entry = /\.bbl$/i.test(r.generated.file) ? (() => {
+                    const item = l => /\\bibitem|\\bib\s*\{/.test(l);
+                    let a = r.generated.line - 1, b = r.generated.line;
+                    while (a > 0 && !item(generatedLines[a])) a--;
+                    while (b < generatedLines.length && !item(generatedLines[b])) b++;
+                    return generatedLines.slice(a, b).join('\n');
+                })() : (generatedLines[r.generated.line - 1] || '');
+                if (block.toLowerCase().includes(p.word) || entry.toLowerCase().includes(p.word)) { out.right++; out.followedRight = (out.followedRight || 0) + 1; }
+                else { out.wrong++; if (out.examples.length < 12) out.examples.push({ kind: 'followed-wrong', page: n, word: w.text, file: path.basename(r.file), line: r.line }); }
                 continue;
             }
             const lines = textOf(r.file);
@@ -188,7 +211,8 @@ async function direct(map, file, lines, pages, random, { pageFilter = null } = {
         if (!rects.length) { out.empty++; if (out.examples.length < 12) out.examples.push({ kind: 'empty', line: s.line, word: s.word, source: lines[s.line - 1].slice(0, 100) }); continue; }
         // The page word may be a compound ("black-hole"), a possessive or
         // hyphenated at the line end: any of its letter runs will do.
-        const same = w => tokens(w.text).some(t => t.length >= 2 && (t.startsWith(s.word) || s.word.startsWith(t)));
+        // Poppler splits slanted text into fragments ("nte" of "slanted").
+        const same = w => tokens(w.text).some(t => t.length >= 2 && (t.startsWith(s.word) || s.word.startsWith(t) || (t.length >= 3 && s.word.includes(t))));
         const hit = rects.some(r => {
             const cx = r.x + r.w / 2, cy = r.y + r.h / 2;
             return (pages[r.page - 1] || []).some(w => cx >= w.x0 - 1 && cx <= w.x1 + 1 && cy >= w.y0 - 1 && cy <= w.y1 + 1 && same(w));
@@ -209,7 +233,7 @@ async function direct(map, file, lines, pages, random, { pageFilter = null } = {
 const pct = (a, b) => b ? `${(100 * a / b).toFixed(1)}%` : '-';
 function summarize(name, inv, dir) {
     const parts = [];
-    if (inv) parts.push(`inverse ${inv.right}/${inv.words} right (${pct(inv.right, inv.words)}), line ${inv.line}, near ${inv.near}, wrong ${inv.wrong}, unmapped ${inv.unmapped} (no source ${inv.unsourced || 0}, click misses glyph ${inv.missed || 0}); ` +
+    if (inv) parts.push(`inverse ${inv.right}/${inv.words} right (${pct(inv.right, inv.words)}), line ${inv.line}, near ${inv.near}, wrong ${inv.wrong}, unmapped ${inv.unmapped} (no source ${inv.unsourced || 0}, click misses glyph ${inv.missed || 0}), followed to .bib/heading ${inv.followedRight || 0}/${inv.followed || 0}; ` +
         `generated ${inv.generatedMapped}/${inv.generated} mapped, figure text ${inv.figure}; p50 ${quantile(inv.ms, 0.5)?.toFixed(3)} ms`);
     if (dir) parts.push(`direct ${dir.right}/${dir.words} right (${pct(dir.right, dir.words)}), empty ${dir.empty}, wrong ${dir.wrong}; p50 ${quantile(dir.ms, 0.5)?.toFixed(3)} ms p90 ${quantile(dir.ms, 0.9)?.toFixed(3)} ms`);
     console.log(`  ${name}: ${parts.join(' | ')}`);
@@ -235,9 +259,10 @@ async function paper(source, main) {
         const all = Array.from({ length: gen.pageCount }, (_, i) => i + 1);
         const pdfPages = popplerWords(gen.pdfPath);
         const view = await lane.refresh(all);
-        const settled = new NativeMap({ nativeView: view, nativeSource: lane.source, generation: { pdfHash: gen.pdfHash, projectDir: project } });
+        const settled = new NativeMap({ nativeView: view, nativeSource: lane.source, generation: { pdfHash: gen.pdfHash, projectDir: project, outDir: gen.outDir } });
         const textOf = file => sources.files.get(file) || (fs.existsSync(file) ? fs.readFileSync(file, 'utf8').split('\n') : null);
-        const inv = inverse(settled, pdfPages, all, sources, textOf);
+        const generatedTextOf = file => { try { return fs.readFileSync(path.join(gen.outDir, file), 'utf8').split('\n'); } catch (_) { return null; } };
+        const inv = inverse(settled, pdfPages, all, sources, textOf, generatedTextOf);
         const dir = await direct(settled, root, original.split('\n'), pdfPages, random);
         summarize(`settled (${gen.pageCount} pages)`, inv, dir);
         result.settled = { pages: gen.pageCount, inverse: strip(inv), direct: strip(dir) };
@@ -253,8 +278,8 @@ async function paper(source, main) {
         const editedLines = edited.split('\n');
         const editedText = file => file === root ? editedLines : textOf(file);
         const view2 = await lane.refresh(all);
-        const moved = new NativeMap({ nativeView: view2, nativeSource: lane.source, generation: { pdfHash: gen.pdfHash, projectDir: project } });
-        const inv2 = inverse(moved, pdfPages, all, sources, editedText);
+        const moved = new NativeMap({ nativeView: view2, nativeSource: lane.source, generation: { pdfHash: gen.pdfHash, projectDir: project, outDir: gen.outDir } });
+        const inv2 = inverse(moved, pdfPages, all, sources, editedText, generatedTextOf);
         const dir2 = await direct(moved, root, editedLines, pdfPages, random);
         summarize('edited (unsaved line above)', inv2, dir2);
         result.edited = { inverse: strip(inv2), direct: strip(dir2) };
@@ -275,7 +300,8 @@ async function paper(source, main) {
                 const drawn = (built.pages || []).map(p => p.page ?? p).filter(Number.isInteger);
                 const liveView = await lane.liveView(drawn.length ? drawn : all);
                 if (liveView) {
-                    const live = new NativeMap({ nativeView: liveView, nativeSource: lane.source, projectDir: project });
+                    const live = new NativeMap({ nativeView: liveView, nativeSource: lane.source, projectDir: project,
+                        generation: { outDir: lane.coldReport?.artifact_directory || null } });
                     const livePages = live.materializedPages;
                     // Ground truth: a cold build of the typed text (live pages equal cold ones).
                     const truth = path.join(run, 'truth');
@@ -286,7 +312,7 @@ async function paper(source, main) {
                     const truthPages = popplerWords(path.join(out, path.basename(main, '.tex') + '.pdf'));
                     const typedLines = typed.split('\n');
                     const typedText = file => file === root ? typedLines : textOf(file);
-                    const inv3 = inverse(live, truthPages, livePages, sources, typedText);
+                    const inv3 = inverse(live, truthPages, livePages, sources, typedText, generatedTextOf);
                     const dir3 = await direct(live, root, typedLines, truthPages, random, { pageFilter: page => live.hasPage(page) });
                     summarize(`live (${livePages.length} pages with maps)`, inv3, dir3);
                     result.live = { pages: livePages, inverse: strip(inv3), direct: strip(dir3) };

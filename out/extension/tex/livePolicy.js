@@ -226,8 +226,7 @@ function authoritativeDelayMs({ configuredMs = 4000, liveDelayMs = 900 } = {}) {
  * Which engine a paper is written for, when it says so or shows it; null
  * when it could be any (the XeTeX live engine may take it).
  *
- * In order: a `% !TEX program = …` line; arXiv's 00README.json
- * (`process.compiler`, passed as `readme`); then the preamble —
+ * In order: a `% !TEX program = …` line; then the preamble —
  * LuaTeX-only code (`\directlua`, luacode), `\pdfoutput=1` (arXiv's
  * pdfLaTeX marker, an undefined control sequence in XeTeX), or pdfTeX-only
  * primitives (`glyphtounicode`, `\pdfminorversion`, …). A preamble that
@@ -235,15 +234,17 @@ function authoritativeDelayMs({ configuredMs = 4000, liveDelayMs = 900 } = {}) {
  * (iftex, ifxetex, `\ifpdf`), is written for more than pdfTeX: its pdfTeX
  * lines count only before `\documentclass`, where nothing guards them.
  *
+ * Not arXiv's 00README.json: it names pdflatex for nearly every paper, as
+ * the compiler arXiv happened to run (38 of 40 in the sample, all of which
+ * XeLaTeX builds).
+ *
  * @returns {{ program: string, why: string, line: number|null }|null}
  */
-function paperEngineIntent(text, { readme = null } = {}) {
+function paperEngineIntent(text) {
     if (typeof text !== 'string') return null;
     const lineOf = at => text.slice(0, at).split('\n').length;
     const magic = /^[ \t]*%[ \t]*![ \t]*TEX[ \t]+(?:TS-)?program[ \t]*=[ \t]*([A-Za-z]+)/im.exec(text.slice(0, 4000));
     if (magic) return { program: magic[1].toLowerCase(), why: `% !TEX program = ${magic[1]}`, line: lineOf(magic.index) };
-    const compiler = typeof readme?.process?.compiler === 'string' ? readme.process.compiler.toLowerCase() : null;
-    if (['pdflatex', 'lualatex', 'xelatex'].includes(compiler)) return { program: compiler, why: `its arXiv 00README.json names ${compiler}`, line: null };
     const begin = text.indexOf('\\begin{document}');
     // Comments blanked, line structure kept: `%` not escaped, to the line end.
     const preamble = (begin < 0 ? text : text.slice(0, begin)).replace(/(^|[^\\])%.*$/gm, (m, c) => c + ' '.repeat(m.length - c.length));

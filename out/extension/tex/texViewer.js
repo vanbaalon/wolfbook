@@ -1322,7 +1322,10 @@ class TexViewer {
                 const view = await lane.liveView(pages);
                 if (request !== this._liveMapRequest) return;
                 const { NativeMap } = require('./nativeMap');
-                this._liveMap = view ? new NativeMap({ nativeView:view, nativeSource:lane.source, projectDir:lane.projectDir }) : null;
+                // The last settled build's auxiliary files (.bbl, .toc) let a
+                // click on a live bibliography or contents line reach its source.
+                this._liveMap = view ? new NativeMap({ nativeView:view, nativeSource:lane.source, projectDir:lane.projectDir,
+                    generation:{ outDir: lane.coldReport?.artifact_directory || null } }) : null;
             } catch (error) {
                 if (request === this._liveMapRequest) this._liveMap = null;
                 if (error?.name !== 'StaleBuild') this._log(`live source map: ${error.message}`);

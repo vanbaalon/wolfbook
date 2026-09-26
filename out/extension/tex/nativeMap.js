@@ -24,6 +24,35 @@ function originLines(location) {
         ? [location.start.line] : [location.start.line, location.end.line];
 }
 
+const fs = require('fs');
+
+/** A file's lines, read once per map (these files do not change under it). */
+function linesOf(cache, file) {
+    if (!cache.has(file)) {
+        let lines = null;
+        try { lines = fs.readFileSync(file, 'utf8').split('\n'); } catch (_) { /* absent */ }
+        cache.set(file, lines);
+    }
+    return cache.get(file);
+}
+
+/** The project's files with `extension`, a few levels deep, hidden ones skipped. */
+function projectFiles(dir, extension, depth = 3) {
+    const out = [];
+    const walk = (d, level) => {
+        let entries = [];
+        try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch (_) { return; }
+        for (const e of entries) {
+            if (e.name.startsWith('.') || e.name === 'node_modules') continue;
+            const full = path.join(d, e.name);
+            if (e.isDirectory()) { if (level < depth) walk(full, level + 1); }
+            else if (e.name.toLowerCase().endsWith(extension)) out.push(full);
+        }
+    };
+    walk(dir, 0);
+    return out;
+}
+
 class NativeMap extends RenderMap {
     constructor(o = {}) {
         super({ ...o, generation: { ...o.generation, synctexPath: null }, synctexDoc: null });
@@ -31,6 +60,10 @@ class NativeMap extends RenderMap {
         this.view = o.nativeView;
         this.source = o.nativeSource;
         this.projectDir = path.resolve(o.projectDir || o.generation?.projectDir || '.');
+        // Where the build wrote its auxiliary files (the .bbl, the .toc), for
+        // text the paper printed from them.
+        this.outDir = o.generation?.outDir || null;
+        this._files = new Map();
         this._invalidated = false;
         this._entries = [];
         this._byItem = new Map();
@@ -210,9 +243,125 @@ class NativeMap extends RenderMap {
             lead: glyph.boxHeight, glyph, exact: glyph.hit.preferred_source.location.accuracy === 'Exact' } : null;
     }
     renderToSource(page, x, y) {
-        const { glyph } = this.glyphAt(page, x, y);
-        if (!glyph) return { flag: FLAG.UNMAPPED, reason: 'no native source box contains this point' };
-        return this._sourceOf(glyph, page, x, y);
+        const hit = this._wordTyped(page, this._under(page, x, y));
+        if (!hit) return this._generatedAt(page, x, y) || { flag: FLAG.UNMAPPED, reason: 'no native source box contains this point' };
+        return this._sourceOf(hit, page, x, y);
+    }
+
+    /** Every glyph under the point, sourced or not, in paint order. */
+    _under(page, x, y) {
+        if (!this.available) return [];
+        return (this._pages.get(page) || []).filter(e => x >= e.x && x <= e.x + e.w && y >= e.y && y <= e.y + e.boxHeight);
+    }
+
+    /** Whether a glyph's own characters were typed in the project (its
+     *  definition is a project position), not only called from there. */
+    _typed(e) {
+        const d = e?.hit?.item?.provenance?.definition;
+        return !!(e?.file && d?.tag && (e.hit.mapped_origins || []).some(o =>
+            o.span.tag === d.tag && o.span.line === d.line && o.span.column === d.column));
+    }
+
+    /**
+     * THE WORD, NOT THE LETTER. `\MakeUppercase` (expl3's case changer, in
+     * running heads, amsart's author line) builds each changed character as a
+     * new token: it prints with no source, or only with the command that
+     * called it (`\maketitle`), while a letter it left alone still points into
+     * `\author{…}`. The letters of one printed word sit edge to edge, so a
+     * glyph that is not typed takes the source of the nearest typed glyph of
+     * its word. Falls back to the topmost sourced glyph under the point.
+     */
+    _wordTyped(page, under) {
+        const top = under.filter(e => e.file).at(-1) || under.at(-1) || null;
+        if (!top || this._typed(top)) return top && top.file ? top : null;
+        const row = (this._rowsOf ||= new Map());
+        const key = `${page}|${top.row}`;
+        if (!row.has(key)) row.set(key, (this._pages.get(page) || []).filter(e => e.row === top.row).sort((a, b) => a.x - b.x));
+        const line = row.get(key);
+        const at = line.indexOf(top);
+        const gap = Math.max(0.5, 0.12 * top.boxHeight);
+        for (const step of [-1, 1]) {
+            for (let i = at + step, prev = top; i >= 0 && i < line.length; prev = line[i], i += step) {
+                const e = line[i];
+                const apart = step < 0 ? prev.x - (e.x + e.w) : e.x - (prev.x + prev.w);
+                if (apart > gap) break;
+                if (this._typed(e)) return e;
+            }
+        }
+        return top.file ? top : null;
+    }
+
+    /**
+     * TEXT THE BUILD WROTE ITSELF. A bibliography entry is typeset from the
+     * .bbl BibTeX wrote, a contents line from the .toc: no project source, but
+     * a reader clicking one wants the entry in the .bib, or the heading. The
+     * worker says where in the generated file the text came from
+     * (`generated_source`); this follows it back. Null when it cannot.
+     */
+    _generatedAt(page, x, y) {
+        if (!this.available) return null;
+        const entry = (this._pages.get(page) || []).filter(e => e.hit.generated_source &&
+            x >= e.x && x <= e.x + e.w && y >= e.y && y <= e.y + e.boxHeight).at(-1);
+        if (!entry) return null;
+        const generated = entry.hit.generated_source;
+        const target = this._followGenerated(generated);
+        if (!target) return null;
+        return { flag: FLAG.PROBABLY_CURRENT, file: target.file, line: target.line, column: target.column || 0,
+            exact: false, generated,
+            box: { page, xBp: entry.x, yTopBp: entry.y, wBp: entry.w, hBp: entry.boxHeight, kind: 'native-generated', line: target.line },
+            object: this.objectAtLine(target.file, target.line) || undefined, glyph: entry, nativeHit: entry.hit };
+    }
+
+    _followGenerated(generated) {
+        const key = `${generated.file}\0${generated.line}`;
+        this._followed ||= new Map();
+        if (this._followed.has(key)) return this._followed.get(key);
+        let target = null;
+        const lines = [this.projectDir, this.outDir].filter(Boolean)
+            .map(dir => linesOf(this._files, path.join(dir, generated.file))).find(Boolean);
+        const extension = path.extname(generated.file).toLowerCase();
+        if (lines && extension === '.bbl') {
+            // The entry's key, from the \bibitem (or amsrefs' \bib{key}{type})
+            // at or above the line.
+            let bibkey = null;
+            for (let i = Math.min(generated.line, lines.length) - 1; i >= 0 && !bibkey; i--)
+                bibkey = /\\bibitem\s*(?:\[[^\]]*\])?\s*\{([^}]+)\}|\\bib\s*\{([^}]+)\}\s*\{/.exec(lines[i])?.slice(1).find(Boolean) || null;
+            if (bibkey) {
+                const pattern = new RegExp(`^\\s*@\\w+\\s*[{(]\\s*${bibkey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*,`);
+                for (const bib of projectFiles(this.projectDir, '.bib')) {
+                    const at = (linesOf(this._files, bib) || []).findIndex(l => pattern.test(l));
+                    if (at >= 0) { target = { file: bib, line: at + 1, column: 0, bibkey }; break; }
+                }
+            }
+        } else if (lines && ['.toc', '.lof', '.lot'].includes(extension)) {
+            // \contentsline{section}{\numberline{1}Title}{page}{anchor}: the heading with that title.
+            const line = lines[generated.line - 1] || '';
+            const m = /\\contentsline\s*\{(\w+)\}\{((?:[^{}]|\{[^{}]*\})*)\}/.exec(line);
+            if (m) {
+                const title = m[2].replace(/\\numberline\s*\{[^}]*\}/, '').replace(/\s+/g, ' ').trim();
+                const command = { figure: 'caption', table: 'caption' }[m[1]] || m[1];
+                const wanted = new RegExp(`\\\\${command}\\*?\\s*(?:\\[[^\\]]*\\])?\\s*\\{`);
+                // Words of the title only: not the commands around it (amsart's
+                // \tocsection{}{1.1}{Title}), nor numbers.
+                const words = title.replace(/\\[a-zA-Z]+\*?/g, ' ').match(/[A-Za-z]{3,}/g) || [];
+                // The heading holding most of the title's words (a title
+                // written with macros keeps some of them in the source).
+                let best = 0;
+                for (const tex of projectFiles(this.projectDir, '.tex')) {
+                    const source = linesOf(this._files, tex) || [];
+                    source.forEach((l, at) => {
+                        if (!words.length || !wanted.test(l)) return;
+                        const score = words.filter(w => l.includes(w)).length / words.length;
+                        if (score > best && score >= 0.5) {
+                            best = score;
+                            target = { file: tex, line: at + 1, column: Math.max(0, l.search(wanted)) };
+                        }
+                    });
+                }
+            }
+        }
+        this._followed.set(key, target);
+        return target;
     }
     /**
      * Point-to-source through the worker's inverse query, so overlapping ink is
@@ -229,8 +378,8 @@ class NativeMap extends RenderMap {
         try { reply = await (this.live ? this.source.inverse(page, xSp, ySp, { live: true }) : this.source.inverse(page, xSp, ySp)); }
         catch (_) { return this.renderToSource(page, x, y); }
         if (!this.available) return { flag: FLAG.UNMAPPED, reason: 'the native map changed during the query' };
-        const glyph = (reply.hits || []).map(h => this._byItem.get(h.item_id)).filter(e => e && e.file).at(-1);
-        if (!glyph) return { flag: FLAG.UNMAPPED, reason: 'no native source glyph under this point' };
+        const glyph = this._wordTyped(page, (reply.hits || []).map(h => this._byItem.get(h.item_id)).filter(Boolean));
+        if (!glyph) return this._generatedAt(page, x, y) || { flag: FLAG.UNMAPPED, reason: 'no native source glyph under this point' };
         return this._sourceOf(glyph, page, x, y);
     }
     _sourceOf(glyph, page, x, y) {

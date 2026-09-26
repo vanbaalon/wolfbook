@@ -1267,20 +1267,17 @@ function applyPageMarkers(editor, coord, decoration) {
  */
 /**
  * What a paper says about its engine: the one it is written for, declared
- * or shown (`paperEngineIntent`: `% !TEX program`, arXiv's 00README.json,
- * `\pdfoutput=1`, pdfTeX- or LuaTeX-only code), and a digest of its preamble
- * (the text before `\begin{document}`), which is what decides whether
- * another engine is needed.
+ * or shown (`paperEngineIntent`: `% !TEX program`, `\pdfoutput=1`, pdfTeX- or
+ * LuaTeX-only code), and a digest of its preamble (the text before
+ * `\begin{document}`), which is what decides whether another engine is needed.
  */
 function paperEngineHints(root, overlay) {
     let text = overlay?.get?.(root);
     if (text == null) { try { text = fs.readFileSync(root, 'utf8'); } catch (_) { return null; } }
-    let readme = null;
-    try { readme = JSON.parse(fs.readFileSync(path.join(path.dirname(root), '00README.json'), 'utf8')); } catch (_) { /* none */ }
-    const intent = paperEngineIntent(text, { readme });
+    const intent = paperEngineIntent(text);
     const begin = text.indexOf('\\begin{document}');
     const preamble = require('crypto').createHash('sha256')
-        .update(begin < 0 ? text : text.slice(0, begin)).update(JSON.stringify(readme?.process || null)).digest('hex');
+        .update(begin < 0 ? text : text.slice(0, begin)).digest('hex');
     return { program: intent?.program || null, intent, preamble };
 }
 

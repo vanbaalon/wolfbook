@@ -321,7 +321,8 @@ Latexmk: All targets (paper.pdf) are up-to-date
             { program: 'pdflatex', why: '% !TEX program = pdflatex', line: 1 });
         assert.equal(intent('% !TeX TS-program = xelatex\n\\pdfoutput=1\n\\documentclass{article}').program, 'xelatex',
             'a declaration wins over what the preamble shows');
-        assert.equal(intent('\\documentclass{article}', { readme: { process: { compiler: 'pdflatex' } } }).program, 'pdflatex');
+        // arXiv's 00README.json is not read: it names pdflatex for nearly every paper.
+        assert.equal(intent('\\documentclass{article}\n\\begin{document}x'), null);
         // Shown: arXiv's marker, pdfTeX-only primitives, LuaTeX code.
         assert.deepEqual(intent('\\pdfoutput=1\n\\documentclass{article}\n\\begin{document}x'),
             { program: 'pdflatex', why: '\\pdfoutput=1', line: 1 });

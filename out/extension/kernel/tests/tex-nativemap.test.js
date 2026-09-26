@@ -265,3 +265,71 @@ test('displaced sweep queries scalar boundaries across CRLF lines', async () => 
     assert.equal((await map.forwardRange(file,{ line:1,column_utf16:0 },{ line:2,column_utf16:3 })).length,1);
     assert.deepEqual(queries,[[1,0],[1,2],[2,0],[2,1],[2,2]]);
 });
+
+/** A one-page view of `hits`, as the worker answers, over `projectDir`. */
+function viewOf(hits, projectDir, outDir) {
+    const source = { isCurrentView: () => true };
+    const view = { generation: 1, sequence: 1, artifact: { page_count: 1, pdf_hash: 'h' },
+        pages: [{ page: 1, header: { magnification: 1000 }, hits }] };
+    return new NativeMap({ generation: { pdfHash: 'h', projectDir, outDir }, nativeView: view, nativeSource: source });
+}
+const glyphAt = (id, x, extra = {}) => ({ item_id: id, box_path: [[9, { kind: 'Horizontal' }]], preferred_source: null, mapped_origins: [],
+    item: { page: 1, kind: 'Glyph', provenance: { definition: { tag: 0, line: 0, column: 0 }, invocation: { tag: 0, line: 0, column: 0 } },
+        glyph: { font: 1, code: 65 }, geometry: { position: { x: x * SP, y: 20 * SP }, width: 6 * SP, height: 7 * SP, depth: 2 * SP } }, ...extra });
+const centre = (map, id) => { const e = map._byItem.get(id); return [e.x + e.w / 2, e.y + e.boxHeight / 2]; };
+
+test('a bibliography entry typeset from the .bbl leads to its .bib record (natbib and amsrefs keys)', () => {
+    const fs = require('node:fs');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wpaper-bbl-')), out = path.join(dir, 'out');
+    fs.mkdirSync(out);
+    fs.writeFileSync(path.join(dir, 'refs.bib'), '@book{other,\n title={Other}\n}\n\n@article {knuth84,\n title={The TeXbook}\n}\n@misc{ams26,\n}\n');
+    fs.writeFileSync(path.join(out, 'paper.bbl'), ['\\begin{thebibliography}{1}', '', '\\bibitem[{Knuth(1984)}]{knuth84}',
+        'D. Knuth, The TeXbook.', '', '\\bib{ams26}{misc}{', '  title={A title},', '}'].join('\n'));
+    const map = viewOf([glyphAt(0, 0, { generated_source: { file: 'paper.bbl', line: 4, column: 3 } }),
+        glyphAt(1, 20, { generated_source: { file: 'paper.bbl', line: 7, column: 2 } }),
+        glyphAt(2, 40, { generated_source: { file: 'paper.bbl', line: 1, column: 0 } })], dir, out);
+    const knuth = map.renderToSource(1, ...centre(map, 0));
+    assert.equal(knuth.file, path.join(dir, 'refs.bib'));
+    assert.equal(knuth.line, 5, 'the @article line of knuth84');
+    assert.deepEqual(knuth.generated, { file: 'paper.bbl', line: 4, column: 3 });
+    assert.equal(map.renderToSource(1, ...centre(map, 1)).line, 8, "amsrefs' \\bib{key}{type}");
+    // Above the first entry ("References") there is no key: no answer.
+    assert.equal(map.renderToSource(1, ...centre(map, 2)).flag, 'unmapped');
+});
+
+test('a contents line typeset from the .toc leads to the heading with its title', () => {
+    const fs = require('node:fs');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wpaper-toc-')), out = path.join(dir, 'out');
+    fs.mkdirSync(out);
+    fs.writeFileSync(path.join(dir, 'paper.tex'), ['\\documentclass{amsart}', '\\begin{document}', '\\tableofcontents',
+        '\\section{Hopf algebras and \\Sym}', 'Text.', '\\subsection*{Main results}'].join('\n'));
+    fs.writeFileSync(path.join(out, 'paper.toc'), ['\\contentsline {section}{\\tocsection {}{1}{Hopf algebras and Sym}}{1}{section.1}%',
+        '\\contentsline {subsection}{\\numberline {1.1}Main results}{2}{subsection.1.1}%'].join('\n'));
+    const map = viewOf([glyphAt(0, 0, { generated_source: { file: 'paper.toc', line: 1, column: 40 } }),
+        glyphAt(1, 20, { generated_source: { file: 'paper.toc', line: 2, column: 45 } })], dir, out);
+    const section = map.renderToSource(1, ...centre(map, 0));
+    assert.equal(section.file, path.join(dir, 'paper.tex'));
+    assert.equal(section.line, 4, 'most title words match; \\Sym is a macro in the source');
+    assert.equal(map.renderToSource(1, ...centre(map, 1)).line, 6);
+});
+
+test('a letter \\MakeUppercase rebuilt takes the source of a typed letter of its word', () => {
+    const typed = { tag: 1, line: 7, column: 9, length: 1 }, call = { tag: 1, line: 12, column: 0, length: 10 };
+    const at = (span, file = 'paper.tex') => ({ file, location: { compiled_revision: 0, current_revision: 1,
+        start: { line: span.line, column_utf16: span.column }, end: { line: span.line, column_utf16: span.column + 1 }, accuracy: 'Exact' } });
+    // "A" kept its token (typed in \author{…}); "B" and "C" were rebuilt and
+    // carry only \maketitle's call; "D", a word away, as well.
+    const hits = [
+        glyphAt(0, 0, { preferred_source: at(typed), mapped_origins: [{ span: typed, source: at(typed) }] }),
+        glyphAt(1, 6, { preferred_source: at(call), mapped_origins: [{ span: call, source: at(call) }] }),
+        glyphAt(2, 12, { preferred_source: at(call), mapped_origins: [{ span: call, source: at(call) }] }),
+        glyphAt(3, 24, { preferred_source: at(call), mapped_origins: [{ span: call, source: at(call) }] }),
+    ];
+    hits[0].item.provenance.definition = { tag: 1, line: 7, column: 9 };
+    for (const h of hits.slice(1)) h.item.provenance.invocation = { tag: 1, line: 12, column: 0 };
+    const map = viewOf(hits, root, null);
+    const c = map.renderToSource(1, ...centre(map, 2));
+    assert.deepEqual([c.line, c.column], [7, 9], 'C answers with A, typed in \\author');
+    const d = map.renderToSource(1, ...centre(map, 3));
+    assert.deepEqual([d.line, d.column], [12, 0], 'D, in another word, keeps its own answer');
+});
