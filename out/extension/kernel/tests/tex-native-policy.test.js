@@ -1120,3 +1120,54 @@ test('removing native pages evicts their text instead of reusing it if the page 
     assert.deepEqual(f.reads,['old:1','old:2','restored:2']);
     assert.deepEqual(Array.from(f.posts.at(-1).reusedPages),[1]);
 });
+
+
+test('live overlay pages carry their own hyperlinks and destinations', async () => {
+    const vm = require('node:vm');
+    const { pathToFileURL } = require('node:url');
+    const js = fs.readFileSync(path.resolve(__dirname, '../../../client/tex-viewer.js'), 'utf8');
+    const txdlCanvas = await import(pathToFileURL(path.resolve(__dirname, '../../../client/txdl-canvas.js')).href);
+    const fn = name => { const start = js.indexOf(`function ${name}(`); return js.slice(start, js.indexOf('\n}\n', start) + 2); };
+    const sp = pt => Math.round(pt * 65536);
+    const txdl = { media_size_sp: [sp(600), sp(800)], fonts: [{ definition_digest: 'f', size_sp: sp(10) }], ops: [
+        { op: 'dest', name: 'section.1', x: 0, y: sp(100) },
+        { op: 'link', rect: { x0: sp(10), y0: sp(20), x1: sp(30), y1: sp(32) }, target: 'section.1' },
+        { op: 'glyphs', font: 'f', glyphs: [[49, sp(10), sp(30)]] },
+        { op: 'link', rect: { x0: 0, y0: sp(20), x1: sp(400), y1: sp(60) }, target: 'https://example.org' },
+        { op: 'glyphs', font: 'f', glyphs: [[50, sp(300), sp(30)]] },
+    ] };
+    const made = [];
+    const node = () => { const el = { style: {}, classList: new Set(), attrs: {}, removed: false,
+        setAttribute(k, v) { el.attrs[k] = v; }, remove() { el.removed = true; } };
+        Object.defineProperty(el, 'className', { set(v) { el._class = v; for (const c of v.split(' ')) el.classList.add(c); }, get() { return el._class; } });
+        return el; };
+    const wrap = { offsetTop: 1000, children: [], appendChild(el) { this.children.push(el); made.push(el); },
+        querySelectorAll(sel) { return this.children.filter(el => !el.removed && sel.split('.').slice(1).every(c => el.classList.has(c))); } };
+    let scrolled = null, relinked = [];
+    const context = vm.createContext({
+        linkLayer: txdlCanvas.linkLayer, pageToCss: txdlCanvas.pageToCss, PT_PER_BP: 72.27 / 72,
+        state: { txdl: { pages: new Map([[3, { txdl }]]) }, rendered: new Map([[3, {}]]) },
+        document: { createElement: () => node(), querySelector: () => ({ clientHeight: 400, scrollTo: o => { scrolled = o; } }) },
+        pagesEl: () => ({ querySelector: () => wrap }),
+        txdlPageBox: () => ({ width: 1200, height: 1600, widthBp: 600 * 72 / 72.27 }),
+        paintLinks: async page => { relinked.push(page); }, status: () => {},
+    });
+    vm.runInContext(fn('paintLiveLinks') + fn('restorePdfLinks') + fn('followLiveDest'), context);
+    // CSS px per pt = 1200 / 600 = 2; the page origin sits one inch (72.27 pt) in.
+    context.paintLiveLinks(3, wrap, txdl, 2, [600, 800]);
+    assert.equal(made.length, 1, 'the wrapped link (40 pt tall over 10 pt text) is left out');
+    const [link] = made;
+    assert.equal(link._dest, 'section.1');
+    assert.ok(link.classList.has('live') && link.classList.has('pdflink'));
+    assert.equal(parseFloat(link.style.left), (72.27 + 10) * 2);
+    assert.equal(parseFloat(link.style.top), (72.27 + 20) * 2);
+    assert.equal(parseFloat(link.style.width), 40);
+    // The destination is found on the live page: 1000 + (72.27 + 100) * 2 - 400 / 4.
+    assert.equal(context.followLiveDest('section.1'), true);
+    assert.ok(Math.abs(scrolled.top - (1000 + (72.27 + 100) * 2 - 100)) < 1e-6);
+    assert.equal(context.followLiveDest('elsewhere'), false, 'unknown names go to the PDF');
+    // The overlay goes: the live links go and the PDF's come back.
+    context.restorePdfLinks(3);
+    assert.equal(link.removed, true);
+    assert.deepEqual(relinked, [3]);
+});

@@ -1040,6 +1040,9 @@ async function paintLinks(n) {
     const wrap = pagesEl().querySelector(`.page[data-page="${n}"]`);
     const r = state.rendered.get(n);
     if (!wrap || !r || !state.doc) return;
+    // A page under a live preview shows the preview's links (paintLiveLinks):
+    // the PDF's rectangles are where the text WAS.
+    if (state.txdl && state.txdl.pages.has(n)) return;
     for (const el2 of wrap.querySelectorAll('.pdflink')) el2.remove();
 
     const doc = state.doc;
@@ -1054,6 +1057,7 @@ async function paintLinks(n) {
     catch (_) { anns = []; }
     // Awaiting gave the paper time to change underneath us.
     if (state.doc !== doc || state.rendered.get(n) !== r) return;
+    if (state.txdl && state.txdl.pages.has(n)) return;
 
     for (const a of anns || []) {
         if (!a || a.subtype !== 'Link') continue;
@@ -1303,9 +1307,10 @@ window.addEventListener('keydown', e => {
  * rather than to the top of the page it happens to be on.
  */
 async function followPdfLink(el2) {
-    if (!state.doc) return;
     const dest = el2._dest;
     if (!dest) return;
+    if (typeof dest === 'string' && followLiveDest(dest)) return;
+    if (!state.doc) return;
     try {
         const d = typeof dest === 'string' ? await state.doc.getDestination(dest) : dest;
         if (!Array.isArray(d) || !d.length) throw new Error('Destination unavailable');
@@ -1611,7 +1616,7 @@ function rectToViewport(n, rect) {
 // Nothing else in this file moves: highlights, selections, chips and links are
 // all placed from the PDF page box, which an overlay does not change.
 
-import { createTxdlRenderer } from './txdl-canvas.js';
+import { createTxdlRenderer, linkLayer, pageToCss } from './txdl-canvas.js';
 
 /** TeX points in a big point; the display list is in TeX pt, PDF boxes in bp. */
 const PT_PER_BP = 72.27 / 72;
@@ -1685,13 +1690,16 @@ function txdlState() {
 /** The PDF stays on this page: the host must not treat it as a live page. */
 function txdlFellBack(page) {
     removeTxdlOverlay(page);
+    restorePdfLinks(page);
     vscode.postMessage({ type: 'txdlFallback', page });
 }
 
 /** Every preview overlay goes; the PDF canvases underneath are untouched. */
 function clearTxdlOverlays() {
     for (const c of document.querySelectorAll('canvas.txdl-overlay')) c.remove();
+    const pages = state.txdl ? [...state.txdl.pages.keys()] : [];
     if (state.txdl) { state.txdl.pages.clear(); state.txdl.generation = null; }
+    for (const page of pages) restorePdfLinks(page);
 }
 
 /**
@@ -1749,6 +1757,7 @@ function clearTxdlOverlaysBefore(openSeq) {
         if ((entry.openSeq ?? 0) >= openSeq) continue;
         entry.canvas.remove();
         t.pages.delete(page);
+        restorePdfLinks(page);
     }
     dropEmptyLiveExtraPages();
 }
@@ -1852,6 +1861,7 @@ async function drawTxdlPage(msg, { duringOpen = false } = {}) {
     const pdfCanvas = wrap.querySelector('canvas:not(.txdl-overlay)');
     if (pdfCanvas) wrap.insertBefore(canvas, pdfCanvas.nextSibling);
     else wrap.appendChild(canvas);       // renderPage puts its canvas under this one
+    paintLiveLinks(page, wrap, txdl, scale, [widthPt, heightPt]);
     // Glyphs whose outline was not cached were skipped, not drawn wrong. Ask
     // for them and draw the same page again when they land.
     if (result.pending > 0) {
@@ -1864,6 +1874,76 @@ async function drawTxdlPage(msg, { duringOpen = false } = {}) {
         // could not load would leave holes on an opaque page: keep the PDF.
         if (again && (again.fallback || again.pending > 0 || again.skipped > 0)) txdlFellBack(page);
     }
+}
+
+/**
+ * The live page's hyperlinks, in place of the PDF's.
+ *
+ * The overlay moved the text, so the PDF's link rectangles now sit over
+ * whatever took their place. TXDL carries hyperref's `pdf:bann`/`eann` pairs
+ * with the ink they enclose, and the same `.pdflink` elements are built from
+ * those. A link that wraps a line is left out: its one rectangle would also
+ * cover the unlinked words beside it (see `linkLayer`).
+ */
+function paintLiveLinks(page, wrap, txdl, scale, mediaSize) {
+    for (const el2 of wrap.querySelectorAll('.pdflink')) el2.remove();
+    let layer;
+    try { layer = linkLayer(txdl); } catch (_) { return; }
+    const geo = pageToCss(txdl, scale, { mediaSize });
+    for (const link of layer.links) {
+        if (link.multiline) continue;
+        const r = geo.rect(link.rect);
+        if (!r || !(r.width > 0 && r.height > 0)) continue;
+        const el2 = document.createElement('a');
+        el2.className = 'pdflink live' + (link.external ? ' ext' : '');
+        el2.style.left = `${r.x}px`;
+        el2.style.top = `${r.y}px`;
+        el2.style.width = `${r.width}px`;
+        el2.style.height = `${r.height}px`;
+        if (link.external) {
+            el2.href = link.target;
+            el2.title = link.target;
+        } else {
+            el2.href = '#';
+            el2.setAttribute('aria-label', 'Go to it in the paper');
+            el2._dest = link.target;
+        }
+        wrap.appendChild(el2);
+    }
+}
+
+/** The PDF's own links come back once the live overlay on a page is gone. */
+function restorePdfLinks(page) {
+    const wrap = pagesEl().querySelector(`.page[data-page="${page}"]`);
+    if (!wrap) return;
+    for (const el2 of wrap.querySelectorAll('.pdflink.live')) el2.remove();
+    if (state.rendered.has(page)) paintLinks(page).catch(() => {});
+}
+
+/**
+ * A named destination on a live page: the preview knows where it is NOW,
+ * which the PDF (typeset before the edit) may not. False when no live page
+ * holds it, so the caller asks the PDF.
+ */
+function followLiveDest(name) {
+    const t = state.txdl;
+    if (!t) return false;
+    for (const [page, entry] of t.pages) {
+        let layer;
+        try { layer = linkLayer(entry.txdl); } catch (_) { continue; }
+        const dest = layer.dests.find(d => d.name === name);
+        if (!dest) continue;
+        const wrap = pagesEl().querySelector(`.page[data-page="${page}"]`);
+        const box = wrap && txdlPageBox(page);
+        if (!box) continue;
+        const widthPt = box.widthBp > 0 ? box.widthBp * PT_PER_BP : 0;
+        const y = widthPt > 0 ? pageToCss(entry.txdl, box.width / widthPt).y(dest.y) : 0;
+        const main = document.querySelector('main');
+        if (main) main.scrollTo({ top: Math.max(0, wrap.offsetTop + y - main.clientHeight * 0.25), behavior: 'smooth' });
+        status(`went to p.${page}`);
+        return true;
+    }
+    return false;
 }
 
 /**

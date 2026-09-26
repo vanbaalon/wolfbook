@@ -179,6 +179,44 @@ export function textLayer(page, fonts = page && page.fonts, options = {}) {
   return items;
 }
 
+/**
+ * The page's hyperlinks and named destinations, in sp and page (DVI)
+ * coordinates (`pageToCss(...).rect` / `.x` / `.y` place them).
+ *
+ * A `link` op's rectangle is the union of the ink between its `pdf:bann` and
+ * `pdf:eann`. dvipdfmx breaks an annotation at each line end, so a link that
+ * wraps has one rectangle per line in the PDF, while the union here also
+ * covers the unlinked text on both lines. Those links are marked `multiline`
+ * (taller than two lines of the text that follows the `bann`) so a caller can
+ * leave them out rather than make neighbouring words clickable.
+ */
+export function linkLayer(page, fonts = page && page.fonts) {
+  const index = fontIndex(fonts);
+  const ops = (page && page.ops) || [];
+  const links = [];
+  const dests = [];
+  ops.forEach((op, at) => {
+    if (op.op === 'dest' && typeof op.name === 'string') {
+      dests.push({ name: op.name, x: op.x, y: op.y });
+      return;
+    }
+    if (op.op !== 'link' || !op.rect || typeof op.target !== 'string' || !op.target) return;
+    let lineSp = 0;
+    for (let next = at + 1; next < ops.length && !lineSp; next++) {
+      const font = ops[next].op === 'glyphs' ? index.get(ops[next].font) : null;
+      if (font && font.size_sp > 0) lineSp = font.size_sp * 1.2;
+    }
+    const height = Math.abs(op.rect.y1 - op.rect.y0);
+    links.push({
+      rect: op.rect,
+      target: op.target,
+      external: /^[a-z][a-z0-9+.-]*:/i.test(op.target),
+      multiline: lineSp > 0 && height > 2 * lineSp,
+    });
+  });
+  return { links, dests };
+}
+
 /** Insertion-ordered cache with a hard bound; the oldest entry is evicted. */
 class BoundedCache {
   constructor(limit) {
