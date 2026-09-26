@@ -9,7 +9,8 @@ const stub = makeVscodeStub();
 stub.workspace.textDocuments = [];
 let configuredMapEngine = 'wlatex';
 let configuredTimeout = 180000;
-const observedTimeouts = [];
+const observedTimeouts = [], observedEngines = [], notices = [];
+stub.window.showInformationMessage = async message => { notices.push(message); };
 let installed = true, constructorCalls = 0;
 stub.workspace.getConfiguration = () => ({ get: (key, fallback) =>
     ({ compileTimeoutMs:configuredTimeout, mapEngine: configuredMapEngine, wlatexDirectory: '/built/wlatex', authoritativeDelayMs: 0 })[key] ?? fallback });
@@ -37,7 +38,7 @@ Module._load = function (req, ...args) {
     const result = oldLoad.call(this, req, ...args);
     if (req === './compileService') return { ...result,
         loadGeneration: () => null, saveGeneration: () => false,
-        compile: async o => { conventionalCalls++; observedTimeouts.push(['conventional', o.timeoutMs]); return { ok:true, generation:100,
+        compile: async o => { conventionalCalls++; observedTimeouts.push(['conventional', o.timeoutMs]); observedEngines.push(o.engine); return { ok:true, generation:100,
             pdfPath:'unused', sourceSnapshotHash:o.sourceSnapshotHash, pageCount:1, diagnostics:[] }; } };
     return result;
 };
@@ -104,13 +105,21 @@ test('a paper for another engine leaves the native lane: declared, or proven by 
         await f.coordinator.build(f.doc, { live:true, quiet:true });
         assert.equal(nativeCalls, native0, 'a declared pdflatex paper never reaches the native lane');
         assert.equal(conventionalCalls, conventional0 + 1);
-        assert.match(f.state.nativeOff, /asks for pdflatex/);
-        // No declaration, but WLaTeX fails where the configured compiler works.
+        assert.match(f.state.nativeOff, /asks for pdflatex \(% !TEX program = pdflatex, line 1\)/);
+        assert.equal(observedEngines.at(-1), 'pdflatex', 'built with the engine the paper asks for');
+        // arXiv's pdfLaTeX marker says so too, before any native build fails.
         fs.writeFileSync(f.state.root, '\\pdfoutput=1\n\\documentclass{article}\n\\begin{document}a');
+        await f.coordinator.build(f.doc, { live:true, quiet:true });
+        assert.equal(nativeCalls, native0);
+        assert.equal(conventionalCalls, conventional0 + 2);
+        assert.match(f.state.nativeOff, /written for pdflatex \(\\pdfoutput=1, line 1\)/);
+        assert.equal(observedEngines.at(-1), 'pdflatex');
+        // No sign at all, but WLaTeX fails where the configured compiler works.
+        fs.writeFileSync(f.state.root, '\\documentclass{article}\n\\usepackage{pdftexonly}\n\\begin{document}a');
         nativeDocumentError = true;
         await f.coordinator.build(f.doc, { live:true, quiet:true });
         assert.equal(nativeCalls, native0 + 1);
-        assert.equal(conventionalCalls, conventional0 + 2);
+        assert.equal(conventionalCalls, conventional0 + 3);
         assert.equal(f.state.generation.ok, true);
         assert.match(f.state.nativeOff, /cannot build this paper/);
         // The next pause does not try WLaTeX again for the same preamble...
@@ -123,6 +132,9 @@ test('a paper for another engine leaves the native lane: declared, or proven by 
         await f.coordinator.build(f.doc, { live:true, quiet:true });
         assert.equal(nativeCalls, native0 + 2);
         assert.equal(f.state.nativeOff, null);
+        // Each reason was said once, as a notice.
+        assert.equal(notices.filter(m => /^Live preview is off for paper\.tex/.test(m)).length, 3);
+        assert.ok(notices.some(m => /written for pdflatex \(\\pdfoutput=1, line 1\).*builds it with pdflatex.*% !TEX program = xelatex/.test(m)), notices.join('\n'));
     } finally { nativeDocumentError = false; f.close(); }
 });
 

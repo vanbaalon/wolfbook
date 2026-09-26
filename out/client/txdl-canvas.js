@@ -312,9 +312,13 @@ const DEFAULTS = {
 /** Scaled points per PostScript point (bp). */
 const SP_PER_BP = (65536 * 72.27) / 72;
 
-/** A TXDL image matrix that places the image as it is (XeTeX's identity). */
-function identityMatrix(matrix) {
-  return !matrix || (matrix[0] === 65536 && matrix[1] === 0 && matrix[2] === 0 && matrix[3] === 65536 && matrix[4] === 0 && matrix[5] === 0);
+/**
+ * A TXDL image matrix that places the image as it is: no scale or rotation.
+ * Its translation moves a figure whose crop box does not start at (0, 0)
+ * back to the reference point: see the `image` op for where that lands.
+ */
+function unscaledMatrix(matrix) {
+  return !matrix || (matrix[0] === 65536 && matrix[1] === 0 && matrix[2] === 0 && matrix[3] === 65536);
 }
 
 /**
@@ -328,8 +332,9 @@ function identityMatrix(matrix) {
  * resolves.
  *
  * `requestImage(file, page)` (optional) resolves to `{ source, widthBp,
- * heightBp }` — a drawable (`ImageBitmap`, canvas, image) and the image's
- * natural size — or null when it cannot be drawn. Without it an image is a
+ * heightBp, originBp? }` — a drawable (`ImageBitmap`, canvas, image), the
+ * image's natural size and, for a PDF page, its crop box's lower-left corner
+ * — or null when it cannot be drawn. Without it an image is a
  * dashed placeholder; with it, images load like outlines (pending, then
  * drawn), and one that cannot be drawn puts the page on the PDF fallback.
  */
@@ -782,7 +787,7 @@ export function createTxdlRenderer(options = {}) {
         }
         case 'image': {
           if (requestImage) {
-            if (!identityMatrix(op.matrix)) {
+            if (!unscaledMatrix(op.matrix)) {
               result.fallback = true;
               break;
             }
@@ -808,7 +813,19 @@ export function createTxdlRenderer(options = {}) {
                 h = naturalH;
               }
             }
-            const drawn = { x: css.x(op.x), y: css.y(op.y - h), width: css.len(w), height: css.len(h) };
+            // XeTeX writes the translation that brings a PDF page's crop box
+            // to the reference point as minus its corner truncated to whole
+            // points and converted with 72/72.27 the wrong way round
+            // (xetex-pic.c), and dvipdfmx places the box by it: off the point
+            // by up to a point plus 0.75% of the corner (3 bp for a corner at
+            // 437 bp). Drawn where the PDF has it.
+            let dx = 0;
+            let dy = 0;
+            if (op.matrix && Array.isArray(image.originBp)) {
+              dx = op.matrix[4] + image.originBp[0] * SP_PER_BP;
+              dy = op.matrix[5] + image.originBp[1] * SP_PER_BP;
+            }
+            const drawn = { x: css.x(op.x + dx), y: css.y(op.y - dy - h), width: css.len(w), height: css.len(h) };
             useAlpha(gs.fillAlpha);
             ctx.drawImage(image.source, drawn.x, drawn.y, drawn.width, drawn.height);
             result.images.push({ file: op.file, page: op.page == null ? null : op.page, rect: drawn });

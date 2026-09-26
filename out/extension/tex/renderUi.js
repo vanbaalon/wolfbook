@@ -28,7 +28,7 @@ const { NativeBuildLane } = require('./nativeCompileService');
 const { findRoot, buildGraph } = require('./texProject');
 const {
     nextLiveDelayMs, liveDeadlineDelayMs, cooldownDelayMs, blendLiveMs, synctexUnchanged,
-    generationSatisfies, authoritativeDelayMs, shouldUseGlyphMap, glyphMapBackoff,
+    generationSatisfies, authoritativeDelayMs, shouldUseGlyphMap, glyphMapBackoff, paperEngineIntent,
 } = require('./livePolicy');
 const { foldForCompile, MARK: COLLAPSE_MARK } = require('./collapse');
 const { formatDependencyHelp } = require('./dependencyHelp');
@@ -528,6 +528,25 @@ class RenderCoordinator {
             .catch(() => { /* a notice must never break compiling */ });
     }
 
+    /**
+     * Say once per paper and reason why its live preview is off: the paper
+     * is written for another engine (WLaTeX's live engine is XeTeX), so the
+     * page follows saves through `engine` instead of every keystroke.
+     */
+    _noticeNativeOff(root, reason, engine) {
+        this._nativeOffNotices ||= new Set();
+        const key = `${root}\0${reason}`;
+        if (this._nativeOffNotices.has(key)) return;
+        this._nativeOffNotices.add(key);
+        const message = `Live preview is off for ${path.basename(root)}: ${reason}, and WLaTeX's live engine is XeTeX. ` +
+            `WPaper builds it with ${engine}, and the page updates when you save. ` +
+            'To preview it live, put "% !TEX program = xelatex" on its first line.';
+        const show = 'Show log';
+        Promise.resolve(vscode.window.showInformationMessage(message, show))
+            .then(pick => { if (pick === show) this.output.show(true); })
+            .catch(() => { /* a notice must never break compiling */ });
+    }
+
     /** Feed an edit through, so the map can translate rather than go stale. */
     noteChange(e) {
         const st = this.stateFor(e.document);
@@ -641,12 +660,23 @@ class RenderCoordinator {
         // this paper off the native lane until its preamble changes.
         const hints = mapEngine === 'wlatex' ? paperEngineHints(root, overlay) : null;
         if (st.nativeIncompatible && st.nativeIncompatible.preamble !== hints?.preamble) st.nativeIncompatible = null;
-        const declared = hints?.program && !['xelatex', 'xetex'].includes(hints.program) ? hints.program : null;
-        st.nativeOff = declared ? `the paper asks for ${declared}` : st.nativeIncompatible?.reason || null;
+        const intent = hints?.intent && !['xelatex', 'xetex'].includes(hints.intent.program) ? hints.intent : null;
+        const where = intent ? `${intent.why}${intent.line ? `, line ${intent.line}` : ''}` : '';
+        st.nativeOff = intent ? (intent.why.startsWith('% !TEX') ? `the paper asks for ${intent.program} (${where})`
+            : `the paper is written for ${intent.program} (${where})`) : st.nativeIncompatible?.reason || null;
+        // The conventional build then uses the engine the paper is written
+        // for, whatever `wolfbook.tex.engine` says.
+        st.nativeOffEngine = intent && ['pdflatex', 'lualatex'].includes(intent.program) ? intent.program : null;
         if (wantNative && st.nativeOff) {
-            if (st.nativeOffLogged !== st.nativeOff) { this.log(`WLaTeX not used: ${st.nativeOff}`); st.nativeOffLogged = st.nativeOff; }
+            if (st.nativeOffLogged !== st.nativeOff) {
+                this.log(`WLaTeX not used: ${st.nativeOff}`);
+                st.nativeOffLogged = st.nativeOff;
+                this._noticeNativeOff(root, st.nativeOff, st.nativeOffEngine || cfg0.get('engine', 'pdflatex'));
+            }
             wantNative = false;
-            mapEngine = 'auto';
+            // A pdfLaTeX paper is built with pdflatex (SyncTeX), not
+            // LuaLaTeX's exact map: the PDF is the one its author gets.
+            mapEngine = st.nativeOffEngine === 'pdflatex' ? 'off' : 'auto';
         }
         if (wantNative && st.nativeRefusedSnapshot === snapshot && st.nativeRefusedDirectory === nativeDirectory) {
             wantNative = false;
@@ -810,7 +840,7 @@ class RenderCoordinator {
                 nativePages: this._nativeWindow(st),
                 // The skeleton only has to be walked when it might have changed.
                 mirror: live ? 'auto' : 'always',
-                engine: cfg.get('engine', 'pdflatex'),
+                engine: st.nativeOffEngine || cfg.get('engine', 'pdflatex'),
                 onLog: (l) => {
                     const run = /^Latexmk: Run number (\d+)/.exec(l);
                     if (run) { note(`pass ${run[1]}`); return; }
@@ -882,6 +912,8 @@ class RenderCoordinator {
                             reason: `WLaTeX (XeTeX) cannot build this paper and ${compileOpts.engine} can (${first})` };
                         st.nativeOff = st.nativeIncompatible.reason;
                         this.log(`  ${st.nativeIncompatible.reason} — using ${compileOpts.engine} until the preamble changes`);
+                        st.nativeOffLogged = st.nativeOff;
+                        this._noticeNativeOff(root, st.nativeOff, compileOpts.engine);
                         gen = conventional;
                     }
                 }
@@ -1232,19 +1264,22 @@ function applyPageMarkers(editor, coord, decoration) {
  * 4.42pt means nothing to an author, 1.6 mm is a thing you can see.
  */
 /**
- * What a paper says about its engine: the `% !TEX program` it declares, and
- * a digest of its preamble (the text before `\begin{document}`), which is
- * what decides whether another engine is needed.
+ * What a paper says about its engine: the one it is written for, declared
+ * or shown (`paperEngineIntent`: `% !TEX program`, arXiv's 00README.json,
+ * `\pdfoutput=1`, pdfTeX- or LuaTeX-only code), and a digest of its preamble
+ * (the text before `\begin{document}`), which is what decides whether
+ * another engine is needed.
  */
 function paperEngineHints(root, overlay) {
     let text = overlay?.get?.(root);
     if (text == null) { try { text = fs.readFileSync(root, 'utf8'); } catch (_) { return null; } }
-    const program = /^[ \t]*%[ \t]*![ \t]*TEX[ \t]+(?:TS-)?program[ \t]*=[ \t]*([A-Za-z]+)/im
-        .exec(text.slice(0, 4000))?.[1]?.toLowerCase() || null;
+    let readme = null;
+    try { readme = JSON.parse(fs.readFileSync(path.join(path.dirname(root), '00README.json'), 'utf8')); } catch (_) { /* none */ }
+    const intent = paperEngineIntent(text, { readme });
     const begin = text.indexOf('\\begin{document}');
     const preamble = require('crypto').createHash('sha256')
-        .update(begin < 0 ? text : text.slice(0, begin)).digest('hex');
-    return { program, preamble };
+        .update(begin < 0 ? text : text.slice(0, begin)).update(JSON.stringify(readme?.process || null)).digest('hex');
+    return { program: intent?.program || null, intent, preamble };
 }
 
 function renderDiagnostics(doc, coord, projection) {

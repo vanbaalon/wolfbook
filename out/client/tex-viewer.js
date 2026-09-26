@@ -1664,7 +1664,11 @@ function txdlRendererInstance() {
 const txdlImageWaits = new Map();
 let txdlImageSeq = 0;
 
-/** A figure the host sent, as `{ source, widthBp, heightBp }`, or null. */
+/**
+ * A figure the host sent, as `{ source, widthBp, heightBp, originBp? }`, or
+ * null. A PDF page is drawn by its crop box (pdf.js's `view`), whose corner
+ * the renderer needs to place it where dvipdfmx does.
+ */
 async function decodeTxdlImage(reply, page) {
     if (!reply || reply.error || !reply.base64) return null;
     const bytes = Uint8Array.from(atob(reply.base64), c => c.charCodeAt(0));
@@ -1681,7 +1685,7 @@ async function decodeTxdlImage(reply, page) {
             canvas.width = Math.ceil(viewport.width);
             canvas.height = Math.ceil(viewport.height);
             await figure.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
-            return { source: canvas, widthBp: natural.width, heightBp: natural.height };
+            return { source: canvas, widthBp: natural.width, heightBp: natural.height, originBp: [figure.view[0], figure.view[1]] };
         } finally { doc.destroy(); }
     }
     const bitmap = await createImageBitmap(new Blob([bytes], { type: reply.mime || 'image/png' }));

@@ -313,6 +313,32 @@ Latexmk: All targets (paper.pdf) are up-to-date
         assert.strictEqual(authoritativeDelayMs({ configuredMs: 0, liveDelayMs: 900 }), 0);
     });
 
+    await test('paperEngineIntent: the engine a paper is written for, declared or shown', () => {
+        const { paperEngineIntent } = require('../../tex/livePolicy');
+        const intent = (text, o) => paperEngineIntent(text, o);
+        // Declared.
+        assert.deepEqual(intent('% !TEX program = pdflatex\n\\documentclass{article}'),
+            { program: 'pdflatex', why: '% !TEX program = pdflatex', line: 1 });
+        assert.equal(intent('% !TeX TS-program = xelatex\n\\pdfoutput=1\n\\documentclass{article}').program, 'xelatex',
+            'a declaration wins over what the preamble shows');
+        assert.equal(intent('\\documentclass{article}', { readme: { process: { compiler: 'pdflatex' } } }).program, 'pdflatex');
+        // Shown: arXiv's marker, pdfTeX-only primitives, LuaTeX code.
+        assert.deepEqual(intent('\\pdfoutput=1\n\\documentclass{article}\n\\begin{document}x'),
+            { program: 'pdflatex', why: '\\pdfoutput=1', line: 1 });
+        assert.deepEqual(intent('\\documentclass{article}\n\\input{glyphtounicode}\n\\pdfgentounicode=1\n\\begin{document}'),
+            { program: 'pdflatex', why: '\\input{glyphtounicode}', line: 2 });
+        assert.equal(intent('\\documentclass{article}\n\\pdfminorversion=7\n\\begin{document}').line, 2);
+        assert.equal(intent('\\documentclass{article}\n\\usepackage{luacode}\n\\begin{document}').program, 'lualatex');
+        // A preamble written for several engines, commented lines, and the body do not count.
+        assert.equal(intent('\\documentclass{article}\n\\usepackage{iftex}\n\\ifpdftex\\pdfminorversion=7\\fi\n\\begin{document}'), null);
+        assert.equal(intent('\\documentclass{article}\n\\usepackage{fontspec}\n\\pdfminorversion=7\n\\begin{document}'), null);
+        assert.equal(intent('%\\pdfoutput=1\n\\documentclass{article}\n% \\pdfminorversion=5\n\\begin{document}'), null);
+        assert.equal(intent('\\documentclass{article}\n\\begin{document}\n\\pdfoutput=1\n'), null);
+        assert.equal(intent('\\documentclass{article}\n\\begin{document}hi'), null);
+        // Before \documentclass nothing guards it.
+        assert.equal(intent('\\pdfoutput=1\n\\documentclass{article}\n\\usepackage{fontspec}\n\\begin{document}').program, 'pdflatex');
+    });
+
     console.log('tex live-compile policy\n');
     results.forEach(r => console.log(r));
     console.log(`\n${pass} passed, ${fail} failed`);

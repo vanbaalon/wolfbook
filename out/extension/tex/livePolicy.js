@@ -222,6 +222,50 @@ function authoritativeDelayMs({ configuredMs = 4000, liveDelayMs = 900 } = {}) {
     return Math.max(c, Number(liveDelayMs || 0) + 1500);
 }
 
+/**
+ * Which engine a paper is written for, when it says so or shows it; null
+ * when it could be any (the XeTeX live engine may take it).
+ *
+ * In order: a `% !TEX program = …` line; arXiv's 00README.json
+ * (`process.compiler`, passed as `readme`); then the preamble —
+ * LuaTeX-only code (`\directlua`, luacode), `\pdfoutput=1` (arXiv's
+ * pdfLaTeX marker, an undefined control sequence in XeTeX), or pdfTeX-only
+ * primitives (`glyphtounicode`, `\pdfminorversion`, …). A preamble that
+ * loads fontspec, unicode-math or polyglossia, or branches on the engine
+ * (iftex, ifxetex, `\ifpdf`), is written for more than pdfTeX: its pdfTeX
+ * lines count only before `\documentclass`, where nothing guards them.
+ *
+ * @returns {{ program: string, why: string, line: number|null }|null}
+ */
+function paperEngineIntent(text, { readme = null } = {}) {
+    if (typeof text !== 'string') return null;
+    const lineOf = at => text.slice(0, at).split('\n').length;
+    const magic = /^[ \t]*%[ \t]*![ \t]*TEX[ \t]+(?:TS-)?program[ \t]*=[ \t]*([A-Za-z]+)/im.exec(text.slice(0, 4000));
+    if (magic) return { program: magic[1].toLowerCase(), why: `% !TEX program = ${magic[1]}`, line: lineOf(magic.index) };
+    const compiler = typeof readme?.process?.compiler === 'string' ? readme.process.compiler.toLowerCase() : null;
+    if (['pdflatex', 'lualatex', 'xelatex'].includes(compiler)) return { program: compiler, why: `its arXiv 00README.json names ${compiler}`, line: null };
+    const begin = text.indexOf('\\begin{document}');
+    // Comments blanked, line structure kept: `%` not escaped, to the line end.
+    const preamble = (begin < 0 ? text : text.slice(0, begin)).replace(/(^|[^\\])%.*$/gm, (m, c) => c + ' '.repeat(m.length - c.length));
+    const found = (re, program, why, body = preamble) => {
+        const m = re.exec(body);
+        return m ? { program, why: why(m), line: lineOf(m.index + (m[0].length - m[0].trimStart().length)) } : null;
+    };
+    const lua = found(/\\directlua\b|\\usepackage\s*(?:\[[^\]]*\])?\s*\{[^}]*\b(?:luacode|luatexbase|luatextra|luamplib)\b[^}]*\}/, 'lualatex',
+        m => `${m[0].startsWith('\\directlua') ? '\\directlua' : 'a LuaTeX package'}`);
+    if (lua) return lua;
+    const pdfOutput = /^[ \t]*\\pdfoutput[ \t]*=?[ \t]*1\b/m;
+    const primitive = /\\(?:pdfgentounicode|pdfglyphtounicode|pdfminorversion|pdfobjcompresslevel|pdfcompresslevel|pdfsuppresswarningpagegroup|pdfmapfile|pdfmapline|pdfadjustspacing|pdfprotrudechars)\b|\\input\s*\{?\s*glyphtounicode\b/;
+    const describe = m => /\\pdfoutput/.test(m[0]) ? '\\pdfoutput=1' : /glyphtounicode/.test(m[0]) ? '\\input{glyphtounicode}' : m[0].trim();
+    const unicodeOrAware = /\\usepackage\s*(?:\[[^\]]*\])?\s*\{[^}]*\b(?:fontspec|unicode-math|polyglossia|xeCJK|xltxtra|iftex|ifxetex|ifluatex|ifpdf|ifptex)\b[^}]*\}|\\RequirePackage\s*\{(?:iftex|ifxetex|ifpdf)\}|\\if(?:pdf|xetex|XeTeX|luatex|LuaTeX|pdftex|PDFTeX|tutex|TUTeX)\b/;
+    const docclass = preamble.search(/\\documentclass\b/);
+    if (unicodeOrAware.test(preamble)) {
+        // Only what precedes \documentclass, which no conditional wraps.
+        return docclass > 0 ? found(pdfOutput, 'pdflatex', describe, preamble.slice(0, docclass)) || found(primitive, 'pdflatex', describe, preamble.slice(0, docclass)) : null;
+    }
+    return found(pdfOutput, 'pdflatex', describe) || found(primitive, 'pdflatex', describe);
+}
+
 module.exports = {
     FLOOR_MS,
     MAX_LIVE_WAIT_MS,
@@ -236,4 +280,5 @@ module.exports = {
     readPassLimit,
     generationSatisfies,
     authoritativeDelayMs,
+    paperEngineIntent,
 };
