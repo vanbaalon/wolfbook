@@ -191,6 +191,73 @@ function setCompileState(msg) {
     if (reader) reader.classList.toggle('is-compiling', !!(msg && msg.compiling));
 }
 
+// --- WLATEX PRO ------------------------------------------------------------
+//
+// When the paper is on the WLaTeX lane the toolbar says so, with what the
+// engine is doing: `live · 18 ms` (the page shows the text being typed, that
+// long after the key), `settling…` (the final PDF is being built), `settled`
+// (the PDF is WLaTeX's own), or `off` with the reason (a paper written for
+// another engine). Its panel lists what Pro does; pages the engine drew
+// while typing carry a small tag unless the reader turns tags off.
+
+const PRO_MARKS_KEY = 'wpaper.pro.liveMarks';
+function proLiveMarks() {
+    try { return localStorage.getItem(PRO_MARKS_KEY) !== 'off'; } catch (_) { return true; }
+}
+
+function setEngineBadge(msg) {
+    const badge = el('probadge'), panel = el('propanel');
+    if (!badge || !panel) return;
+    state.engine = msg && msg.state ? msg : null;
+    const engine = state.engine;
+    badge.hidden = !engine;
+    document.body.classList.toggle('pro-live-marks', !!engine && engine.state !== 'off' && proLiveMarks());
+    if (!engine) { closeProPanel(); return; }
+    badge.dataset.state = engine.state;
+    const ms = v => (Number.isFinite(v) ? `${Math.round(v)} ms` : null);
+    const key = ms(engine.keyMs);
+    badge.querySelector('.pro-state').textContent = {
+        live: key ? `live · ${key}` : 'live', settling: 'settling…', settled: 'settled', off: 'off' }[engine.state] || '';
+    const detail = [ms(engine.firstChangedMs) && `first changed page ${ms(engine.firstChangedMs)}`,
+        engine.recomputed != null && `${engine.recomputed} page(s) recomputed, ${engine.reused ?? 0} reused`].filter(Boolean).join('; ');
+    badge.title = {
+        live: `WLaTeX Pro: the page shows the text you are typing${key ? `, ${key} after the key` : ''}${detail ? ` (${detail})` : ''}. ` +
+            'The final PDF settles when you pause.',
+        settling: 'WLaTeX Pro: the final PDF is being built.',
+        settled: 'WLaTeX Pro: this PDF is WLaTeX\'s settled build; click any word to reach its source.',
+        off: `WLaTeX Pro is off for this paper: ${engine.reason || 'it needs another engine'}.`,
+    }[engine.state] + ' Click for details.';
+    panel.querySelector('.pro-headstate').textContent = badge.querySelector('.pro-state').textContent;
+    const reason = panel.querySelector('.pro-reason');
+    reason.hidden = engine.state !== 'off';
+    reason.textContent = engine.state === 'off'
+        ? `Off for this paper: ${engine.reason || 'it needs another engine'}. Put "% !TEX program = xelatex" on its first line to use WLaTeX.` : '';
+    const last = el('pro-key');
+    if (last) last.textContent = key ? `last: ${key}` : '';
+    el('promarks').checked = proLiveMarks();
+}
+
+function closeProPanel() {
+    const panel = el('propanel'), badge = el('probadge');
+    if (panel) panel.hidden = true;
+    if (badge) badge.setAttribute('aria-expanded', 'false');
+}
+
+el('probadge')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const panel = el('propanel');
+    const open = panel.hidden;
+    panel.hidden = !open;
+    el('probadge').setAttribute('aria-expanded', String(open));
+});
+el('propanel')?.addEventListener('click', (e) => e.stopPropagation());
+document.addEventListener('click', closeProPanel);
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !el('propanel')?.hidden) closeProPanel(); });
+el('promarks')?.addEventListener('change', (e) => {
+    try { localStorage.setItem(PRO_MARKS_KEY, e.target.checked ? 'on' : 'off'); } catch (_) { /* per-viewer convenience */ }
+    document.body.classList.toggle('pro-live-marks', !!state.engine && state.engine.state !== 'off' && e.target.checked);
+});
+
 /** Pause correspondence while the source and painted PDF are different. */
 function setTraceState(msg) {
     state.tracePaused = !!(msg && msg.paused);
@@ -7886,6 +7953,7 @@ window.addEventListener('message', async (ev) => {
         }
         case 'status': status(msg.text, msg.kind || ''); break;
         case 'compileState': setCompileState(msg); break;
+        case 'engine': setEngineBadge(msg); break;
         case 'nativeMapState':
             if (msg.generation != null && String(msg.generation) === String(state.generation))
                 state.nativeMapAvailable = !!msg.available;

@@ -1223,6 +1223,29 @@ class TexViewer {
              (this._openedPdfHash && st.generation.pdfHash && this._openedPdfHash === st.generation.pdfHash)));
     }
 
+    /**
+     * WLaTeX Pro's state, for the viewer's badge: whether this paper is on the
+     * WLaTeX lane and what it is doing — `live` (the page shows the text being
+     * typed), `settling` (the full build is on its way), `settled` (the PDF
+     * is WLaTeX's final build) — or `off` with the reason (a paper written for
+     * another engine), or null when WLaTeX is not in use. The numbers are the
+     * last live preview's, as the status bar reports them.
+     */
+    _postEngine(st) {
+        const gen = st?.generation;
+        const onLane = !!(st?.nativeLane || gen?.runner === 'wlatex');
+        let state = null;
+        if (!onLane) state = st?.nativeOff ? 'off' : null;
+        else if (st.sourceAhead && st.livePreviewAt >= (st.lastEditAt || Infinity)) state = 'live';
+        else if (st.compiling || st.authoritativeRunning || st.sourceAhead || gen?.runner !== 'wlatex' || gen?.rerunWanted) state = 'settling';
+        else state = 'settled';
+        const t = st?.livePreviewStats || {};
+        this._post({ type:'engine', state, reason: state === 'off' ? st.nativeOff : null,
+            interactive: !!st?.nativeLane?.interactive, keyMs: t.sinceKeyMs ?? null,
+            firstChangedMs: t.firstChangedMs ?? null, recomputed: t.recomputed ?? null, reused: t.reused ?? null,
+            pages: gen?.pageCount ?? null });
+    }
+
     _postNativeMapState(st) {
         this._post({ type:'nativeMapState', generation:this._openedGeneration,
             available:!!(st?.map?.native && st.map.available &&
@@ -1276,6 +1299,7 @@ class TexViewer {
         this._post({ type:'txdlBuilt', generation:event.generation,
             pageCount:event.pageCount ?? null, pages:event.pages || [],
             errors:(event.errors || []).map(e => ({ ...e, name:e.file ? path.basename(e.file) : '' })) });
+        this._postEngine(this.coord.roots.get(this.root));
         // Said in the panel's own status line, and said honestly: the PDF and
         // everything derived from it are still the last cold build's.
         if (event.summary) this._post({ type:'status', kind:'', text:`${event.summary} · preview only` });
@@ -1601,6 +1625,7 @@ class TexViewer {
         const st = this.coord.roots.get(this.root);
         this._post({ type: 'compileState', compiling: !!(st && st.compiling) });
         this._postNativeMapState(st);
+        this._postEngine(st);
         if (st && st.sourceAhead) {
             // Restoring/switching papers can discover stale source without
             // an editor-change event. The badge must also schedule recovery.

@@ -1135,10 +1135,12 @@ function makeStatusItem(coord, projection) {
             return;
         }
         if (st && st.sourceAhead && st.livePreviewAt >= (st.lastEditAt || Infinity)) {
-            item.text = `$(zap) live${st.liveCompiling || st.authoritativeRunning ? ' $(sync~spin)' : ''}`;
             const t = st.livePreviewStats || {};
             const ms = v => (v == null ? '?' : `${Math.round(v)} ms`);
-            item.tooltip = 'The page shows your latest text (live WLaTeX preview); click-to-source works on it. ' +
+            // WLaTeX Pro, and how long the last key took to reach the page.
+            item.text = `$(zap) WLaTeX Pro · live${t.sinceKeyMs != null ? ` ${ms(t.sinceKeyMs)}` : ''}` +
+                `${st.liveCompiling || st.authoritativeRunning ? ' $(sync~spin)' : ''}`;
+            item.tooltip = 'WLaTeX Pro: the page shows your latest text (live preview); click-to-source works on it. ' +
                 'The PDF settles when typing pauses.' +
                 `\n\nLast preview: first changed page after ${ms(t.firstChangedMs)}, ` +
                 `${t.recomputed ?? '?'} page(s) recomputed, ${t.reused ?? '?'} reused, ${ms(t.totalMs)} in the engine; ` +
@@ -1160,9 +1162,9 @@ function makeStatusItem(coord, projection) {
         // fall back between builds.
         const gen = st && st.generation;
         const nativeGen = !!gen && gen.runner === 'wlatex';
-        const engineIcon = nativeGen ? '$(zap) ' : '';
+        const engineIcon = nativeGen ? '$(zap) Pro ' : '';
         const engineNote = !gen ? '' : nativeGen
-            ? `\n\nRendered by WLaTeX (native build${gen.rerunWanted ? ', a tool still pending' : ', settled'}).`
+            ? `\n\nRendered by **WLaTeX Pro** (native build${gen.rerunWanted ? ', a tool still pending' : ', settled'}).`
             : `\n\nRendered by ${gen.runner || 'latexmk'}${gen.engine ? ` (${gen.engine})` : ''}.`;
         const map = st && st.map;
         if (!map || !map.available) {

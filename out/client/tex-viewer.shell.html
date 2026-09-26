@@ -1338,6 +1338,48 @@
   #tracelag.compiling::before { background:none; border:1px solid currentColor;
               border-top-color:transparent; animation:wpspin .75s linear infinite; }
   header.tight #tracelag .lagtext { display:none; }
+  /* WLATEX PRO. The engine that makes the page follow the keys says so: a
+     pill at the end of the toolbar with its state (live · ms, settling,
+     settled, off), a panel of what it does, and a tag on pages it drew. */
+  #probadge { flex:none; height:20px; padding:1px 8px 1px 6px; gap:6px; border-radius:10px;
+              border:1px solid color-mix(in srgb, #8b5cf6 55%, transparent);
+              background:linear-gradient(90deg, color-mix(in srgb, #8b5cf6 18%, transparent), color-mix(in srgb, #0ea5e9 14%, transparent));
+              font-size:10.5px; line-height:1; white-space:nowrap; font-variant-numeric:tabular-nums; }
+  #probadge[hidden] { display:none; }
+  .pro-mark { font-weight:600; letter-spacing:.01em; }
+  .pro-mark b { margin-left:3px; padding:1px 4px; border-radius:4px; font-size:9px; font-weight:700;
+              letter-spacing:.06em; text-transform:uppercase; color:#fff;
+              background:linear-gradient(90deg, #8b5cf6, #0ea5e9); }
+  .pro-state { opacity:.85; }
+  .pro-dot { width:6px; height:6px; border-radius:50%; background:#a3a3a3; }
+  #probadge[data-state="live"] .pro-dot { background:#22c55e; box-shadow:0 0 0 2px color-mix(in srgb, #22c55e 30%, transparent); }
+  #probadge[data-state="settling"] .pro-dot { background:none; border:1px solid #f59e0b; border-top-color:transparent;
+              animation:wpspin .75s linear infinite; }
+  #probadge[data-state="settled"] .pro-dot { background:#0ea5e9; }
+  #probadge[data-state="off"] { opacity:.6; filter:grayscale(.7); }
+  header.tight #probadge .pro-state { display:none; }
+  #propanel { position:absolute; right:8px; top:34px; z-index:40; width:300px; padding:10px 12px;
+              background:var(--vscode-editorWidget-background, #f3f3f3);
+              color:var(--vscode-editorWidget-foreground, var(--vscode-foreground, #1f1f1f));
+              font-family:var(--vscode-font-family, -apple-system, system-ui, sans-serif);
+              border:1px solid color-mix(in srgb, #8b5cf6 45%, var(--vscode-panel-border)); border-radius:8px;
+              box-shadow:0 6px 24px rgba(0,0,0,.28); font-size:12px; }
+  #propanel[hidden] { display:none; }
+  .pro-head { display:flex; align-items:center; gap:8px; margin-bottom:8px; font-size:13px; }
+  .pro-headstate { opacity:.75; font-size:11px; font-variant-numeric:tabular-nums; }
+  .pro-reason { margin:0 0 8px; padding:6px 8px; border-radius:5px; font-size:11px;
+              background:color-mix(in srgb, var(--vscode-editorWarning-foreground, #cca700) 14%, transparent); }
+  .pro-list { list-style:none; margin:0 0 8px; padding:0; display:grid; gap:6px; }
+  .pro-list li { display:grid; grid-template-columns:104px 1fr; gap:8px; }
+  .pro-k { font-weight:600; }
+  .pro-d { opacity:.85; }
+  .pro-v { margin-left:4px; font-variant-numeric:tabular-nums; color:#22c55e; }
+  .pro-opt { display:flex; align-items:center; gap:6px; opacity:.85; font-size:11px; }
+  body.pro-live-marks .page:has(> canvas.txdl-overlay)::after {
+              content:'WLaTeX Pro · live'; position:absolute; top:6px; right:6px; z-index:3;
+              padding:2px 6px; border-radius:8px; font:600 9px/1.2 var(--vscode-font-family, -apple-system, system-ui, sans-serif);
+              letter-spacing:.02em; color:#fff; background:linear-gradient(90deg, #8b5cf6, #0ea5e9);
+              opacity:.82; pointer-events:none; }
   /* SAVED-ON-DISK IS NOT THE SAME AS UP-TO-DATE ON SCREEN. A live compile can
      catch the page up while the editor buffer is still unsaved, so this has
      its own persistent, clickable badge rather than borrowing `tracelag`. */
@@ -1415,7 +1457,19 @@
   <button id="sourceunsaved" hidden><span class="dirtytext">Unsaved source</span></button>
   <span id="tracelag" hidden><span class="lagtext">page behind</span></span>
   <span id="where"></span>
+  <button id="probadge" hidden aria-haspopup="dialog" aria-expanded="false" aria-controls="propanel"><span class="pro-dot"></span><span class="pro-mark">WLaTeX<b>Pro</b></span><span class="pro-state"></span></button>
 </header>
+<div id="propanel" role="dialog" aria-label="WLaTeX Pro" hidden>
+  <div class="pro-head"><span class="pro-mark">WLaTeX<b>Pro</b></span><span class="pro-headstate"></span></div>
+  <div class="pro-reason" hidden></div>
+  <ul class="pro-list">
+    <li><span class="pro-k">Instant preview</span><span class="pro-d">The page follows every keystroke<span class="pro-v" id="pro-key"></span></span></li>
+    <li><span class="pro-k">Exact search</span><span class="pro-d">Click any word for its source; the editor cursor shows on the page</span></li>
+    <li><span class="pro-k">Edit on the page</span><span class="pro-d">Click text and type; select, move and delete on the page</span></li>
+    <li><span class="pro-k">Native build</span><span class="pro-d">BibTeX, indexes and the final PDF, settled by WLaTeX</span></li>
+  </ul>
+  <label class="pro-opt"><input type="checkbox" id="promarks"> Tag pages drawn live</label>
+</div>
 <div id="findbar" role="search" hidden>
   <input id="findinput" type="text" placeholder="Find in the paper" aria-label="Find in the paper" spellcheck="false" autocomplete="off">
   <span id="findcount" aria-live="polite"></span>
