@@ -666,6 +666,29 @@ export function createTxdlRenderer(options = {}) {
           patterns.set(op.name, op);
           break;
         }
+        case 'shade': {
+          // A smooth shading over its form's box, under the current
+          // transform and clip (pgf shadings).
+          const ox = css.x(op.x), oy = css.y(op.y);
+          const P = (u, v) => [ox + perBp * u, oy - perBp * v];
+          const c = op.coords || [];
+          let gradient = null;
+          if (op.kind === 'axial' && c.length === 4 && ctx.createLinearGradient) {
+            gradient = ctx.createLinearGradient(...P(c[0], c[1]), ...P(c[2], c[3]));
+          } else if (op.kind === 'radial' && c.length === 6 && ctx.createRadialGradient) {
+            gradient = ctx.createRadialGradient(...P(c[0], c[1]), c[2] * perBp, ...P(c[3], c[4]), c[5] * perBp);
+          }
+          if (!gradient) break;
+          for (const [t, rgba] of op.stops || []) gradient.addColorStop(Math.max(0, Math.min(1, t)), rgbaToCss(rgba, gs.fill));
+          const [x0, y0] = P(op.bbox[0], op.bbox[3]);
+          const [x1, y1] = P(op.bbox[2], op.bbox[1]);
+          useAlpha(gs.fillAlpha);
+          ctx.fillStyle = gradient;
+          fill = null;
+          ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
+          result.shades = (result.shades || 0) + 1;
+          break;
+        }
         case 'gstate': {
           if (op.reset_color) {
             gs.fill = color;
