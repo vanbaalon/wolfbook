@@ -38,9 +38,14 @@ class NativeMap extends RenderMap {
         this._pages = new Map();
         this._headers = new Map();
         this._lines = new Map();
+        // A LIVE MAP answers for the pages the incremental engine drew over the
+        // PDF: each page's map is bound to the text that page was typeset
+        // from, and the worker translates it through every later edit. It has
+        // no artifact and belongs to no PDF.
+        this.live = this.view?.live === true;
         this.pageCount = this.view?.artifact?.page_count || 0;
         if (!this.view || !this.source || !this.source.isCurrentView(this.view)) return;
-        if (o.generation?.pdfHash && o.generation.pdfHash !== this.view.artifact.pdf_hash)
+        if (!this.live && o.generation?.pdfHash && o.generation.pdfHash !== this.view.artifact.pdf_hash)
             throw Error('Native map does not belong to the displayed PDF');
         for (const page of this.view.pages) {
             if (!(page.header.magnification > 0)) throw Error('Invalid native magnification');
@@ -101,7 +106,7 @@ class NativeMap extends RenderMap {
         return this.available ? this._lines.get(`${path.resolve(file)}\0${line}`) || [] : [];
     }
     async _forward(file, line, column) {
-        try { return await this.source.forward(file, line, column); }
+        try { return await (this.live ? this.source.forward(file, line, column, { live: true }) : this.source.forward(file, line, column)); }
         catch (error) {
             // A failed live query cannot leave cached source actions enabled.
             // Recovery admits a fresh map; this view stays invalid permanently.
@@ -221,7 +226,7 @@ class NativeMap extends RenderMap {
         const scale = header.magnification / 1000;
         const xSp = Math.round(bpToSp((x - 72) / scale)), ySp = Math.round(bpToSp((y - 72) / scale));
         let reply;
-        try { reply = await this.source.inverse(page, xSp, ySp); }
+        try { reply = await (this.live ? this.source.inverse(page, xSp, ySp, { live: true }) : this.source.inverse(page, xSp, ySp)); }
         catch (_) { return this.renderToSource(page, x, y); }
         if (!this.available) return { flag: FLAG.UNMAPPED, reason: 'the native map changed during the query' };
         const glyph = (reply.hits || []).map(h => this._byItem.get(h.item_id)).filter(e => e && e.file).at(-1);

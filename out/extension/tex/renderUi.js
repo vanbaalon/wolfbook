@@ -121,7 +121,13 @@ class RenderCoordinator {
         this.rootOf = new Map();         // docPath  -> rootPath
         this._emitter = new vscode.EventEmitter();
         this.onDidChange = this._emitter.event;
+        // The interactive (incremental) lane's pages, for a viewer that draws
+        // them between cold builds. Nothing is ever fired when the installed
+        // WLaTeX has no incremental engine, so a consumer needs no other test.
+        this._interactiveEmitter = new vscode.EventEmitter();
+        this.onDidInteractive = this._interactiveEmitter.event;
         this._liveTimers = new Map();    // rootPath -> debounce handle
+        this._previewTimers = new Map(); // rootPath -> live preview throttle handle
         this._liveFirst = new Map();
         this._idleTimers = new Map();    // rootPath -> the full-rebuild handle
         this._capOk = null;              // can latexmk take our -e? probed once
@@ -138,11 +144,13 @@ class RenderCoordinator {
         }
         for (const s of this.roots.values()) if (s.running) s.running.abort();
         for (const t of this._liveTimers.values()) clearTimeout(t);
+        for (const t of this._previewTimers.values()) clearTimeout(t);
         for (const t of this._idleTimers.values()) clearTimeout(t);
         this._liveTimers.clear();
         this._liveFirst.clear();
         this._idleTimers.clear();
         this._emitter.dispose();
+        this._interactiveEmitter.dispose();
     }
 
     /**
@@ -204,6 +212,11 @@ class RenderCoordinator {
         if (cfg.get('compile', 'onSave') === 'off') return;
         const root = this.rootFor(doc);
         const st = this.roots.get(root);
+        // With an incremental engine the page on screen follows every
+        // keystroke (see _schedulePreview); the full native build below only
+        // settles what the preview cannot (PDF, map of every page, aux files),
+        // so it waits for typing to really stop.
+        const previewing = delayMs === undefined && this._schedulePreview(root, st);
         // THE SETTING IS THE CEILING, NOT THE VALUE. A paper that rebuilds in
         // 400 ms should feel immediate; one that takes 17 s must stay calm,
         // because firing sooner than the last build finished only queues work
@@ -212,6 +225,8 @@ class RenderCoordinator {
             lastMs: st && st.liveMsEwma,
             ceilingMs: Math.max(200, cfg.get('liveRenderDelayMs', 900)),
         });
+        const settleMs = Math.max(0, cfg.get('nativeSettleDelayMs', 2500));
+        if (previewing) wait = Math.max(wait, settleMs);
         const prev = this._liveTimers.get(root);
         if (!this._liveFirst.has(root)) this._liveFirst.set(root, Date.now());
         // A continuous stream of agent edits must not postpone the first
@@ -220,6 +235,7 @@ class RenderCoordinator {
             waitMs: wait,
             firstAtMs: this._liveFirst.get(root),
             nowMs: Date.now(),
+            ...(previewing ? { maxWaitMs: Math.max(10000, settleMs) } : {}),
         });
         if (prev) clearTimeout(prev);
         this._liveTimers.set(root, setTimeout(() => {
@@ -393,6 +409,83 @@ class RenderCoordinator {
     }
 
     /**
+     * THE LIVE PREVIEW FOLLOWS THE KEYSTROKES, NOT THE PAUSES.
+     *
+     * The incremental engine puts an edited page on screen in tens of
+     * milliseconds, and a newer request abandons an older build at its next
+     * page boundary, so there is nothing to wait for: a short trailing
+     * throttle merges a burst of keys into one request. It runs outside
+     * build() and never waits for a cold build. Answers true when a preview
+     * was scheduled (an incremental engine is present).
+     */
+    _schedulePreview(root, st) {
+        const lane = st && st.nativeLane;
+        if (!lane || !lane.interactive || this._disposed) return false;
+        const cfg = vscode.workspace.getConfiguration('wolfbook.tex');
+        const throttle = Math.max(0, cfg.get('livePreviewThrottleMs', 30));
+        clearTimeout(this._previewTimers.get(root));
+        this._previewTimers.set(root, setTimeout(() => {
+            this._previewTimers.delete(root);
+            if (this._disposed || st.nativeLane !== lane) return;
+            this._runInteractive(st, lane, root, { root, sourceFiles: st.files, overlay: this.liveOverlay(root),
+                nativePages: this._nativeWindow(st) }).catch(() => { /* logged inside */ });
+        }, throttle));
+        return true;
+    }
+
+    /**
+     * One interactive preview build, with its pages pushed to whatever is
+     * drawing them. Everything here is contained: it cannot throw, it cannot
+     * retire the lane, and it cannot change `st.generation`, `st.map` or any
+     * other state the cold build owns. The worst it can do is log a line and
+     * cost the pause the time it took.
+     */
+    async _runInteractive(st, lane, root, compileOpts) {
+        const t0 = Date.now();
+        let result = null;
+        try {
+            result = await lane.interactiveBuild({ ...compileOpts,
+                onPage: page => {
+                    if (this._disposed || st.nativeLane !== lane) return;
+                    this._interactiveEmitter.fire({ kind:'page', root, ...page });
+                },
+                onPageMap: map => {
+                    if (this._disposed || st.nativeLane !== lane) return;
+                    this._interactiveEmitter.fire({ kind:'pageMap', root, lane, ...map });
+                } });
+        } catch (error) {
+            // interactiveBuild answers with a failure rather than throwing;
+            // this is here so that a future one still cannot break a keystroke.
+            this.log(`  WLaTeX live preview: ${error.message}`);
+            return null;
+        }
+        if (!result || this._disposed || st.nativeLane !== lane) return null;
+        if (!result.ok) {
+            this.log(`  WLaTeX live preview skipped: ${result.diagnostics[0]?.message || 'unknown reason'}`);
+            return result;
+        }
+        // THE LIVE ERRORS, NOW. A preview that hit a TeX error says so while
+        // the reader is still at the keyboard; the next full build's own
+        // diagnostics replace these (renderDiagnostics compares the times).
+        const errors = (result.diagnostics || []).filter(d => d.severity === 'error' && d.line != null)
+            .map(d => ({ ...d, file: d.file ? path.resolve(lane.projectDir, d.file) : null }));
+        const hadLive = !!st.liveDiagnostics?.list.length;
+        st.liveDiagnostics = { at: Date.now(), list: errors };
+        if (errors.length || hadLive) this._emitter.fire(st);
+        const report = result.report || {};
+        // Honest by construction: this says what the preview recomputed, not
+        // what is settled. The settled state is still the cold build's, and
+        // the status bar keeps saying so.
+        const summary = `live: ${report.pages_recomputed ?? '?'} page(s) recomputed, ` +
+            `${report.pages_reused ?? 0} reused of ${result.pageCount ?? '?'} · ` +
+            `${Math.round(report.total_ms ?? (Date.now() - t0))} ms`;
+        this.log(`  ${summary}`);
+        this._interactiveEmitter.fire({ kind:'built', root, generation:result.generation,
+            pageCount:result.pageCount, pages:result.pages, report, summary });
+        return result;
+    }
+
+    /**
      * Give the native lane up for this root. With a reason it is a failure of
      * the lane itself (worker, protocol, producer), not of the document:
      * document errors come back as failed generations and never reach here.
@@ -514,7 +607,14 @@ class RenderCoordinator {
         let mapEngine = cfg0.get('mapEngine', 'auto');
         const nativeDirectory = cfg0.get('wlatexDirectory', '') || process.env.WLATEX_HOME || '';
         if (force) st.nativeRefusedSnapshot = null;
-        let wantNative = mapEngine === 'wlatex' && !wantFull;
+        // A SETTLED NATIVE BUILD IS AUTHORITATIVE. Saves and the convergence
+        // timer stay on the native lane, which runs the auxiliary passes and
+        // the BibTeX, biber, index and glossary tools itself. latexmk runs
+        // for an explicit Compile, or when the native build of these very
+        // sources left a tool pending (`rerunWanted`).
+        const nativeUnsettled = st.generation?.runner === 'wlatex' && st.generation.rerunWanted &&
+            st.generation.sourceSnapshotHash === snapshot;
+        let wantNative = mapEngine === 'wlatex' && !force && !(authoritative && nativeUnsettled);
         if (wantNative && st.nativeRefusedSnapshot === snapshot && st.nativeRefusedDirectory === nativeDirectory) {
             wantNative = false;
             mapEngine = 'auto';
@@ -526,6 +626,9 @@ class RenderCoordinator {
                     if (st.nativeLane) await this._retireNativeLane(st, st.nativeLane);
                     if (!preparing()) return st;
                     st.nativeLane = new NativeBuildLane(root, directory);
+                    // Start the incremental engine now, so the first keystroke
+                    // already previews instead of only asking for the engine.
+                    if (typeof st.nativeLane.warmInteractive === 'function') st.nativeLane.warmInteractive();
                     const runtime = st.nativeLane.runtime;
                     if (runtime) this.log(`WLaTeX lane: ${runtime.labBinary}` +
                         (runtime.installed ? '' : ' (development checkout, newest build)'));
@@ -693,6 +796,23 @@ class RenderCoordinator {
             let gen;
             if (wantNative) {
                 const lane = st.nativeLane;
+                // THE PREVIEW DRAWS BEFORE THE BUILD RUNS.
+                //
+                // The incremental engine can put the pages an edit touched on
+                // screen in tens of milliseconds, while a cold build of a real
+                // paper is seconds away. It runs here, on the same typing
+                // pause the cold build below runs on, and its pages are drawn
+                // as overlays over the PDF canvases. The cold build then does
+                // everything it did before — the PDF, the source map, the
+                // diagnostics, settlement — and its PDF replaces the overlays.
+                //
+                // It is only ever a preview, so it is only ever run for a LIVE
+                // rebuild (a save or a Compile wants the real thing), and a
+                // failure of it is never a failure of the lane: it is logged
+                // and this keystroke falls back to exactly the old behaviour.
+                // The live preview is not run here any more: it follows every
+                // keystroke on its own schedule (_schedulePreview), so this
+                // build only settles.
                 try {
                     gen = await lane.compile(compileOpts);
                     st.nativeRefusedSnapshot = null;
@@ -1062,7 +1182,10 @@ function renderDiagnostics(doc, coord, projection) {
         .sort((a, b) => (a.sourceRange.endLine - a.sourceRange.startLine) -
             (b.sourceRange.endLine - b.sourceRange.startLine))[0];
 
-    for (const d of st.generation.diagnostics) {
+    // Errors of the live preview, while it is newer than the full build.
+    const live = st.liveDiagnostics && st.liveDiagnostics.at > (st.generation.finishedAt || 0)
+        ? st.liveDiagnostics.list.map(d => ({ ...d, live: true })) : [];
+    for (const d of [...st.generation.diagnostics, ...live]) {
         // Only this file's problems. A diagnostic with no file is the root's.
         if (d.file && path.resolve(d.file) !== path.resolve(file) &&
             path.basename(d.file) !== path.basename(file)) continue;
@@ -1085,7 +1208,7 @@ function renderDiagnostics(doc, coord, projection) {
             d.severity === 'error' ? vscode.DiagnosticSeverity.Error
                 : d.severity === 'warning' ? vscode.DiagnosticSeverity.Warning
                     : vscode.DiagnosticSeverity.Information);
-        diag.source = 'wolfbook-tex (compile)';
+        diag.source = d.live ? 'wolfbook-tex (live)' : 'wolfbook-tex (compile)';
         diag.code = d.kind;
         out.push(diag);
     }

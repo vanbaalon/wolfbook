@@ -32,6 +32,8 @@ exports.run = async function() {
     const viewer = new TexViewer(context, coord, projection);
     let subscription, messagesSubscription;
     let workerCrashRecovered = false;
+    let liveClickVerified = false;
+    const keystrokeToPreviewMs = [];
     const messages = [];
     try {
         const doc = await vscode.workspace.openTextDocument(path.join(folder,'paper.tex'));
@@ -49,8 +51,12 @@ exports.run = async function() {
             if (mode === 'missing') assert.match(st.nativeUnavailable, /not installed or configured/);
             else assert.ok(!st.nativeUnavailable);
         }
+        // Record every webview message from the panel's creation: the first
+        // paint's timing is sent once, and a fast native build can deliver it
+        // before open() returns.
+        const onMessage = viewer._onMessage.bind(viewer);
+        viewer._onMessage = message => { messages.push(message); return onMessage(message); };
         await viewer.open(doc);
-        messagesSubscription = viewer.panel.webview.onDidReceiveMessage(message => messages.push(message));
         await viewer.refresh({ force:true });
         await until(() => viewer._openedPdfHash === st.generation.pdfHash, 'PDF.js opened acknowledgement');
         assert.equal(viewer._openedGeneration, st.generation.generation);
@@ -81,6 +87,45 @@ exports.run = async function() {
         await editor.edit(builder => builder.insert(new vscode.Position(0,0), '% unsaved UI acceptance\n'));
         assert.equal(doc.isDirty, true);
         assert.equal(st.sourceAhead, true);
+        if (mode === 'native') {
+            // A LIVE PAGE ANSWERS FROM ITS OWN MAP. The interactive preview
+            // runs through the real coordinator and viewer; the click carries
+            // the overlay identity the webview would send, and must land on
+            // the line typed live, not where the PDF under the overlay has it.
+            const lane = st.nativeLane;
+            assert.equal(await lane.warmInteractive(), true, lane.interactiveUnavailable);
+            const liveLine = [...Array(doc.lineCount).keys()].find(n => doc.lineAt(n).text.startsWith('Second page.'));
+            assert.ok(liveLine !== undefined, 'the second-page line is present');
+            await editor.edit(builder => builder.replace(doc.lineAt(liveLine).range, 'Second page, typed live.'));
+            await coord._runInteractive(st, lane, doc.uri.fsPath, { sourceFiles:[doc.uri.fsPath],
+                overlay:new Map([[doc.uri.fsPath, doc.getText()]]), wait:true });
+            // The first preview of a lane delivers every page as changed; the
+            // typed line's glyphs say which live page holds it.
+            const liveGlyph = () => viewer._liveMap?.available
+                ? viewer._liveMap.glyphsForLine(doc.uri.fsPath, liveLine + 1).find(e => viewer._liveOverlays?.has(e.page)) : null;
+            await until(() => liveGlyph(), 'live page map holding the typed line');
+            const glyph = liveGlyph(), page = glyph.page;
+            editor.selection = new vscode.Selection(0, 0, 0, 0);
+            await viewer._jumpToSource({ generation:viewer._openedGeneration, page,
+                xBp:glyph.x + glyph.w / 2, yTopBp:glyph.y + glyph.boxHeight / 2, overlay:viewer._liveOverlays.get(page) });
+            assert.equal(editor.selection.start.line, liveLine, 'a click on the live page lands on the typed line');
+            liveClickVerified = true;
+            // KEYSTROKE → PREVIEW, through the preview scheduler scheduleLive
+            // uses (live rendering is off in this harness so that it drives
+            // the cold builds itself): the time until the host posts the
+            // recomputed page to the webview.
+            for (let n = 0; n < 5; n++) {
+                const before = new Map(viewer._previewPages || []);
+                const t0 = Date.now();
+                await editor.edit(builder => builder.insert(doc.lineAt(liveLine).range.end, ' More.'));
+                coord._schedulePreview(doc.uri.fsPath, st);
+                await until(() => [...(viewer._previewPages || new Map())].some(([p, m]) => before.get(p) !== m),
+                    'preview after a keystroke');
+                keystrokeToPreviewMs.push(Date.now() - t0);
+            }
+            const median = [...keystrokeToPreviewMs].sort((a, b) => a - b)[2];
+            assert.ok(median < 500, `keystroke to preview ${keystrokeToPreviewMs.join(', ')} ms`);
+        }
         if (mode === 'native') {
             await until(() => st.map.available, 'translated native map');
             const rects = await st.map.forwardAt(doc.uri.fsPath, 4, 0);
@@ -133,7 +178,10 @@ exports.run = async function() {
             assert.equal(await viewer._applyEditChange({ editId:card.id, text:oldCardText + 'stale' }), false);
             assert.equal(doc.getText(), externalText);
             const nativeGeneration = st.generation.generation;
-            await coord.build(doc, { authoritative:true, quiet:true });
+            // A settled native build stays native on save; an explicit
+            // Compile (`force`) is what still hands over to the configured
+            // compiler.
+            await coord.build(doc, { force:true, quiet:true });
             assert.equal(st.generation.ok, true, st.lastError);
             assert.notEqual(st.generation.runner, 'wlatex');
             assert.equal(st.generation.engine, 'pdflatex');
@@ -217,12 +265,13 @@ exports.run = async function() {
             default_without_wlatex:mode === 'default', unavailable_wlatex_fallback:mode === 'missing',
             conventional_unsaved_rebuild:mode !== 'native', authoritative_native_handoff:mode === 'native',
             real_pdfjs_opened:true, unsaved_source_edit:true, translated_inverse_navigation:mode === 'native',
-            actual_source_worker_crash_recovered:workerCrashRecovered, native_pdf_range_transport:mode === 'native', native_pdf_handles_released:mode === 'native', unchanged_page_text_reused:mode === 'native',
+            actual_source_worker_crash_recovered:workerCrashRecovered, live_page_click_verified:liveClickVerified, keystroke_to_preview_ms:keystrokeToPreviewMs, native_pdf_range_transport:mode === 'native', native_pdf_handles_released:mode === 'native', unchanged_page_text_reused:mode === 'native',
             pointer_gestures_verified:false, visual_acceptance_verified:false,
         }, null, 2));
     } catch (error) {
         await fs.writeFile(path.join(folder, '../vscode-acceptance.json'), JSON.stringify({
             result:'FAIL', error:error.stack || String(error), vscode:vscode.version, node:process.version,
+            messages:messages.map(m => m.type === 'timing' ? `timing:${m.kind || 'marks'}:${m.worker || ''}` : m.type),
         }, null, 2));
         throw error;
     } finally {

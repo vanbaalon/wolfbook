@@ -70,6 +70,7 @@ const state = {
     hints: { left: { chip: 3 }, dwellMs: HINT_DWELL_DEFAULT },
     tour: null,               // {index,total,id,title,say,doIt,done,point} — the tour card
     mma: null,                // the open computation card: {blockId, cells, rects, pos}
+    txdl: null,               // {generation, pages: Map<page, {canvas, txdl}>} — the interactive preview
 };
 
 const el = (id) => document.getElementById(id);
@@ -471,6 +472,12 @@ async function openDocument(msg) {
         state.rendered.clear();
         state.pending.clear();
         textCache.clear();
+        // A NEW PDF RETIRES THE PREVIEWS DRAWN BEFORE IT — but only once its
+        // own pages are painted (below), so the old PDF never flashes between
+        // the overlay and the new render. Overlays the host sends again after
+        // this open (the preview is newer than this PDF) carry this open's
+        // sequence and stay.
+        if (!samePagination) clearTxdlOverlays();
         let placeholders = null;
         if (editingInPlace) await buildPagePlaceholders(true);
         if (!samePagination) {
@@ -479,7 +486,7 @@ async function openDocument(msg) {
         }
         if (openSeq !== state.openSeq) return;
         for (const [page, entry] of retainedPages) {
-            const canvas = pagesEl().querySelector(`.page[data-page="${page}"] canvas`);
+            const canvas = pagesEl().querySelector(`.page[data-page="${page}"] canvas:not(.txdl-overlay)`);
             if (canvas === entry.canvas && entry.scale === state.scale && entry.dpr === (window.devicePixelRatio || 1))
                 state.rendered.set(page, entry);
             else retainedPages.delete(page);
@@ -515,6 +522,7 @@ async function openDocument(msg) {
             const first = Number.isFinite(semanticPage) && semanticPage >= 1 && semanticPage <= state.pageCount
                 ? [...new Set([...vis, semanticPage])] : vis;
             await Promise.all(first.map(renderPage));
+            if (openSeq === state.openSeq) { clearTxdlOverlaysBefore(openSeq); flushTxdlDeferred(); }
             if (!editingInPlace && state.navigationOwner !== 'viewer' && !(await restoreSemanticReveal(msg.semanticReveal, anchor))) restoreAnchor(anchor);
             omark('visible');
             // Awaited so the rest of the repaint can be timed too. These pages
@@ -597,7 +605,7 @@ async function openDocument(msg) {
             state.reportedTiming = true;
             const waitFirst = async () => {
                 for (let i = 0; i < 600; i++) {
-                    if (pagesEl().querySelector('.page canvas')) return;
+                    if (pagesEl().querySelector('.page canvas:not(.txdl-overlay)')) return;
                     await new Promise(r => setTimeout(r, 25));
                 }
             };
@@ -611,7 +619,7 @@ async function openDocument(msg) {
         state.openError = e && e.message ? e.message : String(e);
         status(`could not open the PDF: ${state.openError}`, 'err');
     } finally {
-        if (openSeq === state.openSeq) state.openInFlight = false;
+        if (openSeq === state.openSeq) { state.openInFlight = false; flushTxdlDeferred(); }
     }
 }
 
@@ -657,7 +665,7 @@ async function probeViewer(msg) {
         const wrap = pagesEl().querySelector(`.page[data-page="${n}"]`);
         if (!wrap) throw new Error(`page ${n} is missing`);
         const drawn = state.rendered.get(n);
-        if (drawn && wrap.querySelector('canvas') !== drawn.canvas) {
+        if (drawn && wrap.querySelector('canvas:not(.txdl-overlay)') !== drawn.canvas) {
             throw new Error(`page ${n} has a detached render`);
         }
         const page = await before(1200, state.doc.getPage(n));
@@ -978,8 +986,13 @@ async function renderPage(n) {
         // one a few hundred milliseconds later is a white flash on every
         // pause in typing. Rendering into a detached canvas and replacing the
         // old one in a single operation means the reader never sees a gap.
-        const old = wrap.querySelector('canvas');
+        // `:not(.txdl-overlay)` so a preview overlay is never mistaken for the
+        // page's own canvas and replaced by it; and when there is no page
+        // canvas yet, the new one goes UNDER any overlay rather than over it.
+        const old = wrap.querySelector('canvas:not(.txdl-overlay)');
+        const overlay = wrap.querySelector('canvas.txdl-overlay');
         if (old) wrap.replaceChild(canvas, old);
+        else if (overlay) wrap.insertBefore(canvas, overlay);
         else wrap.appendChild(canvas);
         // `page.view` is the CropBox-aware box; the MediaBox is the wrong frame.
         state.rendered.set(n, { canvas, viewport: vp, view: page.view, rotate: page.rotate, scale:vp.scale, dpr });
@@ -999,6 +1012,9 @@ async function renderPage(n) {
         if (state.mma) paintMmaCard();
         paintLinks(n).catch(() => { /* a paper without links is the common case */ });
         paintBookmarks();
+        // A zoom empties every wrapper, so an interactive preview drawn before
+        // it has to be placed again against the new geometry.
+        redrawTxdlOverlay(n);
     })().finally(() => { if (state.pending.get(n) === job) state.pending.delete(n); });
     state.pending.set(n, job);
     return job;
@@ -1573,6 +1589,250 @@ function fromViewport(n, vx, vy) {
 function rectToViewport(n, rect) {
     const r = state.rendered.get(n);
     return r ? bpRectToViewport(r.view, r.viewport, rect) : null;
+}
+
+// --- the interactive preview overlay ------------------------------------------
+//
+// WLaTeX's incremental engine redraws the pages an edit actually touched in
+// tens of milliseconds, long before a cold build has a new PDF. Those pages
+// arrive as TXDL display lists (`txdlPage`) and are painted onto an OVERLAY
+// canvas positioned exactly over that page's pdf.js canvas — same CSS box,
+// same device pixel ratio, opaque white — so the reader sees the new text at
+// the next pause in typing.
+//
+// THE PDF STAYS AUTHORITATIVE. Every overlay is dropped the moment a document
+// is opened, because the PDF that arrives is a complete, settled-or-not answer
+// and a display list is a preview. A page the renderer cannot draw completely
+// — pgf/TikZ, which reaches the page through painting specials it does not
+// execute — keeps its PDF canvas instead of showing half a page.
+//
+// Nothing else in this file moves: highlights, selections, chips and links are
+// all placed from the PDF page box, which an overlay does not change.
+
+import { createTxdlRenderer } from './txdl-canvas.js';
+
+/** TeX points in a big point; the display list is in TeX pt, PDF boxes in bp. */
+const PT_PER_BP = 72.27 / 72;
+
+const txdlOutlineWaits = new Map();
+let txdlOutlineSeq = 0;
+let txdlRenderer = null;
+
+/** The renderer, built on first use. Its only I/O is the outline request. */
+function txdlRendererInstance() {
+    if (txdlRenderer) return txdlRenderer;
+    txdlRenderer = createTxdlRenderer({
+        requestOutlines(font, gids) {
+            const id = ++txdlOutlineSeq;
+            return new Promise((resolve, reject) => {
+                const timer = setTimeout(() => {
+                    if (txdlOutlineWaits.delete(id)) reject(new Error('the glyph outlines did not arrive'));
+                }, 20000);
+                txdlOutlineWaits.set(id, { resolve, reject, timer });
+                vscode.postMessage({ type: 'txdlOutlines', id, font, glyphs: gids });
+            });
+        },
+    });
+    return txdlRenderer;
+}
+
+function txdlState() {
+    if (!state.txdl) state.txdl = { generation: null, pages: new Map() };
+    return state.txdl;
+}
+
+/** The PDF stays on this page: the host must not treat it as a live page. */
+function txdlFellBack(page) {
+    removeTxdlOverlay(page);
+    vscode.postMessage({ type: 'txdlFallback', page });
+}
+
+/** Every preview overlay goes; the PDF canvases underneath are untouched. */
+function clearTxdlOverlays() {
+    for (const c of document.querySelectorAll('canvas.txdl-overlay')) c.remove();
+    if (state.txdl) { state.txdl.pages.clear(); state.txdl.generation = null; }
+}
+
+/**
+ * A page the live edit added beyond the PDF's last page: a placeholder sized
+ * like the last real page, so the preview can draw it before any PDF has it.
+ */
+function ensureLiveExtraPage(page) {
+    if (pagesEl().querySelector(`.page[data-page="${page}"]`)) return;
+    const pages = [...pagesEl().querySelectorAll('.page')];
+    const last = pages[pages.length - 1];
+    if (!last || Number(last.dataset.page) !== page - 1) return;
+    const wrap = document.createElement('div');
+    wrap.className = 'page';
+    wrap.dataset.page = String(page);
+    wrap.dataset.liveExtra = 'true';
+    wrap.style.width = last.style.width;
+    wrap.style.height = last.style.height;
+    // The paper size in bp, from any rendered page: TeX papers are uniform.
+    for (const r of state.rendered.values()) {
+        const view = r && r.view;
+        if (view && view.length === 4) {
+            wrap.dataset.widthBp = String(view[2] - view[0]);
+            wrap.dataset.heightBp = String(view[3] - view[1]);
+            break;
+        }
+    }
+    const num = document.createElement('div');
+    num.className = 'pagenum';
+    num.textContent = String(page);
+    wrap.appendChild(num);
+    last.after(wrap);
+}
+
+/** Placeholders for live-only pages that no longer hold a preview. */
+function dropEmptyLiveExtraPages(count = Infinity) {
+    for (const wrap of pagesEl().querySelectorAll('.page[data-live-extra="true"]')) {
+        const page = Number(wrap.dataset.page);
+        if (page > count || !wrap.querySelector('canvas.txdl-overlay')) wrap.remove();
+    }
+}
+
+/** Draw the preview pages that arrived while a PDF was opening. */
+function flushTxdlDeferred() {
+    const deferred = state.txdlDeferred;
+    if (!deferred || !deferred.size) return;
+    state.txdlDeferred = null;
+    for (const msg of deferred.values()) drawTxdlPage(msg, { duringOpen: true }).catch(() => {});
+}
+
+/** Overlays drawn under an earlier PDF open go; newer ones stay. */
+function clearTxdlOverlaysBefore(openSeq) {
+    const t = state.txdl;
+    if (!t) return;
+    for (const [page, entry] of [...t.pages]) {
+        if ((entry.openSeq ?? 0) >= openSeq) continue;
+        entry.canvas.remove();
+        t.pages.delete(page);
+    }
+    dropEmptyLiveExtraPages();
+}
+
+function removeTxdlOverlay(page) {
+    const t = txdlState();
+    const entry = t.pages.get(page);
+    if (!entry) return;
+    entry.canvas.remove();
+    t.pages.delete(page);
+}
+
+/**
+ * The box an overlay for this page must fill, in CSS px, with the PDF page
+ * size in bp when it is known. A rendered page answers from its own viewport;
+ * an unrendered one from the placeholder the document sized.
+ */
+function txdlPageBox(page) {
+    const r = state.rendered.get(page);
+    if (r && r.viewport) {
+        const view = r.view || [];
+        return { width: r.viewport.width, height: r.viewport.height,
+            widthBp: view.length === 4 ? view[2] - view[0] : 0,
+            heightBp: view.length === 4 ? view[3] - view[1] : 0 };
+    }
+    const wrap = pagesEl().querySelector(`.page[data-page="${page}"]`);
+    if (!wrap) return null;
+    const width = parseFloat(wrap.style.width) || wrap.clientWidth;
+    const height = parseFloat(wrap.style.height) || wrap.clientHeight;
+    if (!(width > 0 && height > 0)) return null;
+    return { width, height, widthBp: Number(wrap.dataset.widthBp) || 0, heightBp: Number(wrap.dataset.heightBp) || 0 };
+}
+
+/**
+ * Draw one preview page.
+ *
+ * `changed: false` means the engine reproduced the page it had before, so
+ * whatever is on screen for it — the PDF canvas, or an overlay an earlier
+ * preview drew — is already right and nothing is repainted. That is most of
+ * the pages of a long paper on every keystroke, and it is the whole point.
+ */
+async function drawTxdlPage(msg, { duringOpen = false } = {}) {
+    const page = Number(msg.page);
+    if (!Number.isInteger(page) || page < 1) return;
+    // A page arriving while a PDF opens is drawn once that PDF's visible
+    // pages are painted, so the open cannot clear it or draw under it.
+    if (state.openInFlight && !duringOpen) { (state.txdlDeferred ||= new Map()).set(page, msg); return; }
+    const t = txdlState();
+    t.generation = msg.generation;
+    if (msg.changed === false) return;
+    const txdl = msg.txdl;
+    if (!txdl) return;
+    // `unsupported` is the renderer saying it cannot put every mark of this
+    // page on the canvas. The PDF page is then the honest thing to show.
+    if (Array.isArray(txdl.unsupported) && txdl.unsupported.length) { txdlFellBack(page); return; }
+    // The renderer draws a placeholder box for an image; on an opaque overlay
+    // that would hide the figure the PDF shows. Keep the PDF for such pages
+    // until images are drawn.
+    if (Array.isArray(txdl.ops) && txdl.ops.some(op => op && op.op === 'image')) { txdlFellBack(page); return; }
+    if (page > (state.pageCount || 0)) ensureLiveExtraPage(page);
+    const wrap = pagesEl().querySelector(`.page[data-page="${page}"]`);
+    if (!wrap) return;
+    const box = txdlPageBox(page);
+    if (!box) return;
+    // The page size comes from the stream when it carries one, otherwise from
+    // the PDF page this overlay covers — which is the same paper, and the only
+    // measurement available for a stream that declared no media size.
+    let widthPt = 0, heightPt = 0;
+    if (msg.pageSize && msg.pageSize.widthBp > 0 && msg.pageSize.heightBp > 0) {
+        widthPt = msg.pageSize.widthBp * PT_PER_BP;
+        heightPt = msg.pageSize.heightBp * PT_PER_BP;
+    } else if (box.widthBp > 0 && box.heightBp > 0) {
+        widthPt = box.widthBp * PT_PER_BP;
+        heightPt = box.heightBp * PT_PER_BP;
+    }
+    if (!(widthPt > 0)) return;
+    const dpr = window.devicePixelRatio || 1;
+    const scale = box.width / widthPt;            // CSS px per TeX pt
+    if (!(scale > 0)) return;
+    const canvas = document.createElement('canvas');
+    canvas.className = 'txdl-overlay';
+    canvas.width = Math.max(1, Math.floor(box.width * dpr));
+    canvas.height = Math.max(1, Math.floor(box.height * dpr));
+    canvas.style.width = `${Math.floor(box.width)}px`;
+    canvas.style.height = `${Math.floor(box.height)}px`;
+    canvas.style.position = 'absolute';
+    canvas.style.left = '0';
+    canvas.style.top = '0';
+    canvas.style.pointerEvents = 'none';
+    const ctx = canvas.getContext('2d', { alpha: false });
+    if (!ctx) return;
+    const renderer = txdlRendererInstance();
+    const opts = { scale, dpr, background: '#fff', mediaSize: [widthPt, heightPt] };
+    let result;
+    try { result = renderer.render(txdl, ctx, opts); }
+    catch (_) { return; }
+    if (result.fallback) { txdlFellBack(page); return; }
+    const entry = { canvas, txdl, pageSize: msg.pageSize || null, generation: msg.generation,
+        identity: msg.identity || null, openSeq: state.openSeq };
+    removeTxdlOverlay(page);
+    t.pages.set(page, entry);
+    // ABOVE THE PDF CANVAS, BELOW EVERYTHING ELSE. Highlights, chips, links
+    // and cards are later siblings and therefore keep painting on top.
+    const pdfCanvas = wrap.querySelector('canvas:not(.txdl-overlay)');
+    if (pdfCanvas) wrap.insertBefore(canvas, pdfCanvas.nextSibling);
+    else wrap.appendChild(canvas);       // renderPage puts its canvas under this one
+    // Glyphs whose outline was not cached were skipped, not drawn wrong. Ask
+    // for them and draw the same page again when they land.
+    if (result.pending > 0) {
+        try { await renderer.prefetch(txdl); } catch (_) { return; }
+        if (txdlState().pages.get(page) !== entry || !canvas.isConnected) return;
+        try { renderer.render(txdl, ctx, opts); } catch (_) { /* keep what is drawn */ }
+    }
+}
+
+/**
+ * Re-place this page's overlay after its PDF canvas was drawn again — a zoom
+ * (which empties every page wrapper) or a first scroll onto the page. Without
+ * it the preview would silently disappear at a new zoom level.
+ */
+function redrawTxdlOverlay(page) {
+    const entry = state.txdl && state.txdl.pages.get(page);
+    if (!entry) return;
+    drawTxdlPage({ generation: entry.generation, page, changed: true,
+        txdl: entry.txdl, pageSize: entry.pageSize }).catch(() => {});
 }
 
 // --- text layer ---------------------------------------------------------------
@@ -6394,9 +6654,14 @@ function sendClick(n, pt, cx, cy, extra, type = 'click') {
         vscode.postMessage({ type: 'traceRetry', generation: state.generation });
         return;
     }
+    // A click on a live page names the page identity the overlay shows, so
+    // the host answers it from that page's own map and never from the cold
+    // map of the PDF underneath.
+    const overlay = state.txdl && state.txdl.pages.get(n);
     const base = {
         type, page: n, xBp: pt.xBp, yTopBp: pt.yTopBp,
         generation: state.generation, ...extra,
+        ...(overlay && overlay.canvas.isConnected ? { overlay: overlay.identity } : {}),
     };
     const ordinary = type === 'click' && !extra.pick && !extra.widen &&
         !extra.shrink && !extra.takeMe && !extra.commentTarget;
@@ -7063,8 +7328,10 @@ function zoomPreview(anchor, wasScale) {
     for (const p of pages) {
         p.style.width = `${w}px`;
         p.style.height = `${h}px`;
-        const cv = p.querySelector('canvas');
-        if (cv) { cv.style.width = `${w}px`; cv.style.height = `${h}px`; }
+        // Every canvas of the page, so an interactive preview overlay is
+        // stretched with the page canvas it covers instead of standing still
+        // on top of it. With no overlay this is the same one canvas.
+        for (const cv of p.querySelectorAll('canvas')) { cv.style.width = `${w}px`; cv.style.height = `${h}px`; }
     }
     if (anchor) restoreAnchor(anchor);
 
@@ -7238,6 +7505,31 @@ window.addEventListener('message', async (ev) => {
     switch (msg.type) {
         case 'pdfRange': pdfRanges.receive(msg); break;
         case 'open': await openDocument(msg); break;
+        // The interactive preview. Three messages and nothing else changes:
+        // a page to draw, the end of a build (which is where a document that
+        // lost pages drops their overlays), and the answer to an outline
+        // request the renderer made.
+        case 'txdlPage': await drawTxdlPage(msg); break;
+        case 'txdlBuilt': {
+            const count = Number(msg.pageCount);
+            if (Number.isInteger(count) && count >= 0 && state.txdl) {
+                for (const page of [...state.txdl.pages.keys()]) if (page > count) removeTxdlOverlay(page);
+                dropEmptyLiveExtraPages(count);
+            }
+            break;
+        }
+        case 'txdlOutlines': {
+            const wait = txdlOutlineWaits.get(msg.id);
+            if (!wait) break;
+            txdlOutlineWaits.delete(msg.id);
+            clearTimeout(wait.timer);
+            // An error rejects: `prefetch` then leaves the cache untouched and
+            // the next preview asks again. Resolving with nothing would teach
+            // the cache that this font has no such glyph, for good.
+            if (msg.error) wait.reject(new Error(msg.error));
+            else wait.resolve(msg.glyphs || {});
+            break;
+        }
         case 'requestViewState': {
             const snap = viewSnapshot();
             if (snap) vscode.postMessage({ type: 'viewstate', requestId: msg.requestId, ...snap });
@@ -7483,6 +7775,7 @@ window.addEventListener('message', async (ev) => {
             // paper that finished parsing after `blank` could put itself back.
             state.openSeq++;
             state.openInFlight = false;
+            state.txdlDeferred = null;
             clearPages();
             state.generation = null;
             state.nativeMapAvailable = false;
@@ -7655,6 +7948,7 @@ vscode.postMessage({ type: 'ready' });
 function clearPages() {
     pagesEl().innerHTML = '';
     state.pageCount = 0;
+    clearTxdlOverlays();
     state.rendered.clear();
     state.pending.clear();
     textCache.clear();

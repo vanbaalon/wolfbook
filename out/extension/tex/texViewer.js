@@ -841,6 +841,14 @@ class TexViewer {
             for (const d of this._disposables.splice(0)) { try { d.dispose(); } catch (_) {} }
         });
         panel.webview.onDidReceiveMessage((m) => this._onMessage(m));
+        // THE INTERACTIVE PREVIEW, when the installed WLaTeX has an
+        // incremental engine. The coordinator never fires this otherwise, and
+        // an older runtime therefore leaves the panel exactly as it was.
+        if (typeof this.coord?.onDidInteractive === 'function') {
+            this._disposables.push(this.coord.onDidInteractive((e) => {
+                try { this._onInteractive(e); } catch (_) { /* a preview never breaks the panel */ }
+            }));
+        }
         // EVERY change to a .tex, not just the one an open card is tracking:
         // the footer's worklist is about where the reader has been working,
         // which is most of the time nowhere near a card. Disposed with the
@@ -1221,6 +1229,120 @@ class TexViewer {
                 this._openedPdfHash === st.map.view.artifact.pdf_hash) });
     }
 
+    /**
+     * A page, or a whole build, from the interactive (incremental) lane.
+     *
+     * These are PREVIEW pages: display lists the engine produced from the
+     * unsaved text, drawn over the PDF canvases the webview already holds.
+     * They carry no PDF, no source map and no settlement, so nothing here
+     * touches `shownGeneration`, `shownPdfHash` or the trace state — the cold
+     * build still owns all of that, and its `open` drops every overlay.
+     */
+    _onInteractive(event) {
+        if (!this.panel || !event || !this.root || event.root !== this.root) return;
+        if (event.kind === 'page') {
+            // A page the decoder could not read keeps the PDF canvas: half a
+            // page is worse than a page that is merely a moment out of date.
+            if (!event.txdl) return;
+            // An unchanged page is not drawn; do not ship its display list.
+            if (event.changed === false) return;
+            const msg = { type:'txdlPage', generation:event.generation, page:event.page,
+                changed:true, identity:event.identity || null,
+                txdl:event.txdl, fonts:event.fonts || null, pageSize:event.pageSize || null };
+            this._post(msg);
+            (this._liveOverlays ||= new Map()).set(event.page, event.identity || null);
+            (this._previewPages ||= new Map()).set(event.page, msg);
+            return;
+        }
+        if (event.kind === 'pageMap') {
+            // THE LIVE PAGE'S OWN SOURCE MAP. A click on an overlay is answered
+            // from it (see _jumpToLiveSource), never from the cold map, whose
+            // glyphs sit where the PDF under the overlay has them.
+            const ready = (this._liveMapReady ||= new Map());
+            if (event.ready) ready.set(event.page, event.identity || null); else ready.delete(event.page);
+            this._scheduleLiveMap(event.lane);
+            return;
+        }
+        if (event.kind !== 'built') return;
+        for (const page of [...(this._liveOverlays || new Map()).keys()])
+            if (Number.isInteger(event.pageCount) && page > event.pageCount) {
+                this._liveOverlays.delete(page);
+                this._liveMapReady?.delete(page);
+                this._previewPages?.delete(page);
+            }
+        this._post({ type:'txdlBuilt', generation:event.generation,
+            pageCount:event.pageCount ?? null, pages:event.pages || [] });
+        // Said in the panel's own status line, and said honestly: the PDF and
+        // everything derived from it are still the last cold build's.
+        if (event.summary) this._post({ type:'status', kind:'', text:`${event.summary} · preview only` });
+    }
+
+    /**
+     * Rebuild the live map (the incremental engine's own page maps for the
+     * overlays on screen) shortly after page maps arrive. Only pages whose
+     * map was published for the identity the overlay shows are read.
+     */
+    _scheduleLiveMap(lane) {
+        clearTimeout(this._liveMapTimer);
+        this._liveMapTimer = setTimeout(async () => {
+            if (!this.panel || !lane || typeof lane.liveView !== 'function') return;
+            const pages = [...(this._liveMapReady || new Map())]
+                .filter(([page, identity]) => this._liveOverlays?.get(page) === identity).map(([page]) => page)
+                .sort((a, b) => a - b);
+            const request = this._liveMapRequest = (this._liveMapRequest || 0) + 1;
+            try {
+                const view = await lane.liveView(pages);
+                if (request !== this._liveMapRequest) return;
+                const { NativeMap } = require('./nativeMap');
+                this._liveMap = view ? new NativeMap({ nativeView:view, nativeSource:lane.source, projectDir:lane.projectDir }) : null;
+            } catch (error) {
+                if (request === this._liveMapRequest) this._liveMap = null;
+                if (error?.name !== 'StaleBuild') this._log(`live source map: ${error.message}`);
+            }
+        }, 20);
+    }
+
+    /** A new PDF replaced every overlay: the live map answers for none. */
+    _resetLiveMap() {
+        this._liveOverlays?.clear();
+        this._liveMapReady?.clear();
+        this._liveMap = null;
+        this._liveMapRequest = (this._liveMapRequest || 0) + 1;
+    }
+
+    /**
+     * A click on a live page (an overlay the incremental engine drew): answered
+     * from that page's own map, bound to the text the page was typeset from.
+     * Until that map has arrived the click is not answered at all; the cold
+     * map describes the PDF under the overlay, not the text on screen.
+     */
+    _jumpToLiveSource(st, m, request) {
+        const live = this._liveMap;
+        if (!live || !live.available || !live.hasPage(m.page) || this._liveMapReady?.get(m.page) !== m.overlay) {
+            this._post({ type:'status', text:'live page: its source map is still on the way', kind:'warn' });
+            return;
+        }
+        return this._jumpToNativeSource(st, m, request, live);
+    }
+
+    /**
+     * Glyph outlines for the webview's TXDL renderer, answered by the
+     * interactive engine. An error travels back so the renderer can retry the
+     * batch later; answering with empty glyphs would teach its cache that this
+     * font has no such glyph and blank the page for good.
+     */
+    async _onTxdlOutlines(m) {
+        const reply = { type:'txdlOutlines', id:m.id, font:m.font, glyphs:null, error:null };
+        try {
+            const lane = this.root ? this.coord.roots?.get(this.root)?.nativeLane : null;
+            if (!lane || typeof lane.outlines !== 'function') throw Error('no interactive engine');
+            const glyphs = await lane.outlines(m.font, m.glyphs);
+            if (!glyphs) throw Error('no interactive engine');
+            reply.glyphs = glyphs;
+        } catch (error) { reply.error = error.message || String(error); }
+        this._post(reply);
+    }
+
     /** Push the current generation's PDF into the webview. */
     async refresh({ force = false } = {}) {
         if (!this.panel || !this.root) return;
@@ -1347,6 +1469,12 @@ class TexViewer {
             return;
         }
         const readMs = Date.now() - tRead;
+        // A PDF OLDER THAN THE BUFFER DOES NOT RETIRE THE PREVIEW. When the
+        // reader kept typing while this build ran, the live pages are newer
+        // than the PDF: they are drawn again over it (below), and their maps
+        // stay. Only a PDF of the current text replaces them.
+        const previewNewer = !!st.sourceAhead && !!this._previewPages?.size;
+        if (!previewNewer) { this._resetLiveMap(); this._previewPages?.clear(); }
         this._post({
             type: 'open',
             base: w.asWebviewUri(vscode.Uri.joinPath(
@@ -1386,6 +1514,7 @@ class TexViewer {
             // canvas only once its replacement is drawn.
             live: !!st.generation.live && this.shownAnything,
         });
+        if (previewNewer) for (const msg of this._previewPages.values()) this._post(msg);
         this.shownAnything = true;
         // What the webview now holds — the key the next refresh compares.
         this.shownPdfHash = st.generation.pdfHash || null;
@@ -2627,11 +2756,23 @@ class TexViewer {
                 const relative = path.relative(map.projectDir, doc.uri.fsPath).split(path.sep).join('/');
                 if (map.source.files.get(relative)?.text !== doc.getText()) return;
             }
-            const rects = ranged ? await map.forwardRange(doc.uri.fsPath,
+            const forward = target => ranged ? target.forwardRange(doc.uri.fsPath,
                 { line:position.line + 1, column_utf16:position.character },
                 { line:end.line + 1, column_utf16:end.character }, { isCurrent:current })
-                : await map.forwardAt(doc.uri.fsPath, position.line + 1, position.character);
+                : target.forwardAt(doc.uri.fsPath, position.line + 1, position.character);
+            let rects = await forward(map);
             if (!current() || rects === null) return;
+            // Pages the incremental engine drew over the PDF show other text
+            // than the cold map describes: their rectangles come from the
+            // live map, every other page's from the cold one.
+            const live = this._liveMap, overlays = this._liveOverlays;
+            if (live?.available && overlays?.size) {
+                const liveRects = await forward(live).catch(() => null);
+                if (!current()) return;
+                rects = rects.filter(r => !overlays.has(r.page))
+                    .concat((liveRects || []).filter(r => live.hasPage(r.page)))
+                    .sort((a, b) => a.page - b.page || a.y - b.y || a.x - b.x);
+            }
             this._setTracePaused(false);
             if (ranged) {
                 if (!rects.length) return;
@@ -3839,6 +3980,10 @@ class TexViewer {
                 }
                 break;
             case 'textLayer': this._onTextLayer(m); break;
+            case 'txdlOutlines': await this._onTxdlOutlines(m); break;
+            // The webview kept the PDF for this page: it is not a live page.
+            case 'txdlFallback': this._liveOverlays?.delete(m.page); this._liveMapReady?.delete(m.page);
+                this._previewPages?.delete(m.page); break;
             case 'textLayerDone':
                 if (String(m.generation) !== String(this.shownGeneration)) break;
                 this._log(`text layer complete for generation ${m.generation}: ` +
@@ -4970,11 +5115,10 @@ class TexViewer {
         });
     }
 
-    async _jumpToNativeSource(st, m, request) {
-        const map = st.map;
+    async _jumpToNativeSource(st, m, request, map = st.map) {
         const current = () => this.panel && this.root === st.root &&
-            this.coord.roots.get(this.root) === st && st.map === map && map.available &&
-            this._openedPdfHash === map.view.artifact.pdf_hash &&
+            this.coord.roots.get(this.root) === st && map.available &&
+            (map.live ? this._liveMap === map : st.map === map && this._openedPdfHash === map.view.artifact.pdf_hash) &&
             request === this._nativeInverseRequest && m.generation != null &&
             String(m.generation) === String(this._openedGeneration);
         if (!current()) return;
@@ -5159,6 +5303,9 @@ class TexViewer {
                 reason: 'Comments need a compiled page-to-source map.',
             });
             return;
+        }
+        if (m.overlay !== undefined && m.overlay !== null) {
+            return this._jumpToLiveSource(st, m, this._nativeInverseRequest);
         }
         if (st.map.native) {
             return this._jumpToNativeSource(st, m, this._nativeInverseRequest);

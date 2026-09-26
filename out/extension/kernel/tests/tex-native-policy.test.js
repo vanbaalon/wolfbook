@@ -13,7 +13,7 @@ const observedTimeouts = [];
 let installed = true, constructorCalls = 0;
 stub.workspace.getConfiguration = () => ({ get: (key, fallback) =>
     ({ compileTimeoutMs:configuredTimeout, mapEngine: configuredMapEngine, wlatexDirectory: '/built/wlatex', authoritativeDelayMs: 0 })[key] ?? fallback });
-let nativeCalls = 0, conventionalCalls = 0, cancel = false, nativeFailure = false;
+let nativeCalls = 0, conventionalCalls = 0, cancel = false, nativeFailure = false, nativeSettled = false;
 const oldLoad = Module._load;
 Module._load = function (req, ...args) {
     if (req === 'vscode') return stub;
@@ -26,7 +26,7 @@ Module._load = function (req, ...args) {
             if (cancel) throw Object.assign(Error('superseded'), { name: 'AbortError' });
             return { ok:true, runner:'wlatex', generation:nativeCalls, pdfPath:'unused', pdfHash:'native',
                 sourceSnapshotHash:o.sourceSnapshotHash, nativeCompiledSources:new Map(),
-                pageCount:1, rerunWanted:true, diagnostics:[] };
+                pageCount:1, rerunWanted:!nativeSettled, diagnostics:[] };
         }
         invalidate() { this.invalidated = true; }
         async close() {}
@@ -71,6 +71,26 @@ test('native previews select sidecar; authoritative and explicit builds select c
         await f.coordinator.build(f.doc, { force:true, quiet:true });
         assert.equal(conventionalCalls, 2);
     } finally { f.close(); }
+});
+
+test('a save of a settled native build stays native; an unsettled one still gets latexmk', async () => {
+    const f = fixture();
+    const before = { native:nativeCalls, conventional:conventionalCalls };
+    nativeSettled = true;
+    try {
+        await f.coordinator.build(f.doc, { live:true, quiet:true });
+        assert.equal(nativeCalls, before.native + 1);
+        // A save of a settled build never runs latexmk.
+        await f.coordinator.build(f.doc, { authoritative:true, quiet:true });
+        assert.equal(conventionalCalls, before.conventional);
+        assert.equal(f.state.generation.runner, 'wlatex');
+        // New text on save: the native lane builds it.
+        const nativeBefore = nativeCalls;
+        fs.appendFileSync(f.state.root, '\n% saved');
+        await f.coordinator.build(f.doc, { authoritative:true, quiet:true });
+        assert.ok(nativeCalls > nativeBefore);
+        assert.equal(conventionalCalls, before.conventional);
+    } finally { nativeSettled = false; f.close(); }
 });
 
 test('superseded native builds preserve last generation and do not report an error', async () => {

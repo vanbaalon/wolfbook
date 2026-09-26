@@ -21,6 +21,39 @@ function isDocumentFailure(report) {
         report.diagnostics.some(d => d?.severity === 'error' && !d.producer);
 }
 
+// The auxiliary files the interactive lane feeds back to the engine, so that
+// \ref, \cite, the table of contents and the list of figures read the numbers
+// the settled cold build wrote. The engine runs no auxiliary passes of its
+// own: these are ordinary inputs to it.
+const AUXILIARY_FILE = /\.(aux|toc|lof|lot|out)$/i;
+// The engine refuses an overlay name that is not a relative, canonical project
+// path. Checked here so a stray auxiliary name can never fail a whole build.
+const SAFE_OVERLAY = name => typeof name === 'string' && name.length > 0 && !/[\\:\0]/.test(name) &&
+    !name.split('/').some(part => !part || part === '.' || part === '..');
+
+// A preview page as the viewer wants it. `geometry` is already in big points
+// (the SDK converts the stream's scaled points), and it is null whenever the
+// stream carried no media size — most pages, in practice — so the viewer falls
+// back to the geometry of the PDF page the overlay covers.
+function interactivePage(generation, event) {
+    const geometry = event.geometry;
+    return { generation, page:event.page, changed:event.changed !== false,
+        identity:event.identity?.page_hash ?? null,
+        txdl:event.payload?.txdl ?? null, fonts:event.payload?.fonts ?? null,
+        error:event.payload?.error ?? null,
+        pageSize:geometry && geometry.width_pt > 0 && geometry.height_pt > 0
+            ? { widthBp:geometry.width_pt, heightBp:geometry.height_pt } : null };
+}
+
+// A preview that did not run. Shaped like a failed generation so a caller can
+// log it and move on; it is never a reason to retire the native lane, because
+// the cold build that follows is untouched by it.
+function interactiveFailure(generation, message, fatal) {
+    return { ok:false, incremental:true, generation, pages:[], pageCount:null, report:null, fatal:!!fatal,
+        diagnostics:[{ severity:'error', file:null, line:null, producer:false,
+            message:message || 'the interactive build failed' }] };
+}
+
 class NativeBuildLane {
     constructor(root, directory = '', runtimeOptions) {
         this.root = root;
@@ -35,6 +68,32 @@ class NativeBuildLane {
             this.compiler = new sdk.NativeCompiler({ labBinary, nativeBinary, cache:this.artifactCache.directory });
             this.source = new sdk.NativeSourceSession({ labBinary });
         } catch (error) { this.artifactCache.close(); throw error; }
+        // THE INTERACTIVE LANE IS OPTIONAL AND NEVER LOAD-BEARING.
+        //
+        // It is the SDK's long-lived incremental engine, wrapped in a build
+        // session that shares this lane's cold compiler and source session.
+        // A runtime without it — an older WLaTeX, an SDK whose build session
+        // does not take `interactive`, a main file the engine will not accept
+        // — leaves `this.session` null, every interactive entry point below
+        // answers null, and the lane behaves exactly as it did before this
+        // existed. The engine process itself starts lazily, on the first
+        // interactive build; constructing the session costs nothing.
+        this.session = null;
+        this.interactiveUnavailable = null;
+        try {
+            if (typeof sdk.NativeBuildSession === 'function') {
+                const session = new sdk.NativeBuildSession({ compiler:this.compiler, source:this.source,
+                    labBinary, nativeBinary, cache:this.artifactCache.directory,
+                    interactive:{ main:this.root, root:this.projectDir } });
+                if (session.interactive) this.session = session;
+                else this.interactiveUnavailable = 'this WLaTeX has no incremental engine';
+            } else this.interactiveUnavailable = 'this WLaTeX SDK has no build session';
+        } catch (error) { this.session = null; this.interactiveUnavailable = error.message; }
+        // The last successful cold report, for the auxiliary texts the
+        // interactive lane replays. Null until a cold build has succeeded.
+        this.coldReport = null;
+        this.interactiveWarm = false;
+        this._warming = null;
         // SDK build IDs belong to this session; display IDs share the
         // conventional compiler's allocator and survive lane reconstruction.
         this.buildNumber = 0;
@@ -179,6 +238,10 @@ class NativeBuildLane {
             catch (error) { if (error?.name !== 'StaleBuild') throw error; await this.edits.catch(() => {}); }
         }
         requireCurrent();
+        // The interactive lane replays this build's auxiliary files, so the
+        // preview numbers what the settled build numbered. Recorded only for a
+        // build that succeeded, and only once its artifacts exist.
+        this.coldReport = report;
         // A document that shipped no pages has no page geometry; the viewer
         // falls back to its default page size instead of the lane crashing.
         const first = report.build.pages[0] || null;
@@ -193,7 +256,11 @@ class NativeBuildLane {
             pageSize:first ? {widthBp:first.width_pt,heightBp:first.height_pt} : null,
             diagnostics, errors:diagnostics.filter(d=>d.severity==='error').length,
             warnings:diagnostics.filter(d=>d.severity==='warning').length,
-            passes:report.build.passes.length, passesLimited:false, rerunWanted:true,
+            passes:report.build.passes.length, passesLimited:false,
+            // A settled native build (auxiliary files stable, every index,
+            // glossary and biber step run) needs no latexmk pass behind it;
+            // an unsettled one still gets the authoritative rebuild.
+            rerunWanted:report.build.settled !== true,
             stopped:false, stopReason:null, cancelled:false, timedOut:false,
             ms:report.elapsed_ms, finishedAt:Date.now(), nativeView, nativeSource:this.source,
             nativeReport:report,
@@ -202,6 +269,187 @@ class NativeBuildLane {
             nativeCompiledSources: new Map(report.build.source_bindings.map(binding =>
                 [path.join(this.projectDir, binding.file), (snapshot.files[binding.file] ?? this.source.files.get(binding.file)).text])) };
     }
+    /** Is an incremental engine available for live previews on this lane? */
+    get interactive() { return !!(this.session && this.session.interactive && !this.closed); }
+
+    /**
+     * Start the engine process, off the keystroke path.
+     *
+     * Starting it means locating its XeLaTeX format, and building one when the
+     * user's format cache has none — tens of seconds, once per engine binary.
+     * A preview is worth waiting for; a typing pause is not, so the first
+     * interactive build asks for this and then declines to preview, and every
+     * pause after it previews normally. Resolves true when the engine is up.
+     */
+    warmInteractive() {
+        if (!this.interactive) return Promise.resolve(false);
+        if (this._warming) return this._warming;
+        this._warming = Promise.resolve()
+            .then(() => this.session.interactive.start())
+            .then(() => { this.interactiveWarm = !this.closed; return this.interactiveWarm; })
+            .catch(error => {
+                // A preview that cannot start is not a lane that cannot build.
+                this.interactiveUnavailable = error.message;
+                this._warming = null;
+                return false;
+            });
+        return this._warming;
+    }
+
+    /**
+     * Glyph outlines for the webview's TXDL renderer, by font definition
+     * digest. Null when there is no engine, so the caller can say so instead
+     * of drawing a page of blanks.
+     */
+    async outlines(font, glyphs) {
+        if (!this.interactive) return null;
+        return this.session.outlines(font, glyphs);
+    }
+
+    /**
+     * ONE INCREMENTAL BUILD FOR THE LIVE PREVIEW.
+     *
+     * The engine resumes from the latest page checkpoint the edit did not
+     * reach and typesets forward until its state provably matches the previous
+     * document, so a word changed on page 2 of a long paper costs the pages
+     * that actually moved rather than the whole document. Each recomputed page
+     * arrives as a TXDL display list through `o.onPage` and is drawn over the
+     * PDF canvas in the webview.
+     *
+     * IT IS A PREVIEW, NOT A BUILD. It never settles, produces no PDF, no
+     * source map and no provenance; the cold build that follows it still does
+     * all of that and remains what the reader finally sees. Therefore this
+     * NEVER THROWS for a failure of its own: a failed interactive build comes
+     * back as `{ ok: false }` and the caller simply carries on to the cold
+     * build. Only a superseded or aborted build answers null.
+     */
+    async interactiveBuild(o = {}) {
+        if (!this.interactive) return null;
+        // The engine starts lazily, and starting it is the one slow thing here
+        // (see warmInteractive). Ask for it and let this pause go by; the
+        // cold build below is exactly what it always was.
+        if (!this.interactiveWarm) {
+            const warm = this.warmInteractive();
+            if (o.wait !== true) return null;
+            if (!await warm) return interactiveFailure(null, this.interactiveUnavailable, false);
+            if (!this.interactive) return null;
+        }
+        let handle = null, generation = null;
+        try {
+            const texts = this._interactiveOverlays(o);
+            const viewport = [...new Set((o.nativePages || [])
+                .filter(page => Number.isInteger(page) && page >= 1))].sort((a, b) => a - b);
+            generation = ++this.buildNumber;
+            handle = this.session.build({ main:this.root, root:this.projectDir,
+                overlays:Object.fromEntries(texts), auxiliary:this._auxiliaryTexts(),
+                generation, lane:'interactive', viewport });
+        } catch (error) {
+            if (error?.name === 'AbortError') return null;
+            return interactiveFailure(generation, error.message, error.fatal === true);
+        }
+        const abort = () => { try { handle.cancel(); } catch (_) { /* already finished */ } };
+        o.signal?.addEventListener('abort', abort, { once:true });
+        let built = null, failed = null, superseded = false;
+        try {
+            for await (const event of handle.events()) {
+                if (event.event === 'page_finalized') {
+                    // A KEYSTROKE DOES NOT INVALIDATE A PAGE. The reader is
+                    // still typing — that is why this ran — and a page from a
+                    // build two characters old is precisely what the preview
+                    // is for. The session stops emitting pages of a build a
+                    // newer one has superseded, which is the real staleness
+                    // test; only closing the lane or the host's own abort ends
+                    // the drawing here.
+                    if (this.closed || o.signal?.aborted) continue;
+                    if (typeof o.onPage !== 'function') continue;
+                    try { o.onPage(interactivePage(generation, event)); }
+                    catch (_) { /* a viewer that cannot draw never fails a build */ }
+                } else if (event.event === 'page_map_ready' || event.event === 'page_map_failed') {
+                    // The page's own source map reached the worker (or could
+                    // not be bound): clicks on that live page may now be
+                    // answered from it. It never gates the pixels.
+                    if (this.closed || typeof o.onPageMap !== 'function') continue;
+                    try { o.onPageMap({ generation, page:event.page, ready:event.event === 'page_map_ready',
+                        identity:event.identity ?? null, error:event.error ?? null }); }
+                    catch (_) { /* a viewer that cannot map never fails a build */ }
+                } else if (event.event === 'built') built = event;
+                else if (event.event === 'failed') failed = event;
+                else if (event.event === 'superseded' || event.event === 'cancelled') superseded = true;
+            }
+            await handle.report;
+        } catch (error) {
+            if (error?.name === 'AbortError') return null;
+            if (!failed) return interactiveFailure(generation, error.message, error.fatal === true);
+        } finally { o.signal?.removeEventListener('abort', abort); }
+        if (superseded || o.signal?.aborted) return null;
+        if (failed) return interactiveFailure(generation, failed.error, failed.fatal === true);
+        if (!built) return interactiveFailure(generation, 'the interactive build produced no report', false);
+        return { ok:true, incremental:true, generation, pages:built.pages || [],
+            pageCount:built.page_count ?? (built.pages || []).length,
+            report:built.report || null, diagnostics:built.diagnostics || [],
+            elapsedMs:built.elapsed_ms ?? null };
+    }
+
+    /**
+     * The overlay texts one interactive build compiles: the root, the editor's
+     * include graph, every unsaved buffer and every file the source session
+     * already knows (a package the engine discovered on an earlier build).
+     * The same map `_compile` builds, minus the edit-chain synchronization —
+     * that belongs to the cold path, which owns the source map, and a preview
+     * must not perturb it.
+     */
+    _interactiveOverlays(o) {
+        const texts = new Map();
+        for (const file of new Set([this.root, ...(o.sourceFiles || [])])) {
+            try { texts.set(this.relative(file),
+                o.overlay?.has(file) ? o.overlay.get(file) : fs.readFileSync(file, 'utf8')); }
+            catch (error) { if (file === this.root || error.code !== 'ENOENT') throw error; }
+        }
+        for (const [file, text] of o.overlay || []) texts.set(this.relative(file), text);
+        for (const file of this.source.files.keys()) {
+            if (texts.has(file)) continue;
+            try { texts.set(file, fs.readFileSync(path.join(this.projectDir, file), 'utf8')); }
+            catch (error) { if (error.code !== 'ENOENT') throw error; }
+        }
+        return texts;
+    }
+
+    /**
+     * The auxiliary files the last successful cold build wrote, so references,
+     * citations and the contents resolve in the preview exactly as they do in
+     * the PDF on screen. Empty until a cold build has succeeded — a first
+     * preview of a fresh paper shows `??`, which is what the first cold build
+     * shows too. Best effort per file: the artifact cache may have swept one,
+     * and a preview with one fewer input is better than no preview.
+     */
+    _auxiliaryTexts() {
+        const report = this.coldReport;
+        const texts = {};
+        if (!report?.artifact_directory) return texts;
+        for (const name of Object.keys(report.build?.auxiliary_files || {})) {
+            if (!AUXILIARY_FILE.test(name) || !SAFE_OVERLAY(name)) continue;
+            try { texts[name] = fs.readFileSync(path.join(report.artifact_directory, name), 'utf8'); }
+            catch (_) { /* swept or unreadable: the preview reads one fewer */ }
+        }
+        return texts;
+    }
+
+    /**
+     * The live map's view of `pages` (pages the incremental engine drew and
+     * whose own maps reached the worker), or null when there is none.
+     */
+    async liveView(pages) {
+        if (this.closed || !pages.length) return null;
+        // The session keeps each live page's map and publishes it to the
+        // worker only when a viewer reads that page.
+        if (typeof this.session?.ensureLiveMaps === 'function') {
+            const { ready } = await this.session.ensureLiveMaps(pages);
+            pages = pages.filter(page => ready.includes(page));
+        }
+        if (this.closed || !this.source.livePublished || !pages.length) return null;
+        return this.source.readPages(pages, { live:true });
+    }
+
     // The pages a view materializes: the requested window (the pages the
     // viewer has rendered, plus a neighbour each side) clipped to the
     // document, or the first eight pages when nothing is known yet. Reading
@@ -221,10 +469,15 @@ class NativeBuildLane {
     close() {
         if (this._closing) return this._closing;
         this.closed = true;
+        this.interactiveWarm = false;
         this.version++;
         // Both resources must finish shutting down even if one rejects. This
         // also makes repeated disposal/retirement share one completion handle.
         this._closing = Promise.allSettled([
+            // Closing the build session stops the interactive engine process.
+            // It shares this lane's compiler and source session, so it does
+            // not close those; the two entries below still own that.
+            Promise.resolve().then(() => this.session?.close()),
             Promise.resolve().then(() => this.compiler.close()),
             Promise.resolve().then(() => this.source.close()),
         ]).then(async results => {

@@ -1,0 +1,562 @@
+// A browser-side renderer for TXDL pages.
+//
+// Input is the wire JSON `wlatex_txdl::json::page_json` emits per page, plus
+// glyph outlines from `wlatex_txdl::outline_json`. No bundler, no
+// dependencies: this is a plain ES module that runs in a VS Code webview and
+// under Node (with a fake Canvas2D) for tests.
+//
+// Coordinates. Everything in the page JSON is an integer of scaled points
+// (65536 sp = 1 pt, 72.27 pt = 1 in) in the DVI convention: x grows right, y
+// grows *down*, and a glyph's y is its baseline. The page's (0, 0) is the DVI
+// reference point, one inch in from the top-left corner of the paper, so the
+// renderer offsets every coordinate by one inch before drawing. Glyph outlines
+// are in font units with y *up*, which is why glyphs are drawn with a negative
+// y scale.
+//
+// See README.md for the host contract and the list of approximations.
+
+/** Scaled points in one TeX point. */
+export const SP_PER_PT = 65536;
+/** TeX points in one inch. */
+export const PT_PER_INCH = 72.27;
+/**
+ * The DVI reference point is one inch from the top-left corner of the paper.
+ * xdvipdfmx spells the same offset as 72 bp; 72 bp and 72.27 pt are both one
+ * true inch, and this module works in TeX pt throughout.
+ */
+export const ORIGIN_PT = PT_PER_INCH;
+
+/** US Letter, the size used when a page carries no `media_size_sp`. */
+const DEFAULT_MEDIA_PT = [8.5 * PT_PER_INCH, 11 * PT_PER_INCH];
+
+/** Scaled points to TeX points. */
+export function spToPt(sp) {
+  return sp / SP_PER_PT;
+}
+
+/** TeX points to scaled points (rounded, as TeX stores integers). */
+export function ptToSp(pt) {
+  return Math.round(pt * SP_PER_PT);
+}
+
+/**
+ * A TXDL `rgba` quadruple (floats 0..1) as a CSS colour string.
+ * Fully opaque colours come out as `rgb(r, g, b)` so the common case stays
+ * comparable and cheap.
+ */
+export function rgbaToCss(rgba, fallback = '#000') {
+  if (!Array.isArray(rgba) || rgba.length < 3) return fallback;
+  const channel = (v) => Math.max(0, Math.min(255, Math.round((Number(v) || 0) * 255)));
+  const r = channel(rgba[0]);
+  const g = channel(rgba[1]);
+  const b = channel(rgba[2]);
+  const a = rgba.length > 3 && rgba[3] != null ? Number(rgba[3]) : 1;
+  if (!(a < 1)) return `rgb(${r}, ${g}, ${b})`;
+  return `rgba(${r}, ${g}, ${b}, ${Number(Math.max(0, a).toFixed(3))})`;
+}
+
+/**
+ * Geometry helpers for one page at one zoom level.
+ *
+ * `scale` is CSS px per TeX pt. The returned `x`/`y` take scaled points in
+ * page (DVI) coordinates and give CSS px from the top-left corner of the
+ * paper; `len` converts a bare length.
+ */
+export function pageToCss(page, scale = 1, options = {}) {
+  const media = mediaSizePt(page, options.mediaSize);
+  const originX = ORIGIN_PT * scale;
+  const originY = ORIGIN_PT * scale;
+  const len = (sp) => (sp / SP_PER_PT) * scale;
+  const x = (sp) => originX + len(sp);
+  const y = (sp) => originY + len(sp);
+  return {
+    scale,
+    widthPt: media[0],
+    heightPt: media[1],
+    width: media[0] * scale,
+    height: media[1] * scale,
+    originXPt: ORIGIN_PT,
+    originYPt: ORIGIN_PT,
+    originX,
+    originY,
+    pt: spToPt,
+    len,
+    x,
+    y,
+    /** A TXDL `{x0,y0,x1,y1}` rectangle in sp as a CSS-px `{x,y,width,height}`. */
+    rect(r) {
+      if (!r) return null;
+      const x0 = Math.min(r.x0, r.x1);
+      const x1 = Math.max(r.x0, r.x1);
+      const y0 = Math.min(r.y0, r.y1);
+      const y1 = Math.max(r.y0, r.y1);
+      return { x: x(x0), y: y(y0), width: len(x1 - x0), height: len(y1 - y0) };
+    },
+  };
+}
+
+function mediaSizePt(page, override) {
+  if (Array.isArray(override) && override.length === 2) {
+    return [Number(override[0]), Number(override[1])];
+  }
+  const sp = page && page.media_size_sp;
+  if (Array.isArray(sp) && sp.length === 2 && sp[0] > 0 && sp[1] > 0) {
+    return [spToPt(sp[0]), spToPt(sp[1])];
+  }
+  return DEFAULT_MEDIA_PT.slice();
+}
+
+function fontIndex(fonts) {
+  const map = new Map();
+  for (const font of fonts || []) {
+    if (font && typeof font.definition_digest === 'string') {
+      map.set(font.definition_digest, font);
+    }
+  }
+  return map;
+}
+
+/**
+ * The text of one glyph run.
+ *
+ * Native runs carry their `ActualText`. TFM runs do not carry text at all, but
+ * their glyph ids *are* character codes, so codes below 128 are taken as ASCII
+ * and everything else answers U+FFFD. This is for word-level highlighting, not
+ * transcription — the same claim the Rust `text_items` makes.
+ */
+export function runText(op) {
+  if (typeof op.text === 'string' && op.text.length > 0) return op.text;
+  const glyphs = op.glyphs || [];
+  if (op.native) return '�'.repeat(glyphs.length);
+  let out = '';
+  for (const glyph of glyphs) {
+    const id = glyph[0];
+    out += id < 128 ? String.fromCharCode(id) : '�';
+  }
+  return out;
+}
+
+/**
+ * The page's glyph runs as selectable text boxes, in *TeX points* and page
+ * (DVI) coordinates — the shape WPaper's highlight code consumes.
+ *
+ * `x` is the left edge, `baseline` is the run's DVI v, `h` is the font's
+ * scaled size and `w` is the run's advance width. The wire JSON drops per
+ * glyph advances, so `w` spans the first to the last glyph origin plus the
+ * last glyph's advance, which is taken from `options.advance(fontDigest, gid)`
+ * in sp when the caller can supply it (the renderer does, from its outline
+ * cache) and is otherwise guessed at half the font size.
+ */
+export function textLayer(page, fonts = page && page.fonts, options = {}) {
+  const index = fontIndex(fonts);
+  const items = [];
+  for (const op of (page && page.ops) || []) {
+    if (op.op !== 'glyphs') continue;
+    const glyphs = op.glyphs || [];
+    if (glyphs.length === 0) continue;
+    const font = index.get(op.font) || null;
+    const sizeSp = font && font.size_sp > 0 ? font.size_sp : 0;
+    const first = glyphs[0];
+    const last = glyphs[glyphs.length - 1];
+    let advance = null;
+    if (typeof options.advance === 'function') {
+      const value = options.advance(op.font, last[0]);
+      if (typeof value === 'number' && Number.isFinite(value)) advance = value;
+    }
+    if (advance == null) advance = sizeSp / 2;
+    items.push({
+      str: runText(op),
+      x: spToPt(first[1]),
+      baseline: spToPt(first[2]),
+      w: spToPt(last[1] - first[1] + advance),
+      h: spToPt(sizeSp),
+      font: op.font,
+      fontName: font ? font.name : null,
+      size: spToPt(sizeSp),
+      native: !!op.native,
+    });
+  }
+  return items;
+}
+
+/** Insertion-ordered cache with a hard bound; the oldest entry is evicted. */
+class BoundedCache {
+  constructor(limit) {
+    this.limit = limit;
+    this.map = new Map();
+  }
+  has(key) {
+    return this.map.has(key);
+  }
+  get(key) {
+    if (!this.map.has(key)) return undefined;
+    const value = this.map.get(key);
+    this.map.delete(key);
+    this.map.set(key, value);
+    return value;
+  }
+  delete(key) {
+    return this.map.delete(key);
+  }
+  set(key, value) {
+    if (this.map.has(key)) this.map.delete(key);
+    this.map.set(key, value);
+    while (this.map.size > this.limit) {
+      const oldest = this.map.keys().next().value;
+      this.map.delete(oldest);
+    }
+    return value;
+  }
+  clear() {
+    this.map.clear();
+  }
+  get size() {
+    return this.map.size;
+  }
+}
+
+const PATH_RE = /([MLQCZmlqcz])([^MLQCZmlqcz]*)/g;
+const NUMBER_RE = /-?\d*\.?\d+(?:[eE][-+]?\d+)?/g;
+
+/** Replay an SVG path onto a context, for hosts without `Path2D`. */
+function replayPath(ctx, d) {
+  ctx.beginPath();
+  PATH_RE.lastIndex = 0;
+  let match;
+  while ((match = PATH_RE.exec(d)) !== null) {
+    const command = match[1].toUpperCase();
+    const numbers = (match[2].match(NUMBER_RE) || []).map(Number);
+    switch (command) {
+      case 'M':
+        for (let i = 0; i + 1 < numbers.length; i += 2) {
+          if (i === 0) ctx.moveTo(numbers[i], numbers[i + 1]);
+          else ctx.lineTo(numbers[i], numbers[i + 1]);
+        }
+        break;
+      case 'L':
+        for (let i = 0; i + 1 < numbers.length; i += 2) {
+          ctx.lineTo(numbers[i], numbers[i + 1]);
+        }
+        break;
+      case 'Q':
+        for (let i = 0; i + 3 < numbers.length; i += 4) {
+          ctx.quadraticCurveTo(numbers[i], numbers[i + 1], numbers[i + 2], numbers[i + 3]);
+        }
+        break;
+      case 'C':
+        for (let i = 0; i + 5 < numbers.length; i += 6) {
+          ctx.bezierCurveTo(
+            numbers[i],
+            numbers[i + 1],
+            numbers[i + 2],
+            numbers[i + 3],
+            numbers[i + 4],
+            numbers[i + 5],
+          );
+        }
+        break;
+      case 'Z':
+        ctx.closePath();
+        break;
+      default:
+        break;
+    }
+  }
+}
+
+const DEFAULTS = {
+  maxOutlines: 8192,
+  maxPaths: 4096,
+  imageDash: [4, 3],
+};
+
+/**
+ * Create a renderer.
+ *
+ * `requestOutlines(fontDigest, gids)` must resolve to an object keyed by glyph
+ * id whose values are `outline_json` objects (or null when the engine cannot
+ * outline that glyph). It is the only I/O this module performs, and `render`
+ * never waits for it: glyphs whose outline is not cached yet are skipped and
+ * counted in the result's `pending`, and the host re-renders when `prefetch`
+ * resolves.
+ */
+export function createTxdlRenderer(options = {}) {
+  const requestOutlines = options.requestOutlines;
+  if (typeof requestOutlines !== 'function') {
+    throw new TypeError('createTxdlRenderer needs a requestOutlines(fontDigest, gids) function');
+  }
+  const settings = { ...DEFAULTS, ...options };
+  const outlines = new BoundedCache(settings.maxOutlines);
+  const paths = new BoundedCache(settings.maxPaths);
+  // digest -> Set of gids currently being fetched, so prefetch never asks twice.
+  const inFlight = new Map();
+
+  const key = (digest, gid) => `${digest}/${gid}`;
+
+  function pathConstructor() {
+    return settings.Path2D || globalThis.Path2D || null;
+  }
+
+  /** One `Path2D` per (font digest, gid), built once and cached. */
+  function cachedPath(digest, gid, outline, Ctor) {
+    const id = key(digest, gid);
+    const cached = paths.get(id);
+    if (cached !== undefined) return cached;
+    return paths.set(id, new Ctor(outline.path || ''));
+  }
+
+  /** Every (font, gid) the page needs, deduplicated, in first-use order. */
+  function pageRequests(page) {
+    const wanted = new Map();
+    for (const op of (page && page.ops) || []) {
+      if (op.op !== 'glyphs' || !op.font) continue;
+      let set = wanted.get(op.font);
+      if (!set) {
+        set = new Set();
+        wanted.set(op.font, set);
+      }
+      for (const glyph of op.glyphs || []) set.add(glyph[0]);
+    }
+    return wanted;
+  }
+
+  async function prefetch(page) {
+    const wanted = pageRequests(page);
+    const jobs = [];
+    const result = { requested: 0, resolved: 0, missing: 0, errors: [] };
+    for (const [digest, gids] of wanted) {
+      let busy = inFlight.get(digest);
+      if (!busy) {
+        busy = new Set();
+        inFlight.set(digest, busy);
+      }
+      const ask = [];
+      for (const gid of gids) {
+        if (outlines.has(key(digest, gid))) continue;
+        if (busy.has(gid)) continue;
+        busy.add(gid);
+        ask.push(gid);
+      }
+      if (ask.length === 0) {
+        if (busy.size === 0) inFlight.delete(digest);
+        continue;
+      }
+      result.requested += ask.length;
+      jobs.push(
+        Promise.resolve()
+          .then(() => requestOutlines(digest, ask))
+          .then((answer) => {
+            for (const gid of ask) {
+              const outline = answer ? answer[gid] ?? answer[String(gid)] ?? null : null;
+              outlines.set(key(digest, gid), outline || null);
+              if (outline) result.resolved += 1;
+              else result.missing += 1;
+            }
+          })
+          .catch((error) => {
+            // Leave the cache untouched so a later prefetch can retry.
+            result.errors.push({ font: digest, gids: ask, error });
+          })
+          .then(() => {
+            for (const gid of ask) busy.delete(gid);
+            if (busy.size === 0) inFlight.delete(digest);
+          }),
+      );
+    }
+    await Promise.all(jobs);
+    return result;
+  }
+
+  function render(page, ctx, opts = {}) {
+    const scale = opts.scale == null ? 1 : opts.scale;
+    const dpr = opts.dpr == null ? 1 : opts.dpr;
+    const ink = opts.ink == null ? '#000' : opts.ink;
+    const background = opts.background === undefined ? '#fff' : opts.background;
+    const css = pageToCss(page, scale, { mediaSize: opts.mediaSize });
+    const fonts = fontIndex(page && page.fonts);
+    const Ctor = pathConstructor();
+
+    const result = {
+      width: css.width,
+      height: css.height,
+      pending: 0,
+      skipped: 0,
+      glyphs: 0,
+      rules: 0,
+      images: [],
+      links: [],
+      missing: [],
+      fallback: Array.isArray(page && page.unsupported) && page.unsupported.length > 0,
+    };
+    const missingByFont = new Map();
+    const note = (digest, gid) => {
+      let set = missingByFont.get(digest);
+      if (!set) {
+        set = new Set();
+        missingByFont.set(digest, set);
+      }
+      set.add(gid);
+    };
+
+    let fill = null;
+    const useFill = (value) => {
+      if (fill !== value) {
+        ctx.fillStyle = value;
+        fill = value;
+      }
+    };
+
+    ctx.save();
+    if (dpr !== 1) ctx.scale(dpr, dpr);
+    if (background) {
+      useFill(background);
+      ctx.fillRect(0, 0, css.width, css.height);
+    }
+
+    let color = ink;
+    const stack = [];
+    useFill(color);
+
+    for (const op of (page && page.ops) || []) {
+      switch (op.op) {
+        case 'glyphs': {
+          const font = fonts.get(op.font);
+          if (!font || !(font.size_sp > 0)) {
+            result.skipped += (op.glyphs || []).length;
+            break;
+          }
+          const sizePt = spToPt(font.size_sp);
+          useFill(color);
+          for (const glyph of op.glyphs || []) {
+            const [gid, gx, gy] = glyph;
+            const id = key(op.font, gid);
+            const outline = outlines.get(id);
+            if (outline === undefined) {
+              result.pending += 1;
+              note(op.font, gid);
+              continue;
+            }
+            if (outline === null) {
+              // Known to have no outline: drawing it will never succeed, so it
+              // is not pending — the host must not keep re-rendering for it.
+              result.skipped += 1;
+              continue;
+            }
+            const upem = outline.units_per_em || 1000;
+            const unit = (sizePt * scale) / upem;
+            ctx.save();
+            ctx.translate(css.x(gx), css.y(gy));
+            ctx.scale(unit, -unit); // font units are y-up, the page is y-down
+            if (Ctor) {
+              ctx.fill(cachedPath(op.font, gid, outline, Ctor));
+            } else {
+              replayPath(ctx, outline.path || '');
+              ctx.fill();
+            }
+            ctx.restore();
+            result.glyphs += 1;
+          }
+          break;
+        }
+        case 'rule': {
+          if (!(op.w > 0) || !(op.h > 0)) break; // DVI: only positive rules paint
+          useFill(color);
+          // `y` is the rule's bottom edge; it extends up by `h`.
+          ctx.fillRect(css.x(op.x), css.y(op.y - op.h), css.len(op.w), css.len(op.h));
+          result.rules += 1;
+          break;
+        }
+        case 'color': {
+          if (op.action === 'push') {
+            stack.push(color);
+            color = rgbaToCss(op.rgba, color);
+          } else if (op.action === 'pop') {
+            color = stack.length > 0 ? stack.pop() : ink;
+          } else if (op.action === 'set') {
+            color = rgbaToCss(op.rgba, color);
+          }
+          useFill(color);
+          break;
+        }
+        case 'image': {
+          const box =
+            op.w > 0 && op.h > 0
+              ? {
+                  x: css.x(op.x),
+                  y: css.y(op.y - op.h),
+                  width: css.len(op.w),
+                  height: css.len(op.h),
+                }
+              : null;
+          result.images.push({ file: op.file, page: op.page == null ? null : op.page, rect: box });
+          if (box) drawPlaceholder(ctx, box, color, settings.imageDash);
+          break;
+        }
+        case 'link': {
+          const box = css.rect(op.rect);
+          if (box) result.links.push({ rect: box, target: op.target });
+          break;
+        }
+        case 'dest':
+        case 'annotation':
+        case 'special':
+        default:
+          break; // no ink here; `unsupported` already set `fallback`
+      }
+    }
+
+    ctx.restore();
+    for (const [digest, gids] of missingByFont) {
+      result.missing.push({ font: digest, gids: [...gids] });
+    }
+    return result;
+  }
+
+  function drawPlaceholder(ctx, box, color, dash) {
+    ctx.save();
+    if (typeof ctx.setLineDash === 'function') ctx.setLineDash(dash);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(box.x + 0.5, box.y + 0.5, Math.max(0, box.width - 1), Math.max(0, box.height - 1));
+    ctx.restore();
+  }
+
+  /** `textLayer` with the cache's real advances where they are known. */
+  function textLayerFor(page, fonts = page && page.fonts) {
+    const index = fontIndex(fonts);
+    return textLayer(page, fonts, {
+      advance(digest, gid) {
+        const outline = outlines.get(key(digest, gid));
+        const font = index.get(digest);
+        if (!outline || !font || !outline.units_per_em) return null;
+        return (outline.advance / outline.units_per_em) * font.size_sp;
+      },
+    });
+  }
+
+  return {
+    render,
+    prefetch,
+    textLayer: textLayerFor,
+    pageToCss,
+    /** Seed the cache directly (the host may already hold outlines). */
+    putOutline(digest, gid, outline) {
+      outlines.set(key(digest, gid), outline || null);
+      paths.delete(key(digest, gid));
+    },
+    hasOutline(digest, gid) {
+      return outlines.has(key(digest, gid));
+    },
+    pageRequests,
+    clearCache() {
+      outlines.clear();
+      paths.clear();
+      inFlight.clear();
+    },
+    stats() {
+      return { outlines: outlines.size, paths: paths.size, inFlight: inFlight.size };
+    },
+  };
+}
+
+export default createTxdlRenderer;
