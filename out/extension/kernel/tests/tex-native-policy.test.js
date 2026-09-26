@@ -1225,3 +1225,24 @@ test('live TeX errors are marked on the page they were typeset on', () => {
     assert.equal(made[0].removed, true);
     assert.equal(context.state.liveErrors, null);
 });
+
+
+test('live overlays are drawn near the viewport only, and their number is bounded', () => {
+    const vm = require('node:vm');
+    const js = fs.readFileSync(path.resolve(__dirname, '../../../client/tex-viewer.js'), 'utf8');
+    const fn = name => { const start = js.indexOf(`function ${name}(`); return js.slice(start, js.indexOf('\n}\n', start) + 2); };
+    const constant = name => { const start = js.indexOf(`const ${name} =`); return js.slice(start, js.indexOf(';', start) + 1); };
+    const context = vm.createContext({});
+    vm.runInContext(constant('TXDL_DRAW_MARGIN') + constant('TXDL_MAX_OVERLAYS') + fn('txdlShouldDefer') + fn('txdlEvictions')
+        + 'this.margin = TXDL_DRAW_MARGIN; this.cap = TXDL_MAX_OVERLAYS;', context);
+    const { txdlShouldDefer, txdlEvictions, margin, cap } = context;
+    assert.equal(margin, 2);
+    // Viewing pages 10-11: 8..13 draw now, the rest wait.
+    assert.deepEqual([7, 8, 13, 14].map(p => txdlShouldDefer(p, [10, 11])), [true, false, false, true]);
+    assert.equal(txdlShouldDefer(90, []), false, 'without a viewport everything draws');
+    // Over the cap, the farthest from view go first (ties: the later page).
+    const pages = Array.from({ length: cap + 3 }, (_, i) => i + 1);
+    assert.deepEqual(JSON.parse(JSON.stringify(txdlEvictions(pages, [3], cap))), [cap + 3, cap + 2, cap + 1]);
+    assert.deepEqual(JSON.parse(JSON.stringify(txdlEvictions(pages, [cap + 3], cap))), [1, 2, 3]);
+    assert.equal(txdlEvictions(pages.slice(0, cap), [1], cap).length, 0);
+});

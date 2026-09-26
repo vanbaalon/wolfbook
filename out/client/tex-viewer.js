@@ -926,7 +926,7 @@ function observeVisible() {
     observer = new IntersectionObserver((entries) => {
         for (const e of entries) {
             const n = Number(e.target.dataset.page);
-            if (e.isIntersecting) renderPage(n);
+            if (e.isIntersecting) { renderPage(n); flushTxdlPending(n); }
         }
     }, { root: document.querySelector('main'), rootMargin: '400px 0px' });
     for (const w of pagesEl().children) observer.observe(w);
@@ -1701,6 +1701,7 @@ function txdlFellBack(page) {
 
 /** Every preview overlay goes; the PDF canvases underneath are untouched. */
 function clearTxdlOverlays() {
+    state.txdlPending = null;
     for (const c of document.querySelectorAll('canvas.txdl-overlay')) c.remove();
     const pages = state.txdl ? [...state.txdl.pages.keys()] : [];
     if (state.txdl) { state.txdl.pages.clear(); state.txdl.generation = null; }
@@ -1736,26 +1737,32 @@ function ensureLiveExtraPage(page) {
     num.textContent = String(page);
     wrap.appendChild(num);
     last.after(wrap);
+    if (observer) observer.observe(wrap);
 }
 
 /** Placeholders for live-only pages that no longer hold a preview. */
 function dropEmptyLiveExtraPages(count = Infinity) {
     for (const wrap of pagesEl().querySelectorAll('.page[data-live-extra="true"]')) {
         const page = Number(wrap.dataset.page);
-        if (page > count || !wrap.querySelector('canvas.txdl-overlay')) wrap.remove();
+        if (page > count || (!wrap.querySelector('canvas.txdl-overlay') && !state.txdlPending?.has(page))) wrap.remove();
     }
 }
 
 /** Draw the preview pages that arrived while a PDF was opening. */
 function flushTxdlDeferred() {
     const deferred = state.txdlDeferred;
-    if (!deferred || !deferred.size) return;
     state.txdlDeferred = null;
-    for (const msg of deferred.values()) drawTxdlPage(msg, { duringOpen: true }).catch(() => {});
+    for (const msg of (deferred || new Map()).values()) drawTxdlPage(msg, { duringOpen: true }).catch(() => {});
+    // Pages that came into view while the PDF opened waited for it.
+    const visible = visiblePages();
+    for (const page of [...(state.txdlPending || new Map()).keys()])
+        if (!txdlShouldDefer(page, visible)) flushTxdlPending(page, { duringOpen: true });
 }
 
 /** Overlays drawn under an earlier PDF open go; newer ones stay. */
 function clearTxdlOverlaysBefore(openSeq) {
+    for (const [page, pending] of [...(state.txdlPending || [])])
+        if (pending.openSeq < openSeq) state.txdlPending.delete(page);
     const t = state.txdl;
     if (!t) return;
     for (const [page, entry] of [...t.pages]) {
@@ -1804,7 +1811,7 @@ function txdlPageBox(page) {
  * preview drew — is already right and nothing is repainted. That is most of
  * the pages of a long paper on every keystroke, and it is the whole point.
  */
-async function drawTxdlPage(msg, { duringOpen = false } = {}) {
+async function drawTxdlPage(msg, { duringOpen = false, force = false } = {}) {
     const page = Number(msg.page);
     if (!Number.isInteger(page) || page < 1) return;
     // A page arriving while a PDF opens is drawn once that PDF's visible
@@ -1821,6 +1828,17 @@ async function drawTxdlPage(msg, { duringOpen = false } = {}) {
     if (page > (state.pageCount || 0)) ensureLiveExtraPage(page);
     const wrap = pagesEl().querySelector(`.page[data-page="${page}"]`);
     if (!wrap) return;
+    // OFF SCREEN, IT WAITS. An edit early in the paper can change every page
+    // after it, and each overlay is a full-resolution canvas (tens of MB at
+    // 2x). Pages away from the viewport keep their display list and are drawn
+    // as they scroll near (flushTxdlPending); what they showed before is as
+    // stale as anything and nobody is looking at it.
+    if (!force && txdlShouldDefer(page, visiblePages())) {
+        (state.txdlPending ||= new Map()).set(page, { msg, openSeq: state.openSeq });
+        if (t.pages.has(page)) { removeTxdlOverlay(page); restorePdfLinks(page); }
+        return;
+    }
+    state.txdlPending?.delete(page);
     const box = txdlPageBox(page);
     if (!box) return;
     // The page size comes from the stream when it carries one, otherwise from
@@ -1867,6 +1885,15 @@ async function drawTxdlPage(msg, { duringOpen = false } = {}) {
     if (pdfCanvas) wrap.insertBefore(canvas, pdfCanvas.nextSibling);
     else wrap.appendChild(canvas);       // renderPage puts its canvas under this one
     paintLiveLinks(page, wrap, txdl, scale, [widthPt, heightPt]);
+    // A bounded number of canvases: the farthest from view go back to waiting.
+    for (const far of txdlEvictions([...t.pages.keys()], visiblePages(), TXDL_MAX_OVERLAYS)) {
+        const e = t.pages.get(far);
+        if (!e || far === page) continue;
+        (state.txdlPending ||= new Map()).set(far, { openSeq: e.openSeq, msg: { generation: e.generation,
+            page: far, changed: true, txdl: e.txdl, pageSize: e.pageSize, identity: e.identity } });
+        removeTxdlOverlay(far);
+        restorePdfLinks(far);
+    }
     // Glyphs whose outline was not cached were skipped, not drawn wrong. Ask
     // for them and draw the same page again when they land.
     if (result.pending > 0) {
@@ -1879,6 +1906,34 @@ async function drawTxdlPage(msg, { duringOpen = false } = {}) {
         // could not load would leave holes on an opaque page: keep the PDF.
         if (again && (again.fallback || again.pending > 0 || again.skipped > 0)) txdlFellBack(page);
     }
+}
+
+/** Pages within this distance of the viewport are drawn at once. */
+const TXDL_DRAW_MARGIN = 2;
+/** Overlay canvases kept at most; the farthest from view are dropped first. */
+const TXDL_MAX_OVERLAYS = 24;
+
+/** Whether a live page is far enough from the visible ones to wait. */
+function txdlShouldDefer(page, visible) {
+    if (!visible || !visible.length) return false;
+    const lo = Math.min(...visible) - TXDL_DRAW_MARGIN, hi = Math.max(...visible) + TXDL_DRAW_MARGIN;
+    return page < lo || page > hi;
+}
+
+/** Overlay pages to drop so at most `cap` remain, farthest from view first. */
+function txdlEvictions(pages, visible, cap) {
+    if (pages.length <= cap || !visible || !visible.length) return [];
+    const lo = Math.min(...visible), hi = Math.max(...visible);
+    const distance = p => (p < lo ? lo - p : p > hi ? p - hi : 0);
+    return [...pages].sort((a, b) => distance(b) - distance(a) || b - a).slice(0, pages.length - cap);
+}
+
+/** A live page that waited off screen, drawn now that it is near. */
+function flushTxdlPending(page, { duringOpen = false } = {}) {
+    const pending = state.txdlPending?.get(page);
+    if (!pending || (state.openInFlight && !duringOpen)) return;
+    state.txdlPending.delete(page);
+    drawTxdlPage(pending.msg, { force: true, duringOpen }).catch(() => {});
 }
 
 /**
@@ -7677,6 +7732,7 @@ window.addEventListener('message', async (ev) => {
             const count = Number(msg.pageCount);
             if (Number.isInteger(count) && count >= 0 && state.txdl) {
                 for (const page of [...state.txdl.pages.keys()]) if (page > count) removeTxdlOverlay(page);
+                for (const page of [...(state.txdlPending || new Map()).keys()]) if (page > count) state.txdlPending.delete(page);
                 dropEmptyLiveExtraPages(count);
             }
             paintLiveErrors(msg.errors);
