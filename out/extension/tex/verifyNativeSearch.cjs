@@ -168,7 +168,15 @@ function inverse(map, pages, pageNumbers, sources, textOf, generatedTextOf = () 
             if (window.includes(p.word)) out.right++;
             else if (own.includes(p.word)) out.line++;
             else if ([-2, -1, 1, 2].some(k => at(k).includes(p.word))) out.near++;
-            else { out.wrong++; if (out.examples.length < 12) out.examples.push({ kind: 'wrong', page: n, word: w.text, file: path.basename(r.file), line: r.line, column: r.column, source: (lines?.[r.line - 1] || '').slice(0, 100) }); }
+            else {
+                out.wrong++;
+                // How far off: lines from where it landed to the nearest line of
+                // that file holding the word (Infinity: not in that file).
+                let distance = Infinity;
+                (lines || []).forEach((l, i) => { if (l.toLowerCase().includes(p.word)) distance = Math.min(distance, Math.abs(i - (r.line - 1))); });
+                (out.missLines ||= []).push(distance);
+                if (out.examples.length < 12) out.examples.push({ kind: 'wrong', page: n, word: w.text, file: path.basename(r.file), line: r.line, column: r.column, off: distance, source: (lines?.[r.line - 1] || '').slice(0, 100) });
+            }
         }
     }
     return out;
@@ -189,7 +197,9 @@ function sourceWords(lines) {
         if (math || raw.includes('\\end{document}')) continue;
         // Blank what does not print: comments, silent arguments, inline math.
         let line = raw.replace(/(^|[^\\])%.*$/, '$1');
+        // Also optional arguments (options, tikz-cd arrows) and \input file names.
         line = line.replace(SILENT, m => ' '.repeat(m.length)).replace(/\$[^$]*\$|\\\([^)]*\\\)/g, m => ' '.repeat(m.length))
+            .replace(/\\[a-zA-Z]+\*?\s*\[[^\]]*\]/g, m => ' '.repeat(m.length)).replace(/\\(?:input|include)\s+\S+/g, m => ' '.repeat(m.length))
             .replace(/\\[a-zA-Z]+\*?/g, m => ' '.repeat(m.length));
         for (const m of line.matchAll(/[A-Za-z]{4,}/g)) out.push({ line: i + 1, column: m.index + Math.floor(m[0].length / 2), word: m[0].toLowerCase() });
     }
@@ -220,6 +230,14 @@ async function direct(map, file, lines, pages, random, { pageFilter = null } = {
         if (hit) out.right++;
         else {
             out.wrong++;
+            // How far off: points from the highlight to the nearest page word
+            // of the same text on its page (Infinity: none there).
+            let distance = Infinity;
+            for (const r of rects) for (const w of pages[r.page - 1] || []) if (same(w)) {
+                const dx = Math.max(0, w.x0 - (r.x + r.w), r.x - w.x1), dy = Math.max(0, w.y0 - (r.y + r.h), r.y - w.y1);
+                distance = Math.min(distance, Math.hypot(dx, dy));
+            }
+            (out.missPoints ||= []).push(distance);
             if (out.examples.length < 12) {
                 const r = rects[0], cx = r.x + r.w / 2, cy = r.y + r.h / 2;
                 const under = (pages[r.page - 1] || []).find(w => cx >= w.x0 - 1 && cx <= w.x1 + 1 && cy >= w.y0 - 1 && cy <= w.y1 + 1);
@@ -231,14 +249,27 @@ async function direct(map, file, lines, pages, random, { pageFilter = null } = {
 }
 
 const pct = (a, b) => b ? `${(100 * a / b).toFixed(1)}%` : '-';
+/** Misses by distance: `limits` ascending, then beyond, then nowhere near (Infinity). */
+function buckets(values = [], limits) {
+    const out = limits.map(() => 0); let beyond = 0, nowhere = 0;
+    for (const v of values) { const i = limits.findIndex(l => v <= l); if (i >= 0) out[i]++; else if (Number.isFinite(v)) beyond++; else nowhere++; }
+    return { out, beyond, nowhere };
+}
+const LINE_LIMITS = [2, 10, 50], POINT_LIMITS = [20, 100];
+const describeLines = v => { const b = buckets(v, LINE_LIMITS); return `≤2 lines ${b.out[0]}, ≤10 ${b.out[1]}, ≤50 ${b.out[2]}, farther ${b.beyond}, word not in that file ${b.nowhere}`; };
+const describePoints = v => { const b = buckets(v, POINT_LIMITS); return `≤20 pt ${b.out[0]}, ≤100 pt ${b.out[1]}, farther ${b.beyond}, word not on that page ${b.nowhere}`; };
 function summarize(name, inv, dir) {
     const parts = [];
     if (inv) parts.push(`inverse ${inv.right}/${inv.words} right (${pct(inv.right, inv.words)}), line ${inv.line}, near ${inv.near}, wrong ${inv.wrong}, unmapped ${inv.unmapped} (no source ${inv.unsourced || 0}, click misses glyph ${inv.missed || 0}), followed to .bib/heading ${inv.followedRight || 0}/${inv.followed || 0}; ` +
         `generated ${inv.generatedMapped}/${inv.generated} mapped, figure text ${inv.figure}; p50 ${quantile(inv.ms, 0.5)?.toFixed(3)} ms`);
+    if (inv && inv.missLines?.length) parts.push(`wrong clicks land ${describeLines(inv.missLines)}`);
+    if (dir && dir.missPoints?.length) parts.push(`wrong highlights ${describePoints(dir.missPoints)}`);
     if (dir) parts.push(`direct ${dir.right}/${dir.words} right (${pct(dir.right, dir.words)}), empty ${dir.empty}, wrong ${dir.wrong}; p50 ${quantile(dir.ms, 0.5)?.toFixed(3)} ms p90 ${quantile(dir.ms, 0.9)?.toFixed(3)} ms`);
     console.log(`  ${name}: ${parts.join(' | ')}`);
 }
-const strip = r => r && ({ ...r, ms: undefined, p50_ms: quantile(r.ms, 0.5), p90_ms: quantile(r.ms, 0.9) });
+const strip = r => r && ({ ...r, ms: undefined, p50_ms: quantile(r.ms, 0.5), p90_ms: quantile(r.ms, 0.9),
+    missLines: undefined, missPoints: undefined,
+    miss_lines: r.missLines && buckets(r.missLines, LINE_LIMITS), miss_points: r.missPoints && buckets(r.missPoints, POINT_LIMITS) });
 
 async function paper(source, main) {
     const run = fs.mkdtempSync(path.join(os.tmpdir(), 'wpaper-search-'));
@@ -346,6 +377,12 @@ async function main() {
         const dir = Object.values(report).map(r => r[state]?.direct).filter(Boolean);
         const sum = (list, key) => list.reduce((n, r) => n + (r[key] || 0), 0);
         if (!inv.length) continue;
+        const merge = (list, key, limits) => list.reduce((acc, r) => { const b = r[key]; if (!b) return acc;
+            b.out.forEach((v, i) => { acc.out[i] += v; }); acc.beyond += b.beyond; acc.nowhere += b.nowhere; return acc; },
+            { out: limits.map(() => 0), beyond: 0, nowhere: 0 });
+        const ml = merge(inv, 'miss_lines', LINE_LIMITS), mp = merge(dir, 'miss_points', POINT_LIMITS);
+        console.log(`${state} misses: wrong clicks ≤2 lines ${ml.out[0]}, ≤10 ${ml.out[1]}, ≤50 ${ml.out[2]}, farther ${ml.beyond}, word not in that file ${ml.nowhere}; ` +
+            `wrong highlights ≤20 pt ${mp.out[0]}, ≤100 pt ${mp.out[1]}, farther ${mp.beyond}, word not on that page ${mp.nowhere}`);
         console.log(`${state}: inverse ${pct(sum(inv, 'right'), sum(inv, 'words'))} right (+${pct(sum(inv, 'line'), sum(inv, 'words'))} same line, ` +
             `${sum(inv, 'wrong')} wrong, ${sum(inv, 'unmapped')} unmapped [no source ${sum(inv, 'unsourced')}, click misses ${sum(inv, 'missed')}] of ${sum(inv, 'words')} typed words; ` +
             `generated ${pct(sum(inv, 'generatedMapped'), sum(inv, 'generated'))} mapped of ${sum(inv, 'generated')}, figure text ${sum(inv, 'figure')}); ` +

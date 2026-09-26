@@ -111,8 +111,15 @@ test('native cursor admission uses worker membership instead of enclosing ranges
     assert.deepEqual(requested, ['paper.tex', 4, 1]);
     assert.equal(rects.length, 1);
     assert.equal(rects[0].x, map.glyphsForLine(file, 4)[1].x);
+    // A position that prints nothing lights the nearest printed glyph of its
+    // line (column 1 is nearer to 2 than column 0), marked approximate.
     source.forward = async () => ({ hits:[] });
-    assert.deepEqual(await map.forwardAt(file, 4, 2), []);
+    const near = await map.forwardAt(file, 4, 2);
+    assert.equal(near.length, 1);
+    assert.equal(near[0].x, map.glyphsForLine(file, 4)[1].x);
+    assert.equal(near[0].approximate, true);
+    // Nothing printed within two lines: nothing.
+    assert.deepEqual(await map.forwardAt(file, 9, 0), []);
     source.forward = async () => { invalidate(); return { hits:[view.pages[0].hits[0]] }; };
     assert.equal(await map.forwardAt(file, 4, 0), null);
 });
@@ -332,4 +339,63 @@ test('a letter \\MakeUppercase rebuilt takes the source of a typed letter of its
     assert.deepEqual([c.line, c.column], [7, 9], 'C answers with A, typed in \\author');
     const d = map.renderToSource(1, ...centre(map, 3));
     assert.deepEqual([d.line, d.column], [12, 0], 'D, in another word, keeps its own answer');
+});
+
+test('a click next to ink lands on the nearest sourced glyph of its line; far from any, nowhere', () => {
+    const { map } = fixture();
+    const [first, second] = map.glyphsForLine(file, 4);
+    // Between the two glyph boxes (they are 8 wide, 10 apart): the nearer.
+    const gap = map.renderToSource(1, second.x - 0.5, second.y + second.boxHeight / 2);
+    assert.equal(gap.approximate, true);
+    assert.equal(gap.column, 1);
+    // Just above the line, within a line's height: still that line.
+    assert.equal(map.renderToSource(1, first.x + first.w / 2, first.y - 3).column, 0);
+    // Two lines' height above, or an inch and more along: nothing.
+    assert.equal(map.renderToSource(1, first.x + first.w / 2, first.y - 40).flag, 'unmapped');
+    assert.equal(map.renderToSource(1, second.x + second.w + 80, second.y + 2).flag, 'unmapped');
+});
+
+test('a click on text a preamble macro defined lands on its call in the body', () => {
+    const text = ['\\documentclass{article}', '\\DeclareMathOperator{\\Gr}{Gr}', '\\begin{document}', 'See $\\Gr(k,n)$ here.', '\\emph{typed}', '\\end{document}'].join('\n');
+    const at = (line, column) => ({ file: 'paper.tex', location: { compiled_revision: 0, current_revision: 1,
+        start: { line, column_utf16: column }, end: { line, column_utf16: column + 1 }, accuracy: 'Exact' } });
+    const hit = (id, x, definition, invocation) => {
+        const h = glyphAt(id, x, { preferred_source: at(definition.line, definition.column),
+            mapped_origins: [definition, invocation].map(sp => ({ span: { tag: 1, length: 1, ...sp }, source: at(sp.line, sp.column) })) });
+        h.item.provenance = { definition: { tag: 1, ...definition }, invocation: { tag: 1, ...invocation } };
+        return h;
+    };
+    const view = { generation: 1, sequence: 1, artifact: { page_count: 1, pdf_hash: 'h' },
+        pages: [{ page: 1, header: { magnification: 1000 }, hits: [
+            hit(0, 0, { line: 2, column: 26 }, { line: 4, column: 5 }),     // "G" of \Gr: defined in the preamble
+            hit(1, 30, { line: 5, column: 6 }, { line: 5, column: 0 }),     // "t" of \emph{typed}: typed in the body
+        ] }] };
+    const map = new NativeMap({ generation: { pdfHash: 'h', projectDir: root }, nativeView: view,
+        nativeSource: { isCurrentView: () => true, files: new Map([['paper.tex', { text }]]) } });
+    const gr = map.renderToSource(1, ...centre(map, 0));
+    assert.deepEqual([gr.line, gr.column], [4, 5], 'the \\Gr in the text, not its definition');
+    const typed = map.renderToSource(1, ...centre(map, 1));
+    assert.deepEqual([typed.line, typed.column], [5, 6], 'an argument keeps where it was typed');
+});
+
+test('a title typed in the preamble keeps its own line; a multi-line macro body does not', () => {
+    const text = ['\\documentclass{article}', '\\title{Walking flows}', '\\newcommand{\\Gr}{%', '  \\mathrm{Gr}}',
+        '\\begin{document}', '\\maketitle', 'See $\\Gr$.', '\\end{document}'].join('\n');
+    const at = (line, column) => ({ file: 'paper.tex', location: { compiled_revision: 0, current_revision: 1,
+        start: { line, column_utf16: column }, end: { line, column_utf16: column + 1 }, accuracy: 'Exact' } });
+    const hit = (id, x, definition, invocation) => {
+        const h = glyphAt(id, x, { preferred_source: at(definition.line, definition.column),
+            mapped_origins: [definition, invocation].map(sp => ({ span: { tag: 1, length: 1, ...sp }, source: at(sp.line, sp.column) })) });
+        h.item.provenance = { definition: { tag: 1, ...definition }, invocation: { tag: 1, ...invocation } };
+        return h;
+    };
+    const view = { generation: 1, sequence: 1, artifact: { page_count: 1, pdf_hash: 'h' },
+        pages: [{ page: 1, header: { magnification: 1000 }, hits: [
+            hit(0, 0, { line: 2, column: 7 }, { line: 6, column: 0 }),      // "W" of the title, printed by \maketitle
+            hit(1, 30, { line: 4, column: 11 }, { line: 7, column: 5 }),    // "G" in \Gr's body, a line below \newcommand
+        ] }] };
+    const map = new NativeMap({ generation: { pdfHash: 'h', projectDir: root }, nativeView: view,
+        nativeSource: { isCurrentView: () => true, files: new Map([['paper.tex', { text }]]) } });
+    assert.equal(map.renderToSource(1, ...centre(map, 0)).line, 2, 'the title line, not \\maketitle');
+    assert.equal(map.renderToSource(1, ...centre(map, 1)).line, 7, 'the \\Gr in the text, not the macro body');
 });

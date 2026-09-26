@@ -3069,8 +3069,12 @@ class TexViewer {
                     instant:!!opts.instant, label:`selected lines ${position.line + 1}–${end.line + 1}` });
                 return;
             }
-            this._post({ type:'highlight', rects, exact:true,
-                label: rects.length ? `line ${position.line + 1}` : 'no printed source at this cursor',
+            // Text that prints nothing of its own lights the nearest printed
+            // glyph instead (NativeMap._nearestPrinted), and says so.
+            const near = rects.some(r => r.approximate);
+            this._post({ type:'highlight', rects, exact:!near,
+                label: !rects.length ? 'no printed source at this cursor'
+                    : near ? `nearest printed text to line ${position.line + 1}` : `line ${position.line + 1}`,
                 reveal: !opts.preserveView && this._mayScroll() && Date.now() - this._invertedAt >= 1500,
                 instant: !!opts.instant });
         } catch (error) {

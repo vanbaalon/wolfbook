@@ -127,7 +127,7 @@ exports.run = async function () {
                 editor.selection = new vscode.Selection(s.line, s.column, s.line, s.column);
                 viewer.syncFromEditor(editor, { userCursorGesture: true });
                 let rects = null;
-                await until(() => { const m = posted.slice(since).map(p => p.message).find(m => m.exact && Array.isArray(m.rects)); rects = m?.rects || null; return !!m; },
+                await until(() => { const m = posted.slice(since).map(p => p.message).find(m => Array.isArray(m.rects) && (m.rects.length || m.label)); rects = m?.rects || null; return !!m; },
                     'a highlight', 1500).catch(() => {});
                 out.ms.push(performance.now() - t);
                 if (!rects || !rects.length) { out.empty++; if (out.examples.length < 10) out.examples.push({ kind: 'empty', line: s.line + 1, word: s.word }); continue; }

@@ -53,6 +53,40 @@ function projectFiles(dir, extension, depth = 3) {
     return out;
 }
 
+/**
+ * Whether the end of `text` — which starts at a defining command
+ * (`\newcommand{\foo}[1]{…`, `\def\foo#1{…`) — is inside the definition's
+ * body: the name, then the argument groups this kind of definition takes (one
+ * body; `\newenvironment` and `\NewDocumentCommand` two), not yet all closed.
+ */
+function insideDefinition(text) {
+    const head = /^\\([A-Za-z]+)\*?/.exec(text);
+    if (!head) return false;
+    let i = head[0].length;
+    const spaces = () => { while (i < text.length && /\s/.test(text[i])) i++; };
+    const controlSequence = () => { i++; if (/[A-Za-z]/.test(text[i] || '')) while (/[A-Za-z]/.test(text[i] || '')) i++; else i++; };
+    let needed;
+    spaces();
+    if (/^[gex]?def$/.test(head[1])) {
+        if (text[i] === '\\') controlSequence();
+        needed = 1;
+    } else {
+        const braced = text[i] !== '\\';
+        if (!braced) controlSequence();
+        needed = (braced ? 1 : 0) + ({ NewDocumentCommand: 2, RenewDocumentCommand: 2, DeclareDocumentCommand: 2,
+            newenvironment: 2, renewenvironment: 2 }[head[1]] || 1);
+    }
+    let depth = 0, closed = 0;
+    for (; i < text.length; i++) {
+        const c = text[i];
+        if (c === '\\') { i++; continue; }
+        if (c === '%') { while (i < text.length && text[i] !== '\n') i++; continue; }
+        if (c === '{') depth++;
+        else if (c === '}' && --depth === 0 && ++closed >= needed) return false;
+    }
+    return depth > 0;
+}
+
 class NativeMap extends RenderMap {
     constructor(o = {}) {
         super({ ...o, generation: { ...o.generation, synctexPath: null }, synctexDoc: null });
@@ -155,6 +189,7 @@ class NativeMap extends RenderMap {
         // The worker admits the actual anchor, not its translated enclosing
         // range: newly inserted text must not borrow an old glyph's geometry.
         if (!this.available) return null;
+        if (!answer.hits.length) return this._nearestPrinted(file, line, column);
         const selected = [];
         for (const hit of answer.hits) {
             const entry = this._byItem.get(hit.item_id);
@@ -244,8 +279,53 @@ class NativeMap extends RenderMap {
     }
     renderToSource(page, x, y) {
         const hit = this._wordTyped(page, this._under(page, x, y));
-        if (!hit) return this._generatedAt(page, x, y) || { flag: FLAG.UNMAPPED, reason: 'no native source box contains this point' };
+        if (!hit) return this._generatedAt(page, x, y) || this._nearestAt(page, x, y) ||
+            { flag: FLAG.UNMAPPED, reason: 'no native source box contains this point' };
         return this._sourceOf(hit, page, x, y);
+    }
+
+    /**
+     * NEAR, RATHER THAN NOTHING. A point on ink with no source of its own (a
+     * gap between glyph boxes, a rule, a letter a macro built) answers with
+     * the nearest sourced glyph — on the same line first: at most a line's
+     * height away, an inch along it. Farther (a margin, inside a figure) it
+     * answers nothing, rather than somewhere unrelated. Marked `approximate`.
+     */
+    _nearestAt(page, x, y) {
+        if (!this.available) return null;
+        let best = null, cost = Infinity;
+        for (const e of this._pages.get(page) || []) {
+            if (!e.file) continue;
+            const dx = Math.max(0, e.x - x, x - (e.x + e.w)), dy = Math.max(0, e.y - y, y - (e.y + e.boxHeight));
+            if (dy > Math.max(6, e.boxHeight) || dx > 72) continue;
+            const c = dx + 4 * dy;
+            if (c < cost) { cost = c; best = e; }
+        }
+        const hit = best && this._wordTyped(page, [best]);
+        return hit ? { ...this._sourceOf(hit, page, x, y), approximate: true, exact: false } : null;
+    }
+
+    /**
+     * The glyphs printed nearest a source position that prints none itself
+     * (a letter `\MakeUppercase` rebuilt, a character a macro swallowed): on
+     * its line, the glyph whose source column is closest; else on the nearest
+     * line within two that prints. Empty when nothing near prints.
+     */
+    _nearestPrinted(file, line, column) {
+        const absolute = path.resolve(file);
+        for (const delta of [0, -1, 1, -2, 2]) {
+            let best = null, distance = Infinity;
+            for (const e of this.glyphsForLine(absolute, line + delta)) {
+                for (const origin of e.hit.mapped_origins || []) {
+                    const at = origin.source.location.start;
+                    if (at.line !== line + delta || path.resolve(this.projectDir, origin.source.file) !== absolute) continue;
+                    const d = delta === 0 ? Math.abs(at.column_utf16 - column) : at.column_utf16;
+                    if (d < distance) { distance = d; best = e; }
+                }
+            }
+            if (best) return [{ page: best.page, x: best.x, y: best.y, w: best.w, h: best.boxHeight, approximate: true }];
+        }
+        return [];
     }
 
     /** Every glyph under the point, sourced or not, in paint order. */
@@ -379,20 +459,67 @@ class NativeMap extends RenderMap {
         catch (_) { return this.renderToSource(page, x, y); }
         if (!this.available) return { flag: FLAG.UNMAPPED, reason: 'the native map changed during the query' };
         const glyph = this._wordTyped(page, (reply.hits || []).map(h => this._byItem.get(h.item_id)).filter(Boolean));
-        if (!glyph) return this._generatedAt(page, x, y) || { flag: FLAG.UNMAPPED, reason: 'no native source glyph under this point' };
+        if (!glyph) return this._generatedAt(page, x, y) || this._nearestAt(page, x, y) ||
+            { flag: FLAG.UNMAPPED, reason: 'no native source glyph under this point' };
         return this._sourceOf(glyph, page, x, y);
     }
+    /**
+     * WHERE THE READER MEANT. A glyph's characters are written where they are
+     * defined; for a macro's body (`\DeclareMathOperator{\Gr}{Gr}`, a
+     * `\newcommand`) that is the preamble or a package, far from the `\Gr`
+     * in the text that printed it. A click answers with that call site when
+     * the definition is in a preamble or package and the call is not; text
+     * typed in the body (a macro's argument) keeps its own position.
+     */
+    _clickSource(hit) {
+        const preferred = hit.preferred_source;
+        const { definition, invocation } = hit.item?.provenance || {};
+        if (!preferred || !definition?.tag || !invocation?.tag) return preferred;
+        const origin = span => (hit.mapped_origins || []).find(o =>
+            o.span.tag === span.tag && o.span.line === span.line && o.span.column === span.column)?.source;
+        const defined = origin(definition), called = origin(invocation);
+        if (!defined || !called || defined === called) return preferred;
+        return this._inDefinition(defined) && !this._inDefinition(called) ? called : preferred;
+    }
+
+    /**
+     * Whether a source position is inside a macro definition — the body of a
+     * `\newcommand`, `\def`, `\DeclareMathOperator`, … (the command on its
+     * line or up to eight lines above, its braces still open there) — or in a
+     * package or class file. Not the rest of a preamble: `\title{…}` and
+     * `\author{…}` are typed there and print where `\maketitle` puts them.
+     */
+    _inDefinition(source) {
+        const file = path.resolve(this.projectDir, source.file);
+        if (!/\.(tex|ltx)$/i.test(file)) return true;
+        const relative = path.relative(this.projectDir, file).split(path.sep).join('/');
+        const lines = (this.source?.files?.get?.(relative)?.text ?? (linesOf(this._files, file) || []).join('\n')).split('\n');
+        const { line, column_utf16: column } = source.location.start;
+        const DEFINES = /\\(?:(?:re)?newcommand|providecommand|DeclareRobustCommand|DeclareMathOperator|(?:re)?newenvironment|[gex]?def|NewDocumentCommand|RenewDocumentCommand|DeclareDocumentCommand)\b/;
+        for (let first = line - 1; first >= Math.max(0, line - 9); first--) {
+            const at = (lines[first] || '').replace(/(^|[^\\])%.*$/, '$1').search(DEFINES);
+            if (at < 0) continue;
+            const span = first === line - 1
+                ? (lines[first] || '').slice(at, Math.max(at, column))
+                : [(lines[first] || '').slice(at), ...lines.slice(first + 1, line - 1), (lines[line - 1] || '').slice(0, column)].join('\n');
+            if (insideDefinition(span)) return true;
+        }
+        return false;
+    }
+
     _sourceOf(glyph, page, x, y) {
-        const location = glyph.hit.preferred_source.location;
+        const chosen = this._clickSource(glyph.hit);
+        const location = chosen.location;
+        const file = chosen === glyph.hit.preferred_source ? glyph.file : path.resolve(this.projectDir, chosen.file);
         const exact = location.accuracy === 'Exact';
-        const origin = glyph.hit.mapped_origins.find(o => o.source.file === glyph.hit.preferred_source.file &&
+        const origin = glyph.hit.mapped_origins.find(o => o.source.file === chosen.file &&
             o.source.location.start.line === location.start.line && o.source.location.start.column_utf16 === location.start.column_utf16 &&
             o.source.location.end.line === location.end.line && o.source.location.end.column_utf16 === location.end.column_utf16);
-        return { flag: FLAG.PROBABLY_CURRENT, file: glyph.file,
+        return { flag: FLAG.PROBABLY_CURRENT, file,
             line: location.start.line, column: location.start.column_utf16, sourceRange: location,
             generationLine: exact ? origin?.span.line : undefined,
-            box: { page, xBp: glyph.x, yTopBp: glyph.y, wBp: glyph.w, hBp: glyph.boxHeight, kind: 'native', line: glyph.line },
-            object: this.objectAtLine(glyph.file, glyph.line) || undefined,
+            box: { page, xBp: glyph.x, yTopBp: glyph.y, wBp: glyph.w, hBp: glyph.boxHeight, kind: 'native', line: location.start.line },
+            object: this.objectAtLine(file, location.start.line) || undefined,
             candidates: (this._pages.get(page) || []).filter(e => x >= e.x && x <= e.x+e.w && y >= e.y && y <= e.y+e.boxHeight).length,
             exact, glyph, nativeHit: glyph.hit };
     }
