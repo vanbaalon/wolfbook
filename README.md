@@ -306,3 +306,7 @@ If Wolfbook supports your research, a brief mention in the acknowledgements help
 Wolfbook was heavily inspired by and initially based on the official `vscode-wolfram` extension by Wolfram Research Inc. (Apache 2.0). The LSP client layer and kernel-finding logic originate from that project. The notebook frontend and the entire kernel backend have since been rewritten from scratch.
 
 Special thanks to **Ruben Myers** for his help compiling the Unix build of the native binaries — the WSTP bridge and the `btl` math renderer are native addons that must be built per platform, and that work is what makes Wolfbook usable outside macOS and Windows.
+
+WPaper's LaTeX mode uses pdf.js and WLaTeX (Tectonic, XeTeX, dvipdfmx); its TikZ picture
+editor writes PGF/TikZ, tikz-feynman and tikz-cd and takes ideas from KtikZ and Inkscape.
+See [ACKNOWLEDGEMENTS.md](ACKNOWLEDGEMENTS.md).
