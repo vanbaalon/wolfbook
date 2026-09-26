@@ -34,7 +34,7 @@ const FEYNMAN_EDGES = [
 const FEYNMAN_VERTICES = [
     ['', 'Vertex', 'feyn-vertex'], ['dot', 'Dot', 'feyn-dot'], ['empty dot', 'Empty dot', 'feyn-empty-dot'],
     ['crossed dot', 'Crossed dot', 'feyn-crossed-dot'], ['square dot', 'Square dot', 'feyn-square-dot'],
-    ['blob', 'Blob (hatched: shown from the PDF)', 'feyn-blob'],
+    ['blob', 'Blob', 'feyn-blob'],
 ];
 
 const ITEMS = [

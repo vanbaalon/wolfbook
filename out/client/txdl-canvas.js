@@ -334,6 +334,13 @@ function identityMatrix(matrix) {
  * drawn), and one that cannot be drawn puts the page on the PDF fallback.
  */
 export function createTxdlRenderer(options = {}) {
+  /** A drawing surface for pattern tiles. */
+  const makeCanvas = (w, h) => {
+    if (typeof options.createCanvas === 'function') return options.createCanvas(w, h);
+    if (typeof OffscreenCanvas === 'function') return new OffscreenCanvas(w, h);
+    if (typeof document !== 'undefined') { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; }
+    return null;
+  };
   const requestOutlines = options.requestOutlines;
   if (typeof requestOutlines !== 'function') {
     throw new TypeError('createTxdlRenderer needs a requestOutlines(fontDigest, gids) function');
@@ -498,13 +505,73 @@ export function createTxdlRenderer(options = {}) {
     // colour-stack change sets fill and stroke, as dvipdfmx does.
     let color = ink;
     const stack = [];
-    let gs = { fill: ink, stroke: ink, lineWidth: 1, cap: 0, join: 0, miter: 10, dash: null };
+    let gs = { fill: ink, stroke: ink, lineWidth: 1, cap: 0, join: 0, miter: 10, dash: null, fillPattern: null };
+    // Tiling patterns defined on this page, and their tiles per colour.
+    const patterns = new Map();
+    const tiles = new Map();
     const saved = [];
     useFill(color);
     // Open transforms (`pdf:btrans`/`x:gsave`); closed at the page's end.
     let transforms = 0;
     // CSS px per bp, for content-stream coordinates.
     const perBp = css.len(SP_PER_BP);
+
+    /**
+     * A CanvasPattern for a tiling pattern fill, anchored to the page's PDF
+     * space whatever the current transform. One cell is drawn with its
+     * neighbours' overflow (PDF cells may overlap their bounding box), in the
+     * fill's colour for an uncoloured pattern. Without canvas support (tests)
+     * the fill falls back to its colour.
+     */
+    function patternStyle(fillPattern) {
+      const def = patterns.get(fillPattern.name);
+      if (!def || typeof ctx.createPattern !== 'function') return null;
+      const color = rgbaToCss(fillPattern.color, gs.fill);
+      const key = `${def.name}|${color}`;
+      let tile = tiles.get(key);
+      const s = perBp * dpr;
+      if (tile === undefined) {
+        const w = Math.max(1, Math.round(def.xstep * s)), h = Math.max(1, Math.round(def.ystep * s));
+        const canvas = makeCanvas(w, h);
+        const t = canvas && canvas.getContext('2d');
+        tile = null;
+        if (t) {
+          const sx = w / def.xstep, sy = h / def.ystep;
+          for (const i of [-1, 0, 1]) for (const j of [-1, 0, 1]) {
+            for (const shape of def.shapes) {
+              const X = (u) => (u + i * def.xstep) * sx, Y = (v) => (def.ystep - (v + j * def.ystep)) * sy;
+              t.beginPath();
+              for (const seg of shape.segments) {
+                if (seg[0] === 'm') t.moveTo(X(seg[1]), Y(seg[2]));
+                else if (seg[0] === 'l') t.lineTo(X(seg[1]), Y(seg[2]));
+                else if (seg[0] === 'c') t.bezierCurveTo(X(seg[1]), Y(seg[2]), X(seg[3]), Y(seg[4]), X(seg[5]), Y(seg[6]));
+                else if (seg[0] === 're') t.rect(X(seg[1]), Y(seg[2]), seg[3] * sx, -seg[4] * sy);
+                else if (seg[0] === 'h') t.closePath();
+              }
+              t.fillStyle = color;
+              t.strokeStyle = color;
+              if (shape.fill) t.fill(shape.fill === 'evenodd' ? 'evenodd' : 'nonzero');
+              if (shape.stroke) { t.lineWidth = Math.max(shape.line_width * sx, 1); t.stroke(); }
+            }
+          }
+          const pattern = ctx.createPattern(canvas, 'repeat');
+          tile = pattern && { pattern, sx, sy };
+        }
+        tiles.set(key, tile);
+      }
+      if (!tile) return null;
+      // Tile pixels → pattern space → the page's default space (`matrix`) →
+      // CSS px → device, undone by the transform current at this fill.
+      if (typeof tile.pattern.setTransform === 'function' && typeof DOMMatrix === 'function' && ctx.getTransform) {
+        const [a, b, c, d, e, f] = def.matrix;
+        const img = new DOMMatrix([1 / tile.sx, 0, 0, -1 / tile.sy, 0, def.ystep]);
+        const toPage = new DOMMatrix([a, b, c, d, e, f]);
+        const toCss = new DOMMatrix([perBp, 0, 0, -perBp, 0, css.height]);
+        const device = new DOMMatrix([dpr, 0, 0, dpr, 0, 0]).multiply(toCss).multiply(toPage).multiply(img);
+        tile.pattern.setTransform(ctx.getTransform().inverse().multiply(device));
+      }
+      return tile.pattern;
+    }
 
     for (const op of (page && page.ops) || []) {
       switch (op.op) {
@@ -585,6 +652,10 @@ export function createTxdlRenderer(options = {}) {
           useFill(color);
           break;
         }
+        case 'pattern': {
+          patterns.set(op.name, op);
+          break;
+        }
         case 'gstate': {
           if (op.reset_color) {
             gs.fill = color;
@@ -597,6 +668,8 @@ export function createTxdlRenderer(options = {}) {
           if (op.line_join != null) gs.join = op.line_join;
           if (op.miter_limit != null) gs.miter = op.miter_limit;
           if (op.dash) gs.dash = op.dash;
+          if (op.fill_pattern) gs.fillPattern = op.fill_pattern;
+          else if (op.fill) gs.fillPattern = null;
           break;
         }
         case 'path': {
@@ -611,7 +684,11 @@ export function createTxdlRenderer(options = {}) {
             else if (seg[0] === 'h') ctx.closePath();
           }
           if (op.fill) {
-            useFill(gs.fill);
+            const style = gs.fillPattern ? patternStyle(gs.fillPattern) : null;
+            if (style) {
+              ctx.fillStyle = style;
+              fill = null;
+            } else useFill(gs.fill);
             ctx.fill(op.fill === 'evenodd' ? 'evenodd' : 'nonzero');
           }
           if (op.stroke) {
