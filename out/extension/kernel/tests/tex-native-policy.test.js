@@ -9,8 +9,25 @@ const stub = makeVscodeStub();
 stub.workspace.textDocuments = [];
 let configuredMapEngine = 'wlatex';
 let configuredTimeout = 180000;
-const observedTimeouts = [], observedEngines = [], notices = [];
+const observedTimeouts = [], observedEngines = [], notices = [], warnings = [];
 stub.window.showInformationMessage = async message => { notices.push(message); };
+// The writer's answer to "preview with WLaTeX anyway?" (undefined: dismissed).
+let warningPick;
+stub.window.showWarningMessage = async (message, ...choices) => { warnings.push({ message, choices }); return warningPick; };
+// A line/column range, installed by the tests that edit (others install theirs).
+class EditRange { constructor(l0, c0, l1, c1) { Object.assign(this, { l0, c0, l1, c1 }); } }
+stub.WorkspaceEdit = class { constructor() { this.edits = []; } replace(uri, range, text) { this.edits.push({ uri, range, text }); } };
+const docOf = file => { const lines = () => fs.readFileSync(file, 'utf8').split('\n');
+    return { uri: { fsPath: file }, get lineCount() { return lines().length; }, lineAt: n => ({ text: lines()[n] }) }; };
+stub.workspace.openTextDocument = async file => docOf(file);
+stub.workspace.applyEdit = async edit => {
+    for (const { uri, range, text } of edit.edits) {
+        const lines = fs.readFileSync(uri.fsPath, 'utf8').split('\n');
+        lines[range.l0] = lines[range.l0].slice(0, range.c0) + text + lines[range.l0].slice(range.c1);
+        fs.writeFileSync(uri.fsPath, lines.join('\n'));
+    }
+    return true;
+};
 let installed = true, constructorCalls = 0;
 stub.workspace.getConfiguration = () => ({ get: (key, fallback) =>
     ({ compileTimeoutMs:configuredTimeout, mapEngine: configuredMapEngine, wlatexDirectory: '/built/wlatex', authoritativeDelayMs: 0 })[key] ?? fallback });
@@ -132,10 +149,47 @@ test('a paper for another engine leaves the native lane: declared, or proven by 
         await f.coordinator.build(f.doc, { live:true, quiet:true });
         assert.equal(nativeCalls, native0 + 2);
         assert.equal(f.state.nativeOff, null);
-        // Each reason was said once, as a notice.
-        assert.equal(notices.filter(m => /^Live preview is off for paper\.tex/.test(m)).length, 3);
-        assert.ok(notices.some(m => /written for pdflatex \(\\pdfoutput=1, line 1\).*builds it with pdflatex.*% !TEX program = xelatex/.test(m)), notices.join('\n'));
+        // Each reason was said once: the declared engine and the failed build
+        // as notices, the one only shown (\pdfoutput) as a warning with a choice.
+        assert.equal(notices.filter(m => /^Live preview is off for paper\.tex/.test(m)).length, 2);
+        const offered = warnings.filter(w => /^Live preview is off for paper\.tex/.test(w.message));
+        assert.equal(offered.length, 1);
+        assert.match(offered[0].message, /written for pdflatex \(\\pdfoutput=1, line 1\).*may differ slightly.*line 1 to "\\ifdefined\\pdfoutput\\pdfoutput=1\\fi"/);
+        assert.deepEqual(offered[0].choices, ['Preview with WLaTeX', 'Keep pdflatex', 'Show log']);
     } finally { nativeDocumentError = false; f.close(); }
+});
+
+test('the writer may preview a pdfLaTeX paper with WLaTeX after the warning', async () => {
+    const f = fixture();
+    const settle = () => new Promise(resolve => setTimeout(resolve, 20));
+    const savedRange = stub.Range;
+    stub.Range = EditRange;
+    try {
+        // Keep pdflatex: nothing changes.
+        warningPick = 'Keep pdflatex';
+        fs.writeFileSync(f.state.root, '\\pdfoutput=1 % for arXiv\n\\documentclass{article}\n\\begin{document}a');
+        const native0 = nativeCalls;
+        await f.coordinator.build(f.doc, { live:true, quiet:true });
+        await settle();
+        assert.equal(nativeCalls, native0);
+        assert.match(fs.readFileSync(f.state.root, 'utf8'), /^\\pdfoutput=1 % for arXiv/);
+        // Preview with WLaTeX: line 1 becomes engine-neutral and the paper builds natively.
+        warningPick = 'Preview with WLaTeX';
+        f.coordinator._nativeOffNotices.clear();
+        f.state.nativeOffLogged = null;
+        await f.coordinator.build(f.doc, { live:true, quiet:true });
+        await settle(); await settle();
+        assert.equal(fs.readFileSync(f.state.root, 'utf8').split('\n')[0], '\\ifdefined\\pdfoutput\\pdfoutput=1\\fi % for arXiv');
+        assert.ok(nativeCalls > native0, 'the rebuild after the choice ran on WLaTeX');
+        assert.equal(f.state.nativeOff, null);
+        // pdfTeX-only code without \pdfoutput: previewed as it is, for this preamble.
+        const before = nativeCalls;
+        fs.writeFileSync(f.state.root, '\\documentclass{article}\n\\input{glyphtounicode}\n\\begin{document}a');
+        await f.coordinator.build(f.doc, { live:true, quiet:true });
+        await settle(); await settle();
+        assert.ok(nativeCalls > before, 'the override applies to this preamble');
+        assert.match(fs.readFileSync(f.state.root, 'utf8'), /\\input\{glyphtounicode\}/, 'nothing rewritten');
+    } finally { warningPick = undefined; stub.Range = savedRange; f.close(); }
 });
 
 test('superseded native builds preserve last generation and do not report an error', async () => {

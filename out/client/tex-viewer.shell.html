@@ -1369,6 +1369,9 @@
   .pro-headstate { opacity:.75; font-size:11px; font-variant-numeric:tabular-nums; }
   .pro-reason { margin:0 0 8px; padding:6px 8px; border-radius:5px; font-size:11px;
               background:color-mix(in srgb, var(--vscode-editorWarning-foreground, #cca700) 14%, transparent); }
+  #prochoose { display:block; margin:0 0 8px; padding:4px 10px; border-radius:5px; font-weight:600; color:#fff;
+              background:linear-gradient(90deg, #8b5cf6, #0ea5e9); border:none; cursor:pointer; }
+  #prochoose[hidden] { display:none; }
   .pro-list { list-style:none; margin:0 0 8px; padding:0; display:grid; gap:6px; }
   .pro-list li { display:grid; grid-template-columns:104px 1fr; gap:8px; }
   .pro-k { font-weight:600; }
@@ -1462,6 +1465,7 @@
 <div id="propanel" role="dialog" aria-label="WLaTeX Pro" hidden>
   <div class="pro-head"><span class="pro-mark">WLaTeX<b>Pro</b></span><span class="pro-headstate"></span></div>
   <div class="pro-reason" hidden></div>
+  <button id="prochoose" hidden>Preview with WLaTeX</button>
   <ul class="pro-list">
     <li><span class="pro-k">Instant preview</span><span class="pro-d">The page follows every keystroke<span class="pro-v" id="pro-key"></span></span></li>
     <li><span class="pro-k">Exact search</span><span class="pro-d">Click any word for its source; the editor cursor shows on the page</span></li>

@@ -533,18 +533,81 @@ class RenderCoordinator {
      * is written for another engine (WLaTeX's live engine is XeTeX), so the
      * page follows saves through `engine` instead of every keystroke.
      */
-    _noticeNativeOff(root, reason, engine) {
+    _noticeNativeOff(root, reason, engine, choice = null) {
         this._nativeOffNotices ||= new Set();
         const key = `${root}\0${reason}`;
         if (this._nativeOffNotices.has(key)) return;
         this._nativeOffNotices.add(key);
-        const message = `Live preview is off for ${path.basename(root)}: ${reason}, and WLaTeX's live engine is XeTeX. ` +
+        const name = path.basename(root);
+        const show = 'Show log';
+        const intent = choice?.intent;
+        // THE WRITER CHOOSES. A paper that only shows it is written for
+        // pdfLaTeX (not one that declares it) may be previewed with WLaTeX
+        // anyway, after a warning: fonts and line breaks can differ a little
+        // from the pdflatex PDF. `\pdfoutput=1` would stop XeTeX, so that
+        // choice rewrites it as `\ifdefined\pdfoutput\pdfoutput=1\fi` —
+        // which pdflatex reads as before and arXiv still recognises — and the
+        // paper is then simply one WLaTeX builds. Other pdfTeX- or
+        // LuaTeX-only code is previewed as it is, for this preamble.
+        if (intent && !intent.why.startsWith('% !TEX')) {
+            const pdfoutput = intent.why === '\\pdfoutput=1' && intent.line;
+            const anyway = 'Preview with WLaTeX', keep = `Keep ${engine}`;
+            const message = `Live preview is off for ${name}: ${reason}, and WLaTeX's live engine is XeTeX. ` +
+                `WLaTeX can preview it anyway; fonts and line breaks may differ slightly from the ${engine} PDF. ` +
+                (pdfoutput ? `This changes line ${intent.line} to "\\ifdefined\\pdfoutput\\pdfoutput=1\\fi", which ${engine} and arXiv read as before. ` : '') +
+                `An explicit Compile still uses ${engine}.`;
+            Promise.resolve(vscode.window.showWarningMessage(message, anyway, keep, show))
+                .then(async pick => {
+                    if (pick === show) this.output.show(true);
+                    if (pick === anyway) await this.chooseNative(root);
+                })
+                .catch(() => { /* a notice must never break compiling */ });
+            return;
+        }
+        const message = `Live preview is off for ${name}: ${reason}, and WLaTeX's live engine is XeTeX. ` +
             `WPaper builds it with ${engine}, and the page updates when you save. ` +
             'To preview it live, put "% !TEX program = xelatex" on its first line.';
-        const show = 'Show log';
         Promise.resolve(vscode.window.showInformationMessage(message, show))
             .then(pick => { if (pick === show) this.output.show(true); })
             .catch(() => { /* a notice must never break compiling */ });
+    }
+
+    /**
+     * The writer chose WLaTeX for a paper written for another engine (from
+     * the warning, or the WLaTeX Pro badge at any time): `\pdfoutput=1` is
+     * made engine-neutral, other pdfTeX- or LuaTeX-only code is previewed as
+     * it is while the preamble stays the same. Resolves false when the paper
+     * declares its engine (`% !TEX program`) or nothing was in the way.
+     */
+    async chooseNative(root) {
+        const st = this.roots.get(root);
+        if (!st) return false;
+        const hints = paperEngineHints(root, this.liveOverlay(root));
+        const intent = hints?.intent;
+        if (!intent || ['xelatex', 'xetex'].includes(intent.program) || intent.why.startsWith('% !TEX')) return false;
+        const doc = await vscode.workspace.openTextDocument(root);
+        const name = path.basename(root);
+        if (intent.why === '\\pdfoutput=1' && intent.line) {
+            if (!await this._neutralizePdfoutput(doc, intent.line)) return false;
+            this.log(`WLaTeX chosen for ${name}: line ${intent.line} now reads \\ifdefined\\pdfoutput\\pdfoutput=1\\fi`);
+        } else {
+            st.nativeOverride = hints.preamble;
+            this.log(`WLaTeX chosen for ${name} while its preamble stays as it is`);
+        }
+        st.nativeOffLogged = null;
+        await this.build(doc, { quiet: true });
+        return true;
+    }
+
+    /** `\pdfoutput=1` on `line` (1-based) → `\ifdefined\pdfoutput\pdfoutput=1\fi`, as one edit. */
+    async _neutralizePdfoutput(doc, line) {
+        if (line < 1 || line > doc.lineCount) return false;
+        const text = doc.lineAt(line - 1).text;
+        const m = /\\pdfoutput\s*=?\s*1\b/.exec(text);
+        if (!m || /\\ifdefined\s*\\pdfoutput/.test(text)) return false;
+        const edit = new vscode.WorkspaceEdit();
+        edit.replace(doc.uri, new vscode.Range(line - 1, m.index, line - 1, m.index + m[0].length), `\\ifdefined\\pdfoutput${m[0]}\\fi`);
+        return vscode.workspace.applyEdit(edit);
     }
 
     /** Feed an edit through, so the map can translate rather than go stale. */
@@ -660,18 +723,23 @@ class RenderCoordinator {
         // this paper off the native lane until its preamble changes.
         const hints = mapEngine === 'wlatex' ? paperEngineHints(root, overlay) : null;
         if (st.nativeIncompatible && st.nativeIncompatible.preamble !== hints?.preamble) st.nativeIncompatible = null;
-        const intent = hints?.intent && !['xelatex', 'xetex'].includes(hints.intent.program) ? hints.intent : null;
+        // The writer chose WLaTeX for this preamble anyway (see _noticeNativeOff).
+        const overridden = !!hints?.preamble && st.nativeOverride === hints.preamble;
+        const intent = hints?.intent && !['xelatex', 'xetex'].includes(hints.intent.program) && !overridden ? hints.intent : null;
         const where = intent ? `${intent.why}${intent.line ? `, line ${intent.line}` : ''}` : '';
         st.nativeOff = intent ? (intent.why.startsWith('% !TEX') ? `the paper asks for ${intent.program} (${where})`
             : `the paper is written for ${intent.program} (${where})`) : st.nativeIncompatible?.reason || null;
         // The conventional build then uses the engine the paper is written
         // for, whatever `wolfbook.tex.engine` says.
         st.nativeOffEngine = intent && ['pdflatex', 'lualatex'].includes(intent.program) ? intent.program : null;
+        // Shown, not declared: the writer may choose WLaTeX anyway (chooseNative).
+        st.nativeOffChoosable = !!intent && !intent.why.startsWith('% !TEX');
         if (wantNative && st.nativeOff) {
             if (st.nativeOffLogged !== st.nativeOff) {
                 this.log(`WLaTeX not used: ${st.nativeOff}`);
                 st.nativeOffLogged = st.nativeOff;
-                this._noticeNativeOff(root, st.nativeOff, st.nativeOffEngine || cfg0.get('engine', 'pdflatex'));
+                this._noticeNativeOff(root, st.nativeOff, st.nativeOffEngine || cfg0.get('engine', 'pdflatex'),
+                    intent ? { intent, st, preamble: hints.preamble } : null);
             }
             wantNative = false;
             // A pdfLaTeX paper is built with pdflatex (SyncTeX), not

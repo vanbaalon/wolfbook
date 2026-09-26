@@ -231,7 +231,12 @@ function setEngineBadge(msg) {
     const reason = panel.querySelector('.pro-reason');
     reason.hidden = engine.state !== 'off';
     reason.textContent = engine.state === 'off'
-        ? `Off for this paper: ${engine.reason || 'it needs another engine'}. Put "% !TEX program = xelatex" on its first line to use WLaTeX.` : '';
+        ? `Off for this paper: ${engine.reason || 'it needs another engine'}. ` + (engine.choosable
+            ? 'You can preview it with WLaTeX anyway; fonts and line breaks may differ slightly from the other engine\'s PDF.' +
+                ((/\\pdfoutput=1, line (\d+)/.exec(engine.reason || '') || [])[1]
+                    ? ` Line ${/\\pdfoutput=1, line (\d+)/.exec(engine.reason)[1]} becomes \\ifdefined\\pdfoutput\\pdfoutput=1\\fi, which pdflatex and arXiv read as before.` : '')
+            : 'Put "% !TEX program = xelatex" on its first line to use WLaTeX.') : '';
+    el('prochoose').hidden = !(engine.state === 'off' && engine.choosable);
     const last = el('pro-key');
     if (last) last.textContent = key ? `last: ${key}` : '';
     el('promarks').checked = proLiveMarks();
@@ -251,6 +256,7 @@ el('probadge')?.addEventListener('click', (e) => {
     el('probadge').setAttribute('aria-expanded', String(open));
 });
 el('propanel')?.addEventListener('click', (e) => e.stopPropagation());
+el('prochoose')?.addEventListener('click', () => { vscode.postMessage({ type: 'chooseNative' }); closeProPanel(); });
 document.addEventListener('click', closeProPanel);
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !el('propanel')?.hidden) closeProPanel(); });
 el('promarks')?.addEventListener('change', (e) => {

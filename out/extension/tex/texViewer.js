@@ -1241,6 +1241,7 @@ class TexViewer {
         else state = 'settled';
         const t = st?.livePreviewStats || {};
         this._post({ type:'engine', state, reason: state === 'off' ? st.nativeOff : null,
+            choosable: state === 'off' && !!st?.nativeOffChoosable,
             interactive: !!st?.nativeLane?.interactive, keyMs: t.sinceKeyMs ?? null,
             firstChangedMs: t.firstChangedMs ?? null, recomputed: t.recomputed ?? null, reused: t.reused ?? null,
             pages: gen?.pageCount ?? null });
@@ -4160,6 +4161,11 @@ class TexViewer {
             // persistence follows through the ordinary viewstate snapshot.
             case 'fitMode': break;
             case 'recompile': await this.rebuild(); break;
+            // The WLaTeX Pro panel's "Preview with WLaTeX" for a paper written
+            // for another engine (renderUi's chooseNative).
+            case 'chooseNative':
+                if (this.root && typeof this.coord.chooseNative === 'function') await this.coord.chooseNative(this.root);
+                break;
             case 'saveSource': await this._savePaperSources(); break;
             case 'traceRetry': {
                 // A dropped/stale pause message must not permanently swallow
