@@ -505,7 +505,15 @@ export function createTxdlRenderer(options = {}) {
     // colour-stack change sets fill and stroke, as dvipdfmx does.
     let color = ink;
     const stack = [];
-    let gs = { fill: ink, stroke: ink, lineWidth: 1, cap: 0, join: 0, miter: 10, dash: null, fillPattern: null };
+    let gs = { fill: ink, stroke: ink, lineWidth: 1, cap: 0, join: 0, miter: 10, dash: null, fillPattern: null, fillAlpha: 1, strokeAlpha: 1 };
+    // Constant opacity (ExtGState `ca`/`CA`), set just before each paint.
+    let alphaNow = 1;
+    const useAlpha = (a) => {
+      if (alphaNow !== a) {
+        ctx.globalAlpha = a;
+        alphaNow = a;
+      }
+    };
     // Tiling patterns defined on this page, and their tiles per colour.
     const patterns = new Map();
     const tiles = new Map();
@@ -583,6 +591,7 @@ export function createTxdlRenderer(options = {}) {
           }
           const sizePt = spToPt(font.size_sp);
           useFill(gs.fill);
+          useAlpha(gs.fillAlpha);
           // XeTeX's synthetic effects (fontspec FakeSlant/FakeStretch/
           // FakeBold, xeCJK's AutoFake*): 16.16 factors, and an outline
           // stroke width in pt for embolden.
@@ -633,6 +642,7 @@ export function createTxdlRenderer(options = {}) {
         case 'rule': {
           if (!(op.w > 0) || !(op.h > 0)) break; // DVI: only positive rules paint
           useFill(gs.fill);
+          useAlpha(gs.fillAlpha);
           // `y` is the rule's bottom edge; it extends up by `h`.
           ctx.fillRect(css.x(op.x), css.y(op.y - op.h), css.len(op.w), css.len(op.h));
           result.rules += 1;
@@ -668,6 +678,8 @@ export function createTxdlRenderer(options = {}) {
           if (op.line_join != null) gs.join = op.line_join;
           if (op.miter_limit != null) gs.miter = op.miter_limit;
           if (op.dash) gs.dash = op.dash;
+          if (op.fill_alpha != null) gs.fillAlpha = op.fill_alpha;
+          if (op.stroke_alpha != null) gs.strokeAlpha = op.stroke_alpha;
           if (op.fill_pattern) gs.fillPattern = op.fill_pattern;
           else if (op.fill) gs.fillPattern = null;
           break;
@@ -684,6 +696,7 @@ export function createTxdlRenderer(options = {}) {
             else if (seg[0] === 'h') ctx.closePath();
           }
           if (op.fill) {
+            useAlpha(gs.fillAlpha);
             const style = gs.fillPattern ? patternStyle(gs.fillPattern) : null;
             if (style) {
               ctx.fillStyle = style;
@@ -692,6 +705,7 @@ export function createTxdlRenderer(options = {}) {
             ctx.fill(op.fill === 'evenodd' ? 'evenodd' : 'nonzero');
           }
           if (op.stroke) {
+            useAlpha(gs.strokeAlpha);
             ctx.strokeStyle = gs.stroke;
             // Never thinner than a device pixel (PDF's zero width means that
             // too), as PDF rasterisers draw hairlines such as TikZ's
@@ -721,6 +735,7 @@ export function createTxdlRenderer(options = {}) {
               gs = saved.pop();
               transforms -= 1;
               fill = null; // the restore reverted the context's fill
+              alphaNow = null; // and its alpha
             }
           } else if (op.action === 'set' && Array.isArray(op.matrix)) {
             // The whole transform, as a map of DVI space onto itself (see
@@ -771,6 +786,7 @@ export function createTxdlRenderer(options = {}) {
               }
             }
             const drawn = { x: css.x(op.x), y: css.y(op.y - h), width: css.len(w), height: css.len(h) };
+            useAlpha(gs.fillAlpha);
             ctx.drawImage(image.source, drawn.x, drawn.y, drawn.width, drawn.height);
             result.images.push({ file: op.file, page: op.page == null ? null : op.page, rect: drawn });
             break;
