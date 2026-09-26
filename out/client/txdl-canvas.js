@@ -493,11 +493,18 @@ export function createTxdlRenderer(options = {}) {
       ctx.fillRect(0, 0, css.width, css.height);
     }
 
+    // The colour stack (`color push/pop`) and the paint state a content
+    // stream sets (`rg`, `w`, …); Push/Pop save and restore the latter, and a
+    // colour-stack change sets fill and stroke, as dvipdfmx does.
     let color = ink;
     const stack = [];
+    let gs = { fill: ink, stroke: ink, lineWidth: 1, cap: 0, join: 0, miter: 10, dash: null };
+    const saved = [];
     useFill(color);
     // Open transforms (`pdf:btrans`/`x:gsave`); closed at the page's end.
     let transforms = 0;
+    // CSS px per bp, for content-stream coordinates.
+    const perBp = css.len(SP_PER_BP);
 
     for (const op of (page && page.ops) || []) {
       switch (op.op) {
@@ -508,7 +515,7 @@ export function createTxdlRenderer(options = {}) {
             break;
           }
           const sizePt = spToPt(font.size_sp);
-          useFill(color);
+          useFill(gs.fill);
           // XeTeX's synthetic effects (fontspec FakeSlant/FakeStretch/
           // FakeBold, xeCJK's AutoFake*): 16.16 factors, and an outline
           // stroke width in pt for embolden.
@@ -547,7 +554,7 @@ export function createTxdlRenderer(options = {}) {
             if (emboldenPt > 0) {
               ctx.lineWidth = (emboldenPt * upem) / sizePt;
               ctx.lineJoin = 'round';
-              ctx.strokeStyle = color;
+              ctx.strokeStyle = gs.fill;
               if (glyphPath) ctx.stroke(glyphPath);
               else ctx.stroke();
             }
@@ -558,7 +565,7 @@ export function createTxdlRenderer(options = {}) {
         }
         case 'rule': {
           if (!(op.w > 0) || !(op.h > 0)) break; // DVI: only positive rules paint
-          useFill(color);
+          useFill(gs.fill);
           // `y` is the rule's bottom edge; it extends up by `h`.
           ctx.fillRect(css.x(op.x), css.y(op.y - op.h), css.len(op.w), css.len(op.h));
           result.rules += 1;
@@ -573,19 +580,81 @@ export function createTxdlRenderer(options = {}) {
           } else if (op.action === 'set') {
             color = rgbaToCss(op.rgba, color);
           }
+          gs.fill = color;
+          gs.stroke = color;
           useFill(color);
+          break;
+        }
+        case 'gstate': {
+          if (op.reset_color) {
+            gs.fill = color;
+            gs.stroke = color;
+          }
+          if (op.fill) gs.fill = rgbaToCss(op.fill, gs.fill);
+          if (op.stroke) gs.stroke = rgbaToCss(op.stroke, gs.stroke);
+          if (op.line_width != null) gs.lineWidth = op.line_width;
+          if (op.line_cap != null) gs.cap = op.line_cap;
+          if (op.line_join != null) gs.join = op.line_join;
+          if (op.miter_limit != null) gs.miter = op.miter_limit;
+          if (op.dash) gs.dash = op.dash;
+          break;
+        }
+        case 'path': {
+          const px = (u) => css.x(op.x) + perBp * u;
+          const py = (v) => css.y(op.y) - perBp * v;
+          ctx.beginPath();
+          for (const seg of op.segments || []) {
+            if (seg[0] === 'm') ctx.moveTo(px(seg[1]), py(seg[2]));
+            else if (seg[0] === 'l') ctx.lineTo(px(seg[1]), py(seg[2]));
+            else if (seg[0] === 'c') ctx.bezierCurveTo(px(seg[1]), py(seg[2]), px(seg[3]), py(seg[4]), px(seg[5]), py(seg[6]));
+            else if (seg[0] === 're') ctx.rect(px(seg[1]), py(seg[2]), perBp * seg[3], -perBp * seg[4]);
+            else if (seg[0] === 'h') ctx.closePath();
+          }
+          if (op.fill) {
+            useFill(gs.fill);
+            ctx.fill(op.fill === 'evenodd' ? 'evenodd' : 'nonzero');
+          }
+          if (op.stroke) {
+            ctx.strokeStyle = gs.stroke;
+            // Never thinner than a device pixel (PDF's zero width means that
+            // too), as PDF rasterisers draw hairlines such as TikZ's
+            // `very thin`.
+            ctx.lineWidth = Math.max(gs.lineWidth * perBp, 1 / dpr);
+            ctx.lineCap = ['butt', 'round', 'square'][gs.cap] || 'butt';
+            ctx.lineJoin = ['miter', 'round', 'bevel'][gs.join] || 'miter';
+            ctx.miterLimit = gs.miter;
+            if (ctx.setLineDash) {
+              ctx.setLineDash(gs.dash ? gs.dash.array.map((x) => x * perBp) : []);
+              ctx.lineDashOffset = gs.dash ? gs.dash.phase * perBp : 0;
+            }
+            ctx.stroke();
+          }
+          if (op.clip) ctx.clip(op.clip === 'evenodd' ? 'evenodd' : 'nonzero');
+          result.paths = (result.paths || 0) + 1;
           break;
         }
         case 'transform': {
           if (op.action === 'push') {
             ctx.save();
+            saved.push({ ...gs });
             transforms += 1;
           } else if (op.action === 'pop') {
             if (transforms > 0) {
               ctx.restore();
+              gs = saved.pop();
               transforms -= 1;
               fill = null; // the restore reverted the context's fill
             }
+          } else if (op.action === 'set' && Array.isArray(op.matrix)) {
+            // The whole transform, as a map of DVI space onto itself (see
+            // TXDL `TransformOp::Set`), conjugated into CSS px.
+            const [a, b, c, d, e, f] = op.matrix;
+            const s = css.len(1);
+            const ox = css.originX;
+            const oy = css.originY;
+            const ce = ox - (a * ox + c * oy) + s * e;
+            const cf = oy - (b * ox + d * oy) + s * f;
+            ctx.setTransform(dpr * a, dpr * b, dpr * c, dpr * d, dpr * ce, dpr * cf);
           } else {
             const ox = css.x(op.x);
             const oy = css.y(op.y);
