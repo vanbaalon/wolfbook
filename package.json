@@ -1093,7 +1093,7 @@
             "off"
           ],
           "default": "auto",
-          "markdownDescription": "How WPaper builds its render map. `auto` (default): when `lualatex` is installed, the WPaper view is compiled with LuaLaTeX plus the wbmap hook, so every printed glyph is mapped to its exact box and source line (exact click-to-source and cursor highlight); a document LuaLaTeX cannot build falls back to `#wolfbook.tex.engine#` with an approximate (SyncTeX) map. `lualatex`: always. `wlatex`: opt into a separately installed WLaTeX engine for previews; saved/authoritative builds use the configured engine. Configure `#wolfbook.tex.wlatexDirectory#` or WLATEX_HOME. If WLaTeX is unavailable, use the normal automatic map engine. `off`: never — use `#wolfbook.tex.engine#` and SyncTeX only."
+          "markdownDescription": "How WPaper builds its render map. `auto` (default): when `lualatex` is installed, the WPaper view is compiled with LuaLaTeX plus the wbmap hook, so every printed glyph is mapped to its exact box and source line (exact click-to-source and cursor highlight); a document LuaLaTeX cannot build falls back to `#wolfbook.tex.engine#` with an approximate (SyncTeX) map. `lualatex`: always. `wlatex`: use a separately installed WLaTeX engine: the page follows every keystroke through its incremental engine, and its native build settles the paper (index, glossaries, BibTeX and biber included); saves stay native unless that build left a tool pending, and an explicit Compile uses the configured engine. Configure `#wolfbook.tex.wlatexDirectory#` or WLATEX_HOME. If WLaTeX is unavailable, use the normal automatic map engine. `off`: never — use `#wolfbook.tex.engine#` and SyncTeX only."
         },
         "wolfbook.tex.wlatexDirectory": {
           "type": "string",
@@ -1119,6 +1119,20 @@
           "minimum": 200,
           "maximum": 10000,
           "description": "The LONGEST Wolfbook will wait after the last keystroke before a live recompile. Papers that rebuild quickly recompile sooner: the wait tracks how long the last live rebuild actually took, so a fast paper feels immediate while a long one stays calm."
+        },
+        "wolfbook.tex.livePreviewThrottleMs": {
+          "type": "number",
+          "default": 30,
+          "minimum": 0,
+          "maximum": 2000,
+          "description": "With the WLaTeX engine: how long a burst of keystrokes is merged before the incremental engine redraws the page (a newer request abandons an older one at its next page)."
+        },
+        "wolfbook.tex.nativeSettleDelayMs": {
+          "type": "number",
+          "default": 2500,
+          "minimum": 0,
+          "maximum": 60000,
+          "description": "With the WLaTeX engine: how long typing must pause before the full native build settles the paper (PDF, cross-references, every page's source map). The live page does not wait for it."
         },
         "wolfbook.tex.liveSinglePass": {
           "type": "boolean",
@@ -1656,6 +1670,11 @@
       {
         "command": "wolfbook.tex.compile",
         "title": "Compile WPaper",
+        "category": "Wolfbook"
+      },
+      {
+        "command": "wolfbook.tex.exportPdf",
+        "title": "WPaper: Export PDF…",
         "category": "Wolfbook"
       },
       {

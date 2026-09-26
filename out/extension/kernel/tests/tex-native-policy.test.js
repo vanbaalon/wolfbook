@@ -13,7 +13,7 @@ const observedTimeouts = [];
 let installed = true, constructorCalls = 0;
 stub.workspace.getConfiguration = () => ({ get: (key, fallback) =>
     ({ compileTimeoutMs:configuredTimeout, mapEngine: configuredMapEngine, wlatexDirectory: '/built/wlatex', authoritativeDelayMs: 0 })[key] ?? fallback });
-let nativeCalls = 0, conventionalCalls = 0, cancel = false, nativeFailure = false, nativeSettled = false;
+let nativeCalls = 0, conventionalCalls = 0, cancel = false, nativeFailure = false, nativeSettled = false, nativeDocumentError = false;
 const oldLoad = Module._load;
 Module._load = function (req, ...args) {
     if (req === 'vscode') return stub;
@@ -24,6 +24,9 @@ Module._load = function (req, ...args) {
             observedTimeouts.push(['native', o.timeoutMs]);
             if (nativeFailure) throw Error('runtime cannot start');
             if (cancel) throw Object.assign(Error('superseded'), { name: 'AbortError' });
+            if (nativeDocumentError) return { ok:false, runner:'wlatex', generation:nativeCalls, pdfPath:null,
+                sourceSnapshotHash:o.sourceSnapshotHash, nativeCompiledSources:new Map(), errors:1, warnings:0,
+                diagnostics:[{ severity:'error', message:'Undefined control sequence \\pdfoutput' }] };
             return { ok:true, runner:'wlatex', generation:nativeCalls, pdfPath:'unused', pdfHash:'native',
                 sourceSnapshotHash:o.sourceSnapshotHash, nativeCompiledSources:new Map(),
                 pageCount:1, rerunWanted:!nativeSettled, diagnostics:[] };
@@ -91,6 +94,36 @@ test('a save of a settled native build stays native; an unsettled one still gets
         assert.ok(nativeCalls > nativeBefore);
         assert.equal(conventionalCalls, before.conventional);
     } finally { nativeSettled = false; f.close(); }
+});
+
+test('a paper for another engine leaves the native lane: declared, or proven by a native-only failure', async () => {
+    const f = fixture();
+    try {
+        fs.writeFileSync(f.state.root, '% !TEX program = pdflatex\n\\documentclass{article}');
+        const native0 = nativeCalls, conventional0 = conventionalCalls;
+        await f.coordinator.build(f.doc, { live:true, quiet:true });
+        assert.equal(nativeCalls, native0, 'a declared pdflatex paper never reaches the native lane');
+        assert.equal(conventionalCalls, conventional0 + 1);
+        assert.match(f.state.nativeOff, /asks for pdflatex/);
+        // No declaration, but WLaTeX fails where the configured compiler works.
+        fs.writeFileSync(f.state.root, '\\pdfoutput=1\n\\documentclass{article}\n\\begin{document}a');
+        nativeDocumentError = true;
+        await f.coordinator.build(f.doc, { live:true, quiet:true });
+        assert.equal(nativeCalls, native0 + 1);
+        assert.equal(conventionalCalls, conventional0 + 2);
+        assert.equal(f.state.generation.ok, true);
+        assert.match(f.state.nativeOff, /cannot build this paper/);
+        // The next pause does not try WLaTeX again for the same preamble...
+        fs.appendFileSync(f.state.root, ' more body text');
+        await f.coordinator.build(f.doc, { live:true, quiet:true });
+        assert.equal(nativeCalls, native0 + 1);
+        // ...but a changed preamble does.
+        nativeDocumentError = false;
+        fs.writeFileSync(f.state.root, '\\documentclass{article}\n\\begin{document}y');
+        await f.coordinator.build(f.doc, { live:true, quiet:true });
+        assert.equal(nativeCalls, native0 + 2);
+        assert.equal(f.state.nativeOff, null);
+    } finally { nativeDocumentError = false; f.close(); }
 });
 
 test('superseded native builds preserve last generation and do not report an error', async () => {

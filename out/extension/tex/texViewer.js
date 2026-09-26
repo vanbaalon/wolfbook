@@ -1343,6 +1343,32 @@ class TexViewer {
         this._post(reply);
     }
 
+    /**
+     * A figure a live page draws, read for the webview. Only image files inside
+     * the paper's project directory are served; anything else (an EPS, a file
+     * elsewhere) answers with an error and that page keeps the PDF.
+     */
+    async _onTxdlImage(m) {
+        const reply = { type:'txdlImage', id:m.id, error:null };
+        try {
+            const lane = this.root ? this.coord.roots?.get(this.root)?.nativeLane : null;
+            const projectDir = lane?.projectDir || (this.root && path.dirname(this.root));
+            if (!projectDir || typeof m.file !== 'string' || !m.file) throw Error('no project');
+            const file = path.resolve(projectDir, m.file);
+            const inside = path.relative(projectDir, file);
+            if (!inside || inside.startsWith('..') || path.isAbsolute(inside)) throw Error('figure outside the project');
+            const ext = path.extname(file).toLowerCase();
+            const mime = { '.png':'image/png', '.jpg':'image/jpeg', '.jpeg':'image/jpeg', '.gif':'image/gif', '.webp':'image/webp' }[ext];
+            if (!mime && ext !== '.pdf') throw Error(`${ext || 'this'} figures need the PDF`);
+            const stat = await fs.promises.stat(file);
+            if (!stat.isFile() || stat.size > 24 * 1024 * 1024) throw Error('figure too large');
+            reply.kind = ext === '.pdf' ? 'pdf' : 'raster';
+            reply.mime = mime || 'application/pdf';
+            reply.base64 = (await fs.promises.readFile(file)).toString('base64');
+        } catch (error) { reply.error = error.message || String(error); }
+        this._post(reply);
+    }
+
     /** Push the current generation's PDF into the webview. */
     async refresh({ force = false } = {}) {
         if (!this.panel || !this.root) return;
@@ -3981,6 +4007,7 @@ class TexViewer {
                 break;
             case 'textLayer': this._onTextLayer(m); break;
             case 'txdlOutlines': await this._onTxdlOutlines(m); break;
+            case 'txdlImage': await this._onTxdlImage(m); break;
             // The webview kept the PDF for this page: it is not a live page.
             case 'txdlFallback': this._liveOverlays?.delete(m.page); this._liveMapReady?.delete(m.page);
                 this._previewPages?.delete(m.page); break;

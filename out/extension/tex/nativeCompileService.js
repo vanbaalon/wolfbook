@@ -25,7 +25,9 @@ function isDocumentFailure(report) {
 // \ref, \cite, the table of contents and the list of figures read the numbers
 // the settled cold build wrote. The engine runs no auxiliary passes of its
 // own: these are ordinary inputs to it.
-const AUXILIARY_FILE = /\.(aux|toc|lof|lot|out)$/i;
+// The settled build's tool outputs too (bibliography, index, glossaries,
+// nomenclature), or the live pages lose those sections.
+const AUXILIARY_FILE = /\.(aux|toc|lof|lot|out|bbl|ind|gls|acr|nls|sls)$/i;
 // The engine refuses an overlay name that is not a relative, canonical project
 // path. Checked here so a stray auxiliary name can never fail a whole build.
 const SAFE_OVERLAY = name => typeof name === 'string' && name.length > 0 && !/[\\:\0]/.test(name) &&
@@ -54,6 +56,20 @@ function interactiveFailure(generation, message, fatal) {
             message:message || 'the interactive build failed' }] };
 }
 
+// BUILD ARTIFACTS DO NOT LIVE IN THE PAPER'S FOLDER. A project folder is often
+// synced (Dropbox, iCloud) or committed, and every build writes tens of
+// megabytes of PDF, XDV and maps. They go to the user's cache directory, one
+// folder per project path (`WLATEX_ARTIFACT_CACHE` overrides the base).
+function artifactParent(projectDir) {
+    const key = require('crypto').createHash('sha256').update(path.resolve(projectDir)).digest('hex').slice(0, 16);
+    const home = require('os').homedir();
+    const base = process.env.WLATEX_ARTIFACT_CACHE
+        || (process.platform === 'darwin' ? path.join(home, 'Library/Caches/wlatex/projects')
+            : process.platform === 'win32' ? path.join(process.env.LOCALAPPDATA || require('os').tmpdir(), 'wlatex/projects')
+                : path.join(process.env.XDG_CACHE_HOME || path.join(home, '.cache'), 'wlatex/projects'));
+    return path.join(base, key);
+}
+
 class NativeBuildLane {
     constructor(root, directory = '', runtimeOptions) {
         this.root = root;
@@ -63,7 +79,7 @@ class NativeBuildLane {
         if (!this.runtime) throw Error('WLaTeX is not installed or configured');
         const sdk = require(this.runtime.sdk);
         const { labBinary, nativeBinary } = this.runtime;
-        this.artifactCache = new NativeArtifactCache(path.join(this.projectDir, '.wlatex/native'));
+        this.artifactCache = new NativeArtifactCache(artifactParent(this.projectDir));
         try {
             this.compiler = new sdk.NativeCompiler({ labBinary, nativeBinary, cache:this.artifactCache.directory });
             this.source = new sdk.NativeSourceSession({ labBinary });

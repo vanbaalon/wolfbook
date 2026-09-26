@@ -420,7 +420,7 @@ class RenderCoordinator {
      */
     _schedulePreview(root, st) {
         const lane = st && st.nativeLane;
-        if (!lane || !lane.interactive || this._disposed) return false;
+        if (!lane || !lane.interactive || this._disposed || st.nativeOff) return false;
         const cfg = vscode.workspace.getConfiguration('wolfbook.tex');
         const throttle = Math.max(0, cfg.get('livePreviewThrottleMs', 30));
         clearTimeout(this._previewTimers.get(root));
@@ -471,7 +471,10 @@ class RenderCoordinator {
             .map(d => ({ ...d, file: d.file ? path.resolve(lane.projectDir, d.file) : null }));
         const hadLive = !!st.liveDiagnostics?.list.length;
         st.liveDiagnostics = { at: Date.now(), list: errors };
-        if (errors.length || hadLive) this._emitter.fire(st);
+        // The page now shows the latest text: the status says "live".
+        const wasCurrent = st.livePreviewAt >= (st.lastEditAt || 0);
+        st.livePreviewAt = Date.now();
+        if (errors.length || hadLive || !wasCurrent) this._emitter.fire(st);
         const report = result.report || {};
         // Honest by construction: this says what the preview recomputed, not
         // what is settled. The settled state is still the cold build's, and
@@ -514,6 +517,7 @@ class RenderCoordinator {
         const st = this.stateFor(e.document);
         if (!st) return;
         st.sourceAhead = true;
+        st.lastEditAt = Date.now();
         if (st.nativeLane) {
             const lane = st.nativeLane;
             if (st.map?.native) st.map.noteEdit();
@@ -615,6 +619,19 @@ class RenderCoordinator {
         const nativeUnsettled = st.generation?.runner === 'wlatex' && st.generation.rerunWanted &&
             st.generation.sourceSnapshotHash === snapshot;
         let wantNative = mapEngine === 'wlatex' && !force && !(authoritative && nativeUnsettled);
+        // A PAPER WRITTEN FOR ANOTHER ENGINE. `% !TEX program = pdflatex`
+        // says so outright; a paper that failed natively but built with the
+        // configured compiler (`\pdfoutput`, luacode) proved it. Either keeps
+        // this paper off the native lane until its preamble changes.
+        const hints = mapEngine === 'wlatex' ? paperEngineHints(root, overlay) : null;
+        if (st.nativeIncompatible && st.nativeIncompatible.preamble !== hints?.preamble) st.nativeIncompatible = null;
+        const declared = hints?.program && !['xelatex', 'xetex'].includes(hints.program) ? hints.program : null;
+        st.nativeOff = declared ? `the paper asks for ${declared}` : st.nativeIncompatible?.reason || null;
+        if (wantNative && st.nativeOff) {
+            if (st.nativeOffLogged !== st.nativeOff) { this.log(`WLaTeX not used: ${st.nativeOff}`); st.nativeOffLogged = st.nativeOff; }
+            wantNative = false;
+            mapEngine = 'auto';
+        }
         if (wantNative && st.nativeRefusedSnapshot === snapshot && st.nativeRefusedDirectory === nativeDirectory) {
             wantNative = false;
             mapEngine = 'auto';
@@ -835,6 +852,23 @@ class RenderCoordinator {
                 }
                 if (gen.nativeCompiledSources) gen.sourceSnapshotHash = snapshotSources(st.files,
                     new Map([...(overlay || []), ...gen.nativeCompiledSources]));
+                // A document error WLaTeX hits and the configured compiler
+                // does not is the paper needing that engine. Tried once per
+                // preamble: an error both engines hit (a half-typed macro) is
+                // the reader's, and the native lane stays.
+                if (!gen.ok && gen.errors > 0 && !ac.signal.aborted && hints?.preamble &&
+                    st.nativeIncompatibleTried !== hints.preamble) {
+                    st.nativeIncompatibleTried = hints.preamble;
+                    const conventional = await compile({ ...compileOpts, maxPasses: null });
+                    if (conventional.ok && !ac.signal.aborted) {
+                        const first = gen.diagnostics?.find(d => d.severity === 'error')?.message || 'a document error';
+                        st.nativeIncompatible = { preamble: hints.preamble,
+                            reason: `WLaTeX (XeTeX) cannot build this paper and ${compileOpts.engine} can (${first})` };
+                        st.nativeOff = st.nativeIncompatible.reason;
+                        this.log(`  ${st.nativeIncompatible.reason} — using ${compileOpts.engine} until the preamble changes`);
+                        gen = conventional;
+                    }
+                }
             } else gen = await compile({
                 ...primaryOpts,
                 maxPasses: (capWanted && this._capOk) ? 1 : null,
@@ -1052,6 +1086,13 @@ function makeStatusItem(coord, projection) {
             item.show();
             return;
         }
+        if (st && st.sourceAhead && st.livePreviewAt >= (st.lastEditAt || Infinity)) {
+            item.text = `$(zap) live${st.liveCompiling || st.authoritativeRunning ? ' $(sync~spin)' : ''}`;
+            item.tooltip = 'The page shows your latest text (live WLaTeX preview); click-to-source works on it. ' +
+                'The PDF settles when typing pauses.';
+            item.show();
+            return;
+        }
         if (st && st.sourceAhead) {
             item.text = `$(history) page behind${st.liveCompiling || st.authoritativeRunning ? ' $(sync~spin)' : ''}`;
             item.tooltip = 'The WPaper page is behind the editor. Tracing is paused until the matching compile is visible.';
@@ -1068,7 +1109,7 @@ function makeStatusItem(coord, projection) {
         const nativeGen = !!gen && gen.runner === 'wlatex';
         const engineIcon = nativeGen ? '$(zap) ' : '';
         const engineNote = !gen ? '' : nativeGen
-            ? '\n\nRendered by the WLaTeX native preview.'
+            ? `\n\nRendered by WLaTeX (native build${gen.rerunWanted ? ', a tool still pending' : ', settled'}).`
             : `\n\nRendered by ${gen.runner || 'latexmk'}${gen.engine ? ` (${gen.engine})` : ''}.`;
         const map = st && st.map;
         if (!map || !map.available) {
@@ -1169,6 +1210,22 @@ function applyPageMarkers(editor, coord, decoration) {
  * exceeds the text width by 1.6 mm", on the paragraph. The millimetres matter:
  * 4.42pt means nothing to an author, 1.6 mm is a thing you can see.
  */
+/**
+ * What a paper says about its engine: the `% !TEX program` it declares, and
+ * a digest of its preamble (the text before `\begin{document}`), which is
+ * what decides whether another engine is needed.
+ */
+function paperEngineHints(root, overlay) {
+    let text = overlay?.get?.(root);
+    if (text == null) { try { text = fs.readFileSync(root, 'utf8'); } catch (_) { return null; } }
+    const program = /^[ \t]*%[ \t]*![ \t]*TEX[ \t]+(?:TS-)?program[ \t]*=[ \t]*([A-Za-z]+)/im
+        .exec(text.slice(0, 4000))?.[1]?.toLowerCase() || null;
+    const begin = text.indexOf('\\begin{document}');
+    const preamble = require('crypto').createHash('sha256')
+        .update(begin < 0 ? text : text.slice(0, begin)).digest('hex');
+    return { program, preamble };
+}
+
 function renderDiagnostics(doc, coord, projection) {
     const st = coord.stateFor(doc);
     if (!st || !st.generation) return [];

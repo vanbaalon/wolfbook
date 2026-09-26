@@ -478,6 +478,8 @@ async function openDocument(msg) {
         // this open (the preview is newer than this PDF) carry this open's
         // sequence and stay.
         if (!samePagination) clearTxdlOverlays();
+        // Figures are read again: a new build may follow a changed file.
+        if (txdlRenderer) txdlRenderer.clearImages();
         let placeholders = null;
         if (editingInPlace) await buildPagePlaceholders(true);
         if (!samePagination) {
@@ -1632,8 +1634,47 @@ function txdlRendererInstance() {
                 vscode.postMessage({ type: 'txdlOutlines', id, font, glyphs: gids });
             });
         },
+        // Figures: the host reads the file, the webview decodes it (a PDF
+        // figure's page through pdf.js), and the renderer draws it.
+        requestImage(file, page) {
+            const id = ++txdlImageSeq;
+            return new Promise((resolve, reject) => {
+                const timer = setTimeout(() => {
+                    if (txdlImageWaits.delete(id)) reject(new Error('the figure did not arrive'));
+                }, 20000);
+                txdlImageWaits.set(id, { resolve, reject, timer });
+                vscode.postMessage({ type: 'txdlImage', id, file, page });
+            }).then(reply => decodeTxdlImage(reply, page));
+        },
     });
     return txdlRenderer;
+}
+
+const txdlImageWaits = new Map();
+let txdlImageSeq = 0;
+
+/** A figure the host sent, as `{ source, widthBp, heightBp }`, or null. */
+async function decodeTxdlImage(reply, page) {
+    if (!reply || reply.error || !reply.base64) return null;
+    const bytes = Uint8Array.from(atob(reply.base64), c => c.charCodeAt(0));
+    if (reply.kind === 'pdf') {
+        const pdfjs = state.pdfjs;
+        if (!pdfjs) return null;
+        const doc = await pdfjs.getDocument({ data: bytes }).promise;
+        try {
+            const figure = await doc.getPage(page || 1);
+            const natural = figure.getViewport({ scale: 1 });
+            const scale = Math.max(1, Math.min(4, 2048 / Math.max(natural.width, natural.height)));
+            const viewport = figure.getViewport({ scale });
+            const canvas = document.createElement('canvas');
+            canvas.width = Math.ceil(viewport.width);
+            canvas.height = Math.ceil(viewport.height);
+            await figure.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+            return { source: canvas, widthBp: natural.width, heightBp: natural.height };
+        } finally { doc.destroy(); }
+    }
+    const bitmap = await createImageBitmap(new Blob([bytes], { type: reply.mime || 'image/png' }));
+    return { source: bitmap, widthBp: bitmap.width, heightBp: bitmap.height };
 }
 
 function txdlState() {
@@ -1763,10 +1804,6 @@ async function drawTxdlPage(msg, { duringOpen = false } = {}) {
     // `unsupported` is the renderer saying it cannot put every mark of this
     // page on the canvas. The PDF page is then the honest thing to show.
     if (Array.isArray(txdl.unsupported) && txdl.unsupported.length) { txdlFellBack(page); return; }
-    // The renderer draws a placeholder box for an image; on an opaque overlay
-    // that would hide the figure the PDF shows. Keep the PDF for such pages
-    // until images are drawn.
-    if (Array.isArray(txdl.ops) && txdl.ops.some(op => op && op.op === 'image')) { txdlFellBack(page); return; }
     if (page > (state.pageCount || 0)) ensureLiveExtraPage(page);
     const wrap = pagesEl().querySelector(`.page[data-page="${page}"]`);
     if (!wrap) return;
@@ -1804,7 +1841,8 @@ async function drawTxdlPage(msg, { duringOpen = false } = {}) {
     let result;
     try { result = renderer.render(txdl, ctx, opts); }
     catch (_) { return; }
-    if (result.fallback) { txdlFellBack(page); return; }
+    // A glyph that has no outline would be a hole in the text: keep the PDF.
+    if (result.fallback || result.skipped > 0) { txdlFellBack(page); return; }
     const entry = { canvas, txdl, pageSize: msg.pageSize || null, generation: msg.generation,
         identity: msg.identity || null, openSeq: state.openSeq };
     removeTxdlOverlay(page);
@@ -1819,7 +1857,12 @@ async function drawTxdlPage(msg, { duringOpen = false } = {}) {
     if (result.pending > 0) {
         try { await renderer.prefetch(txdl); } catch (_) { return; }
         if (txdlState().pages.get(page) !== entry || !canvas.isConnected) return;
-        try { renderer.render(txdl, ctx, opts); } catch (_) { /* keep what is drawn */ }
+        // A figure that could not be loaded puts the page back on the PDF.
+        let again = null;
+        try { again = renderer.render(txdl, ctx, opts); } catch (_) { /* keep what is drawn */ }
+        // Outlines that never arrived (an unresolved font) or figures that
+        // could not load would leave holes on an opaque page: keep the PDF.
+        if (again && (again.fallback || again.pending > 0 || again.skipped > 0)) txdlFellBack(page);
     }
 }
 
@@ -7516,6 +7559,14 @@ window.addEventListener('message', async (ev) => {
                 for (const page of [...state.txdl.pages.keys()]) if (page > count) removeTxdlOverlay(page);
                 dropEmptyLiveExtraPages(count);
             }
+            break;
+        }
+        case 'txdlImage': {
+            const wait = txdlImageWaits.get(msg.id);
+            if (!wait) break;
+            txdlImageWaits.delete(msg.id);
+            clearTimeout(wait.timer);
+            wait.resolve(msg);
             break;
         }
         case 'txdlOutlines': {

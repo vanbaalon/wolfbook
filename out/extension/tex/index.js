@@ -1563,6 +1563,23 @@ async function offerReload(doc, diskText, output) {
         wire(watcher);
         context.subscriptions.push({ dispose: () => diskWatch.dispose() });
 
+        // STYLES, FIGURES AND DATA CHANGE TOO. A regenerated plot, an edited
+        // .sty or a new data table changes the paper as surely as its .tex:
+        // rebuild the paper on screen when one inside its folder changes.
+        // (The paper's own exported PDF is not a figure of it.)
+        const assetWatcher = vscode.workspace.createFileSystemWatcher(
+            '**/*.{sty,cls,bst,bbx,cbx,def,cfg,png,jpg,jpeg,pdf,eps,csv,dat,tikz,pgf,txt}');
+        const onAsset = (uri) => {
+            const root = viewer.isOpen && viewer.isOpen() ? viewer.root : null;
+            if (!root) return;
+            const relative = path.relative(path.dirname(root), uri.fsPath);
+            if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) return;
+            if (uri.fsPath === root.replace(/\.tex$/i, '.pdf')) return;
+            try { coord.scheduleLive({ uri: { fsPath: root } }); } catch (_) { /* the next edit will */ }
+        };
+        context.subscriptions.push(assetWatcher, assetWatcher.onDidChange(onAsset),
+            assetWatcher.onDidCreate(onAsset), assetWatcher.onDidDelete(onAsset));
+
         // A PAPER IS USUALLY NOT IN THE WORKSPACE FOLDER.
         //
         // `createFileSystemWatcher('**/*.tex')` resolves its pattern against
@@ -1736,6 +1753,36 @@ async function offerReload(doc, diskText, output) {
             vscode.window.setStatusBarMessage(
                 `$(pass) ${g.pageCount ?? '?'} pages · ${g.errors} error(s) · ${g.warnings} warning(s)`, 5000);
         }
+    });
+
+    // THE PDF LIVES IN A CACHE; THIS PUTS A COPY WHERE THE READER WANTS IT.
+    // A page behind the buffer, or a build that is only a preview pass, is
+    // brought up to date first so the file is the settled paper.
+    reg('wolfbook.tex.exportPdf', async () => {
+        let doc = vscode.window.activeTextEditor?.document;
+        if (!isTex(doc) && viewer.root) {
+            try { doc = await vscode.workspace.openTextDocument(vscode.Uri.file(viewer.root)); }
+            catch (_) { /* fall through to the warning */ }
+        }
+        if (!isTex(doc)) { vscode.window.showWarningMessage('Open a .tex file first.'); return; }
+        let st = coord.stateFor(doc);
+        const g0 = st && st.generation;
+        if (!g0 || !g0.ok || !g0.pdfPath || st.sourceAhead || g0.rerunWanted || g0.passesLimited) {
+            st = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification,
+                title: 'WPaper: building the PDF to export' }, () => coord.build(doc, { authoritative: true, quiet: true }));
+        }
+        const g = st && st.generation;
+        if (!g || !g.ok || !g.pdfPath || !fs.existsSync(g.pdfPath)) {
+            vscode.window.showErrorMessage(`No PDF to export${st && st.lastError ? `: ${st.lastError}` : ''}.`);
+            return;
+        }
+        const root = coord.rootFor(doc);
+        const target = await vscode.window.showSaveDialog({
+            defaultUri: vscode.Uri.file(path.join(path.dirname(root), `${path.basename(root, '.tex')}.pdf`)),
+            filters: { PDF: ['pdf'] } });
+        if (!target) return;
+        await fs.promises.copyFile(g.pdfPath, target.fsPath);
+        vscode.window.setStatusBarMessage(`$(pass) Exported ${path.basename(target.fsPath)}`, 5000);
     });
 
     reg('wolfbook.tex.compareWith', async () => {

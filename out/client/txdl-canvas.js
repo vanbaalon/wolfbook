@@ -267,8 +267,17 @@ function replayPath(ctx, d) {
 const DEFAULTS = {
   maxOutlines: 8192,
   maxPaths: 4096,
+  maxImages: 64,
   imageDash: [4, 3],
 };
+
+/** Scaled points per PostScript point (bp). */
+const SP_PER_BP = (65536 * 72.27) / 72;
+
+/** A TXDL image matrix that places the image as it is (XeTeX's identity). */
+function identityMatrix(matrix) {
+  return !matrix || (matrix[0] === 65536 && matrix[1] === 0 && matrix[2] === 0 && matrix[3] === 65536 && matrix[4] === 0 && matrix[5] === 0);
+}
 
 /**
  * Create a renderer.
@@ -279,6 +288,12 @@ const DEFAULTS = {
  * never waits for it: glyphs whose outline is not cached yet are skipped and
  * counted in the result's `pending`, and the host re-renders when `prefetch`
  * resolves.
+ *
+ * `requestImage(file, page)` (optional) resolves to `{ source, widthBp,
+ * heightBp }` — a drawable (`ImageBitmap`, canvas, image) and the image's
+ * natural size — or null when it cannot be drawn. Without it an image is a
+ * dashed placeholder; with it, images load like outlines (pending, then
+ * drawn), and one that cannot be drawn puts the page on the PDF fallback.
  */
 export function createTxdlRenderer(options = {}) {
   const requestOutlines = options.requestOutlines;
@@ -288,6 +303,10 @@ export function createTxdlRenderer(options = {}) {
   const settings = { ...DEFAULTS, ...options };
   const outlines = new BoundedCache(settings.maxOutlines);
   const paths = new BoundedCache(settings.maxPaths);
+  const requestImage = typeof options.requestImage === 'function' ? options.requestImage : null;
+  const images = new BoundedCache(settings.maxImages);
+  const imagesInFlight = new Set();
+  const imageKey = (op) => `${op.file}#${op.page == null ? 1 : op.page}`;
   // digest -> Set of gids currently being fetched, so prefetch never asks twice.
   const inFlight = new Map();
 
@@ -363,6 +382,29 @@ export function createTxdlRenderer(options = {}) {
           }),
       );
     }
+    if (requestImage) {
+      for (const op of (page && page.ops) || []) {
+        if (op.op !== 'image' || !op.file) continue;
+        const id = imageKey(op);
+        if (images.has(id) || imagesInFlight.has(id)) continue;
+        imagesInFlight.add(id);
+        result.requested += 1;
+        jobs.push(
+          Promise.resolve()
+            .then(() => requestImage(op.file, op.page == null ? null : op.page))
+            .then((image) => {
+              const usable = image && image.source && image.widthBp > 0 && image.heightBp > 0;
+              images.set(id, usable ? image : null);
+              if (usable) result.resolved += 1;
+              else result.missing += 1;
+            })
+            .catch((error) => {
+              result.errors.push({ image: op.file, error });
+            })
+            .then(() => imagesInFlight.delete(id)),
+        );
+      }
+    }
     await Promise.all(jobs);
     return result;
   }
@@ -416,6 +458,8 @@ export function createTxdlRenderer(options = {}) {
     let color = ink;
     const stack = [];
     useFill(color);
+    // Open transforms (`pdf:btrans`/`x:gsave`); closed at the page's end.
+    let transforms = 0;
 
     for (const op of (page && page.ops) || []) {
       switch (op.op) {
@@ -478,7 +522,59 @@ export function createTxdlRenderer(options = {}) {
           useFill(color);
           break;
         }
+        case 'transform': {
+          if (op.action === 'push') {
+            ctx.save();
+            transforms += 1;
+          } else if (op.action === 'pop') {
+            if (transforms > 0) {
+              ctx.restore();
+              transforms -= 1;
+              fill = null; // the restore reverted the context's fill
+            }
+          } else {
+            const ox = css.x(op.x);
+            const oy = css.y(op.y);
+            ctx.translate(ox, oy);
+            if (op.action === 'scale') ctx.scale(op.sx, op.sy);
+            else if (op.action === 'rotate') ctx.rotate((-op.degrees * Math.PI) / 180); // PDF angles are counter-clockwise, the page is y-down
+            ctx.translate(-ox, -oy);
+          }
+          break;
+        }
         case 'image': {
+          if (requestImage) {
+            if (!identityMatrix(op.matrix)) {
+              result.fallback = true;
+              break;
+            }
+            const image = images.get(imageKey(op));
+            if (image === undefined) {
+              result.pending += 1;
+              result.images.push({ file: op.file, page: op.page == null ? null : op.page, rect: null, pending: true });
+              break;
+            }
+            if (image === null) {
+              result.fallback = true;
+              break;
+            }
+            let w = op.w;
+            let h = op.h;
+            const naturalW = image.widthBp * SP_PER_BP;
+            const naturalH = image.heightBp * SP_PER_BP;
+            if (!(w > 0 && h > 0)) {
+              if (w > 0) h = (w * naturalH) / naturalW;
+              else if (h > 0) w = (h * naturalW) / naturalH;
+              else {
+                w = naturalW;
+                h = naturalH;
+              }
+            }
+            const drawn = { x: css.x(op.x), y: css.y(op.y - h), width: css.len(w), height: css.len(h) };
+            ctx.drawImage(image.source, drawn.x, drawn.y, drawn.width, drawn.height);
+            result.images.push({ file: op.file, page: op.page == null ? null : op.page, rect: drawn });
+            break;
+          }
           const box =
             op.w > 0 && op.h > 0
               ? {
@@ -505,6 +601,10 @@ export function createTxdlRenderer(options = {}) {
       }
     }
 
+    while (transforms > 0) {
+      ctx.restore();
+      transforms -= 1;
+    }
     ctx.restore();
     for (const [digest, gids] of missingByFont) {
       result.missing.push({ font: digest, gids: [...gids] });
@@ -539,6 +639,10 @@ export function createTxdlRenderer(options = {}) {
     prefetch,
     textLayer: textLayerFor,
     pageToCss,
+    /** Forget loaded figures (the files may have changed on disk). */
+    clearImages() {
+      images.clear();
+    },
     /** Seed the cache directly (the host may already hold outlines). */
     putOutline(digest, gid, outline) {
       outlines.set(key(digest, gid), outline || null);
