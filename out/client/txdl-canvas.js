@@ -873,9 +873,47 @@ export function createTxdlRenderer(options = {}) {
     });
   }
 
+  /**
+   * The page's text one glyph at a time, in TeX points like `textLayer`:
+   * `[{str, x, baseline, w, h}]`. A glyph's character comes from the outline
+   * cache (the engine sends what each glyph stands for: the font's cmap
+   * reversed, or a TFM font's encoding) — so `prefetch(page)` first. A run
+   * with ActualText stays one item with that text; a glyph with no known
+   * character is U+FFFD. Gaps between glyphs are where the words break.
+   */
+  function glyphText(page, fonts = page && page.fonts) {
+    const index = fontIndex(fonts);
+    const items = [];
+    for (const op of (page && page.ops) || []) {
+      if (op.op !== 'glyphs') continue;
+      const glyphs = op.glyphs || [];
+      if (!glyphs.length) continue;
+      const font = index.get(op.font) || null;
+      const size = font && font.size_sp > 0 ? font.size_sp : 0;
+      const advance = gid => {
+        const outline = outlines.get(key(op.font, gid));
+        return outline && outline.units_per_em ? (outline.advance / outline.units_per_em) * size : size / 2;
+      };
+      if (typeof op.text === 'string' && op.text.length > 0) {
+        const first = glyphs[0], last = glyphs[glyphs.length - 1];
+        items.push({ str: op.text, x: spToPt(first[1]), baseline: spToPt(first[2]),
+          w: spToPt(last[1] - first[1] + advance(last[0])), h: spToPt(size) });
+        continue;
+      }
+      for (const [gid, x, y] of glyphs) {
+        const outline = outlines.get(key(op.font, gid));
+        const str = outline && typeof outline.text === 'string' ? outline.text
+          : !op.native && gid < 128 ? String.fromCharCode(gid) : '\uFFFD';
+        items.push({ str, x: spToPt(x), baseline: spToPt(y), w: spToPt(advance(gid)), h: spToPt(size) });
+      }
+    }
+    return items;
+  }
+
   return {
     render,
     prefetch,
+    glyphText,
     textLayer: textLayerFor,
     pageToCss,
     /** Forget loaded figures (the files may have changed on disk). */

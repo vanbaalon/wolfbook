@@ -274,6 +274,28 @@
                border-radius:8px; background:var(--vscode-editorWidget-background, #252526); color:var(--vscode-editorWidget-foreground, inherit);
                border:1px solid var(--vscode-editorWidget-border, #454545); box-shadow:0 2px 12px rgba(0,0,0,.35); font-size:12px; }
   #tikzpanel[hidden] { display:none; }
+  /* FIND IN THE PAPER. The bar floats under the toolbar at the right, like the
+     editor's own find widget; matches are marked on the page, the current one
+     stronger. */
+  #findbar { position:fixed; top:44px; right:14px; z-index:60; display:flex; align-items:center; gap:2px;
+             padding:3px 4px 3px 6px; border-radius:6px; font-size:12px;
+             background:var(--vscode-editorWidget-background, #252526); color:var(--vscode-editorWidget-foreground, inherit);
+             border:1px solid var(--vscode-editorWidget-border, #454545); box-shadow:0 2px 8px rgba(0,0,0,.3); }
+  #findbar[hidden] { display:none; }
+  #findinput { width:210px; font:inherit; padding:3px 6px; border-radius:3px; outline:none;
+               color:var(--vscode-input-foreground, inherit); background:var(--vscode-input-background, #3c3c3c);
+               border:1px solid var(--vscode-input-border, transparent); }
+  #findinput:focus { border-color:var(--vscode-focusBorder, #3794ff); }
+  #findbar.none #findinput { border-color:var(--vscode-inputValidation-errorBorder, #be1100); }
+  #findcount { min-width:5.5em; padding:0 6px; text-align:center; opacity:.8; font-variant-numeric:tabular-nums; }
+  #findbar button { display:inline-flex; align-items:center; justify-content:center; width:22px; height:22px; padding:0;
+                    border:0; border-radius:4px; background:none; color:inherit; cursor:pointer; }
+  #findbar button:hover { background:var(--vscode-toolbar-hoverBackground, rgba(128,128,128,.18)); }
+  #findbar button:disabled { opacity:.4; cursor:default; }
+  .find-hit { position:absolute; z-index:4; pointer-events:none; border-radius:2px;
+              background:var(--vscode-editor-findMatchHighlightBackground, rgba(234,92,0,.33)); }
+  .find-hit.current { background:var(--vscode-editor-findMatchBackground, rgba(255,150,50,.6));
+                      outline:1px solid var(--vscode-editor-findMatchBorder, rgba(230,120,0,.9)); }
   #tikzpanel .tz-head { display:flex; align-items:center; gap:6px; padding:6px 8px; border-bottom:1px solid var(--vscode-editorWidget-border, #454545); }
   #tikzpanel .tz-head strong { flex:1; }
   #tikzpanel .tz-coords { font-variant-numeric:tabular-nums; opacity:.75; }
@@ -1366,6 +1388,8 @@
     <symbol id="ti-chevron-left" viewBox="0 0 16 16"><path d="m10 3.5-4.5 4.5 4.5 4.5"/></symbol>
     <symbol id="ti-chevron-right" viewBox="0 0 16 16"><path d="m6 3.5 4.5 4.5L6 12.5"/></symbol>
     <symbol id="ti-chevron-down" viewBox="0 0 16 16"><path d="m3.5 6 4.5 4.5L12.5 6"/></symbol>
+    <symbol id="ti-chevron-up" viewBox="0 0 16 16"><path d="m3.5 10 4.5-4.5 4.5 4.5"/></symbol>
+    <symbol id="ti-search" viewBox="0 0 16 16"><circle cx="6.8" cy="6.8" r="4.3"/><path d="m10 10 3.8 3.8"/></symbol>
   </defs>
 </svg>
 <header>
@@ -1376,6 +1400,7 @@
   <button id="fit" title="Fit page width (⌘0) · double-click to keep fitted while resizing" aria-pressed="false"><svg class="tool-icon"><use href="#ti-fit"/></svg><span class="tlbl">Fit</span></button>
   <button id="compare" class="icon-only" title="Compare with another version of this paper" aria-label="Compare versions"><svg class="tool-icon"><use href="#ti-compare"/></svg></button>
   <button id="labels" class="icon-only" title="Show every label (or just hold Shift)" aria-label="Show labels" aria-pressed="false"><svg class="tool-icon"><use href="#ti-tag"/></svg></button>
+  <button id="findtool" class="icon-only" title="Find in the paper (⌘F)" aria-label="Find in the paper" aria-pressed="false"><svg class="tool-icon"><use href="#ti-search"/></svg></button>
   <button id="outline" class="icon-only" title="Contents — the sections of this paper (⌘⌥O)" aria-label="Contents" aria-pressed="false"><svg class="tool-icon"><use href="#ti-outline"/></svg></button>
   <span id="commentstool"><button id="commentsbutton" title="Show comments" aria-pressed="false"><svg class="tool-icon"><use href="#ti-comment"/></svg><span class="tlbl">Comments</span><span id="commentscount" hidden>0</span></button><button id="commentsmenu" title="Choose a comment" aria-label="Choose a comment" aria-haspopup="menu" aria-expanded="false"><svg class="tool-icon"><use href="#ti-chevron-down"/></svg></button></span>
   <button id="addmma" class="icon-only" title="Insert a Mathematica computation — then click where it goes" aria-label="Insert Mathematica computation" aria-pressed="false"><svg class="tool-icon"><use href="#ti-compute"/></svg></button>
@@ -1391,6 +1416,13 @@
   <span id="tracelag" hidden><span class="lagtext">page behind</span></span>
   <span id="where"></span>
 </header>
+<div id="findbar" role="search" hidden>
+  <input id="findinput" type="text" placeholder="Find in the paper" aria-label="Find in the paper" spellcheck="false" autocomplete="off">
+  <span id="findcount" aria-live="polite"></span>
+  <button id="findprev" title="Previous match (⇧Enter)" aria-label="Previous match"><svg class="tool-icon"><use href="#ti-chevron-up"/></svg></button>
+  <button id="findnext" title="Next match (Enter)" aria-label="Next match"><svg class="tool-icon"><use href="#ti-chevron-down"/></svg></button>
+  <button id="findclose" title="Close (Escape)" aria-label="Close find"><svg class="tool-icon"><use href="#ti-close"/></svg></button>
+</div>
 <div id="commentsdropdown" role="menu" aria-label="Comments in this paper" hidden></div>
 <div id="diffbar">
   <span id="diffwhat"></span>

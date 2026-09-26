@@ -1011,6 +1011,7 @@ async function renderPage(n) {
         if (state.comments) paintCommentMarkers();
         if (state.labels && labelsVisible()) paintLabels().catch(() => {});
         if (state.sections) paintSections();
+        findPageRendered(n);
         if (state.moveCaret) paintMoveCaret(state.moveCaret);
         if (state.edit) paintEditCard();
         if (state.mma) paintMmaCard();
@@ -5093,7 +5094,7 @@ const bookmarkSvg = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4a1
 
 function bookmarkSection(b) {
     if (b.automatic) return b.section || '';
-    const sections = state.sections?.generation === state.generation ? state.sections.items || [] : [];
+    const sections = state.sections?.generation === state.generation ? state.sections?.items || [] : [];
     const before = sections.map(s => ({ ...s, page: s.startPage ?? s.page, y: s.startY ?? s.y }))
         .filter(s => s.kind === 'section' && s.page &&
         (s.page < b.page || (s.page === b.page && s.y <= b.y + 3)))
@@ -5225,7 +5226,7 @@ function paintBookmarks() {
             if (!ids.has(mark.dataset.bookmark) || b.page !== Number(mark.closest('.page')?.dataset.page)) mark.remove();
         }
         const above = [], below = [];
-        const nearest = nearbySectionBookmarks(state.sections?.generation === state.generation ? state.sections.items || [] : [],
+        const nearest = nearbySectionBookmarks(state.sections?.generation === state.generation ? state.sections?.items || [] : [],
             bounds, bookmarkScreenY);
         const revisionLinks = reviewPlacementCurrent() ? revisionEdgeLinks(reviewHunks()) : [];
         for (const b of bookmarks) {
@@ -7739,12 +7740,12 @@ window.addEventListener('message', async (ev) => {
     const msg = ev.data || {};
     switch (msg.type) {
         case 'pdfRange': pdfRanges.receive(msg); break;
-        case 'open': await openDocument(msg); break;
+        case 'open': await openDocument(msg); findPageChanged(); break;
         // The interactive preview. Three messages and nothing else changes:
         // a page to draw, the end of a build (which is where a document that
         // lost pages drops their overlays), and the answer to an outline
         // request the renderer made.
-        case 'txdlPage': await drawTxdlPage(msg); tikzPageChanged(Number(msg.page)); break;
+        case 'txdlPage': await drawTxdlPage(msg); tikzPageChanged(Number(msg.page)); findPageChanged(); break;
         case 'tikzResolved': tikzResolved(msg); break;
         case 'tikzEdited': tikzEdited(msg); break;
         case 'tikzPalette': tikzPaletteArrived(msg); break;
@@ -9320,3 +9321,252 @@ function tikzPaletteArrived(msg) {
 }
 
 window.__wbTikzTest = { tikz, tikzDragTransform, tikzPath, tikzResolved, tikzEdited, tikzModel, tikzSelected, tikzArrange };
+
+// =============================================================================
+// FIND IN THE PAPER
+// =============================================================================
+//
+// ⌘F / Ctrl+F, or the magnifier in the toolbar, opens a find bar. It searches
+// what the reader SEES: a page the live engine drew is searched in its display
+// list, every other page in the PDF's text — so a word typed a moment ago is
+// found before any PDF has it. Enter and Shift+Enter (⌘G, ⇧⌘G) step through
+// the matches, which are marked on the page; Escape closes. The text model and
+// the folding (case, accents, math italic, ligatures, hyphenation at line
+// ends) are in tex-find.mjs.
+import * as texFind from './tex-find.mjs';
+
+function findS() {
+    return (state.find ||= { open: false, query: '', matches: [], index: -1, models: new Map(),
+        dirty: true, seq: 0, reveal: -1, timer: null, running: null });
+}
+
+/** The live display list page `n` shows now, or null when it shows the PDF. */
+function findLiveTxdl(n) {
+    return state.txdl?.pages.get(n)?.txdl || state.txdlPending?.get(n)?.msg?.txdl || null;
+}
+
+/**
+ * Page `n`'s searchable text, cached per source: `{source, kind, items, model}`.
+ * Live runs are in TeX pt from the DVI origin; PDF items are the ones
+ * `textItems` keeps, in the same order, so a match's run index finds its
+ * box in either.
+ */
+async function findModel(n) {
+    const f = findS();
+    const live = findLiveTxdl(n);
+    const source = live || state.doc;
+    const cached = f.models.get(n);
+    if (cached && cached.source === source) return cached;
+    let kind = 'pdf', items = [];
+    if (live) {
+        kind = 'live';
+        // One item per glyph: a native run is a whole line of glyph ids, and
+        // the characters and the word gaps are only visible glyph by glyph.
+        const renderer = txdlRendererInstance();
+        let layer = [];
+        try { await renderer.prefetch(live); layer = renderer.glyphText(live); } catch (_) { /* no text */ }
+        items = layer.map(it => ({ str: it.str, x: it.x, y: it.baseline - 0.8 * it.h, w: it.w, h: it.h }));
+    } else if (state.doc) {
+        try {
+            const page = await state.doc.getPage(n);
+            const vp = page.getViewport({ scale: 1 });
+            const tc = await page.getTextContent();
+            for (const it of tc.items) {
+                if (!it.str || !it.str.trim() || !it.transform) continue;
+                const t = mul(vp.transform, it.transform);
+                const fh = Math.hypot(t[2], t[3]) || Math.abs(t[3]) || 10;
+                items.push({ str: it.str, x: t[4], y: t[5] - fh, w: it.width || 0, h: fh });
+            }
+        } catch (_) { /* a page that will not give its text has none */ }
+    }
+    const entry = { source, kind, items, model: texFind.pageText(items) };
+    f.models.set(n, entry);
+    return entry;
+}
+
+function findCountText() {
+    const f = findS();
+    const bar = el('findbar');
+    if (f.running) { el('findcount').textContent = '…'; return; }
+    const none = !!texFind.foldQuery(f.query) && !f.matches.length;
+    bar.classList.toggle('none', none);
+    el('findcount').textContent = !texFind.foldQuery(f.query) ? ''
+        : none ? 'No results' : `${f.index + 1} of ${f.matches.length}`;
+    el('findprev').disabled = el('findnext').disabled = f.matches.length === 0;
+}
+
+/**
+ * Search every page. The current match stays where the reader is: the first
+ * match at or after the current one's page (or the first visible page).
+ */
+async function findSearch() {
+    const f = findS();
+    const seq = ++f.seq;
+    const query = f.query;
+    const q = texFind.foldQuery(query);
+    const anchor = f.matches[f.index]?.page || visiblePages()[0] || 1;
+    const out = [];
+    f.running = q ? seq : null;
+    findCountText();
+    if (q) {
+        // Live pages past the PDF's last page (the paper grew while typing) count too.
+        const last = Math.max(state.pageCount || 0, ...(state.txdl ? state.txdl.pages.keys() : []),
+            ...(state.txdlPending ? state.txdlPending.keys() : []));
+        for (let n = 1; n <= last; n++) {
+            const m = await findModel(n);
+            if (seq !== f.seq) return false;
+            for (const [start, end] of texFind.findAll(m.model.text, q)) out.push({ page: n, start, end });
+        }
+    }
+    f.running = null;
+    f.matches = out;
+    f.searched = query;
+    f.dirty = false;
+    const at = out.findIndex(m => m.page >= anchor);
+    f.index = out.length ? (at >= 0 ? at : 0) : -1;
+    findCountText();
+    findPaintAll();
+    return true;
+}
+
+/** Boxes of match `m` in its page wrapper's CSS px, or null if not on screen. */
+async function findRects(m) {
+    const f = findS();
+    const entry = f.models.get(m.page);
+    if (!entry) return null;
+    const spans = texFind.matchSpans(entry.model, m.start, m.end);
+    if (entry.kind === 'live') {
+        const drawn = state.txdl?.pages.get(m.page);
+        if (!drawn || drawn.txdl !== entry.source) return null;
+        const box = txdlPageBox(m.page);
+        const ps = drawn.pageSize;
+        const widthPt = ps && ps.widthBp > 0 ? ps.widthBp * PT_PER_BP : (box?.widthBp || 0) * PT_PER_BP;
+        const heightPt = ps && ps.heightBp > 0 ? ps.heightBp * PT_PER_BP : (box?.heightBp || 0) * PT_PER_BP;
+        if (!box || !(widthPt > 0)) return null;
+        const scale = box.width / widthPt;
+        const geo = pageToCss(drawn.txdl, scale, { mediaSize: [widthPt, heightPt] });
+        return texFind.spanRects(entry.items, spans).map(r => ({
+            x: geo.originX + r.x * scale, y: geo.originY + r.y * scale, w: r.w * scale, h: r.h * scale }));
+    }
+    if (!state.rendered.has(m.page) || entry.source !== state.doc) return null;
+    let items;
+    try { items = await textItems(m.page); } catch (_) { return null; }
+    if (items.length !== entry.items.length) return null;
+    return texFind.spanRects(items, spans);
+}
+
+async function findPaintPage(n) {
+    const f = findS();
+    const wrap = pagesEl().querySelector(`.page[data-page="${n}"]`);
+    if (!wrap) return;
+    for (const e of wrap.querySelectorAll('.find-hit')) e.remove();
+    if (!f.open) return;
+    const seq = f.seq;
+    for (let i = 0; i < f.matches.length; i++) {
+        const m = f.matches[i];
+        if (m.page !== n) continue;
+        const rects = await findRects(m);
+        if (seq !== f.seq || !rects) continue;
+        for (const r of rects) {
+            const hit = document.createElement('div');
+            hit.className = 'find-hit' + (i === f.index ? ' current' : '');
+            hit.style.left = `${r.x - 1}px`;
+            hit.style.top = `${r.y - 1}px`;
+            hit.style.width = `${r.w + 2}px`;
+            hit.style.height = `${r.h + 2}px`;
+            wrap.appendChild(hit);
+            if (i === f.index && f.reveal === i) {
+                f.reveal = -1;
+                try { hit.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch (_) { /* fine */ }
+            }
+        }
+    }
+}
+
+function findPaintAll() {
+    for (const e of document.querySelectorAll('.find-hit')) e.remove();
+    const f = findS();
+    if (!f.open) return;
+    const pages = new Set(f.matches.map(m => m.page));
+    for (const n of pages) if (state.rendered.has(n) || state.txdl?.pages.has(n)) findPaintPage(n);
+}
+
+/** Step to the next (+1) or previous (-1) match and bring it into view. */
+async function findStep(delta) {
+    const f = findS();
+    if (f.dirty || f.running) { if (!await findSearch()) return; delta = f.matches[f.index]?.page >= (visiblePages()[0] || 1) ? 0 : delta; }
+    if (!f.matches.length) return;
+    f.index = (f.index + delta + f.matches.length) % f.matches.length;
+    f.reveal = f.index;
+    findCountText();
+    const m = f.matches[f.index];
+    const wrap = pagesEl().querySelector(`.page[data-page="${m.page}"]`);
+    renderAround(m.page);
+    if (wrap && !(state.rendered.has(m.page) || state.txdl?.pages.has(m.page))) {
+        try { wrap.scrollIntoView({ block: 'center' }); } catch (_) { /* fine */ }
+    }
+    findPaintAll();
+}
+
+function findOpen() {
+    const f = findS();
+    f.open = true;
+    el('findbar').hidden = false;
+    el('findtool').setAttribute('aria-pressed', 'true');
+    const input = el('findinput');
+    // Whatever is selected on the page is what people usually want to find.
+    const picked = String(window.getSelection?.() || '').trim();
+    if (picked && picked.length < 200 && !picked.includes('\n')) input.value = picked;
+    input.focus();
+    input.select();
+    if (input.value !== f.query || f.dirty) { f.query = input.value; findSearch(); }
+    else findPaintAll();
+}
+
+function findClose() {
+    const f = findS();
+    f.open = false;
+    f.seq++;
+    el('findbar').hidden = true;
+    el('findtool').setAttribute('aria-pressed', 'false');
+    for (const e of document.querySelectorAll('.find-hit')) e.remove();
+}
+
+/** The page's text changed (a live page arrived, a new PDF): search again soon. */
+function findPageChanged() {
+    const f = state.find;
+    if (!f) return;
+    f.dirty = true;
+    if (!f.open || !texFind.foldQuery(f.query)) return;
+    clearTimeout(f.timer);
+    f.timer = setTimeout(() => { findSearch(); }, 250);
+}
+
+/** A page was rendered (or re-rendered at a new zoom): put its marks back. */
+function findPageRendered(n) {
+    if (state.find?.open) findPaintPage(n);
+}
+
+el('findtool').addEventListener('click', () => (findS().open ? findClose() : findOpen()));
+el('findclose').addEventListener('click', findClose);
+el('findnext').addEventListener('click', () => findStep(1));
+el('findprev').addEventListener('click', () => findStep(-1));
+el('findinput').addEventListener('input', () => {
+    const f = findS();
+    f.query = el('findinput').value;
+    clearTimeout(f.timer);
+    f.timer = setTimeout(() => { findSearch(); }, 120);
+});
+el('findinput').addEventListener('keydown', e => {
+    e.stopPropagation();
+    if (e.key === 'Enter') { e.preventDefault(); findStep(e.shiftKey ? -1 : 1); }
+    else if (e.key === 'Escape') { e.preventDefault(); findClose(); }
+});
+window.addEventListener('keydown', e => {
+    const key = String(e.key || '').toLowerCase();
+    if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
+    if (key === 'f' && !e.shiftKey) { e.preventDefault(); e.stopPropagation(); findOpen(); }
+    else if (key === 'g' && findS().open) { e.preventDefault(); e.stopPropagation(); findStep(e.shiftKey ? -1 : 1); }
+}, true);
+
+window.__wbFindTest = { findS, findSearch, findStep, findOpen, findClose, findModel, findRects };
