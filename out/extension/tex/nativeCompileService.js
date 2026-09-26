@@ -351,6 +351,16 @@ class NativeBuildLane {
     }
 
     /**
+     * An EPS/PS figure of the project as a one-page PDF Buffer — the
+     * engine's Ghostscript conversion, what the PDF shows. Null without an
+     * engine (or one too old to convert).
+     */
+    async figure(relativeFile) {
+        if (!this.interactive || typeof this.session.figure !== 'function') return null;
+        return this.session.figure(relativeFile);
+    }
+
+    /**
      * ONE INCREMENTAL BUILD FOR THE LIVE PREVIEW.
      *
      * The engine resumes from the latest page checkpoint the edit did not

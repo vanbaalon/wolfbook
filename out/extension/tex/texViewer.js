@@ -1563,8 +1563,9 @@ class TexViewer {
 
     /**
      * A figure a live page draws, read for the webview. Only image files inside
-     * the paper's project directory are served; anything else (an EPS, a file
-     * elsewhere) answers with an error and that page keeps the PDF.
+     * the paper's project directory are served; an EPS or PS figure goes as
+     * the engine's PDF conversion (what the PDF itself shows); anything else
+     * (a file elsewhere) answers with an error and that page keeps the PDF.
      */
     async _onTxdlImage(m) {
         const reply = { type:'txdlImage', id:m.id, error:null };
@@ -1577,12 +1578,19 @@ class TexViewer {
             if (!inside || inside.startsWith('..') || path.isAbsolute(inside)) throw Error('figure outside the project');
             const ext = path.extname(file).toLowerCase();
             const mime = { '.png':'image/png', '.jpg':'image/jpeg', '.jpeg':'image/jpeg', '.gif':'image/gif', '.webp':'image/webp' }[ext];
-            if (!mime && ext !== '.pdf') throw Error(`${ext || 'this'} figures need the PDF`);
-            const stat = await fs.promises.stat(file);
-            if (!stat.isFile() || stat.size > 24 * 1024 * 1024) throw Error('figure too large');
-            reply.kind = ext === '.pdf' ? 'pdf' : 'raster';
-            reply.mime = mime || 'application/pdf';
-            reply.base64 = (await fs.promises.readFile(file)).toString('base64');
+            if (ext === '.eps' || ext === '.ps') {
+                const pdf = lane && typeof lane.figure === 'function'
+                    ? await lane.figure(inside.split(path.sep).join('/')) : null;
+                if (!pdf) throw Error(`${ext} figures need the PDF`);
+                Object.assign(reply, { kind:'pdf', mime:'application/pdf', base64:Buffer.from(pdf).toString('base64') });
+            } else {
+                if (!mime && ext !== '.pdf') throw Error(`${ext || 'this'} figures need the PDF`);
+                const stat = await fs.promises.stat(file);
+                if (!stat.isFile() || stat.size > 24 * 1024 * 1024) throw Error('figure too large');
+                reply.kind = ext === '.pdf' ? 'pdf' : 'raster';
+                reply.mime = mime || 'application/pdf';
+                reply.base64 = (await fs.promises.readFile(file)).toString('base64');
+            }
         } catch (error) { reply.error = error.message || String(error); }
         this._post(reply);
     }
