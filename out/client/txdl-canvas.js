@@ -471,6 +471,12 @@ export function createTxdlRenderer(options = {}) {
           }
           const sizePt = spToPt(font.size_sp);
           useFill(color);
+          // XeTeX's synthetic effects (fontspec FakeSlant/FakeStretch/
+          // FakeBold, xeCJK's AutoFake*): 16.16 factors, and an outline
+          // stroke width in pt for embolden.
+          const extend = font.extend ? font.extend / 65536 : 1;
+          const slant = font.slant ? font.slant / 65536 : 0;
+          const emboldenPt = font.embolden ? font.embolden / 65536 : 0;
           for (const glyph of op.glyphs || []) {
             const [gid, gx, gy] = glyph;
             const id = key(op.font, gid);
@@ -491,11 +497,21 @@ export function createTxdlRenderer(options = {}) {
             ctx.save();
             ctx.translate(css.x(gx), css.y(gy));
             ctx.scale(unit, -unit); // font units are y-up, the page is y-down
-            if (Ctor) {
-              ctx.fill(cachedPath(op.font, gid, outline, Ctor));
+            if (extend !== 1) ctx.scale(extend, 1);
+            if (slant) ctx.transform(1, 0, slant, 1, 0, 0);
+            const glyphPath = Ctor ? cachedPath(op.font, gid, outline, Ctor) : null;
+            if (glyphPath) {
+              ctx.fill(glyphPath);
             } else {
               replayPath(ctx, outline.path || '');
               ctx.fill();
+            }
+            if (emboldenPt > 0) {
+              ctx.lineWidth = (emboldenPt * upem) / sizePt;
+              ctx.lineJoin = 'round';
+              ctx.strokeStyle = color;
+              if (glyphPath) ctx.stroke(glyphPath);
+              else ctx.stroke();
             }
             ctx.restore();
             result.glyphs += 1;

@@ -121,10 +121,17 @@ class NativeBuildLane {
         if (!name || name.startsWith('../') || path.isAbsolute(name)) throw Error('Native source is outside the project directory');
         return name;
     }
+    isInside(file) {
+        const name = path.relative(this.projectDir, file);
+        return !!name && !name.startsWith('..') && !path.isAbsolute(name);
+    }
     invalidate() { this.version++; }
     noteChange(document, changes) {
         if (this.closed) return Promise.reject(Error('Native lane is closed'));
         this.version++;
+        // A file outside the project is not part of the native snapshot (the
+        // engine cannot read it): its edits have nothing to update.
+        if (!this.isInside(document.uri.fsPath)) return Promise.resolve();
         const file = this.relative(document.uri.fsPath);
         const text = document.getText();
         const captured = changes.map(c => ({ start: c.rangeOffset, end: c.rangeOffset + c.rangeLength, text: c.text }))
@@ -170,11 +177,13 @@ class NativeBuildLane {
         requireCurrent();
         const texts = new Map();
         for (const file of new Set([this.root, ...(o.sourceFiles || [])])) {
+            // Outside the project: the engine cannot read it; TeX reports it missing.
+            if (!this.isInside(file)) continue;
             try { texts.set(this.relative(file),
                 o.overlay?.has(file) ? o.overlay.get(file) : fs.readFileSync(file, 'utf8')); }
             catch (error) { if (file === this.root || error.code !== 'ENOENT') throw error; }
         }
-        for (const [file, text] of o.overlay || []) texts.set(this.relative(file), text);
+        for (const [file, text] of o.overlay || []) if (this.isInside(file)) texts.set(this.relative(file), text);
         // Full synchronization recovers after a missed editor event.
         // Packages discovered by the native engine are not necessarily present
         // in the editor's TeX graph. Refresh them before freezing a new build.
@@ -417,11 +426,13 @@ class NativeBuildLane {
     _interactiveOverlays(o) {
         const texts = new Map();
         for (const file of new Set([this.root, ...(o.sourceFiles || [])])) {
+            // Outside the project: the engine cannot read it; TeX reports it missing.
+            if (!this.isInside(file)) continue;
             try { texts.set(this.relative(file),
                 o.overlay?.has(file) ? o.overlay.get(file) : fs.readFileSync(file, 'utf8')); }
             catch (error) { if (file === this.root || error.code !== 'ENOENT') throw error; }
         }
-        for (const [file, text] of o.overlay || []) texts.set(this.relative(file), text);
+        for (const [file, text] of o.overlay || []) if (this.isInside(file)) texts.set(this.relative(file), text);
         for (const file of this.source.files.keys()) {
             if (texts.has(file)) continue;
             try { texts.set(file, fs.readFileSync(path.join(this.projectDir, file), 'utf8')); }

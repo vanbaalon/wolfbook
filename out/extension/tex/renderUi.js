@@ -474,6 +474,10 @@ class RenderCoordinator {
         // The page now shows the latest text: the status says "live".
         const wasCurrent = st.livePreviewAt >= (st.lastEditAt || 0);
         st.livePreviewAt = Date.now();
+        const r = result.report || {};
+        st.livePreviewStats = { firstChangedMs: r.first_changed_ms ?? null, totalMs: r.total_ms ?? null,
+            recomputed: r.pages_recomputed ?? null, reused: r.pages_reused ?? null,
+            sinceKeyMs: st.lastEditAt ? Date.now() - st.lastEditAt : null };
         if (errors.length || hadLive || !wasCurrent) this._emitter.fire(st);
         const report = result.report || {};
         // Honest by construction: this says what the preview recomputed, not
@@ -1088,8 +1092,13 @@ function makeStatusItem(coord, projection) {
         }
         if (st && st.sourceAhead && st.livePreviewAt >= (st.lastEditAt || Infinity)) {
             item.text = `$(zap) live${st.liveCompiling || st.authoritativeRunning ? ' $(sync~spin)' : ''}`;
+            const t = st.livePreviewStats || {};
+            const ms = v => (v == null ? '?' : `${Math.round(v)} ms`);
             item.tooltip = 'The page shows your latest text (live WLaTeX preview); click-to-source works on it. ' +
-                'The PDF settles when typing pauses.';
+                'The PDF settles when typing pauses.' +
+                `\n\nLast preview: first changed page after ${ms(t.firstChangedMs)}, ` +
+                `${t.recomputed ?? '?'} page(s) recomputed, ${t.reused ?? '?'} reused, ${ms(t.totalMs)} in the engine; ` +
+                `${ms(t.sinceKeyMs)} from the keystroke to the finished preview.`;
             item.show();
             return;
         }

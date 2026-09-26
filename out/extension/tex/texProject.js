@@ -44,6 +44,9 @@ function resolveTexPath(baseDir, ref, deps) {
 
 /** Every file this one pulls in, with the line it was pulled in on. */
 function directIncludes(src, file, deps) {
+    // A commented-out \input is not an input: blank comments (keeping every
+    // line where it was, so line numbers stay true).
+    src = src.replace(/(^|[^\\])((?:\\\\)*)%.*$/gm, '$1$2');
     const baseDir = path.dirname(file);
     const out = [];
     const lineAt = makeLineIndex(src);
