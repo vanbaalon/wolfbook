@@ -399,3 +399,13 @@ test('a title typed in the preamble keeps its own line; a multi-line macro body 
     assert.equal(map.renderToSource(1, ...centre(map, 0)).line, 2, 'the title line, not \\maketitle');
     assert.equal(map.renderToSource(1, ...centre(map, 1)).line, 7, 'the \\Gr in the text, not the macro body');
 });
+
+test('with no .bib record, a bibliography click lands in the .bbl the project ships', () => {
+    const fs = require('node:fs');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wpaper-shipped-bbl-'));
+    fs.writeFileSync(path.join(dir, 'paper.bbl'), ['\\begin{thebibliography}{1}', '', '\\bibitem{only}', 'A. Author, Title.'].join('\n'));
+    const map = viewOf([glyphAt(0, 0, { generated_source: { file: 'paper.bbl', line: 4, column: 3 } })], dir, null);
+    const hit = map.renderToSource(1, ...centre(map, 0));
+    assert.equal(hit.file, path.join(dir, 'paper.bbl'));
+    assert.deepEqual([hit.line, hit.column], [4, 3]);
+});

@@ -413,6 +413,10 @@ class NativeMap extends RenderMap {
                     if (at >= 0) { target = { file: bib, line: at + 1, column: 0, bibkey }; break; }
                 }
             }
+            // No .bib record (an arXiv source ships only its .bbl): the entry
+            // in the project's own .bbl, the file the writer edits then.
+            const shipped = path.join(this.projectDir, generated.file);
+            if (!target && linesOf(this._files, shipped)) target = { file: shipped, line: generated.line, column: generated.column || 0 };
         } else if (lines && ['.toc', '.lof', '.lot'].includes(extension)) {
             // \contentsline{section}{\numberline{1}Title}{page}{anchor}: the heading with that title.
             const line = lines[generated.line - 1] || '';
