@@ -1134,6 +1134,11 @@
           "maximum": 60000,
           "description": "With the WLaTeX engine: how long typing must pause before the full native build settles the paper (PDF, cross-references, every page's source map). The live page does not wait for it."
         },
+        "wolfbook.tex.inspireSearch": {
+          "type": "boolean",
+          "default": true,
+          "description": "WLaTeX Pro: the citation picker (⌘⇧C at the page caret) also searches INSPIRE-HEP (inspirehep.net) for what you type — words, an arXiv number or a texkey — and a record you choose is added to the paper's .bib (or its thebibliography). Only the typed search is sent."
+        },
         "wolfbook.tex.inkTyping": {
           "type": "boolean",
           "default": true,

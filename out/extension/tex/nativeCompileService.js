@@ -612,8 +612,7 @@ class NativeBuildLane {
         // Until this session's first build lands, the settled build kept from
         // the last one: the first live pages then already number references.
         const directory = report?.artifact_directory || (!report && this._keptSeedFiles() ? this.settledSeed : null);
-        const files = report?.artifact_directory ? report.build?.auxiliary_files : this._keptSeedFiles();
-        if (!directory) return texts;
+        const files = directory ? (report?.artifact_directory ? report.build?.auxiliary_files : this._keptSeedFiles()) : null;
         for (const name of Object.keys(files || {})) {
             if (!AUXILIARY_FILE.test(name) || !SAFE_OVERLAY(name)) continue;
             try { texts[name] = fs.readFileSync(path.join(directory, name), 'utf8'); }

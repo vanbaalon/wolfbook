@@ -4843,6 +4843,106 @@ function setInkCaret(msg) {
     }, 600);
 }
 
+// --- the reference and citation picker at the caret --------------------------
+
+let activePicker = null;
+function closePicker() { activePicker = null; for (const el of document.querySelectorAll('.inkpicker')) el.remove(); }
+
+function openPicker(msg) {
+    closePicker();
+    const ink = state.ink;
+    const wrap = ink && pagesEl().querySelector(`.page[data-page="${ink.page}"]`);
+    const v = wrap && inkToViewport(ink);
+    if (!v) return;
+    const items = Array.isArray(msg.items) ? msg.items : [];
+    const box = document.createElement('div');
+    box.className = 'inkpicker';
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.placeholder = msg.kind === 'ref' ? 'Refer to… (label, number, title)' : 'Cite… (key, author, year, title)';
+    input.setAttribute('aria-label', input.placeholder);
+    const list = document.createElement('div');
+    list.className = 'inkpicker-list';
+    box.append(input, list);
+    let shown = [], at = 0;
+    // INSPIRE-HEP, for a citation: searched as the reader types (the host
+    // asks inspirehep.net), listed below the paper's own bibliography.
+    let inspireItems = [], inspireNote = '', inspireSeq = 0, inspireTimer = null;
+    const local = new Set(items.map(it => it.key));
+    const describe = it => msg.kind === 'ref'
+        ? [`${it.kind || 'label'}${it.printed ? ' ' + it.printed : ''}`, it.title || '', it.key]
+        : [`${it.printed ? '[' + it.printed + '] ' : ''}${[it.author, it.year].filter(Boolean).join(' ')}`, it.title || '', it.key];
+    const render = () => {
+        const words = input.value.toLowerCase().split(/\s+/).filter(Boolean);
+        const mine = items.filter(it => { const hay = describe(it).join(' ').toLowerCase(); return words.every(w => hay.includes(w)); }).slice(0, 60);
+        const theirs = inspireItems.filter(it => !local.has(it.key));
+        shown = [...mine, ...theirs];
+        at = Math.min(at, Math.max(0, shown.length - 1));
+        const rows = shown.map((it, i) => {
+            const [head, title, key] = describe(it);
+            const row = document.createElement('div');
+            row.className = 'inkpicker-row' + (i === at ? ' on' : '');
+            const h = document.createElement('span'); h.className = 'head'; h.textContent = head;
+            const t = document.createElement('span'); t.className = 'title'; t.textContent = title;
+            const k = document.createElement('span'); k.className = 'key'; k.textContent = key;
+            row.append(h, t, k);
+            row.addEventListener('mousedown', e => { e.preventDefault(); choose(i); });
+            return row;
+        });
+        if (msg.kind === 'cite' && (theirs.length || inspireNote)) {
+            const head = document.createElement('div');
+            head.className = 'inkpicker-section';
+            head.textContent = inspireNote || 'From INSPIRE';
+            head.title = 'Chosen, a record is added to the paper\'s bibliography';
+            rows.splice(mine.length, 0, head);
+        }
+        list.replaceChildren(...rows);
+        if (!shown.length && !inspireNote) list.textContent = items.length ? 'nothing matches' : (msg.kind === 'ref' ? 'no labels yet' : 'no bibliography found — type to search INSPIRE');
+        list.querySelector('.on')?.scrollIntoView({ block: 'nearest' });
+    };
+    const choose = i => {
+        const it = shown[i];
+        closePicker();
+        if (it) vscode.postMessage({ type: 'inkKey', key: 'insert', kind: msg.kind, name: it.key, equation: it.kind === 'equation',
+            ...(it.source === 'inspire' ? { inspire: it.recid } : {}) });
+    };
+    input.addEventListener('input', () => {
+        at = 0;
+        render();
+        if (msg.kind !== 'cite') return;
+        clearTimeout(inspireTimer);
+        const q = input.value.trim();
+        if (q.length < 3) { inspireItems = []; inspireNote = ''; render(); return; }
+        inspireTimer = setTimeout(() => {
+            inspireSeq++;
+            inspireNote = 'INSPIRE — searching…';
+            render();
+            vscode.postMessage({ type: 'inspireSearch', q, seq: inspireSeq });
+        }, 450);
+    });
+    activePicker = { onInspire(m) {
+        if (m.seq !== inspireSeq) return;
+        inspireItems = Array.isArray(m.items) ? m.items : [];
+        inspireNote = m.error ? m.error : inspireItems.some(it => !local.has(it.key)) ? '' : 'INSPIRE — nothing new';
+        render();
+    } };
+    input.addEventListener('keydown', e => {
+        if (e.key === 'ArrowDown') { at = Math.min(shown.length - 1, at + 1); render(); }
+        else if (e.key === 'ArrowUp') { at = Math.max(0, at - 1); render(); }
+        else if (e.key === 'Enter') choose(at);
+        else if (e.key === 'Escape') closePicker();
+        else return;
+        e.preventDefault();
+        e.stopPropagation();
+    });
+    input.addEventListener('blur', () => setTimeout(() => { if (!box.contains(document.activeElement)) closePicker(); }, 150));
+    box.style.left = `${Math.max(4, Math.min(v.x, wrap.clientWidth - 360))}px`;
+    box.style.top = `${v.y + v.h + 4}px`;
+    wrap.appendChild(box);
+    render();
+    input.focus();
+}
+
 const INK_KEYS = new Set(['Enter', 'Backspace', 'Delete', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'Escape']);
 // Before every other key handler (capture): with a caret on the page, the keys are text.
 // ⌘B / ⌘I: on a selection, format it; at the ink caret, type in that format.
@@ -4866,6 +4966,9 @@ window.addEventListener('keydown', (e) => {
     if (e.isComposing) return;
     let key = null;
     if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'z') key = e.shiftKey ? 'redo' : 'undo';
+    // ⌘⇧R a cross-reference, ⌘⇧C a citation: a picker at the caret.
+    else if ((e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && ['r', 'c'].includes(e.key.toLowerCase()))
+        key = e.key.toLowerCase() === 'r' ? 'picker:ref' : 'picker:cite';
     else if (e.metaKey || e.ctrlKey) return;
     else if (INK_KEYS.has(e.key)) key = e.key;
     else if ([...e.key].length === 1) key = e.key;
@@ -8028,6 +8131,8 @@ window.addEventListener('message', async (ev) => {
         // request the renderer made.
         case 'liveStart': liveStart(msg); break;
         case 'inkCaret': setInkCaret(msg); break;
+        case 'picker': openPicker(msg); break;
+        case 'inspireResults': activePicker?.onInspire(msg); break;
         case 'txdlPage': await drawTxdlPage(msg); tikzPageChanged(Number(msg.page)); findPageChanged(); break;
         case 'tikzResolved': tikzResolved(msg); break;
         case 'tikzEdited': tikzEdited(msg); break;

@@ -30,6 +30,8 @@ const { shipDecision } = require('./livePolicy');
 const { balanceRange, closeFor, commentMask } = require('./texBalance');
 const { caretAt, keyEdit, proseAt } = require('./inkEdit');
 const { format: formatSource } = require('./texFormat');
+const { bibEntries, bblEntries, refItems, insertion } = require('./texPickers');
+const inspire = require('./inspire');
 // Formats from the page (texFormat.js), by action id.
 const PAGE_FORMATS = new Set(['bold', 'italic', 'mono', 'math', 'footnote', 'heading']);
 const { sectionSpans, ADDRESSABLE } = require('./texModel');
@@ -478,6 +480,8 @@ class EditorFlash {
 // _scheduleLiveMap); a click on a live page waits at most this long for it.
 const LIVE_MAP_TYPING_IDLE_MS = 400;
 const LIVE_MAP_CLICK_WAIT_MS = 1500;
+// The live map holds the pages this near the reader (see _buildLiveMap).
+const LIVE_MAP_WINDOW = 3;
 
 class TexViewer {
     /**
@@ -1352,12 +1356,21 @@ class TexViewer {
         }, wait);
     }
 
-    /** Build the live map now, from the page maps published for what the overlays show. */
-    async _buildLiveMap(lane) {
+    /**
+     * Build the live map now, from the page maps published for what the
+     * overlays show — near the reader only (the ink caret's page, else the
+     * page they are reading, and LIVE_MAP_WINDOW either side), plus `want`:
+     * an edit that reflows the rest of a long paper leaves dozens of live
+     * pages, and reading every one took the worker 1.5 s that a caret move
+     * then waited behind. A click elsewhere asks for its page (_ensureLiveMap).
+     */
+    async _buildLiveMap(lane, want = null) {
         clearTimeout(this._liveMapTimer);
         if (!this.panel || !lane || typeof lane.liveView !== 'function') return;
+        const center = this._ink?.caret?.page || this._viewState?.page || null;
         const pages = [...(this._liveMapReady || new Map())]
             .filter(([page, identity]) => this._liveOverlays?.get(page) === identity).map(([page]) => page)
+            .filter(page => !center || Math.abs(page - center) <= LIVE_MAP_WINDOW || page === want)
             .sort((a, b) => a - b);
         const request = this._liveMapRequest = (this._liveMapRequest || 0) + 1;
         const building = (async () => {
@@ -1391,7 +1404,7 @@ class TexViewer {
             if (this._liveMapReady?.get(page) === identity && this._liveMapLane) {
                 if (this._liveMapBuilding) await this._liveMapBuilding.catch(() => {});
                 if (ready()) return true;
-                await this._buildLiveMap(this._liveMapLane);
+                await this._buildLiveMap(this._liveMapLane, page);
                 if (ready()) return true;
             }
             await new Promise(resolve => setTimeout(resolve, 10));
@@ -1512,6 +1525,28 @@ class TexViewer {
             return this._inkFollow();
         }
         if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(m.key)) return this._inkMove(doc, m.key);
+        if (m.key === 'picker:ref' || m.key === 'picker:cite') return this._inkPicker(doc, m.key.slice(7));
+        if (m.key === 'insert' && (m.kind === 'ref' || m.kind === 'cite') && typeof m.name === 'string' && m.name) {
+            let current = text;
+            if (m.kind === 'cite' && m.inspire != null) {
+                // A record from INSPIRE: into the paper's bibliography first.
+                let added;
+                try { added = await this._inspireAdd(doc, this.coord.roots.get(ink.root), m.name, m.inspire); }
+                catch (error) { this._post({ type:'status', text:`INSPIRE: ${error.message}`, kind:'err' }); return; }
+                ink.offset += added.shift;
+                ink.version = doc.version;
+                current = doc.getText();
+                this._post({ type:'status', text:`${m.name}: ${added.where}`, kind:'ok' });
+            }
+            const r = insertion(current, ink.offset, m.kind, m.name, { equation: !!m.equation });
+            const old = await this._inkReplace(doc, r.start, r.end, r.insert, true);
+            if (old === null) return;
+            ink.undo.push({ start: r.start, end: r.start + r.insert.length, insert: old, caret: ink.offset });
+            ink.redo = [];
+            ink.offset = r.caret;
+            ink.version = doc.version;
+            return this._inkFollow();
+        }
         if (typeof m.key === 'string' && m.key.startsWith('format:')) {
             // ⌘B, ⌘I … at the caret: open a group to type into, or step out of it.
             const r = formatSource(text, ink.offset, ink.offset, m.key.slice(7));
@@ -1540,6 +1575,117 @@ class TexViewer {
         ink.offset = edit.caret;
         ink.version = doc.version;
         this._inkFollow();
+    }
+
+    /**
+     * The picker at the caret: what the paper can refer to (its labels, with
+     * the numbers the last build printed) or cite (its .bib entries, or the
+     * .bbl it ships), for the webview to search.
+     */
+    _inkPicker(doc, kind) {
+        const st = this.coord.roots.get(this._ink?.root);
+        const outDir = st?.generation?.outDir || st?.nativeLane?.coldReport?.artifact_directory || null;
+        const root = st?.root || this.root;
+        const deps = { readFile: f => fs.readFileSync(f, 'utf8'), exists: f => fs.existsSync(f) };
+        let aux = { labels: new Map(), cites: new Map() };
+        try { if (outDir) aux = readAuxLabels(outDir, root, deps); } catch (_) { /* no numbers */ }
+        let items;
+        if (kind === 'ref') {
+            let objects = [];
+            try { objects = this.projection.get(doc).model.objects || []; } catch (_) { /* labels only */ }
+            items = refItems(aux.labels, objects);
+        } else {
+            items = [];
+            for (const bib of this._bibFiles(st, root))
+                try { items.push(...bibEntries(fs.readFileSync(bib, 'utf8'))); } catch (_) { /* not there */ }
+            // A paper that ships only its bibliography: the .bbl's items.
+            if (!items.length) {
+                const job = path.basename(root).replace(/\.tex$/i, '');
+                for (const bbl of [outDir && path.join(outDir, `${job}.bbl`), path.join(path.dirname(root), `${job}.bbl`)].filter(Boolean)) {
+                    try { items = bblEntries(fs.readFileSync(bbl, 'utf8')); break; } catch (_) { /* next */ }
+                }
+            }
+            // A bibliography written into the paper itself (thebibliography).
+            if (!items.length) {
+                for (const file of new Set([root, ...(st?.files || [])])) {
+                    try { const src = fs.readFileSync(file, 'utf8'); if (src.includes('\\bibitem')) items.push(...bblEntries(src)); }
+                    catch (_) { /* next */ }
+                }
+            }
+            for (const item of items) item.printed = aux.cites.get(item.key)?.printed || item.label || '';
+        }
+        this._post({ type:'picker', kind, items: items.slice(0, 5000) });
+    }
+
+    /** The .bib databases the project names (\bibliography, \addbibresource), existing or not. */
+    _bibFiles(st, root) {
+        const out = [];
+        for (const file of new Set([root, ...(st?.files || [])])) {
+            let src = '';
+            try { src = fs.readFileSync(file, 'utf8'); } catch (_) { continue; }
+            for (const m of src.matchAll(/\\(?:bibliography|addbibresource)\s*(?:\[[^\]]*\])?\s*\{([^}]*)\}/g)) {
+                for (const name of m[1].split(',').map(n => n.trim()).filter(Boolean)) {
+                    const bib = path.resolve(path.dirname(file), /\.bib$/i.test(name) ? name : `${name}.bib`);
+                    if (!out.includes(bib)) out.push(bib);
+                }
+            }
+        }
+        return out;
+    }
+
+    /** INSPIRE-HEP results for what the reader typed into the citation picker. */
+    async _inspireSearch(m) {
+        const seq = m.seq;
+        if (vscode.workspace.getConfiguration('wolfbook.tex').get('inspireSearch', true) === false) {
+            this._post({ type:'inspireResults', seq, items:[], error:'INSPIRE search is off (wolfbook.tex.inspireSearch)' });
+            return;
+        }
+        try { this._post({ type:'inspireResults', seq, items: await inspire.searchInspire(String(m.q || '').slice(0, 300)) }); }
+        catch (error) { this._post({ type:'inspireResults', seq, items:[], error:`INSPIRE: ${error.message}` }); }
+    }
+
+    /**
+     * Make an INSPIRE record citable in this paper before its \cite goes in:
+     * its BibTeX appended to the paper's .bib (saved, so the settle's BibTeX
+     * reads it); for a bibliography written in the .tex, INSPIRE's \bibitem
+     * before \end{thebibliography}; otherwise the BibTeX on the clipboard.
+     * Answers how far the caret moved (an insertion before it) and where.
+     */
+    async _inspireAdd(doc, st, key, recid) {
+        const root = st?.root || this.root;
+        const bibs = this._bibFiles(st, root);
+        const has = file => { try { return bibEntries(fs.readFileSync(file, 'utf8')).some(e => e.key === key); } catch (_) { return false; } };
+        if (bibs.some(has)) return { shift: 0, where: 'already in the bibliography' };
+        if (bibs.length) {
+            const bibtex = await inspire.inspireBibtex(recid);
+            const uri = vscode.Uri.file(bibs.find(f => fs.existsSync(f)) || bibs[0]);
+            const edit = new vscode.WorkspaceEdit();
+            let bibDoc = null;
+            if (fs.existsSync(uri.fsPath)) {
+                bibDoc = await vscode.workspace.openTextDocument(uri);
+                const body = bibDoc.getText();
+                edit.insert(uri, bibDoc.lineAt(bibDoc.lineCount - 1).range.end, `${!body || body.endsWith('\n') ? '' : '\n'}\n${bibtex}\n`);
+            } else {
+                edit.createFile(uri, { ignoreIfExists: true });
+                edit.insert(uri, new vscode.Position(0, 0), `${bibtex}\n`);
+            }
+            if (!await vscode.workspace.applyEdit(edit)) throw Error(`could not add ${key} to ${path.basename(uri.fsPath)}`);
+            bibDoc = bibDoc || await vscode.workspace.openTextDocument(uri);
+            await bibDoc.save();
+            return { shift: 0, where: `added to ${path.basename(uri.fsPath)}` };
+        }
+        for (const file of new Set([root, ...(st?.files || [])])) {
+            const texDoc = await Promise.resolve(vscode.workspace.openTextDocument(vscode.Uri.file(file))).catch(() => null);
+            const at = texDoc ? texDoc.getText().lastIndexOf('\\end{thebibliography}') : -1;
+            if (at < 0) continue;
+            const insert = `${await inspire.inspireBibitem(recid)}\n\n`;
+            const edit = new vscode.WorkspaceEdit();
+            edit.insert(texDoc.uri, texDoc.positionAt(at), insert);
+            if (!await vscode.workspace.applyEdit(edit)) throw Error(`could not add ${key} to the bibliography`);
+            return { shift: texDoc === doc && at < (this._ink?.offset ?? Infinity) ? insert.length : 0, where: 'added to thebibliography' };
+        }
+        await vscode.env.clipboard.writeText(await inspire.inspireBibtex(recid));
+        return { shift: 0, where: 'no .bib here: its BibTeX is on the clipboard' };
     }
 
     /** Replace [start, end) of `doc` with `insert`; the replaced text, or null. */
@@ -4553,6 +4699,7 @@ class TexViewer {
             case 'txdlOutlines': await this._onTxdlOutlines(m); break;
             case 'txdlImage': await this._onTxdlImage(m); break;
             // The webview kept the PDF for this page: it is not a live page.
+            case 'inspireSearch': this._inspireSearch(m); break;
             case 'inkKey': this._inkKey(m); break;
             case 'txdlFallback': this._liveOverlays?.delete(m.page); this._liveMapReady?.delete(m.page);
                 this._previewPages?.delete(m.page); break;

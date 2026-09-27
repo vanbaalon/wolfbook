@@ -165,6 +165,21 @@
   .inkcaret.typing { animation:none; }
   .wb-dark-pages .inkcaret { background:#f2f2f2; }
   @keyframes inkblink { 0%, 55% { opacity:1 } 56%, 100% { opacity:0 } }
+  /* The reference / citation picker at the ink caret. */
+  .inkpicker { position:absolute; z-index:12; width:350px; border-radius:6px; overflow:hidden;
+               background: var(--vscode-editorWidget-background, #252526); color: var(--vscode-editorWidget-foreground, #ccc);
+               border:1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border, #454545));
+               box-shadow:0 4px 14px rgba(0,0,0,.3); font: 12px var(--vscode-font-family, sans-serif); }
+  .inkpicker input { width:100%; box-sizing:border-box; border:none; outline:none; padding:6px 8px;
+                     background: var(--vscode-input-background, #3c3c3c); color: var(--vscode-input-foreground, #ccc); font:inherit; }
+  .inkpicker-list { max-height:220px; overflow-y:auto; padding:2px 0; }
+  .inkpicker-row { display:grid; grid-template-columns:auto 1fr; gap:0 8px; padding:3px 8px; cursor:pointer; }
+  .inkpicker-row .head { font-weight:600; white-space:nowrap; }
+  .inkpicker-row .title { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; opacity:.85; }
+  .inkpicker-row .key { grid-column:1 / -1; font-family: var(--vscode-editor-font-family, monospace); font-size:11px; opacity:.6; }
+  .inkpicker-section { padding:4px 8px 2px; font-size:10.5px; text-transform:uppercase; letter-spacing:.04em; opacity:.6;
+                       border-top:1px solid var(--vscode-panel-border, rgba(128,128,128,.3)); margin-top:2px; }
+  .inkpicker-row.on { background: var(--vscode-list-activeSelectionBackground, #094771); color: var(--vscode-list-activeSelectionForeground, #fff); }
   /* A darkened page would swallow a multiply blend, so the wash goes on top
      instead. Keyed off the PAGE theme, not `prefers-color-scheme`: that is the
      operating system's preference, and a light VS Code theme on a dark desktop
