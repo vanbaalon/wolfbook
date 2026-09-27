@@ -61,6 +61,28 @@ function proseAt(text, offset) {
     return true;
 }
 
+const MATH_ENVS = new Set(['equation', 'equation*', 'align', 'align*', 'alignat', 'alignat*', 'gather', 'gather*', 'multline',
+    'multline*', 'eqnarray', 'eqnarray*', 'displaymath', 'math', 'flalign', 'flalign*']);
+
+/** Is `offset` in maths — a maths environment, \\[ \\], or inline — after \\begin{document}? */
+function mathAt(text, offset) {
+    if (!Number.isInteger(offset) || offset < 0 || offset > text.length) return false;
+    const begin = text.search(/\\begin\s*\{document\}/);
+    if (begin < 0 || offset <= begin) return false;
+    const mask = commentMask(text);
+    if (offset < text.length && mask[offset]) return false;
+    if (environmentAt(text, offset, mask).some(env => MATH_ENVS.has(env))) return true;
+    const lineStart = text.lastIndexOf('\n', offset - 1) + 1;
+    const lineEnd = text.indexOf('\n', offset);
+    if (isInMath(text.slice(lineStart, lineEnd < 0 ? text.length : lineEnd), offset - lineStart)) return true;
+    let display = false;
+    for (const m of text.slice(0, offset).matchAll(/(\\+)([[\]])/g)) {
+        if (mask[m.index] || m[1].length % 2 === 0) continue;
+        display = m[2] === '[';
+    }
+    return display;
+}
+
 function span(entry) {
     const loc = entry?.hit?.preferred_source?.location;
     if (!loc || loc.accuracy !== 'Exact' || loc.start.line !== loc.end.line) return null;
@@ -204,4 +226,4 @@ function del(text, offset) {
     return remove(offset, offset + n);
 }
 
-module.exports = { caretAt, keyEdit, proseAt, environmentAt, literal };
+module.exports = { caretAt, keyEdit, proseAt, mathAt, environmentAt, literal };

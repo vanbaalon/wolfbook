@@ -28,7 +28,7 @@ const { buildObjectMap, glyphAtPoint, tokenAt, groupAround, symbolicFonts, caret
 const { buildComparison, describeSummary } = require('./texCompare');
 const { shipDecision } = require('./livePolicy');
 const { balanceRange, closeFor, commentMask } = require('./texBalance');
-const { caretAt, keyEdit, proseAt } = require('./inkEdit');
+const { caretAt, keyEdit, proseAt, mathAt } = require('./inkEdit');
 const { format: formatSource } = require('./texFormat');
 const { bibEntries, bblEntries, refItems, insertion } = require('./texPickers');
 const inspire = require('./inspire');
@@ -6091,8 +6091,12 @@ class TexViewer {
         this._rememberCursor(doc, placed);
         this._postEditSelection(doc, range, !m.takeMe, caret ? start : null, m.typingRequest);
         // WLaTeX Pro: exact prose takes a caret on the page itself.
-        if (hit.exact && !m.takeMe && !Number.isFinite(m.typingRequest)) this._inkPlace?.(st, doc, start, map);
-        else this._inkClear?.();
+        if (hit.exact && !m.takeMe && !Number.isFinite(m.typingRequest)) {
+            // Prose takes a caret on the page; maths opens the card over the
+            // equation (its Mathematica keys, the page re-typesetting live).
+            if (!this._inkPlace?.(st, doc, start, map) && this._inkEnabled?.(st) && mathAt(doc.getText(), doc.offsetAt(start)))
+                this._openEditSession?.(m)?.catch?.(() => {});
+        } else this._inkClear?.();
         const glyph = hit.glyph;
         this._post({ type:'selection', span:null });
         this._post({ type:'highlight', exact:true, reveal:false,

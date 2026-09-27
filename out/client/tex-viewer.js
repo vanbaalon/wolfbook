@@ -1710,6 +1710,7 @@ function rectToViewport(n, rect) {
 // all placed from the PDF page box, which an overlay does not change.
 
 import { createTxdlRenderer, linkLayer, pageToCss } from './txdl-canvas.js';
+import { mathKey, mathKeyFor, inMathAt, aliasEdit, GREEK_PALETTE } from './math-keys.js';
 
 /** TeX points in a big point; the display list is in TeX pt, PDF boxes in bp. */
 const PT_PER_BP = 72.27 / 72;
@@ -6333,6 +6334,113 @@ function makeDraggable(card, handle, session) {
     });
 }
 
+// --- maths in the edit card: Mathematica's keys --------------------------------
+//
+// ⌃^ ⌃_ ⌃/ ⌃2 build superscripts, subscripts, fractions and roots, ⌃, and
+// ⌃Enter add matrix columns and rows, ⌃Space steps out of a structure, Tab goes
+// to the next empty slot, and Esc a Esc is α — as in a Mathematica notebook,
+// written as the LaTeX a writer would type (math-keys.js). Each is one text
+// insertion, so it is one undo step and reaches the source like typing; with
+// WLaTeX the equation on the page re-typesets as it changes.
+
+/** Apply an edit from math-keys.js to the card's textarea, as typing. */
+function applyCardEdit(ta, r) {
+    ta.focus();
+    if (r.insert !== undefined) {
+        ta.setSelectionRange(r.start, r.end);
+        // execCommand keeps the edit on the textarea's own undo stack and fires
+        // beforeinput/input exactly as typing does (miniInputOperation).
+        if (!document.execCommand('insertText', false, r.insert)) {
+            ta.setRangeText(r.insert, r.start, r.end, 'end');
+            ta.dispatchEvent(new Event('input'));
+        }
+    }
+    ta.setSelectionRange(r.caret, r.caret);
+}
+
+/** The card's maths keys (capture phase: before the card's own Esc and ⌃Enter). */
+function wireMathKeys(card, ta) {
+    let alias = null;       // where an escape alias began, while one is typed
+    const endAlias = () => { alias = null; card.classList.remove('aliasing'); };
+    ta.addEventListener('blur', endAlias);
+    ta.addEventListener('keydown', ev => {
+        const math = inMathAt(ta.value, ta.selectionStart);
+        const key = mathKeyFor(ev);
+        // ⌃Enter saves outside maths; inside, it is a new row.
+        if (key && (key !== 'row' || math)) {
+            const r = mathKey(ta.value, ta.selectionStart, ta.selectionEnd, key);
+            if (!r) return;
+            ev.preventDefault(); ev.stopImmediatePropagation();
+            applyCardEdit(ta, r);
+            return;
+        }
+        if (ev.key === 'Tab' && !ev.shiftKey && !ev.ctrlKey && !ev.metaKey && math) {
+            const r = mathKey(ta.value, ta.selectionStart, ta.selectionEnd, 'tab');
+            if (r) { ev.preventDefault(); ev.stopImmediatePropagation(); applyCardEdit(ta, r); }
+            return;
+        }
+        if (ev.key !== 'Escape' || ev.ctrlKey || ev.metaKey || ev.altKey) return;
+        if (alias !== null) {
+            const at = ta.selectionStart, from = alias;
+            endAlias();
+            if (at <= from) return;        // Esc Esc: the card's own Esc closes it
+            ev.preventDefault(); ev.stopImmediatePropagation();
+            const r = aliasEdit(ta.value, from, at);
+            if (r) applyCardEdit(ta, r);
+            else status(`no alias "${ta.value.slice(from, at)}" — Esc a Esc is α, Esc D Esc is Δ`, 'warn');
+            return;
+        }
+        if (math && ta.selectionStart === ta.selectionEnd) {
+            alias = ta.selectionStart;
+            card.classList.add('aliasing');
+            ev.preventDefault(); ev.stopImmediatePropagation();
+        }
+    }, true);
+}
+
+/** The maths bar over the card's text, when the block holds maths. */
+function buildMathBar(card, ta, e) {
+    wireMathKeys(card, ta);
+    if (!/\$|\\\[|\\\(|\\begin\{(equation|align|alignat|gather|multline|eqnarray|displaymath|math|flalign)/.test(e.text || '')) return null;
+    const bar = document.createElement('div');
+    bar.className = 'ec-math';
+    const act = (label, title, fn, cls = '') => {
+        const b = document.createElement('button');
+        b.type = 'button'; b.textContent = label; b.title = title; if (cls) b.className = cls;
+        // The textarea keeps the caret and the selection the button acts on.
+        b.addEventListener('mousedown', ev => ev.preventDefault());
+        b.addEventListener('click', fn);
+        return b;
+    };
+    const key = k => () => { const r = mathKey(ta.value, ta.selectionStart, ta.selectionEnd, k); if (r) applyCardEdit(ta, r); };
+    const greek = document.createElement('div');
+    greek.className = 'ec-greek';
+    greek.hidden = true;
+    for (const [name, glyph] of GREEK_PALETTE) {
+        greek.appendChild(act(glyph, `\\${name}`, () => {
+            const s = ta.selectionStart, t = ta.selectionEnd;
+            const tail = /^[A-Za-z]/.test(ta.value.slice(t, t + 1)) ? ' ' : '';
+            const body = `\\${name}${tail}`;
+            const math = inMathAt(ta.value, s);
+            applyCardEdit(ta, math ? { start: s, end: t, insert: body, caret: s + body.length }
+                : { start: s, end: t, insert: `$\\${name}$`, caret: s + name.length + 3 });
+        }));
+    }
+    bar.append(
+        act('x²', 'Superscript (⌃^ or ⌃6)', key('sup')),
+        act('x₂', 'Subscript (⌃_ or ⌃-)', key('sub')),
+        act('a⁄b', 'Fraction (⌃/): the selection, or the term before the caret, on top', key('frac')),
+        act('√', 'Square root (⌃2)', key('sqrt')),
+        act('⊞│', 'Matrix column (⌃,)', key('col')),
+        act('⊞─', 'Matrix row (⌃Enter)', key('row')),
+        act('⤴', 'Out of the structure (⌃Space); Tab: the next empty slot', key('exit')),
+        act('αβ', 'Greek letters — or type Esc a Esc for α, Esc D Esc for Δ', () => { greek.hidden = !greek.hidden; }, 'ec-greek-toggle'));
+    const wrap = document.createElement('div');
+    wrap.className = 'ec-mathwrap';
+    wrap.append(bar, greek);
+    return wrap;
+}
+
 function buildEditCard(e) {
     const card = document.createElement('div');
     card.className = 'editcard';
@@ -6644,7 +6752,8 @@ function buildEditCard(e) {
     hint.className = 'ec-hint';
     hint.textContent = 'drag title · ←←/→→ previous/next · ⌘S save · ⌘⌥↵ commit · ⇧⌘⌥↵ push · Esc close';
 
-    card.append(head, box, hint);
+    const mathBar = buildMathBar(card, ta, e);
+    card.append(head, ...(mathBar ? [mathBar] : []), box, hint);
     return card;
 }
 

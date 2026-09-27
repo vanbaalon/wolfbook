@@ -160,6 +160,17 @@
   .wb-dark-pages .curcaret { background:#ff6169; box-shadow:0 0 0 .5px rgba(0,0,0,.5); }
   /* Typing in the ink (WLaTeX Pro): the page's own text caret, blinking as a
      text field's does while it has the keys. */
+  /* The edit card's maths bar (Mathematica's keys in the tooltips) and Greek row. */
+  .ec-mathwrap { border-bottom:1px solid var(--vscode-panel-border, rgba(128,128,128,.3)); }
+  .ec-math, .ec-greek { display:flex; flex-wrap:wrap; gap:1px; padding:2px 4px; }
+  .ec-greek[hidden] { display:none; }
+  .ec-math button, .ec-greek button { min-width:24px; height:20px; padding:0 4px; border:none; border-radius:3px; cursor:pointer;
+      background:transparent; color:inherit; font:13px/1 'Latin Modern Math','STIX Two Math','Cambria Math',serif; }
+  .ec-math button:hover, .ec-greek button:hover { background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,.22)); }
+  .ec-math .ec-greek-toggle { margin-left:auto; }
+  /* Between Esc and Esc: an alias (Esc a Esc is α). */
+  .editcard.aliasing .ec-editor { outline:1px dashed var(--vscode-focusBorder, #0078d4); outline-offset:-1px; }
+  .editcard.aliasing .ec-head::after { content:'⋮ alias — Esc'; margin-left:6px; font-size:11px; opacity:.7; }
   .inkcaret { position:absolute; pointer-events:none; z-index:10; width:1.5px; margin-left:-.75px;
               background:#1a1a1a; animation:inkblink 1.06s steps(1) infinite; }
   .inkcaret.typing { animation:none; }

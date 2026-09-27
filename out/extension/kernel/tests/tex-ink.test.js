@@ -84,3 +84,14 @@ test('the caret sits between the glyphs typed around its column', () => {
     assert.equal(caretAt(fi, 5, 1, 'fi').x, 14);
     assert.equal(caretAt([], 5, 0, line), null);
 });
+
+test('a click in maths opens the card, not the ink caret', () => {
+    const { mathAt } = require('../../tex/inkEdit');
+    const d = '\\documentclass{a}\\begin{document}\nText $x+y$ here \\[ z \\] and\n\\begin{equation}\na=b\n\\end{equation}\nend\\\\[2mm] x\n\\end{document}';
+    const at = w => mathAt(d, d.indexOf(w) + 1);
+    assert.equal(at('Text'), false);
+    assert.equal(at('x+y'), true, 'inline');
+    assert.equal(at(' z '), true, 'display \\[');
+    assert.equal(at('a=b'), true, 'an equation environment');
+    assert.equal(at(' x'), false, 'a \\\\[2mm] line break is not maths');
+});

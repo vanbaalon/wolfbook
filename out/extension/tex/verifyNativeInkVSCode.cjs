@@ -124,14 +124,21 @@ exports.run = async function () {
         check(!viewer._ink, 'Escape puts the caret away');
         report.latencies = latencies.map(Math.round);
         report.key_to_caret_ms = { p50: quantile(latencies, 0.5), p90: quantile(latencies, 0.9), max: Math.max(...latencies), keys: latencies.length };
-        // Maths keeps the card: a click in a display equation places no caret.
-        const mathLine = doc.getText().split('\n').findIndex((l, i) => i > line && /^\s*\\begin\{(equation|align)/.test(l));
+        // Maths opens the equation card: a click in a display equation places
+        // no ink caret and opens the card on the equation instead.
+        const opened = [];
+        { const post = viewer._post.bind(viewer); viewer._post = msg => { if (msg?.type === 'editOpen') opened.push(msg); return post(msg); }; }
+        const docLines = doc.getText().split('\n');
+        const mathLine = docLines.findIndex(l => /^\s*\\begin\{(equation|align|gather)\*?\}/.test(l));
         if (mathLine > 0) {
-            const inside = [1, 2, 3].map(k => st.map.glyphsForLine(file, mathLine + 1 + k)).find(g => g.length)?.[0];
-            if (inside && viewer._liveOverlays?.has(inside.page) !== true) {
+            const inside = await until(() => st.map?.available && [1, 2].map(k => st.map.glyphsForLine(file, mathLine + 1 + k)).find(g => g.length)?.[0],
+                'the equation in the map', 30000).then(() => [1, 2].map(k => st.map.glyphsForLine(file, mathLine + 1 + k)).find(g => g.length)?.[0], () => null);
+            if (inside) {
                 await viewer._jumpToSource({ generation: viewer._openedGeneration, page: inside.page,
                     xBp: inside.x + inside.w / 2, yTopBp: inside.y + inside.boxHeight / 2 });
+                await until(() => opened.length, 'the equation card', 10000).catch(() => {});
                 check(!viewer._ink, 'a click in display maths places no ink caret');
+                check(opened.length && /\\begin\{(equation|align|gather)/.test(opened[0].text || ''), `a click in display maths opens the card on it (${opened[0]?.label || 'none'})`);
                 report.maths_checked = true;
             }
         }
