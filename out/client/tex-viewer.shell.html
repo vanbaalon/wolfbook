@@ -1392,6 +1392,18 @@
               border:1px solid color-mix(in srgb, #8b5cf6 45%, var(--vscode-panel-border)); border-radius:8px;
               box-shadow:0 6px 24px rgba(0,0,0,.28); font-size:12px; }
   #propanel[hidden] { display:none; }
+  #prointro { position:absolute; right:8px; top:34px; z-index:41; width:290px; padding:10px 12px 9px; border-radius:8px;
+              background: var(--vscode-editorWidget-background, #252526); color: var(--vscode-editorWidget-foreground, #ccc);
+              border:1px solid var(--vscode-focusBorder, #0078d4); box-shadow:0 6px 18px rgba(0,0,0,.3); font-size:12px; }
+  #prointro[hidden] { display:none; }
+  #prointro .prointro-head { font-size:13px; margin-bottom:4px; }
+  #prointro ul { margin:4px 0 8px 16px; padding:0; line-height:1.45; }
+  #prointro .prointro-actions { display:flex; gap:6px; justify-content:flex-end; }
+  #prointro button { border:none; border-radius:4px; padding:3px 10px; cursor:pointer; font:inherit;
+                     background: var(--vscode-button-secondaryBackground, #3a3d41); color: var(--vscode-button-secondaryForeground, #ccc); }
+  #prointro #prointro-tour { background: var(--vscode-button-background, #0e639c); color: var(--vscode-button-foreground, #fff); }
+  .pro-tag { display:inline-block; margin-left:6px; padding:0 4px; border-radius:3px; font-size:9.5px; font-weight:700;
+             letter-spacing:.04em; vertical-align:2px; background:linear-gradient(90deg, #8b5cf6, #0ea5e9); color:#fff; }
   .pro-head { display:flex; align-items:center; gap:8px; margin-bottom:8px; font-size:13px; }
   .pro-headstate { opacity:.75; font-size:11px; font-variant-numeric:tabular-nums; }
   .pro-reason { margin:0 0 8px; padding:6px 8px; border-radius:5px; font-size:11px;
@@ -1494,12 +1506,22 @@
   <div class="pro-reason" hidden></div>
   <button id="prochoose" hidden>Preview with WLaTeX</button>
   <ul class="pro-list">
-    <li><span class="pro-k">Instant preview</span><span class="pro-d">The page follows every keystroke<span class="pro-v" id="pro-key"></span></span></li>
+    <li><span class="pro-k">Instant preview</span><span class="pro-d">The page follows every keystroke; new references resolve as you pause<span class="pro-v" id="pro-key"></span></span></li>
+    <li><span class="pro-k">Type on the page</span><span class="pro-d">Click prose and type; ⌘B ⌘I and the selection bar format; Esc stops</span></li>
+    <li><span class="pro-k">Cite and refer</span><span class="pro-d">⌘⇧R a reference, ⌘⇧C a citation — from the paper or from INSPIRE</span></li>
     <li><span class="pro-k">Exact search</span><span class="pro-d">Click any word for its source; the editor cursor shows on the page</span></li>
-    <li><span class="pro-k">Edit on the page</span><span class="pro-d">Click text and type; select, move and delete on the page</span></li>
     <li><span class="pro-k">Native build</span><span class="pro-d">BibTeX, indexes and the final PDF, settled by WLaTeX</span></li>
   </ul>
   <label class="pro-opt"><input type="checkbox" id="promarks"> Tag pages drawn live</label>
+</div>
+<div id="prointro" role="dialog" aria-label="WLaTeX Pro is on" hidden>
+  <div class="prointro-head"><span class="pro-mark">WLaTeX<b>Pro</b></span> is on</div>
+  <ul>
+    <li>The page follows every keystroke.</li>
+    <li>Click any word to reach its source.</li>
+    <li>Click prose and type — right on the page. ⌘⇧R and ⌘⇧C insert references and citations.</li>
+  </ul>
+  <div class="prointro-actions"><button id="prointro-tour">Show me</button><button id="prointro-ok">Got it</button></div>
 </div>
 <div id="findbar" role="search" hidden>
   <input id="findinput" type="text" placeholder="Find in the paper" aria-label="Find in the paper" spellcheck="false" autocomplete="off">

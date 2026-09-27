@@ -228,6 +228,9 @@ function setEngineBadge(msg) {
         off: `WLaTeX Pro is off for this paper: ${engine.reason || 'it needs another engine'}.`,
     }[engine.state] + ' Click for details.';
     panel.querySelector('.pro-headstate').textContent = badge.querySelector('.pro-state').textContent;
+    // The first time WLaTeX Pro is on: what it adds, once (the host remembers).
+    const intro = el('prointro');
+    if (intro) intro.hidden = !(engine.intro && engine.state !== 'off');
     const reason = panel.querySelector('.pro-reason');
     reason.hidden = engine.state !== 'off';
     reason.textContent = engine.state === 'off'
@@ -2736,6 +2739,13 @@ function renderTour() {
     card.hidden = false;
     el('tourstep').textContent = `${t.index + 1} of ${t.total}`;
     el('tourtitle').textContent = t.title || '';
+    if (t.pro) {
+        const tag = document.createElement('span');
+        tag.className = 'pro-tag';
+        tag.textContent = 'PRO';
+        tag.title = 'WLaTeX Pro';
+        el('tourtitle').appendChild(tag);
+    }
     el('toursay').textContent = t.say || '';
     // The platform's own word for the key, so the instruction is followable.
     const isMac = /Mac|iP(hone|ad)/.test(navigator.platform || navigator.userAgent || '');
@@ -2767,6 +2777,13 @@ function placeTourRing(selector) {
 }
 
 function tourAct(action) { vscode.postMessage({ type: 'tourAction', action }); }
+
+function wireProIntro() {
+    const act = action => { el('prointro').hidden = true; vscode.postMessage({ type: 'proIntro', action }); };
+    el('prointro-tour')?.addEventListener('click', () => act('tour'));
+    el('prointro-ok')?.addEventListener('click', () => act('ok'));
+}
+wireProIntro();
 
 function wireTour() {
     const skip = el('tourskip'); if (skip) skip.onclick = () => tourAct('skip');
@@ -4945,6 +4962,17 @@ function openPicker(msg) {
 
 const INK_KEYS = new Set(['Enter', 'Backspace', 'Delete', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'Escape']);
 // Before every other key handler (capture): with a caret on the page, the keys are text.
+// ⌘⇧R / ⌘⇧C with no caret on the page: say what they need.
+window.addEventListener('keydown', (e) => {
+    if (state.ink || !(e.metaKey || e.ctrlKey) || !e.shiftKey || e.altKey || !['r', 'c'].includes(e.key.toLowerCase())) return;
+    const t = e.target;
+    if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.isContentEditable)) return;
+    const pro = !el('probadge')?.hidden && el('probadge')?.dataset.state !== 'off';
+    status(pro ? 'Click in the text on the page first: references and citations go in at the caret'
+        : 'Inserting from the page needs WLaTeX Pro (wolfbook.tex.wlatexDirectory)', 'warn');
+    e.preventDefault();
+}, true);
+
 // ⌘B / ⌘I: on a selection, format it; at the ink caret, type in that format.
 window.addEventListener('keydown', (e) => {
     if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;

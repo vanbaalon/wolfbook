@@ -34,7 +34,8 @@ exports.run = async function () {
     const context = { extensionUri: vscode.Uri.file(path.resolve(__dirname, '../../..')), workspaceState: memento(), globalState: memento(), subscriptions: [] };
     const viewer = new TexViewer(context, coord, projection);
     const pickers = [];
-    { const post = viewer._post.bind(viewer); viewer._post = m => { if (m?.type === 'picker') pickers.push(m); return post(m); }; }
+    const statuses = [];
+    { const post = viewer._post.bind(viewer); viewer._post = m => { if (m?.type === 'picker') pickers.push(m); if (m?.type === 'status') statuses.push(m.text); return post(m); }; }
     const failures = [];
     const check = (ok, what) => { if (!ok) failures.push(what); };
     let subscription;
@@ -47,6 +48,9 @@ exports.run = async function () {
         const st = coord.stateFor(doc);
         if (st.generation?.runner !== 'wlatex') throw Error(`not on the WLaTeX lane: ${st.lastError || st.nativeUnavailable || st.nativeOff}`);
         await until(() => viewer._openedPdfHash === st.generation.pdfHash, 'the PDF open in the viewer');
+        // The paper as it was: its pages and the citations it left undefined.
+        const undefinedCites = () => new Set((st.generation?.diagnostics || []).map(d => /Citation `([^']+)'.*undefined/.exec(d.message)?.[1]).filter(Boolean));
+        const pagesBefore = st.generation.pageCount, undefinedBefore = undefinedCites();
         subscription = vscode.workspace.onDidChangeTextDocument(event => {
             if (event.document !== doc) return;
             coord.noteChange(event);
@@ -103,28 +107,21 @@ exports.run = async function () {
         check(answer && !answer.error && answer.items.length, `INSPIRE answers: ${answer?.error || answer?.items.length}`);
         const record = answer?.items[0];
         if (record) {
-            const bibsBefore = viewer._bibFiles(st, st.root || file);
-            const n2 = builds.length, at = viewer._ink.offset;
+            const n2 = builds.length;
             await key('insert', { kind: 'cite', name: record.key, inspire: record.recid });
-            // Right after the citation just inserted, it joins it: \cite{a,key}.
+            // Right after the citation just inserted, it joins it: \\cite{a,key}.
             check(new RegExp(`\\\\cite\\{[^}]*\\b${record.key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\}`).test(doc.getText()), 'the INSPIRE citation is in the source');
-            if (bibsBefore.length) {
-                const bibText = bibsBefore.map(f => { try { return fs.readFileSync(f, 'utf8'); } catch (_) { return ''; } }).join('\n');
-                check(bibText.includes(`{${record.key},`), `its BibTeX is in ${bibsBefore.map(f => path.basename(f)).join(', ')} (saved)`);
-                report.inspire = { key: record.key, added_to: 'bib' };
-                // The settle runs BibTeX on the saved .bib: the citation is defined there.
-                const t = performance.now();
-                await coord.build(doc, { quiet: true });
-                const undefinedThere = (st.generation?.diagnostics || []).some(d => d.message.includes(`\`${record.key}'`) && /undefined/.test(d.message));
-                check(st.generation?.ok && !undefinedThere, `the settle defines the INSPIRE citation (${st.generation?.ok ? 'built' : st.generation?.stopReason})`);
-                report.inspire.settle_ms = Math.round(performance.now() - t);
-            } else if (doc.getText().includes('\\end{thebibliography}')) {
-                check(doc.getText().includes(`\\bibitem{${record.key}}`), 'its \\bibitem is in the paper\'s thebibliography');
-                report.inspire = { key: record.key, added_to: 'thebibliography' };
-                // Written in the .tex, it resolves live (a reference pass reads the new \bibcite).
-                await until(() => builds.slice(n2).some(b => b?.ok && !(b.diagnostics || []).some(d => d.message.includes(`\`${record.key}'`))), 'the INSPIRE citation defined live', 30000)
-                    .then(() => { report.inspire.resolved_live = true; }, () => { report.inspire.resolved_live = false; });
-            } else report.inspire = { key: record.key, added_to: 'clipboard' };
+            report.inspire = { key: record.key, added_to: statuses.filter(t => t.startsWith(record.key)).pop() || null };
+            // The settle: the new citation defined, and nothing the paper had defined lost.
+            await coord.build(doc, { quiet: true });
+            const undefinedAfter = undefinedCites();
+            const lost = [...undefinedAfter].filter(k => !undefinedBefore.has(k) && k !== record.key);
+            check(st.generation?.ok, `the settle builds (${st.generation?.stopReason || ''})`);
+            check(!undefinedAfter.has(record.key), 'the settle defines the INSPIRE citation');
+            check(!lost.length, `no citation the paper had is lost: ${lost.slice(0, 5).join(', ')}`);
+            check(Math.abs((st.generation?.pageCount ?? 0) - pagesBefore) <= 1, `the paper keeps its length: ${pagesBefore} -> ${st.generation?.pageCount}`);
+            report.inspire.pages = [pagesBefore, st.generation?.pageCount];
+            report.inspire.undefined_citations = [undefinedBefore.size, undefinedAfter.size];
         }
         report.failures = failures;
         report.result = failures.length ? 'FAIL' : 'PASS';

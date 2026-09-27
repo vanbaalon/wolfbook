@@ -40,7 +40,7 @@ const { MATH_ENVS } = require('./texScanner');
 const { readAuxLabels } = require('./auxLabels');
 const { buildLabelChips, formatLabelCopy, altFormat,
     blockOf, inColumn, tagRows, rowsOver, CHIP_H } = require('./labelChips');
-const { stepAt, satisfies } = require('./tourSteps');
+const { stepAt, satisfies, stepsFor } = require('./tourSteps');
 const { graphicxInsertion } = require('./texPaste');
 const mmaBlocks = require('./mmaBlocks');
 const mmaWrite = require('./mmaWrite');
@@ -78,6 +78,7 @@ const { CommentStore, sidecarFor, markdownFor } = require('./commentStore');
  * what the reader asked for.
  */
 const TOUR_KEY = 'wolfbook.tex.tour';
+const PRO_INTRO_KEY = 'wolfbook.tex.proIntroSeen';
 const GROUP_KEY = 'wolfbook.tex.reviewGroup';
 const HINT_BUDGET = { chip: 3 };
 const hintsLeft = { ...HINT_BUDGET };
@@ -1257,7 +1258,9 @@ class TexViewer {
             choosable: state === 'off' && !!st?.nativeOffChoosable,
             interactive: !!st?.nativeLane?.interactive, keyMs: t.sinceKeyMs ?? null,
             firstChangedMs: t.firstChangedMs ?? null, recomputed: t.recomputed ?? null, reused: t.reused ?? null,
-            pages: gen?.pageCount ?? null });
+            pages: gen?.pageCount ?? null,
+            // The one-time "WLaTeX Pro is on" card, until the reader has answered it.
+            intro: state && state !== 'off' && !this.context?.globalState?.get(PRO_INTRO_KEY) });
     }
 
     _postNativeMapState(st) {
@@ -1645,47 +1648,65 @@ class TexViewer {
     }
 
     /**
-     * Make an INSPIRE record citable in this paper before its \cite goes in:
-     * its BibTeX appended to the paper's .bib (saved, so the settle's BibTeX
-     * reads it); for a bibliography written in the .tex, INSPIRE's \bibitem
-     * before \end{thebibliography}; otherwise the BibTeX on the clipboard.
-     * Answers how far the caret moved (an insertion before it) and where.
+     * Make an INSPIRE record citable in this paper before its \cite goes in,
+     * in the bibliography the paper actually uses — never replacing it:
+     * appended to a .bib that exists (saved, so the settle's BibTeX reads it);
+     * else INSPIRE's \bibitem added to the thebibliography TeX reads (a
+     * shipped .bbl — how arXiv sources come, their .bib left out — or one
+     * written in the .tex); else, for a paper with no bibliography yet, the
+     * .bib it names created; else the BibTeX on the clipboard. Creating a
+     * named .bib beside a shipped .bbl would make BibTeX replace the whole
+     * bibliography with this one entry. Answers how far the caret moved (an
+     * insertion before it) and where the record went.
      */
     async _inspireAdd(doc, st, key, recid) {
         const root = st?.root || this.root;
         const bibs = this._bibFiles(st, root);
+        const existing = bibs.filter(f => fs.existsSync(f));
         const has = file => { try { return bibEntries(fs.readFileSync(file, 'utf8')).some(e => e.key === key); } catch (_) { return false; } };
-        if (bibs.some(has)) return { shift: 0, where: 'already in the bibliography' };
-        if (bibs.length) {
-            const bibtex = await inspire.inspireBibtex(recid);
-            const uri = vscode.Uri.file(bibs.find(f => fs.existsSync(f)) || bibs[0]);
+        if (existing.some(has)) return { shift: 0, where: 'already in the bibliography' };
+        const append = async (uri, text) => {
             const edit = new vscode.WorkspaceEdit();
-            let bibDoc = null;
+            let target = null;
             if (fs.existsSync(uri.fsPath)) {
-                bibDoc = await vscode.workspace.openTextDocument(uri);
-                const body = bibDoc.getText();
-                edit.insert(uri, bibDoc.lineAt(bibDoc.lineCount - 1).range.end, `${!body || body.endsWith('\n') ? '' : '\n'}\n${bibtex}\n`);
+                target = await vscode.workspace.openTextDocument(uri);
+                const body = target.getText();
+                edit.insert(uri, target.lineAt(target.lineCount - 1).range.end, `${!body || body.endsWith('\n') ? '' : '\n'}\n${text}\n`);
             } else {
                 edit.createFile(uri, { ignoreIfExists: true });
-                edit.insert(uri, new vscode.Position(0, 0), `${bibtex}\n`);
+                edit.insert(uri, new vscode.Position(0, 0), `${text}\n`);
             }
-            if (!await vscode.workspace.applyEdit(edit)) throw Error(`could not add ${key} to ${path.basename(uri.fsPath)}`);
-            bibDoc = bibDoc || await vscode.workspace.openTextDocument(uri);
-            await bibDoc.save();
-            return { shift: 0, where: `added to ${path.basename(uri.fsPath)}` };
+            if (!await this._asReaderEdit(uri.fsPath, () => vscode.workspace.applyEdit(edit))) throw Error(`could not add ${key} to ${path.basename(uri.fsPath)}`);
+            await (target || await vscode.workspace.openTextDocument(uri)).save();
+        };
+        if (existing.length) {
+            await append(vscode.Uri.file(existing[0]), await inspire.inspireBibtex(recid));
+            return { shift: 0, where: `added to ${path.basename(existing[0])}` };
         }
-        for (const file of new Set([root, ...(st?.files || [])])) {
-            const texDoc = await Promise.resolve(vscode.workspace.openTextDocument(vscode.Uri.file(file))).catch(() => null);
-            const at = texDoc ? texDoc.getText().lastIndexOf('\\end{thebibliography}') : -1;
+        // The thebibliography TeX reads: the paper's own .tex, or the .bbl it ships.
+        const job = path.basename(root).replace(/\.tex$/i, '');
+        const shipped = path.join(path.dirname(root), `${job}.bbl`);
+        for (const file of [...new Set([root, ...(st?.files || [])]), ...(fs.existsSync(shipped) ? [shipped] : [])]) {
+            const target = await Promise.resolve(vscode.workspace.openTextDocument(vscode.Uri.file(file))).catch(() => null);
+            const at = target ? target.getText().lastIndexOf('\\end{thebibliography}') : -1;
             if (at < 0) continue;
+            if (new RegExp(`\\\\bibitem\\s*(\\[[^\\]]*\\])?\\s*\\{${key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\}`).test(target.getText()))
+                return { shift: 0, where: 'already in the bibliography' };
             const insert = `${await inspire.inspireBibitem(recid)}\n\n`;
             const edit = new vscode.WorkspaceEdit();
-            edit.insert(texDoc.uri, texDoc.positionAt(at), insert);
-            if (!await vscode.workspace.applyEdit(edit)) throw Error(`could not add ${key} to the bibliography`);
-            return { shift: texDoc === doc && at < (this._ink?.offset ?? Infinity) ? insert.length : 0, where: 'added to thebibliography' };
+            edit.insert(target.uri, target.positionAt(at), insert);
+            if (!await this._asReaderEdit(target.uri.fsPath, () => vscode.workspace.applyEdit(edit))) throw Error(`could not add ${key} to the bibliography`);
+            // A .bbl is read from disk by the settle: saved.
+            if (file === shipped) await target.save();
+            return { shift: target === doc && at < (this._ink?.offset ?? Infinity) ? insert.length : 0,
+                where: file === shipped ? `added to ${path.basename(shipped)}` : 'added to thebibliography' };
+        }
+        if (bibs.length) {
+            await append(vscode.Uri.file(bibs[0]), await inspire.inspireBibtex(recid));
+            return { shift: 0, where: `added to ${path.basename(bibs[0])} (new)` };
         }
         await vscode.env.clipboard.writeText(await inspire.inspireBibtex(recid));
-        return { shift: 0, where: 'no .bib here: its BibTeX is on the clipboard' };
+        return { shift: 0, where: 'no bibliography here: its BibTeX is on the clipboard' };
     }
 
     /** Replace [start, end) of `doc` with `insert`; the replaced text, or null. */
@@ -1693,14 +1714,22 @@ class TexViewer {
         const old = doc.getText().slice(start, end);
         const range = new vscode.Range(doc.positionAt(start), doc.positionAt(end));
         const editor = (vscode.window.visibleTextEditors || []).find(e => e.document === doc);
-        let ok;
-        if (editor) ok = await editor.edit(b => b.replace(range, insert), { undoStopBefore: !!stop, undoStopAfter: !!stop });
-        else {
+        // The reader's own edit, from the page: not an agent's for review.
+        const ok = await this._asReaderEdit(doc.uri.fsPath, async () => {
+            if (editor) return editor.edit(b => b.replace(range, insert), { undoStopBefore: !!stop, undoStopAfter: !!stop });
             const edit = new vscode.WorkspaceEdit();
             edit.replace(doc.uri, range, insert);
-            ok = await vscode.workspace.applyEdit(edit);
-        }
+            return vscode.workspace.applyEdit(edit);
+        });
         return ok ? old : null;
+    }
+
+    /** Run an edit announced as the reader's own (see _applyReaderEdit), not an agent's. */
+    async _asReaderEdit(file, apply) {
+        const event = { file, origin: 'user', source: 'wpaper.viewer' };
+        announceAgentEdit({ ...event, phase: 'begin' });
+        try { return await apply(); }
+        finally { announceAgentEdit({ ...event, phase: 'end' }); }
     }
 
     /** Arrows, Home and End move the caret by what the page shows. */
@@ -2600,6 +2629,8 @@ class TexViewer {
         } catch (_) { /* a paper we cannot model teaches only the gestures */ }
         return {
             hasLabels, hasSections, hasAnchors,
+            // WLaTeX Pro's steps (typing on the page) need its live engine.
+            pro: !!st?.nativeLane?.interactive,
             hasReview: !!(this._review && this._review.sessionFor(this.root)),
         };
     }
@@ -4536,6 +4567,16 @@ class TexViewer {
         switch (m.type) {
             case 'viewerNavigation': this._claimViewerNavigation(); break;
             case 'tourAction': this._tourAction(m); return;
+            case 'proIntro': {
+                try { this.context?.globalState?.update(PRO_INTRO_KEY, true); } catch (_) { /* shown again next time */ }
+                if (m.action === 'tour') {
+                    // The tour, at its first WLaTeX Pro step.
+                    const at = stepsFor(this._tourContext()).findIndex(s => s.pro);
+                    this._tourSave({ at: Math.max(0, at), done: false, started: true });
+                    this._tourPost();
+                }
+                return;
+            }
             case 'reviewGroup':
                 // The reader's choice of collation outlives the panel.
                 if (m.by === 'section' || m.by === 'arrival') {

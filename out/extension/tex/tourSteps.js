@@ -38,6 +38,24 @@ const STEPS = [
         satisfy: (e) => e.type === 'cursor',
     },
     {
+        id: 'inkType',
+        pro: true,
+        title: 'Type on the page',
+        say: 'With WLaTeX Pro a click on prose puts a caret in the text itself: type, and the LaTeX changes under it while the page follows every key. ⌘B and ⌘I format, Esc stops. Maths, pictures and tables still open the card.',
+        doIt: 'Click a word on the page and type a few letters.',
+        when: (ctx) => !!ctx.pro,
+        satisfy: (e) => e.type === 'inkKey' && typeof e.key === 'string' && [...e.key].length === 1,
+    },
+    {
+        id: 'inkCite',
+        pro: true,
+        title: 'Cite without leaving the page',
+        say: '⌘⇧R inserts a cross-reference from the paper\'s labels, numbered as the paper numbers them; ⌘⇧C a citation from its bibliography — or from INSPIRE, added to the .bib for you.',
+        doIt: 'With the caret on the page, press ⌘⇧R (or ⌘⇧C).',
+        when: (ctx) => !!ctx.pro,
+        satisfy: (e) => e.type === 'inkKey' && typeof e.key === 'string' && e.key.startsWith('picker:'),
+    },
+    {
         id: 'contents',
         title: 'Find your way through it',
         say: 'The contents open over the paper, numbered as the paper numbers them, with the section you are in already marked. Click one and they get out of the way. The paper\'s own cross-references work too: hover an equation number for a miniature, or click it to jump.',
@@ -200,6 +218,7 @@ function stepAt(progress = {}, ctx = {}) {
         doIt: s.doIt || null,
         done: s.done || null,
         point: s.point || null,
+        pro: !!s.pro,
     };
 }
 
