@@ -179,6 +179,21 @@
   .ec-tablebar button:hover { background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,.22)); }
   .ec-tablebar button.on { background: var(--vscode-toolbar-activeBackground, rgba(128,128,128,.32)); }
   .ec-align { display:inline-flex; margin-left:6px; }
+  .ec-figure { display:flex; flex-wrap:wrap; align-items:center; gap:6px 10px; padding:4px 6px; font-size:12px;
+    border-bottom:1px solid var(--vscode-panel-border, rgba(128,128,128,.3)); }
+  .ec-figure[hidden] { display:none; }
+  .ec-figure label { display:inline-flex; align-items:center; gap:4px; }
+  .ec-figure input[type=range] { width:120px; }
+  .ec-figure .ec-pct { min-width:3.5em; opacity:.75; }
+  .ec-figure .ec-caption { flex:1; min-width:14em; font:inherit; padding:2px 4px; color:inherit;
+    background: var(--vscode-input-background, transparent); border:1px solid var(--vscode-input-border, rgba(128,128,128,.4)); border-radius:3px; }
+  .ec-figure label:has(.ec-caption) { flex:1; }
+  .ec-figure button { height:20px; min-width:22px; border:none; border-radius:3px; cursor:pointer; background:transparent; color:inherit; }
+  .ec-figure button:hover { background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,.22)); }
+  .np-row[draggable=true] { cursor:grab; }
+  .np-row.np-dragging { opacity:.45; }
+  .np-row.np-drop { box-shadow: inset 0 2px 0 var(--vscode-focusBorder, #0078d4); }
+  #navlist.np-drop-end { box-shadow: inset 0 -2px 0 var(--vscode-focusBorder, #0078d4); }
   .ec-borders { display:flex; flex-wrap:wrap; gap:2px; padding:0 0 4px; }
   .ec-borders[hidden] { display:none; }
   .ec-borders button { width:34px; height:26px; padding:3px 4px; border:1px solid transparent; border-radius:4px; cursor:pointer;

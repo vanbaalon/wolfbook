@@ -41,7 +41,8 @@ const { readAuxLabels } = require('./auxLabels');
 const { buildLabelChips, formatLabelCopy, altFormat,
     blockOf, inColumn, tagRows, rowsOver, CHIP_H } = require('./labelChips');
 const { stepAt, satisfies, stepsFor } = require('./tourSteps');
-const { graphicxInsertion, packageInsertion } = require('./texPaste');
+const { graphicxInsertion, packageInsertion, imagePathFor, hasGraphicx } = require('./texPaste');
+const { moveLines, moveBlock, figureAt, outsideEnvironments, figureFor } = require('./texStructure');
 const mmaBlocks = require('./mmaBlocks');
 const mmaWrite = require('./mmaWrite');
 const { announceAgentEdit } = require('./reviewBus');
@@ -1725,6 +1726,120 @@ class TexViewer {
     }
 
     /** Run an edit announced as the reader's own (see _applyReaderEdit), not an agent's. */
+    // --- structure and figures (WLaTeX Pro) -----------------------------------
+    //
+    // A section dragged in the outline, a figure moved a paragraph up or down
+    // from its card, an image dropped on the page: each is one edit of the
+    // source (one undo), and the page follows as it follows typing.
+
+    /** Move a section (heading to the end of its span) before another, or to after the last. */
+    async _sectionMove(m) {
+        const st = this.root && this.coord.roots.get(this.root);
+        if (!st || !m?.key) return;
+        let items = [];
+        try { items = this._sectionControls(st).filter(i => i.kind === 'section'); } catch (_) { items = []; }
+        const item = items.find(i => i.key === m.key);
+        const target = m.beforeKey ? items.find(i => i.key === m.beforeKey) : null;
+        const peers = item ? items.filter(i => i.file === item.file) : [];
+        const lastOf = peers.at(-1);
+        if (!item || (m.beforeKey && !target)) { this._post({ type:'status', text:'that section is no longer there', kind:'warn' }); return; }
+        if (target && target.file !== item.file) { this._post({ type:'status', text:'sections move within their own file', kind:'warn' }); return; }
+        const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(item.file));
+        const before = target ? target.headStart : lastOf.spanEnd + 1;
+        const r = moveLines(doc.getText(), item.headStart, item.spanEnd, before);
+        if (!r) { this._post({ type:'status', text:'it is already there', kind:'' }); return; }
+        const ok = await this._guardedWrite(doc, 'wpaper.outline', `moved "${item.title}"`, we => {
+            we.delete(doc.uri, new vscode.Range(doc.positionAt(r.deleteFrom), doc.positionAt(r.deleteTo)));
+            we.insert(doc.uri, doc.positionAt(r.insertAt), r.insertText);
+        });
+        if (ok) this._post({ type:'status', kind:'ok', text:`moved "${item.title || 'the section'}" ${target ? `before "${target.title}"` : 'to the end'}` });
+    }
+
+    /** Move the figure the card holds above the paragraph before it, or below the one after. */
+    async _figureMove(m) {
+        const s = this._edit;
+        if (!s || m?.editId !== s.id) return;
+        if (this._editApplyQueue) await this._editApplyQueue.catch(() => {});
+        const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(s.file));
+        const r = moveBlock(doc.getText(), s.startOffset, s.endOffset, m.dir < 0 ? -1 : 1);
+        if (!r) { this._post({ type:'status', text:`nothing to move it ${m.dir < 0 ? 'above' : 'below'} here`, kind:'warn' }); return; }
+        // The card's own block moves: detached while the edit applies, then
+        // attached where the block now is (its text is unchanged).
+        this._edit = null;
+        let ok = false;
+        try {
+            ok = await this._guardedWrite(doc, 'wpaper.figure', 'moved a figure', we => {
+                we.delete(doc.uri, new vscode.Range(doc.positionAt(r.deleteFrom), doc.positionAt(r.deleteTo)));
+                we.insert(doc.uri, doc.positionAt(r.insertAt), r.insertText);
+            });
+        } finally { this._edit = s; }
+        if (!ok) return;
+        s.startOffset = r.start;
+        s.endOffset = r.end - 1;
+        s.lastText = doc.getText(new vscode.Range(doc.positionAt(s.startOffset), doc.positionAt(s.endOffset)));
+        this._rememberEditState();
+        const a = doc.positionAt(s.startOffset), b = doc.positionAt(s.endOffset);
+        this._post({ type:'editUpdate', editId:s.id, text:s.native ? wireText(s.lastText) : s.lastText, startLine:a.line + 1, endLine:b.line + 1 });
+        this._post({ type:'status', kind:'ok', text:`figure moved ${m.dir < 0 ? 'up' : 'down'} a paragraph` });
+    }
+
+    /** An image dropped on the page: saved in the project, a figure at the seam under the drop. */
+    async _imageDrop(m) {
+        const st = this.root && this.coord.roots.get(this.root);
+        if (!st?.map?.available || !m?.page) return;
+        const hit = this._resolvePoint(st, m);
+        const file = hit && hit.flag !== FLAG.UNMAPPED && hit.file ? hit.file : this.root;
+        const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
+        let t = null;
+        try { t = this._blockDropTarget(st, m, doc); } catch (_) { t = null; }
+        if (!t) { this._post({ type:'status', text:'drop the image on the text where the figure should go', kind:'warn' }); return; }
+        let bytes = null;
+        if (typeof m.data === 'string') bytes = Buffer.from(m.data, 'base64');
+        else if (m.uri) { try { bytes = Buffer.from(await vscode.workspace.fs.readFile(vscode.Uri.parse(m.uri))); } catch (_) { bytes = null; } }
+        if (!bytes?.length) { this._post({ type:'status', text:'the dropped file could not be read', kind:'err' }); return; }
+        const where = imagePathFor(bytes, t.file, m.mime || (/\.jpe?g$/i.test(m.name || '') ? 'image/jpeg' : /\.pdf$/i.test(m.name || '') ? 'application/pdf' : 'image/png'));
+        await vscode.workspace.fs.createDirectory(vscode.Uri.file(where.dir));
+        try { await vscode.workspace.fs.stat(vscode.Uri.file(where.abs)); }
+        catch (_) { await vscode.workspace.fs.writeFile(vscode.Uri.file(where.abs), new Uint8Array(bytes)); }
+        const target = t.file === doc.uri.fsPath ? doc : await vscode.workspace.openTextDocument(vscode.Uri.file(t.file));
+        const rootDoc = await vscode.workspace.openTextDocument(vscode.Uri.file(this.root));
+        const pkg = hasGraphicx(rootDoc.getText()) ? null : packageInsertion(rootDoc.getText(), 'graphicx');
+        const needsPkg = !!pkg;
+        // Never inside another block: a drop on a caption goes after its figure.
+        const at = outsideEnvironments(target.getText(), t.offset);
+        const ok = await this._guardedWrite(target, 'wpaper.drop', `dropped ${m.name || 'an image'}`, we => {
+            we.insert(target.uri, target.positionAt(at), figureFor(where.rel));
+            if (needsPkg) we.insert(rootDoc.uri, rootDoc.positionAt(pkg.offset), pkg.text);
+        });
+        if (ok) this._post({ type:'status', kind:'ok', text:`figure added at line ${target.positionAt(at).line + 1}${needsPkg ? ' (and \\usepackage{graphicx})' : ''} — ${where.rel}` });
+    }
+
+    /**
+     * The figure a point on a picture belongs to: the nearest sourced text
+     * below the point (the caption, within 500 bp) when it is inside a figure.
+     * A picture prints no glyphs of its own, so this is how a click on it
+     * finds its figure. `{ xBp, yTopBp, file, offset }` of that text, or null.
+     */
+    _figureUnder(map, m) {
+        if (!map?.available || typeof map.entriesOnPage !== 'function') return null;
+        const cands = map.entriesOnPage(m.page)
+            .filter(e => e.y >= m.yTopBp && e.y - m.yTopBp < 500 && e.x < m.xBp + 300 && e.x + e.w > m.xBp - 300)
+            .sort((a, b) => a.y - b.y || Math.abs(a.x - m.xBp) - Math.abs(b.x - m.xBp))
+            .slice(0, 40);
+        for (const e of cands) {
+            const hit = map.renderToSource(m.page, e.x + e.w / 2, e.y + e.boxHeight / 2);
+            if (!hit?.exact || !hit.file || !hit.sourceRange?.start) continue;
+            const relative = path.relative(map.projectDir, hit.file).split(path.sep).join('/');
+            const text = map.source?.files?.get(relative)?.text;
+            if (typeof text !== 'string') return null;
+            const lines = text.split('\n');
+            const { line, column_utf16 } = hit.sourceRange.start;
+            const offset = lines.slice(0, line - 1).reduce((n, l) => n + l.length + 1, 0) + column_utf16;
+            return figureAt(text, offset) ? { xBp: e.x + e.w / 2, yTopBp: e.y + e.boxHeight / 2, file: hit.file, offset } : null;
+        }
+        return null;
+    }
+
     /** A table style needs a package (booktabs): load it in the main file's preamble, once. */
     async _tablePackage(m) {
         if (!/^[A-Za-z][\w-]*$/.test(m?.name || '') || !this.root) return;
@@ -4758,6 +4873,9 @@ class TexViewer {
             case 'inspireSearch': this._inspireSearch(m); break;
             case 'inkKey': this._inkKey(m); break;
             case 'tablePackage': this._tablePackage(m).catch(() => {}); break;
+            case 'sectionMove': await this._sectionMove(m); break;
+            case 'figureMove': await this._figureMove(m); break;
+            case 'imageDrop': await this._imageDrop(m); break;
             case 'txdlFallback': this._liveOverlays?.delete(m.page); this._liveMapReady?.delete(m.page);
                 this._previewPages?.delete(m.page); break;
             case 'textLayerDone':
@@ -5950,6 +6068,15 @@ class TexViewer {
             ? await map.renderToSourceViaWorker(m.page, m.xBp, m.yTopBp)
             : map.renderToSource(m.page, m.xBp, m.yTopBp);
         if (!current()) return;
+        if ((!hit?.file || hit.flag === FLAG.UNMAPPED) && !m.pick && !m.commentTarget && !Number.isFinite(m.typingRequest) && !m.live && !map.live) {
+            // A click on a picture: its figure's card (the caption below finds it).
+            const fig = this._inkEnabled?.(st) && this._figureUnder(map, m);
+            if (fig) {
+                this._post({ type:'selection', span:null });
+                this._openEditSession?.({ ...m, xBp: fig.xBp, yTopBp: fig.yTopBp, sourceOffset: fig.offset })?.catch?.(() => {});
+                return;
+            }
+        }
         if (!hit?.file || hit.flag === FLAG.UNMAPPED) {
             if (!m.live) this._pickAnchor = null;
             this._post({ type:'selection', span:null });

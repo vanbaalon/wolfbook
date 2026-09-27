@@ -1496,6 +1496,12 @@ function renderNav() {
         row.dataset.end = String(it.spanEnd || it.line);
         row.dataset.file = it.file || '';
         row.dataset.page = String(it.page || 0);
+        // Drag a section onto another to move it there.
+        if (it.kind === 'section') {
+            row.draggable = true;
+            row.dataset.key = it.key;
+            row.title = 'Drag to move this section and everything in it';
+        }
         // INDENTED BY LEVEL, so the shape of the paper is visible at a glance
         // rather than having to be read off the numbers.
         row.style.paddingLeft = `${10 + Math.max(0, (it.level || 2) - 2) * 10}px`;
@@ -1588,6 +1594,42 @@ function navVisible() {
 
 el('outline').addEventListener('click', () => setNav(!navVisible()));
 el('navclose').addEventListener('click', () => setNav(false));
+
+// DRAG A SECTION IN THE OUTLINE: dropped on a row it goes
+// before that section; dropped below the last, to the end. One edit of the
+// source, so one undo; the page follows.
+{
+    const list = el('navlist');
+    let dragged = null;
+    const clear = () => { for (const r of list.querySelectorAll('.np-drop')) r.classList.remove('np-drop'); list.classList.remove('np-drop-end'); };
+    list.addEventListener('dragstart', ev => {
+        const row = ev.target.closest?.('.np-row[data-key]');
+        if (!row) return;
+        dragged = row.dataset.key;
+        ev.dataTransfer.effectAllowed = 'move';
+        ev.dataTransfer.setData('text/plain', row.querySelector('.np-title')?.textContent || '');
+        row.classList.add('np-dragging');
+    });
+    list.addEventListener('dragend', ev => { ev.target.closest?.('.np-row')?.classList.remove('np-dragging'); dragged = null; clear(); });
+    list.addEventListener('dragover', ev => {
+        if (!dragged) return;
+        ev.preventDefault();
+        clear();
+        const row = ev.target.closest?.('.np-row[data-key]');
+        if (row && row.dataset.key !== dragged) row.classList.add('np-drop');
+        else if (!row) list.classList.add('np-drop-end');
+    });
+    list.addEventListener('drop', ev => {
+        if (!dragged) return;
+        ev.preventDefault();
+        const row = ev.target.closest?.('.np-row[data-key]');
+        const key = dragged;
+        dragged = null;
+        clear();
+        if (row && row.dataset.key === key) return;
+        vscode.postMessage(row ? { type: 'sectionMove', key, beforeKey: row.dataset.key } : { type: 'sectionMove', key, toEnd: true });
+    });
+}
 
 el('navlist').addEventListener('click', (ev) => {
     // A CONTROL IS NOT A NAVIGATION. Checked first, and it does not close the
@@ -1712,6 +1754,7 @@ function rectToViewport(n, rect) {
 import { createTxdlRenderer, linkLayer, pageToCss } from './txdl-canvas.js';
 import { mathKey, mathKeyFor, inMathAt, aliasEdit, GREEK_PALETTE } from './math-keys.js';
 import * as texTable from './tex-table.js';
+import * as texFigure from './tex-figure.js';
 
 /** TeX points in a big point; the display list is in TeX pt, PDF boxes in bp. */
 const PT_PER_BP = 72.27 / 72;
@@ -6109,6 +6152,35 @@ pagesEl().addEventListener('dblclick', (ev) => {
     sendClick(n, pt, ev.clientX - r.left, ev.clientY - r.top, { takeMe: true });
 });
 
+// DROP AN IMAGE ON THE PAGE: it is saved in the project and a
+// figure goes in at the seam under the drop. VS Code hands a webview files
+// dropped with Shift held (from Finder, or its own Explorer as a URI).
+pagesEl().addEventListener('dragover', (ev) => {
+    const types = [...(ev.dataTransfer?.types || [])];
+    if (!(types.includes('Files') || types.includes('application/vnd.code.uri-list') || types.includes('text/uri-list'))) return;
+    ev.preventDefault();
+    ev.dataTransfer.dropEffect = 'copy';
+});
+pagesEl().addEventListener('drop', async (ev) => {
+    const wrap = ev.target.closest?.('.page');
+    if (!wrap) return;
+    const n = Number(wrap.dataset.page);
+    const r = wrap.getBoundingClientRect();
+    const pt = fromViewport(n, ev.clientX - r.left, ev.clientY - r.top);
+    if (!pt) return;
+    const file = [...(ev.dataTransfer.files || [])].find(f => /^image\/|\/pdf$/.test(f.type) || /\.(png|jpe?g|pdf|eps|gif|webp)$/i.test(f.name));
+    const uri = (ev.dataTransfer.getData('application/vnd.code.uri-list') || ev.dataTransfer.getData('text/uri-list') || '').split(/\r?\n/).find(u => /\.(png|jpe?g|pdf|eps)$/i.test(u));
+    if (!file && !uri) return;
+    ev.preventDefault();
+    let extra;
+    if (file) {
+        const data = await new Promise(resolve => { const fr = new FileReader(); fr.onload = () => resolve(String(fr.result).replace(/^data:[^,]*,/, '')); fr.onerror = () => resolve(null); fr.readAsDataURL(file); });
+        if (!data) { status('the dropped image could not be read', 'err'); return; }
+        extra = { name: file.name, mime: file.type, data };
+    } else extra = { name: uri.replace(/^.*\//, ''), uri };
+    sendClick(n, pt, ev.clientX - r.left, ev.clientY - r.top, extra, 'imageDrop');
+});
+
 // RIGHT-CLICK MEANS "EDIT THIS, HERE".
 //
 // The paragraph or equation under the pointer opens in a mini-editor pinned
@@ -6630,6 +6702,68 @@ function buildTableGrid(card, ta, e) {
     return wrap;
 }
 
+// THE FIGURE BAR (WLaTeX Pro): a card on a figure sizes its picture (a
+// fraction of the line width), edits the caption, and moves the figure a
+// paragraph up or down. Size and caption edit the card's own text, as typing
+// does; a move is the host's (it edits outside the block), and the card
+// follows the figure to where it went.
+function buildFigureBar(card, ta, e) {
+    if (!/\\begin\s*\{(figure\*?|wrapfigure|SCfigure)\}/.test(e.text || '') || !/\\includegraphics/.test(e.text || '')) return null;
+    const wrap = document.createElement('div');
+    wrap.className = 'ec-figure';
+    const label = (text, input) => { const l = document.createElement('label'); l.append(text, input); return l; };
+    const width = document.createElement('input');
+    width.type = 'range'; width.min = '10'; width.max = '100'; width.step = '5';
+    const pct = document.createElement('span');
+    pct.className = 'ec-pct';
+    const caption = document.createElement('input');
+    caption.type = 'text'; caption.className = 'ec-caption'; caption.spellcheck = true;
+    caption.placeholder = 'Caption';
+    const move = (glyph, title, dir) => {
+        const b = document.createElement('button');
+        b.type = 'button'; b.textContent = glyph; b.title = title;
+        b.addEventListener('mousedown', ev => ev.preventDefault());
+        b.addEventListener('click', () => {
+            vscode.postMessage({ type: 'editChange', editId: e.id, text: ta.value });
+            vscode.postMessage({ type: 'figureMove', editId: e.id, dir });
+        });
+        return b;
+    };
+    wrap.append(label('Width ', width), pct, label('Caption ', caption),
+        move('↑', 'Move the figure above the paragraph before it', -1), move('↓', 'Move the figure below the paragraph after it', 1));
+    /** The figure's span in the card's text. */
+    const figSpan = () => {
+        const m = /\\begin\s*\{(figure\*?|wrapfigure|SCfigure)\}/.exec(ta.value);
+        if (!m) return null;
+        const end = ta.value.indexOf(`\\end{${m[1]}}`, m.index);
+        return end < 0 ? null : [m.index, end + `\\end{${m[1]}}`.length];
+    };
+    const sync = () => {
+        const sp = figSpan();
+        if (!sp) { wrap.hidden = true; return; }
+        wrap.hidden = false;
+        const p = texFigure.figureParts(ta.value.slice(...sp));
+        const w = p.graphics?.width;
+        width.disabled = !p.graphics;
+        if (document.activeElement !== width) width.value = String(Math.round((w ?? 0.8) * 100));
+        pct.textContent = w == null ? (p.graphics ? '(its own size)' : '') : `${Math.round(w * 100)}%`;
+        if (document.activeElement !== caption) caption.value = p.caption ? p.caption.text : '';
+    };
+    const edit = fn => {
+        const sp = figSpan();
+        if (!sp) return;
+        const fig = ta.value.slice(...sp), next = fn(fig);
+        if (next !== fig) replaceCardText(ta, sp[0], sp[1], next);
+    };
+    width.addEventListener('input', () => { edit(f => texFigure.setFigureWidth(f, Number(width.value) / 100)); pct.textContent = `${width.value}%`; });
+    caption.addEventListener('input', () => edit(f => texFigure.setCaption(f, caption.value)));
+    caption.addEventListener('keydown', ev => { if (ev.key === 'Escape' || ev.key === 'Enter') { ev.preventDefault(); ev.stopPropagation(); ta.focus(); } });
+    card._figureRefresh = sync;
+    ta.addEventListener('input', () => { if (!wrap.contains(document.activeElement)) sync(); });
+    sync();
+    return wrap;
+}
+
 function buildEditCard(e) {
     const card = document.createElement('div');
     card.className = 'editcard';
@@ -6943,8 +7077,9 @@ function buildEditCard(e) {
 
     // A table's card has the grid; its cells' maths is typed in the source below.
     const tableGrid = buildTableGrid(card, ta, e);
-    const mathBar = tableGrid ? (wireMathKeys(card, ta), null) : buildMathBar(card, ta, e);
-    card.append(head, ...(mathBar ? [mathBar] : []), ...(tableGrid ? [tableGrid] : []), box, hint);
+    const figureBar = buildFigureBar(card, ta, e);
+    const mathBar = tableGrid || figureBar ? (wireMathKeys(card, ta), null) : buildMathBar(card, ta, e);
+    card.append(head, ...[mathBar, figureBar, tableGrid].filter(Boolean), box, hint);
     return card;
 }
 
@@ -8674,6 +8809,7 @@ window.addEventListener('message', async (ev) => {
                 e.sel = null;
                 syncHighlight(card);
                 card._tableRefresh?.();
+                card._figureRefresh?.();
             }
             const ln = document.querySelector('.editcard .ec-lines');
             if (ln && msg.startLine) {
