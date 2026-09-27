@@ -1106,6 +1106,7 @@ async function renderPage(n) {
         // A zoom empties every wrapper, so an interactive preview drawn before
         // it has to be placed again against the new geometry.
         redrawTxdlOverlay(n);
+        if (state.ink?.page === n) paintInkCaret();
     })().finally(() => { if (state.pending.get(n) === job) state.pending.delete(n); });
     state.pending.set(n, job);
     return job;
@@ -4800,6 +4801,68 @@ function paintCursorCaret(h) {
     wrap.appendChild(el);
 }
 
+// --- typing in the ink (WLaTeX Pro) ------------------------------------------
+//
+// A click on prose the native map knows exactly puts a text caret on the page
+// (the host's `inkCaret`); while it is there, keys go to the host as `inkKey`
+// and become edits of the LaTeX source at that point (inkEdit.js). The live
+// engine redraws the page and the host moves the caret to where the text now
+// is. Escape, or a click elsewhere, puts it away.
+
+/** A caret rect in bp as pixels on its page: the PDF viewport, or a live page's box. */
+function inkToViewport(c) {
+    if (state.rendered.has(c.page)) return rectToViewport(c.page, { page: c.page, x: c.x, y: c.y, w: 0, h: c.h });
+    const box = txdlPageBox(c.page);
+    if (!box || !(box.widthBp > 0)) return null;
+    const k = box.width / box.widthBp;
+    return { x: c.x * k, y: c.y * k, w: 0, h: c.h * k };
+}
+
+function paintInkCaret() {
+    for (const c of document.querySelectorAll('.inkcaret')) c.remove();
+    const ink = state.ink;
+    if (!ink) return;
+    const wrap = pagesEl().querySelector(`.page[data-page="${ink.page}"]`);
+    const v = wrap && inkToViewport(ink);
+    if (!v) return;
+    const el = document.createElement('div');
+    el.className = 'inkcaret' + (ink.typing ? ' typing' : '');
+    el.style.left = `${v.x}px`;
+    el.style.top = `${v.y}px`;
+    el.style.height = `${Math.max(6, v.h)}px`;
+    wrap.appendChild(el);
+}
+
+function setInkCaret(msg) {
+    clearTimeout(state.inkTypingTimer);
+    state.ink = msg && !msg.clear ? { page: msg.page, x: msg.x, y: msg.y, h: msg.h, typing: !!msg.typing } : null;
+    paintInkCaret();
+    // Solid while keys arrive, blinking again at a pause.
+    if (state.ink?.typing) state.inkTypingTimer = setTimeout(() => {
+        if (state.ink) { state.ink.typing = false; paintInkCaret(); }
+    }, 600);
+}
+
+const INK_KEYS = new Set(['Enter', 'Backspace', 'Delete', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'Escape']);
+// Before every other key handler (capture): with a caret on the page, the keys are text.
+window.addEventListener('keydown', (e) => {
+    if (!state.ink) return;
+    const t = e.target;
+    if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.isContentEditable)) return;
+    if (e.isComposing) return;
+    let key = null;
+    if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'z') key = e.shiftKey ? 'redo' : 'undo';
+    else if (e.metaKey || e.ctrlKey) return;
+    else if (INK_KEYS.has(e.key)) key = e.key;
+    else if ([...e.key].length === 1) key = e.key;
+    if (!key) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    if (key === 'Escape') { setInkCaret(null); vscode.postMessage({ type: 'inkKey', key }); return; }
+    if (state.ink) { state.ink.typing = true; paintInkCaret(); }
+    vscode.postMessage({ type: 'inkKey', key, shift: e.shiftKey });
+}, true);
+
 function paintHighlight() {
     for (const box of document.querySelectorAll('.hl')) box.remove();
     const h = state.highlight;
@@ -7927,6 +7990,7 @@ window.addEventListener('message', async (ev) => {
         // lost pages drops their overlays), and the answer to an outline
         // request the renderer made.
         case 'liveStart': liveStart(msg); break;
+        case 'inkCaret': setInkCaret(msg); break;
         case 'txdlPage': await drawTxdlPage(msg); tikzPageChanged(Number(msg.page)); findPageChanged(); break;
         case 'tikzResolved': tikzResolved(msg); break;
         case 'tikzEdited': tikzEdited(msg); break;

@@ -81,6 +81,12 @@ function settledSeedDirectory(projectDir, root) {
     return path.join(artifactParent(projectDir), 'settled', key);
 }
 
+function auxiliaryDigest(texts) {
+    const hash = require('crypto').createHash('sha256');
+    for (const name of Object.keys(texts).sort()) hash.update(name).update('\0').update(texts[name]).update('\0');
+    return hash.digest('hex');
+}
+
 /** Copy a settled build's seed (a trimmed build.json and its auxiliary files) into `directory`. */
 function keepSettledSeed(directory, report) {
     const build = report.build;
@@ -444,8 +450,10 @@ class NativeBuildLane {
             const viewport = [...new Set((o.nativePages || [])
                 .filter(page => Number.isInteger(page) && page >= 1))].sort((a, b) => a - b);
             generation = ++this.buildNumber;
+            const auxiliary = this._auxiliaryTexts();
+            this._liveAuxiliary = auxiliaryDigest(auxiliary);
             handle = this.session.build({ main:this.root, root:this.projectDir,
-                overlays:Object.fromEntries(texts), auxiliary:this._auxiliaryTexts(),
+                overlays:Object.fromEntries(texts), auxiliary,
                 generation, lane:'interactive', viewport });
         } catch (error) {
             if (error?.name === 'AbortError') return null;
@@ -548,6 +556,17 @@ class NativeBuildLane {
             catch (_) { /* swept or unreadable: the preview reads one fewer */ }
         }
         return texts;
+    }
+
+    /**
+     * Whether the settled build's auxiliary files differ from those the last
+     * live build read. The engine then restarts from the top on its next live
+     * build (the files are read by the preamble and every page after), which
+     * is better paid right after a settle than on the reader's next key.
+     */
+    liveAuxiliaryStale() {
+        return this.interactive && this.interactiveWarm && this._liveAuxiliary !== undefined &&
+            auxiliaryDigest(this._auxiliaryTexts()) !== this._liveAuxiliary;
     }
 
     /** The auxiliary files of the settled build kept for this main file, or null. */

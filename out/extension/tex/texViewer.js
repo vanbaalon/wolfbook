@@ -28,6 +28,7 @@ const { buildObjectMap, glyphAtPoint, tokenAt, groupAround, symbolicFonts, caret
 const { buildComparison, describeSummary } = require('./texCompare');
 const { shipDecision } = require('./livePolicy');
 const { balanceRange, closeFor, commentMask } = require('./texBalance');
+const { caretAt, keyEdit, proseAt } = require('./inkEdit');
 const { sectionSpans, ADDRESSABLE } = require('./texModel');
 const collapse = require('./collapse');
 const { MATH_ENVS } = require('./texScanner');
@@ -1303,6 +1304,7 @@ class TexViewer {
             const ready = (this._liveMapReady ||= new Map());
             if (event.ready) ready.set(event.page, event.identity || null); else ready.delete(event.page);
             this._scheduleLiveMap(event.lane);
+            if (this._ink && event.ready && Math.abs(event.page - this._ink.caret.page) <= 1) this._inkFollow();
             return;
         }
         if (event.kind !== 'built') return;
@@ -1336,12 +1338,13 @@ class TexViewer {
         this._liveMapLane = lane;
         clearTimeout(this._liveMapTimer);
         const st = this.root ? this.coord.roots?.get(this.root) : null;
-        const sinceKey = st?.lastEditAt ? Date.now() - st.lastEditAt : Infinity;
+        const lastKey = Math.max(st?.lastEditAt || 0, st?.lastInkAt || 0);
+        const sinceKey = lastKey ? Date.now() - lastKey : Infinity;
         const wait = sinceKey < LIVE_MAP_TYPING_IDLE_MS ? LIVE_MAP_TYPING_IDLE_MS - sinceKey : 20;
         this._liveMapTimer = setTimeout(() => {
             // A key since this was asked for: wait for the pause again.
-            const since = st?.lastEditAt ? Date.now() - st.lastEditAt : Infinity;
-            if (since < LIVE_MAP_TYPING_IDLE_MS) { this._scheduleLiveMap(lane); return; }
+            const last = Math.max(st?.lastEditAt || 0, st?.lastInkAt || 0);
+            if (last && Date.now() - last < LIVE_MAP_TYPING_IDLE_MS) { this._scheduleLiveMap(lane); return; }
             this._buildLiveMap(lane).catch(() => {});
         }, wait);
     }
@@ -1391,6 +1394,205 @@ class TexViewer {
             await new Promise(resolve => setTimeout(resolve, 10));
         }
         return ready();
+    }
+
+    // --- typing in the ink (WLaTeX Pro) --------------------------------------
+    //
+    // A click on prose the native map knows exactly puts a caret on the page;
+    // keys then edit the source there (inkEdit.keyEdit: what is typed is what
+    // shows, and Backspace never breaks a command), one at a time, and the
+    // caret follows the text as soon as the live page showing it has its
+    // map. Maths, verbatim, pictures and tables keep the source card.
+
+    _inkEnabled(st) {
+        return !!st?.nativeLane?.interactive &&
+            vscode.workspace.getConfiguration('wolfbook.tex').get('inkTyping', true) !== false;
+    }
+
+    /** Put the caret at `position` of `doc` when it is prose that `map` shows. */
+    _inkPlace(st, doc, position, map) {
+        const offset = doc.offsetAt(position);
+        const caret = this._inkEnabled(st) && proseAt(doc.getText(), offset) ? this._inkRect(map, doc, offset) : null;
+        if (!caret) { this._inkClear(); return false; }
+        this._ink = { root: this.root, file: doc.uri.fsPath, offset, version: doc.version, caret, undo: [], redo: [] };
+        this._inkMap = map;
+        this._post({ type:'inkCaret', ...caret });
+        return true;
+    }
+
+    _inkClear() {
+        clearTimeout(this._inkTimer);
+        if (!this._ink) return;
+        this._ink = null;
+        this._inkMap = null;
+        this._post({ type:'inkCaret', clear:true });
+    }
+
+    /** Where the caret for `offset` is drawn, from `map`; an empty line takes the next text's start. */
+    _inkRect(map, doc, offset) {
+        if (!map?.available) return null;
+        const at = off => {
+            const pos = doc.positionAt(off);
+            return caretAt(map.glyphsForLine(doc.uri.fsPath, pos.line + 1), pos.line + 1, pos.character, doc.lineAt(pos.line).text);
+        };
+        const here = at(offset);
+        if (here) return here;
+        const next = doc.getText().slice(offset, offset + 400).search(/\S/);
+        return next > 0 ? at(offset + next) : null;
+    }
+
+    /** The caret follows the text once the live page showing it has its map. */
+    _inkFollow() {
+        clearTimeout(this._inkTimer);
+        this._inkTimer = setTimeout(() => { this._inkRefresh().catch(() => {}); }, 0);
+    }
+
+    async _inkRefresh() {
+        const ink = this._ink;
+        if (!ink) return;
+        const st = this.coord.roots.get(ink.root);
+        const lane = st?.nativeLane;
+        const doc = vscode.workspace.textDocuments.find(d => d.uri.fsPath === ink.file);
+        if (!doc || doc.version !== ink.version) return;
+        // Only the pages around the caret: a whole live map is what typing
+        // postpones (_scheduleLiveMap).
+        const pages = [ink.caret.page - 1, ink.caret.page, ink.caret.page + 1]
+            .filter(p => p >= 1 && this._liveOverlays?.has(p) && this._liveMapReady?.get(p) === this._liveOverlays.get(p));
+        let map = null;
+        if (pages.length && typeof lane?.liveView === 'function') {
+            const view = await lane.liveView(pages).catch(() => null);
+            if (view && this._ink === ink) {
+                const { NativeMap } = require('./nativeMap');
+                try { map = new NativeMap({ nativeView:view, nativeSource:lane.source, projectDir:lane.projectDir }); }
+                catch (_) { map = null; }
+            }
+        }
+        if (this._ink !== ink || doc.version !== ink.version) return;
+        let caret = map && this._inkRect(map, doc, ink.offset);
+        if (!caret && st?.map?.available) { map = st.map; caret = this._inkRect(map, doc, ink.offset); }
+        if (!caret) return;
+        ink.caret = caret;
+        this._inkMap = map;
+        this._post({ type:'inkCaret', ...caret });
+    }
+
+    /** A key from the page: queued, so fast typing applies in order. */
+    _inkKey(m) {
+        if (m.key === 'Escape') { this._ink = null; this._inkMap = null; return; }
+        if (!this._ink) return;
+        // Moving the caret is typing too, for the map reads that wait for a
+        // pause (renderUi._scheduleNativeRefresh, _scheduleLiveMap).
+        const st = this.coord.roots.get(this._ink.root);
+        if (st) st.lastInkAt = Date.now();
+        this._inkQueue = (this._inkQueue || Promise.resolve()).then(() => this._inkApply(m)).catch(error => this._log(`ink: ${error.message}`));
+    }
+
+    async _inkApply(m) {
+        const ink = this._ink;
+        if (!ink) return;
+        const doc = vscode.workspace.textDocuments.find(d => d.uri.fsPath === ink.file);
+        if (!doc || doc.version !== ink.version) {
+            this._inkClear();
+            this._post({ type:'status', text:'The source changed — click the page to type there again', kind:'warn' });
+            return;
+        }
+        const text = doc.getText();
+        if (m.key === 'undo' || m.key === 'redo') {
+            const step = (m.key === 'undo' ? ink.undo : ink.redo).pop();
+            if (!step) return;
+            const back = await this._inkReplace(doc, step.start, step.end, step.insert, true);
+            if (!back) return;
+            (m.key === 'undo' ? ink.redo : ink.undo).push({ start: step.start, end: step.start + step.insert.length,
+                insert: back, caret: ink.offset });
+            ink.offset = step.caret;
+            ink.version = doc.version;
+            return this._inkFollow();
+        }
+        if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(m.key)) return this._inkMove(doc, m.key);
+        const edit = keyEdit(text, ink.offset, m.key);
+        if (!edit) {
+            this._post({ type:'status', text:'That is not deleted from the page — edit it in the source', kind:'warn' });
+            return;
+        }
+        if (edit.insert === undefined) { ink.offset = edit.caret; return this._inkFollow(); }
+        // One undo step per word: a space or a new paragraph closes it.
+        const old = await this._inkReplace(doc, edit.start, edit.end, edit.insert, /\s/.test(edit.insert) || !edit.insert);
+        if (old === null) return;
+        ink.undo.push({ start: edit.start, end: edit.start + edit.insert.length, insert: old, caret: ink.offset });
+        ink.redo = [];
+        ink.offset = edit.caret;
+        ink.version = doc.version;
+        this._inkFollow();
+    }
+
+    /** Replace [start, end) of `doc` with `insert`; the replaced text, or null. */
+    async _inkReplace(doc, start, end, insert, stop) {
+        const old = doc.getText().slice(start, end);
+        const range = new vscode.Range(doc.positionAt(start), doc.positionAt(end));
+        const editor = (vscode.window.visibleTextEditors || []).find(e => e.document === doc);
+        let ok;
+        if (editor) ok = await editor.edit(b => b.replace(range, insert), { undoStopBefore: !!stop, undoStopAfter: !!stop });
+        else {
+            const edit = new vscode.WorkspaceEdit();
+            edit.replace(doc.uri, range, insert);
+            ok = await vscode.workspace.applyEdit(edit);
+        }
+        return ok ? old : null;
+    }
+
+    /** Arrows, Home and End move the caret by what the page shows. */
+    async _inkMove(doc, key) {
+        const ink = this._ink;
+        // A live view stays current only until the next live page map is
+        // published, which a running build does page after page: read the
+        // caret's pages again when it has gone stale.
+        if (!this._inkMap?.available) await this._inkRefresh();
+        const map = this._inkMap;
+        if (this._ink !== ink || !map?.available) return;
+        const text = doc.getText(), caret = ink.caret;
+        const offsetOf = (entry, end) => {
+            const loc = entry.hit.preferred_source.location;
+            const p = end ? loc.end : loc.start;
+            return doc.offsetAt(new vscode.Position(p.line - 1, p.column_utf16));
+        };
+        let target = null;
+        if (key === 'ArrowLeft' || key === 'ArrowRight') {
+            const step = key === 'ArrowLeft' ? -1 : 1;
+            for (let off = ink.offset + step, n = 0; off >= 0 && off <= text.length && n < 400; off += step, n++) {
+                if (!proseAt(text, off)) continue;
+                const r = this._inkRect(map, doc, off);
+                if (r && (r.page !== caret.page || r.row !== caret.row || Math.abs(r.x - caret.x) > 0.3)) { target = off; break; }
+            }
+        } else {
+            const exact = map.entriesOnPage(caret.page).filter(e => e.hit?.preferred_source?.location?.accuracy === 'Exact' && e.file === doc.uri.fsPath);
+            const rows = new Map();
+            for (const e of exact) {
+                const r = rows.get(e.row) || { row: e.row, y: Infinity, entries: [] };
+                r.y = Math.min(r.y, e.y); r.entries.push(e); rows.set(e.row, r);
+            }
+            const ordered = [...rows.values()].sort((a, b) => a.y - b.y);
+            const i = ordered.findIndex(r => r.row === caret.row);
+            const candidates = key === 'Home' || key === 'End' ? [ordered[i]]
+                : key === 'ArrowUp' ? ordered.slice(Math.max(0, i - 6), Math.max(0, i)).reverse() : ordered.slice(i + 1, i + 7);
+            // The nearest row with prose under the caret's x (a row of maths is passed over).
+            for (const row of candidates.filter(Boolean)) {
+                const byX = row.entries.sort((a, b) => a.x - b.x);
+                let off;
+                if (key === 'Home') off = offsetOf(byX[0], false);
+                else if (key === 'End') off = offsetOf(byX[byX.length - 1], true);
+                else {
+                    const g = byX.reduce((best, e) => Math.abs(e.x + e.w / 2 - caret.x) < Math.abs(best.x + best.w / 2 - caret.x) ? e : best);
+                    off = offsetOf(g, caret.x > g.x + g.w / 2);
+                }
+                if (proseAt(text, off)) { target = off; break; }
+            }
+        }
+        if (target === null || !proseAt(text, target)) return;
+        const r = this._inkRect(map, doc, target);
+        if (!r) return;
+        ink.offset = target;
+        ink.caret = r;
+        this._post({ type:'inkCaret', ...r });
     }
 
     /** A new PDF replaced every overlay: the live map answers for none. */
@@ -4279,6 +4481,8 @@ class TexViewer {
                 // An older PDF can finish opening after a replacement was
                 // sent. Its acknowledgement must not overwrite the new state.
                 if (this.shownGeneration != null && String(m.generation) !== String(this.shownGeneration)) break;
+                // The page under the caret may now be the PDF's: place it again.
+                if (this._ink) this._inkFollow();
                 this._viewerReloading = false;
                 clearTimeout(this._viewerReloadTimer);
                 this._viewerReloadTimer = null;
@@ -4332,6 +4536,7 @@ class TexViewer {
             case 'txdlOutlines': await this._onTxdlOutlines(m); break;
             case 'txdlImage': await this._onTxdlImage(m); break;
             // The webview kept the PDF for this page: it is not a live page.
+            case 'inkKey': this._inkKey(m); break;
             case 'txdlFallback': this._liveOverlays?.delete(m.page); this._liveMapReady?.delete(m.page);
                 this._previewPages?.delete(m.page); break;
             case 'textLayerDone':
@@ -5656,6 +5861,9 @@ class TexViewer {
         }
         this._rememberCursor(doc, placed);
         this._postEditSelection(doc, range, !m.takeMe, caret ? start : null, m.typingRequest);
+        // WLaTeX Pro: exact prose takes a caret on the page itself.
+        if (hit.exact && !m.takeMe && !Number.isFinite(m.typingRequest)) this._inkPlace?.(st, doc, start, map);
+        else this._inkClear?.();
         const glyph = hit.glyph;
         this._post({ type:'selection', span:null });
         this._post({ type:'highlight', exact:true, reveal:false,

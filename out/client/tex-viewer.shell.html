@@ -158,6 +158,13 @@
               width:2px; margin-left:-1px; border-radius:1px;
               background:#e5484d; box-shadow:0 0 0 .5px rgba(255,255,255,.55); }
   .wb-dark-pages .curcaret { background:#ff6169; box-shadow:0 0 0 .5px rgba(0,0,0,.5); }
+  /* Typing in the ink (WLaTeX Pro): the page's own text caret, blinking as a
+     text field's does while it has the keys. */
+  .inkcaret { position:absolute; pointer-events:none; z-index:10; width:1.5px; margin-left:-.75px;
+              background:#1a1a1a; animation:inkblink 1.06s steps(1) infinite; }
+  .inkcaret.typing { animation:none; }
+  .wb-dark-pages .inkcaret { background:#f2f2f2; }
+  @keyframes inkblink { 0%, 55% { opacity:1 } 56%, 100% { opacity:0 } }
   /* A darkened page would swallow a multiply blend, so the wash goes on top
      instead. Keyed off the PAGE theme, not `prefers-color-scheme`: that is the
      operating system's preference, and a light VS Code theme on a dark desktop

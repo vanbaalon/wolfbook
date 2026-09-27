@@ -169,6 +169,8 @@ class NativeMap extends RenderMap {
     clearEdits() {}
     _toGenerationLine(file, line) { return { line, shifted: false }; }
     _toCurrentLine(file, line) { return line; }
+    /** The glyph entries of a page this view holds (for moving a caret by rows). */
+    entriesOnPage(page) { return this.available ? this._pages.get(page) || [] : []; }
     glyphsForLine(file, line) {
         return this.available ? this._lines.get(`${path.resolve(file)}\0${line}`) || [] : [];
     }

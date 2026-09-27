@@ -385,12 +385,14 @@ class RenderCoordinator {
         // live build before its page arrived. The live pages show the typing;
         // this map catches up at a pause, or at once for a click
         // (ensureNativeMap).
-        const sinceKey = st.lastEditAt ? Date.now() - st.lastEditAt : Infinity;
+        const lastKey = Math.max(st.lastEditAt || 0, st.lastInkAt || 0);
+        const sinceKey = lastKey ? Date.now() - lastKey : Infinity;
         if (lane?.interactive && sinceKey < NATIVE_REFRESH_TYPING_IDLE_MS) delayMs = Math.max(delayMs, NATIVE_REFRESH_TYPING_IDLE_MS - sinceKey);
         clearTimeout(st.nativeRefreshTimer);
         st.nativeRefreshTimer = setTimeout(() => {
             // A key since this was asked for: wait for the pause again.
-            if (lane?.interactive && st.lastEditAt && Date.now() - st.lastEditAt < NATIVE_REFRESH_TYPING_IDLE_MS) {
+            const last = Math.max(st.lastEditAt || 0, st.lastInkAt || 0);
+            if (lane?.interactive && last && Date.now() - last < NATIVE_REFRESH_TYPING_IDLE_MS) {
                 this._scheduleNativeRefresh(st, lane, 0);
                 return;
             }
@@ -478,6 +480,23 @@ class RenderCoordinator {
             run.finally(() => { if (busy.get(root) === run) busy.delete(root); });
         }, busy.has(root) ? throttle : 0));
         return true;
+    }
+
+    /**
+     * A settle that changed the auxiliary files (new references, a longer
+     * contents) makes the live engine's next build start from the top. Paid
+     * here, in the background while the reader is not typing, rather than on
+     * their next key: a live build whose pages are not drawn.
+     */
+    _warmLiveAfterSettle(root, st, lane) {
+        if (!lane?.interactive || typeof lane.liveAuxiliaryStale !== 'function' || !lane.liveAuxiliaryStale()) return;
+        const last = Math.max(st.lastEditAt || 0, st.lastInkAt || 0);
+        if ((last && Date.now() - last < NATIVE_REFRESH_TYPING_IDLE_MS) || this._previewBusy?.has(root)) return;
+        const busy = (this._previewBusy ||= new Map());
+        const run = lane.interactiveBuild({ root, sourceFiles: st.files, overlay: this.liveOverlay(root),
+            nativePages: this._nativeWindow(st) }).catch(() => null);
+        busy.set(root, run);
+        run.finally(() => { if (busy.get(root) === run) busy.delete(root); });
     }
 
     /**
@@ -1006,6 +1025,7 @@ class RenderCoordinator {
                 try {
                     gen = await lane.compile(compileOpts);
                     st.nativeRefusedSnapshot = null;
+                    if (gen?.ok) this._warmLiveAfterSettle(root, st, lane);
                 } catch (error) {
                     if (ac.signal.aborted || ['AbortError', 'StaleBuild'].includes(error?.name)) throw error;
                     // A TeX error in the document resolves as a failed
