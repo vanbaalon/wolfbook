@@ -441,6 +441,44 @@ test('AN MCP EDIT THROUGH THE BUFFER IS REVIEWABLE, NOT MIRRORED AWAY', async ()
     assert.ok(s.hunks.every(h => s.undo(h.id).ok), 'so both can be undone');
 });
 
+test('TRACK MY CHANGES: page edits are the reader\'s own changes in the review, to keep or undo', async () => {
+    const cfg = stub.workspace.getConfiguration;
+    const typed = (from, to) => {
+        const at = DOC.getText().indexOf(from);
+        DOC._setText(DOC.getText().replace(from, to));
+        DOC.isDirty = true;
+        for (const fn of changeHandlers) fn({ document: DOC, contentChanges: [{ rangeOffset: at, rangeLength: from.length, text: to }] });
+    };
+    const pageEdit = async (from, to) => {
+        busMod.announceAgentEdit({ file: FILE, origin: 'user', source: 'wpaper.viewer', phase: 'begin' });
+        typed(from, to);
+        busMod.announceAgentEdit({ file: FILE, origin: 'user', source: 'wpaper.viewer', phase: 'end' });
+        await new Promise(r => setTimeout(r, 320));
+    };
+    try {
+        // Off (the default): a page edit is the reader's typing, not a change to review.
+        stub.workspace.getConfiguration = () => ({ get: (k, d) => d });
+        let { ui } = makeUi({ docText: BASE, diskText: BASE });
+        await pageEdit('A second paragraph nobody is arguing about.', 'A second paragraph typed on the page.');
+        assert.ok(!ui.sessionFor(FILE) || ui.sessionFor(FILE).pendingCount === 0, 'untracked by default');
+        // On: the same edit is a change by "You".
+        stub.workspace.getConfiguration = () => ({ get: (k, d) => (k === 'trackMyChanges' ? true : k === 'groupWindowSeconds' ? 0 : d) });
+        ({ ui } = makeUi({ docText: BASE, diskText: BASE }));
+        await pageEdit('A second paragraph nobody is arguing about.', 'A second paragraph typed on the page.');
+        const s = ui.sessionFor(FILE);
+        assert.ok(s, 'a review opens');
+        assert.strictEqual(s.pendingCount, 1, 'with the page edit in it');
+        const batch = s.batches.find(b => b.id === s.firstSeen.get(s.hunks[0].id));
+        assert.strictEqual(batch.source, 'you');
+        assert.strictEqual(batch.author.name, 'You (on the page)');
+        assert.strictEqual(s.arrivals.length, 0, 'no copy of the file per keystroke');
+        // Typing in the editor is still mirrored, not listed.
+        typed('# ', '# ');
+        await ui.undo(FILE, s.hunks[0].id);
+        assert.strictEqual(DOC.getText(), BASE, 'Undo puts the page edit back');
+    } finally { stub.workspace.getConfiguration = cfg; }
+});
+
 test('the commands are registered and act on the file in front', async () => {
     const { ui } = makeUi();
     await ui.noteAgentChange({ file: FILE, baseText: BASE });

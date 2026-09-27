@@ -126,6 +126,29 @@ exports.run = async function () {
         const rowBefore = viewer._ink.caret.row;
         await key('ArrowDown');
         check(viewer._ink.caret.row !== rowBefore, 'ArrowDown moves to the next row');
+        // Track my changes (B7): the Pro panel's toggle, and a review to see it.
+        const { ReviewUi } = require('./reviewUi');
+        const review = new ReviewUi({ viewer, output, mapView: () => ({}) });
+        {
+            // The extension's own review is registered too: its commands exist.
+            const register = vscode.commands.registerCommand;
+            vscode.commands.registerCommand = (id, fn) => { try { return register(id, fn); } catch (_) { return { dispose() {} }; } };
+            try { review.register(context); } finally { vscode.commands.registerCommand = register; }
+        }
+        await viewer._onMessage({ type: 'trackMine', on: true });
+        check(vscode.workspace.getConfiguration('wolfbook.tex').get('trackMyChanges') === true, 'the Pro panel turns tracking on');
+        const textBefore = doc.getText();
+        for (const ch of 'Tr') await key(ch);
+        await until(() => review.sessionFor(file)?.pendingCount, 'the review of the typing', 5000).catch(() => {});
+        const rs = review.sessionFor(file);
+        const ownBatch = rs && rs.hunks[0] && rs.batches.find(b => b.id === rs.firstSeen.get(rs.hunks[0].id));
+        check(rs?.pendingCount === 1 && ownBatch?.source === 'you', `the typing is one change by You in the review (${rs?.pendingCount}, ${ownBatch?.source})`);
+        if (rs?.hunks[0]) {
+            await review.undo(file, rs.hunks[0].id);
+            check(doc.getText() === textBefore, 'Undo in the review takes the typing back');
+            report.tracked = true;
+        }
+        await viewer._onMessage({ type: 'trackMine', on: false });
         viewer._onMessage({ type: 'inkKey', key: 'Escape' });
         check(!viewer._ink, 'Escape puts the caret away');
         report.latencies = latencies.map(Math.round);

@@ -243,6 +243,38 @@ class ReviewUi {
         return s;
     }
 
+    /**
+     * TRACK MY CHANGES. With `wolfbook.tex.trackMyChanges` on, what the reader
+     * does on the page (typing in the ink, the card, a table, a figure, a
+     * move, a drop — every edit WPaper's viewer announces) opens or extends
+     * the review as a change by "You", to keep or undo like an agent's. It is
+     * held out of the baseline mirror while it applies, as an agent's write
+     * is; unlike one, it keeps no before/after copy of the file per write and
+     * raises no "the agent changed" notice.
+     */
+    noteOwnChange(ev) {
+        const file = ev.file;
+        if (ev.phase === 'begin') {
+            this._agentWriting.set(file, Date.now());
+            this._userWriting.set(file, Date.now());
+            const base = typeof ev.baseText === 'string' ? ev.baseText : this._buffers.get(file) ??
+                (vscode.workspace.textDocuments || []).find(d => d.uri.fsPath === file)?.getText();
+            if (!this.sessions.has(file) && typeof base === 'string') this.sessions.set(file, this._newSession(file, base));
+            return;
+        }
+        try {
+            const s = this.sessions.get(file);
+            if (!s) return;
+            this._hidden.delete(file);
+            s.noteBatch({ source: 'you', note: ev.note || '', author: YOU });
+            clearTimeout(this._ownRefresh);
+            this._ownRefresh = setTimeout(() => { this.refresh(file).catch(() => {}); }, 250);
+        } finally {
+            this._agentWriting.delete(file);
+            this._userWriting.delete(file);
+        }
+    }
+
     /** True while this file's buffer is being rebased — the watcher must wait. */
     isMerging(file) { return this._merging.has(file); }
 
@@ -538,6 +570,8 @@ class ReviewUi {
             const doc = e.document;
             const clamp = (l) => Math.max(0, Math.min(l, doc.lineCount - 1));
             const buckets = { add: [], change: [], del: [], word: [], focus: [] };
+            // Who made each change: the agent, or the reader on the page (track my changes).
+            const whoOf = h => (s.batches.find(b => b.id === s.firstSeen.get(h.id))?.source === 'you' ? 'You' : 'The agent');
             for (const h of s.hunks) {
                 const from = clamp(h.ourRange.startLine - 1);
                 const to = clamp(h.ourRange.endLine - 2);
@@ -546,12 +580,12 @@ class ReviewUi {
                     const seam = clamp(h.ourRange.startLine - 2);
                     buckets.del.push({
                         range: new vscode.Range(seam, 0, seam, 0),
-                        hoverMessage: removedHover(h),
+                        hoverMessage: removedHover(h, whoOf(h)),
                     });
                 } else {
                     buckets[h.verb === 'add' ? 'add' : 'change'].push({
                         range: whole,
-                        hoverMessage: changeHover(h),
+                        hoverMessage: changeHover(h, whoOf(h)),
                     });
                     if (h.verb === 'change') {
                         for (const r of wordRanges(doc, h, clamp)) buckets.word.push(r);
@@ -888,6 +922,7 @@ class ReviewUi {
         // tool the agent is told to use is the one whose edits cannot be seen.
         context.subscriptions.push(bus.onAgentEdit(async (ev) => {
             if (ev.origin === 'user') {
+                if (trackingMine(ev)) { this.noteOwnChange(ev); return; }
                 if (ev.phase === 'begin') this._userWriting.set(ev.file, Date.now());
                 else this._userWriting.delete(ev.file);
                 return;
@@ -920,6 +955,14 @@ class ReviewUi {
 
 // ----------------------------------------------------------------- helpers --
 
+const YOU = { name: 'You (on the page)' };
+
+/** A page edit of the reader's, while they have asked for their changes to be tracked. */
+function trackingMine(ev) {
+    return /^wpaper\./.test(ev?.source || '') &&
+        vscode.workspace.getConfiguration('wolfbook.tex').get('trackMyChanges', false) === true;
+}
+
 function describeHunk(h, s) {
     const n = Math.max(h.ourRange.endLine - h.ourRange.startLine,
         h.theirRange.endLine - h.theirRange.startLine);
@@ -929,9 +972,9 @@ function describeHunk(h, s) {
     return s.edited.has(h.id) ? `${what} · you have edited this since` : what;
 }
 
-function changeHover(h) {
+function changeHover(h, who = 'The agent') {
     const md = new vscode.MarkdownString();
-    md.appendMarkdown(h.verb === 'add' ? '**The agent added this.**\n\n' : '**The agent changed this.**\n\n');
+    md.appendMarkdown(h.verb === 'add' ? `**${who} added this.**\n\n` : `**${who} changed this.**\n\n`);
     if (h.verb === 'change' && h.theirText) {
         md.appendMarkdown('Before:\n');
         md.appendCodeblock(h.theirText.slice(0, 800), 'latex');
@@ -939,9 +982,9 @@ function changeHover(h) {
     return md;
 }
 
-function removedHover(h) {
+function removedHover(h, who = 'The agent') {
     const md = new vscode.MarkdownString();
-    md.appendMarkdown('**The agent removed this.**\n\n');
+    md.appendMarkdown(`**${who} removed this.**\n\n`);
     md.appendCodeblock(String(h.theirText || '').slice(0, 800), 'latex');
     return md;
 }

@@ -1142,7 +1142,12 @@
         "wolfbook.tex.inkTyping": {
           "type": "boolean",
           "default": true,
-          "description": "WLaTeX Pro: a click on prose puts a caret on the page itself, and typing edits the LaTeX there (what you type is what shows: % becomes \\%; Backspace never breaks a command). Maths, verbatim, pictures and tables keep the source card. Escape puts the caret away."
+          "description": "WLaTeX Pro: a click on prose puts a caret on the page itself, and typing edits the LaTeX there (what you type is what shows: % becomes \\%; Backspace never breaks a command). A click in maths opens the equation card (Mathematica's keys), in a table the table grid, on a picture its figure's card. Escape puts the caret away."
+        },
+        "wolfbook.tex.trackMyChanges": {
+          "type": "boolean",
+          "default": false,
+          "description": "WLaTeX Pro: each change you make on the page (typing in the ink, the edit card, tables, figures, moves and drops) shows in the review, to keep or undo, as an agent's changes do. Typing in the editor is not tracked. Also a checkbox in the WLaTeX Pro panel."
         },
         "wolfbook.tex.synctex": {
           "type": "boolean",

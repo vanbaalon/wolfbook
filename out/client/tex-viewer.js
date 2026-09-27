@@ -243,6 +243,8 @@ function setEngineBadge(msg) {
     const last = el('pro-key');
     if (last) last.textContent = key ? `last: ${key}` : '';
     el('promarks').checked = proLiveMarks();
+    const track = el('protrack');
+    if (track) track.checked = !!engine.trackMine;
 }
 
 function closeProPanel() {
@@ -262,6 +264,7 @@ el('propanel')?.addEventListener('click', (e) => e.stopPropagation());
 el('prochoose')?.addEventListener('click', () => { vscode.postMessage({ type: 'chooseNative' }); closeProPanel(); });
 document.addEventListener('click', closeProPanel);
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !el('propanel')?.hidden) closeProPanel(); });
+el('protrack')?.addEventListener('change', (e) => vscode.postMessage({ type: 'trackMine', on: !!e.target.checked }));
 el('promarks')?.addEventListener('change', (e) => {
     try { localStorage.setItem(PRO_MARKS_KEY, e.target.checked ? 'on' : 'off'); } catch (_) { /* per-viewer convenience */ }
     document.body.classList.toggle('pro-live-marks', !!state.engine && state.engine.state !== 'off' && e.target.checked);

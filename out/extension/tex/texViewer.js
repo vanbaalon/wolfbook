@@ -1260,6 +1260,7 @@ class TexViewer {
             interactive: !!st?.nativeLane?.interactive, keyMs: t.sinceKeyMs ?? null,
             firstChangedMs: t.firstChangedMs ?? null, recomputed: t.recomputed ?? null, reused: t.reused ?? null,
             pages: gen?.pageCount ?? null,
+            trackMine: vscode.workspace.getConfiguration('wolfbook.tex').get('trackMyChanges', false) === true,
             // The one-time "WLaTeX Pro is on" card, until the reader has answered it.
             intro: state && state !== 'off' && !this.context?.globalState?.get(PRO_INTRO_KEY) });
     }
@@ -4758,6 +4759,11 @@ class TexViewer {
             case 'recompile': await this.rebuild(); break;
             // The WLaTeX Pro panel's "Preview with WLaTeX" for a paper written
             // for another engine (renderUi's chooseNative).
+            case 'trackMine':
+                // Track my changes: page edits go to the review, with Keep/Undo (reviewUi).
+                await vscode.workspace.getConfiguration('wolfbook.tex').update('trackMyChanges', !!m.on, vscode.ConfigurationTarget.Global);
+                this._post({ type:'status', kind:'ok', text: m.on ? 'your page edits now show in the review, each to keep or undo' : 'your page edits are no longer tracked' });
+                break;
             case 'chooseNative':
                 if (this.root && typeof this.coord.chooseNative === 'function') await this.coord.chooseNative(this.root);
                 break;
