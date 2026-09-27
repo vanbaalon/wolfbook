@@ -4845,8 +4845,22 @@ function setInkCaret(msg) {
 
 const INK_KEYS = new Set(['Enter', 'Backspace', 'Delete', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'Escape']);
 // Before every other key handler (capture): with a caret on the page, the keys are text.
+// ⌘B / ⌘I: on a selection, format it; at the ink caret, type in that format.
+window.addEventListener('keydown', (e) => {
+    if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
+    const kind = { b: 'bold', i: 'italic' }[e.key.toLowerCase()];
+    const t = e.target;
+    if (!kind || (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.isContentEditable))) return;
+    if (state.selection && !state.selection.pendingStart) vscode.postMessage({ type: 'selectionAction', action: kind });
+    else if (state.ink) vscode.postMessage({ type: 'inkKey', key: `format:${kind}` });
+    else return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+}, true);
 window.addEventListener('keydown', (e) => {
     if (!state.ink) return;
+    // A selection on the page takes the keys (typing replaces it).
+    if (state.selection && !state.selection.pendingStart) return;
     const t = e.target;
     if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.isContentEditable)) return;
     if (e.isComposing) return;
@@ -5194,6 +5208,16 @@ const ACTION_ICONS = {
     paste: 'M6.5 1.5h3a1 1 0 0 1 1 1V3h1.5A1.5 1.5 0 0 1 13.5 4.5v9A1.5 1.5 0 0 1 12 15H4a1.5 1.5 0 0 1-1.5-1.5v-9A1.5 1.5 0 0 1 4 3h1.5v-.5a1 1 0 0 1 1-1M4 4.5v9h8v-9h-1.5v1h-5v-1zm3-1.5v1h2v-1z',
     delete: 'M6.5 1.5h3a1 1 0 0 1 1 1V3H13v1.5h-1V13a1.5 1.5 0 0 1-1.5 1.5h-5A1.5 1.5 0 0 1 4 13V4.5H3V3h2.5v-.5a1 1 0 0 1 1-1M5.5 4.5V13h5V4.5zM7 6h1.2v5.5H7zm2 0h1.2v5.5H9z',
 };
+// Formatting (WLaTeX Pro and every other lane: the edits are the source's):
+// each a toggle, so a second press takes the format off (texFormat.js).
+const FORMAT_ACTIONS = [
+    { id: 'bold', text: 'B', title: 'Bold — \\textbf (⌘B)' },
+    { id: 'italic', text: 'I', title: 'Emphasis — \\emph (⌘I)' },
+    { id: 'mono', text: 'T', title: 'Typewriter — \\texttt' },
+    { id: 'math', text: '$', title: 'Inline maths — $…$' },
+    { id: 'footnote', text: 'fn', title: 'Footnote — \\footnote' },
+    { id: 'heading', text: '§', title: 'Heading level — section, subsection, subsubsection, text' },
+];
 const ACTIONS = [
     { id: 'copy', title: 'Copy the LaTeX (⌘C)' },
     { id: 'cut', title: 'Cut the LaTeX (⌘X)' },
@@ -5218,6 +5242,19 @@ function paintSelectionActions() {
 
     const bar = document.createElement('div');
     bar.className = 'selact';
+    for (const a of FORMAT_ACTIONS) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.dataset.action = a.id;
+        b.title = a.title;
+        b.setAttribute('aria-label', a.title);
+        b.className = `fmt fmt-${a.id}`;
+        b.textContent = a.text;
+        bar.appendChild(b);
+    }
+    const gap = document.createElement('span');
+    gap.className = 'selact-gap';
+    bar.appendChild(gap);
     for (const a of ACTIONS) {
         const b = document.createElement('button');
         b.type = 'button';

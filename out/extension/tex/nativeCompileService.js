@@ -81,6 +81,55 @@ function settledSeedDirectory(projectDir, root) {
     return path.join(artifactParent(projectDir), 'settled', key);
 }
 
+/**
+ * What an .aux says references print as, by line: each label's number and
+ * each citation's label (`key -> { value, line }`). Page numbers are left
+ * out — a \\pageref catches up at the settle, not with a whole live rebuild
+ * per paragraph that moved.
+ */
+function referenceEntries(aux) {
+    const out = new Map();
+    for (const line of String(aux || '').split('\n')) {
+        const label = /^\\newlabel\{([^}]*)\}\{\{([^}]*)\}/.exec(line);
+        const cite = !label && /^\\bibcite\{([^}]*)\}\{([^}]*)\}/.exec(line);
+        const m = label || cite;
+        if (!m) continue;
+        const key = `${label ? 'L' : 'C'}${m[1]}`;
+        // LaTeX keeps the last of a label defined twice.
+        out.set(key, { value: m[2], line, count: (out.get(key)?.count || 0) + 1 });
+    }
+    return out;
+}
+
+/**
+ * The .aux a live build read, with the references a later live build wrote
+ * differently (or new ones). A build that stopped where its pages met the
+ * previous build's (`complete` false) wrote only its own pages' entries: the
+ * rest stand as read, and a label defined twice cannot be judged from part
+ * of the document (the last definition wins). Null when nothing differs.
+ */
+function mergeReferences(read, written, complete = true) {
+    const was = referenceEntries(read), now = referenceEntries(written);
+    const changed = [...now].filter(([key, e]) => {
+        const old = was.get(key);
+        if (!old) return true;
+        if (!complete && (old.count > 1 || e.count > 1)) return false;
+        return old.value !== e.value;
+    });
+    if (!changed.length) return null;
+    const lines = String(read || '').split('\n');
+    const at = new Map(lines.map((line, i) => [line, i]));
+    const extra = [];
+    for (const [key, e] of changed) {
+        const old = was.get(key);
+        if (old && at.has(old.line)) lines[at.get(old.line)] = e.line; else extra.push(e.line);
+    }
+    // New entries before the closing lines LaTeX writes last.
+    const end = lines.findIndex(l => /^\\gdef\s*\\@abspage@last|^\\@abspage@last/.test(l));
+    if (end >= 0) lines.splice(end, 0, ...extra); else lines.push(...extra);
+    return lines.join('\n');
+}
+
 function auxiliaryDigest(texts) {
     const hash = require('crypto').createHash('sha256');
     for (const name of Object.keys(texts).sort()) hash.update(name).update('\0').update(texts[name]).update('\0');
@@ -331,6 +380,9 @@ class NativeBuildLane {
         // preview numbers what the settled build numbered. Recorded only for a
         // build that succeeded, and only once its artifacts exist.
         this.coldReport = report;
+        // The settle wrote its own .aux: live builds read that from now on.
+        this._liveAuxiliaryAdopted = null;
+        this._pendingLiveAuxiliary = null;
         // Kept for the next session, when it changed (see keepSettledSeed).
         if (report.build.settled === true) {
             const kept = JSON.stringify([report.build.auxiliary_files, report.build.tool_inputs || null]);
@@ -444,7 +496,7 @@ class NativeBuildLane {
             if (!await warm) return interactiveFailure(null, this.interactiveUnavailable, false);
             if (!this.interactive) return null;
         }
-        let handle = null, generation = null;
+        let handle = null, generation = null, fedAuxiliary = {};
         try {
             const texts = this._interactiveOverlays(o);
             const viewport = [...new Set((o.nativePages || [])
@@ -452,6 +504,7 @@ class NativeBuildLane {
             generation = ++this.buildNumber;
             const auxiliary = this._auxiliaryTexts();
             this._liveAuxiliary = auxiliaryDigest(auxiliary);
+            fedAuxiliary = auxiliary;
             handle = this.session.build({ main:this.root, root:this.projectDir,
                 overlays:Object.fromEntries(texts), auxiliary,
                 generation, lane:'interactive', viewport });
@@ -496,7 +549,18 @@ class NativeBuildLane {
         if (superseded || o.signal?.aborted) return null;
         if (failed) return interactiveFailure(generation, failed.error, failed.fatal === true);
         if (!built) return interactiveFailure(generation, 'the interactive build produced no report', false);
-        return { ok:true, incremental:true, generation, pages:built.pages || [],
+        // NEW REFERENCES. A \\label typed now is in the .aux this build wrote,
+        // not in the one it read: one more build reading it prints the number
+        // (the host runs it at a pause, see renderUi._scheduleReferencePass).
+        const merged = {};
+        for (const [name, text] of Object.entries(built.auxiliary_written || {})) {
+            if (!SAFE_OVERLAY(name) || typeof text !== 'string') continue;
+            const next = mergeReferences(fedAuxiliary[name], text, built.report?.stop === 'EndOfDocument');
+            if (next !== null) merged[name] = next;
+        }
+        const referencesChanged = Object.keys(merged).length > 0;
+        this._pendingLiveAuxiliary = referencesChanged ? merged : null;
+        return { ok:true, incremental:true, generation, referencesChanged, pages:built.pages || [],
             pageCount:built.page_count ?? (built.pages || []).length,
             report:built.report || null, diagnostics:built.diagnostics || [],
             elapsedMs:built.elapsed_ms ?? null };
@@ -555,7 +619,23 @@ class NativeBuildLane {
             try { texts[name] = fs.readFileSync(path.join(directory, name), 'utf8'); }
             catch (_) { /* swept or unreadable: the preview reads one fewer */ }
         }
+        // What a reference pass adopted from a live build (adoptLiveAuxiliary),
+        // until the next settle writes its own.
+        for (const [name, text] of Object.entries(this._liveAuxiliaryAdopted || {}))
+            if (SAFE_OVERLAY(name) && typeof text === 'string') texts[name] = text;
         return texts;
+    }
+
+    /**
+     * Take the .aux the last live build wrote as the one live builds read, when
+     * it defines references differently from what that build read. True when
+     * there was one: the next live build then prints the new numbers.
+     */
+    adoptLiveAuxiliary() {
+        if (!this._pendingLiveAuxiliary) return false;
+        this._liveAuxiliaryAdopted = { ...(this._liveAuxiliaryAdopted || {}), ...this._pendingLiveAuxiliary };
+        this._pendingLiveAuxiliary = null;
+        return true;
     }
 
     /**

@@ -29,6 +29,9 @@ const { buildComparison, describeSummary } = require('./texCompare');
 const { shipDecision } = require('./livePolicy');
 const { balanceRange, closeFor, commentMask } = require('./texBalance');
 const { caretAt, keyEdit, proseAt } = require('./inkEdit');
+const { format: formatSource } = require('./texFormat');
+// Formats from the page (texFormat.js), by action id.
+const PAGE_FORMATS = new Set(['bold', 'italic', 'mono', 'math', 'footnote', 'heading']);
 const { sectionSpans, ADDRESSABLE } = require('./texModel');
 const collapse = require('./collapse');
 const { MATH_ENVS } = require('./texScanner');
@@ -1509,6 +1512,20 @@ class TexViewer {
             return this._inkFollow();
         }
         if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(m.key)) return this._inkMove(doc, m.key);
+        if (typeof m.key === 'string' && m.key.startsWith('format:')) {
+            // ⌘B, ⌘I … at the caret: open a group to type into, or step out of it.
+            const r = formatSource(text, ink.offset, ink.offset, m.key.slice(7));
+            if (r.error) { this._post({ type:'status', text:r.error, kind:'warn' }); return; }
+            if (r.insert !== undefined) {
+                const old = await this._inkReplace(doc, r.start, r.end, r.insert, true);
+                if (old === null) return;
+                ink.undo.push({ start: r.start, end: r.start + r.insert.length, insert: old, caret: ink.offset });
+                ink.redo = [];
+                ink.version = doc.version;
+            }
+            ink.offset = r.caret;
+            return this._inkFollow();
+        }
         const edit = keyEdit(text, ink.offset, m.key);
         if (!edit) {
             this._post({ type:'status', text:'That is not deleted from the page — edit it in the source', kind:'warn' });
@@ -5137,6 +5154,30 @@ class TexViewer {
         if (!t) { this._post({ type: 'status', text: 'nothing is selected', kind: 'warn' }); return; }
         const { doc, range, sel } = t;
         const text = doc.getText(range);
+
+        if (PAGE_FORMATS.has(action)) {
+            // One edit; the formatted text stays selected, so a second click
+            // takes the format off again.
+            const r = formatSource(doc.getText(), doc.offsetAt(range.start), doc.offsetAt(range.end), action);
+            if (r.error) { this._post({ type: 'status', text: r.error, kind: 'warn' }); return; }
+            if (r.insert !== undefined) {
+                const edit = new vscode.WorkspaceEdit();
+                edit.replace(doc.uri, new vscode.Range(doc.positionAt(r.start), doc.positionAt(r.end)), r.insert);
+                let ok = false;
+                try { ok = await this._applyReaderEdit(doc, edit); } catch (_) { ok = false; }
+                if (!ok) { this._post({ type: 'status', text: `the ${action} could not be applied`, kind: 'err' }); return; }
+            }
+            if (r.select) {
+                const start = doc.positionAt(r.select[0]), end = doc.positionAt(r.select[1]);
+                this._afterSelectionEdit(sel.file, start, end, 'kept');
+                // Our own edit says exactly where the text is: it stays the
+                // selection (bound to this text, not to a map still being
+                // re-read), so the next press toggles it straight back.
+                this._lastSelection = { file:sel.file, nativeMap:null, documentVersion:doc.version, start, end };
+            }
+            this._post({ type: 'status', text: `${action}: ${r.insert !== undefined ? 'applied' : 'unchanged'}`, kind: 'ok' });
+            return;
+        }
 
         if (action === 'copy') {
             if (!text) { this._post({ type: 'status', text: 'nothing to copy', kind: 'warn' }); return; }

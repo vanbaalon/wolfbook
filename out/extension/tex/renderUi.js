@@ -483,6 +483,34 @@ class RenderCoordinator {
     }
 
     /**
+     * NEW REFERENCES RESOLVE LIVE. A \\label (or a \\ref to one) typed now
+     * prints "??" until a build reads the .aux that defines it: the live
+     * build that saw it wrote that .aux, so at the next pause in typing one
+     * more live build reads it (LaTeX's second pass, without waiting for the
+     * settle). At most two per text, as LaTeX's own reruns converge.
+     */
+    _scheduleReferencePass(root, st, lane) {
+        const timers = (this._referenceTimers ||= new Map());
+        clearTimeout(timers.get(root));
+        if (st.referencePassText === st.lastEditAt && (st.referencePasses || 0) >= 2) return;
+        const fire = () => {
+            if (this._disposed || st.nativeLane !== lane || !lane.interactive) return;
+            const last = Math.max(st.lastEditAt || 0, st.lastInkAt || 0);
+            const wait = last ? NATIVE_REFRESH_TYPING_IDLE_MS - (Date.now() - last) : 0;
+            if (wait > 0 || this._previewBusy?.has(root)) { timers.set(root, setTimeout(fire, Math.max(wait, 30))); return; }
+            if (typeof lane.adoptLiveAuxiliary !== 'function' || !lane.adoptLiveAuxiliary()) return;
+            if (st.referencePassText !== st.lastEditAt) { st.referencePassText = st.lastEditAt; st.referencePasses = 0; }
+            st.referencePasses++;
+            const busy = (this._previewBusy ||= new Map());
+            const run = this._runInteractive(st, lane, root, { root, sourceFiles: st.files, overlay: this.liveOverlay(root),
+                nativePages: this._nativeWindow(st) }).catch(() => { /* logged inside */ });
+            busy.set(root, run);
+            run.finally(() => { if (busy.get(root) === run) busy.delete(root); });
+        };
+        timers.set(root, setTimeout(fire, 0));
+    }
+
+    /**
      * A settle that changed the auxiliary files (new references, a longer
      * contents) makes the live engine's next build start from the top. Paid
      * here, in the background while the reader is not typing, rather than on
@@ -578,6 +606,7 @@ class RenderCoordinator {
             pageCount:result.pageCount, pages:result.pages, report, summary,
             errors: errors.filter(e => Number.isInteger(e.page)).slice(0, 20)
                 .map(e => ({ page:e.page, file:e.file, line:e.line, message:e.message })) });
+        if (result.referencesChanged) this._scheduleReferencePass(root, st, lane);
         return result;
     }
 

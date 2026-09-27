@@ -241,6 +241,11 @@
          -webkit-appearance:none; appearance:none; }
   .selact button:hover { background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,.22)); }
   .selact button:active { transform: translateY(.5px); }
+  .selact button.fmt { font: 600 12px/1 Georgia, 'Times New Roman', serif; min-width:20px; }
+  .selact button.fmt-italic { font-style:italic; font-weight:400; }
+  .selact button.fmt-mono { font-family: var(--vscode-editor-font-family, Menlo, monospace); font-weight:400; }
+  .selact button.fmt-footnote { font-size:10px; font-weight:400; }
+  .selact .selact-gap { width:1px; margin:2px 3px; background: var(--vscode-panel-border, rgba(128,128,128,.35)); }
   .selact button:focus-visible { outline:1px solid var(--vscode-focusBorder, #4a9eff); outline-offset:-1px; }
   /* Only the irreversible one is coloured, and only once the pointer is on it:
      a red icon sitting on the page permanently reads as an error. */
