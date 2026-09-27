@@ -171,6 +171,27 @@
   /* Between Esc and Esc: an alias (Esc a Esc is α). */
   .editcard.aliasing .ec-editor { outline:1px dashed var(--vscode-focusBorder, #0078d4); outline-offset:-1px; }
   .editcard.aliasing .ec-head::after { content:'⋮ alias — Esc'; margin-left:6px; font-size:11px; opacity:.7; }
+  .ec-table { border-bottom:1px solid var(--vscode-panel-border, rgba(128,128,128,.3)); padding:2px 4px 6px; max-height:40vh; overflow:auto; }
+  .ec-table[hidden] { display:none; }
+  .ec-tablebar { display:flex; flex-wrap:wrap; gap:1px; padding:0 0 4px; }
+  .ec-tablebar button { height:20px; padding:0 6px; border:none; border-radius:3px; cursor:pointer; font-size:11px;
+    background:transparent; color:inherit; }
+  .ec-tablebar button:hover { background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,.22)); }
+  .ec-tablebar button.on { background: var(--vscode-toolbar-activeBackground, rgba(128,128,128,.32)); }
+  .ec-align { display:inline-flex; margin-left:6px; }
+  .ec-borders { display:flex; flex-wrap:wrap; gap:2px; padding:0 0 4px; }
+  .ec-borders[hidden] { display:none; }
+  .ec-borders button { width:34px; height:26px; padding:3px 4px; border:1px solid transparent; border-radius:4px; cursor:pointer;
+    background:transparent; color:inherit; }
+  .ec-borders button:hover { background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,.22)); }
+  .ec-borders button.on { border-color: var(--vscode-focusBorder, #0078d4); }
+  .ec-align[hidden] { display:none; }
+  .ec-grid { border-collapse:collapse; width:100%; }
+  .ec-grid td { border:1px dashed rgba(128,128,128,.28); padding:0; }
+  .ec-grid input { width:100%; min-width:4em; box-sizing:border-box; border:none; padding:2px 4px; background:transparent;
+    color:inherit; font:12px var(--vscode-editor-font-family, monospace); }
+  .ec-grid input:focus { outline:1px solid var(--vscode-focusBorder, #0078d4); outline-offset:-1px;
+    background: var(--vscode-input-background, rgba(128,128,128,.08)); }
   .inkcaret { position:absolute; pointer-events:none; z-index:10; width:1.5px; margin-left:-.75px;
               background:#1a1a1a; animation:inkblink 1.06s steps(1) infinite; }
   .inkcaret.typing { animation:none; }

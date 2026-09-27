@@ -1711,6 +1711,7 @@ function rectToViewport(n, rect) {
 
 import { createTxdlRenderer, linkLayer, pageToCss } from './txdl-canvas.js';
 import { mathKey, mathKeyFor, inMathAt, aliasEdit, GREEK_PALETTE } from './math-keys.js';
+import * as texTable from './tex-table.js';
 
 /** TeX points in a big point; the display list is in TeX pt, PDF boxes in bp. */
 const PT_PER_BP = 72.27 / 72;
@@ -6441,6 +6442,194 @@ function buildMathBar(card, ta, e) {
     return wrap;
 }
 
+// ===========================================================================
+// THE TABLE GRID (WLaTeX Pro)
+// ===========================================================================
+//
+// A card on a block holding a tabular shows it as a grid over the source: a
+// cell is a text box, Tab and Shift-Tab walk the cells (Tab in the last cell
+// adds a row, as in a word processor), and the bar adds or removes rows and
+// columns, sets a column's alignment and switches between \hline and booktabs
+// rules. Typing in a cell replaces only that cell's text in the source; the bar
+// rewrites the table as tidy LaTeX (tex-table.js). Both reach the source as
+// the card's typing does, so with WLaTeX the table on the page re-typesets as
+// it changes. The grid is the card's, not an overlay on the page's cells.
+
+/** Replace `from..to` of the card's text as an edit of the reader's (not focusing the textarea). */
+function replaceCardText(ta, from, to, text) {
+    ta.setSelectionRange(from, to);
+    ta.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertReplacementText', data: text }));
+    ta.setRangeText(text, from, to, 'end');
+    ta.dispatchEvent(new Event('input'));
+}
+
+function buildTableGrid(card, ta, e) {
+    if (!/\\begin\s*\{tabular/.test(e.text || '')) return null;
+    let at = Number.isFinite(e.clickOffset) ? e.clickOffset : -1;
+    let focus = null;                 // { row, col } to focus after a redraw
+    const wrap = document.createElement('div');
+    wrap.className = 'ec-table';
+    const bar = document.createElement('div');
+    bar.className = 'ec-tablebar';
+    const grid = document.createElement('table');
+    grid.className = 'ec-grid';
+    const current = () => texTable.parseTabular(ta.value, at);
+    const where = () => {
+        const el = document.activeElement;
+        return el && el.dataset && el.dataset.row !== undefined ? { row: +el.dataset.row, col: +el.dataset.col } : focus || { row: 0, col: 0 };
+    };
+    /** Rewrite the whole table from a grid operation. */
+    const rewrite = (op, next) => {
+        const t = current();
+        if (!t) return;
+        const n = op(t);
+        replaceCardText(ta, t.start, t.end, texTable.serializeTabular(n));
+        focus = next || where();
+        draw();
+    };
+    const act = (label, title, fn) => {
+        const b = document.createElement('button');
+        b.type = 'button'; b.textContent = label; b.title = title;
+        b.addEventListener('mousedown', ev => ev.preventDefault());
+        b.addEventListener('click', fn);
+        return b;
+    };
+    const align = document.createElement('span');
+    align.className = 'ec-align';
+    // Border styles, each drawn as a small table.
+    const styles = document.createElement('div');
+    styles.className = 'ec-borders';
+    styles.hidden = true;
+    const STYLE_NAMES = { none: 'No lines', header: 'A line under the header', rows: 'Lines between rows',
+        box: 'A frame', grid: 'Every cell framed', double: 'Double frame', booktabs: 'booktabs: top, middle and bottom rules (adds \\usepackage{booktabs})' };
+    const preview = name => {
+        const b = texTable.BORDERS[name];
+        const W = 26, H = 18, x0 = 3, x1 = W - 3, ys = [3, 7.5, 12, 15.5];
+        const line = (x1_, y1, x2, y2, w = 1) => `<line x1="${x1_}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="currentColor" stroke-width="${w}"/>`;
+        let svg = '';
+        const heavy = name === 'booktabs' ? 1.6 : 1;
+        if (b.top.length) svg += line(x0, 1.5, x1, 1.5, heavy) + (b.top.length > 1 ? line(x0, 3, x1, 3) : '');
+        if (b.head.length) svg += line(x0, 6, x1, 6);
+        if (b.between.length) svg += line(x0, 11, x1, 11);
+        if (b.bottom.length) svg += line(x0, H - 1.5, x1, H - 1.5, heavy) + (b.bottom.length > 1 ? line(x0, H - 3, x1, H - 3) : '');
+        if (b.outer) svg += line(x0, 1.5, x0, H - 1.5) + line(x1, 1.5, x1, H - 1.5);
+        if (b.outer > 1) svg += line(x0 + 1.5, 1.5, x0 + 1.5, H - 1.5) + line(x1 - 1.5, 1.5, x1 - 1.5, H - 1.5);
+        if (b.inner) svg += line(W / 2, 1.5, W / 2, H - 1.5);
+        // The cells' text, faint.
+        for (const y of ys.slice(0, 3)) svg += `<rect x="${x0 + 3}" y="${y + 1}" width="6" height="1.4" fill="currentColor" opacity=".45"/><rect x="${W / 2 + 2}" y="${y + 1}" width="6" height="1.4" fill="currentColor" opacity=".45"/>`;
+        return `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">${svg}</svg>`;
+    };
+    for (const name of Object.keys(texTable.BORDERS)) {
+        const b = act('', STYLE_NAMES[name] || name, () => {
+            rewrite(x => texTable.setBorders(x, name));
+            if (name === 'booktabs') vscode.postMessage({ type: 'tablePackage', editId: e.id, name: 'booktabs' });
+            styles.hidden = true;
+        });
+        b.innerHTML = preview(name);
+        b.dataset.style = name;
+        styles.appendChild(b);
+    }
+    const books = act('Borders ▾', 'Border style', () => { styles.hidden = !styles.hidden; });
+    books.className = 'ec-borders-toggle';
+    bar.append(
+        act('+ row', 'Add a row below (Tab in the last cell does too)', () => { const w = where(); rewrite(t => texTable.addRow(t, w.row), { row: w.row + 1, col: 0 }); }),
+        act('− row', 'Remove this row', () => { const w = where(); rewrite(t => texTable.removeRow(t, w.row), { row: Math.max(0, w.row - 1), col: w.col }); }),
+        act('+ col', 'Add a column to the right', () => { const w = where(); rewrite(t => texTable.addColumn(t, w.col), { row: w.row, col: w.col + 1 }); }),
+        act('− col', 'Remove this column', () => { const w = where(); rewrite(t => texTable.removeColumn(t, w.col), { row: w.row, col: Math.max(0, w.col - 1) }); }),
+        align, books);
+    wrap.append(bar, styles, grid);
+    for (const [a, glyph] of [['l', '⇤'], ['c', '↔'], ['r', '⇥']]) {
+        const b = act(glyph, `Align this column: ${{ l: 'left', c: 'centre', r: 'right' }[a]}`, () => { const w = where(); rewrite(t => texTable.setAlign(t, w.col, a)); });
+        b.dataset.align = a;
+        align.appendChild(b);
+    }
+    const draw = () => {
+        const t = current();
+        if (!t) { wrap.hidden = true; return; }
+        wrap.hidden = false;
+        at = t.start;
+        grid.replaceChildren();
+        const width = Math.max(1, t.cols.length, ...t.rows.map(r => r.cells.length));
+        // The grid draws the lines the table has: rules above rows, the frame, the column bars.
+        const lines = rules => rules.filter(x => /^\\(hline|toprule|midrule|bottomrule)$/.test(x)).length;
+        const spec = t.spec.replace(/\s+/g, '').replace(/[@!]\{[^}]*\}/g, '');
+        const outer = /^\|\|/.test(spec) ? 2 : /^\|/.test(spec) ? 1 : 0;
+        const inner = /[^|]\|[^|]/.test(spec.replace(/^\|+|\|+$/g, 'x'));
+        const edge = n => (n > 1 ? 'double' : n ? 'solid' : '');
+        t.rows.forEach((row, r) => {
+            const tr = document.createElement('tr');
+            const above = lines(row.rules), below = r === t.rows.length - 1 ? lines(t.closing) : 0;
+            row.cells.forEach((cell, c) => {
+                const td = document.createElement('td');
+                if (above) td.style.borderTop = `${above > 1 ? 3 : row.rules.some(x => /toprule/.test(x)) ? 2 : 1}px ${edge(above)} currentColor`;
+                if (below) td.style.borderBottom = `${below > 1 ? 3 : t.closing.some(x => /bottomrule/.test(x)) ? 2 : 1}px ${edge(below)} currentColor`;
+                if (c === 0 && outer) td.style.borderLeft = `${outer > 1 ? 3 : 1}px ${edge(outer)} currentColor`;
+                if (c === row.cells.length - 1 && outer) td.style.borderRight = `${outer > 1 ? 3 : 1}px ${edge(outer)} currentColor`;
+                if (c > 0 && inner) td.style.borderLeft = '1px solid currentColor';
+                const span = /^\\multicolumn\{(\d+)\}/.exec(cell);
+                if (span) td.colSpan = Math.min(width, +span[1]);
+                const input = document.createElement('input');
+                input.value = cell;
+                input.spellcheck = false;
+                input.dataset.row = String(r); input.dataset.col = String(c);
+                const a = (t.cols[c]?.align || 'l')[0];
+                input.style.textAlign = { c: 'center', r: 'right' }[a] || 'left';
+                input.addEventListener('focus', () => {
+                    focus = { row: r, col: c };
+                    for (const b of align.children) b.classList.toggle('on', b.dataset.align === a);
+                });
+                input.addEventListener('input', () => {
+                    const now = current();
+                    const sp = now?.rows[r]?.spans?.[c];
+                    if (sp) replaceCardText(ta, sp[0], sp[1], input.value);
+                });
+                input.addEventListener('keydown', ev => {
+                    if (ev.key === 'Tab') {
+                        ev.preventDefault(); ev.stopPropagation();
+                        const cells = [...grid.querySelectorAll('input')];
+                        const i = cells.indexOf(input) + (ev.shiftKey ? -1 : 1);
+                        if (i >= cells.length) rewrite(x => texTable.addRow(x, r), { row: r + 1, col: 0 });
+                        else if (i >= 0) cells[i].focus();
+                    } else if (ev.key === 'Enter' && !ev.metaKey && !ev.ctrlKey) {
+                        ev.preventDefault(); ev.stopPropagation();
+                        const below = grid.querySelector(`input[data-row="${r + 1}"][data-col="${c}"]`);
+                        if (below) below.focus(); else rewrite(x => texTable.addRow(x, r), { row: r + 1, col: c });
+                    } else if (ev.key === 'Escape') {
+                        ev.preventDefault(); ev.stopPropagation();
+                        ta.focus();
+                    }
+                });
+                td.appendChild(input);
+                tr.appendChild(td);
+            });
+            grid.appendChild(tr);
+        });
+        align.hidden = !t.specEditable;
+        const style = texTable.bordersOf(t);
+        for (const b of styles.children) b.classList.toggle('on', b.dataset.style === style);
+        if (focus && grid.isConnected) {
+            const el = grid.querySelector(`input[data-row="${focus.row}"][data-col="${focus.col}"]`) || grid.querySelector('input');
+            if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+            focus = null;
+        }
+    };
+    // The cell that was clicked on the page, focused once the card is placed.
+    const first = current();
+    const clicked = first && at >= 0 ? texTable.cellAt(first, at) : null;
+    card._tableFocus = () => {
+        if (!clicked) return false;
+        focus = clicked;
+        draw();
+        return wrap.contains(document.activeElement);
+    };
+    // A change from elsewhere (the textarea, the editor) redraws the grid,
+    // unless the reader is typing in it.
+    card._tableRefresh = () => { if (!wrap.contains(document.activeElement)) draw(); };
+    ta.addEventListener('input', () => { if (!wrap.contains(document.activeElement)) draw(); });
+    draw();
+    return wrap;
+}
+
 function buildEditCard(e) {
     const card = document.createElement('div');
     card.className = 'editcard';
@@ -6752,8 +6941,10 @@ function buildEditCard(e) {
     hint.className = 'ec-hint';
     hint.textContent = 'drag title · ←←/→→ previous/next · ⌘S save · ⌘⌥↵ commit · ⇧⌘⌥↵ push · Esc close';
 
-    const mathBar = buildMathBar(card, ta, e);
-    card.append(head, ...(mathBar ? [mathBar] : []), box, hint);
+    // A table's card has the grid; its cells' maths is typed in the source below.
+    const tableGrid = buildTableGrid(card, ta, e);
+    const mathBar = tableGrid ? (wireMathKeys(card, ta), null) : buildMathBar(card, ta, e);
+    card.append(head, ...(mathBar ? [mathBar] : []), ...(tableGrid ? [tableGrid] : []), box, hint);
     return card;
 }
 
@@ -7242,7 +7433,10 @@ function paintEditCard(focus = false) {
     // one so often left the reader looking at the wrong part of the page.
     if (fresh && focus) {
         const ta = card.querySelector('textarea');
-        try { ta.focus({ preventScroll: true }); } catch (_) { ta.focus(); }
+        // A table opened from a click on a cell: that cell of the grid.
+        if (!card._tableFocus?.()) {
+            try { ta.focus({ preventScroll: true }); } catch (_) { ta.focus(); }
+        }
         revealEditCard(card);
     }
 }
@@ -8449,6 +8643,7 @@ window.addEventListener('message', async (ev) => {
                 caretEnd: Number.isFinite(msg.caretEnd) ? msg.caretEnd
                     : (Number.isFinite(msg.caretStart) ? msg.caretStart : 0),
                 caretDirection: msg.caretDirection === 'backward' ? 'backward' : 'forward',
+                ...(Number.isFinite(msg.clickOffset) ? { clickOffset: msg.clickOffset } : {}),
             };
             const page = editCardPage(state.edit);
             await renderPage(page);
@@ -8478,6 +8673,7 @@ window.addEventListener('message', async (ev) => {
                 e.caretDirection = ta.selectionDirection;
                 e.sel = null;
                 syncHighlight(card);
+                card._tableRefresh?.();
             }
             const ln = document.querySelector('.editcard .ec-lines');
             if (ln && msg.startLine) {

@@ -28,7 +28,7 @@ const { buildObjectMap, glyphAtPoint, tokenAt, groupAround, symbolicFonts, caret
 const { buildComparison, describeSummary } = require('./texCompare');
 const { shipDecision } = require('./livePolicy');
 const { balanceRange, closeFor, commentMask } = require('./texBalance');
-const { caretAt, keyEdit, proseAt, mathAt } = require('./inkEdit');
+const { caretAt, keyEdit, proseAt, mathAt, tableAt } = require('./inkEdit');
 const { format: formatSource } = require('./texFormat');
 const { bibEntries, bblEntries, refItems, insertion } = require('./texPickers');
 const inspire = require('./inspire');
@@ -41,7 +41,7 @@ const { readAuxLabels } = require('./auxLabels');
 const { buildLabelChips, formatLabelCopy, altFormat,
     blockOf, inColumn, tagRows, rowsOver, CHIP_H } = require('./labelChips');
 const { stepAt, satisfies, stepsFor } = require('./tourSteps');
-const { graphicxInsertion } = require('./texPaste');
+const { graphicxInsertion, packageInsertion } = require('./texPaste');
 const mmaBlocks = require('./mmaBlocks');
 const mmaWrite = require('./mmaWrite');
 const { announceAgentEdit } = require('./reviewBus');
@@ -1725,6 +1725,21 @@ class TexViewer {
     }
 
     /** Run an edit announced as the reader's own (see _applyReaderEdit), not an agent's. */
+    /** A table style needs a package (booktabs): load it in the main file's preamble, once. */
+    async _tablePackage(m) {
+        if (!/^[A-Za-z][\w-]*$/.test(m?.name || '') || !this.root) return;
+        // After the card's table edit: the two arrive together, and an insert
+        // above the block while the card's edit applies reads as a conflict.
+        if (this._editApplyQueue) await this._editApplyQueue.catch(() => {});
+        const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(this.root));
+        const add = packageInsertion(doc.getText(), m.name);
+        if (!add) return;
+        const edit = new vscode.WorkspaceEdit();
+        edit.insert(doc.uri, doc.positionAt(add.offset), add.text);
+        if (await this._asReaderEdit(doc.uri.fsPath, () => vscode.workspace.applyEdit(edit)))
+            this._post({ type:'status', kind:'ok', text:`added \\usepackage{${m.name}} to ${path.basename(doc.uri.fsPath)}` });
+    }
+
     async _asReaderEdit(file, apply) {
         const event = { file, origin: 'user', source: 'wpaper.viewer' };
         announceAgentEdit({ ...event, phase: 'begin' });
@@ -4742,6 +4757,7 @@ class TexViewer {
             // The webview kept the PDF for this page: it is not a live page.
             case 'inspireSearch': this._inspireSearch(m); break;
             case 'inkKey': this._inkKey(m); break;
+            case 'tablePackage': this._tablePackage(m).catch(() => {}); break;
             case 'txdlFallback': this._liveOverlays?.delete(m.page); this._liveMapReady?.delete(m.page);
                 this._previewPages?.delete(m.page); break;
             case 'textLayerDone':
@@ -6093,9 +6109,13 @@ class TexViewer {
         // WLaTeX Pro: exact prose takes a caret on the page itself.
         if (hit.exact && !m.takeMe && !Number.isFinite(m.typingRequest)) {
             // Prose takes a caret on the page; maths opens the card over the
-            // equation (its Mathematica keys, the page re-typesetting live).
-            if (!this._inkPlace?.(st, doc, start, map) && this._inkEnabled?.(st) && mathAt(doc.getText(), doc.offsetAt(start)))
-                this._openEditSession?.(m)?.catch?.(() => {});
+            // equation (its Mathematica keys, the page re-typesetting live),
+            // and a table the card with its grid, at the cell clicked.
+            if (!this._inkPlace?.(st, doc, start, map) && this._inkEnabled?.(st)) {
+                const at = doc.offsetAt(start);
+                if (mathAt(doc.getText(), at) || tableAt(doc.getText(), at))
+                    this._openEditSession?.({ ...m, sourceOffset: at })?.catch?.(() => {});
+            }
         } else this._inkClear?.();
         const glyph = hit.glyph;
         this._post({ type:'selection', span:null });
@@ -7987,6 +8007,9 @@ class TexViewer {
             startLine,
             endLine,
             text: s.native ? wireText(s.lastText) : s.lastText,
+            // Where in the block the page was clicked (the table grid focuses that cell).
+            ...(Number.isFinite(m.sourceOffset) && m.sourceOffset >= s.startOffset && m.sourceOffset <= s.endOffset
+                ? { clickOffset: s.native ? wireOffset(s.lastText, m.sourceOffset - s.startOffset) : m.sourceOffset - s.startOffset } : {}),
             // With no printed rows to hang off (a figure, an unmapped block),
             // the click point itself anchors the card.
             page: m.page,

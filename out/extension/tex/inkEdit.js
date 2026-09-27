@@ -83,6 +83,22 @@ function mathAt(text, offset) {
     return display;
 }
 
+/** Whether `offset` of `text` is in a table's body (tabular, tabular*, tabularx, longtable) — the table grid's. */
+function tableAt(text, offset) {
+    if (!Number.isInteger(offset) || offset < 0 || offset > text.length) return false;
+    const begin = text.search(/\\begin\s*\{document\}/);
+    if (begin < 0 || offset <= begin) return false;
+    const mask = commentMask(text);
+    if (offset < text.length && mask[offset]) return false;
+    const envs = environmentAt(text, offset, mask);
+    // The innermost of a table or maths decides: a cell's $x$ is the table's.
+    for (let i = envs.length - 1; i >= 0; i--) {
+        if (/^(tabular\*?|tabularx)$/.test(envs[i])) return true;
+        if (MATH_ENVS.has(envs[i])) return false;
+    }
+    return false;
+}
+
 function span(entry) {
     const loc = entry?.hit?.preferred_source?.location;
     if (!loc || loc.accuracy !== 'Exact' || loc.start.line !== loc.end.line) return null;
@@ -226,4 +242,4 @@ function del(text, offset) {
     return remove(offset, offset + n);
 }
 
-module.exports = { caretAt, keyEdit, proseAt, mathAt, environmentAt, literal };
+module.exports = { caretAt, keyEdit, proseAt, mathAt, tableAt, environmentAt, literal };

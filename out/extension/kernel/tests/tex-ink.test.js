@@ -95,3 +95,15 @@ test('a click in maths opens the card, not the ink caret', () => {
     assert.equal(at('a=b'), true, 'an equation environment');
     assert.equal(at(' x'), false, 'a \\\\[2mm] line break is not maths');
 });
+
+test('a click in a table opens the card with its grid', () => {
+    const { tableAt } = require('../../tex/inkEdit');
+    const d = '\\documentclass{a}\\begin{document}\nText\n\\begin{table}\\centering\n\\begin{tabular}{lc}\nA & $x$ \\\\\n% B & C\n\\end{tabular}\n\\caption{Cap}\n\\end{table}\n\\begin{equation}\\begin{array}{cc}p&q\\end{array}\\end{equation}\n\\end{document}';
+    const at = w => tableAt(d, d.indexOf(w) + 1);
+    assert.equal(at('Text'), false);
+    assert.equal(at('A &'), true, 'a cell');
+    assert.equal(at('$x$'), true, 'maths in a cell is the table\'s');
+    assert.equal(at('B & C'), false, 'a comment');
+    assert.equal(at('Cap'), false, 'the caption');
+    assert.equal(at('p&q'), false, 'an array in maths is the equation\'s');
+});

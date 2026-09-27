@@ -161,6 +161,22 @@ function graphicxInsertion(text) {
     return null;
 }
 
+/** Where and what to insert so the preamble of `text` loads package `name`; null when it already does. */
+function packageInsertion(text, name) {
+    const t = String(text || '');
+    const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (new RegExp(`\\\\(usepackage|RequirePackage)(\\[[^\\]]*\\])?\\{[^}]*\\b${esc}\\b[^}]*\\}`).test(t)) return null;
+    const cls = /\\documentclass\s*(\[[^\]]*\])?\s*\{[^}]*\}/.exec(t);
+    const line = `\\usepackage{${name}}\n`;
+    if (cls) {
+        const end = cls.index + cls[0].length;
+        const nl = t.indexOf('\n', end);
+        return { offset: nl < 0 ? end : nl + 1, text: line };
+    }
+    const beg = t.indexOf('\\begin{document}');
+    return beg >= 0 ? { offset: beg, text: line } : null;
+}
+
 /**
  * The first image-like item in a DataTransfer, whatever mime it arrived under.
  *
@@ -205,5 +221,5 @@ function findImageItem(dataTransfer) {
 
 module.exports = {
     MIME_EXT, PASTE_MIMES, imagePathFor, labelSuggestion,
-    figureSnippet, insideFloat, hasGraphicx, graphicxInsertion, findImageItem,
+    figureSnippet, insideFloat, hasGraphicx, graphicxInsertion, packageInsertion, findImageItem,
 };

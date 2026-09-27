@@ -51,7 +51,13 @@ exports.run = async function () {
     const viewer = new TexViewer(context, coord, projection);
     const carets = [];
     const post = viewer._post.bind(viewer);
-    viewer._post = message => { if (message?.type === 'inkCaret') carets.push({ at: performance.now(), message }); return post(message); };
+    const pagesPosted = [];
+    viewer._post = message => {
+        if (message?.type === 'inkCaret') carets.push({ at: performance.now(), message });
+        if (message?.type === 'txdlPage') pagesPosted.push(message.page);
+        if (message?.type === 'editConflict' || (message?.type === 'status' && message.kind !== 'ok' && /edit|source/i.test(message.text || ''))) failures.push(`card: ${message.type} ${message.text?.slice?.(0, 120) || ''}`);
+        return post(message);
+    };
     let subscription;
     const failures = [];
     const check = (ok, what) => { if (!ok) failures.push(what); };
@@ -140,6 +146,47 @@ exports.run = async function () {
                 check(!viewer._ink, 'a click in display maths places no ink caret');
                 check(opened.length && /\\begin\{(equation|align|gather)/.test(opened[0].text || ''), `a click in display maths opens the card on it (${opened[0]?.label || 'none'})`);
                 report.maths_checked = true;
+            }
+        }
+        // A table opens the card with its grid at the clicked cell; what the
+        // grid sends (a cell edited, the booktabs style) reaches the source,
+        // the package is loaded once, and the page is drawn again.
+        const tableLine = (() => {
+            const ls = doc.getText().split('\n');
+            let inTab = false;
+            for (let i = 0; i < ls.length; i++) {
+                if (/\\begin\{tabular/.test(ls[i])) { inTab = true; continue; }
+                if (/\\end\{tabular/.test(ls[i])) { inTab = false; continue; }
+                if (inTab && ls[i].includes('&') && !/^\s*%/.test(ls[i]) && st.map?.available && st.map.glyphsForLine(file, i + 1).length) return i;
+            }
+            return -1;
+        })();
+        if (tableLine >= 0) {
+            opened.length = 0;
+            const cellGlyph = st.map.glyphsForLine(file, tableLine + 1)[0];
+            await viewer._jumpToSource({ generation: viewer._openedGeneration, page: cellGlyph.page,
+                xBp: cellGlyph.x + cellGlyph.w / 2, yTopBp: cellGlyph.y + cellGlyph.boxHeight / 2 });
+            await until(() => opened.length, 'the table card', 10000).catch(() => {});
+            const card = opened[0];
+            check(card && /\\begin\{tabular/.test(card.text || ''), `a click in a table opens the card on it (${card?.label || 'none'})`);
+            const texTable = await import(path.resolve(__dirname, '../../client/tex-table.js'));
+            const t = card && texTable.parseTabular(card.text, card.clickOffset);
+            const cell = t && Number.isFinite(card.clickOffset) && texTable.cellAt(t, card.clickOffset);
+            check(!!cell, `the card knows the clicked cell (offset ${card?.clickOffset})`);
+            if (t && cell) {
+                const edited = texTable.setBorders(texTable.setCell(t, cell.row, cell.col, `${t.rows[cell.row].cells[cell.col]} Ink`), 'booktabs');
+                const text = card.text.slice(0, t.start) + texTable.serializeTabular(edited) + card.text.slice(t.end);
+                const pagesBefore = pagesPosted.length, t0 = performance.now();
+                viewer._onMessage({ type: 'editChange', editId: card.editId, text, caret: { start: t.start, end: t.start, direction: 'forward' } });
+                viewer._onMessage({ type: 'tablePackage', editId: card.editId, name: 'booktabs' });
+                await until(() => doc.getText().includes('\\toprule') && /\\usepackage(\[[^\]]*\])?\{[^}]*booktabs/.test(doc.getText()), 'the table and its package in the source', 10000).catch(() => {});
+                check(doc.getText().includes(`${t.rows[cell.row].cells[cell.col]} Ink`), 'the edited cell is in the source');
+                check(/\\usepackage(\[[^\]]*\])?\{[^}]*booktabs/.test(doc.getText()), 'booktabs is loaded');
+                check((doc.getText().match(/\\usepackage\{booktabs\}/g) || []).length <= 1, 'and only once');
+                await until(() => pagesPosted.slice(pagesBefore).some(p => p === cellGlyph.page), `page ${cellGlyph.page} drawn again`, 30000).catch(() => {});
+                check(pagesPosted.slice(pagesBefore).includes(cellGlyph.page), `the table's page is drawn again live (pages ${pagesPosted.slice(pagesBefore).join(',')})`);
+                report.table_ms = Math.round(performance.now() - t0);
+                report.table_checked = true;
             }
         }
         report.failures = failures;
