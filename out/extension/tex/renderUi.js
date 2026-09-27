@@ -112,6 +112,10 @@ class RootState {
     }
 }
 
+// With a live engine, the cold map's re-read after typing waits for this long
+// a pause in it (see noteChange).
+const NATIVE_REFRESH_TYPING_IDLE_MS = 400;
+
 class RenderCoordinator {
     /** @param {import('./index').Projection} projection */
     constructor(projection, output) {
@@ -358,7 +362,9 @@ class RenderCoordinator {
         if (!st.renderedPages || st.renderedPages.generation !== String(generation))
             st.renderedPages = { generation: String(generation), pages: new Set() };
         st.renderedPages.pages.add(page);
-        if (st.nativeLane && st.map?.native && !st.map.hasPage(page)) this._scheduleNativeRefresh(st, st.nativeLane, 0);
+        // The viewer's text sweep reports every page in turn after an open: a
+        // burst is one read of the grown window, not one read per page.
+        if (st.nativeLane && st.map?.native && !st.map.hasPage(page)) this._scheduleNativeRefresh(st, st.nativeLane, 50);
     }
     _nativeWindow(st) {
         const pages = new Set();
@@ -372,8 +378,41 @@ class RenderCoordinator {
      * The worker translates every intermediate revision, so nothing is lost.
      */
     _scheduleNativeRefresh(st, lane, delayMs = 80) {
+        // WITH A LIVE ENGINE, NOT WHILE THE READER TYPES — whoever asks (an
+        // edit, the viewer's text sweep, a read a keystroke made stale). On a
+        // long paper the read is the whole document, and done per keystroke
+        // it held this process long enough for the next key to supersede the
+        // live build before its page arrived. The live pages show the typing;
+        // this map catches up at a pause, or at once for a click
+        // (ensureNativeMap).
+        const sinceKey = st.lastEditAt ? Date.now() - st.lastEditAt : Infinity;
+        if (lane?.interactive && sinceKey < NATIVE_REFRESH_TYPING_IDLE_MS) delayMs = Math.max(delayMs, NATIVE_REFRESH_TYPING_IDLE_MS - sinceKey);
         clearTimeout(st.nativeRefreshTimer);
-        st.nativeRefreshTimer = setTimeout(() => { this._runNativeRefresh(st, lane).catch(() => {}); }, delayMs);
+        st.nativeRefreshTimer = setTimeout(() => {
+            // A key since this was asked for: wait for the pause again.
+            if (lane?.interactive && st.lastEditAt && Date.now() - st.lastEditAt < NATIVE_REFRESH_TYPING_IDLE_MS) {
+                this._scheduleNativeRefresh(st, lane, 0);
+                return;
+            }
+            this._runNativeRefresh(st, lane).catch(() => {});
+        }, delayMs);
+    }
+    /**
+     * The cold map, current, for a click that needs it now: a refresh the
+     * typing postponed runs at once. True when the map is available.
+     */
+    async ensureNativeMap(st, timeoutMs = 1500) {
+        if (!st?.map?.native || st.map.available) return !!st?.map?.available;
+        const lane = st.nativeLane;
+        if (!lane) return false;
+        const deadline = Date.now() + timeoutMs;
+        clearTimeout(st.nativeRefreshTimer);
+        await this._runNativeRefresh(st, lane).catch(() => {});
+        while (!st.map?.available && Date.now() < deadline) {
+            if (!st.nativeRefreshing) await this._runNativeRefresh(st, lane).catch(() => {});
+            await new Promise(resolve => setTimeout(resolve, 10));
+        }
+        return !!st.map?.available;
     }
     async _runNativeRefresh(st, lane) {
         if (st.nativeRefreshing) { st.nativeRefreshAgain = true; return; }

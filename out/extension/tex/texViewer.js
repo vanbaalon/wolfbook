@@ -470,6 +470,11 @@ class EditorFlash {
     }
 }
 
+// While the reader types, the live map waits for this long a pause (see
+// _scheduleLiveMap); a click on a live page waits at most this long for it.
+const LIVE_MAP_TYPING_IDLE_MS = 400;
+const LIVE_MAP_CLICK_WAIT_MS = 1500;
+
 class TexViewer {
     /**
      * @param {vscode.ExtensionContext} context
@@ -1318,17 +1323,38 @@ class TexViewer {
 
     /**
      * Rebuild the live map (the incremental engine's own page maps for the
-     * overlays on screen) shortly after page maps arrive. Only pages whose
-     * map was published for the identity the overlay shows are read.
+     * overlays on screen) once page maps arrive — but NOT WHILE THE READER
+     * TYPES. Reading and decoding every live page's map is tens to hundreds
+     * of milliseconds of this process's time on a long paper, and doing it
+     * after every keystroke held the event loop long enough for the next
+     * key to supersede the live build before its page arrived: typing
+     * continuously into an 80-page paper updated the page only at pauses.
+     * So it waits for a pause in typing; a click that needs it meanwhile
+     * asks for it at once (_ensureLiveMap).
      */
     _scheduleLiveMap(lane) {
+        this._liveMapLane = lane;
         clearTimeout(this._liveMapTimer);
-        this._liveMapTimer = setTimeout(async () => {
-            if (!this.panel || !lane || typeof lane.liveView !== 'function') return;
-            const pages = [...(this._liveMapReady || new Map())]
-                .filter(([page, identity]) => this._liveOverlays?.get(page) === identity).map(([page]) => page)
-                .sort((a, b) => a - b);
-            const request = this._liveMapRequest = (this._liveMapRequest || 0) + 1;
+        const st = this.root ? this.coord.roots?.get(this.root) : null;
+        const sinceKey = st?.lastEditAt ? Date.now() - st.lastEditAt : Infinity;
+        const wait = sinceKey < LIVE_MAP_TYPING_IDLE_MS ? LIVE_MAP_TYPING_IDLE_MS - sinceKey : 20;
+        this._liveMapTimer = setTimeout(() => {
+            // A key since this was asked for: wait for the pause again.
+            const since = st?.lastEditAt ? Date.now() - st.lastEditAt : Infinity;
+            if (since < LIVE_MAP_TYPING_IDLE_MS) { this._scheduleLiveMap(lane); return; }
+            this._buildLiveMap(lane).catch(() => {});
+        }, wait);
+    }
+
+    /** Build the live map now, from the page maps published for what the overlays show. */
+    async _buildLiveMap(lane) {
+        clearTimeout(this._liveMapTimer);
+        if (!this.panel || !lane || typeof lane.liveView !== 'function') return;
+        const pages = [...(this._liveMapReady || new Map())]
+            .filter(([page, identity]) => this._liveOverlays?.get(page) === identity).map(([page]) => page)
+            .sort((a, b) => a - b);
+        const request = this._liveMapRequest = (this._liveMapRequest || 0) + 1;
+        const building = (async () => {
             try {
                 const view = await lane.liveView(pages);
                 if (request !== this._liveMapRequest) return;
@@ -1341,7 +1367,30 @@ class TexViewer {
                 if (request === this._liveMapRequest) this._liveMap = null;
                 if (error?.name !== 'StaleBuild') this._log(`live source map: ${error.message}`);
             }
-        }, 20);
+        })();
+        this._liveMapBuilding = building;
+        await building;
+    }
+
+    /**
+     * The live map, current for `page` as the overlay `identity` shows it —
+     * built now if typing had postponed it. Waits for the page's own map
+     * to reach the worker for a moment (it follows the page by a few ms).
+     */
+    async _ensureLiveMap(page, identity) {
+        const ready = () => this._liveMap?.available && this._liveMap.hasPage(page) && this._liveMapReady?.get(page) === identity;
+        if (ready()) return true;
+        const deadline = Date.now() + LIVE_MAP_CLICK_WAIT_MS;
+        while (Date.now() < deadline) {
+            if (this._liveMapReady?.get(page) === identity && this._liveMapLane) {
+                if (this._liveMapBuilding) await this._liveMapBuilding.catch(() => {});
+                if (ready()) return true;
+                await this._buildLiveMap(this._liveMapLane);
+                if (ready()) return true;
+            }
+            await new Promise(resolve => setTimeout(resolve, 10));
+        }
+        return ready();
     }
 
     /** A new PDF replaced every overlay: the live map answers for none. */
@@ -1358,13 +1407,13 @@ class TexViewer {
      * Until that map has arrived the click is not answered at all; the cold
      * map describes the PDF under the overlay, not the text on screen.
      */
-    _jumpToLiveSource(st, m, request) {
-        const live = this._liveMap;
-        if (!live || !live.available || !live.hasPage(m.page) || this._liveMapReady?.get(m.page) !== m.overlay) {
+    async _jumpToLiveSource(st, m, request) {
+        if (!await this._ensureLiveMap(m.page, m.overlay)) {
             this._post({ type:'status', text:'live page: its source map is still on the way', kind:'warn' });
             return;
         }
-        return this._jumpToNativeSource(st, m, request, live);
+        if (request !== this._nativeInverseRequest) return;
+        return this._jumpToNativeSource(st, m, request, this._liveMap);
     }
 
     // --- the TikZ picture editor ----------------------------------------------
@@ -5625,6 +5674,13 @@ class TexViewer {
         // dropped without a word.
         if (st && m.overlay !== undefined && m.overlay !== null) {
             return this._jumpToLiveSource(st, m, this._nativeInverseRequest);
+        }
+        // Typing postpones the cold map's re-read (renderUi.noteChange); a
+        // click on a PDF page reads it now.
+        if (st?.map?.native && !st.map.available && typeof this.coord.ensureNativeMap === 'function') {
+            const request = this._nativeInverseRequest;
+            await this.coord.ensureNativeMap(st);
+            if (request !== this._nativeInverseRequest) return;
         }
         if (!st || !st.map || !st.map.available) {
             if (m.commentTarget) this._post({
