@@ -1809,6 +1809,35 @@ async function offerReload(doc, diskText, output) {
         vscode.window.setStatusBarMessage(`$(pass) Exported ${path.basename(target.fsPath)}${synctexNote}`, 5000);
     });
 
+    // WLATEX IS LICENSED, WPAPER IS FREE. This checks a licence file with
+    // the configured WLaTeX's own engine and installs it for this user;
+    // the next build uses WLaTeX again.
+    reg('wolfbook.tex.enterWlatexLicense', async () => {
+        const directory = vscode.workspace.getConfiguration('wolfbook.tex').get('wlatexDirectory', '') || process.env.WLATEX_HOME || '';
+        let runtime = null;
+        try { runtime = require('./nativeRuntime').resolveNativeRuntime(directory); }
+        catch (error) { vscode.window.showErrorMessage(`WLaTeX: ${error.message}`); return; }
+        if (!runtime) {
+            vscode.window.showWarningMessage('WLaTeX is not installed: set wolfbook.tex.wlatexDirectory to it first.');
+            return;
+        }
+        const sdk = require(runtime.sdk);
+        if (typeof sdk.installLicense !== 'function') {
+            vscode.window.showWarningMessage('This WLaTeX does not take licences.');
+            return;
+        }
+        const picked = await vscode.window.showOpenDialog({ canSelectMany: false, openLabel: 'Use Licence',
+            filters: { 'WLaTeX licence': ['license', 'json'] } });
+        if (!picked?.length) return;
+        try {
+            const result = sdk.installLicense(runtime.nativeBinary, picked[0].fsPath);
+            coord.licenseInstalled();
+            vscode.window.showInformationMessage(`WLaTeX is licensed to ${result.licensee}${result.expires ? ` until ${result.expires}` : ''}.`);
+        } catch (error) {
+            vscode.window.showErrorMessage(`WLaTeX licence not installed: ${error.message}`);
+        }
+    });
+
     reg('wolfbook.tex.compareWith', async () => {
         const doc = vscode.window.activeTextEditor?.document
             || (viewer.root ? await vscode.workspace.openTextDocument(vscode.Uri.file(viewer.root)) : null);

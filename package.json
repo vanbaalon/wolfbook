@@ -1704,6 +1704,11 @@
         "category": "Wolfbook"
       },
       {
+        "command": "wolfbook.tex.enterWlatexLicense",
+        "title": "WPaper: Enter WLaTeX Licence…",
+        "category": "Wolfbook"
+      },
+      {
         "command": "wolfbook.tex.commitChanges",
         "title": "WPaper: Commit Changes",
         "category": "Wolfbook",

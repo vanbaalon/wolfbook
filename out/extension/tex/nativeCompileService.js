@@ -183,6 +183,18 @@ class NativeBuildLane {
         if (!this.runtime) throw Error('WLaTeX is not installed or configured');
         const sdk = require(this.runtime.sdk);
         const { labBinary, nativeBinary } = this.runtime;
+        // WLATEX IS LICENSED; WPAPER IS NOT. Without a WLaTeX licence (after
+        // its trial) the engine refuses every build, so the lane is not
+        // made at all and WPaper compiles with its own compiler, saying why
+        // once. An SDK or engine from before licences answers "not required".
+        if (typeof sdk.licenseStatus === 'function') {
+            this.license = sdk.licenseStatus(nativeBinary);
+            if (this.license.required && !this.license.allowed) {
+                const error = Error(`${this.license.message}. WPaper: Enter WLaTeX Licence… installs one`);
+                error.code = 'WLATEX_LICENSE';
+                throw error;
+            }
+        }
         this.artifactCache = new NativeArtifactCache(artifactParent(this.projectDir));
         try {
             this.compiler = new sdk.NativeCompiler({ labBinary, nativeBinary, cache:this.artifactCache.directory, env:coldBuildEnv });

@@ -624,14 +624,27 @@ class RenderCoordinator {
         if (reason) this._noticeNativeLane(`WLaTeX preview stopped: ${reason}. Using the normal WPaper compiler until the next Compile.`);
     }
 
-    _noticeNativeLane(message) {
+    _noticeNativeLane(message, license = false) {
         this._nativeNotices ||= new Set();
         if (this._nativeNotices.has(message)) return;
         this._nativeNotices.add(message);
-        const show = 'Show log';
-        Promise.resolve(vscode.window.showWarningMessage(message, show))
-            .then(pick => { if (pick === show) this.output.show(true); })
+        const show = 'Show log', enter = 'Enter Licence…';
+        const picks = license ? [enter, show] : [show];
+        Promise.resolve(vscode.window.showWarningMessage(message, ...picks))
+            .then(pick => {
+                if (pick === show) this.output.show(true);
+                if (pick === enter) vscode.commands.executeCommand('wolfbook.tex.enterWlatexLicense');
+            })
             .catch(() => { /* a notice must never break compiling */ });
+    }
+
+    /**
+     * A licence was just installed: WLaTeX may be used again at the next
+     * build, and its notices may be said again.
+     */
+    licenseInstalled() {
+        this._licenseRefused = null;
+        this._nativeNotices = new Set([...(this._nativeNotices || [])].filter(m => !/WLaTeX (trial|licen)/i.test(m)));
     }
 
     /**
@@ -862,7 +875,14 @@ class RenderCoordinator {
                 if (!st.nativeLane || st.nativeLane.directory !== directory) {
                     if (st.nativeLane) await this._retireNativeLane(st, st.nativeLane);
                     if (!preparing()) return st;
+                    // A licence refusal holds until a licence is entered;
+                    // asking the engine again at every build would only
+                    // cost the build time.
+                    if (this._licenseRefused) throw this._licenseRefused;
                     st.nativeLane = new NativeBuildLane(root, directory);
+                    const license = st.nativeLane.license;
+                    if (license?.required && license.state === 'trial' && license.days_left <= 7)
+                        this._noticeNativeLane(`WLaTeX trial: ${license.days_left} day${license.days_left === 1 ? '' : 's'} left.`, true);
                     // Start the incremental engine now, so the first keystroke
                     // already previews instead of only asking for the engine.
                     if (typeof st.nativeLane.warmInteractive === 'function') st.nativeLane.warmInteractive();
@@ -874,9 +894,10 @@ class RenderCoordinator {
                 st.nativeUnavailable = null;
             } catch (error) {
                 const reason = `WLaTeX unavailable: ${error.message}. Using the normal WPaper compiler.`;
+                if (error?.code === 'WLATEX_LICENSE') this._licenseRefused = error;
                 if (st.nativeUnavailable !== reason) this.log(reason);
                 st.nativeUnavailable = reason;
-                this._noticeNativeLane(reason);
+                this._noticeNativeLane(reason, error?.code === 'WLATEX_LICENSE');
                 wantNative = false;
                 mapEngine = 'auto';
             }
