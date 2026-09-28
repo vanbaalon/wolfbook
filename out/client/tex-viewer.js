@@ -1296,6 +1296,22 @@ async function destinationPreview(dest) {
         let fallback = !rects.length;
         const heading = target?.kind === 'section-heading';
         const citation = typeof dest === 'string' && /^cite[.:]/i.test(dest);
+        // AN EQUATION WITHOUT BOUNDS FROM THE LABEL MAP (not fetched yet, of
+        // another build, or a page the map has not read) is still findable:
+        // its number is printed at the margin of the destination page, next
+        // to the anchor. The display is the band around that number.
+        let approxEquation = false;
+        const eqDest = typeof dest === 'string' && /^equation[.:]/i.test(dest);
+        if (fallback && (target?.kind === 'display-equation' || eqDest)) {
+            const number = target?.printed || (eqDest ? dest.replace(/^equation[.:]/i, '') : null);
+            const mode = d[1]?.name;
+            const top = mode === 'FitH' || mode === 'FitBH' ? d[2] : mode === 'FitR' ? d[5] : d[3];
+            const anchorY = Number.isFinite(top) ? vp.convertToViewportPoint(0, top)[1] : 0;
+            try {
+                const band = number ? equationBand(await p.getTextContent(), vp, page, String(number), anchorY) : null;
+                if (band) { rects = [band]; fallback = false; approxEquation = true; }
+            } catch (_) { /* no text: the note says so */ }
+        }
         if (fallback || heading) {
             const mode = d[1]?.name;
             const top = mode === 'FitH' || mode === 'FitBH' ? d[2] : mode === 'FitR' ? d[5] : d[3];
@@ -1334,9 +1350,10 @@ async function destinationPreview(dest) {
             } catch (_) { /* keep the explicitly labelled excerpt if no bounds are available */ }
         }
         const multipage = new Set((target?.target || []).map(r => r.page)).size > 1;
-        const unresolvedEquation = fallback && (target?.kind === 'display-equation' ||
-            (typeof dest === 'string' && /^equation[.:]/i.test(dest)));
-        const title = target ? `${target.title || target.name}${target.printed ? ' · ' + target.printed : ''}` : citation ? 'Citation' : 'Reference target';
+        const unresolvedEquation = fallback && (target?.kind === 'display-equation' || eqDest);
+        const eqNumber = approxEquation ? (target?.printed || dest.replace(/^equation[.:]/i, '')) : null;
+        const title = target ? `${target.title || target.name}${target.printed ? ' · ' + target.printed : ''}`
+            : eqNumber ? `Equation (${eqNumber})` : citation ? 'Citation' : 'Reference target';
         let shot = null;
         const width = Math.max(...rects.map(r => r.x + r.w)) - Math.min(...rects.map(r => r.x));
         const height = Math.max(...rects.map(r => r.y + r.h)) - Math.min(...rects.map(r => r.y));
@@ -1348,11 +1365,57 @@ async function destinationPreview(dest) {
         const kindName = { 'display-equation': 'Equation', figure: 'Figure', table: 'Table', tabular: 'Table', 'section-heading': 'Section' }[target?.kind];
         const caption = kindName && target.printed ? `${kindName} ${target.printed}` : title;
         return { shot, title, citation, heading: unresolvedEquation ? 'Equation preview' : `${caption}${fallback ? ' · excerpt' : multipage ? ' · first page' : ''}`,
-            note: `${unresolvedEquation ? 'Exact equation bounds unavailable' : fallback ? 'Destination-page excerpt' : heading ? 'Heading and opening excerpt' : multipage ? 'First target page' : 'Target preview'} · p.${page}` };
+            note: `${unresolvedEquation ? 'Exact equation bounds unavailable' : approxEquation ? 'Equation, found by its number' : fallback ? 'Destination-page excerpt' : heading ? 'Heading and opening excerpt' : multipage ? 'First target page' : 'Target preview'} · p.${page}` };
     })();
     pdfPreviewCache.set(key, job);
     if (pdfPreviewCache.size > 64) pdfPreviewCache.delete(pdfPreviewCache.keys().next().value);
     try { return await job; } catch (error) { pdfPreviewCache.delete(key); throw error; }
+}
+
+/**
+ * The band of a displayed equation on its page, found by its printed number
+ * `(n)`: the occurrence at the text's margin (a prose reference to it can be
+ * on the same page), nearest the anchor and not far above it. Viewport units
+ * of `vp`; null when the number is not printed there.
+ */
+function equationBand(text, vp, page, number, anchorY) {
+    const items = (text.items || []).filter(it => it.str && it.transform).map(it => {
+        const [x, base] = vp.convertToViewportPoint(it.transform[4], it.transform[5]);
+        const h = Math.hypot(it.transform[2], it.transform[3]) || it.height || 10;
+        return { s: it.str.replace(/\s+/g, ''), x, w: it.width || 0, top: base - h, base, h };
+    });
+    const ink = items.filter(i => i.s && i.w > 0);
+    if (!ink.length) return null;
+    const left = Math.min(...ink.map(i => i.x)), right = Math.max(...ink.map(i => i.x + i.w));
+    const want = `(${number})`;
+    let best = null;
+    for (const i of ink) {
+        if (!(i.s === want || i.s.endsWith(want) || i.s === number)) continue;
+        if (i.top < anchorY - 40) continue;
+        const margin = right - (i.x + i.w) < 6 || i.x - left < 6;
+        const score = Math.abs(i.top - anchorY) + (margin ? 0 : 1000);
+        if (!best || score < best.score) best = { ...i, score };
+    }
+    if (!best || best.score >= 1000) return null;
+    // The display is the ink that touches the number's row, grown line by
+    // line while the gap stays small (a fraction's parts sit within a few
+    // points of each other; the text around a display is a display skip away).
+    let top = best.top, bottom = best.base + best.h * 0.25;
+    const byTop = ink.slice().sort((a, b) => a.top - b.top);
+    for (let grew = true; grew;) {
+        grew = false;
+        for (const i of byTop) {
+            const iTop = i.top, iBottom = i.base + i.h * 0.25;
+            if (iBottom < top - 2.5 || iTop > bottom + 2.5 || (iTop >= top && iBottom <= bottom)) continue;
+            // Never past a whole prose line: a row spanning most of the text
+            // width is running text, not part of the display.
+            if (i.w > (right - left) * 0.6 && i !== best) continue;
+            top = Math.min(top, iTop); bottom = Math.max(bottom, iBottom); grew = true;
+        }
+    }
+    const inBand = ink.filter(i => i.base > top && i.top < bottom);
+    const x0 = Math.min(...inBand.map(i => i.x)), x1 = Math.max(...inBand.map(i => i.x + i.w));
+    return { page, x: Math.max(0, x0 - 6), y: Math.max(0, top - 4), w: Math.min(vp.width, x1 + 6) - Math.max(0, x0 - 6), h: bottom - top + 8 };
 }
 
 async function showPdfLinkPreview(anchor) {

@@ -15,7 +15,7 @@
 const fixtureTex = String.raw`\documentclass{article}
 \usepackage[margin=1in]{geometry}
 \usepackage{amsmath}
-\usepackage{tikz}
+\usepackage{tikz}\usepackage{hyperref}
 \begin{document}
 \section{Fixture}
 The velocity $\dot{Z}$ of the particle appears here in a paragraph of
@@ -31,6 +31,11 @@ gamma & delta \\ \hline
 \draw[thick] (0,0) -- (3,1.5);
 \node at (1.5,0) {figlabel};
 \end{tikzpicture}
+
+\begin{equation}\label{eq:x}
+  E = \frac{m c^2}{\sqrt{1 - v^2}}
+\end{equation}
+Seen again in \eqref{eq:x}, here.
 \end{document}
 `;
 
@@ -663,6 +668,26 @@ tests.push({
         // Closing gives the text its width back.
         await t.eval(() => document.querySelector('.ec-commentsbtn').click());
         await t.waitFor(() => !document.querySelector('.ec-comments'), null, { what: 'the pane to close' });
+    },
+});
+
+tests.push({
+    id: 'eq-preview',
+    name: 'hovering an equation reference shows the equation even without the label map (it is found by its printed number)',
+    async run(t) {
+        const link = await t.waitFor(() => {
+            const l = [...document.querySelectorAll('.pdflink')].find(a => a._dest && /^equation/.test(typeof a._dest === 'string' ? a._dest : ''));
+            if (!l) return null;
+            const r = l.getBoundingClientRect();
+            return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+        }, null, { what: 'the \\eqref link' });
+        await t.page.mouse.move(link.x, link.y);
+        const card = await t.waitFor(() => {
+            const c = document.querySelector('.destination-preview');
+            return c ? { img: !!c.querySelector('img'), text: c.textContent } : null;
+        }, null, { what: 'the reference preview', timeout: 4000 });
+        t.assert(card.img, `the preview shows the equation, not "Preview unavailable" (${card.text})`);
+        if (process.env.WPAPER_WEBVIEW_SHOTS) await t.page.screenshot({ path: `${process.env.WPAPER_WEBVIEW_SHOTS}/eq-preview.png` });
     },
 });
 

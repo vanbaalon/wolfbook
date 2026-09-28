@@ -15,7 +15,7 @@
 // only things added are the acquireVsCodeApi mock and a few VS Code theme
 // variables.
 //
-// The fixture PDF is compiled once (xelatex, else pdflatex) into
+// The fixture PDF is compiled (xelatex, else pdflatex; two passes) into
 // os.tmpdir()/wpaper-webview-fixture-<hash>/ and its word boxes are read with
 // poppler's `pdftotext -bbox`, so tests can aim at real words.
 //
@@ -86,7 +86,8 @@ function buildFixture(tex) {
         let ok = false, lastErr = null;
         for (const engine of ['xelatex', 'pdflatex']) {
             try {
-                execFileSync(engine, ['-interaction=nonstopmode', '-halt-on-error', 'fx.tex'],
+                // Twice: cross-references (\eqref) resolve, and hyperref links them, on the second pass.
+                for (let pass = 0; pass < 2; pass++) execFileSync(engine, ['-interaction=nonstopmode', '-halt-on-error', 'fx.tex'],
                     { cwd: dir, stdio: 'pipe', timeout: 120000 });
                 ok = fs.existsSync(pdf);
                 if (ok) break;
