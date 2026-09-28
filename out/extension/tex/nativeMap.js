@@ -138,6 +138,14 @@ class NativeMap extends RenderMap {
         return map;
     }
 
+    /** A project-relative source name, absolute: once per name, not once per glyph (a third of indexing). */
+    _absolute(file) {
+        const memo = (this._absoluteMemo ||= new Map());
+        let a = memo.get(file);
+        if (a === undefined) { a = path.resolve(this.projectDir, file); memo.set(file, a); }
+        return a;
+    }
+
     _indexPage(page) {
         if (!(page.header.magnification > 0)) throw Error('Invalid native magnification');
         this._headers.set(page.page, page.header);
@@ -145,7 +153,7 @@ class NativeMap extends RenderMap {
         for (const hit of page.hits) {
             const rect = rectangle(hit.item.geometry, page.header);
             const preferred = hit.preferred_source;
-            const file = preferred ? path.resolve(this.projectDir, preferred.file) : null;
+            const file = preferred ? this._absolute(preferred.file) : null;
             const boxes = hit.box_path.filter(([, box]) => box.kind === 'Horizontal');
             const row = boxes.length ? boxes[boxes.length - 1][0] : `baseline:${rect.baseline}`;
             const entry = { hit, ...rect, boxHeight: rect.h, h: rect.baseline - rect.y, page: page.page, file, fileId: file,
@@ -162,7 +170,7 @@ class NativeMap extends RenderMap {
             const seen = new Set();
             for (const origin of hit.mapped_origins || []) {
                 const source = origin.source;
-                const absolute = path.resolve(this.projectDir, source.file);
+                const absolute = this._absolute(source.file);
                 for (const line of originLines(source.location)) {
                     const key = `${absolute}\0${line}`;
                     if (seen.has(key)) continue;

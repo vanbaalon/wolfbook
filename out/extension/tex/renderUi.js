@@ -128,6 +128,9 @@ class RootState {
 // With a live engine, the cold map's re-read after typing waits for this long
 // a pause in it (see noteChange).
 const NATIVE_REFRESH_TYPING_IDLE_MS = 400;
+// How long a live build that has not shown its first page yet is protected
+// from the next keystroke (see _schedulePreview).
+const PREVIEW_FIRST_PAGE_GRACE_MS = 700;
 
 class RenderCoordinator {
     /** @param {import('./index').Projection} projection */
@@ -483,7 +486,7 @@ class RenderCoordinator {
      * build() and never waits for a cold build. Answers true when a preview
      * was scheduled (an incremental engine is present).
      */
-    _schedulePreview(root, st) {
+    _schedulePreview(root, st, { now = false } = {}) {
         const lane = st && st.nativeLane;
         if (!lane || !lane.interactive || this._disposed || st.nativeOff) return false;
         const cfg = vscode.workspace.getConfiguration('wolfbook.tex');
@@ -494,15 +497,37 @@ class RenderCoordinator {
         // and start a single build that supersedes it, so a burst still
         // coalesces into one build per throttle window.
         const busy = (this._previewBusy ||= new Map());
+        // NO KEY CANCELS A BUILD THAT HAS NOT SHOWN ANYTHING YET. On a long
+        // paper the first changed page takes longer than the gap between two
+        // keys, so superseding at every key cancelled every build before its
+        // page arrived: nothing moved until a pause ("it only refreshes after
+        // 2–3 words"). The key waits instead, and its build starts the moment
+        // that page is on screen (or the build ends, or the grace runs out).
+        const cur = (this._previewCur ||= new Map()).get(root);
+        if (cur && busy.get(root) === cur.run && !cur.shown && Date.now() - cur.started < PREVIEW_FIRST_PAGE_GRACE_MS) {
+            cur.pending = true;
+            clearTimeout(cur.graceTimer);
+            cur.graceTimer = setTimeout(() => { if (cur.pending) { cur.pending = false; cur.shown = true; this._schedulePreview(root, st); } },
+                Math.max(0, PREVIEW_FIRST_PAGE_GRACE_MS - (Date.now() - cur.started)));
+            return true;
+        }
         clearTimeout(this._previewTimers.get(root));
         this._previewTimers.set(root, setTimeout(() => {
             this._previewTimers.delete(root);
             if (this._disposed || st.nativeLane !== lane) return;
+            const next = { started: Date.now(), shown: false, pending: false, run: null };
             const run = this._runInteractive(st, lane, root, { root, sourceFiles: st.files, overlay: this.liveOverlay(root),
-                nativePages: this._nativeWindow(st) }).catch(() => { /* logged inside */ });
+                nativePages: this._nativeWindow(st) }, next).catch(() => { /* logged inside */ });
+            next.run = run;
+            this._previewCur.set(root, next);
             busy.set(root, run);
-            run.finally(() => { if (busy.get(root) === run) busy.delete(root); });
-        }, busy.has(root) ? throttle : 0));
+            run.finally(() => {
+                if (busy.get(root) === run) busy.delete(root);
+                clearTimeout(next.graceTimer);
+                // A key held for this build that ended without a page.
+                if (next.pending) { next.pending = false; this._schedulePreview(root, st); }
+            });
+        }, busy.has(root) && !now ? throttle : 0));
         return true;
     }
 
@@ -577,7 +602,16 @@ class RenderCoordinator {
      * other state the cold build owns. The worst it can do is log a line and
      * cost the pause the time it took.
      */
-    async _runInteractive(st, lane, root, compileOpts) {
+    /** A live build's first changed page is on screen: a key held for it starts the next build now. */
+    _previewShown(root, st, cur) {
+        if (cur.shown) return;
+        cur.shown = true;
+        clearTimeout(cur.graceTimer);
+        // It has waited already: no throttle.
+        if (cur.pending) { cur.pending = false; setImmediate(() => this._schedulePreview(root, st, { now: true })); }
+    }
+
+    async _runInteractive(st, lane, root, compileOpts, cur = null) {
         const t0 = Date.now();
         let result = null;
         try {
@@ -585,6 +619,7 @@ class RenderCoordinator {
                 onPage: page => {
                     if (this._disposed || st.nativeLane !== lane) return;
                     this._interactiveEmitter.fire({ kind:'page', root, ...page });
+                    if (cur && page.changed !== false) this._previewShown(root, st, cur);
                 },
                 onPageMap: map => {
                     if (this._disposed || st.nativeLane !== lane) return;

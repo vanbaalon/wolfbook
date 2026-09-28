@@ -79,10 +79,21 @@ exports.run = async function () {
         const reads = [];
         const readPages = lane.source.readPages.bind(lane.source);
         lane.source.readPages = (pages, o = {}) => {
-            const r = { live: !!o.live, pages: pages.length, start: performance.now() };
+            const r = { live: !!o.live, pages: pages.length, start: performance.now(),
+                // Who asked (timeline only): the first frames outside the SDK.
+                from: process.env.WPAPER_TYPING_TIMELINE ? String(new Error().stack).split('\n').slice(2, 7)
+                    .map(l => l.trim().replace(/^at /, '').replace(/\(.*\/(\w+\.c?js):(\d+):\d+\)/, '$1:$2')).join(' < ') : null };
             reads.push(r);
             return readPages(pages, o).then(view => { r.ms = performance.now() - r.start; r.hits = view.pages.reduce((n, p) => n + p.hits.length, 0); return view; });
         };
+        // Who starts a live-map build (timeline only).
+        const liveMapCalls = [];
+        if (process.env.WPAPER_TYPING_TIMELINE) {
+            const blm = viewer._buildLiveMap.bind(viewer);
+            viewer._buildLiveMap = (...a) => { const st2 = coord.roots.get(viewer.root);
+                liveMapCalls.push({ at: performance.now(), sinceKey: Math.round(Date.now() - (st2?.lastEditAt || 0)), root: viewer.root, has: !!st2,
+                    from: String(new Error().stack).split('\n').slice(2, 5).map(l => l.trim()).join(' < ') }); return blm(...a); };
+        }
         // How long the extension host's event loop is held up while typing.
         const lags = [];
         let tick = performance.now();
@@ -145,8 +156,9 @@ exports.run = async function () {
         if (process.env.WPAPER_TYPING_TIMELINE) {
             const t0 = keys[0].t0, r = v => Math.round(v - t0);
             report.timeline = [...keys.map(k => ({ at: r(k.t0), what: 'key' })),
-                ...typed.map(x => ({ at: r(x.start), what: `${x.live ? 'live' : 'cold'} read ${x.pages} pages, ${Math.round(x.ms || -1)} ms` })),
+                ...typed.map(x => ({ at: r(x.start), what: `${x.live ? 'live' : 'cold'} read ${x.pages} pages, ${Math.round(x.ms || -1)} ms${x.from ? ' ← ' + x.from : ''}` })),
                 ...stalls.filter(x => x.at >= t0).map(x => ({ at: r(x.at), what: `stall ${Math.round(x.ms)} ms` })),
+                ...liveMapCalls.filter(x => x.at >= t0).map(x => ({ at: r(x.at), what: `buildLiveMap sinceKey=${x.sinceKey} has=${x.has} ← ${x.from}` })),
                 ...builds.filter(b => b.start >= t0).map(b => ({ at: r(b.start), what: `build -> page ${b.firstPage ? Math.round(b.firstPage - b.start) : '-'}` }))]
                 .sort((a, b) => a.at - b.at).map(e => `${e.at} ${e.what}`);
         }

@@ -1440,7 +1440,7 @@ test('TikZ drags become moves, snapped scales and 15° rotations', async () => {
     assert.equal(drag('rotate', 110, 101).none, true);
 });
 
-test('a keystroke with no preview build running starts one at once; a burst while one runs coalesces', async () => {
+test('a keystroke with no preview build running starts one at once; a burst while one runs coalesces (#42)', async () => {
     const f = fixture();
     try {
         const { coordinator, state, root } = { ...f, root: f.state.root };
@@ -1448,8 +1448,8 @@ test('a keystroke with no preview build running starts one at once; a burst whil
         coordinator.liveOverlay = () => new Map();
         coordinator._nativeWindow = () => [];
         const started = [];
-        let finish = null;
-        coordinator._runInteractive = () => { started.push(Date.now()); return new Promise(resolve => { finish = resolve; }); };
+        let finish = null, cur = null;
+        coordinator._runInteractive = (st, lane, r, opts, c) => { started.push(Date.now()); cur = c; return new Promise(resolve => { finish = resolve; }); };
         const tick = ms => new Promise(resolve => setTimeout(resolve, ms));
         assert.equal(coordinator._schedulePreview(root, state), true);
         await tick(5);
@@ -1457,7 +1457,12 @@ test('a keystroke with no preview build running starts one at once; a burst whil
         for (let i = 0; i < 20; i++) { coordinator._schedulePreview(root, state); await tick(1); }
         assert.equal(started.length, 1, 'while it runs, keystrokes wait');
         await tick(60);
-        assert.equal(started.length, 2, 'the burst becomes one build after the throttle');
+        // (#42) A build that has shown nothing yet is not cancelled by the burst…
+        assert.equal(started.length, 1, 'no key cancels a build before its first page');
+        // …which starts the burst's one build as soon as its page is on screen.
+        coordinator._previewShown(root, state, cur);
+        await tick(5);
+        assert.equal(started.length, 2, 'the burst becomes one build once the first page is shown');
         finish(); await tick(5);
         finish(); await tick(5);
         coordinator._schedulePreview(root, state);
