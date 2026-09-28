@@ -4909,7 +4909,10 @@ function paintMoveCaret(msg) {
 function paintCursorCaret(h) {
     for (const c of document.querySelectorAll('.curcaret')) c.remove();
     const cr = h && h.caret;
-    if (!cr) return;
+    // ONE CARET AT A TIME. While the page takes typing, its own (black) caret
+    // is the cursor; the red one mirroring the editor sat beside it and read
+    // as two different places.
+    if (!cr || state.ink) return;
     const wrap = pagesEl().querySelector(`.page[data-page="${cr.page}"]`);
     if (!wrap || !state.rendered.has(cr.page)) return;
     // Zero width: rectToViewport scales a box, and a caret is a box with no
@@ -4962,6 +4965,7 @@ function setInkCaret(msg) {
     clearTimeout(state.inkTypingTimer);
     state.ink = msg && !msg.clear ? { page: msg.page, x: msg.x, y: msg.y, h: msg.h, typing: !!msg.typing } : null;
     paintInkCaret();
+    paintCursorCaret(state.highlight);        // the red caret gives way to it, and comes back after
     // Solid while keys arrive, blinking again at a pause.
     if (state.ink?.typing) state.inkTypingTimer = setTimeout(() => {
         if (state.ink) { state.ink.typing = false; paintInkCaret(); }

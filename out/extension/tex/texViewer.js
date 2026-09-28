@@ -487,6 +487,29 @@ const LIVE_MAP_CLICK_WAIT_MS = 1500;
 // The live map holds the pages this near the reader (see _buildLiveMap).
 const LIVE_MAP_WINDOW = 3;
 
+/**
+ * Where a selection's brackets go when the glyphs of its first and last
+ * characters are not known: the left end of its first printed line and the
+ * right end of its last, lines being boxes that overlap vertically. (Sorting
+ * glyph boxes by their tops is not reading order: an accent starts above its
+ * line and a comma below it.)
+ */
+function printedEnds(rects) {
+    const rows = [];
+    for (const r of [...rects].sort((a, b) => a.page - b.page || a.y - b.y)) {
+        const row = rows[rows.length - 1];
+        if (row && row.page === r.page && r.y < row.bottom - 0.5) {
+            row.bottom = Math.max(row.bottom, r.y + r.h);
+            row.rects.push(r);
+        } else rows.push({ page: r.page, top: r.y, bottom: r.y + r.h, rects: [r] });
+    }
+    const a = rows[0], z = rows[rows.length - 1];
+    const left = a.rects.reduce((m, r) => (r.x < m.x ? r : m));
+    const right = z.rects.reduce((m, r) => (r.x + r.w > m.x + m.w ? r : m));
+    return { first: { page: a.page, x: left.x, y: a.top, h: a.bottom - a.top },
+        last: { page: z.page, x: right.x + right.w, y: z.top, h: z.bottom - z.top } };
+}
+
 /** Offset of the `\begin{tikzpicture}` whose picture contains `offset`, or null. */
 function enclosingPicture(text, offset) {
     const BEGIN = '\\begin{tikzpicture}', END = '\\end{tikzpicture}';
@@ -3704,10 +3727,28 @@ class TexViewer {
                     start:new vscode.Position(position.line, position.character),
                     end:new vscode.Position(end.line, end.character) };
                 if (!opts.preserveView) this._postEditSelection(doc, editor.selection, false);
-                const first = rects[0], last = rects[rects.length - 1];
+                // THE BRACKETS GO AT THE FIRST AND LAST SELECTED CHARACTERS' OWN
+                // GLYPHS — source order, not the page's. Taken from the extreme
+                // boxes, they landed on the dot of a \dot Z (the highest box)
+                // and the comma after it (the lowest), mid-selection.
+                const glyphAt = async (line, col) => {
+                    try {
+                        let r = await map.forwardAt(doc.uri.fsPath, line + 1, col);
+                        if (useLive && r?.length && overlays.has(r[0].page))
+                            r = (await live.forwardAt(doc.uri.fsPath, line + 1, col).catch(() => null)) || r;
+                        return r && r.length && !r.some(x => x.approximate) ? r[0] : null;
+                    } catch (_) { return null; }
+                };
+                const lastCol = end.character > 0 ? end.character - 1 : null;
+                const [g0, g1] = await Promise.all([glyphAt(position.line, position.character),
+                    lastCol == null ? null : glyphAt(end.line, lastCol)]);
+                if (!current()) return;
+                const fallback = printedEnds(rects);
+                const first = g0 ? { page:g0.page, x:g0.x, y:g0.y, h:g0.h } : fallback.first;
+                const last = g1 ? { page:g1.page, x:g1.x + g1.w, y:g1.y, h:g1.h } : fallback.last;
                 this._post({ type:'selection', span:{ native:true, rows:rects,
-                    start:{ exactEdge:{ page:first.page, x:first.x, y:first.y, h:first.h } },
-                    end:{ exactEdge:{ page:last.page, x:last.x + last.w, y:last.y, h:last.h } },
+                    start:{ exactEdge:first },
+                    end:{ exactEdge:last },
                     lines:end.line - position.line + 1 },
                     reveal:!opts.preserveView && this._mayScroll() && Date.now() - this._invertedAt >= 1500,
                     instant:!!opts.instant, label:`selected lines ${position.line + 1}–${end.line + 1}` });
@@ -3738,16 +3779,21 @@ class TexViewer {
                 let a = col, b = col;
                 while (a > 0 && letter(text[a - 1])) a--;
                 while (b < text.length && letter(text[b])) b++;
-                // The caret's letter and the word, asked together.
-                const inWord = letter(text[col]), afterWord = !inWord && col > 0 && letter(text[col - 1]);
-                const [g, word] = await Promise.all([
-                    inWord ? at(col) : afterWord ? at(col - 1) : null,
+                // The caret's letter and the word, asked together. Not only
+                // letters: in maths the caret sits at \hat, { or ^ and goes
+                // before the glyph that prints there, else after the one before.
+                const printable = c => !!c && !/\s/.test(c);
+                const inWord = letter(text[col]);
+                const [g0, word] = await Promise.all([
+                    printable(text[col]) ? at(col) : null,
                     b - a > 1 ? map.forwardRange(doc.uri.fsPath, { line:position.line + 1, column_utf16:a },
                         { line:position.line + 1, column_utf16:b }, { isCurrent:current }).catch(() => null) : null,
                 ]);
                 if (!current()) return;
-                if (g && inWord) caret = { page:g.page, x:g.x, y:g.y, h:g.h, at: col === a ? 'before' : 'inside', offset:col - a };
-                else if (g) caret = { page:g.page, x:g.x + g.w, y:g.y, h:g.h, at:'after', offset:col - a };
+                const g1 = !g0 && col > 0 && printable(text[col - 1]) ? await at(col - 1) : null;
+                if (!current()) return;
+                if (g0) caret = { page:g0.page, x:g0.x, y:g0.y, h:g0.h, at: inWord && col !== a ? 'inside' : 'before', offset:col - a };
+                else if (g1) caret = { page:g1.page, x:g1.x + g1.w, y:g1.y, h:g1.h, at:'after', offset:col - a };
                 if (word && word.length && !(overlays?.size && word.some(r => overlays.has(r.page)))) rects = word;
             } catch (_) { caret = null; }
             this._post({ type:'selection', span:null });
@@ -3772,6 +3818,9 @@ class TexViewer {
      */
     syncFromEditor(editor, opts = {}) {
         this._nativeCursorRequest = (this._nativeCursorRequest || 0) + 1;
+        // The reader moved the editor's caret: the page's typing caret is
+        // somewhere else now, and a stale one also hid the red caret.
+        if (opts.userCursorGesture && this._ink) this._inkClear();
         this._syncInstant = !!opts.instant;
         this._syncPreserveView = !!opts.preserveView;
         if (!this.panel || !editor) return;
@@ -8344,6 +8393,7 @@ class TexViewer {
         if (!this.panel || !m) return;
         const s = this._edit;
         if (!s || m.editId !== s.id) return;
+        if (this._ink) this._inkClear();         // typing moved to the card
         const request = this._miniCaretRequest = (this._miniCaretRequest || 0) + 1;
         // Supersede an already-running native answer before waiting for the
         // new caret's preceding text edit or document open.
