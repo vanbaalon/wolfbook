@@ -8325,7 +8325,7 @@ class TexViewer {
 
         // A TIKZ PICTURE OPENS IN THE TIKZ EDITOR, with what was right-clicked
         // selected — the drawing is what the reader pointed at, not its code.
-        if (this._proActive() && !m.textCard && /^\s*\\begin\{tikzpicture\}/.test(lines[startLine - 1] || '')) {
+        if (this._proActive?.() && !m.textCard && /^\s*\\begin\{tikzpicture\}/.test(lines[startLine - 1] || '')) {
             this._post({ type:'tikzOpenAt', page: m.page, xBp: m.xBp, yTopBp: m.yTopBp });
             return;
         }
