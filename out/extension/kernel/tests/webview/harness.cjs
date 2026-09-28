@@ -26,7 +26,9 @@
 //
 // Always headless: it never opens a window.
 //
-// Tests live in tex-webview-bugs.spec.cjs next to this file. Not part of
+// Tests live in tex-webview-bugs.spec.cjs next to this file
+// ($WPAPER_WEBVIEW_SPEC overrides). $WPAPER_EXT_ROOT runs them against another
+// extension root's out/client (e.g. an older build, to see a test fail). Not part of
 // run-all.js (that runner is headless-only).
 
 const fs = require('fs');
@@ -38,7 +40,10 @@ const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 
 const EXT = path.resolve(__dirname, '..', '..', '..', '..', '..');
-const CLIENT = path.join(EXT, 'out', 'client');
+// The client under test: this repo's out/client, or another tree's (a build
+// to compare against) when WPAPER_EXT_ROOT names an extension root.
+const CLIENT_ROOT = process.env.WPAPER_EXT_ROOT ? path.resolve(process.env.WPAPER_EXT_ROOT) : EXT;
+const CLIENT = path.join(CLIENT_ROOT, 'out', 'client');
 const SPEC = process.env.WPAPER_WEBVIEW_SPEC || path.join(__dirname, 'tex-webview-bugs.spec.cjs');
 const TEST_TIMEOUT_MS = 30000;
 
@@ -121,7 +126,7 @@ function hostHtml(origin) {
             return { toString: () => `${origin}/${rel}` };
         },
     };
-    const html = TexViewer.prototype._html.call({ panel: { webview }, context: { extensionUri: { fsPath: EXT, path: EXT } } });
+    const html = TexViewer.prototype._html.call({ panel: { webview }, context: { extensionUri: { fsPath: CLIENT_ROOT, path: CLIENT_ROOT } } });
     const nonce = (/nonce="([^"]+)"/.exec(html) || [])[1];
     if (!nonce) throw new Error('the host page has no script nonce — _html changed shape');
     // VS Code puts its theme into the page as CSS variables and body classes.
@@ -311,7 +316,7 @@ async function main() {
     const exe = chromePath();
     const browser = await chromium.launch({ headless: true, ...(exe ? { executablePath: exe } : {}) });
     console.log(`WPaper webview tests — playwright ${from}, browser ${exe || 'bundled chromium'} ${browser.version()}`);
-    console.log(`fixture ${fixture.pdf}`);
+    console.log(`client ${CLIENT}\nfixture ${fixture.pdf}`);
 
     const tests = spec.tests.filter(tc => !filters.length ||
         filters.some(f => tc.id.replace(/^#/, '') === f || tc.name.toLowerCase().includes(f.toLowerCase())));

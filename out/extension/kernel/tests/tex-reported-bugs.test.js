@@ -668,9 +668,10 @@ test('#32 a statement inside a picture resolves to its enclosing \\begin{tikzpic
     assert.equal(enclosingPicture(TIKZ_DOC, TIKZ_DOC.indexOf('\\node')), begin);
     assert.equal(enclosingPicture(TIKZ_DOC, TIKZ_DOC.indexOf('{label}') + 2), begin, 'a node label');
     assert.equal(enclosingPicture(TIKZ_DOC, TIKZ_DOC.indexOf('\\caption')), null, 'the caption is outside it');
-    const nested = 'a\\begin{tikzpicture}x\\begin{tikzpicture}y\\end{tikzpicture}z\\end{tikzpicture}b';
-    assert.equal(enclosingPicture(nested, nested.indexOf('z')), 1, 'past a nested picture, the outer one');
-    assert.equal(enclosingPicture(nested, nested.indexOf('b')), null);
+    const nested = 'A\\begin{tikzpicture}X\\begin{tikzpicture}Y\\end{tikzpicture}Q\\end{tikzpicture}B';
+    assert.equal(enclosingPicture(nested, nested.indexOf('Y')), nested.indexOf('\\begin', 5), 'inside the nested picture: it');
+    assert.equal(enclosingPicture(nested, nested.indexOf('Q')), 1, 'past a nested picture: the outer one');
+    assert.equal(enclosingPicture(nested, nested.indexOf('B')), null);
 });
 
 test('#32 the engine names the picture by a \\node inside it, and the TikZ editor still gets its paths', async () => {
@@ -755,20 +756,22 @@ test('#34 settling after live-lane edits stays on WLaTeX: no latexmk full recomp
 
 // ── #36 the range selection is drawn wrongly ────────────────────────────────
 
-// "a \dot Z, b" on line 2: the dot is the highest box (above Z), the comma the lowest.
+// "a \dot Z, b" on line 2, baseline 109 (cmr10-like boxes): the raised dot is
+// the highest box and sits over the middle of Z; the comma is the lowest.
 const DOT_LINE = 'Let a \\dot Z, b hold.';
-const DOT = { a: { page: 1, x: 10, y: 100, w: 5, h: 9 }, dot: { page: 1, x: 32, y: 95, w: 2, h: 3 },
-    Z: { page: 1, x: 30, y: 100, w: 6, h: 9 }, comma: { page: 1, x: 37, y: 103, w: 2, h: 8 }, b: { page: 1, x: 45, y: 100, w: 5, h: 9 } };
+const DOT = { a: { page: 1, x: 10, y: 104.7, w: 5, h: 4.3 }, dot: { page: 1, x: 32, y: 99.8, w: 2, h: 6.7 },
+    Z: { page: 1, x: 30, y: 102.2, w: 6, h: 6.8 }, comma: { page: 1, x: 37, y: 108, w: 2, h: 3 }, b: { page: 1, x: 45, y: 102.1, w: 5, h: 6.9 } };
 const dotSelection = glyphs => nativeCursorFixture({ text: `x\n${DOT_LINE}\n`, anchor: [1, DOT_LINE.indexOf('a ')],
     active: [1, DOT_LINE.indexOf('b ') + 1], glyphs,
-    range: [DOT.dot, DOT.a, DOT.Z, DOT.b, DOT.comma] });
+    // forwardRange's order: by page, then top, then left.
+    range: [DOT.dot, DOT.b, DOT.Z, DOT.a, DOT.comma] });
 
 test('#36 selection brackets sit at the glyphs of the first and last selected characters, not the extreme boxes', async () => {
     const f = dotSelection({ [`2:${DOT_LINE.indexOf('a ')}`]: DOT.a, [`2:${DOT_LINE.indexOf('b ')}`]: DOT.b });
     await f.run();
     const sel = f.posts.find(p => p.type === 'selection' && p.span);
-    assert.deepEqual(sel.span.start.exactEdge, { page: 1, x: 10, y: 100, h: 9 }, 'left of "a", not on the dot of \\dot Z');
-    assert.deepEqual(sel.span.end.exactEdge, { page: 1, x: 50, y: 100, h: 9 }, 'right of "b", not after the comma');
+    assert.deepEqual(sel.span.start.exactEdge, { page: 1, x: 10, y: 104.7, h: 4.3 }, 'left of "a", not on the dot of \\dot Z');
+    assert.deepEqual(sel.span.end.exactEdge, { page: 1, x: 50, y: 102.1, h: 6.9 }, 'right of "b", not after the comma');
 });
 
 test('#36 without the end glyphs, brackets take the ends of the first and last printed lines', async () => {
@@ -776,9 +779,9 @@ test('#36 without the end glyphs, brackets take the ends of the first and last p
     await f.run();
     const sel = f.posts.find(p => p.type === 'selection' && p.span);
     assert.equal(sel.span.start.exactEdge.x, 10, 'the leftmost box of the line the accent and comma belong to');
-    assert.equal(sel.span.end.exactEdge.x, 50);
-    assert.equal(sel.span.start.exactEdge.y, 95, 'one line spanning the accent\'s top ...');
-    assert.equal(sel.span.start.exactEdge.h, 16, '... to the comma\'s bottom');
+    assert.equal(sel.span.end.exactEdge.x, 50, 'the rightmost');
+    assert.equal(sel.span.start.exactEdge.y, 99.8, 'one line, from the accent\'s top ...');
+    assert.ok(Math.abs(sel.span.start.exactEdge.h - 11.2) < 1e-9, '... to the comma\'s bottom');
 });
 
 // ── #37 no red caret on some symbols ────────────────────────────────────────
