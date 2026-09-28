@@ -218,7 +218,7 @@ try {
         'a reference at the end of a line shifts its miniature inside the visible paper area');
     assert.match(client, /aria-label', 'Go to it in the paper'/,
         'reference navigation remains accessible without covering the preview with a native tooltip');
-    assert.match(client, /const openSeq = \+\+state\.openSeq;[\s\S]*const pdfjs = await loadPdfjs[\s\S]*openSeq !== state\.openSeq/,
+    assert.match(client, /const openSeq = \+\+state\.openSeq;[\s\S]*(?:const )?pdfjs = await loadPdfjs[\s\S]*openSeq !== state\.openSeq/,
         'an older asynchronous PDF open cannot finish after and replace a newer render');
     assert.match(client, /case 'reviewFocus':[\s\S]*msg\.generation[\s\S]*state\.generation[\s\S]*!reviewPlacementCurrent\(\)/,
         'review navigation rejects coordinates belonging to another PDF generation');

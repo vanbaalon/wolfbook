@@ -1,13 +1,26 @@
 'use strict';
 const path = require('path');
+// Open .wslide decks. They live in a custom editor, not workspace.textDocuments,
+// so the tabs are the source of truth. Drives the MCP "slides" tool family.
+function openSlideFiles(window) {
+    const out = new Set();
+    for (const group of window?.tabGroups?.all || []) {
+        for (const tab of group.tabs || []) {
+            const uri = tab.input?.uri;
+            if (uri?.fsPath && /\.wslide$/i.test(uri.fsPath)) out.add(uri.fsPath);
+        }
+    }
+    return [...out];
+}
 function paperWindowInfo() {
     try {
-        const { workspace } = require('vscode');
+        const { workspace, window } = require('vscode');
         return {
-            paperFiles: (workspace.textDocuments || []).filter(d => !d.isClosed && /\.tex$/i.test(d.uri.fsPath)).map(d => d.uri.fsPath),
+            paperFiles: [...new Set((workspace.textDocuments || []).filter(d => !d.isClosed && /\.tex$/i.test(d.uri.fsPath)).map(d => d.uri.fsPath))],
+            slideFiles: openSlideFiles(window),
             workspaceRoots: (workspace.workspaceFolders || []).map(f => f.uri.fsPath),
         };
-    } catch (_) { return { paperFiles: [], workspaceRoots: [] }; }
+    } catch (_) { return { paperFiles: [], slideFiles: [], workspaceRoots: [] }; }
 }
 function normal(file) {
     const windows = /^[A-Za-z]:[\\/]|^\\\\/.test(file || '');

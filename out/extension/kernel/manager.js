@@ -190,6 +190,18 @@ class KernelManager {
         const destination = this.get(kernelId);
         if (!destination) throw new Error(`Unknown kernel_id: ${kernelId}`);
         const source = this.bindingFor(key);
+        // Same kernel is not a move, so "busy" is irrelevant. VS Code re-selects a
+        // notebook's controller whenever it gets an editor — an in-memory notebook
+        // an agent is running cells in, opened as a tab mid-run, landed here and
+        // threw "Cannot rebind while … busy" at the user for a no-op.
+        if (source && source.id === destination.id) {
+            if (this._bindings.get(key) !== destination.slotKey) {
+                this._bindings.set(key, destination.slotKey);
+                await this._persist();
+                this._emit();
+            }
+            return this.describe(destination, key);
+        }
         if (source?.controller?.arbiter?.status(source.controller)?.busy ||
             destination.controller?.arbiter?.status(destination.controller)?.busy) {
             throw new Error('Cannot rebind while the source or destination kernel is busy; abort first.');

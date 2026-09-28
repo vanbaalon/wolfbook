@@ -1844,20 +1844,12 @@ function renderSlide() {
   styleEl.textContent = getThemeVarsCSS();
   canvasEl.appendChild(styleEl);
 
-  // Slide content wrapper
-  const contentDiv = document.createElement('div');
-  contentDiv.className = 'slide-content';
-  contentDiv.style.cssText = 'width:1920px;height:1080px;position:relative;overflow:hidden;';
-  applyContainerLayout(contentDiv, slide);
-  if (slide.padding) contentDiv.style.padding = slide.padding;
-
-  // Deck/slide-level font scaling (feedback §C). `scale` multiplies the slide's
-  // base font size so the whole slide enlarges to fill space with a single knob;
-  // `baseFontSize` (px) is an alias (relative to 36px). Headings are expressed in
-  // `em` (see the .slide-content CSS) so they scale with this; block-level inline
-  // fontSize still overrides. Resolution: slide wins over deck.
-  const _scale = resolveSlideScale(slide, deck);
-  if (_scale !== 1) contentDiv.style.fontSize = (36 * _scale) + 'px';
+  // Slide content wrapper. Deck/slide-level font scaling (feedback §C) lives in
+  // buildSlideContentDiv: `scale` multiplies the slide's base font size so the
+  // whole slide enlarges with a single knob; `baseFontSize` (px) is an alias
+  // (relative to 36px). Headings are in `em` (see the .slide-content CSS) so
+  // they scale with it; block-level inline fontSize still overrides.
+  const contentDiv = buildSlideContentDiv(slide, deck);
 
   (slide.children || []).forEach(block => {
     const dom = renderBlock(block, slide);
@@ -1906,6 +1898,26 @@ function resolveSlideScale(slide, dk) {
   return (s && s > 0) ? s : 1;
 }
 
+// The ONE place a slide turns into a .slide-content stage. Every renderer —
+// canvas, thumbnail, off-screen measurement, export AND presentation — builds
+// its root through this, so stage size, container layout, padding and the
+// slide/deck font scale cannot drift between views.
+//
+// They did drift: populatePanel (presentation) was the one path that skipped
+// resolveSlideScale, so a slide carrying `scale: 1.45` rendered 45% smaller on
+// the projector than in the editor, and every line re-wrapped. Do not inline a
+// sixth copy of this — add the renderer here.
+function buildSlideContentDiv(slide, dk) {
+  const contentDiv = document.createElement('div');
+  contentDiv.className = 'slide-content';
+  contentDiv.style.cssText = 'width:1920px;height:1080px;position:relative;overflow:hidden;';
+  applyContainerLayout(contentDiv, slide || {});
+  if (slide && slide.padding) contentDiv.style.padding = slide.padding;
+  const _scale = resolveSlideScale(slide, dk === undefined ? deck : dk);
+  if (_scale !== 1) contentDiv.style.fontSize = (36 * _scale) + 'px';
+  return contentDiv;
+}
+
 /** One layout frame, with a timer fallback for a throttled/hidden webview. */
 function _settleFrame() {
   return new Promise(res => {
@@ -1943,13 +1955,7 @@ async function measureSlideOffscreen(slideIndex) {
   styleEl.textContent = getThemeVarsCSS();
   stage.appendChild(styleEl);
 
-  const contentDiv = document.createElement('div');
-  contentDiv.className = 'slide-content';
-  contentDiv.style.cssText = 'width:1920px;height:1080px;position:relative;overflow:hidden;';
-  applyContainerLayout(contentDiv, slide);
-  if (slide.padding) contentDiv.style.padding = slide.padding;
-  const _scale = resolveSlideScale(slide, deck);
-  if (_scale !== 1) contentDiv.style.fontSize = (36 * _scale) + 'px';
+  const contentDiv = buildSlideContentDiv(slide, deck);   // resolveSlideScale inside
 
   (slide.children || []).forEach(block => {
     const dom = renderBlock(block, slide);
@@ -2025,7 +2031,7 @@ function applyContainerLayout(dom, block) {
 
 // Combines offset (animation nudge) + rotation into one CSS transform, in a
 // fixed order, so live drags (startRotate) and the initial render agree byte-
-// for-byte. Shared with buildPresBlock() and mirrored in slideExporter.js.
+// for-byte. Shared with the presentation renderer and mirrored in slideExporter.js.
 function _blockTransform(block) {
   let t = '';
   if (block.offset && (block.offset.dx || block.offset.dy)) t += `translate(${block.offset.dx || 0}px, ${block.offset.dy || 0}px)`;
@@ -2047,7 +2053,7 @@ function renderBlock(block, slide) {
     case 'box':       dom = renderBox(block, slide); break;
     case 'code':      dom = renderCode(block); break;
     case 'eval':      dom = renderEval(block); break;
-    case 'raw':       dom = renderRaw(block); break;
+    case 'raw':       dom = renderRaw(block, slide); break;
     case 'arrow':     dom = renderArrow(block); break;
     case 'shape':     dom = renderShape(block); break;
     default:          dom = renderText(block); break;
@@ -2230,10 +2236,12 @@ function renderList(block, slide) {
         if (childDom) li.appendChild(childDom);
       });
     }
-    if (item.id === selectedBlockId) {
-      li.classList.add('selected');
+    if (!_thumbMode) {
+      if (item.id === selectedBlockId) li.classList.add('selected');
+      // Chrome-free renders (thumbnail / export / presentation) must not wire
+      // this up: a click on a list item mid-talk would select and drag it.
+      attachBlockEvents(li, item, slide);
     }
-    attachBlockEvents(li, item, slide);
     dom.appendChild(li);
   });
   return dom;
@@ -2360,7 +2368,7 @@ function renderEval(block) {
   return dom;
 }
 
-function renderRaw(block) {
+function renderRaw(block, slide) {
   const dom = document.createElement('div');
   dom.style.overflow = 'hidden';
   dom.style.position = 'relative';
@@ -2368,14 +2376,18 @@ function renderRaw(block) {
   iframe.className = 'raw-iframe';
   iframe.style.cssText = 'width:100%;height:100%;border:none;';
   iframe.setAttribute('allowtransparency', 'true');
-  const bg = deck?.slides[slideIdx]?.background || '#fafcff';
+  // The slide being RENDERED, not the one the editor is showing — presentation
+  // and export render slides other than slideIdx.
+  const bg = slide?.background || deck?.slides[slideIdx]?.background || '#fafcff';
   const css = deck?.theme?.editorCSS || deck?.theme?.css || '';
   iframe.srcdoc = buildRawSrcdoc(block.html || '', bg, css);
   dom.appendChild(iframe);
-  // Click catcher over iframe
-  const catcher = document.createElement('div');
-  catcher.style.cssText = 'position:absolute;inset:0;z-index:5;';
-  dom.appendChild(catcher);
+  if (!_thumbMode) {
+    // Click catcher over iframe (editor selection only)
+    const catcher = document.createElement('div');
+    catcher.style.cssText = 'position:absolute;inset:0;z-index:5;';
+    dom.appendChild(catcher);
+  }
   return dom;
 }
 
@@ -2454,8 +2466,8 @@ function renderShape(block) {
   d.className = 'shape-block';
   d.style.position = 'relative';
   if (block.opacity != null) d.style.opacity = block.opacity;
-  // Rotation is applied by the caller (renderBlock / buildPresBlock's shared
-  // position code via _blockTransform) so it composes correctly with offset.
+  // Rotation is applied by the caller (renderBlock's shared position code, via
+  // _blockTransform) so it composes correctly with offset.
   const bg = document.createElement('div');
   bg.style.cssText = 'position:absolute;inset:0;pointer-events:none;';
   bg.innerHTML = buildShapeSVG(block);
@@ -2528,6 +2540,12 @@ function renderArrow(block) {
   pathEl.setAttribute('marker-end', `url(#${markerId})`);
   svg.appendChild(pathEl);
   wrap.appendChild(svg);
+
+  // Everything below is editor-only: a transparent hit box and three draggable
+  // control points. They are NOT chrome the viewer may keep — the hit box has
+  // pointer-events:all, so in a presentation it would swallow advance clicks,
+  // and the coloured dots would be drawn over the slide.
+  if (_thumbMode) return wrap;
 
   // Transparent click-catcher for shift/cmd-click selection (wrapper has pointer-events:none)
   const _bx0 = Math.min(block.x0||300, block.x1||900, block.mx||600);
@@ -5493,222 +5511,31 @@ function presScaleStage() {
     '| stage left', ((vw - 1920 * s) / 2).toFixed(1), 'top', ((vh - 1080 * s) / 2).toFixed(1));
 }
 
-/** Build presentation DOM for a block */
-function buildPresBlock(block) {
-  if (!block) return null;
-  let dom;
-
-  switch (block.type) {
-    case 'container': {
-      dom = document.createElement('div');
-      applyContainerLayout(dom, block);
-      (block.children || []).forEach(child => {
-        const cd = buildPresBlock(child);
-        if (cd) dom.appendChild(cd);
-      });
-      break;
-    }
-    case 'heading': {
-      const level = block.level || 2;
-      dom = document.createElement('h' + Math.min(level, 6));
-      dom.innerHTML = _renderMd(block.content || '');
-      if (block.fontSize) dom.style.fontSize = block.fontSize + 'px';
-      if (block.color) dom.style.color = block.color;
-      break;
-    }
-    case 'text': {
-      const tag = block.tag || 'div';
-      dom = document.createElement(tag === 'span' ? 'div' : tag);
-      dom.innerHTML = _renderMd(block.content || '');
-      if (block.fontSize) dom.style.fontSize = block.fontSize + 'px';
-      if (block.color) dom.style.color = block.color;
-      break;
-    }
-    case 'image': {
-      dom = document.createElement('div');
-      dom.style.cssText = 'overflow:hidden;line-height:0;';
-      const img = document.createElement('img');
-      img.src = block.src || '';
-      img.alt = block.alt || '';
-      const fitMode = block.fit || 'contain';
-      if (block.h != null) {
-        img.style.cssText = `width:100%;height:100%;display:block;object-fit:${fitMode};`;
-      } else {
-        img.style.cssText = `width:100%;height:auto;display:block;object-fit:${fitMode};`;
-      }
-      dom.appendChild(img);
-      break;
-    }
-    case 'shape': {
-      dom = renderShape(block);
-      break;
-    }
-    case 'list': {
-      dom = document.createElement(block.ordered ? 'ol' : 'ul');
-      (block.items || []).forEach(item => {
-        const li = document.createElement('li');
-        li.innerHTML = _renderMd(item.content || '');
-        if (item.children) {
-          item.children.forEach(child => {
-            const cd = buildPresBlock(child);
-            if (cd) li.appendChild(cd);
-          });
-        }
-        if (item.fragmentOrder >= 1) {
-          li.classList.add('pres-frag');
-          li.dataset.presStep = item.fragmentOrder;
-        }
-        dom.appendChild(li);
-      });
-      break;
-    }
-    case 'math': {
-      dom = document.createElement('div');
-      dom.textContent = '$$' + (block.mathSrc || '') + '$$';
-      break;
-    }
-    case 'box': {
-      dom = document.createElement('div');
-      dom.style.background = 'rgba(0,100,180,.07)';
-      dom.style.borderLeft = '4px solid #0064b4';
-      dom.style.borderRadius = '0 7px 7px 0';
-      dom.style.padding = '14px 20px';
-      (block.children || []).forEach(child => {
-        const cd = buildPresBlock(child);
-        if (cd) dom.appendChild(cd);
-      });
-      break;
-    }
-    case 'code': {
-      dom = document.createElement('div');
-      dom.className = 'code-block';
-      if (block.fontSize) dom.style.fontSize = block.fontSize + 'px';
-      const _pre = document.createElement('pre');
-      _pre.style.cssText = 'margin:0;white-space:pre-wrap;';
-      const _code = document.createElement('code');
-      const _lang = block.language ? langToPrism(block.language) : null;
-      if (_lang && _lang !== 'plain') { _code.className = 'language-' + _lang; _code.style.background = 'none'; }
-      _code.textContent = block.content || '';
-      _pre.appendChild(_code); dom.appendChild(_pre);
-      if (_lang && _lang !== 'plain' && window.Prism) {
-        requestAnimationFrame(() => { try { Prism.highlightElement(_code); } catch(e) {} });
-      }
-      break;
-    }
-    case 'eval': {
-      dom = document.createElement('div');
-      dom.className = 'eval-block';
-      dom.style.background = block.evalBg || 'transparent';
-      if (block.output) {
-        if (block.output.type === 'svg' && block.output.data) {
-          const wrap = document.createElement('div');
-          wrap.className = 'eval-output eval-svg-output';
-          wrap.innerHTML = block.output.data;
-          const svgEl = wrap.querySelector('svg');
-          if (svgEl) { svgEl.style.maxWidth = '100%'; svgEl.style.height = 'auto'; }
-          dom.appendChild(wrap);
-        } else if (block.output.type === 'latex' && block.output.html) {
-          const wrap = document.createElement('div');
-          wrap.className = 'eval-output eval-latex-output';
-          wrap.innerHTML = block.output.html;
-          dom.appendChild(wrap);
-        } else if (block.output.type === 'image' && block.output.data) {
-          const wrap = document.createElement('div');
-          wrap.className = 'eval-output';
-          const img = document.createElement('img');
-          img.src = block.output.data;
-          wrap.appendChild(img);
-          dom.appendChild(wrap);
-        } else if (block.output.type === 'text' && block.output.text) {
-          const t = document.createElement('div');
-          t.className = 'eval-output-text';
-          t.textContent = block.output.text;
-          dom.appendChild(t);
-        }
-      }
-      break;
-    }
-    case 'raw': {
-      dom = document.createElement('div');
-      dom.style.overflow = 'hidden';
-      const iframe = document.createElement('iframe');
-      iframe.style.cssText = 'width:100%;height:100%;border:none;pointer-events:none;';
-      const bg = deck?.slides[presSlideIdx]?.background || '#fafcff';
-      const css = deck?.theme?.editorCSS || deck?.theme?.css || '';
-      iframe.srcdoc = buildRawSrcdoc(block.html || '', bg, css);
-      dom.appendChild(iframe);
-      break;
-    }
-    case 'arrow': {
-      const _svgNS = 'http://www.w3.org/2000/svg';
-      dom = document.createElement('div');
-      dom.style.cssText = 'position:absolute;left:0;top:0;width:1920px;height:1080px;pointer-events:none;overflow:visible;';
-      const _svg = document.createElementNS(_svgNS, 'svg');
-      _svg.setAttribute('width', '1920'); _svg.setAttribute('height', '1080');
-      _svg.setAttribute('overflow', 'visible');
-      _svg.style.cssText = 'position:absolute;left:0;top:0;overflow:visible;pointer-events:none;';
-      const _defs = document.createElementNS(_svgNS, 'defs');
-      const _mId = 'pm-' + block.id;
-      const _mk = document.createElementNS(_svgNS, 'marker');
-      _mk.setAttribute('id', _mId); _mk.setAttribute('markerWidth', '10');
-      _mk.setAttribute('markerHeight', '7'); _mk.setAttribute('refX', '9');
-      _mk.setAttribute('refY', '3.5'); _mk.setAttribute('orient', 'auto');
-      const _poly = document.createElementNS(_svgNS, 'polygon');
-      _poly.setAttribute('points', '0 0, 10 3.5, 0 7');
-      _poly.setAttribute('fill', block.color || '#be1e2d');
-      _poly.style.fill = block.color || '#be1e2d';
-      _mk.appendChild(_poly); _defs.appendChild(_mk); _svg.appendChild(_defs);
-      const _path = document.createElementNS(_svgNS, 'path');
-      _path.setAttribute('d',
-        `M ${block.x0||300} ${block.y0||500} Q ${block.mx||600} ${block.my||250} ${block.x1||900} ${block.y1||500}`);
-      _path.setAttribute('stroke', block.color || '#be1e2d');
-      _path.style.stroke = block.color || '#be1e2d';
-      _path.setAttribute('stroke-width', String(block.strokeWidth || 3));
-      _path.setAttribute('fill', 'none');
-      _path.setAttribute('marker-end', `url(#${_mId})`);
-      _svg.appendChild(_path); dom.appendChild(_svg);
-      if (block.fragmentOrder >= 1) { dom.classList.add('pres-frag'); dom.dataset.presStep = block.fragmentOrder; }
-      return dom; // skip generic position post-processing
-    }
-    default: {
-      dom = document.createElement('div');
-      dom.innerHTML = block.content || '';
-      break;
-    }
-  }
-
-  if (!dom) return null;
-
-  // Position
-  if (block.position === 'absolute') {
-    dom.style.position = 'absolute';
-    if (block.x != null) dom.style.left = block.x + 'px';
-    if (block.y != null) dom.style.top = block.y + 'px';
-  }
-  if (block.w != null) dom.style.width = block.w + 'px';
-  if (block.h != null) dom.style.height = block.h + 'px';
-  if (block.flex) dom.style.flex = block.flex;
-  const _presTfm = _blockTransform(block);
-  if (_presTfm) dom.style.transform = _presTfm;
-  if (block.stylePreset && deck?.stylePresets?.[block.stylePreset]) {
-    Object.entries(deck.stylePresets[block.stylePreset]).forEach(([k, v]) => { dom.style[k] = v; });
-  }
-  if (block.style && typeof block.style === 'object') {
-    Object.entries(block.style).forEach(([k, v]) => { dom.style[k] = v; });
-  }
-  if (block.className) {
-    block.className.split(/\s+/).forEach(c => { if (c) dom.classList.add(c); });
-  }
-
-  // Fragment
-  if (block.fragmentOrder >= 1) {
-    dom.classList.add('pres-frag');
-    dom.dataset.presStep = block.fragmentOrder;
-  }
-
-  return dom;
+// Tag the rendered DOM with the presentation fragment classes, from the model's
+// fragmentOrder. Mirrors _applyFragmentClasses (the Reveal export) exactly —
+// same walk, different class names — so a deck reveals in the same order in the
+// presenter and in an exported HTML deck.
+function _applyPresFragments(content, slide) {
+  const map = {};
+  (function walk(b) {
+    if (!b || typeof b !== 'object') return;
+    if (b.id && b.fragmentOrder >= 1) map[b.id] = b.fragmentOrder;
+    (b.children || []).forEach(walk);
+    (b.items || []).forEach(walk);
+    (b.elements || []).forEach(walk);
+  })({ children: slide.children, items: slide.items, elements: slide.elements });
+  content.querySelectorAll('[data-block-id]').forEach(el => {
+    const fo = map[el.dataset.blockId];
+    if (fo >= 1) { el.classList.add('pres-frag'); el.dataset.presStep = String(fo); }
+  });
 }
 
+// Presentation renders through the EDITOR's own renderBlock, in chrome-free
+// mode — the identical call buildSlideContentForExport and renderThumbContent
+// make. There used to be a second block renderer here (buildPresBlock); it had
+// silently drifted, and populatePanel built its own .slide-content root without
+// the slide font scale, so a slide with `scale: 1.45` was one size in the editor
+// and another on the projector. One renderer, one stage builder: no drift.
 function populatePanel(panel, sIdx) {
   panel.innerHTML = '';
   if (!deck || !deck.slides[sIdx]) return;
@@ -5719,24 +5546,30 @@ function populatePanel(panel, sIdx) {
   styleEl.textContent = getThemeVarsCSS();
   panel.appendChild(styleEl);
 
-  const contentDiv = document.createElement('div');
-  contentDiv.className = 'slide-content';
-  contentDiv.style.cssText = 'width:1920px;height:1080px;position:relative;overflow:hidden;';
-  applyContainerLayout(contentDiv, slide);
-  if (slide.padding) contentDiv.style.padding = slide.padding;
-
-  (slide.children || []).forEach(block => {
-    const dom = buildPresBlock(block);
-    if (dom) contentDiv.appendChild(dom);
-  });
+  const contentDiv = buildSlideContentDiv(slide, deck);   // resolveSlideScale inside
+  const prev = _thumbMode; _thumbMode = true;
+  try {
+    (slide.children || []).forEach(block => {
+      const dom = renderBlock(block, slide);
+      if (dom) contentDiv.appendChild(dom);
+    });
+  } finally { _thumbMode = prev; }
+  // The same editor affordances the export strips — renderBlock emits a few
+  // regardless of mode.
+  contentDiv.querySelectorAll('.eval-spinner, .frag-badge, .font-warn, .move-handle, .rh')
+    .forEach(el => el.remove());
+  _applyPresFragments(contentDiv, slide);
   panel.appendChild(contentDiv);
 
-  requestAnimationFrame(() => {
+  // _settleFrame, not a bare rAF: a throttled webview would otherwise leave the
+  // slide untypeset and show raw $…$ on the projector.
+  _settleFrame().then(() => {
     if (window.renderMathInElement) {
       try { renderMathInElement(contentDiv, { delimiters:KATEX_DELIMS, throwOnError:false }); } catch(e) {}
     }
   });
 }
+
 
 function buildPresSlide(sIdx) {
   const slide = deck.slides[sIdx];
@@ -6049,13 +5882,7 @@ function renderAll() {
 // Render one slide's content with the SAME renderer the editor uses, into a
 // detached .slide-content div (chrome suppressed, all fragments visible).
 function buildSlideContentForExport(slide) {
-  const contentDiv = document.createElement('div');
-  contentDiv.className = 'slide-content';
-  contentDiv.style.cssText = 'width:1920px;height:1080px;position:relative;overflow:hidden;';
-  applyContainerLayout(contentDiv, slide);
-  if (slide.padding) contentDiv.style.padding = slide.padding;
-  const _scale = resolveSlideScale(slide, deck);
-  if (_scale !== 1) contentDiv.style.fontSize = (36 * _scale) + 'px';
+  const contentDiv = buildSlideContentDiv(slide, deck);   // resolveSlideScale inside
   const prev = _thumbMode; _thumbMode = true;
   try {
     (slide.children || []).forEach(block => {
@@ -6165,15 +5992,9 @@ function renderThumbContent(preview, slide) {
   styleEl.textContent = getThemeVarsCSS();
   inner.appendChild(styleEl);
 
-  const contentDiv = document.createElement('div');
-  contentDiv.className = 'slide-content';
-  contentDiv.style.cssText = 'width:1920px;height:1080px;position:relative;overflow:hidden;';
-  applyContainerLayout(contentDiv, slide);
-  if (slide.padding) contentDiv.style.padding = slide.padding;
-  // Slide/deck font scale — renderSlide applies this, so a thumbnail that skips
-  // it shows a differently-sized slide than the canvas does.
-  const _tScale = resolveSlideScale(slide, deck);
-  if (_tScale !== 1) contentDiv.style.fontSize = (36 * _tScale) + 'px';
+  // Slide/deck font scale comes with the stage — a thumbnail that skips it shows
+  // a differently-sized slide than the canvas does.
+  const contentDiv = buildSlideContentDiv(slide, deck);   // resolveSlideScale inside
 
   _thumbMode = true;
   try {

@@ -3,6 +3,8 @@
 const http = require('http');
 const crypto = require('crypto');
 
+const CONTROL_TIMEOUTS_MS = { begin: 15000, end: 15000, status: 10000, abort: 15000, stop: 30000, restart: 120000 };
+
 class RemoteKernelSession {
     constructor(port, kernelId, generation) {
         this.port = Number(port);
@@ -13,7 +15,11 @@ class RemoteKernelSession {
         this.isRemote = true;
     }
 
+    // Control calls get a deadline; evaluations do not (a computation may
+    // legitimately run for hours). Without one, a hung owner window — paused in a
+    // debugger, a frozen extension host — hung this window's cell forever.
     _call(action, args = {}) {
+        const timeoutMs = CONTROL_TIMEOUTS_MS[action] || 0;
         return new Promise((resolve, reject) => {
             const body = JSON.stringify({
                 action, kernelId: this.kernelId, generation: this.generation,
@@ -21,7 +27,8 @@ class RemoteKernelSession {
             });
             const req = http.request({
                 hostname: '127.0.0.1', port: this.port, path: '/kernel-session', method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+                headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body),
+                    ...require('./auth').authHeaders() },
             }, res => {
                 let raw = '';
                 res.setEncoding('utf8');
@@ -38,6 +45,7 @@ class RemoteKernelSession {
                 });
             });
             req.on('error', error => reject(new Error(`Remote kernel owner is unavailable: ${error.message}`)));
+            if (timeoutMs && typeof req.setTimeout === "function") req.setTimeout(timeoutMs, () => req.destroy(new Error(`no answer to "${action}" within ${timeoutMs / 1000} s`)));
             req.write(body); req.end();
         });
     }
@@ -65,14 +73,20 @@ class RemoteKernelSession {
         if (this.transactionId) return this._call('evaluate', { expression, options });
         await this.beginTransaction('Remote kernel evaluation');
         try { return await this._call('evaluate', { expression, options }); }
-        finally { await this.endTransaction(); }
+        finally { await this._endQuietly(); }
     }
     async _implicit(action, args) {
         if (this.transactionId) return this._call(action, args);
         await this.beginTransaction(`Remote kernel ${action}`);
         try { return await this._call(action, args); }
-        finally { await this.endTransaction(); }
+        finally { await this._endQuietly(); }
     }
+    // An implicit transaction's "end" failing (owner went away just after
+    // answering) used to REPLACE the result: a successful evaluation was
+    // reported as "Remote kernel owner is unavailable". The owner sweeps an
+    // abandoned transaction after 2 min idle (worker.js _sweepKernelTransactions);
+    // the state here is reset regardless.
+    async _endQuietly() { try { await this.endTransaction(); } catch (_) {} }
     subAuto(expression) { return this._implicit('subAuto', { expression }); }
     dialogEval(expression) { return this._implicit('dialogEval', { expression }); }
     exitDialog(value) { return this._implicit('exitDialog', { value }); }
@@ -83,4 +97,4 @@ class RemoteKernelSession {
     get isDialogOpen() { return false; }
 }
 
-module.exports = { RemoteKernelSession };
+module.exports = { RemoteKernelSession, CONTROL_TIMEOUTS_MS };

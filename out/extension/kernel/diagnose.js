@@ -204,7 +204,7 @@ function probeKernelLicense(kernelPath,
             finish({ ok: false, timedOut: false, exitCode: null,
                      spawnError: String(e.message || e) });
         });
-        child.on('close', (code) => {
+        child.on('close', (code, signal) => {
             clearTimeout(timer);
             // Wolfram documents a non-zero status (and normally 0/0/0 fields)
             // when no valid licence is available.
@@ -225,7 +225,7 @@ function probeKernelLicense(kernelPath,
             finish({ ok, verified: ok && looksLikeInfo,
                      reason: noSeats ? 'no-seats' : zeroInfo ? 'no-valid-license'
                          : licenseError ? licenseError.sub : ok && !looksLikeInfo ? 'unconfirmed-output' : null,
-                     timedOut, exitCode: code, spawnError: null });
+                     timedOut, exitCode: code, signal: signal || null, spawnError: null });
         });
     });
 }
@@ -272,13 +272,77 @@ function probeKernelDirect(kernelPath, { timeoutMs = PROBE_TIMEOUT_MS } = {}) {
                      spawnError: String(e.message || e),
                      durationMs: Date.now() - started });
         });
-        child.on('close', (code) => {
+        child.on('close', (code, signal) => {
             clearTimeout(timer);
             finish({ ok: out.includes(PROBE_SENTINEL), timedOut, exitCode: code,
-                     output: out, spawnError: null,
+                     signal: signal || null, output: out, spawnError: null,
                      durationMs: Date.now() - started });
         });
     });
+}
+
+// ── licence gate ────────────────────────────────────────────────────────────
+/**
+ * True when `-licenseinfo` failed WITHOUT saying anything about the licence:
+ * the probe was killed by a signal, or exited non-zero with output we cannot
+ * read (e.g. a build that rejects the option). Every definite verdict — valid
+ * licence, 0/0/0 fields, no free seats, licence text, timeout, spawn error —
+ * is excluded and keeps its existing handling.
+ */
+function isInconclusiveLicenseCheck(r) {
+    return !!r && !r.ok && !r.timedOut && !r.spawnError && r.reason == null
+        && !classifyKernelOutput(r.output);
+}
+
+/**
+ * Decide whether a WSTP launch is safe. WSTP's connect is synchronous and can
+ * freeze the extension host when the kernel dies during licence startup, so
+ * we only proceed on evidence that the kernel gets past licensing on its own:
+ *   - `-licenseinfo` succeeds, or
+ *   - it was inconclusive AND a direct, asynchronous launch of the kernel
+ *     prints the sentinel (it ran code, so licensing is done).
+ * The second opinion exists because `-licenseinfo` itself can be killed or
+ * rejected on machines whose kernel starts fine — blocking those users on a
+ * result that proves nothing was a regression.
+ *
+ * @returns {Promise<{proceed:boolean, licensePreflight:object, directProbe:object|null}>}
+ */
+async function licenseGate(kernelPath, { licenseProbe = probeKernelLicense,
+                                         directProbe = probeKernelDirect } = {}) {
+    let licensePreflight;
+    try {
+        licensePreflight = await licenseProbe(kernelPath);
+    } catch (e) {
+        licensePreflight = { ok: false, timedOut: false, exitCode: null, signal: null,
+                             output: '', spawnError: String(e.message || e), durationMs: 0 };
+    }
+    if (licensePreflight.ok) return { proceed: true, licensePreflight, directProbe: null };
+    if (!isInconclusiveLicenseCheck(licensePreflight)) {
+        return { proceed: false, licensePreflight, directProbe: null };
+    }
+    let direct;
+    try {
+        direct = await directProbe(kernelPath);
+    } catch (e) {
+        direct = { ok: false, timedOut: false, exitCode: null, signal: null, output: '',
+                   spawnError: String(e.message || e), durationMs: 0 };
+    }
+    return { proceed: !!direct.ok, licensePreflight, directProbe: direct };
+}
+
+function _describeExit(code, signal) {
+    return signal ? `was terminated by signal ${signal}` : `exited with code ${code}`;
+}
+
+/** macOS kills quarantined / badly-signed binaries outright, with no output. */
+function _signalHint(signal, kernelPath, platform) {
+    if (!signal || platform !== 'darwin') return '';
+    if (!/^SIG(KILL|TRAP|ABRT|BUS|SEGV)$/.test(signal)) return '';
+    const app = (/^(.*?\.app)\//.exec(kernelPath || '') || [])[1];
+    const target = app ? `"${app}"` : 'the Wolfram app';
+    return ` On macOS this usually means Gatekeeper or security software blocked the kernel ` +
+           `(a quarantined or damaged app copy). Try \`xattr -dr com.apple.quarantine ${target}\`, ` +
+           `or reinstall Wolfram from the official installer.`;
 }
 
 // ── main entry ──────────────────────────────────────────────────────────────
@@ -290,6 +354,10 @@ function probeKernelDirect(kernelPath, { timeoutMs = PROBE_TIMEOUT_MS } = {}) {
  *                      customPath?: boolean      — user set wolfbook.systemKernel
  *                      discovered?: [{label,description,path}]  — FindKernel.discoverKernels()
  *                      addonLoaded?: boolean     — WstpSession was available
+ *                      licensePreflight?: object — licenseGate() result
+ *                      directProbeResult?: object — direct probe already run by
+ *                                                licenseGate(); reused, not re-run
+ *                      platform?: string       — for tests
  *                      skipProbe?: boolean, timeoutMs?: number,
  *                      probe?: fn                — injectable for tests }
  * @returns { cause, sub?, summary, detailLines: string[] }
@@ -299,6 +367,7 @@ async function diagnoseKernelLaunch(kernelPath, opts = {}) {
     const push = (s) => detail.push(s);
     const probe = opts.probe || probeKernelDirect;
     const discovered = opts.discovered || [];
+    const platform = opts.platform || process.platform;
 
     push(`time            : ${new Date().toISOString()}`);
     push(`platform / arch : ${process.platform} / ${process.arch}`);
@@ -343,7 +412,7 @@ async function diagnoseKernelLaunch(kernelPath, opts = {}) {
     if (opts.licensePreflight && !opts.licensePreflight.ok) {
         const r = opts.licensePreflight;
         push(`license preflight: ok=false timedOut=${r.timedOut} exit=${r.exitCode} ` +
-             `spawnError=${r.spawnError || 'none'} (${r.durationMs} ms)`);
+             `signal=${r.signal || 'none'} spawnError=${r.spawnError || 'none'} (${r.durationMs} ms)`);
         if (r.probePath) push(`probe executable: ${r.probePath}`);
         if (r.output && r.output.trim()) {
             push('── licence-check output (secrets redacted) ─────────');
@@ -353,6 +422,13 @@ async function diagnoseKernelLaunch(kernelPath, opts = {}) {
         const mathpass = findMathPassCandidates(kernelPath);
         for (const c of mathpass) {
             push(`mathpass        : ${c.path} [${c.exists ? (c.readable ? 'present/readable' : 'present/unreadable') : 'not found'}]`);
+        }
+        // The licence check said nothing about the licence, and licenseGate()
+        // already launched the kernel directly for a second opinion: classify
+        // from that evidence (step 3) instead of blaming the licence.
+        if (opts.directProbeResult && isInconclusiveLicenseCheck(r)) {
+            push('license preflight inconclusive → classified from the direct kernel launch');
+            return _classifyDirectProbe(opts.directProbeResult, kernelPath, detail, opts, platform);
         }
         const lic = classifyKernelOutput(r.output);
         if (r.reason === 'no-seats') {
@@ -383,7 +459,7 @@ async function diagnoseKernelLaunch(kernelPath, opts = {}) {
         }
         if (r.reason !== 'no-valid-license') {
             return { cause: 'unknown', sub: 'license-check-failed',
-                     summary: `The licence probe exited with code ${r.exitCode} without a recognised licensing result. This does not establish an invalid licence. Startup was stopped to prevent a blocking WSTP connection; check the probe executable and its diagnostics.`,
+                     summary: `The licence probe ${_describeExit(r.exitCode, r.signal)} without a recognised licensing result. This does not establish an invalid licence. Startup was stopped to prevent a blocking WSTP connection; check the probe executable and its diagnostics.${_signalHint(r.signal, r.probePath || kernelPath, platform)}`,
                      detailLines: detail, mathPassCandidates: mathpass };
         }
         return { cause: 'license', sub: 'license-invalid',
@@ -399,8 +475,14 @@ async function diagnoseKernelLaunch(kernelPath, opts = {}) {
     }
     push('probe           : launching kernel directly (no WSTP) …');
     const r = await probe(kernelPath, { timeoutMs: opts.timeoutMs });
+    return _classifyDirectProbe(r, kernelPath, detail, opts, platform);
+}
+
+/** Turn a probeKernelDirect() result into a diagnosis (shared by steps 2 and 3). */
+function _classifyDirectProbe(r, kernelPath, detail, opts, platform) {
+    const push = (s) => detail.push(s);
     push(`probe result    : ok=${r.ok} timedOut=${r.timedOut} exit=${r.exitCode} ` +
-         `spawnError=${r.spawnError || 'none'} (${r.durationMs} ms)`);
+         `signal=${r.signal || 'none'} spawnError=${r.spawnError || 'none'} (${r.durationMs} ms)`);
     if (r.output && r.output.trim()) {
         push('── kernel output ──────────────────────────────');
         for (const line of r.output.trim().split(/\r?\n/).slice(0, 40)) push('  ' + line);
@@ -443,8 +525,9 @@ async function diagnoseKernelLaunch(kernelPath, opts = {}) {
 
     const tail = (r.output || '').trim().split(/\r?\n/).slice(-3).join(' | ');
     return { cause: 'kernel-crash',
-             summary: `The kernel exited immediately (code ${r.exitCode}) without a license message.` +
-                      (tail ? ` Last output: ${tail}` : ' It produced no output.'),
+             summary: `The kernel ${_describeExit(r.exitCode, r.signal)} immediately, without a license message.` +
+                      (tail ? ` Last output: ${tail}` : ' It produced no output.') +
+                      _signalHint(r.signal, kernelPath, platform),
              detailLines: detail };
 }
 
@@ -452,6 +535,8 @@ module.exports = {
     diagnoseKernelLaunch,
     probeKernelDirect,
     probeKernelLicense,
+    licenseGate,
+    isInconclusiveLicenseCheck,
     classifyKernelOutput,
     findMathPassCandidates,
     recordAddonLoadError,

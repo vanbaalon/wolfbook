@@ -494,6 +494,28 @@ async function showSettingsUI(notebook) {
         },
     ];
 
+    // ── Evaluation context (Mathematica's "Notebook's Default Context") ──
+    const _nbCtx = require('./kernel/notebook-context');
+    const _ctxSetting = _nbCtx.normalizeContextSetting(notebook.metadata?.wolframSettings?.context) || _nbCtx.MODE_GLOBAL;
+    const _isCustomCtx = _ctxSetting !== _nbCtx.MODE_GLOBAL && _ctxSetting !== _nbCtx.MODE_NOTEBOOK;
+    const contextItems = [
+        {
+            label:       (_ctxSetting === _nbCtx.MODE_GLOBAL ? '$(check) ' : '$(circle-large-outline) ') + 'Global`',
+            description: 'shared with every notebook on this kernel',
+            value:       '__ctx_global__',
+        },
+        {
+            label:       (_ctxSetting === _nbCtx.MODE_NOTEBOOK ? '$(check) ' : '$(circle-large-outline) ') + 'Unique to This Notebook',
+            description: _nbCtx.uniqueContextFor(notebook.uri.fsPath),
+            value:       '__ctx_notebook__',
+        },
+        {
+            label:       (_isCustomCtx ? '$(check) ' : '$(circle-large-outline) ') + 'Custom context…',
+            description: _isCustomCtx ? `current: ${_ctxSetting}` : 'notebooks naming the same context share it',
+            value:       '__ctx_custom__',
+        },
+    ];
+
     // ── Wolfbook System Prompt presets ──────────────────────────────────────
     const _activePromptName = _getActivePromptName();
     const _allPrompts = _listPrompts();
@@ -536,6 +558,8 @@ async function showSettingsUI(notebook) {
         ...imageItems,
         { label: 'Kernel', kind: vscode.QuickPickItemKind.Separator },
         ...kernelItems,
+        { label: 'Evaluation Context', kind: vscode.QuickPickItemKind.Separator },
+        ...contextItems,
         { label: 'Copilot Instructions', kind: vscode.QuickPickItemKind.Separator },
         ...promptItems,
         { label: 'MCP Server', kind: vscode.QuickPickItemKind.Separator },
@@ -640,6 +664,26 @@ async function showSettingsUI(notebook) {
 
     } else if (pick.value === '__select_kernel__') {
         await vscode.commands.executeCommand('wolfbook.selectKernel');
+
+    } else if (pick.value === '__ctx_global__' || pick.value === '__ctx_notebook__' || pick.value === '__ctx_custom__') {
+        let setting = pick.value === '__ctx_notebook__' ? _nbCtx.MODE_NOTEBOOK : _nbCtx.MODE_GLOBAL;
+        if (pick.value === '__ctx_custom__') {
+            const input = await vscode.window.showInputBox({
+                prompt:         'Context for this notebook\'s evaluations',
+                placeHolder:    'MyProject`',
+                value:          _isCustomCtx ? _ctxSetting : '',
+                ignoreFocusOut: true,
+                validateInput:  v => _nbCtx.normalizeContextSetting(v) ? null
+                    : 'A context name such as MyProject` or MyProject`Sub` (not System` or Wolfbook`)',
+            });
+            if (input === undefined) return;
+            setting = _nbCtx.normalizeContextSetting(input);
+        }
+        // Stored in the .wb itself, like CellContext in a .nb: it travels with the file.
+        await updateNotebookSettings(notebook, { context: setting });
+        vscode.window.showInformationMessage(
+            `Cells in this notebook now evaluate in ${_nbCtx.describeContextSetting(setting, notebook.uri.fsPath)}. ` +
+            'Definitions already made elsewhere are not moved.');
 
     } else if (pick.value === '__mcp_toggle__') {
         const wasEnabled = configCompat.getSetting('mcpEnabled', true);

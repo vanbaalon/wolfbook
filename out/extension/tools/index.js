@@ -325,16 +325,35 @@ class NewNotebookTool {
 
         const overwrite = !!input.overwrite;
         const waitMs = Math.max(1000, Math.min(Number(input.waitMs || 10000), 60000));
+        // isolation: "none" (shared default kernel, Global`), "kernel" (a new
+        // private kernel process), or "context" (shared kernel, but the notebook
+        // evaluates in its own $Context — Mathematica's "Unique to This Notebook").
+        const nbContext = require('../kernel/notebook-context');
+        const isolation = String(input.isolation || 'none').toLowerCase();
+        if (!['none', 'kernel', 'context'].includes(isolation)) {
+            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
+                `Unknown isolation "${input.isolation}". Use "none", "kernel" or "context".`)]);
+        }
+        let contextSetting = null;
+        if (isolation === 'context') {
+            contextSetting = input.context ? nbContext.normalizeContextSetting(input.context) : nbContext.MODE_NOTEBOOK;
+            if (!contextSetting || contextSetting === nbContext.MODE_GLOBAL) {
+                return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
+                    `Invalid context "${input.context}". Omit it for a context unique to this notebook, or pass a name such as "MyProject\`" (not Global\`, System\` or Wolfbook\`).`)]);
+            }
+        }
         let cells;
         try {
             cells = Array.isArray(input.cells) ? input.cells.map(c => this._cellToJson(c)) : [];
         } catch (err) {
             return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(err.message)]);
         }
+        const baseMetadata = input.metadata && typeof input.metadata === 'object' ? input.metadata : {};
         const notebookJson = {
             cells,
             metadata: {
-                ...(input.metadata && typeof input.metadata === 'object' ? input.metadata : {}),
+                ...baseMetadata,
+                ...(contextSetting ? { wolframSettings: { ...(baseMetadata.wolframSettings || {}), context: contextSetting } } : {}),
                 createdBy: 'wolfbook_newNotebook',
                 createdAt: new Date().toISOString(),
             },
@@ -362,6 +381,39 @@ class NewNotebookTool {
                 return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
                     `Created ${path.basename(nbPath)}, but VS Code did not make the notebook editor visible within ${waitMs} ms.`
                 )]);
+            }
+
+            // An existing notebook asked for its own context gets the setting
+            // written into its metadata (and saved, so the file carries it).
+            if (contextSetting && ed.notebook.metadata?.wolframSettings?.context !== contextSetting) {
+                const edit = new vscode.WorkspaceEdit();
+                edit.set(uri, [vscode.NotebookEdit.updateNotebookMetadata({
+                    ...ed.notebook.metadata,
+                    wolframSettings: { ...(ed.notebook.metadata?.wolframSettings || {}), context: contextSetting },
+                })]);
+                await vscode.workspace.applyEdit(edit);
+                try { await ed.notebook.save(); } catch (_) {}
+            }
+
+            // isolation:"kernel" — start a private kernel and bind this notebook
+            // to it BEFORE the default-slot binding below (which then skips it).
+            let isolationLine = '';
+            if (isolation === 'kernel') {
+                if (!this._manager) {
+                    isolationLine = 'Isolation: no kernel manager in this window — the notebook uses the shared kernel.';
+                } else {
+                    try {
+                        const entry = await this._manager.create({ label: input.kernel_label });
+                        await this._manager.bind(nbPath, entry.id);
+                        isolationLine = `Isolation: new private kernel ${entry.label} (${entry.id}) — no definitions are shared with other notebooks.`;
+                    } catch (err) {
+                        isolationLine = `Isolation: could not start a private kernel (${err.message}) — the notebook uses the shared kernel. ` +
+                            'Retry with isolation:"context" to separate definitions on the shared kernel.';
+                    }
+                }
+            } else if (contextSetting) {
+                isolationLine = `Isolation: cells evaluate in ${nbContext.describeContextSetting(contextSetting, nbPath)} on the shared kernel. ` +
+                    'Names that already exist in Global` still resolve there.';
             }
 
             // Agent-created notebooks must be immediately routable. Persist an
@@ -434,6 +486,7 @@ class NewNotebookTool {
                 `Path: ${nbPath}\n` +
                 `Ready: notebook editor is visible (${ed.notebook.cellCount} cells).\n` +
                 assocLine + '\n' +
+                (isolationLine ? isolationLine + '\n' : '') +
                 `Target: this notebook is ready for subsequent Wolfbook MCP editing and evaluation tools.` +
                 evalLines
             )]);
@@ -3968,53 +4021,6 @@ class KernelCrashLogTool {
 }
 
 // ---------------------------------------------------------------------------
-// wolfbook_runTerminal — run a shell command, return stdout/stderr
-// ---------------------------------------------------------------------------
-
-class RunTerminalTool {
-    async prepareInvocation(options, _token) {
-        const cmd = options.input?.command || '(no command)';
-        return { invocationMessage: `Run: ${cmd.slice(0, 80)}` };
-    }
-
-    async invoke(options, _token) {
-        const { exec } = require('child_process');
-        const command = options.input?.command;
-        if (!command) return new vscode.LanguageModelToolResult([
-            new vscode.LanguageModelTextPart('command is required.')]);
-        const timeoutMs = Math.min((Number(options.input?.timeoutSeconds) || 30), 120) * 1000;
-        const wsf = vscode.workspace.workspaceFolders;
-        const wsRoot = wsf && wsf.length > 0 ? wsf[0].uri.fsPath : (process.env.HOME || '/');
-        const cwd = options.input?.cwd || wsRoot;
-        try {
-            const output = await new Promise((resolve, reject) => {
-                let cancellation;
-                const child = exec(command, {
-                cwd,
-                timeout: timeoutMs,
-                maxBuffer: 512 * 1024,
-                encoding: 'utf8',
-                shell: process.platform === 'win32' ? (process.env.ComSpec || 'cmd.exe') : (process.env.SHELL || '/bin/sh'),
-                env: { ...process.env }
-                }, (error, stdout, stderr) => {
-                    cancellation?.dispose?.();
-                    if (error) { error.stdout = stdout; error.stderr = stderr; reject(error); }
-                    else resolve(stdout || stderr);
-                });
-                cancellation = _token?.onCancellationRequested?.(() => child.kill());
-                if (_token?.isCancellationRequested) child.kill();
-            });
-            return new vscode.LanguageModelToolResult([
-                new vscode.LanguageModelTextPart(output || '(no output)')]);
-        } catch (e) {
-            const msg = [e.stdout || '', e.stderr || '', e.message || ''].join('\n').trim();
-            return new vscode.LanguageModelToolResult([
-                new vscode.LanguageModelTextPart(`Command failed:\n${msg}`)]);
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // wolfbook_showImage — return a base64 thumbnail of a local image file
 // ---------------------------------------------------------------------------
 
@@ -4038,7 +4044,7 @@ class ShowImageTool {
         const stat = fs.statSync(imgPath);
         if (stat.size > 4 * 1024 * 1024) {
             return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
-                `File too large to inline (${(stat.size / 1024 / 1024).toFixed(1)} MB). Use wolfbook_runTerminal to inspect it or resize first.`
+                `File too large to inline (${(stat.size / 1024 / 1024).toFixed(1)} MB). Inspect or resize it with your shell tools first.`
             )]);
         }
 
@@ -4083,99 +4089,6 @@ class ShowImageTool {
     }
 }
 
-// ---------------------------------------------------------------------------
-// wolfbook_fileOps — read, write, or list workspace files
-// ---------------------------------------------------------------------------
-
-class FileOpsTool {
-    async prepareInvocation(options, _token) {
-        const action = options.input?.action || 'read';
-        const p = options.input?.path || '';
-        if (action === 'write') return { invocationMessage: `Write file: ${p}` };
-        if (action === 'list') return { invocationMessage: `List files in: ${p || '.'}` };
-        return { invocationMessage: `Read file: ${p}` };
-    }
-
-    async invoke(options, _token) {
-        const action = options.input?.action || 'read';
-        const wsf = vscode.workspace.workspaceFolders;
-        const wsRoot = wsf && wsf.length > 0 ? wsf[0].uri.fsPath : (process.env.HOME || '/');
-
-        function resolveP(p) {
-            if (!p) return wsRoot;
-            return path.isAbsolute(p) ? p : path.join(wsRoot, p);
-        }
-
-        if (action === 'read') {
-            const filePath = options.input?.path;
-            if (!filePath) return new vscode.LanguageModelToolResult([
-                new vscode.LanguageModelTextPart('path is required for action="read".')]);
-            const resolved = resolveP(filePath);
-            try {
-                const content = fs.readFileSync(resolved, 'utf8');
-                const maxChar = 80000;
-                const trunc = content.length > maxChar;
-                return new vscode.LanguageModelToolResult([
-                    new vscode.LanguageModelTextPart(trunc ? content.slice(0, maxChar) + '\n[\u2026 truncated]' : content)]);
-            } catch (e) {
-                return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(`Error reading file: ${e.message}`)]);
-            }
-        }
-
-        if (action === 'write') {
-            const filePath = options.input?.path;
-            const content  = options.input?.content;
-            if (!filePath) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart('path is required for action="write".')]);
-            if (content === undefined) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart('content is required for action="write".')]);
-            const resolved = resolveP(filePath);
-            try {
-                fs.mkdirSync(path.dirname(resolved), { recursive: true });
-                fs.writeFileSync(resolved, content, 'utf8');
-                return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(`Written ${content.length} chars to ${resolved}`)]);
-            } catch (e) {
-                return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(`Error writing file: ${e.message}`)]);
-            }
-        }
-
-        if (action === 'list') {
-            const inputPath = options.input?.path || '';
-            let base = resolveP(inputPath || '');
-            if (!fs.existsSync(base)) {
-                return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(`Path not found: ${base}`)]);
-            }
-            const ext      = options.input?.ext;
-            const depth    = Math.min(Number(options.input?.depth) || 4, 8);
-            const maxFiles = 500;
-            const results  = [];
-            // Entries are shown relative to the LISTED BASE (with a header naming
-            // it) — relativising against the workspace root prefixed every entry
-            // of an outside-the-workspace listing with ../../../.. noise.
-            const walk = (dir, d) => {
-                if (d > depth || results.length >= maxFiles) return;
-                let entries;
-                try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
-                for (const e of entries) {
-                    if (e.name.startsWith('.')) continue;
-                    const full = path.join(dir, e.name);
-                    const rel  = path.relative(base, full);
-                    if (e.isDirectory()) { results.push(rel + '/'); walk(full, d + 1); }
-                    else if (!ext || e.name.endsWith(ext.startsWith('.') ? ext : '.' + ext)) results.push(rel);
-                    if (results.length >= maxFiles) break;
-                }
-            };
-            walk(base, 0);
-            const trunc = results.length >= maxFiles;
-            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
-                `base: ${base}\n` +
-                (results.join('\n') + (trunc ? '\n[truncated at 500 entries]' : '') || '(empty directory)'))]);
-        }
-
-        return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(`Unknown action "${action}". Use "read", "write", or "list".`)]);
-    }
-}
-
-
-// Wolfteam interaction tools — inline user consultation via confirmations
 // ---------------------------------------------------------------------------
 
 class ProposePlanTool {
@@ -4955,6 +4868,64 @@ ${detail}
     }
 }
 
+// ---------------------------------------------------------------------------
+// wolfbook_tools — reveal rarely used tools on demand (Copilot side)
+// ---------------------------------------------------------------------------
+// The policy lives in claude-mcp/tool-exposure.js and is shared with the MCP
+// server, which answers this name itself per session. In Copilot a family is a
+// context key (wolfbook.tools.<family>) that its tools' `when` clauses test, so
+// enabling one makes those tools available to the model on its next turn.
+
+class ToolsTool {
+    constructor(getToolMap) {
+        this._getToolMap = getToolMap;
+        this._enabled = new Set();
+        this._schemaCache = null;
+    }
+    _schemas() {
+        if (!this._schemaCache) {
+            const { loadMCPSchemas } = require('../claude-mcp/server');
+            this._schemaCache = loadMCPSchemas(path.join(__dirname, '..', '..', '..', 'package.json'));
+        }
+        return this._schemaCache;
+    }
+    async prepareInvocation(options) {
+        const a = options.input || {};
+        return { invocationMessage: a.action === 'call' ? `Run ${a.name || 'tool'}` : `Wolfbook tools: ${a.action || 'list'}` };
+    }
+    async invoke(options, token) {
+        const exposure = require('../claude-mcp/tool-exposure');
+        const a = options.input || {};
+        const action = a.action || 'list';
+        const reply = t => new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(t)]);
+        const info = require('../claude-mcp/paper-routing').paperWindowInfo();
+        const context = { slides: (info.slideFiles || []).length > 0, paper: (info.paperFiles || []).length > 0 };
+        if (action === 'list') {
+            return reply('Tool families (core tools are always available):\n' +
+                exposure.catalogue(this._schemas(), { families: this._enabled, context }));
+        }
+        if (action === 'call') {
+            const name = String(a.name || '');
+            if (exposure.REMOVED_TOOLS[name]) return reply(`${name}: ${exposure.REMOVED_TOOLS[name]}`);
+            const impl = this._getToolMap()?.get(name);
+            if (!impl || name === 'wolfbook_tools') return reply(`Unknown tool "${name}". Use action="list".`);
+            return impl.invoke({ ...options, input: a.arguments && typeof a.arguments === 'object' ? a.arguments : {} }, token);
+        }
+        if (action !== 'enable' && action !== 'disable') return reply(`Unknown action "${action}".`);
+        const req = exposure.resolveRequest(this._schemas(), a.families, a.tools);
+        // Copilot gates by family: enabling one tool enables the family it belongs to.
+        const fams = new Set(req.families);
+        for (const n of req.tools) { const fam = exposure.familyOf(this._schemas().find(t => t.name === n)); if (fam) fams.add(fam); }
+        if (!fams.size) return reply('Nothing to change.' + (req.unknown.length ? ` Unknown: ${req.unknown.join(', ')}.` : ''));
+        for (const fam of fams) {
+            if (action === 'enable') this._enabled.add(fam); else this._enabled.delete(fam);
+            await vscode.commands.executeCommand('setContext', `wolfbook.tools.${fam}`, action === 'enable');
+        }
+        return reply(`${action === 'enable' ? 'Enabled' : 'Disabled'} families: ${[...fams].join(', ')}.` +
+            (action === 'enable' ? ' Their tools are available from your next step; or run one now with action="call".' : ''));
+    }
+}
+
 function registerTools(context, getController, debugCtrl, getAskPanel) {
     // alias(impl, defaults): register one implementation under a second name.
     // Returns a fresh delegate object so the invoke-wrap loop below installs a
@@ -4975,6 +4946,7 @@ function registerTools(context, getController, debugCtrl, getAskPanel) {
     const inspectSymbolsTool = new InspectSymbolsTool(getController);
     const statusTool = new StatusTool(getController);
     const evaluationJournalTool = new EvaluationJournalTool(getController);
+    const literatureSearchTool = new PaperSearchTool();
     // Lazy accessor: the self-test exercises the FINISHED (wrapped) delegates.
     let toolMap = null;
     const selfTestTool = new SelfTestTool(getController, () => toolMap);
@@ -5018,6 +4990,10 @@ function registerTools(context, getController, debugCtrl, getAskPanel) {
         { name: 'wolfbook_exportSessionReport',impl: alias(evaluationJournalTool, { action: 'export' }) },
         { name: 'wolfbook_cancelOperation',    impl: new CancelOperationTool(getController) },
         { name: 'wolfbook_selfTest',           impl: selfTestTool },
+        // Reveal rarely used tools on demand. Over MCP the server answers this name
+        // itself (per session); this implementation serves Copilot, where a family
+        // is switched on by a context key its tools' `when` clauses test.
+        { name: 'wolfbook_tools',              impl: new ToolsTool(() => toolMap) },
         { name: 'wolfbook_saveNotebook',       impl: new SaveNotebookTool() },
         { name: 'wolfbook_getResult',           impl: new GetResultTool(getController) },
         // Agent-only tools (not shown in chat panel)
@@ -5029,10 +5005,11 @@ function registerTools(context, getController, debugCtrl, getAskPanel) {
         { name: 'wolfbook_kernelCrashLog',     impl: new KernelCrashLogTool() },
         { name: 'wolfbook_findPackage',        impl: new FindPackageTool(getController) },
         { name: 'wolfbook_debugCell',          impl: new DebugCellTool(getController, debugCtrl) },
-        { name: 'wolfbook_fileOps',            impl: new FileOpsTool() },
         { name: 'wolfbook_showImage',          impl: new ShowImageTool() },
-        { name: 'wolfbook_runTerminal',        impl: new RunTerminalTool() },
-        { name: 'wolfbook_paperSearch',        impl: new PaperSearchTool() },
+        // Published literature (INSPIRE/arXiv). Renamed from wolfbook_paperSearch,
+        // which read as a search of the user's own paper (that is paper_search).
+        { name: 'wolfbook_literatureSearch',   impl: literatureSearchTool },
+        { name: 'wolfbook_paperSearch',        impl: alias(literatureSearchTool) },
         { name: 'wolfbook_skilxiv',            impl: new SkilXivTool(context) },
         { name: 'wolfbook_fairy_dispatch',     impl: new FairyDispatchTool() },
         { name: 'wolfbook_fairy_status',       impl: new FairyStatusTool() },
@@ -5073,70 +5050,6 @@ function registerTools(context, getController, debugCtrl, getAskPanel) {
         { name: 'wolfslide_imageAsset',      impl: new WolfslideImageAssetTool() },
         { name: 'wolfslide_insertEvalBlock', impl: new WolfslideInsertEvalBlockTool(getController) },
         { name: 'wolfslide_runEvalBlock',    impl: new WolfslideRunEvalBlockTool(getController) },
-        // Shadow VS Code's built-in notebook tools — only redirects when a Wolfbook notebook is active.
-        // For other notebook types (Python, Jupyter) the model should use the built-in tools directly;
-        // we return a neutral pass-through message so Copilot falls back to its own handling.
-        { name: 'edit_notebook_file', impl: {
-            prepareInvocation: () => ({ invocationMessage: 'Checking notebook type…' }),
-            invoke: () => {
-                const nb = vscode.window.activeNotebookEditor?.notebook;
-                const isWolfbook = nb && /\.(wb|evsnb|vsnb)$/.test(nb.uri.fsPath);
-                if (!isWolfbook) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
-                    'This is not a Wolfbook notebook — use the standard edit_notebook_file tool directly.'
-                )]);
-                return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
-                    'ERROR: Do NOT use edit_notebook_file on Wolfbook (.wb/.evsnb) notebooks. ' +
-                    'Use wolfbook_insertCells (with evaluate:true to auto-run), wolfbook_editCell, ' +
-                    'wolfbook_deleteCell, or wolfbook_moveCell instead. ' +
-                    'These tools handle the custom Wolfbook cell format correctly and support live kernel evaluation.'
-                )]);
-            },
-        }},
-        { name: 'run_notebook_cell', impl: {
-            prepareInvocation: () => ({ invocationMessage: 'Checking notebook type…' }),
-            invoke: () => {
-                const nb = vscode.window.activeNotebookEditor?.notebook;
-                const isWolfbook = nb && /\.(wb|evsnb|vsnb)$/.test(nb.uri.fsPath);
-                if (!isWolfbook) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
-                    'This is not a Wolfbook notebook — use the standard run_notebook_cell tool directly.'
-                )]);
-                return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
-                    'ERROR: Do NOT use run_notebook_cell on Wolfbook (.wb/.evsnb) notebooks. ' +
-                    'Use wolfbook_runCell (by cellId or cellNumber) or wolfbook_insertCells with evaluate:true instead.'
-                )]);
-            },
-        }},
-        // Intercept replace_string_in_file when used on .wb/.evsnb notebooks.
-        // These files store cell content as JSON with escaped chars — on-disk edits silently
-        // corrupt the format.  Return a clear error with the correct alternatives.
-        { name: 'replace_string_in_file', impl: {
-            prepareInvocation: (options) => {
-                const fp = options.input?.filePath || options.input?.path || '';
-                if (/\.(wb|evsnb|vsnb)$/i.test(fp)) {
-                    return { invocationMessage: `⛔ Blocked: replace_string_in_file on Wolfbook file` };
-                }
-                return { invocationMessage: `Edit file: ${fp.split('/').pop() || fp}` };
-            },
-            invoke: (options) => {
-                const fp = options.input?.filePath || options.input?.path || '';
-                if (/\.(wb|evsnb|vsnb)$/i.test(fp)) {
-                    return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
-                        `ERROR: replace_string_in_file must NOT be used on Wolfbook notebooks (${fp.split('/').pop()}).\n` +
-                        '.wb/.evsnb files store cell content as JSON with escaped characters; direct file edits silently corrupt the format.\n\n' +
-                        'Use the correct Wolfbook tools instead:\n' +
-                        '  • wolfbook_editCell(cellId, newSource) — replace the source of an existing cell\n' +
-                        '  • wolfbook_insertCells(cells, position) — insert new cells\n' +
-                        '  • wolfbook_deleteCell(cellId/cellNumber) — delete a cell\n' +
-                        '  • wolfbook_moveCell(cellId/cellNumber, newPosition) — reorder cells\n' +
-                        'Call wolfbook_getNotebookContext first to get cell IDs.'
-                    )]);
-                }
-                // Not a wolfbook file — return a pass-through so Copilot uses its built-in tool
-                return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
-                    'This is not a Wolfbook notebook file — use the standard replace_string_in_file tool directly.'
-                )]);
-            },
-        }},
     ];
 
     for (const { name, impl } of tools) {
@@ -5276,7 +5189,7 @@ function registerTools(context, getController, debugCtrl, getAskPanel) {
                     return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
                         `Operation started asynchronously.\n\nOperation ID: ${operation.id}\n\n` +
                         `Kernel ID: ${controller.kernelIdentity?.kernel_id || 'unknown'}\n\n` +
-                        `Use wolfbook_operationStatus or wolfbook_waitEvaluation with operation_id="${operation.id}".`
+                        `Use wolfbook_operationStatus with operation_id="${operation.id}" (wait_seconds waits for it).`
                     )]);
                 }
                 let result;
@@ -5330,6 +5243,7 @@ function registerTools(context, getController, debugCtrl, getAskPanel) {
 
     // Build and return tool map for MCP server use
     toolMap = new Map(tools.map(({ name, impl }) => [name, impl]));
+    _participantToolMap = toolMap;
     return toolMap;
 }
 
@@ -5356,6 +5270,41 @@ function _getWolfbookSystemPrompt() {
     try { return fs.readFileSync(_WOLFBOOK_SYSTEM_PROMPT_PATH, 'utf8'); } catch (_) { return ''; }
 }
 let WOLFBOOK_SYSTEM_PROMPT = _getWolfbookSystemPrompt();
+
+// ---------------------------------------------------------------------------
+// Tools for the @wolfbook / @wolfteam chat participants
+// ---------------------------------------------------------------------------
+// Rarely used Wolfbook tools carry Copilot `when` clauses (tool families), which
+// hide them from vscode.lm.tools until enabled. The participants must not depend
+// on that: their Wolfbook tools are defined from the same package.json schemas
+// and invoked directly. VS Code's own file and terminal tools replace the removed
+// wolfbook_fileOps / wolfbook_runTerminal and keep VS Code's confirmation prompts.
+let _participantToolMap = null;   // set by registerTools
+const PARTICIPANT_WOLFBOOK_TOOLS = [
+    'wolfbook_getNotebookContext', 'wolfbook_evaluateExpression', 'wolfbook_lookupSymbol',
+    'wolfbook_insertCells', 'wolfbook_editCell', 'wolfbook_runCell', 'wolfbook_getCellOutput',
+    'wolfbook_validateSyntax', 'wolfbook_deleteCell', 'wolfbook_restoreDeletedCells', 'wolfbook_moveCell',
+    'wolfbook_searchCells', 'wolfbook_inspectSymbols', 'wolfbook_status', 'wolfbook_saveNotebook',
+    'wolfbook_kernelControl', 'wolfbook_kernelCrashLog', 'wolfbook_findPackage', 'wolfbook_debugCell',
+    'wolfbook_literatureSearch', 'wolfbook_latex', 'wolfbook_remote_checkpoint',
+];
+const PARTICIPANT_HOST_TOOLS = [
+    'copilot_readFile', 'copilot_listDirectory', 'copilot_findFiles', 'copilot_findTextInFiles',
+    'copilot_createFile', 'copilot_replaceString', 'run_in_terminal', 'get_terminal_output',
+];
+function _participantTools(wolfbookNames) {
+    const { loadMCPSchemas } = require('../claude-mcp/server');
+    const schemas = loadMCPSchemas(path.join(__dirname, '..', '..', '..', 'package.json'));
+    const own = schemas.filter(t => wolfbookNames.includes(t.name))
+        .map(t => ({ name: t.name, description: t.description, inputSchema: t.inputSchema }));
+    const host = (vscode.lm.tools || []).filter(t => PARTICIPANT_HOST_TOOLS.includes(t.name));
+    return [...own, ...host];
+}
+function _invokeParticipantTool(name, input, toolInvocationToken, token) {
+    const impl = _participantToolMap?.get(name);
+    if (impl) return impl.invoke({ input, toolInvocationToken }, token);
+    return vscode.lm.invokeTool(name, { input, toolInvocationToken }, token);
+}
 
 function registerChatParticipant(context, getController) {
     // Guard: chat API may not be available in older VS Code versions
@@ -5473,19 +5422,9 @@ function registerChatParticipant(context, getController) {
         }
 
         const toolNames = [
-            'wolfbook_getNotebookContext',
-            'wolfbook_evaluateExpression', 'wolfbook_lookupSymbol',
-            'wolfbook_insertCells', 'wolfbook_editCell', 'wolfbook_runCell', 'wolfbook_runRange',
-            'wolfbook_getCellOutput', 'wolfbook_validateSyntax',
-            'wolfbook_deleteCell', 'wolfbook_restoreDeletedCells',
-            'wolfbook_moveCell', 'wolfbook_searchCells', 'wolfbook_getKernelState',
-            'wolfbook_kernelControl', 'wolfbook_kernelCrashLog',
-            'wolfbook_findPackage', 'wolfbook_debugCell',
-            'wolfbook_fileOps', 'wolfbook_runTerminal',
-            'wolfbook_paperSearch',
-            'wolfbook_saveLatex', 'wolfbook_compileLatex', 'wolfbook_getLatexErrors',
+            ...PARTICIPANT_WOLFBOOK_TOOLS,
         ];
-        const tools = vscode.lm.tools.filter(t => toolNames.includes(t.name));
+        const tools = _participantTools(toolNames);
 
         const options = {
             justification: 'Wolfbook chat participant needs tool access to operate on the notebook and kernel.',
@@ -5529,14 +5468,11 @@ function registerChatParticipant(context, getController) {
                 const label = tc.name.replace('wolfbook_', '#wolfbook');
                 stream.progress(`Using ${label}…`);
                 try {
-                    const result = await vscode.lm.invokeTool(tc.name, {
-                        input: tc.input,
-                        // Do NOT pass toolInvocationToken — doing so enrolls our
-                        // WorkspaceEdits into VS Code's Copilot Edits session, which
-                        // produces confusing diff noise + a non-functional Keep button
-                        // the next time the panel is opened.
-                        toolInvocationToken: undefined,
-                    }, token);
+                    // Do NOT pass toolInvocationToken — doing so enrolls our
+                    // WorkspaceEdits into VS Code's Copilot Edits session, which
+                    // produces confusing diff noise + a non-functional Keep button
+                    // the next time the panel is opened.
+                    const result = await _invokeParticipantTool(tc.name, tc.input, undefined, token);
                     toolResultParts.push(
                         new vscode.LanguageModelToolResultPart(tc.callId, result.content)
                     );
@@ -5680,21 +5616,11 @@ function registerWolfteamParticipant(context, getController) {
 
         // ── Tool set (full wolfbook set + wolfteam interaction tools) ────────
         const toolNames = [
-            'wolfbook_getNotebookContext',
-            'wolfbook_evaluateExpression', 'wolfbook_lookupSymbol',
-            'wolfbook_insertCells', 'wolfbook_editCell', 'wolfbook_runCell', 'wolfbook_runRange',
-            'wolfbook_getCellOutput', 'wolfbook_validateSyntax',
-            'wolfbook_deleteCell', 'wolfbook_restoreDeletedCells',
-            'wolfbook_moveCell', 'wolfbook_searchCells', 'wolfbook_getKernelState',
-            'wolfbook_kernelControl', 'wolfbook_kernelCrashLog',
-            'wolfbook_findPackage', 'wolfbook_debugCell',
-            'wolfbook_fileOps', 'wolfbook_runTerminal',
-            'wolfbook_paperSearch',
-            'wolfbook_saveLatex', 'wolfbook_compileLatex', 'wolfbook_getLatexErrors',
+            ...PARTICIPANT_WOLFBOOK_TOOLS,
             // Wolfteam interaction tools — inline confirmations
             'wolfteam_proposePlan', 'wolfteam_askDecision', 'wolfteam_checkpoint',
         ];
-        const tools = vscode.lm.tools.filter(t => toolNames.includes(t.name));
+        const tools = _participantTools(toolNames);
         const options = {
             justification: 'Wolfteam collaborative agent needs tool access to operate on the notebook and kernel.',
             tools,
@@ -5750,10 +5676,8 @@ function registerWolfteamParticipant(context, getController) {
                 // would create unwanted Copilot Edits diff noise.
                 const isInteractionTool = tc.name.startsWith('wolfteam_');
                 try {
-                    const result = await vscode.lm.invokeTool(tc.name, {
-                        input: tc.input,
-                        toolInvocationToken: isInteractionTool ? request.toolInvocationToken : undefined,
-                    }, token);
+                    const result = await _invokeParticipantTool(tc.name, tc.input,
+                        isInteractionTool ? request.toolInvocationToken : undefined, token);
                     allToolNames.push(tc.name);
                     toolCallRounds.push({ name: tc.name, input: tc.input });
                     toolResultParts.push(

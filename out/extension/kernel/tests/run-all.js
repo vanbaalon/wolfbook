@@ -4,6 +4,7 @@
 // process, prints a pass/fail table, exits non-zero if any fail.
 //
 //   node "Extension Development/out/extension/kernel/tests/run-all.js"
+//   node "Extension Development/out/extension/kernel/tests/run-all.js" stability
 //
 // deploy-extension.sh only syntax-checks (node --check); run this manually
 // before every deploy that touches kernel/, tools/, or claude-mcp/.
@@ -13,7 +14,10 @@ const fs = require('fs');
 const path = require('path');
 
 const dir = __dirname;
-const files = fs.readdirSync(dir).filter(f => f.endsWith('.test.js')).sort();
+// Optional name filter, e.g. `run-all.js stability` runs the multi-kernel /
+// multi-window stability suite (stability-*.test.js) on its own.
+const only = process.argv[2] || '';
+const files = fs.readdirSync(dir).filter(f => f.endsWith('.test.js') && f.includes(only)).sort();
 
 let failed = 0;
 const rows = [];

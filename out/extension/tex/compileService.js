@@ -531,6 +531,17 @@ async function _compileLocked(o, ctx) {
     let logText = '';
     try { logText = fs.readFileSync(logPath, 'utf8'); } catch (_) { logText = run.stdout; }
     const parsed = parseLog(logText, { file: root });
+    // DID THIS RUN WRITE A LOG AT ALL? A log older than the run belongs to an
+    // earlier one (same rule as the synctex and glyph map below). Without this
+    // the caller cannot tell "LaTeX read the document and rejected it" from
+    // "the engine never started", and reports 0 errors for both — which is how
+    // issue #21 reached a user as `FAILED · 0 error(s)` with the real cause
+    // (a spawn that died instantly) sitting unprinted in run.code.
+    let logWritten = false;
+    try {
+        logWritten = fs.existsSync(logPath) &&
+            fs.statSync(logPath).mtimeMs >= runStartedAt - 1500;
+    } catch (_) { logWritten = false; }
     let referenceAuxRestored = false;
     if (run.cancelled || run.timedOut || parsed.errors > 0 || parsed.stopped) {
         for (const [file, bytes] of referenceAux) {
@@ -655,6 +666,13 @@ async function _compileLocked(o, ctx) {
         ms: Date.now() - t0,
         queuedMs: t0 - queuedAt,
         exit: run.code,
+        // What the caller needs to report a failure honestly (issue #21):
+        // whether LaTeX ever ran, what the process said, and what it exited
+        // with in words. stderr is capped — a report, not a transcript.
+        logWritten,
+        stderr: (run.stderr || '').split('\n').filter(l => l.trim()).slice(0, 20).join('\n'),
+        command: `latexmk ${args.join(' ')}`,
+        commandCwd: outDir,
         cancelled: run.cancelled,
         timedOut: run.timedOut,
         // pdflatex can be pushed into DVI mode by a 2009-era class; it exits 0,
@@ -687,7 +705,92 @@ function unavailableRecord({ root, projectDir, outDir, engine, queuedAt, t0, iss
  * spawn + collect, with a PROCESS-GROUP kill. Killing the latexmk pid alone
  * leaves a pdflatex holding the output directory; Spike D measured the group
  * kill at 45-80 ms with zero orphans across 8 configurations.
+ *
+ * `detached` IS POSIX-ONLY HERE, and the two lines are one mechanism.
+ *
+ * detached:true exists solely so that process.kill(-pid) can signal the whole
+ * group. A negative pid is not a process group on Windows: the call throws,
+ * we fall back to killing latexmk alone, and the pdflatex we were trying to
+ * reach survives anyway — so on Windows detaching buys nothing. It also costs
+ * everything: it gives the child its own console, and a Windows latexmk dies
+ * on the spot with 0xC0000409 (STATUS_STACK_BUFFER_OVERRUN / __fastfail)
+ * before writing a log, i.e. WPaper never compiles at all. Reported as
+ * GitHub issue #21 by ArcanoxDragon, who found it by patching this file.
+ *
+ * nb-import/subprocessSupervisor.js already had the guard; this was the one
+ * spawn site in the extension missing it. Windows gets `taskkill /T`, which
+ * is the actual tree kill there.
  */
+const _WIN = process.platform === 'win32';
+
+/**
+ * Name an exit code, so a failure report is diagnosable rather than googleable.
+ *
+ * Windows returns NTSTATUS values as huge unsigned integers — `3221226505` is
+ * 0xC0000409, the fail-fast code. Printing the decimal alone (which is what we
+ * used to do: nothing) told the user nothing at all.
+ *
+ * Pure, vscode-free, platform passed in so it is unit-testable off Windows.
+ */
+const _NTSTATUS = {
+    0xC0000005: 'STATUS_ACCESS_VIOLATION',
+    0xC0000008: 'STATUS_INVALID_HANDLE',
+    0xC000000D: 'STATUS_INVALID_PARAMETER',
+    0xC0000017: 'STATUS_NO_MEMORY',
+    0xC000001D: 'STATUS_ILLEGAL_INSTRUCTION',
+    0xC0000094: 'STATUS_INTEGER_DIVIDE_BY_ZERO',
+    0xC00000FD: 'STATUS_STACK_OVERFLOW',
+    0xC0000135: 'STATUS_DLL_NOT_FOUND',
+    0xC0000142: 'STATUS_DLL_INIT_FAILED',
+    0xC000013A: 'STATUS_CONTROL_C_EXIT',
+    0xC0000409: 'STATUS_STACK_BUFFER_OVERRUN',   // also the generic __fastfail
+    0xC0000374: 'STATUS_HEAP_CORRUPTION',
+};
+/**
+ * Turn a failed generation into lines a user can act on — or [] when the
+ * failure is an ordinary LaTeX error, which the diagnostics list already
+ * explains far better than any prose here could.
+ *
+ * The case this exists for: no PDF, no log, sub-second runtime. LaTeX never
+ * saw the document, so "0 error(s)" is not a finding about the document — it
+ * is the absence of evidence, and must not be printed as if it were.
+ *
+ * Pure and vscode-free; `gen` is a compile() record.
+ */
+function describeCompileFailure(gen, platform = process.platform) {
+    if (!gen || gen.ok || gen.cancelled) return [];
+    const out = [];
+    const neverRan = !gen.logWritten && !gen.pdfPath && !gen.dependencyIssue;
+    if (neverRan) {
+        out.push(`the engine never ran — latexmk exited ${describeExit(gen.exit, platform)} ` +
+                 `after ${gen.ms} ms without writing a log`);
+        out.push('this is a toolchain or process-launch problem, not a problem with the document');
+        if (gen.command) out.push(`command: ${gen.command}`);
+        if (gen.commandCwd) out.push(`cwd: ${gen.commandCwd}`);
+    } else if (gen.exit !== 0 && gen.exit != null && !gen.errors) {
+        out.push(`latexmk exited ${describeExit(gen.exit, platform)} but logged no error`);
+    }
+    if (gen.stderr) {
+        out.push('stderr:');
+        for (const l of gen.stderr.split('\n')) out.push('  ' + l);
+    } else if (neverRan) {
+        out.push('stderr was empty — the process produced no output at all');
+    }
+    return out;
+}
+
+function describeExit(code, platform = process.platform) {
+    if (code == null) return 'no exit code (killed by a signal, or never started)';
+    if (typeof code === 'string') return code;              // 'ETIMEDOUT' etc.
+    if (code === 0) return '0';
+    if (platform === 'win32' && code > 0x3FFFFFFF) {
+        const hex = '0x' + (code >>> 0).toString(16).toUpperCase().padStart(8, '0');
+        const name = _NTSTATUS[code >>> 0];
+        return `${code} (${hex}${name ? ' ' + name : ''})`;
+    }
+    return String(code);
+}
+
 function spawnCollect(cmd, args, opts = {}) {
     return new Promise((resolve, reject) => {
         let child;
@@ -695,7 +798,8 @@ function spawnCollect(cmd, args, opts = {}) {
             child = spawn(cmd, args, {
                 cwd: opts.cwd, env: opts.env,
                 stdio: ['ignore', 'pipe', 'pipe'],
-                detached: true,
+                detached: !_WIN,
+                windowsHide: true,
             });
         } catch (e) { reject(e); return; }
 
@@ -703,6 +807,12 @@ function spawnCollect(cmd, args, opts = {}) {
         let cancelled = false; let timedOut = false; let settled = false;
 
         const killGroup = (sig) => {
+            if (_WIN) {
+                // /T kills the tree, /F forces it. There is no signal to pass.
+                try { spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'],
+                    { stdio: 'ignore', windowsHide: true }); return; }
+                catch (_) { try { child.kill(); } catch (_) { /* gone */ } return; }
+            }
             try { process.kill(-child.pid, sig); }
             catch (_) { try { child.kill(sig); } catch (_) { /* gone */ } }
         };
@@ -856,6 +966,7 @@ function probeLualatex() {
 
 module.exports = {
     nextGeneration,
+    describeExit, describeCompileFailure,
     glyphMapHookPath, probeLualatex,
     probeExecutable, checkToolchain,
     saveGeneration,

@@ -184,9 +184,79 @@ Run **"Wolfbook: Configure Claude and Codex Agents"** to repair either entry aft
 
 ---
 
+## Using with Claude Science
+
+Claude Science is Anthropic's local app for research work. It runs as a background service and opens in your browser. Wolfbook connects to it as a **Local command** connector.
+
+Claude Science runs every connector inside a macOS sandbox. The sandbox cannot read files in your home folder, and it cannot open network connections to other programs on your Mac. Wolfbook works within those rules:
+
+- the connector talks to Wolfbook through a **private socket**, `/private/tmp/wolfbook-mcp-<your uid>/mcp.sock`, which only your user account can use;
+- the bridge program is copied to `~/.wolfbook/mcp/stdio-bridge.js`, a fixed location, so Wolfbook updates don't break the connector;
+- two entries in `~/.claude-science/config.toml` let the sandbox read the bridge (and Node.js, if it is installed in your home folder) and connect to the socket. Nothing else in the sandbox changes.
+
+### Setup
+
+1. With VS Code and Wolfbook running, run **"Wolfbook: Configure Claude Science MCP"** from the Command Palette. When Claude Science is installed, Wolfbook also offers this itself.
+2. Wolfbook lists exactly what it will allow in the sandbox and asks you to confirm.
+3. Click **Restart Claude Science** when prompted, or quit and reopen it yourself. The sandbox settings apply only after a restart.
+4. Start a **new conversation** in Claude Science.
+
+Wolfbook never changes Claude Science's sandbox without asking. When VS Code starts, Wolfbook only keeps a connector it already set up current. Do **not** turn off Claude Science's sandbox to get Wolfbook working.
+
+### Manual setup
+
+1. Find your user id: run `id -u` in Terminal (for example `501`).
+2. Copy the bridge somewhere fixed:
+
+   ```bash
+   mkdir -p ~/.wolfbook/mcp
+   cp ~/.vscode/extensions/wolfbook.wolfbook-*/out/extension/claude-mcp/stdio-bridge.js ~/.wolfbook/mcp/
+   ```
+3. Add these lines to `~/.claude-science/config.toml` (create the file if it does not exist). If the file already has a `[sandbox]` or `[sandbox.network]` section, add the line to that section instead. Replace `<you>` and `501`:
+
+   ```toml
+   [sandbox]
+   user_read_paths = ["/Users/<you>/.wolfbook/mcp"]
+
+   [sandbox.network]
+   allow_unix_sockets = ["/private/tmp/wolfbook-mcp-501"]
+   ```
+
+   If `which node` prints a path inside your home folder (for example `~/.local/node/bin/node`), also add that installation's folder, `/Users/<you>/.local/node`, to `user_read_paths`. Node.js from Homebrew or the nodejs.org installer needs nothing extra.
+4. Quit and reopen Claude Science.
+5. In Claude Science open **Customize → Connectors → Add connector → Local command** and enter:
+   - **Name:** `wolfbook`
+   - **Command:** `/opt/homebrew/bin/node /Users/<you>/.wolfbook/mcp/stdio-bridge.js --socket=/private/tmp/wolfbook-mcp-501/mcp.sock` (use your own Node path from `which node`)
+6. Start a new conversation.
+
+Notes:
+
+- **Keep VS Code running.** The socket exists only while a VS Code window runs Wolfbook. Without one, the connector reports that it could not connect.
+- **Use *Local command*, not *Remote*.** Claude Science accepts only public `https` addresses for remote connectors.
+- If the connector fails with `sandbox-exec: execvp() … Operation not permitted`, the sandbox cannot read Node.js or the bridge. Check `user_read_paths`, then restart Claude Science.
+- If your organisation has turned off custom connectors, the **Add connector** button is missing and neither method works.
+
+---
+
 GitHub Copilot in Agent mode uses the same MCP tools. See [AI Integration](ai-integration.md) for the full Copilot-specific guide.
 
 The key difference: Copilot is accessed via the VS Code chat panel (`⌃⌘I`), while Claude Code and Codex are accessed via the terminal or their own interfaces. Every MCP client also receives a server-level instruction telling it to prefer Wolfbook over launching a separate `wolframscript` or `WolframKernel` process for ordinary VS Code work.
+
+---
+
+## Protocol and transports
+
+Wolfbook speaks MCP protocol versions **2025-11-25**, 2025-06-18, 2025-03-26 and 2024-11-05, and answers each client in the version that client asks for. Clients on 2025-03-26 or later also receive **tool annotations**, which mark each tool as read-only, destructive, or reaching outside your machine. Clients can use these to skip confirmation prompts for tools that only read.
+
+| Endpoint | Transport |
+|---|---|
+| `http://127.0.0.1:27182/mcp` (`/mcp/economy`) | Streamable HTTP, the current standard |
+| `http://127.0.0.1:27182/sse` (`/sse/economy`) | legacy HTTP+SSE, kept for older clients |
+| `/private/tmp/wolfbook-mcp-<uid>/mcp.sock` | both of the above, over a private Unix socket (macOS/Linux) for sandboxed hosts |
+
+**Access.** Any program on your Mac can reach `127.0.0.1`. That includes other user accounts and sandboxed apps that may use the network but not your files. So Wolfbook asks TCP callers for a per-user token, stored in `~/.wolfbook/mcp-token` and readable only by you. The stdio bridge, other Wolfbook windows and the Overleaf extension's local server read it automatically, so you don't need to configure anything. The private socket needs no token. Web pages are refused separately, by their `Origin` and `Host` headers. The first time a new AI agent connects, Wolfbook shows a notice with a **Block** button. It never makes the agent wait. **Wolfbook: Manage Agent Access** allows or blocks agents later. If a client connects by URL and can't send an `Authorization` header, turn off `wolfbook.mcp.requireToken`.
+
+Most clients should keep using the stdio bridge that the configure commands install. It waits for VS Code to start and finds the right port or socket by itself. The port moves within 27182–27202 when that range is busy.
 
 ---
 

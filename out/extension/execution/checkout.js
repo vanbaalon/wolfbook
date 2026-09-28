@@ -9,6 +9,7 @@ const { scrollLog, wstpLog } = require('../utils/dev-logger');
 const _output = require('../output/renderer');
 const { splitIntoSubexpressions } = require('../utils/wl-parse');
 const runningLines = require('./running-lines');
+const notebookContext = require('../kernel/notebook-context');
 
 function _operationOutputPreview(cell) {
     const parts = [];
@@ -27,6 +28,9 @@ function _operationOutputPreview(cell) {
 
 async function checkoutExecutionQueue(self) {
     let currentExecution;
+    // The notebook's own $Context, when it has one (see kernel/notebook-context.js).
+    // Set only once the kernel has actually entered it, so `finally` leaves it.
+    let _nbContext = null;
     try {
         currentExecution = self.executionQueue.getNextPendingExecution();
     } catch (_getErr) {
@@ -306,6 +310,24 @@ async function checkoutExecutionQueue(self) {
                 } catch (_e) {
                     self.writeDebugLog(`[CHECKOUT] $WBNotebookDirectory update failed (non-fatal): ${_e.message}`);
                 }
+            }
+        }
+
+        // ---- Enter the notebook's own context (Notebook's Default Context) ----
+        // Entered per cell and left in `finally`, so between cells the kernel is
+        // back in Global` for other notebooks and tools. Failing to enter fails
+        // the cell: running it in Global` instead would silently break isolation.
+        {
+            const _wantCtx = notebookContext.resolveNotebookContext(currentExecution.execution.cell.notebook);
+            if (_wantCtx) {
+                try {
+                    await self.session.evaluate(notebookContext.enterContextCode(_wantCtx),
+                        { interactive: false, rejectDialog: true });
+                } catch (_ctxErr) {
+                    throw new Error(`Could not enter the notebook's context ${_wantCtx}: ${_ctxErr.message}`);
+                }
+                _nbContext = _wantCtx;
+                self.writeDebugLog(`[CHECKOUT] cell ${currentExecution.execution.cell.index} | entered context ${_wantCtx}`);
             }
         }
 
@@ -1732,6 +1754,19 @@ async function checkoutExecutionQueue(self) {
         try { runningLines.clearRunning(); } catch (_) {}
         // The queue has moved on; re-read it rather than assume what is left.
         try { runningLines.setQueued(self.executionQueue.pendingCells()); } catch (_) {}
+        // Leave the notebook's context before anything else talks to the kernel.
+        // Bounded: after a fatal link error the session may never answer, and the
+        // restart that follows starts the kernel in Global` anyway.
+        if (_nbContext && self.session) {
+            try {
+                await Promise.race([
+                    self.session.evaluate(notebookContext.leaveContextCode(_nbContext), { interactive: false, rejectDialog: true }),
+                    new Promise(resolve => setTimeout(resolve, 3000)),
+                ]);
+            } catch (_ctxErr) {
+                self.writeDebugLog(`[CHECKOUT] leaving context ${_nbContext} failed: ${_ctxErr.message}`);
+            }
+        }
         if (self.session?.endTransaction) {
             try { await self.session.endTransaction(self.isAborting ? 'aborted' : 'completed'); } catch (_) {}
         }

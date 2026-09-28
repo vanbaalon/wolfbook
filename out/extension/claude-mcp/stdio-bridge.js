@@ -10,6 +10,13 @@
 //   stdio, Claude Code spawns US — we wait for the HTTP server to be ready,
 //   then transparently relay.  No timing race.
 //
+// Sandboxed hosts (Claude Science) cannot reach TCP 127.0.0.1; pass
+// --socket=<path> (or WOLFBOOK_MCP_SOCKET) to use the primary's private Unix
+// socket instead. The bridge tries the socket first, then the TCP ports, so
+// it still works with an older Wolfbook that has no socket. This file must
+// stay self-contained (only node built-ins): it is copied out of the
+// extension to a stable path the sandbox is allowed to read.
+//
 // Claude Code config (~/.claude/settings.json):
 //   {
 //     "mcpServers": {
@@ -23,26 +30,66 @@
 // ---------------------------------------------------------------------------
 
 const http  = require('http');
+const fs    = require('fs');
+const path  = require('path');
 
-const DEFAULT_PORT  = 27182;
-const PORT_RANGE    = 20;
+// WOLFBOOK_MCP_PORT pins one port (tests use it so they never reach a live server).
+const PINNED_PORT   = Number(process.env.WOLFBOOK_MCP_PORT) || 0;
+const DEFAULT_PORT  = PINNED_PORT || 27182;
+const PORT_RANGE    = PINNED_PORT ? 0 : 20;
 const POLL_INTERVAL = 1000;   // ms between health-check retries
 const MAX_WAIT_MS   = 60000;  // give VS Code up to 60s to start
 const PING_TIMEOUT  = 3000;   // ms per health-check attempt
 const PROFILE_ARG   = process.argv.slice(2).find(arg => arg.startsWith('--profile='));
-const PROFILE       = PROFILE_ARG ? PROFILE_ARG.slice('--profile='.length) : 'full';
-const SSE_PATH      = PROFILE === 'economy' ? '/sse/economy' : '/sse';
+// No flag = the server default (auto). Every profile is passed through; this used
+// to map only economy and silently drop notebook/slides/paper.
+const PROFILE       = PROFILE_ARG ? PROFILE_ARG.slice('--profile='.length) : '';
+const SSE_PATH      = PROFILE === 'economy' ? '/sse/economy'
+                    : PROFILE ? `/sse?profile=${encodeURIComponent(PROFILE)}` : '/sse';
+const SOCKET_ARG    = process.argv.slice(2).find(arg => arg.startsWith('--socket='));
+const SOCKET_PATH   = SOCKET_ARG ? SOCKET_ARG.slice('--socket='.length) : (process.env.WOLFBOOK_MCP_SOCKET || '');
+
+// Over TCP the server wants the per-user token Wolfbook keeps in ~/.wolfbook/mcp-token
+// (claude-mcp/auth.js). Inside a sandbox that cannot read it, the socket needs none.
+function readToken() {
+    try {
+        const file = process.env.WOLFBOOK_MCP_TOKEN_FILE || path.join(require('os').homedir(), '.wolfbook', 'mcp-token');
+        return fs.readFileSync(file, 'utf8').trim() || null;
+    } catch { return null; }
+}
+
+// A server "target" is { socketPath } or { port }; every request goes through here.
+function targetOptions(target, extra) {
+    if (target.socketPath) return { socketPath: target.socketPath, ...extra };
+    const token = readToken();
+    const headers = { ...(extra.headers || {}), ...(token ? { Authorization: `Bearer ${token}` } : {}) };
+    return { hostname: '127.0.0.1', port: target.port, ...extra, headers };
+}
+function describeTarget(target) {
+    return target.socketPath ? `unix:${target.socketPath}` : `port ${target.port}`;
+}
+
+// /tmp is shared: only talk to a socket in a directory WE own that nobody else
+// can write to, or another user could impersonate Wolfbook to this client.
+function socketDirSafe(socketPath) {
+    try {
+        const st = fs.lstatSync(path.dirname(socketPath));
+        const uid = typeof process.getuid === 'function' ? process.getuid() : null;
+        return st.isDirectory() && !st.isSymbolicLink() &&
+            (uid == null || st.uid === uid) && (st.mode & 0o022) === 0;
+    } catch { return false; }
+}
 
 // ── Find the HTTP server ───────────────────────────────────────────────────
-function checkPort(port) {
+function checkTarget(target) {
     return new Promise(resolve => {
-        const req = http.get(`http://127.0.0.1:${port}/health`, { timeout: PING_TIMEOUT }, res => {
+        const req = http.get(targetOptions(target, { path: '/health', timeout: PING_TIMEOUT }), res => {
             let body = '';
             res.on('data', c => body += c);
             res.on('end', () => {
                 try {
                     const j = JSON.parse(body);
-                    if (j.status === 'ok') resolve(port);
+                    if (j.status === 'ok') resolve(target);
                     else resolve(null);
                 } catch { resolve(null); }
             });
@@ -54,9 +101,19 @@ function checkPort(port) {
 
 async function findServer() {
     const deadline = Date.now() + MAX_WAIT_MS;
+    let warned = false;
     while (Date.now() < deadline) {
+        if (SOCKET_PATH) {
+            if (socketDirSafe(SOCKET_PATH)) {
+                const found = await checkTarget({ socketPath: SOCKET_PATH });
+                if (found) return found;
+            } else if (!warned && fs.existsSync(path.dirname(SOCKET_PATH))) {
+                warned = true;
+                process.stderr.write(`[wolfbook-mcp-bridge] Ignoring ${SOCKET_PATH}: its directory is not private to this user.\n`);
+            }
+        }
         for (let p = DEFAULT_PORT; p <= DEFAULT_PORT + PORT_RANGE; p++) {
-            const found = await checkPort(p);
+            const found = await checkTarget({ port: p });
             if (found) return found;
         }
         await new Promise(r => setTimeout(r, POLL_INTERVAL));
@@ -65,11 +122,11 @@ async function findServer() {
 }
 
 // ── SSE client (persistent connection to HTTP server) ─────────────────────
-function openSSE(port) {
+function openSSE(target) {
     return new Promise((resolve, reject) => {
-        const req = http.get(`http://127.0.0.1:${port}${SSE_PATH}`, {
-            headers: { Accept: 'text/event-stream' }
-        }, res => {
+        const req = http.get(targetOptions(target, {
+            path: SSE_PATH, headers: { Accept: 'text/event-stream' }
+        }), res => {
             let sessionPath = null;
             let buf = '';
 
@@ -85,7 +142,7 @@ function openSSE(port) {
                     else if (ln === '') {
                         if (eventType === 'endpoint' && dataLine) {
                             sessionPath = dataLine;
-                            resolve({ res, sessionPath, port });
+                            resolve({ res, sessionPath, target });
                         } else if (eventType === 'message' && dataLine) {
                             onSSEMessage(dataLine);
                         }
@@ -110,20 +167,23 @@ function onSSEMessage(data) {
         if (timeout) clearTimeout(timeout);
         pending.delete(msg.id);
         resolve(msg);
+    } else if (msg.id == null && typeof msg.method === 'string') {
+        // Server-initiated notifications (notifications/tools/list_changed …) were
+        // dropped here, so a stdio client never learned its tool list changed.
+        writeStdout(msg);
     }
 }
 
 // ── Forward JSON-RPC to HTTP server, get reply via SSE ────────────────────
-function forwardRequest(sessionPath, port, rpcMsg) {
+function forwardRequest(sessionPath, target, rpcMsg) {
     return new Promise((resolve, reject) => {
         // Notifications (no id) — fire and forget
         if (rpcMsg.id == null) {
             const body = JSON.stringify(rpcMsg);
-            const req = http.request({
-                hostname: '127.0.0.1', port, method: 'POST',
-                path: sessionPath,
+            const req = http.request(targetOptions(target, {
+                method: 'POST', path: sessionPath,
                 headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }
-            }, res => { res.resume(); });
+            }), res => { res.resume(); });
             req.on('error', () => {});
             req.write(body);
             req.end();
@@ -134,11 +194,10 @@ function forwardRequest(sessionPath, port, rpcMsg) {
         // Requests — wait for SSE reply
         pending.set(rpcMsg.id, { resolve });
         const body = JSON.stringify(rpcMsg);
-        const req = http.request({
-            hostname: '127.0.0.1', port, method: 'POST',
-            path: sessionPath,
+        const req = http.request(targetOptions(target, {
+            method: 'POST', path: sessionPath,
             headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }
-        }, res => { res.resume(); });
+        }), res => { res.resume(); });
         req.on('error', err => {
             const entry = pending.get(rpcMsg.id);
             if (entry?.timeout) clearTimeout(entry.timeout);
@@ -187,20 +246,20 @@ function writeStdout(msg) {
 (async () => {
     process.stderr.write('[wolfbook-mcp-bridge] Waiting for VS Code extension server...\n');
 
-    const port = await findServer();
-    if (!port) {
+    const target = await findServer();
+    if (!target) {
         process.stderr.write('[wolfbook-mcp-bridge] Timed out — VS Code extension not started.\n');
         process.exit(1);
     }
 
-    process.stderr.write(`[wolfbook-mcp-bridge] Found server on port ${port}, connecting ${PROFILE} profile...\n`);
+    process.stderr.write(`[wolfbook-mcp-bridge] Found server on ${describeTarget(target)}, connecting ${PROFILE || "default"} profile...\n`);
 
-    const { sessionPath } = await openSSE(port);
+    const { sessionPath } = await openSSE(target);
     process.stderr.write(`[wolfbook-mcp-bridge] Ready. Session: ${sessionPath}\n`);
 
     readStdin(async rpcMsg => {
         try {
-            const reply = await forwardRequest(sessionPath, port, rpcMsg);
+            const reply = await forwardRequest(sessionPath, target, rpcMsg);
             if (reply) writeStdout(reply);
         } catch (e) {
             if (rpcMsg.id != null) {

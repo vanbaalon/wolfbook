@@ -85,7 +85,8 @@ function writeHostRecord(self) {
 let _diagChannel = null;   // lazily-created "Wolfbook Kernel Diagnostics" output channel
 
 async function _reportKernelFailure(self, kernelCommand, wstpError,
-                                    { addonLoaded = true, licensePreflight = null } = {}) {
+                                    { addonLoaded = true, licensePreflight = null,
+                                      directProbeResult = null } = {}) {
     let diag;
     try {
         const configCompat = require('../config-compat');
@@ -94,6 +95,7 @@ async function _reportKernelFailure(self, kernelCommand, wstpError,
         try { discovered = self.findKernel.discoverKernels(); } catch (_) {}
         diag = await _diagnose.diagnoseKernelLaunch(kernelCommand, {
             wstpError, customPath, discovered, addonLoaded, licensePreflight,
+            directProbeResult,
         });
     } catch (e) {
         // Diagnostics must never mask the original failure.
@@ -150,20 +152,55 @@ async function _reportKernelFailure(self, kernelCommand, wstpError,
 //
 // On VS Code window reload, deactivate() is called and quitKernel() runs.
 // On crash / SIGKILL of the extension host, no cleanup runs — the next
-// launchKernel() detects stale PIDs and kills those processes before starting
-// a fresh kernel.
+// launchKernel() reaps the kernels that crash left behind.
+//
+// THE FILE IS MACHINE-WIDE (os.tmpdir()), shared by every window and every
+// kernel. It used to be a bare PID list that every launchKernel() killed in full
+// and every quitKernel() deleted outright — so starting ANY kernel (another
+// window, an isolated K2, a restart) SIGKILLed every other live kernel on the
+// machine, and any quit erased everyone else's orphan tracking. Each entry now
+// records its owner (the extension-host PID). A kernel is reaped only when its
+// owner is dead AND the process is still a Wolfram kernel (PIDs get reused).
 
-const _PID_FILE = path.join(os.tmpdir(), 'wolfbook_kernel_pids.json');
+// WOLFBOOK_PID_FILE exists for the tests only: they must never touch the real,
+// machine-wide file that live windows depend on.
+const _PID_FILE = process.env.WOLFBOOK_PID_FILE || path.join(os.tmpdir(), 'wolfbook_kernel_pids.json');
 
-function _savePidFile(pids) {
-    try { fs.writeFileSync(_PID_FILE, JSON.stringify(pids)); } catch(_) {}
+function _savePidFile(entries) {
+    try {
+        if (!entries.length) { fs.unlinkSync(_PID_FILE); return; }
+    } catch (_) { return; }
+    // Atomic replace: another window may be reading it right now.
+    const tmp = _PID_FILE + '.' + process.pid + '.tmp';
+    try { fs.writeFileSync(tmp, JSON.stringify(entries)); fs.renameSync(tmp, _PID_FILE); }
+    catch (_) { try { fs.unlinkSync(tmp); } catch (__) {} }
 }
 function _loadPidFile() {
-    try { return JSON.parse(fs.readFileSync(_PID_FILE, 'utf8')); } catch(_) { return []; }
+    let raw;
+    try { raw = JSON.parse(fs.readFileSync(_PID_FILE, 'utf8')); } catch (_) { return []; }
+    if (!Array.isArray(raw)) return [];
+    // Legacy entries are bare numbers with no known owner.
+    return raw.map(e => (typeof e === 'number' ? { pid: e, owner: null } : e))
+              .filter(e => e && Number.isInteger(e.pid) && e.pid > 0);
 }
-function _clearPidFile() {
-    try { fs.unlinkSync(_PID_FILE); } catch(_) {}
+
+function _pidAlive(pid) {
+    if (!Number.isInteger(pid) || pid <= 0) return false;
+    try { process.kill(pid, 0); return true; }
+    catch (e) { return e && e.code === 'EPERM'; }   // exists, not ours to signal
 }
+
+/** { ppid, comm } via ps, or null (Windows, or ps failed). */
+function _psInfo(pid) {
+    if (process.platform === 'win32') return null;
+    try {
+        const out = require('child_process').execFileSync('ps', ['-o', 'ppid=,comm=', '-p', String(pid)],
+            { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+        const m = out.match(/^(\d+)\s+(.*)$/);
+        return m ? { ppid: Number(m[1]), comm: m[2] } : null;
+    } catch (_) { return null; }
+}
+const _looksLikeKernel = comm => /wolfram|mathkernel/i.test(String(comm || ''));
 
 /** Kill a process by PID. Tries SIGTERM; schedules SIGKILL 1.5s later in case
  *  WolframKernel is stuck inside Dialog[] and ignores SIGTERM. */
@@ -184,23 +221,55 @@ function _killPid(pid) {
     } catch(_) { /* process already gone */ }
 }
 
-/** Read the PID file, kill every listed process, and delete the file. */
-function _killStalePids() {
-    const pids = _loadPidFile();
-    if (pids.length > 0) {
-        scrollLog('[lifecycle] killing stale kernel PIDs from previous session:', pids);
-        for (const pid of pids) _killPid(pid);
-        _clearPidFile();
-    }
+/**
+ * Decide what to do with one PID-file entry. Pure apart from the injected
+ * probes, so the policy is unit-testable (tests/pid-reaper.test.js).
+ * @returns {'keep'|'drop'|'kill'}
+ */
+function _classifyPidEntry(entry, { self = process.pid, alive = _pidAlive, ps = _psInfo, platform = process.platform } = {}) {
+    if (!entry || !alive(entry.pid)) return 'drop';                 // already gone
+    if (entry.owner === self) return 'keep';                           // a sibling kernel in THIS window
+    if (entry.owner && alive(entry.owner)) return 'keep';              // a live window's kernel — never touch
+    // Owner dead, or unknown (legacy). Only a process that is still a Wolfram
+    // kernel is a candidate; anything else got the PID by reuse.
+    const info = ps(entry.pid);
+    if (platform === 'win32') return entry.owner ? 'kill' : 'drop';  // no ps: trust only a known-dead owner
+    if (!info || !_looksLikeKernel(info.comm)) return 'drop';
+    if (entry.owner) return 'kill';
+    // Legacy entry, owner unknown: only a kernel re-parented to init/launchd
+    // (its parent host died) is an orphan. Otherwise it belongs to someone alive.
+    return info.ppid === 1 ? 'kill' : 'drop';
 }
 
-/** Append a PID to the PID file (called after kernel/subkernel starts). */
-function _appendPid(pid) {
-    const pids = _loadPidFile();
-    if (!pids.includes(pid)) {
-        pids.push(pid);
-        _savePidFile(pids);
+/** Reap kernels whose owning extension host is gone; leave every live one alone. */
+function _killStalePids() {
+    const entries = _loadPidFile();
+    if (!entries.length) return;
+    const keep = [];
+    for (const entry of entries) {
+        const verdict = _classifyPidEntry(entry);
+        if (verdict === 'keep') keep.push(entry);
+        else if (verdict === 'kill') {
+            scrollLog('[lifecycle] reaping orphaned kernel PID', entry.pid, '(owner', entry.owner, 'gone)');
+            _killPid(entry.pid);
+        }
     }
+    if (keep.length !== entries.length) _savePidFile(keep);
+}
+
+/** Record a kernel this window started (called after the kernel is up). */
+function _appendPid(pid) {
+    const entries = _loadPidFile().filter(e => e.pid !== pid);
+    entries.push({ pid, owner: process.pid, at: Date.now() });
+    _savePidFile(entries);
+}
+
+/** Forget ONE kernel (clean quit). Never the whole file — it is shared. */
+function _removePid(pid) {
+    if (!Number.isInteger(pid)) return;
+    const entries = _loadPidFile();
+    const rest = entries.filter(e => e.pid !== pid);
+    if (rest.length !== entries.length) _savePidFile(rest);
 }
 
 // Wrap a WstpSession in a Proxy that records all WSTP method calls to wstp.log.
@@ -261,13 +330,20 @@ function _wstpWrap(sess, label) {
     });
 }
 
+// The renderer channel is shared by every kernel in the window, so these must
+// address only the notebooks this kernel is bound to. A bare postMessage()
+// let one kernel's offline state gray a notebook driven by a different, live
+// kernel — most often the remote proxy this window holds for another window's
+// kernel, which is why the symptom appeared on window switches.
 function applyKernelOfflineUI(self) {
-    try { self._rendererMessaging.postMessage({ type: 'kernel-offline' }); } catch (_) {}
+    if (typeof self._postToOwnedRenderers === 'function') self._postToOwnedRenderers({ type: 'kernel-offline' });
+    else try { self._rendererMessaging.postMessage({ type: 'kernel-offline' }); } catch (_) {}
     _setNotebookCellColorsOffline(self, true);
 }
 
 function clearKernelOfflineUI(self) {
-    try { self._rendererMessaging.postMessage({ type: 'kernel-online' }); } catch (_) {}
+    if (typeof self._postToOwnedRenderers === 'function') self._postToOwnedRenderers({ type: 'kernel-online' });
+    else try { self._rendererMessaging.postMessage({ type: 'kernel-online' }); } catch (_) {}
     _setNotebookCellColorsOffline(self, false);
 }
 
@@ -276,6 +352,12 @@ function clearKernelOfflineUI(self) {
 // and replace them with luminance-equivalent grays while offline.
 function _setNotebookCellColorsOffline(self, offline) {
     try {
+        // colorCustomizations is WORKSPACE-scoped — every window on this
+        // workspace sees the write. A kernel that drives no visible notebook
+        // here (a remote proxy, an isolated kernel bound to nothing on screen)
+        // must never gray, or it repaints notebooks that are perfectly alive.
+        if (offline && typeof self._ownedVisibleEditors === 'function'
+            && self._ownedVisibleEditors().length === 0) return;
         const config = vscode.workspace.getConfiguration('workbench');
         const currentColors = config.get('colorCustomizations') || {};
         // Single source of truth: gray/restore EXACTLY the keys applyNotebookSettings
@@ -478,26 +560,24 @@ async function launchKernel(self, WstpSession) {
     // WSTP can wait forever and freeze VS Code's shared extension host. The
     // documented `-licenseinfo` check is a cheap child process (~tens of ms), is
     // asynchronous from VS Code's point of view, and has a hard timeout.
-    let _licensePreflight;
-    try {
-        _licensePreflight = await _diagnose.probeKernelLicense(kernelCommand);
-    } catch (e) {
-        _licensePreflight = {
-            ok: false, timedOut: false, exitCode: null, output: '',
-            spawnError: String(e.message || e), durationMs: 0,
-        };
-    }
-    if (!_licensePreflight.ok) {
+    // When that check is inconclusive (killed by a signal, unreadable non-zero
+    // exit) licenseGate() launches the kernel directly — still async — and only
+    // lets WSTP start if it ran code. Never proceed on "no evidence".
+    const _gate = await _diagnose.licenseGate(kernelCommand);
+    const _licensePreflight = _gate.licensePreflight;
+    if (!_gate.proceed) {
         scrollLog('[launchKernel] licence preflight failed — WSTP launch skipped');
         self.kernelStatusString = 'error';
         applyKernelOfflineUI(self);
         await _reportKernelFailure(self, kernelCommand, 'pre-WSTP licence check failed', {
             licensePreflight: _licensePreflight,
+            directProbeResult: _gate.directProbe,
         });
         return;
     }
-    devLog(LOG_CHANNELS.KERNEL,
-        `[launchKernel] licence preflight ${_licensePreflight.verified ? 'verified' : 'clean exit; licence fields unconfirmed, continuing'} (${_licensePreflight.durationMs} ms)`);
+    devLog(LOG_CHANNELS.KERNEL, _gate.directProbe
+        ? `[launchKernel] licence preflight inconclusive (${_licensePreflight.signal ? 'signal ' + _licensePreflight.signal : 'exit ' + _licensePreflight.exitCode}); direct kernel launch succeeded in ${_gate.directProbe.durationMs} ms, continuing`
+        : `[launchKernel] licence preflight ${_licensePreflight.verified ? 'verified' : 'clean exit; licence fields unconfirmed, continuing'} (${_licensePreflight.durationMs} ms)`);
 
     try {
         devLog(LOG_CHANNELS.KERNEL, '[launchKernel] creating WstpSession…');
@@ -807,9 +887,13 @@ async function launchKernel(self, WstpSession) {
         clearKernelOfflineUI(self);
         // Notify renderer that a new session started — it will remove stale
         // Out[N]= labels and expand banners tagged with the old epoch.
-        try {
-            self._rendererMessaging.postMessage({ type: 'session-changed', epoch: self._sessionEpoch });
-        } catch (_) {}
+        // Our notebooks only: each kernel carries its own epoch, so a broadcast
+        // deletes the headers every OTHER kernel in this window just stamped.
+        if (typeof self._postToOwnedRenderers === 'function') {
+            self._postToOwnedRenderers({ type: 'session-changed', epoch: self._sessionEpoch });
+        } else {
+            try { self._rendererMessaging.postMessage({ type: 'session-changed', epoch: self._sessionEpoch }); } catch (_) {}
+        }
         // Process any cells that were queued while the kernel was launching
         // (e.g. via preVisualStart before the kernel was ready).
         // .then() callers also invoke checkoutExecutionQueue, but calling it
@@ -880,9 +964,9 @@ function quitKernel(self) {
     self._lastMainImgDir = null;
     self._lastMainImgRel = null;
     self._interruptHandlerInstalled = false;
-    // Clean exit — remove the PID file so the next launch doesn't try to kill
-    // processes that are already gone.
-    _clearPidFile();
+    // Clean exit — forget THIS kernel's PID only. The file is machine-wide;
+    // deleting it (as this used to) dropped every other kernel's record.
+    _removePid(self.kernelMetadata && self.kernelMetadata.pid);
     self.kernelStatusString = "unresolved";
     vscode.commands.executeCommand("setContext", "wolframKernelActive", false);
     applyKernelOfflineUI(self);
@@ -893,6 +977,11 @@ function quitKernel(self) {
 module.exports = {
     launchKernel,
     quitKernel,
+    _classifyPidEntry,
+    _killStalePids,
+    _appendPid,
+    _removePid,
+    _loadPidFile,
     prewarmSubKernel,
     applyKernelOfflineUI,
     clearKernelOfflineUI,

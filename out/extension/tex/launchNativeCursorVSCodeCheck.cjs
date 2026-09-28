@@ -11,6 +11,7 @@ const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
+const { spawnCode } = require('./vscodeTestLaunch.cjs');
 async function main() {
     const [runtime, code, paper, entry, pace = '120'] = process.argv.slice(2);
     if (!runtime || !code || !paper || !entry || ![runtime, code, paper].every(p => path.isAbsolute(p)))
@@ -28,7 +29,7 @@ async function main() {
     }, null, 2));
     console.log(`Isolated VS Code cursor check: ${run}`);
     // Its own artifact cache: the first session finds nothing kept.
-    const child = spawn(code, ['--wait', '--new-window', '--user-data-dir', profile,
+    const child = spawnCode(code, ['--wait', '--new-window', '--user-data-dir', profile,
         '--extensions-dir', path.join(run, 'extensions'),
         '--extensionDevelopmentPath', path.resolve(__dirname, '../../..'),
         '--extensionTestsPath', path.join(__dirname, 'verifyNativeCursorVSCode.cjs'),

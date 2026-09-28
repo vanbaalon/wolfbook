@@ -202,12 +202,44 @@ class WolframNotebookKernel {
         this._id                 = kernelOptions.controllerId || "wolfram-notebook-kernel";
         this._label              = kernelOptions.controllerLabel || "Wolfram Kernel";
         this._claimNotebook      = kernelOptions.claimNotebook || (() => true);
+        // Every window/workspace listener this kernel registers. They MUST die with
+        // the kernel: remote proxies are created and evicted for every other
+        // window's kernel generation, and an evicted proxy whose listeners live on
+        // is a zombie — dispose() sets it "unresolved", so on every tab switch its
+        // auto-launch fired an HTTP call at the dead owner ("Auto-launch failed:
+        // Remote kernel owner is unavailable"), one toast per dead generation.
+        this._disposables = [];
+        this._disposed    = false;
+        this._track = (d) => { if (d && typeof d.dispose === "function") this._disposables.push(d); return d; };
         // Renderer messages arrive on a channel shared by every kernel, so a
         // handler that talks to `this.session` must first check that this kernel
         // is the one bound to the notebook the message came from.
         this._ownsNotebook = (nb) => {
             if (!nb) return false;
             try { return !!this._claimNotebook(nb); } catch (_) { return false; }
+        };
+        // The visible wolfram notebooks this kernel is actually bound to.
+        // Everything that paints kernel state (offline gray, session epoch) must
+        // go through this: a bare postMessage() reaches EVERY renderer in the
+        // window, so a second kernel — above all the remote proxy this window
+        // creates for every OTHER window's kernel — repainted notebooks it does
+        // not own. That is what turned a live notebook gray and, because each
+        // kernel carries its own random _sessionEpoch, wiped every Out[N]=
+        // header as "stale" the moment a renderer reloaded.
+        this._ownedVisibleEditors = () => {
+            try {
+                return vscode.window.visibleNotebookEditors.filter(
+                    ed => ed.notebook?.notebookType === 'extended-wolfram-notebook'
+                        && this._ownsNotebook(ed.notebook));
+            } catch (_) { return []; }
+        };
+        // Post to this kernel's own renderers only. Returns how many got it.
+        this._postToOwnedRenderers = (msg) => {
+            let sent = 0;
+            for (const ed of this._ownedVisibleEditors()) {
+                try { this._rendererMessaging.postMessage(msg, ed); sent++; } catch (_) {}
+            }
+            return sent;
         };
         // The cell whose stored output carries this Manipulate. A kernel restart
         // strips the output header (it is tagged with the old session epoch), so
@@ -377,18 +409,26 @@ class WolframNotebookKernel {
         // Also restores per-notebook default output format from persistent storage.
         // Also sends session-changed so the renderer can clean up stale session elements
         // from a previous run (e.g. when the notebook is reopened without restarting VS Code).
-        vscode.window.onDidChangeVisibleNotebookEditors(() => {
-            if (this.kernelStatusString !== 'resolved') this._applyKernelOfflineUI();
+        this._track(vscode.window.onDidChangeVisibleNotebookEditors(() => {
+            // Only gray notebooks THIS kernel owns. A remote proxy (or an
+            // isolated kernel bound to nothing visible) owns no editor here, so
+            // its offline state must not touch the window.
+            if (this.kernelStatusString !== 'resolved' && this._ownedVisibleEditors().length) {
+                this._applyKernelOfflineUI();
+            }
             // Auto-launch kernel when a wolfram notebook becomes visible and kernel has
             // never been started (unresolved) in this session window.
-            if (this.kernelStatusString === 'unresolved') {
-                const _hasWolframNb = vscode.window.visibleNotebookEditors.some(
-                    ed => ed.notebook.notebookType === 'extended-wolfram-notebook'
-                );
-                if (_hasWolframNb) {
+            // Only for a notebook THIS kernel is bound to. Checking "any wolfram
+            // notebook is visible" made every never-started kernel in the window
+            // launch when an unrelated tab (e.g. an in-memory notebook getting its
+            // first editor) appeared — a stray WolframKernel for an idle isolated
+            // kernel, and for a remote proxy a call into another window. A remote
+            // proxy never launches anything: its owner does.
+            if (this.kernelStatusString === 'unresolved' && !this._disposed && !this.session?.isRemote) {
+                if (this._ownedVisibleEditors().length) {
                     scrollLog('[auto-launch] wolfram nb visible + kernel unresolved — scheduling launch in 800ms');
                     setTimeout(() => {
-                        if (this.kernelStatusString === 'unresolved') {
+                        if (this.kernelStatusString === 'unresolved' && !this._disposed && this._ownedVisibleEditors().length) {
                             scrollLog('[auto-launch] 800ms fired — launching kernel | queue:', this.executionQueue.queueLength());
                             this.launchKernel().then(() => {
                                 scrollLog('[auto-launch] launchKernel resolved | status:', this.kernelStatusString, '| queue:', this.executionQueue.queueLength());
@@ -404,12 +444,10 @@ class WolframNotebookKernel {
                     }, 800);
                 }
             }
-            // Send current epoch so renderer removes stale Out-headers/banners from old sessions
-            try {
-                this._rendererMessaging.postMessage(
-                    { type: 'session-changed', epoch: this._sessionEpoch }
-                );
-            } catch (_) {}
+            // Send current epoch so renderer removes stale Out-headers/banners from old
+            // sessions — to OUR notebooks only. Broadcast, another kernel's epoch
+            // deleted the headers this one had just stamped.
+            this._postToOwnedRenderers({ type: 'session-changed', epoch: this._sessionEpoch });
             // Restore per-notebook default format for newly visible notebooks
             if (this._extContext) {
                 for (const ed of vscode.window.visibleNotebookEditors) {
@@ -426,8 +464,10 @@ class WolframNotebookKernel {
                         if (savedExpr) this._notebookDefaultExprFormat.set(key, savedExpr);
                         if (savedGfx || savedExpr) {
                             try {
+                                // To THIS notebook only: broadcast, every visible
+                                // notebook took the last one's saved default.
                                 this._rendererMessaging.postMessage(
-                                    { type: 'nb-default-format', formatGfx: savedGfx || '', formatExpr: savedExpr || '' }
+                                    { type: 'nb-default-format', formatGfx: savedGfx || '', formatExpr: savedExpr || '' }, ed
                                 );
                             } catch (_) {}
                         }
@@ -494,11 +534,11 @@ class WolframNotebookKernel {
                     }
                 }
             }
-        });
+        }));
 
         // Save scroll position whenever the user scrolls a wolfram notebook.
         // Debounced 1 s so we don't thrash workspaceState on every wheel tick.
-        vscode.window.onDidChangeNotebookEditorVisibleRanges(event => {
+        this._track(vscode.window.onDidChangeNotebookEditorVisibleRanges(event => {
             if (event.notebookEditor.notebook.notebookType !== 'extended-wolfram-notebook') return;
             if (!this._extContext) return;
             const key    = event.notebookEditor.notebook.uri.toString();
@@ -509,7 +549,7 @@ class WolframNotebookKernel {
             this._scrollPosTimers.set(key, setTimeout(() => {
                 this._extContext.workspaceState.update('wolfbook.scrollPos.' + key, topCell);
             }, 1000));
-        });
+        }));
         // Scroll-after-evaluation tracking: stored by cell INDEX (number), not
         // object reference, because VS Code may return different proxy objects
         // from createNotebookCellExecution than were passed in.
@@ -573,7 +613,7 @@ class WolframNotebookKernel {
         // Claim all notebooks already open when the extension activates
         for (const nb of vscode.workspace.notebookDocuments) { _claimNotebook(nb); }
         // Claim notebooks opened later
-        vscode.workspace.onDidOpenNotebookDocument(nb => _claimNotebook(nb));
+        this._track(vscode.workspace.onDidOpenNotebookDocument(nb => _claimNotebook(nb)));
 
         // ---- Eagerly select controller when a wolfbook notebook becomes active ----
         // updateNotebookAffinity(Preferred) is not enough: VS Code runs its own
@@ -584,7 +624,7 @@ class WolframNotebookKernel {
         // Calling notebook.selectKernel with a specific id/extension silently
         // selects our controller (no picker UI) whenever the notebook becomes
         // the active editor, guaranteeing association before any keystroke.
-        if (this._autoSelectActive) vscode.window.onDidChangeActiveNotebookEditor(editor => {
+        if (this._autoSelectActive) this._track(vscode.window.onDidChangeActiveNotebookEditor(editor => {
             if (!editor) return;
             const nb = editor.notebook;
             if (nb.notebookType !== 'extended-wolfram-notebook') return;
@@ -595,14 +635,14 @@ class WolframNotebookKernel {
                 extension: 'wolfbook.wolfbook',
                 label:     this._controller.label,
             }).then(undefined, () => {});
-        });
+        }));
 
 
 
         // ---- Auto-GC when cells are deleted from any wolfram notebook ----
         // Runs _cleanupImgDir for the affected notebook so pasted/rendered images
         // whose cells were removed get deleted from img/<nbBase>/ immediately.
-        vscode.workspace.onDidChangeNotebookDocument(event => {
+        this._track(vscode.workspace.onDidChangeNotebookDocument(event => {
             const hasCellRemovals = event.cellChanges.some(c =>
                 c.document == null  // cell was removed (no longer has a document)
             ) || event.contentChanges.some(c => c.removedCells && c.removedCells.length > 0);
@@ -615,17 +655,28 @@ class WolframNotebookKernel {
             // fire on every keystroke-induced cell change while editing.
             clearTimeout(this._gcDebounce);
             this._gcDebounce = setTimeout(() => this._cleanupImgDir(notebook, imgDir), 15000);
-        });
+        }));
 
         // ---- Renderer messaging: expand / open-as-text buttons ----
         this._rendererMessaging = vscode.notebooks.createRendererMessaging("wolfram-notebook-renderer");
-        this._rendererMessaging.onDidReceiveMessage(async event => {
+        this._track(this._rendererMessaging.onDidReceiveMessage(async event => {
             const message = event.message;
             // event.editor is the NotebookEditor the renderer message came from.
             // Store its notebook URI so btl.log writes use the correct path even
             // when the user has moved focus to another panel (activeNotebookEditor
             // would be null in that case).
             const _eventNbUri = event.editor?.notebook?.uri;
+            // This channel is shared by EVERY kernel in the window, remote proxies
+            // included, so each message reaches all of them. Anything that is not
+            // keyed to state only one kernel holds (an output id in its registry, an
+            // open Dialog) must be answered by exactly one: the notebook's owner, or
+            // the default kernel for an editor-less event from an older VS Code.
+            // Without this, a click produced one "output info not found" toast per
+            // non-owning kernel, a doc lookup opened N times, and a non-owner's
+            // "No dialog open" raced the owner's real Dialog result.
+            const _mine = event.editor?.notebook
+                ? this._ownsNotebook(event.editor.notebook)
+                : this._id === "wolfram-notebook-kernel";
             if (DEV_MODE) this.outputPanel.print(`[Renderer] message: ${JSON.stringify(message)}`);
 
             // Renderer webview just registered its message listener — re-broadcast
@@ -633,10 +684,27 @@ class WolframNotebookKernel {
             // immediately (the initial kernel-offline sent during activate() may have
             // been dropped if the webview wasn't loaded yet).
             if (message.type === 'renderer-ready') {
+                // This channel is shared by every kernel in the window, so EVERY
+                // controller sees this message — including the remote proxy for
+                // another window's kernel. Answering for a notebook we do not own
+                // is what painted a live notebook gray and deleted its Out[N]=
+                // headers (our random epoch ≠ the epoch they were stamped with)
+                // every time a webview reloaded — i.e. on every window switch and
+                // after every freshly inserted output.
+                const _nb = event.editor?.notebook;
                 const _kState = this.kernelStatusString === 'resolved' ? 'kernel-online' : 'kernel-offline';
-                scrollLog('[renderer-ready] re-broadcasting', _kState, '| epoch:', this._sessionEpoch);
-                try { this._rendererMessaging.postMessage({ type: _kState }); } catch (_) {}
-                try { this._rendererMessaging.postMessage({ type: 'session-changed', epoch: this._sessionEpoch }); } catch (_) {}
+                if (_nb) {
+                    if (!this._ownsNotebook(_nb)) return;
+                    scrollLog('[renderer-ready] answering', _nb.uri?.fsPath, _kState, '| epoch:', this._sessionEpoch);
+                    try { this._rendererMessaging.postMessage({ type: _kState }, event.editor); } catch (_) {}
+                    try { this._rendererMessaging.postMessage({ type: 'session-changed', epoch: this._sessionEpoch }, event.editor); } catch (_) {}
+                    return;
+                }
+                // No editor on the event (older VS Code): fall back to our own
+                // renderers rather than the whole window, so the filter still holds.
+                const _n = this._postToOwnedRenderers({ type: _kState });
+                if (_n) this._postToOwnedRenderers({ type: 'session-changed', epoch: this._sessionEpoch });
+                scrollLog('[renderer-ready] no editor on event — answered', _n, 'owned renderer(s)', _kState);
                 return;
             }
 
@@ -719,7 +787,7 @@ class WolframNotebookKernel {
             if (message.type === "expand-truncated-output" && message.uuid) {
                 const info = this.truncatedOutputCells.get(message.uuid);
                 if (!info) {
-                    vscode.window.showWarningMessage("Cannot expand: output info not found.");
+                    if (_mine) vscode.window.showWarningMessage("Cannot expand: output info not found.");
                     return;
                 }
                 // Hard limits: 30-second render timeout + 1 MB HTML size guard.
@@ -783,7 +851,7 @@ class WolframNotebookKernel {
             } else if (message.type === "open-truncated-as-text" && message.uuid) {
                 const info = this.truncatedOutputCells.get(message.uuid);
                 if (!info) {
-                    vscode.window.showWarningMessage("Cannot open as text: output info not found.");
+                    if (_mine) vscode.window.showWarningMessage("Cannot open as text: output info not found.");
                     return;
                 }
                 try {
@@ -851,7 +919,7 @@ class WolframNotebookKernel {
                 const truncEntry = this.truncatedOutputCells.get(message.outputId);
                 const txtInfo = regEntry || truncEntry;
                 if (!txtInfo) {
-                    vscode.window.showWarningMessage("Cannot open as text: output info not found.");
+                    if (_mine) vscode.window.showWarningMessage("Cannot open as text: output info not found.");
                 } else {
                     try {
                         const pageWidth = this.config.get("notebook.textOutput.pageWidth") ?? 100;
@@ -965,6 +1033,7 @@ class WolframNotebookKernel {
                 }
 
             } else if (message.type === "scroll-to-output" && message.outputId) {
+                if (!_mine) return;
                 // Wrap button clicked — scroll to the top of that output's cell.
                 // Find the cell that owns this outputId by scanning all visible cells.
                 scrollLog('scroll-to-output received for outputId:', message.outputId);
@@ -1257,6 +1326,7 @@ class WolframNotebookKernel {
 
             // ---- Hover output → highlight source lines in the input cell ----
             if (message.type === 'hover-output') {
+                if (!_mine) return;
                 const nb = event.editor?.notebook;
                 if (nb && message.cellIdx != null) {
                     try {
@@ -1293,6 +1363,7 @@ class WolframNotebookKernel {
 
             // ---- Double-click output header → navigate cursor to source line ----
             if (message.type === 'goto-source') {
+                if (!_mine) return;
                 const nb = event.editor?.notebook;
                 const nbEditor = event.editor;
                 if (!nb || !nbEditor || message.cellIdx == null) return;
@@ -1332,6 +1403,7 @@ class WolframNotebookKernel {
             // symbol badge in ?*pattern* search results.  We delegate to the same
             // wolfbook.expandHoverDoc command used by hover-tooltip 📖 links.
             if (message.type === 'doc-lookup' && message.symbol) {
+                if (!_mine) return;
                 try {
                     await vscode.commands.executeCommand('wolfbook.expandHoverDoc', message.symbol);
                 } catch (err) {
@@ -1351,7 +1423,7 @@ class WolframNotebookKernel {
                         .catch(err => {
                             this._rendererMessaging.postMessage({ type: 'dialog-eval-error', error: err.message, requestId: rid });
                         });
-                } else {
+                } else if (_mine) {
                     this._rendererMessaging.postMessage({ type: 'dialog-eval-error', error: 'No dialog open', requestId: rid });
                 }
             }
@@ -1360,7 +1432,7 @@ class WolframNotebookKernel {
                     this.session.exitDialog(message.retVal || undefined).catch(() => {});
                 }
             }
-        });
+        }));
 
         // Config change → re-send to kernel
         this.config.onDidChange(config => {
@@ -1378,7 +1450,7 @@ class WolframNotebookKernel {
         });
 
         // Notebook selection
-        this._controller.onDidChangeSelectedNotebooks(({ notebook, selected }) => {
+        this._track(this._controller.onDidChangeSelectedNotebooks(({ notebook, selected }) => {
             if (selected) {
                 this.selectedNotebooks.add(notebook);
                 // Cancel any pending kernel shutdown (e.g. Save As deselects old notebook
@@ -1400,12 +1472,12 @@ class WolframNotebookKernel {
                     if (this.selectedNotebooks.size === 0) this.quitKernel();
                 }, 500);
             }
-        });
+        }));
 
         // Re-associate controller after "Save As": VS Code does NOT fire
         // onDidOpenNotebookDocument for Save As — it renames the URI in-place.
         // onDidRenameFiles IS fired; re-claim any renamed wolfbook notebook.
-        vscode.workspace.onDidRenameFiles(event => {
+        this._track(vscode.workspace.onDidRenameFiles(event => {
             for (const { newUri } of event.files) {
                 const nb = vscode.workspace.notebookDocuments.find(
                     n => n.uri.toString() === newUri.toString());
@@ -1414,10 +1486,10 @@ class WolframNotebookKernel {
                         nb, vscode.NotebookControllerAffinity.Preferred);
                 }
             }
-        });
+        }));
 
         // Clear syntax + runtime-message decorations when user edits
-        vscode.workspace.onDidChangeTextDocument(event => {
+        this._track(vscode.workspace.onDidChangeTextDocument(event => {
             const docUri = event.document.uri.toString();
             if (this.cellDecorations.has(docUri)) {
                 this.cellDecorations.delete(docUri);
@@ -1446,14 +1518,31 @@ class WolframNotebookKernel {
                 !this._suppressDirtyTracking) {
                 this._cellDirty.add(docUri);
             }
-        });
+        }));
     }
 
     // -----------------------------------------------------------------------
     dispose() {
-        this.quitKernel();
-        this._controller.dispose();
+        if (this._disposed) return;
+        this._disposed = true;
+        for (const d of this._disposables.splice(0)) { try { d.dispose(); } catch (_) {} }
+        clearTimeout(this._quitKernelTimer);
+        clearTimeout(this._gcDebounce);
+        for (const t of this._scrollPosTimers.values()) clearTimeout(t);
+        // NotebookConfig owns its onDidChangeConfiguration subscription.
+        try { this.config?.dispose?.(); } catch (_) {}
+        try { this.quitKernel(); } catch (_) {}
+        try { this._controller.dispose(); } catch (_) {}
+        // Per-kernel VS Code resources, released LAST (quitKernel may still log):
+        // one output channel, diagnostics and three decoration types per kernel —
+        // a remote proxy per foreign generation added another "Wolfram Language
+        // Notebook" channel every time.
+        for (const r of [this.outputPanel?.outputChannel, this.diagnosticCollection,
+            this.syntaxErrorDecoration, this.runtimeMsgDecoration, this.hoverOutputDecoration]) {
+            try { r?.dispose?.(); } catch (_) {}
+        }
     }
+
 
     // -----------------------------------------------------------------------
     writeDebugLog(message) {

@@ -20,6 +20,7 @@ const fs = require('fs');
 
 const {
     compile, saveGeneration, loadGeneration, probeInitCode, snapshotSources, MAX_PASSES_CODE, probeLualatex,
+    describeCompileFailure, describeExit,
 } = require('./compileService');
 const { RenderMap, FLAG } = require('./renderMap');
 const { GlyphMap } = require('./glyphMap');
@@ -396,6 +397,12 @@ class RenderCoordinator {
                 this._scheduleNativeRefresh(st, lane, 0);
                 return;
             }
+            // NOT WHILE A BUILD RUNS: it installs its own map when it lands,
+            // and a read now (hundreds of ms of this thread on a long paper)
+            // would be thrown away seconds later. Afterwards, only if the map
+            // is still behind (the build failed or was superseded).
+            if (st.compiling) { this._scheduleNativeRefresh(st, lane, 500); return; }
+            if (st.map?.native && st.map.available && this._nativeWindow(st).every(p => st.map.hasPage(p))) return;
             this._runNativeRefresh(st, lane).catch(() => {});
         }, delayMs);
     }
@@ -1137,7 +1144,10 @@ class RenderCoordinator {
             // disable the exact map for the rest of the session.
             if (wantGlyphMap && !gen.ok && !gen.cancelled && !ac.signal.aborted &&
                 primaryOpts.engine !== compileOpts.engine) {
-                this.log(`  lualatex produced no PDF (${gen.stopReason || 'unknown reason'}) — trying ${compileOpts.engine}`);
+                // Not "unknown reason": we are holding the exit code.
+                this.log(`  lualatex produced no PDF (${gen.stopReason
+                    || (gen.logWritten === false ? `exited ${describeExit(gen.exit)}, no log written`
+                                                 : `${gen.errors} error(s) in the log`)}) — trying ${compileOpts.engine}`);
                 glyphFallback = await compile({ ...compileOpts, maxPasses: null });
                 gen = glyphFallback;
             }
@@ -1186,21 +1196,35 @@ class RenderCoordinator {
             st.sourceAhead = !(gen.ok && gen.pdfPath && gen.sourceSnapshotHash &&
                 gen.sourceSnapshotHash === currentSnapshot);
             if (st.map.exact) this.log(st.map.native ? '  render map: native provenance' : '  render map: exact (GlyphMap)');
-            st.lastError = gen.dependencyIssue?.summary || (gen.ok ? null : (gen.stopReason || 'compile produced no PDF'));
+            // The preview shows this. "compile produced no PDF" sent a user round
+            // the same loop; name the launch failure instead when that is what it is.
+            st.lastError = gen.dependencyIssue?.summary || (gen.ok ? null
+                : gen.stopReason
+                || (gen.logWritten === false
+                    ? `latexmk exited ${describeExit(gen.exit)} without running — see the WPaper output channel`
+                    : 'compile produced no PDF'));
             if (gen.dependencyIssue) this._reportDependencyIssue(gen.dependencyIssue);
             saveGeneration(gen);
             // Tune the debounce to what this paper actually costs. gen.ms, not
             // the wall time: queue time is an artefact of the previous build,
             // and feeding it back would inflate the wait that caused it.
             if (live && gen.ok && !gen.cancelled) st.liveMsEwma = blendLiveMs(st.liveMsEwma, gen.ms);
+            // "0 error(s)" IS A CLAIM ABOUT THE DOCUMENT, so only make it when
+            // a log was actually read. A compile that died before LaTeX started
+            // has no error count — it has no evidence at all (issue #21).
+            const counts = (gen.ok || gen.logWritten !== false)
+                ? `${gen.errors} error(s) · ${gen.warnings} warning(s) · `
+                : 'no log written · ';
             this.log(`  ${gen.ok ? 'ok' : 'FAILED'} · ${gen.pageCount ?? '?'} pages · ` +
-                `${gen.errors} error(s) · ${gen.warnings} warning(s) · ` +
+                counts +
                 `${gen.passes ?? '?'} pass(es)${gen.passesLimited ? ' (capped)' : ''}` +
                 `${gen.runner === 'wlatex' ? ' (native preview; authoritative build pending)'
                     : gen.rerunWanted ? ' (cross-references one pass behind)' : ''} · ` +
                 `${gen.ms} ms${gen.queuedMs ? ` (+${gen.queuedMs} ms queued)` : ''} · ` +
                 `${Date.now() - t0} ms total`);
             if (!gen.ok && gen.stopReason) this.log(`  stopped: ${gen.stopReason}`);
+            // Everything the process told us that we used to discard.
+            for (const line of describeCompileFailure(gen)) this.log(`  ${line}`);
             // A BUILD THAT LEFT SOMETHING BEHIND SCHEDULES ITS OWN CORRECTION,
             // even if the reader types nothing more — which is the case that
             // matters for a new \label: it is typed once and then the reader

@@ -23,6 +23,14 @@ const {
     getMcpInfoPayload,
     writeRooCodeConfig,
     needsRooCodeConfigUpdate,
+    writeClaudeScienceConfig,
+    needsClaudeScienceConfigUpdate,
+    claudeScienceInstalled,
+    claudeSciencePlan,
+    installClaudeScienceBridge,
+    claudeScienceEntryState,
+    claudeScienceSandboxState,
+    grantClaudeScienceSandbox,
 } = require('../../claude-mcp/server');
 Module._load = originalLoad;
 
@@ -120,6 +128,19 @@ Module._load = originalLoad;
         );
         assert.strictEqual(needsConfigUpdate(bridgePath, nodeBin, [], home), false);
 
+        // Codex gets --profile=full: it defers MCP tools behind a search built from the
+        // FIRST tools/list and ignores tools/list_changed, so the auto profile would hide
+        // rare tools from it for good. An entry without the flag is stale.
+        const codexPath = path.join(home, '.codex', 'config.toml');
+        const codexToml = fs.readFileSync(codexPath, 'utf8');
+        assert.match(codexToml, /\[mcp_servers\.wolfbook\][\s\S]*args = \[".*stdio-bridge\.js", "--profile=full"\]/,
+            'Codex bridge args carry --profile=full');
+        assert.strictEqual((codexToml.match(/\[mcp_servers\.wolfbook\]/g) || []).length, 1, 'exactly one wolfbook block');
+        fs.writeFileSync(codexPath, codexToml.replace(', "--profile=full"', ''));
+        assert.strictEqual(needsConfigUpdate(bridgePath, nodeBin, [], home), true, 'a Codex entry without the flag is stale');
+        writeClaudeConfig(bridgePath, nodeBin, home, 27182, []);
+        assert.strictEqual(needsConfigUpdate(bridgePath, nodeBin, [], home), false, 'rewritten with the flag');
+
         // A legacy local entry that reappears is removed once user scope exists.
         claude.projects['/legacy'] = {
             mcpServers: {
@@ -182,6 +203,89 @@ Module._load = originalLoad;
         assert.strictEqual(roo.mcpServers['wolfbook-economy'].timeout, 600);
         assert.strictEqual(needsRooCodeConfigUpdate(bridgePath, nodeBin, home), false,
             'valid economy config must survive future eager activation checks');
+
+        // Claude Science: "Local command" connectors live in
+        // ~/.claude-science/mcp/local-mcp.json as { servers: [...] } and run in a
+        // sandbox that cannot read $HOME or reach TCP. Never create the app's data
+        // dir; never lose the user's other connectors; grant only what is needed.
+        const sock = '/private/tmp/wolfbook-mcp-501/mcp.sock';
+        const homeNode = path.join(home, '.local', 'node', 'bin', 'node');
+        fs.mkdirSync(path.dirname(homeNode), { recursive: true });
+        fs.writeFileSync(homeNode, '');
+        const plan0 = claudeSciencePlan(homeNode, home, { socketPath: sock, systemNodes: [] });
+        assert.strictEqual(claudeScienceInstalled(home), false);
+        assert.strictEqual(needsClaudeScienceConfigUpdate(plan0, home), false, 'not installed → nothing to do');
+        assert.strictEqual(writeClaudeScienceConfig(plan0, home).skipped, true);
+        assert(!fs.existsSync(path.join(home, '.claude-science')), 'must not create the app data dir');
+
+        // The plan: stable bridge copy, the socket, and exactly the grants they need.
+        const realHome = fs.realpathSync(home);
+        assert.strictEqual(plan0.bridge, path.join(realHome, '.wolfbook', 'mcp', 'stdio-bridge.js'));
+        assert.deepStrictEqual(plan0.readPaths, [path.join(realHome, '.wolfbook', 'mcp'), path.join(realHome, '.local', 'node')],
+            'a node inside $HOME needs its install root granted');
+        assert.deepStrictEqual(plan0.unixSockets, ['/private/tmp/wolfbook-mcp-501']);
+        const sysPlan = claudeSciencePlan(homeNode, home, { socketPath: sock, systemNodes: [process.execPath] });
+        if (!fs.realpathSync(process.execPath).startsWith(realHome + path.sep)) {
+            assert.strictEqual(sysPlan.node, fs.realpathSync(process.execPath), 'prefer a system node outside $HOME');
+            assert.deepStrictEqual(sysPlan.readPaths, [path.join(realHome, '.wolfbook', 'mcp')]);
+        }
+
+        const csDir = path.join(home, '.claude-science', 'mcp');
+        fs.mkdirSync(csDir, { recursive: true });
+        const csConfig = path.join(csDir, 'local-mcp.json');
+        const plan = claudeSciencePlan(homeNode, home, { socketPath: sock, systemNodes: [] });
+        assert.strictEqual(claudeScienceInstalled(home), true);
+        assert.strictEqual(needsClaudeScienceConfigUpdate(plan, home), false,
+            'activation never CREATES an entry — that needs the consented command');
+
+        // Bridge copy is byte-identical and only rewritten when it changed.
+        const realBridge = path.join(__dirname, '..', '..', 'claude-mcp', 'stdio-bridge.js');
+        assert.strictEqual(installClaudeScienceBridge(realBridge, plan), true);
+        assert(fs.readFileSync(plan.bridge).equals(fs.readFileSync(realBridge)));
+        assert.strictEqual(installClaudeScienceBridge(realBridge, plan), false);
+
+        fs.writeFileSync(csConfig, JSON.stringify({ servers: [
+            { name: 'other', command: 'npx', args: ['-y', 'x'], env: { K: 'v' } },
+            { name: 'wolfbook', command: '/old/node', args: ['/old/stdio-bridge.js', '--socket=/old.sock', '--profile=economy'],
+                env: { A: '1' }, description: 'mine' },
+        ] }));
+        assert.deepStrictEqual(claudeScienceEntryState(plan), { present: true, managed: true, current: false });
+        assert.strictEqual(needsClaudeScienceConfigUpdate(plan, home), true, 'a stale Wolfbook entry is repaired');
+        assert.strictEqual(writeClaudeScienceConfig(plan, home).updated, true);
+        const cs = JSON.parse(fs.readFileSync(csConfig, 'utf8'));
+        assert.deepStrictEqual(cs.servers[0], { name: 'other', command: 'npx', args: ['-y', 'x'], env: { K: 'v' } });
+        assert.deepStrictEqual(cs.servers[1], { name: 'wolfbook', command: plan.node,
+            args: [plan.bridge, `--socket=${sock}`, '--profile=economy'], env: { A: '1' }, description: 'mine' });
+        assert.strictEqual(fs.statSync(csConfig).mode & 0o777, 0o600, 'keeps the app\'s private file mode');
+        assert.strictEqual(needsClaudeScienceConfigUpdate(plan, home), false);
+
+        // Sandbox grants: missing → consented grant → present; the user's own entries survive.
+        const toml = path.join(home, '.claude-science', 'config.toml');
+        fs.writeFileSync(toml, '[update]\nchannel = "x"\n\n[sandbox]\nuser_read_paths = ["/data"]\n');
+        assert.deepStrictEqual(claudeScienceSandboxState(plan),
+            { ok: false, missingReads: plan.readPaths, missingSockets: plan.unixSockets });
+        assert.strictEqual(getMcpInfoPayload(bridgePath, homeNode, 0, false, false, home).configured.claudeScience, false,
+            'an entry the sandbox blocks is not "configured"');
+        assert.deepStrictEqual(grantClaudeScienceSandbox(plan), { ok: true, changed: true, tomlPath: toml });
+        const tomlText = fs.readFileSync(toml, 'utf8');
+        assert.match(tomlText, /^\[update\]\nchannel = "x"\n/);
+        assert(tomlText.includes(`user_read_paths = ["/data", "${plan.readPaths[0]}", "${plan.readPaths[1]}"]`));
+        assert(tomlText.includes('[sandbox.network]\nallow_unix_sockets = ["/private/tmp/wolfbook-mcp-501"]'));
+        assert.strictEqual(claudeScienceSandboxState(plan).ok, true);
+        assert.strictEqual(grantClaudeScienceSandbox(plan).changed, false, 'idempotent');
+
+        // A layout we cannot edit safely is refused, untouched.
+        fs.writeFileSync(toml, 'sandbox.network.enabled = true\n');
+        const refused = grantClaudeScienceSandbox(plan);
+        assert.strictEqual(refused.ok, false);
+        assert.strictEqual(fs.readFileSync(toml, 'utf8'), 'sandbox.network.enabled = true\n');
+
+        // A malformed connector file makes the app drop every local connector;
+        // don't "repair" it by overwriting the user's entries.
+        fs.writeFileSync(csConfig, '{ not json');
+        assert.strictEqual(needsClaudeScienceConfigUpdate(plan, home), false);
+        assert.strictEqual(writeClaudeScienceConfig(plan, home).updated, false);
+        assert.strictEqual(fs.readFileSync(csConfig, 'utf8'), '{ not json');
     } finally {
         fs.rmSync(home, { recursive: true, force: true });
     }

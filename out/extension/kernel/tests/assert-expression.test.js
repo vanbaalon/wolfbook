@@ -98,8 +98,8 @@ const schemas = [
     const actualSchemas = loadMCPSchemas(path.join(__dirname, '..', '..', '..', '..', 'package.json'));
     const actualEconomy = await new WolframMCPServer(new Map(), actualSchemas, { profile: 'economy' })
         ._dispatch('tools/list', {});
-    assert.strictEqual(actualEconomy.tools.length, ECONOMY_TOOL_NAMES.size + 3,
-        'all economy tools plus the three routing/wait helpers are advertised');
+    assert.strictEqual(actualEconomy.tools.length, ECONOMY_TOOL_NAMES.size + 4,
+        'all economy tools plus the routing/wait helpers and wolfbook_tools are advertised');
     assert(actualEconomy.tools.every(t => t.name.startsWith('wolfbook_')),
         'the real economy surface contains only wolfbook_* tools');
     assert(Buffer.byteLength(JSON.stringify(actualEconomy)) < 12 * 1024,

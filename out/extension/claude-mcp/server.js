@@ -1,15 +1,17 @@
 'use strict';
 // ---------------------------------------------------------------------------
-// Wolfbook MCP Server — HTTP/SSE transport
-// Exposes Wolfram notebook tools to Claude Desktop via MCP protocol.
+// Wolfbook MCP Server
+// Exposes Wolfram notebook tools to MCP clients. Runs inside the VS Code
+// extension process so it has full access to the vscode.* APIs the tools use.
 //
-// The server runs inside the VS Code extension process so it has full access
-// to all vscode.* APIs used by the tool implementations.
-//
-// Configuration in Claude Desktop (~/.../Claude/claude_desktop_config.json):
-//   { "mcpServers": { "wolfbook": { "url": "http://127.0.0.1:27182/sse" } } }
-//
-// Run wolfbook.configureClaude command to write this automatically.
+// Transports (all served by one handler):
+//   POST/GET/DELETE /mcp     Streamable HTTP (protocol 2025-03-26 and later)
+//   GET /sse + POST /message legacy HTTP+SSE (2024-11-05) — kept: the stdio
+//                            bridge and older clients use it
+// Both on 127.0.0.1:27182+ and, on macOS/Linux, a private Unix socket
+// (local-socket.js) for sandboxed hosts such as Claude Science.
+// Clients normally connect through stdio-bridge.js; the configure commands
+// write those entries.
 // ---------------------------------------------------------------------------
 
 const http   = require('http');
@@ -19,6 +21,9 @@ const fs     = require('fs');
 const { setMcpCallActive } = require('../tools/shared');
 const { McpResultStore, structuralSummary } = require('./result-store');
 const { runWithActivityContext } = require('../monitor/activity');
+const { ensurePrivateSocketDir, socketAlive } = require('./local-socket');
+const { toolAnnotations } = require('./tool-annotations');
+const auth = require('./auth');
 
 const DEFAULT_PORT  = 27182;
 const PORT_RANGE    = 20;  // try DEFAULT_PORT … DEFAULT_PORT+PORT_RANGE if busy
@@ -26,7 +31,23 @@ const OPERATION_WAIT_MS  = 300000;  // return control to the model every 5 minut
 const OPERATION_FAST_WAIT_MS = 2000; // complete quick calls inline; return a handle for slow work
 const OPERATION_LEASE_MS = 600000;  // forget transport waiter if the model is silent
 
-const MCP_PROFILES = new Set(['economy', 'notebook', 'slides', 'paper', 'full']);
+const MCP_PROFILES = new Set(['auto', 'economy', 'notebook', 'slides', 'paper', 'full']);
+
+// Protocol revisions this server speaks, newest first. initialize echoes the
+// client's version when it is here, else offers the newest (spec "Version
+// negotiation"). 2026-07-28 (stateless, no initialize) is not implemented yet.
+const MCP_PROTOCOL_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
+const MCP_LATEST_PROTOCOL = MCP_PROTOCOL_VERSIONS[0];
+function negotiateProtocolVersion(requested) {
+    return MCP_PROTOCOL_VERSIONS.includes(requested) ? requested : MCP_LATEST_PROTOCOL;
+}
+const HTTP_SESSION_IDLE_MS = 60 * 60 * 1000;   // Streamable HTTP session with no traffic and no stream
+const SOCKET_CHECK_MS = 60 * 1000;             // re-create the socket if /tmp cleaning removed it
+let _serverVersion = '0.0.0';
+try { _serverVersion = require('../../../package.json').version || _serverVersion; } catch (_) {}
+// Codex defers MCP tools and never re-fetches tools/list — see writeClaudeConfig.
+const CODEX_BRIDGE_PROFILE_ARG = '--profile=full';
+const exposure = require('./tool-exposure');
 
 // A deliberately small, still-complete notebook/kernel surface for models that
 // struggle with Wolfbook's full catalogue. Calls to unadvertised tools remain
@@ -105,6 +126,9 @@ const MCP_SERVER_INSTRUCTIONS =
     'launching wolframscript or WolframKernel in a terminal, and never edit Wolfbook ' +
     'notebook JSON with generic file tools. Use a direct/headless Wolfram process only ' +
     'when the user explicitly requests it or Wolfbook is unavailable. ' +
+    'Frequently used tools are always listed; slide and paper tools appear while a deck or .tex is open. ' +
+    'Rarer tools (debugger, literature search, slide/paper extras, ask-the-user, Oberon) are revealed with ' +
+    'wolfbook_tools (action "list", then "enable" or "call"). ' +
     // Claude Desktop has no local skill directory, so this string is the ONLY
     // guidance it ever sees — the SKILL.md section on this cannot reach it.
     'Show any result the user is meant to read as a Grid (e.g. ' +
@@ -117,7 +141,7 @@ const MCP_ECONOMY_INSTRUCTIONS =
     'Read notebook context before editing cells. Use the advertised Wolfbook tools ' +
     'for notebook edits, evaluation, results, status, and kernel control; do not edit ' +
     'Wolfbook notebook JSON or launch a separate Wolfram kernel. This is the compact ' +
-    'economy tool surface. Show user-facing tabular results as Grid, not Association.';
+    'economy tool surface; wolfbook_tools reveals more when needed. Show user-facing tabular results as Grid, not Association.';
 
 /**
  * Probe whether a Wolfbook MCP server is already running on the given port.
@@ -152,6 +176,19 @@ class WolframMCPServer {
         this._sessions = new Map();   // sessionId → http.ServerResponse (SSE)
         this._sessionConnectedAt = new Map();
         this._sessionProfiles = new Map(); // sessionId → per-connection tools/list profile
+        this._sessionProtocol = new Map(); // sessionId → negotiated protocol version
+        this._sessionTransport = new Map(); // sessionId → 'sse' | 'streamable-http'
+        this._httpSessions = new Map();    // Streamable HTTP sessionId → { lastSeen }
+        this._httpSessionSweep = null;
+        // Unix socket (set by extension.js; null in tests unless they opt in).
+        this._socketPath = operationOptions.socketPath || null;
+        this._socketServer = null;
+        this._socketCheck = null;
+        // Access (auth.js). Off unless extension.js turns it on, so tests stay simple.
+        this._requireAuth = !!operationOptions.requireAuth;
+        this._onNewClient = operationOptions.onNewClient || null;          // (name) → void, never blocks
+        this._isClientBlocked = operationOptions.isClientBlocked || null;  // (name) → bool
+        this._announcedClients = new Set();
         this._server  = null;
         this._port    = 0;
         this._secondary = false;  // true = another window owns the server; we just reuse its port
@@ -193,7 +230,59 @@ class WolframMCPServer {
         // this._tools, so every name keeps working — the zero-breakage guarantee.
         this._exposeDeprecatedTools = !!operationOptions.exposeDeprecatedTools;
         this._profile = MCP_PROFILES.has(operationOptions.profile)
-            ? operationOptions.profile : 'full';
+            ? operationOptions.profile : 'auto';
+        // Reveal-on-demand state (see tool-exposure.js). Per session: families and
+        // single tools the agent enabled with wolfbook_tools. Remembered per client
+        // name for 60 min so a reconnect keeps them, like _lastTargetByClient.
+        this._sessionExposure = new Map();     // sessionId → { families:Set, tools:Set }
+        this._exposureByClient = new Map();    // clientInfo.name → { families, tools, ts }
+        // Baseline = nothing open. Starting from "unknown" swallowed the FIRST change,
+        // so a deck opened before any other context event was never announced.
+        this._lastDocContextKey = '00';       // slides|paper flags last announced
+    }
+
+    _exposureFor(sessionId) {
+        if (!this._sessionExposure.has(sessionId)) {
+            this._sessionExposure.set(sessionId, { families: new Set(), tools: new Set() });
+        }
+        return this._sessionExposure.get(sessionId);
+    }
+
+    /** Open-document context across ALL windows: is a deck / a paper open anywhere? */
+    _docContext() {
+        let own = {};
+        try { own = require('./paper-routing').paperWindowInfo(); } catch (_) {}
+        const slides = (own.slideFiles || []).length > 0 ||
+            [...this._workers.values()].some(w => (w.slideFiles || []).length > 0);
+        const paper = (own.paperFiles || []).length > 0 ||
+            [...this._workers.values()].some(w => (w.paperFiles || []).length > 0);
+        return { slides, paper };
+    }
+
+    /** Tell sessions whose list depends on context that it changed. */
+    _checkDocContext() {
+        const ctx = this._docContext();
+        const key = `${ctx.slides ? 1 : 0}${ctx.paper ? 1 : 0}`;
+        if (key === this._lastDocContextKey) return;
+        this._lastDocContextKey = key;
+        for (const [sessionId, profile] of this._sessionProfiles) {
+            if (profile === 'auto') this._notifyToolsChanged(sessionId);
+        }
+    }
+
+    _notifyToolsChanged(sessionId) {
+        const sse = this._sessions.get(sessionId);
+        this._sendSSE(sse, { jsonrpc: '2.0', method: 'notifications/tools/list_changed' });
+    }
+
+    /** Listed for this session? Legacy profiles keep their old rules, plus anything enabled. */
+    _listedFor(t, sessionId, profile) {
+        const ex = this._sessionExposure.get(sessionId);
+        return exposure.isListed(t, {
+            profile, context: this._docContext(),
+            families: ex?.families, tools: ex?.tools,
+            exposeDeprecated: this._exposeDeprecatedTools,
+        }, (tool, p) => this._isToolVisible(tool, p));
     }
 
     /** Phase 0.2: should this schema entry appear in tools/list? */
@@ -268,7 +357,8 @@ class WolframMCPServer {
                 this._activity?.setPort(this._port);
                 this._activity?.setPrimary(true);
                 this._activity?.record({ type: 'system.monitor.started', state: 'completed', payload: { port: this._port } });
-                console.log(`[Wolfbook MCP] Listening on http://127.0.0.1:${this._port}/sse`);
+                console.log(`[Wolfbook MCP] Listening on http://127.0.0.1:${this._port}/mcp (legacy /sse)`);
+                this._listenSocket().catch(() => {});
                 // A primary can restart quickly enough that workers never hit
                 // their health-failure threshold. Re-discover the durable
                 // registry on every primary start, not only after an election.
@@ -286,6 +376,51 @@ class WolframMCPServer {
             });
         });
     }
+
+    /** Also serve on the private Unix socket (primary only; failures are non-fatal). */
+    async _listenSocket() {
+        const sockPath = this._socketPath;
+        if (!sockPath || this._socketServer) return;
+        try {
+            ensurePrivateSocketDir(path.dirname(sockPath));
+            if (fs.existsSync(sockPath)) {
+                // Another live server owns it: leave it. A crashed primary's file: take over.
+                if (await socketAlive(sockPath)) {
+                    console.warn(`[Wolfbook MCP] ${sockPath} is served by another process — not taking it over`);
+                    return;
+                }
+                fs.unlinkSync(sockPath);
+            }
+            const srv = http.createServer((req, res) => {
+                try { this._handle(req, res); }
+                catch (e) { if (!res.headersSent) { res.writeHead(500); res.end(); } }
+            });
+            await new Promise((resolve, reject) => {
+                srv.once('error', reject);
+                srv.listen(sockPath, () => { srv.off('error', reject); resolve(); });
+            });
+            try { fs.chmodSync(sockPath, 0o600); } catch (_) {}
+            this._socketServer = srv;
+            console.log(`[Wolfbook MCP] Also listening on unix:${sockPath}`);
+            if (!this._socketCheck) {
+                // macOS/Linux periodically clean /tmp; a removed socket file means
+                // no new connection can find us, so re-create it.
+                this._socketCheck = setInterval(() => {
+                    if (this._socketServer && !fs.existsSync(sockPath)) {
+                        const old = this._socketServer;
+                        this._socketServer = null;
+                        old.close();
+                        this._listenSocket().catch(() => {});
+                    }
+                }, SOCKET_CHECK_MS);
+                this._socketCheck.unref?.();
+            }
+        } catch (e) {
+            console.warn(`[Wolfbook MCP] Unix socket unavailable (${sockPath}): ${e.message}`);
+        }
+    }
+
+    get socketPath() { return this._socketServer ? this._socketPath : null; }
 
     get port() { return this._port; }
     get isSecondary() { return this._secondary; }
@@ -307,6 +442,7 @@ class WolframMCPServer {
     /** Called from extension.js when open notebooks change. */
     updateOwnNotebooks(notebooks) {
         this._ownNotebooks = notebooks || [];
+        this._checkDocContext();
     }
 
     setKernelProvider(provider) { this._getOwnKernels = provider; }
@@ -361,7 +497,7 @@ class WolframMCPServer {
         const body = JSON.stringify(event);
         const req = http.request({
             hostname: '127.0.0.1', port: worker.port, path: '/notebook-notice', method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+            headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body), ...auth.authHeaders() },
             timeout: 2000,
         }, res => res.resume());
         req.on('error', () => {});
@@ -393,7 +529,7 @@ class WolframMCPServer {
                 const req = http.request({
                     hostname: '127.0.0.1', port: w.workerPort,
                     path: '/new-primary', method: 'POST',
-                    headers: { 'Content-Length': 0 }, timeout: 1500,
+                    headers: { 'Content-Length': 0, ...auth.authHeaders() }, timeout: 1500,
                 }, res => { res.resume(); resolve(); });
                 req.on('error', () => resolve());
                 req.on('timeout', () => { req.destroy(); resolve(); });
@@ -404,7 +540,16 @@ class WolframMCPServer {
 
     stop() {
         for (const operationId of this._operations.keys()) this._forgetOperation(operationId);
+        if (this._httpSessionSweep) { clearInterval(this._httpSessionSweep); this._httpSessionSweep = null; }
         if (this._secondary) return Promise.resolve(); // not our server to close
+        if (this._socketCheck) { clearInterval(this._socketCheck); this._socketCheck = null; }
+        if (this._socketServer) {
+            const sock = this._socketServer;
+            this._socketServer = null;
+            sock.close();
+            // Only unlink the file we created; a successor may already own a new one.
+            try { if (fs.existsSync(this._socketPath)) fs.unlinkSync(this._socketPath); } catch (_) {}
+        }
         return new Promise(resolve => {
             if (this._server) this._server.close(() => resolve());
             else resolve();
@@ -423,18 +568,34 @@ class WolframMCPServer {
         if (req.headers.origin && req.headers.origin !== `http://127.0.0.1:${this._port}`) {
             res.writeHead(403); res.end('Browser origin is not allowed'); return;
         }
-        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+        // DNS rebinding: a page on evil.example resolved to 127.0.0.1 is "same-origin"
+        // for GETs (no Origin header) — its Host header still names evil.example.
+        if (!auth.isLocalHost(req)) { res.writeHead(403); res.end('Host is not allowed'); return; }
+        // Any other local process (another account, a sandboxed app) must hold the token.
+        // Open without it: /health (how bridges and new windows find the server) and
+        // GET /workers (read-only window list; the Overleaf extension's kernel picker
+        // cannot hold the token). Neither runs anything.
+        const openRoute = url.pathname === '/health' || (req.method === 'GET' && url.pathname === '/workers');
+        if (this._requireAuth && req.method !== 'OPTIONS' && !openRoute && !auth.isAuthorized(req)) {
+            auth.rejectUnauthorized(res); return;
+        }
+        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Mcp-Session-Id, MCP-Protocol-Version');
         if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
-        if (req.method === 'GET' && (url.pathname === '/sse' || url.pathname === '/sse/economy')) {
+        if (url.pathname === '/mcp' || url.pathname === '/mcp/economy') {
+            this._handleStreamable(req, res, url);
+        } else if (req.method === 'GET' && (url.pathname === '/sse' || url.pathname === '/sse/economy')) {
             this._handleSSE(req, res, url);
         } else if (req.method === 'POST' && url.pathname === '/message') {
             this._handleMessage(req, res, url);
         } else if (req.method === 'GET' && url.pathname === '/health') {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ status: 'ok', tools: this._schemas.length, port: this._port,
-                endpoints: { full: '/sse', economy: '/sse/economy' } }));
+                version: _serverVersion, protocolVersions: MCP_PROTOCOL_VERSIONS,
+                socket: this.socketPath,
+                endpoints: { full: '/sse', economy: '/sse/economy',
+                    streamable: '/mcp', streamableEconomy: '/mcp/economy' } }));
         } else if (req.method === 'POST' && url.pathname === '/register') {
             this._handleRegister(req, res);
         } else if (req.method === 'GET' && url.pathname === '/workers') {
@@ -461,6 +622,7 @@ class WolframMCPServer {
                         pid:       info.pid,
                         notebooks: info.notebooks || [],
                         paperFiles: info.paperFiles || [],
+                        slideFiles: info.slideFiles || [],
                         workspaceRoots: info.workspaceRoots || [],
                         kernels:   info.kernels || [],
                         generation: info.generation || null,
@@ -468,6 +630,7 @@ class WolframMCPServer {
                         workspace: info.workspace || this._workspaceFromClientId(info.clientId),
                     });
                 }
+                this._checkDocContext();
             } catch {}
             res.writeHead(200); res.end();
         });
@@ -485,27 +648,44 @@ class WolframMCPServer {
             'Connection':    'keep-alive',
         });
         res.flushHeaders?.();
+        this._openSession(sessionId, profile, 'sse');
         this._sessions.set(sessionId, res);
-        this._sessionConnectedAt.set(sessionId, Date.now());
-        this._sessionProfiles.set(sessionId, profile);
-        this._activity?.record({ type: 'agent.connected', source: 'mcp', agentSessionId: sessionId,
-            state: 'running', payload: this._hostActivityPayload({ transport: 'sse', profile }) });
         // MCP SSE transport: first event tells the client where to POST messages
         res.write(`event: endpoint\ndata: /message?sessionId=${sessionId}\n\n`);
-        req.on('close', () => {
-            // A synchronous request belongs to its transport. If the bridge or
-            // client disappears, do not leave its already-dispatched kernel
-            // evaluation orphaned. Explicit wait_mode:"async" work is the one
-            // exception: it was intentionally detached by the caller.
-            this._cancelSessionOperations(sessionId, 'MCP transport disconnected').catch(() => {});
-            this._activity?.record({ type: 'agent.disconnected', source: 'mcp', agentSessionId: sessionId,
-                agentName: this._sessionClientNames.get(sessionId) || null, state: 'completed', payload: { transport: 'sse' } });
-            this._sessions.delete(sessionId);
-            this._sessionConnectedAt.delete(sessionId);
-            this._sessionProfiles.delete(sessionId);
-            this._sessionTargets.delete(sessionId);  // release any target claim
-            this._sessionClientNames.delete(sessionId);
-        });
+        // A synchronous request belongs to its transport. If the bridge or
+        // client disappears, do not leave its already-dispatched kernel
+        // evaluation orphaned. Explicit wait_mode:"async" work is the one
+        // exception: it was intentionally detached by the caller.
+        req.on('close', () => this._endSession(sessionId, 'MCP transport disconnected'));
+    }
+
+    /** Register a session on either transport. */
+    _openSession(sessionId, profile, transport) {
+        this._sessionConnectedAt.set(sessionId, Date.now());
+        this._sessionProfiles.set(sessionId, profile);
+        this._sessionTransport.set(sessionId, transport);
+        this._activity?.record({ type: 'agent.connected', source: 'mcp', agentSessionId: sessionId,
+            state: 'running', payload: this._hostActivityPayload({ transport, profile }) });
+    }
+
+    /** Forget a session: SSE close, Streamable HTTP DELETE, or idle expiry. */
+    _endSession(sessionId, reason) {
+        if (!this._sessionConnectedAt.has(sessionId)) return;
+        const transport = this._sessionTransport.get(sessionId) || 'sse';
+        this._cancelSessionOperations(sessionId, reason).catch(() => {});
+        this._activity?.record({ type: 'agent.disconnected', source: 'mcp', agentSessionId: sessionId,
+            agentName: this._sessionClientNames.get(sessionId) || null, state: 'completed', payload: { transport } });
+        const stream = this._sessions.get(sessionId);
+        this._sessions.delete(sessionId);
+        if (transport !== 'sse' && stream && !stream.destroyed) stream.end();
+        this._httpSessions.delete(sessionId);
+        this._sessionConnectedAt.delete(sessionId);
+        this._sessionProfiles.delete(sessionId);
+        this._sessionProtocol.delete(sessionId);
+        this._sessionTransport.delete(sessionId);
+        this._sessionExposure.delete(sessionId);
+        this._sessionTargets.delete(sessionId);  // release any target claim
+        this._sessionClientNames.delete(sessionId);
     }
 
     // ── Message POST — JSON-RPC dispatch ──────────────────────────────────
@@ -529,43 +709,178 @@ class WolframMCPServer {
 
             let msg;
             try { msg = JSON.parse(body); } catch { return; }
+            const response = await this._processMessage(msg, sessionId);
+            if (response) this._sendSSE(sse, response);
+        });
+    }
 
-            // MCP cancellation is a notification, but the corresponding tool
-            // may already own a kernel lease. Propagate it to the execution
-            // registry/arbiter using the UUID injected for this request.
-            if (msg.id == null) {
-                if (msg.method === 'notifications/cancelled') {
-                    await this._cancelManagedRequest(sessionId, msg.params?.requestId,
-                        msg.params?.reason || 'MCP client cancelled request');
-                }
+    /** One JSON-RPC message from any transport → its response, or null for notifications. */
+    async _processMessage(msg, sessionId) {
+        // MCP cancellation is a notification, but the corresponding tool
+        // may already own a kernel lease. Propagate it to the execution
+        // registry/arbiter using the UUID injected for this request.
+        if (msg.id == null || typeof msg.method !== 'string') {
+            if (msg.method === 'notifications/cancelled') {
+                await this._cancelManagedRequest(sessionId, msg.params?.requestId,
+                    msg.params?.reason || 'MCP client cancelled request');
+            }
+            return null;
+        }
+
+        // wolfbook_tools {action:"call"} is the same request as calling the tool
+        // directly — rewrite it first so routing, operation tracking, bounding
+        // and the envelope are all exactly those of a direct call.
+        if (msg.method === 'tools/call') msg.params = this._unwrapToolsCall(msg.params || {});
+
+        const clientName = this._sessionClientNames.get(sessionId);
+        if (msg.method === 'tools/call' && clientName && this._isClientBlocked?.(clientName)) {
+            return { jsonrpc: '2.0', id: msg.id, result: this._toolErrorResult(new Error(
+                `The user has blocked "${clientName}" from using Wolfbook. They can allow it again with ` +
+                'the "Wolfbook: Manage Agent Access" command in VS Code.'), msg.params?.name) };
+        }
+
+        let result, error;
+        try {
+            const isManagedToolCall = msg.method === 'tools/call' &&
+                msg.params?.name !== 'wolfbook_waitEvaluation';
+            result = isManagedToolCall
+                ? await this._runManagedToolCall(msg.params || {}, sessionId, msg.id)
+                : await this._dispatch(msg.method, msg.params || {}, sessionId);
+        } catch (e) {
+            if (msg.method === 'tools/call') {
+                result = this._toolErrorResult(e, msg.params?.name);
+            } else {
+                const code = (typeof e.code === 'number') ? e.code : -32603;
+                error = { code, message: String(e.message || e) };
+            }
+        }
+
+        if (!error && msg.method === 'tools/call') {
+            result = this._finalizeToolResult(result, msg.params?.name, sessionId);
+        }
+
+        return error
+            ? { jsonrpc: '2.0', id: msg.id, error }
+            : { jsonrpc: '2.0', id: msg.id, result };
+    }
+
+    // ── Streamable HTTP (/mcp) ─────────────────────────────────────────────
+    /** Host header must name this machine — a DNS-rebinding page names its own host. */
+    _isLocalRequest(req) { return auth.isLocalHost(req); }
+
+    _jsonRpcHttpError(res, status, code, message, id = null) {
+        res.writeHead(status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ jsonrpc: '2.0', id, error: { code, message } }));
+    }
+
+    _handleStreamable(req, res, url) {
+        if (!this._isLocalRequest(req)) {
+            res.writeHead(403); res.end('Host is not allowed'); return;
+        }
+        const headerSession = req.headers['mcp-session-id'];
+        const known = headerSession && this._httpSessions.get(headerSession);
+
+        if (req.method === 'GET') {
+            // Server→client stream: tools/list_changed and other notifications.
+            if (!headerSession) return this._jsonRpcHttpError(res, 400, -32000, 'Mcp-Session-Id header required');
+            if (!known) return this._jsonRpcHttpError(res, 404, -32001, 'Unknown or expired MCP session');
+            if (!/text\/event-stream/.test(String(req.headers.accept || ''))) {
+                res.writeHead(406); res.end('Accept: text/event-stream required'); return;
+            }
+            res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache',
+                'Connection': 'keep-alive', 'Mcp-Session-Id': headerSession });
+            res.flushHeaders?.();
+            const previous = this._sessions.get(headerSession);
+            if (previous && previous !== res && !previous.destroyed) previous.end();
+            this._sessions.set(headerSession, res);
+            known.lastSeen = Date.now();
+            req.on('close', () => {
+                if (this._sessions.get(headerSession) === res) this._sessions.delete(headerSession);
+                const s = this._httpSessions.get(headerSession);
+                if (s) s.lastSeen = Date.now();
+            });
+            return;
+        }
+        if (req.method === 'DELETE') {
+            if (!known) return this._jsonRpcHttpError(res, 404, -32001, 'Unknown or expired MCP session');
+            this._endSession(headerSession, 'MCP client ended the session');
+            res.writeHead(200); res.end();
+            return;
+        }
+        if (req.method !== 'POST') {
+            res.writeHead(405, { Allow: 'GET, POST, DELETE' }); res.end(); return;
+        }
+        const pv = req.headers['mcp-protocol-version'];
+        if (pv && !MCP_PROTOCOL_VERSIONS.includes(pv)) {
+            return this._jsonRpcHttpError(res, 400, -32600, `Unsupported MCP-Protocol-Version: ${pv}`);
+        }
+
+        let body = '';
+        req.setEncoding('utf8');
+        req.on('data', chunk => {
+            body += chunk;
+            if (Buffer.byteLength(body) > 16 * 1024 * 1024) req.destroy();
+        });
+        req.on('end', async () => {
+            let msg;
+            try { msg = JSON.parse(body); } catch {
+                return this._jsonRpcHttpError(res, 400, -32700, 'Parse error');
+            }
+            if (Array.isArray(msg)) {
+                return this._jsonRpcHttpError(res, 400, -32600, 'JSON-RPC batches are not supported');
+            }
+            if (!msg || typeof msg !== 'object') {
+                return this._jsonRpcHttpError(res, 400, -32600, 'Invalid Request');
+            }
+
+            let sessionId = headerSession;
+            if (msg.method === 'initialize') {
+                sessionId = crypto.randomUUID();
+                const requestedProfile = url.pathname === '/mcp/economy'
+                    ? 'economy' : url.searchParams.get('profile');
+                const profile = MCP_PROFILES.has(requestedProfile) ? requestedProfile : this._profile;
+                this._openSession(sessionId, profile, 'streamable-http');
+                this._httpSessions.set(sessionId, { lastSeen: Date.now() });
+                this._startHttpSessionSweep();
+            } else if (!headerSession) {
+                return this._jsonRpcHttpError(res, 400, -32000, 'Mcp-Session-Id header required', msg.id ?? null);
+            } else if (!known) {
+                return this._jsonRpcHttpError(res, 404, -32001, 'Unknown or expired MCP session', msg.id ?? null);
+            } else {
+                known.lastSeen = Date.now();
+            }
+
+            // Notifications and client responses: accepted, no body.
+            if (msg.id == null || typeof msg.method !== 'string') {
+                res.writeHead(202); res.end();
+                await this._processMessage(msg, sessionId);
                 return;
             }
+            // A dropped connection is NOT a cancellation on this transport (spec);
+            // the client sends notifications/cancelled when it means one.
+            const response = await this._processMessage(msg, sessionId);
+            const s = this._httpSessions.get(sessionId);
+            if (s) s.lastSeen = Date.now();
+            if (res.destroyed || res.writableEnded) return;
+            res.writeHead(200, { 'Content-Type': 'application/json', 'Mcp-Session-Id': sessionId });
+            res.end(JSON.stringify(response));
+        });
+    }
 
-            let result, error;
-            try {
-                const isManagedToolCall = msg.method === 'tools/call' &&
-                    msg.params?.name !== 'wolfbook_waitEvaluation';
-                result = isManagedToolCall
-                    ? await this._runManagedToolCall(msg.params || {}, sessionId, msg.id)
-                    : await this._dispatch(msg.method, msg.params || {}, sessionId);
-            } catch (e) {
-                if (msg.method === 'tools/call') {
-                    result = this._toolErrorResult(e, msg.params?.name);
-                } else {
-                    const code = (typeof e.code === 'number') ? e.code : -32603;
-                    error = { code, message: String(e.message || e) };
+    /** Streamable HTTP sessions have no connection to close; expire idle ones. */
+    _startHttpSessionSweep() {
+        if (this._httpSessionSweep) return;
+        this._httpSessionSweep = setInterval(() => {
+            const now = Date.now();
+            for (const [sessionId, s] of this._httpSessions) {
+                const streaming = this._sessions.get(sessionId) && !this._sessions.get(sessionId).destroyed;
+                const busy = [...this._operations.values()].some(op => op?.sessionId === sessionId);
+                if (!streaming && !busy && now - s.lastSeen > HTTP_SESSION_IDLE_MS) {
+                    this._endSession(sessionId, 'MCP session expired');
                 }
             }
-
-            if (!error && msg.method === 'tools/call') {
-                result = this._finalizeToolResult(result, msg.params?.name, sessionId);
-            }
-
-            const response = error
-                ? { jsonrpc: '2.0', id: msg.id, error }
-                : { jsonrpc: '2.0', id: msg.id, result };
-            this._sendSSE(sse, response);
-        });
+        }, 5 * 60 * 1000);
+        this._httpSessionSweep.unref?.();
     }
 
     _sendSSE(sse, data) {
@@ -585,6 +900,70 @@ class WolframMCPServer {
         };
     }
 
+    /** wolfbook_tools {action:"call", name, arguments} → the plain tools/call it stands for. */
+    _unwrapToolsCall(params) {
+        const args = params?.arguments;
+        if (params?.name !== 'wolfbook_tools' || !args || args.action !== 'call') return params;
+        const target = String(args.name || '').trim();
+        if (!target || target === 'wolfbook_tools') return params;   // handled as an error below
+        const inner = args.arguments && typeof args.arguments === 'object' ? args.arguments : {};
+        return { ...params, name: target, arguments: inner };
+    }
+
+    _handleToolsTool(args, sessionId) {
+        const action = args.action || 'list';
+        const ex = this._exposureFor(sessionId);
+        const state = { families: ex.families, context: this._docContext() };
+        const text = (t, isError = false) => ({ content: [{ type: 'text', text: t }], isError });
+        if (action === 'list') {
+            return text('Tool families (core tools are always listed; call wolfbook_tools with action="enable" to add a family):\n' +
+                exposure.catalogue(this._schemas, state));
+        }
+        if (action === 'call') {
+            return text('action="call" needs name (a tool other than wolfbook_tools) and optional arguments.', true);
+        }
+        if (action !== 'enable' && action !== 'disable') return text(`Unknown action "${action}". Use list, enable, disable or call.`, true);
+        const req = exposure.resolveRequest(this._schemas, args.families, args.tools);
+        if (!req.families.length && !req.tools.length) {
+            return text(`Nothing to ${action}.` + (req.unknown.length ? ` Unknown: ${req.unknown.join(', ')}.` : '') +
+                ' Call wolfbook_tools with action="list" for the family ids.', true);
+        }
+        for (const fam of req.families) ex.families[action === 'enable' ? 'add' : 'delete'](fam);
+        for (const tool of req.tools) ex.tools[action === 'enable' ? 'add' : 'delete'](tool);
+        const clientName = this._sessionClientNames.get(sessionId);
+        if (clientName) this._exposureByClient.set(clientName, { families: [...ex.families], tools: [...ex.tools], ts: Date.now() });
+        this._notifyToolsChanged(sessionId);
+        const lines = [`${action === 'enable' ? 'Enabled' : 'Disabled'}: ${[...req.families, ...req.tools].join(', ')}.`];
+        if (req.unknown.length) lines.push(`Unknown (ignored): ${req.unknown.join(', ')}.`);
+        if (action === 'enable') {
+            const names = new Set(req.tools);
+            for (const t of this._schemas) if (req.families.includes(exposure.familyOf(t))) names.add(t.name);
+            const briefs = this._schemas.filter(t => names.has(t.name) && !exposure.REMOVED_TOOLS[t.name]).map(exposure.brief);
+            if (briefs.length) lines.push('', ...briefs);
+            lines.push('', 'Your tool list was refreshed. If these tools do not appear, call them through wolfbook_tools {action:"call", name, arguments}.');
+        }
+        return text(lines.join('\n'));
+    }
+
+    /** list_clients without the 10 KB of repetition: kernels carry counts, not the paths again. */
+    _compactClientList() {
+        const drop = obj => Object.fromEntries(Object.entries(obj).filter(([, v]) =>
+            v !== null && v !== undefined && !(Array.isArray(v) && v.length === 0)));
+        return this._buildClientList().map(c => drop({
+            clientId: c.clientId, role: c.role, workspace: c.workspace,
+            notebooks: [...new Set(c.notebooks || [])],
+            paperFiles: [...new Set(c.paperFiles || [])],
+            slideFiles: [...new Set(c.slideFiles || [])],
+            kernels: (c.kernels || []).map(k => drop({
+                kernel_id: k.kernel_id, label: k.kernel_label, default: k.is_default || undefined,
+                lifecycle: k.lifecycle, busy: k.busy || undefined,
+                notebooks: (k.notebooks || []).length,
+                active_operation: k.active_operation ? { id: k.active_operation.operationId, caption: k.active_operation.caption, elapsedMs: k.active_operation.elapsedMs } : undefined,
+                agents: (k.attached_agents || []).map(a => a.agent_name),
+            })),
+        }));
+    }
+
     _finalizeToolResult(input, toolName, sessionId) {
         let result = this._boundResult(input || { content: [] }, toolName, null, sessionId);
         const texts = (result.content || []).filter(part => part?.type === 'text').map(part => String(part.text || ''));
@@ -596,7 +975,10 @@ class WolframMCPServer {
         const existing = result.structuredContent && typeof result.structuredContent === 'object'
             ? result.structuredContent : {};
         const target = existing.target || result._wolfbookTarget || null;
-        const failed = !!result.isError || parsed?.ok === false || parsed?.error != null;
+        const EVAL_TOOLS = /^wolfbook_(evaluateExpression|insertCells|editCell|runCell|runCells|newNotebook)$/;
+        const textFailure = !parsed && !EVAL_TOOLS.test(toolName || '') &&
+            /^(?:error\b|❌|unknown (?:operation_id|client|tool|kernel)|missing (?:operation_id|required)|no (?:notebook|kernel) (?:is |could|found))/i.test(joined);
+        const failed = !!result.isError || parsed?.ok === false || parsed?.error != null || textFailure;
         const state = parsed?.state || existing.state || (failed ? 'failed' : 'completed');
         const code = parsed?.code || existing.code || (failed ? 'tool-error' : 'ok');
         const firstLine = joined.split('\n').find(line => line.trim())?.replace(/^#+\s*/, '').trim() || '';
@@ -613,6 +995,10 @@ class WolframMCPServer {
             (['pending', 'running', 'running-background'].includes(state) ? 'wait' : resultHandle ? 'getResult' : 'none');
         const envelope = {
             ok: !failed, state, code, message, tool: toolName || null,
+            // A plain-text body used to exist ONLY in content[]. Claude Code shows
+            // the model structuredContent when present, so it saw just the first
+            // line (status, notebook lists, getNotebookContext read …).
+            ...(!parsed && joined && joined !== message ? { text: joined } : {}),
             target,
             notebookRevision: parsed?.notebook_revision ?? parsed?.current_notebook_revision ?? existing.notebookRevision ?? null,
             cells: parsed?.cells || parsed?.edit?.deleted || existing.cells || [],
@@ -623,8 +1009,16 @@ class WolframMCPServer {
             remedy: parsed?.remedy || existing.remedy || null,
             ...(parsed ? { data: parsed } : existing.data !== undefined ? { data: existing.data } : {}),
         };
+        // Drop empty fields: every call paid ~200 bytes of nulls and [].
+        for (const [k, v] of Object.entries(envelope)) {
+            if (v === null || v === undefined || (Array.isArray(v) && v.length === 0) ||
+                (k === 'nextAction' && v === 'none')) delete envelope[k];
+        }
+        // JSON results: the text channel carries the same envelope, compact (MCP:
+        // "SHOULD also return the serialized JSON in a TextContent block"). It used to
+        // carry only the message line, so text-reading clients lost the data.
         if (parsed) result = { ...result, content: [
-            { type: 'text', text: message }, ...(result.content || []).filter(part => part?.type !== 'text')
+            { type: 'text', text: JSON.stringify(envelope) }, ...(result.content || []).filter(part => part?.type !== 'text')
         ] };
         delete result._wolfbookTarget;
         return { ...result, isError: failed, structuredContent: envelope };
@@ -636,13 +1030,27 @@ class WolframMCPServer {
             case 'initialize': {
                 const clientName = params?.clientInfo?.name;
                 const profile = this._sessionProfiles.get(sessionId) || this._profile;
-                if (clientName) this._sessionClientNames.set(sessionId, String(clientName));
+                if (clientName) {
+                    this._sessionClientNames.set(sessionId, String(clientName));
+                    const kept = this._exposureByClient.get(String(clientName));
+                    if (kept && Date.now() - kept.ts < 60 * 60 * 1000) {
+                        this._sessionExposure.set(sessionId, { families: new Set(kept.families), tools: new Set(kept.tools) });
+                    }
+                }
                 this._activity?.record({ type: 'agent.initialized', source: 'mcp', agentSessionId: sessionId,
                     agentName: clientName || null, state: 'running', payload: this._hostActivityPayload({ clientInfo: params?.clientInfo || null, protocolVersion: params?.protocolVersion || null, profile }) });
+                if (clientName && this._onNewClient && !this._announcedClients.has(String(clientName))) {
+                    this._announcedClients.add(String(clientName));
+                    try { this._onNewClient(String(clientName)); } catch (_) {}
+                }
+                const protocolVersion = negotiateProtocolVersion(params?.protocolVersion);
+                this._sessionProtocol.set(sessionId, protocolVersion);
+                const serverInfo = { name: profile === 'economy' ? 'wolfbook-economy' : 'wolfbook', version: _serverVersion };
+                if (protocolVersion >= '2025-06-18') serverInfo.title = 'Wolfbook';
                 return {
-                    protocolVersion: '2024-11-05',
-                    capabilities:    { tools: {} },
-                    serverInfo:      { name: profile === 'economy' ? 'wolfbook-economy' : 'wolfbook', version: '1.0.0' },
+                    protocolVersion,
+                    capabilities:    { tools: { listChanged: true } },
+                    serverInfo,
                     instructions:    profile === 'economy' ? MCP_ECONOMY_INSTRUCTIONS : MCP_SERVER_INSTRUCTIONS,
                 };
             }
@@ -652,31 +1060,37 @@ class WolframMCPServer {
 
             case 'tools/list': {
                 const profile = this._sessionProfiles.get(sessionId) || this._profile;
-                // Inject optional client_id param into every tool so the agent can
-                // target a specific window without calling wolfbook_list_clients first.
+                const protocol = this._sessionProtocol.get(sessionId) || '2024-11-05';
+                // Routing parameters. client_id routes any tool to a window; kernel_id
+                // only means something to kernel-scoped tools. They used to be injected
+                // into all 80 tools with ~180-char descriptions: 30.8 KB, 22 % of the
+                // whole tools/list payload (audit 2026-09-25).
                 const CLIENT_ID_PARAM = {
                     type: 'string',
                     description: profile === 'economy' ? 'Optional target window ID.' :
-                        'Target client ID, e.g. "VSCode[ClasterVersion]" or ' +
-                        '"Antigravity[ClasterVersion]". Omit to auto-route by notebook ' +
-                        'path. Use wolfbook_list_clients to see available clients.',
+                        'Target window (see wolfbook_list_clients). Omit to route by notebook or session target.',
                 };
                 const KERNEL_ID_PARAM = {
                     type: 'string',
                     description: profile === 'economy' ? 'Optional kernel binding assertion.' :
-                        'Opaque kernel ID from wolfbook_list_clients. For notebook tools this is an assertion; a changed binding is rejected.',
+                        'Kernel ID assertion; a changed binding is rejected.',
                 };
-                const injectClientId = (schema) => {
+                const wantsKernelId = name => /^wolfbook_/.test(name) || /^wolfslide_(insert|run)EvalBlock$/.test(name);
+                const injectRouting = (name, schema) => {
                     if (!schema || schema.type !== 'object') return schema;
-                    return { ...schema, properties: { ...schema.properties, client_id: CLIENT_ID_PARAM, kernel_id: KERNEL_ID_PARAM } };
+                    return { ...schema, properties: { ...schema.properties, client_id: CLIENT_ID_PARAM,
+                        ...(wantsKernelId(name) ? { kernel_id: KERNEL_ID_PARAM } : {}) } };
                 };
+                const listed = t => this._listedFor(t, sessionId, profile);
                 const tools = this._schemas
-                    .filter(t => this._isToolVisible(t, profile))
-                    .map(t => profile === 'economy' ? _economyToolSchema(t) : t)
-                    .map(({ tags, ...t }) => ({
+                    .filter(t => !Object.prototype.hasOwnProperty.call(exposure.SYNTHETIC_FAMILY, t.name))
+                    .filter(listed)
+                    .map(t => profile === 'economy' && ECONOMY_TOOL_NAMES.has(t.name) ? _economyToolSchema(t) : t)
+                    .map(({ tags, title, ...t }) => ({
                         ...t,
+                        ...(title && protocol >= '2025-06-18' ? { title } : {}),
                         description: this._describeTool({ ...t, tags }),
-                        inputSchema: injectClientId(t.inputSchema),
+                        inputSchema: injectRouting(t.name, t.inputSchema),
                     }));
                 // Synthetic tools — not in _tools map, handled in tools/call
                 tools.push({
@@ -731,15 +1145,50 @@ class WolframMCPServer {
                         required: ['operation_id'],
                     },
                 });
-                return { tools };
+                tools.push({
+                    name: 'wolfbook_tools',
+                    description: 'Reveal rarely used Wolfbook tools on demand. action="list" shows the tool families ' +
+                        '(slides/paper extras, debugging, literature search, ask-the-user, Oberon) and which are on; ' +
+                        '"enable"/"disable" add or remove families or single tools from your tool list; ' +
+                        '"call" runs any listed-or-hidden tool by name — use it if your client does not refresh its tool list.',
+                    inputSchema: {
+                        type: 'object',
+                        properties: {
+                            action: { type: 'string', enum: ['list', 'enable', 'disable', 'call'], description: 'Default list.' },
+                            families: { type: 'array', items: { type: 'string' }, description: 'Family ids for enable/disable, from action="list".' },
+                            tools: { type: 'array', items: { type: 'string' }, description: 'Single tool names for enable/disable.' },
+                            name: { type: 'string', description: 'Tool to run (action="call").' },
+                            arguments: { type: 'object', description: 'Arguments for the tool (action="call").' },
+                        },
+                        required: [],
+                    },
+                });
+                // Families apply to synthetic tools only under auto; the legacy profiles
+                // always listed all of them, and still do.
+                const visibleTools = tools.filter(t => !Object.prototype.hasOwnProperty.call(exposure.SYNTHETIC_FAMILY, t.name) ||
+                    profile !== 'auto' || listed({ name: t.name, tags: [] }));
+                // Tool annotations exist from 2025-03-26; an older client gets exactly the old list.
+                if (protocol >= '2025-03-26') {
+                    for (const t of visibleTools) {
+                        const annotations = toolAnnotations(t.name);
+                        if (annotations) t.annotations = annotations;
+                    }
+                }
+                return { tools: visibleTools };
             }
 
             case 'tools/call': {
+                params = this._unwrapToolsCall(params);
                 const { name, arguments: rawArgs } = params;
+
+                if (exposure.REMOVED_TOOLS[name]) {
+                    return { content: [{ type: 'text', text: `${name}: ${exposure.REMOVED_TOOLS[name]}` }], isError: true };
+                }
+                if (name === 'wolfbook_tools') return this._handleToolsTool(rawArgs || {}, sessionId);
 
                 // ── Synthetic: wolfbook_list_clients ────────────────────────
                 if (name === 'wolfbook_list_clients') {
-                    const clients = this._buildClientList();
+                    const clients = rawArgs?.detail === true ? this._buildClientList() : this._compactClientList();
                     return { content: [{ type: 'text', text: `${clients.length} Wolfbook window${clients.length === 1 ? '' : 's'} connected.` }],
                         structuredContent: { ok: true, state: 'completed', code: 'ok', message: 'Connected Wolfbook windows.', data: { clients } },
                         isError: false };
@@ -1210,15 +1659,31 @@ class WolframMCPServer {
         if (!operationId) {
             return { content: [{ type: 'text', text: 'Missing operation_id.' }], isError: true };
         }
+        // IDs this server issued for a call still running past the response window
+        // live HERE, not in any kernel registry. operationStatus used to probe only
+        // the kernels and answered "Unknown operation_id" for them.
+        const transportOp = this._operations.get(operationId);
+        if (transportOp) {
+            this._renewOperationLease(transportOp);
+            const settled = await this._waitForOperation(transportOp, waitSeconds * 1000);
+            if (!settled) return this._operationStillRunningResult(transportOp);
+            this._forgetOperation(operationId);
+            if (transportOp.status === 'rejected') throw transportOp.error;
+            return this._boundResult(transportOp.result, transportOp.name, transportOp.kernelId, sessionId);
+        }
         this._pruneWorkers();
 
         const target = targetClientId || this._sessionTargets.get(sessionId)?.clientId;
         if (target && target !== this._ownClientId) {
             const worker = this._workers.get(target);
-            if (!worker) return { content: [{ type: 'text', text: `Unknown client: "${target}".` }], isError: true };
-            return this._invokeWorker(worker.port, 'wolfbook_operationStatus', {
-                operation_id: operationId, include_progress: includeProgress, wait_seconds: waitSeconds, kernel_id: kernelId
-            });
+            if (worker) {
+                const direct = await this._invokeWorker(worker.port, 'wolfbook_operationStatus', {
+                    operation_id: operationId, include_progress: includeProgress, wait_seconds: waitSeconds, kernel_id: kernelId
+                }).catch(err => ({ content: [{ type: 'text', text: `Unknown operation_id (${err.message})` }], isError: true }));
+                // A miss in the named window falls through to probing every window:
+                // the UUID is the capability, not the window it was guessed to be in.
+                if (!this._isUnknownOperationResult(direct)) return direct;
+            }
         }
 
         const probeErrors = [];
@@ -1292,7 +1757,7 @@ class WolframMCPServer {
                 `Operation is still running after ${Math.max(1, Math.round(this._operationFastWaitMs / 1000))} seconds. It has not been aborted.\n\n` +
                 `Operation ID: ${operation.id}\n\n` +
                 'Choose one:\n' +
-                `- Continue: call wolfbook_waitEvaluation with operation_id="${operation.id}".\n` +
+                `- Continue: call wolfbook_operationStatus with operation_id="${operation.id}" and wait_seconds=300.\n` +
                 '- Stop: call wolfbook_kernelControl with action="abort".\n\n' +
                 'The operation remains discoverable in the execution journal even if the transport waiter expires.'
             }],
@@ -1560,6 +2025,7 @@ class WolframMCPServer {
                 headers:  {
                     'Content-Type':   'application/json',
                     'Content-Length': Buffer.byteLength(body),
+                    ...auth.authHeaders(),
                 },
                 timeout: 0,        // primary operation manager owns long-call deadlines
             }, res => {
@@ -1784,7 +2250,7 @@ class WolframMCPServer {
     /** Current MCP transports, kept separate from the durable event ledger so
      * interrupted extension hosts cannot leave ghost agents marked active. */
     _buildSessionList() {
-        return [...this._sessions.keys()].map(sessionId => {
+        return [...this._sessionConnectedAt.keys()].map(sessionId => {
             const target = this._sessionTargets.get(sessionId) || null;
             return {
                 sessionId,
@@ -1892,6 +2358,7 @@ function loadMCPSchemas(packageJsonPath) {
             description: t.modelDescription || t.displayName || t.name,
             inputSchema: sanitizeInputSchema(t.inputSchema || { type: 'object', properties: {} }),
             tags:        Array.isArray(t.tags) ? t.tags : [],
+            ...(t.displayName ? { title: t.displayName } : {}),
         }));
     } catch (e) {
         console.warn('[Wolfbook MCP] Could not load package.json schemas:', e.message);
@@ -2067,7 +2534,12 @@ function writeClaudeConfig(bridgePath, nodeBin, home, port, _workspacePaths) {
         try { if (fs.existsSync(codexConfigPath)) toml = fs.readFileSync(codexConfigPath, 'utf8'); } catch {}
 
         // Build the new mcp_servers.wolfbook block
-        const argsToml = '[' + [bridgePath].map(a => `"${a.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`).join(', ') + ']';
+        // Codex gets the full tool list. It defers MCP tools behind its own tool
+        // search, built from the FIRST tools/list, and ignores tools/list_changed
+        // (openai/codex #33266) — so under the "auto" profile it could never find a
+        // rarely used tool by searching, and listing everything costs it nothing up
+        // front. Eager clients keep the server default. Verified 2026-09-26, Codex 0.155.
+        const argsToml = '[' + [bridgePath, CODEX_BRIDGE_PROFILE_ARG].map(a => `"${a.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`).join(', ') + ']';
         const newBlock = `\n[mcp_servers.wolfbook]\ncommand = "${nodeBin.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"\nargs = ${argsToml}\n`;
 
         // Remove any existing [mcp_servers.wolfbook] section (up to next section header or EOF)
@@ -2185,9 +2657,10 @@ function needsConfigUpdate(bridgePath, nodeBin, _workspacePaths, home) {
     // Check Codex config.toml
     try {
         const toml = fs.readFileSync(path.join(home, '.codex', 'config.toml'), 'utf8');
-        // Simple check: both strings must appear in the wolfbook section
+        // Simple check: these strings must appear in the wolfbook section
         if (!toml.includes(`command = "${nodeBin}"`)) return true;
         if (!toml.includes(`"${bridgePath}"`)) return true;
+        if (!toml.includes(`"${CODEX_BRIDGE_PROFILE_ARG}"`)) return true;
     } catch { return true; }
 
     return false;
@@ -2229,6 +2702,212 @@ function needsAntigravityConfigUpdate(bridgePath, nodeBin) {
         const entry = cfg?.mcpServers?.wolfbook;
         return !entry || entry.command !== nodeBin || entry.args?.[0] !== bridgePath;
     } catch { return true; }
+}
+
+// ---------------------------------------------------------------------------
+// Claude Science (Anthropic's local science app, bundle id com.anthropic.operon)
+//
+// Connector file: ~/.claude-science/mcp/local-mcp.json → { servers: [ { name,
+// command, args, env, description } ] }. It is what the app's own Customize →
+// Connectors → "Local command" form writes, and the daemon re-reads it on
+// every listing. (Remote connectors must be public https — not an option.)
+//
+// Every local connector runs in a seatbelt sandbox (measured 2026-09-27):
+//   * reads of anything under $HOME are denied, except the app's own dirs and
+//     `[sandbox] user_read_paths` → node and the bridge must be granted;
+//   * outbound TCP (127.0.0.1:27182 included) is denied; the only way to a
+//     local process is `[sandbox.network] allow_unix_sockets` → the bridge
+//     talks to the primary's private socket (local-socket.js).
+// Both grants live in ~/.claude-science/config.toml, belong to the user, and
+// take effect after the app restarts. Wolfbook only writes them from the
+// configure command, after the user confirms — never at activation.
+// ---------------------------------------------------------------------------
+
+const CLAUDE_SCIENCE_DESCRIPTION = 'Wolfbook: live Wolfram kernel, notebooks, slides and papers in VS Code';
+
+function _claudeScienceDataDir(homeOverride) {
+    return path.join(homeOverride || process.env.HOME || process.env.USERPROFILE || '~', '.claude-science');
+}
+
+function _claudeScienceConfigPath(homeOverride) {
+    return path.join(_claudeScienceDataDir(homeOverride), 'mcp', 'local-mcp.json');
+}
+
+function _claudeScienceTomlPath(homeOverride) {
+    return path.join(_claudeScienceDataDir(homeOverride), 'config.toml');
+}
+
+function claudeScienceInstalled(homeOverride) {
+    return fs.existsSync(_claudeScienceDataDir(homeOverride));
+}
+
+function _realpath(p) { try { return fs.realpathSync(p); } catch (_) { return p; } }
+
+function _isUnder(child, parent) {
+    const rel = path.relative(parent, child);
+    return rel === '' || (!!rel && !rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
+/**
+ * Everything the Claude Science connector needs, computed once:
+ *  node        — a node the sandbox can read: the resolved one, or a system node
+ *                (/opt/homebrew, /usr/local) when the resolved one lives in $HOME;
+ *  bridge      — a stable copy of stdio-bridge.js (~/.wolfbook/mcp/), so the entry
+ *                survives extension upgrades (the extension path carries its version);
+ *  socketPath  — the primary's private Unix socket;
+ *  readPaths / unixSockets — the sandbox grants those require.
+ */
+function claudeSciencePlan(nodeBin, homeOverride, opts = {}) {
+    const home = _realpath(homeOverride || process.env.HOME || process.env.USERPROFILE || '~');
+    const socketPath = opts.socketPath !== undefined ? opts.socketPath : require('./local-socket').localSocketPath();
+    let node = _realpath(nodeBin);
+    if (_isUnder(node, home)) {
+        const systemNode = (opts.systemNodes || ['/opt/homebrew/bin/node', '/usr/local/bin/node'])
+            .map(_realpath).find(n => fs.existsSync(n) && !_isUnder(n, home) && validateNodeBinary(n).ok);
+        if (systemNode) node = systemNode;
+    }
+    const bridgeDir = path.join(home, '.wolfbook', 'mcp');
+    const readPaths = [bridgeDir];
+    // node lives in <root>/bin/node; the whole install root is harmless to read.
+    if (_isUnder(node, home)) readPaths.push(path.dirname(path.dirname(node)));
+    return {
+        node,
+        bridge: path.join(bridgeDir, 'stdio-bridge.js'),
+        socketPath,
+        readPaths,
+        unixSockets: socketPath ? [path.dirname(socketPath)] : [],
+        configPath: _claudeScienceConfigPath(homeOverride),
+        tomlPath: _claudeScienceTomlPath(homeOverride),
+    };
+}
+
+/** Copy the (self-contained) bridge to the plan's stable path when it differs. */
+function installClaudeScienceBridge(bridgePath, plan) {
+    const src = fs.readFileSync(bridgePath);
+    let current = null;
+    try { current = fs.readFileSync(plan.bridge); } catch (_) {}
+    if (current && current.equals(src)) return false;
+    fs.mkdirSync(path.dirname(plan.bridge), { recursive: true });
+    const tmp = plan.bridge + '.wolfbook.tmp';
+    fs.writeFileSync(tmp, src, { mode: 0o644 });
+    fs.renameSync(tmp, plan.bridge);
+    return true;
+}
+
+function _claudeScienceEntryArgs(plan, existingArgs) {
+    // Keep any flag the user added (e.g. --profile=economy); the socket is ours.
+    const extra = (Array.isArray(existingArgs) ? existingArgs.slice(1) : [])
+        .filter(a => typeof a === 'string' && !a.startsWith('--socket='));
+    return [plan.bridge, ...(plan.socketPath ? [`--socket=${plan.socketPath}`] : []), ...extra];
+}
+
+function _readClaudeScienceServers(configPath) {
+    const raw = fs.readFileSync(configPath, 'utf8');
+    if (!raw.trim()) return { servers: [] };
+    const config = JSON.parse(raw);
+    if (!Array.isArray(config.servers)) config.servers = [];
+    return config;
+}
+
+/** A wolfbook entry Wolfbook wrote (its first arg is a stdio-bridge.js). */
+function _isManagedClaudeScienceEntry(entry) {
+    const first = Array.isArray(entry?.args) ? entry.args[0] : '';
+    return typeof first === 'string' && path.basename(first) === 'stdio-bridge.js';
+}
+
+/** Write the wolfbook entry into Claude Science's local-mcp.json.
+ *  Returns { updated: bool, configPath: string, skipped: bool, error? }.
+ */
+function writeClaudeScienceConfig(plan, homeOverride) {
+    const configPath = plan.configPath;
+    if (!claudeScienceInstalled(homeOverride)) return { updated: false, configPath, skipped: true };
+    try {
+        // An unreadable file makes the app drop EVERY local connector, so never
+        // paper over it with a rewrite that loses the user's entries.
+        const config = fs.existsSync(configPath) ? _readClaudeScienceServers(configPath) : { servers: [] };
+        const i = config.servers.findIndex(s => s && s.name === 'wolfbook');
+        const existing = i >= 0 ? config.servers[i] : {};
+        const entry = {
+            ...existing,
+            name: 'wolfbook',
+            command: plan.node,
+            args: _claudeScienceEntryArgs(plan, existing.args),
+            env: existing.env && typeof existing.env === 'object' ? existing.env : {},
+            description: existing.description || CLAUDE_SCIENCE_DESCRIPTION,
+        };
+        if (i >= 0) config.servers[i] = entry; else config.servers.push(entry);
+        fs.mkdirSync(path.dirname(configPath), { recursive: true });
+        const tmp = configPath + '.wolfbook.tmp';
+        fs.writeFileSync(tmp, JSON.stringify(config, null, 2), { encoding: 'utf8', mode: 0o600 });
+        fs.renameSync(tmp, configPath);
+        return { updated: true, configPath, skipped: false };
+    } catch (e) {
+        console.warn('[Wolfbook MCP] Could not write Claude Science config:', e.message);
+        return { updated: false, configPath, skipped: false, error: e.message };
+    }
+}
+
+/** Is there a wolfbook entry, and does it match the plan? */
+function claudeScienceEntryState(plan) {
+    let config;
+    try { config = _readClaudeScienceServers(plan.configPath); }
+    catch (e) { return e.code === 'ENOENT' ? { present: false, current: false } : { present: false, current: false, unreadable: true }; }
+    const entry = config.servers.find(s => s && s.name === 'wolfbook');
+    if (!entry) return { present: false, current: false };
+    const current = entry.command === plan.node &&
+        JSON.stringify(entry.args) === JSON.stringify(_claudeScienceEntryArgs(plan, entry.args));
+    return { present: true, managed: _isManagedClaudeScienceEntry(entry), current };
+}
+
+/** Which of the plan's sandbox grants config.toml is missing. */
+function claudeScienceSandboxState(plan) {
+    const { readStringArray } = require('./toml-patch');
+    let text = '';
+    try { text = fs.readFileSync(plan.tomlPath, 'utf8'); } catch (_) {}
+    try {
+        const reads = readStringArray(text, 'sandbox', 'user_read_paths');
+        const socks = readStringArray(text, 'sandbox.network', 'allow_unix_sockets');
+        const missingReads = plan.readPaths.filter(p => !reads.includes(p));
+        const missingSockets = plan.unixSockets.filter(p => !socks.includes(p));
+        return { ok: !missingReads.length && !missingSockets.length, missingReads, missingSockets };
+    } catch (e) {
+        return { ok: false, missingReads: plan.readPaths, missingSockets: plan.unixSockets, unreadable: e.message };
+    }
+}
+
+/** The config.toml lines a user would paste by hand. */
+function claudeScienceTomlSnippet(plan) {
+    const { tomlString } = require('./toml-patch');
+    return `[sandbox]\nuser_read_paths = [${plan.readPaths.map(tomlString).join(', ')}]\n\n` +
+        `[sandbox.network]\nallow_unix_sockets = [${plan.unixSockets.map(tomlString).join(', ')}]\n`;
+}
+
+/** Add the plan's grants to config.toml. Only call after the user agreed.
+ *  Returns { ok, changed, tomlPath, error? } — error when the file's layout is not safely editable. */
+function grantClaudeScienceSandbox(plan) {
+    const { ensureStringArray } = require('./toml-patch');
+    const tomlPath = plan.tomlPath;
+    try {
+        let text = '';
+        let mode = 0o600;
+        try { text = fs.readFileSync(tomlPath, 'utf8'); mode = fs.statSync(tomlPath).mode & 0o777; } catch (e) { if (e.code !== 'ENOENT') throw e; }
+        const a = ensureStringArray(text, 'sandbox', 'user_read_paths', plan.readPaths);
+        const b = ensureStringArray(a.text, 'sandbox.network', 'allow_unix_sockets', plan.unixSockets);
+        if (!a.changed && !b.changed) return { ok: true, changed: false, tomlPath };
+        const tmp = tomlPath + '.wolfbook.tmp';
+        fs.writeFileSync(tmp, b.text.endsWith('\n') ? b.text : b.text + '\n', { encoding: 'utf8', mode });
+        fs.renameSync(tmp, tomlPath);
+        return { ok: true, changed: true, tomlPath };
+    } catch (e) {
+        return { ok: false, changed: false, tomlPath, error: e.message };
+    }
+}
+
+/** Activation-time repair only: refresh an EXISTING Wolfbook-written entry that went stale. */
+function needsClaudeScienceConfigUpdate(plan, homeOverride) {
+    if (!claudeScienceInstalled(homeOverride)) return false;
+    const st = claudeScienceEntryState(plan);
+    return st.present && st.managed && !st.current;
 }
 
 // ---------------------------------------------------------------------------
@@ -2521,6 +3200,7 @@ function getMcpInfoPayload(bridgePath, nodeBin, port, isSecondary, isDisabled, h
             : path.join(home, 'Library', 'Application Support', 'Code', 'User', 'globalStorage', 'rooveterinaryinc.roo-cline', 'settings', 'mcp_settings.json'),
         antigravity: path.join(home, '.gemini', 'antigravity', 'mcp_config.json'),
         codex:       path.join(home, '.codex', 'config.toml'),
+        claudeScience: _claudeScienceConfigPath(home),
     };
 
     const configured = {};
@@ -2533,6 +3213,14 @@ function getMcpInfoPayload(bridgePath, nodeBin, port, isSecondary, isDisabled, h
     } catch { configured.rooCode = false; }
     try { configured.antigravity   = !!(JSON.parse(fs.readFileSync(configPaths.antigravity, 'utf8'))?.mcpServers?.wolfbook); }    catch { configured.antigravity  = false; }
     try { configured.codex         = fs.readFileSync(configPaths.codex, 'utf8').includes('[mcp_servers.wolfbook]'); }            catch { configured.codex        = false; }
+    try {
+        // "Configured" = the entry exists AND the sandbox lets it run.
+        if (!claudeScienceInstalled(home)) configured.claudeScience = false;
+        else {
+            const plan = claudeSciencePlan(nodeBin, home);
+            configured.claudeScience = claudeScienceEntryState(plan).present && claudeScienceSandboxState(plan).ok;
+        }
+    } catch { configured.claudeScience = false; }
 
     const skillPaths = getAgentSkillPaths(home);
     const skillsInstalled = {
@@ -2542,15 +3230,19 @@ function getMcpInfoPayload(bridgePath, nodeBin, port, isSecondary, isDisabled, h
         cline: _skillTargetCurrent(skillPaths.cline),
         rooCode: _skillTargetCurrent(skillPaths.rooCode),
         antigravity: _skillTargetCurrent(skillPaths.antigravity),
+        claudeScience: null, // Guidance arrives via the MCP server instructions; no skill file is written.
     };
 
     return { port: port || 0, bridgePath, nodeBin, isSecondary: !!isSecondary, isDisabled: !!isDisabled,
         configPaths, configured, skillPaths, skillsInstalled };
 }
 
-module.exports = { WolframMCPServer, loadMCPSchemas, configureClaudeDesktop, writeClaudeConfig,
+module.exports = { WolframMCPServer, loadMCPSchemas, MCP_PROTOCOL_VERSIONS, negotiateProtocolVersion, configureClaudeDesktop, writeClaudeConfig,
     repairStaleClaudeConfigs, needsConfigUpdate, resolveNodeBinary, validateNodeBinary, probeExistingServer,
     writeAntigravityConfig, needsAntigravityConfigUpdate,
+    writeClaudeScienceConfig, needsClaudeScienceConfigUpdate, claudeScienceInstalled, claudeSciencePlan,
+    installClaudeScienceBridge, claudeScienceEntryState, claudeScienceSandboxState, claudeScienceTomlSnippet,
+    grantClaudeScienceSandbox,
     installAgentSkills, needsAgentSkillsInstall, getAgentSkillPaths,
     installAntigravitySkill, needsSkillInstall,
     writeClineConfig, needsClineConfigUpdate, writeRooCodeConfig, needsRooCodeConfigUpdate,

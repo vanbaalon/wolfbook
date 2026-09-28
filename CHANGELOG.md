@@ -4,6 +4,61 @@ All notable changes to **Wolfbook** are documented here.
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- **Repository CLI accounts.** The new **CLI Accounts** view in Wolfbook Controls
+  manages named Claude Code and Codex CLI profiles, remembers each repository's
+  selection, and provides sign-in, account checks, and terminal launches.
+  Profiles use separate CLI configuration directories outside repositories.
+  See [CLI accounts](docs/cli-accounts.md) for setup and scope.
+- **Claude Science support.** Wolfbook can now be a connector in Claude
+  Science, Anthropic's local research app. Run **Wolfbook: Configure Claude
+  Science MCP**, confirm, and restart Claude Science. When Claude Science is
+  installed, Wolfbook also offers this itself. Claude Science runs every
+  connector in a macOS sandbox that cannot read your home folder or open
+  network connections to other programs, so the first attempt failed with
+  `sandbox-exec: execvp() … Operation not permitted`. Wolfbook now connects
+  through a private socket instead of the network. It also copies its bridge to
+  a fixed path (`~/.wolfbook/mcp/`), so updates don't break the connector. The
+  two sandbox entries it needs in `~/.claude-science/config.toml` are written
+  only after you confirm a dialog listing them. If that file's layout can't be
+  edited safely, Wolfbook opens the lines for you to paste instead of guessing.
+  Manual setup is documented step by step.
+- **Current MCP protocol.** Wolfbook answered every client with the 2024-11-05
+  protocol version. It now uses whichever version the client asks for, up to
+  **2025-11-25**, and gives each tool a readable title.
+- **Tool annotations.** Every tool now says whether it only reads, adds,
+  overwrites or deletes, runs Wolfram code, or reaches the internet. Clients
+  use these hints to decide when to ask before a call, so looking at a
+  notebook no longer needs the same confirmation as deleting a cell. Clients on
+  2024-11-05 receive exactly the tool list they received before.
+- **Streamable HTTP endpoint.** The current MCP transport is served at
+  `http://127.0.0.1:27182/mcp` (and `/mcp/economy`). The older `/sse`
+  endpoint keeps working, and the stdio bridge still uses it.
+- **Wolfbook: Manage Agent Access.** Shows every AI agent that has connected
+  and lets you block or allow each one.
+
+### Security
+
+- **Local programs need Wolfbook's token.** Any program on the machine could
+  reach `127.0.0.1:27182`, or a Wolfbook window's internal port, and run
+  Wolfram code as you. That included other user accounts and sandboxed apps
+  allowed to use the network but not your files. TCP callers now present a
+  per-user token from `~/.wolfbook/mcp-token`, which only you can read. The
+  bridge, other Wolfbook windows and the Overleaf extension's local server
+  read it themselves, so agents you've already set up keep working with no
+  changes. Turn it off with `wolfbook.mcp.requireToken` if a client connects by
+  URL and can't send an `Authorization` header.
+- **DNS rebinding closed on every route.** A web page whose domain resolves to
+  `127.0.0.1` counts as the same origin, so its GET requests carry no `Origin`
+  header, and it could read the window and notebook list. Every route now
+  checks the `Host` header.
+- **A notice when a new agent connects.** The first time an agent connects,
+  Wolfbook shows one notice with a **Block** button. It never makes the agent
+  wait. Turn it off with `wolfbook.mcp.announceNewAgents`.
+
 ## [2.10.0] - 2026-09-10
 
 ### Fixed

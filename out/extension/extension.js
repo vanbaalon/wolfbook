@@ -45,6 +45,7 @@ async function activate(context) {
     // Resolve the diagnostic-log root before anything can write. Logs go to
     // globalStorage, never the workspace — see utils/log-paths.js.
     require('./utils/log-paths').init(context);
+    require('./agent-accounts').register(context);
 
     // Show a loading indicator while the extension activates
     const _loadingStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 1000);
@@ -802,6 +803,10 @@ async function activate(context) {
         return disposable;
     };
     _trackBuiltInKernelSelection(_defaultKernelEntry, true);
+    // Keep VS Code's controller affinity in step with KernelManager bindings —
+    // see kernel/affinity.js for why an MCP bind needs this.
+    const { syncBindingAffinities } = require('./kernel/affinity');
+    context.subscriptions.push(kernelManager.onDidChange(() => syncBindingAffinities(vscode, kernelManager)));
     let _creatingKernelFromPicker = false;
     const _selectKernelEntry = async (notebook, entry) => {
         if (!entry?.controller?._controller) return;
@@ -1433,15 +1438,42 @@ async function activate(context) {
         throw new Error(`Unknown control-room action: ${action}`);
     });
     context.subscriptions.push({ dispose: () => _activityMonitor.dispose() });
+    // Access control (claude-mcp/auth.js): an invisible per-user token for TCP
+    // callers, and a one-time, non-blocking notice when a new agent connects.
+    const _mcpRequireToken = config.get('mcp.requireToken', true) !== false;
+    if (_mcpRequireToken) {
+        try { require('./claude-mcp/auth').getToken({ create: true }); }
+        catch (e) { console.warn('[Wolfbook MCP] Could not create the access token:', e.message); }
+    }
+    const _AGENTS_KEY = 'wolfbook.mcp.agents';   // { [clientName]: { firstSeen, blocked } }
+    const _agentRecord = () => context.globalState.get(_AGENTS_KEY) || {};
+    const _onNewMcpClient = name => {
+        const agents = _agentRecord();
+        if (agents[name]) return;                  // seen before (in any window): stay quiet
+        context.globalState.update(_AGENTS_KEY, { ...agents, [name]: { firstSeen: Date.now(), blocked: false } });
+        if (!config.get('mcp.announceNewAgents', true)) return;
+        vscode.window.showInformationMessage(
+            `"${name}" connected to Wolfbook. It can run Wolfram code and edit your notebooks.`, 'OK', 'Block')
+            .then(pick => {
+                if (pick !== 'Block') return;
+                const now = _agentRecord();
+                context.globalState.update(_AGENTS_KEY, { ...now, [name]: { ...(now[name] || {}), blocked: true } });
+            });
+    };
     const _mcpExposureOptions = {
         canonicalProjection: config.get('mcp.canonicalOutputProjection', true),
         renderCache: config.get('mcp.renderCache', false),
         boundedResults: config.get('mcp.boundedResults', true),
         resultThreshold: config.get('mcp.resultHandleThreshold', 12000),
         exposeDeprecatedTools: config.get('mcp.exposeDeprecatedTools', false),
-        profile: config.get('mcp.profile', 'full'),
+        profile: config.get('mcp.profile', 'auto'),
         activityMonitor: _activityMonitor,
         notebookNotifier: event => require('./tools/shared').notifyAgentNotebookEvent(event),
+        requireAuth: _mcpRequireToken,
+        onNewClient: _onNewMcpClient,
+        isClientBlocked: name => !!_agentRecord()[name]?.blocked,
+        // Private Unix socket beside TCP, for sandboxed hosts (Claude Science).
+        socketPath: (() => { try { return require('./claude-mcp/local-socket').localSocketPath(); } catch (_) { return null; } })(),
     };
     let   _mcpServer = new WolframMCPServer(_toolMap, _mcpSchema, _mcpExposureOptions);
 
@@ -1688,6 +1720,7 @@ async function activate(context) {
             event => require('./tools/shared').notifyAgentNotebookEvent(event)
         );
         ws.activityMonitor = _activityMonitor;
+        ws.requireAuth = _mcpRequireToken;
         ws.updateNotebooks(_getOpenNbPaths());
         ws.onPromoted(async () => {
             devLog(LOG_CHANNELS.EXTENSION, '[Wolfbook MCP] Election won — promoting to primary');
@@ -1796,7 +1829,23 @@ async function activate(context) {
                 payload: { notebooks, kernels, category: 'diagnostic' } });
         } catch (_) {}
     };
+    // Copilot counterpart of the MCP "auto" profile: the slides/paper tool
+    // families declare `when` clauses on these keys (package.json).
+    let _docCtxKey = '';
+    const _syncDocContextKeys = () => {
+        try {
+            const info = require('./claude-mcp/paper-routing').paperWindowInfo();
+            const slides = (info.slideFiles || []).length > 0, paper = (info.paperFiles || []).length > 0;
+            const key = `${slides}|${paper}`;
+            if (key === _docCtxKey) return;
+            _docCtxKey = key;
+            vscode.commands.executeCommand('setContext', 'wolfbook.ctx.slides', slides);
+            vscode.commands.executeCommand('setContext', 'wolfbook.ctx.paper', paper);
+        } catch (_) {}
+    };
+    _syncDocContextKeys();
     const _syncNotebooks = () => {
+        _syncDocContextKeys();
         const paths = _getOpenNbPaths();
         _mcpServer.updateOwnNotebooks?.(paths);
         _workerServer?.updateNotebooks(paths);
@@ -1968,6 +2017,31 @@ async function activate(context) {
             vscode.window.showErrorMessage(`Failed to configure Roo Code: ${e.message}`);
         }
     }));
+
+    // Claude Science: command + activation pass (keeps an existing connector
+    // current; offers setup; never widens its sandbox without a modal consent).
+    context.subscriptions.push(vscode.commands.registerCommand('wolfbook.manageAgentAccess', async () => {
+        const agents = _agentRecord();
+        const names = Object.keys(agents).sort((a, b) => a.localeCompare(b));
+        if (!names.length) { vscode.window.showInformationMessage('No AI agent has connected to Wolfbook yet.'); return; }
+        const pick = await vscode.window.showQuickPick(names.map(name => ({
+            label: `${agents[name].blocked ? '$(circle-slash)' : '$(check)'} ${name}`,
+            description: agents[name].blocked ? 'blocked — select to allow' : 'allowed — select to block',
+            detail: agents[name].firstSeen ? `First connected ${new Date(agents[name].firstSeen).toLocaleString()}` : undefined,
+            name,
+        })), { title: 'Wolfbook: AI agents that have connected', placeHolder: 'Select an agent to allow or block it' });
+        if (!pick) return;
+        const now = _agentRecord();
+        const blocked = !now[pick.name]?.blocked;
+        await context.globalState.update(_AGENTS_KEY, { ...now, [pick.name]: { ...(now[pick.name] || {}), blocked } });
+        vscode.window.showInformationMessage(`"${pick.name}" is now ${blocked ? 'blocked from' : 'allowed to use'} Wolfbook.`);
+    }));
+
+    require('./claude-mcp/claude-science-setup').register(context, {
+        resolveNodeBinary,
+        checkNode: _checkNodeForMcpConfig,
+        mcpEnabled: !_mcpDisabled && !_mcpUnavailable,
+    });
 
     // Update WBDirectory[] and NotebookDirectory[] whenever the active notebook changes
     function _updateKernelNotebookDir(ed) {

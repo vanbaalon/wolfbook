@@ -21,37 +21,39 @@ Before writing, editing, or evaluating notebook cells, call `wolfbook_getNoteboo
 
 ## Available MCP tools
 
+Frequently used tools are always listed. Slide tools appear while a `.wslide` deck
+is open and paper tools while a `.tex` paper is open, in any Wolfbook window.
+Everything else is **on demand**: call `wolfbook_tools` with `action:"list"` to
+see the families, `action:"enable"` to add one to your tool list, or
+`action:"call"` to run any tool by name if your client does not refresh its list.
+
 | Tool | Use when |
 |------|----------|
-| `wolfbook_newNotebook` | Open an existing filesystem `.wb` or create one; preserve its binding or attach the default kernel before returning |
-| `wolfbook_getNotebookContext` | **Call first.** Read all cells + outputs; also action="save"/"list" |
-| `wolfbook_evaluateExpression` | Run a WL expression against the live kernel; returns result |
-| `wolfbook_lookupSymbol` | Look up usage, options, docs for any WL symbol; set fetchWeb:true for the full reference page |
-| `wolfbook_insertCells` | Add one or more cells; set evaluate:true to run the last code cell immediately |
-| `wolfbook_editCell` | Replace source of an existing cell; use cellId (preferred) or cellNumber |
-| `wolfbook_runCell` | Execute a cell by cellId or cellNumber; also supports range mode (startCell+endCell) |
-| `wolfbook_getCellOutput` | Read current output of a single cell |
-| `wolfbook_deleteCell` | Delete one or more cells (content is saved for recovery) |
-| `wolfbook_searchCells` | Search notebook cells by pattern — returns matching cell numbers and previews |
-| `wolfbook_inspectSymbols` | List user-defined symbols and their values (EVALUATES in the kernel; Wolfbook internals hidden by default). Formerly `wolfbook_getKernelState` — the old name still works |
-| `wolfbook_status` | ONE side-effect-free status surface: scope="all"\|"clients"\|"kernels"\|"operations"\|"notebook". Replaces `wolfbook_list_clients`/`wolfbook_kernelStatus` (both still work) |
-| `wolfbook_selfTest` | End-to-end MCP self-check (create → run → verify in kernel → save SHA → cleanup); run after an update or when tools misbehave |
-| `wolfbook_cancelOperation` | Cancel one operation by ID, or discard its future result without interrupting the kernel |
-| `wolfbook_exportSessionReport` | Export a filtered Markdown audit report of the retained session |
-| `wolfbook_moveCell` | Move a cell to a different position |
-| `wolfbook_restoreDeletedCells` | List or re-insert recently deleted cells |
-| `wolfbook_kernelControl` | Restart kernel (clears all state), abort a running evaluation, checkpoint/restore kernel state |
-| `wolfbook_kernelManager` | List/rename kernel IDs and bindings; explicitly create, bind, or stop a bounded private kernel (creation requires resource-cost acknowledgement) |
-| `wolfbook_selectKernel` | List kernels or select/default/create the kernel used by a notebook; notebooks may intentionally share one kernel |
-| `wolfbook_waitEvaluation` | Continue waiting for an operation that exceeded the five-minute MCP response window |
-| `wolfbook_kernelCrashLog` | Read kernel debug / crash logs |
-| `wolfbook_findPackage` | Discover packages on Paclet Server + GitHub |
-| `wolfbook_debugCell` | Step-through debugger: analyse, start, step, breakpoints, watch |
-| `wolfbook_fileOps` | Read / write / list workspace files (action="read"\|"write"\|"list") |
-| `wolfbook_runTerminal` | Run a shell command; returns stdout/stderr |
-| `wolfbook_validateSyntax` | Check Wolfram Language syntax in one or more cells |
-| `wolfbook_latex` | Save, compile, and inspect LaTeX errors (action="build"\|"save"\|"compile"\|"errors") |
-| `wolfbook_paperSearch` | Search academic papers via INSPIRE-HEP / arXiv / Semantic Scholar |
+| `wolfbook_getNotebookContext` | **Call first.** Read cells + outputs (`brief`, ranges, `since_revision` for large notebooks) |
+| `wolfbook_newNotebook` | Open or create a `.wb` and make it the session target |
+| `wolfbook_evaluateExpression` | Evaluate WL in the live kernel; `expect` asserts in the same round trip |
+| `wolfbook_insertCells` / `wolfbook_editCell` / `wolfbook_deleteCell` | Change cells by CellId; code cells evaluate by default on insert |
+| `wolfbook_runCell` | Re-run a cell or a startCell..endCell range |
+| `wolfbook_getCellOutput` | One cell's output and run state, without re-running |
+| `wolfbook_saveNotebook` | Save and verify the bytes on disk |
+| `wolfbook_lookupSymbol` | Usage, options and docs for a WL symbol |
+| `wolfbook_status` | Side-effect-free snapshot: windows, kernels, operations, target notebook |
+| `wolfbook_operationStatus` | Follow any operation ID; `wait_seconds` waits and returns the result |
+| `wolfbook_getResult` | Read more of a result that was cut off |
+| `wolfbook_cancelOperation` / `wolfbook_kernelControl` | Cancel one operation; restart / abort / checkpoint the kernel |
+| `wolfbook_kernelManager` | Kernels and notebook bindings |
+| `wolfbook_evaluationJournal` | Recent operations; `action:"digest"` to re-orient after compaction |
+| `wolfbook_list_clients` / `wolfbook_setTarget` | Windows, and the session's default window/notebook |
+| `wolfbook_tools` | Reveal the families below |
+
+On-demand families (`wolfbook_tools`): **notebook_more** (searchCells, moveCell,
+restoreDeletedCells, inspectSymbols, validateSyntax, showImage, agent notes, session
+report), **debug** (debugCell, kernelCrashLog, selfTest), **research**
+(literatureSearch — published papers via INSPIRE/arXiv; findPackage; skilxiv),
+**slides** / **slides_more**, **paper** / **paper_more**, **human** (wolfteam_* pop-ups
+that ask the user), **oberon** (Fairy sub-agent, gold suite).
+
+For files and shell commands use your own tools; never write `.wb`/`.evsnb`/`.vsnb`/`.nb` files directly.
 
 ## Editing LaTeX papers semantically
 
@@ -82,9 +84,9 @@ Before writing, editing, or evaluating notebook cells, call `wolfbook_getNoteboo
 
 ## Notebook safety rules
 
-- **Never** modify `.wb` / `.evsnb` notebook JSON directly with `wolfbook_fileOps` write.
+- **Never** modify `.wb` / `.evsnb` notebook JSON directly with file tools.
 - For notebook changes, always use cell tools (`wolfbook_insertCells`, `wolfbook_editCell`, `wolfbook_deleteCell`, `wolfbook_moveCell`).
-- Use `wolfbook_fileOps` only for non-notebook workspace files (`.wl`, `.md`, `.tex`, `.csv`, etc.).
+- Non-notebook files (`.wl`, `.md`, `.csv`, …) are edited with your own file tools; `.tex` papers with the `paper_*` tools.
 
 ## Multi-step tasks
 
@@ -183,16 +185,16 @@ Grid[{{"Absolute", absoluteResidual},
 - Default timeout = 30 s (single cell) or 120 s (range mode). Use `timeoutSeconds` to increase.
 - For work that is expected to outlive the current turn, pass
   `wait_mode:"async"` and a concise `caption`. The tool returns immediately with
-  a durable operation ID; poll it with `wolfbook_operationStatus` or wait with
-  `wolfbook_waitEvaluation`. The UUID remains valid after an SSE reconnect and
+  a durable operation ID; follow it with `wolfbook_operationStatus` (pass
+  `wait_seconds` to wait for the result). The UUID remains valid after an SSE reconnect and
   is discovered across registered Wolfbook windows without restoring the old
   session target.
 - If an MCP call is still running after five minutes, Wolfbook returns an
-  operation ID without aborting it. Call `wolfbook_waitEvaluation` with that ID
-  to wait another five minutes, or `wolfbook_kernelControl` with action="abort"
+  operation ID without aborting it. Call `wolfbook_operationStatus` with that ID
+  and `wait_seconds:300` to wait another five minutes, or `wolfbook_kernelControl` with action="abort"
   to stop it. Transport expiry never aborts unrelated kernel work.
 - If a tool returns "timed out … execution may still be running", the kernel is still busy.
-  - Poll `wolfbook_operationStatus` or resume with `wolfbook_waitEvaluation` using its operation ID.
+  - Follow it with `wolfbook_operationStatus` (optionally `wait_seconds`) using its operation ID.
   - To stop it, explicitly call `wolfbook_kernelControl` with action="abort" and that operation ID.
 - Use `wolfbook_status` (side-effect-free), never `wolfbook_inspectSymbols`, to check busy state without touching WSTP.
 - Print output, message tags, and any changing `progress_symbol` appear as

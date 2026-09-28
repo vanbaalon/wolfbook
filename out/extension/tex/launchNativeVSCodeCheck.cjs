@@ -3,6 +3,7 @@ const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
+const { spawnCode } = require('./vscodeTestLaunch.cjs');
 async function main() {
     const [runtime, code, mode = 'native', eol = 'lf'] = process.argv.slice(2);
     if (!['lf', 'crlf'].includes(eol)) throw Error('Unknown line ending mode');
@@ -28,7 +29,7 @@ async function main() {
     console.log(`Isolated VS Code acceptance: ${run}`);
     const env = { ...process.env };
     if (mode !== 'native') delete env.WLATEX_HOME;
-    const child = spawn(code, ['--wait', '--new-window', '--user-data-dir', profile,
+    const child = spawnCode(code, ['--wait', '--new-window', '--user-data-dir', profile,
         '--extensions-dir', path.join(run,'extensions'),
         '--extensionDevelopmentPath', path.resolve(__dirname,'../../..'),
         '--extensionTestsPath', path.join(__dirname,'verifyNativeVSCode.cjs'),

@@ -671,12 +671,25 @@ t('a provider deck push cancels the pending autosave', () => {
 
 // ── renderer parity ───────────────────────────────────────────────────────
 //
-// The editor has THREE code paths that turn a slide into DOM: the canvas, the
-// thumbnail panel, and the off-screen measurement stage. Each drift between
-// them is a bug where one view disagrees with another — thumbnails showed raw
-// LaTeX for months because only the canvas ran KaTeX.
+// The editor has FIVE code paths that turn a slide into DOM: the canvas, the
+// thumbnail panel, the off-screen measurement stage, the export serializer and
+// the presenter. Each drift between them is a bug where one view disagrees with
+// another — thumbnails showed raw LaTeX for months because only the canvas ran
+// KaTeX, and the presenter skipped the slide font scale, so a deck built at
+// `scale: 1.45` re-wrapped every line the moment it went on the projector.
 
 console.log('renderer parity');
+
+// The five renderers, sliced by their REAL end marker. A fixed-length window
+// overruns into the next function and passes on ITS text — which is exactly how
+// the presenter went unchecked while sitting next to a compliant neighbour.
+const RENDERERS = [
+    ['renderSlide',                 'function renderSlide()',                '\nfunction resolveSlideScale'],
+    ['renderThumbContent',          'function renderThumbContent(',          'Structural hash to detect'],
+    ['measureSlideOffscreen',       'async function measureSlideOffscreen',  '\nfunction applyContainerLayout'],
+    ['buildSlideContentForExport',  'function buildSlideContentForExport(',  '\n// Tag blocks that have a fragmentOrder'],
+    ['populatePanel',               'function populatePanel(',               '\nfunction buildPresSlide'],
+];
 
 function rendererBody(name) {
     const html = fs.readFileSync(WEBVIEW, 'utf8');
@@ -685,20 +698,97 @@ function rendererBody(name) {
     return html.slice(i, i + 3200);
 }
 
-for (const r of ['function renderSlide()', 'function renderThumbContent(', 'async function measureSlideOffscreen']) {
-    t(`${r.replace(/function |\(\)|\(/g, '').trim()} typesets math`, () => {
-        assert.ok(/renderMathInElement/.test(rendererBody(r)),
-            'a renderer that skips KaTeX shows raw $…$ where the others show a formula');
+function renderRegion(entry) {
+    const [, from, to] = entry;
+    const html = fs.readFileSync(WEBVIEW, 'utf8');
+    const i = html.indexOf(from), j = html.indexOf(to, i);
+    assert.ok(i > 0, `${entry[0]}: start marker not found`);
+    assert.ok(j > i, `${entry[0]}: end marker not found — the guard would scan the wrong region`);
+    return html.slice(i, j);
+}
+
+for (const entry of RENDERERS) {
+    const [name] = entry;
+    t(`${name} builds its stage with buildSlideContentDiv`, () => {
+        // Stage size, container layout, padding and the slide/deck font scale
+        // all live in that one helper. A renderer that hand-rolls its root is
+        // one edit away from disagreeing with the other four about any of them.
+        const body = renderRegion(entry);
+        assert.ok(/buildSlideContentDiv\(/.test(body),
+            `${name} builds its own .slide-content root — the font scale WILL drift`);
+        assert.ok(!/contentDiv\.className = 'slide-content'/.test(body),
+            `${name} still hand-rolls the stage`);
     });
-    t(`${r.replace(/function |\(\)|\(/g, '').trim()} applies the slide font scale`, () => {
-        assert.ok(/resolveSlideScale/.test(rendererBody(r)),
-            'skipping the scale renders the slide at a different size than the canvas');
-    });
-    t(`${r.replace(/function |\(\)|\(/g, '').trim()} uses the shared renderBlock`, () => {
-        assert.ok(/renderBlock\(/.test(rendererBody(r)),
+    t(`${name} uses the shared renderBlock`, () => {
+        assert.ok(/renderBlock\(/.test(renderRegion(entry)),
             'a second block renderer would drift from what actually ships');
     });
+    t(`${name} typesets math`, () => {
+        assert.ok(/renderMathInElement/.test(rendererBody(name === 'renderSlide'
+            ? 'function renderSlide()' : entry[1])),
+            'a renderer that skips KaTeX shows raw $…$ where the others show a formula');
+    });
 }
+
+t('the slide font scale is applied in exactly one place', () => {
+    // The bug this file exists to prevent: four renderers applied the scale and
+    // the fifth did not, so the editor and the projector showed different decks.
+    const html = fs.readFileSync(WEBVIEW, 'utf8');
+    const applications = html.match(/\(36 \* [_A-Za-z][\w]*\) \+ 'px'/g) || [];
+    assert.strictEqual(applications.length, 1,
+        `the 36px base is scaled in ${applications.length} places — it belongs only in buildSlideContentDiv`);
+    const i = html.indexOf('function buildSlideContentDiv(');
+    const j = html.indexOf('\n}', i);
+    assert.ok(i > 0 && /resolveSlideScale\(/.test(html.slice(i, j)),
+        'buildSlideContentDiv must be the one caller of resolveSlideScale');
+});
+
+t('the presenter has no block renderer of its own', () => {
+    // buildPresBlock was a full second copy of renderBlock. It drifted, and
+    // every divergence showed up only once the talk had started.
+    const html = fs.readFileSync(WEBVIEW, 'utf8');
+    assert.ok(!/function buildPresBlock/.test(html),
+        'a presenter-only block renderer is a guaranteed editor/projector mismatch');
+});
+
+t('chrome-free renders wire up no editor interaction', () => {
+    // renderBlock guards attachBlockEvents behind _thumbMode, but renderList
+    // and renderArrow reached around it — so with the presenter on the shared
+    // renderer, a click on a list item mid-talk selected and dragged it, and the
+    // arrow hit box (pointer-events:all) swallowed the click that advances.
+    const html = fs.readFileSync(WEBVIEW, 'utf8');
+    for (const [fn, from, to] of [
+        ['renderList',  'function renderList(',  '\nfunction renderMath'],
+        ['renderArrow', 'function renderArrow(', '\nfunction updateArrowDOM'],
+        ['renderRaw',   'function renderRaw(',   '\n// ── Arrow block renderer'],
+    ]) {
+        const i = html.indexOf(from), j = html.indexOf(to, i);
+        assert.ok(j > i, `${fn}: markers not found`);
+        const body = html.slice(i, j);
+        if (!/attachBlockEvents|addEventListener/.test(body)) continue;
+        assert.ok(/_thumbMode/.test(body),
+            `${fn} attaches editor handlers unconditionally — they fire in the presenter`);
+    }
+});
+
+t('the presenter strips the same affordances the export does', () => {
+    const body = renderRegion(RENDERERS[4]);
+    assert.ok(/eval-spinner|frag-badge|font-warn/.test(body),
+        'the presenter must drop the editor-only affordances renderBlock emits regardless of mode');
+});
+
+t('presentation fragments are tagged from the model, not from the renderer', () => {
+    const html = fs.readFileSync(WEBVIEW, 'utf8');
+    const i = html.indexOf('function _applyPresFragments(');
+    assert.ok(i > 0, '_applyPresFragments must exist — the presenter no longer tags inline');
+    const body = html.slice(i, html.indexOf('\n}\n', i));
+    assert.ok(/pres-frag/.test(body) && /presStep/.test(body),
+        'it must set both the class the CSS uses and the step the reveal logic reads');
+    for (const kids of ['children', 'items', 'elements']) {
+        assert.ok(new RegExp(`b\\.${kids}`).test(body),
+            `${kids} are skipped — fragments nested there never reveal`);
+    }
+});
 
 // ── inline rich editor ────────────────────────────────────────────────────
 

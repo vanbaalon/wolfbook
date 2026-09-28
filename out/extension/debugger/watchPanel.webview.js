@@ -446,6 +446,8 @@
               cmd: 'wolfbook.configureRooCode',   cmdLabel: 'Auto-configure' },
             { key: 'antigravity',   label: 'Antigravity IDE',
               cmd: 'wolfbook.configureAntigravity', cmdLabel: 'Auto-configure' },
+            { key: 'claudeScience', label: 'Claude Science',
+              cmd: 'wolfbook.configureClaudeScience', cmdLabel: 'Auto-configure' },
             { key: 'codex',         label: 'OpenAI Codex CLI',
               cmd: 'wolfbook.configureClaude',    cmdLabel: 'Auto-configure' },
         ];

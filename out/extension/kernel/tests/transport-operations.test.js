@@ -183,13 +183,17 @@ Module._load = originalLoad;
     assert.strictEqual(envelope.kernel_id, 'k-bounded');
     assert.strictEqual(bounded._resultStore.get(envelope.result_handle, 4090, 20).data.length, 20);
 
-    // Canonical MCP responses keep JSON out of duplicate text blocks while
-    // retaining it under structuredContent.
+    // JSON results: structuredContent holds the envelope and the text block holds
+    // the same envelope, compact (MCP: a tool returning structuredContent SHOULD
+    // also return the serialized JSON as text). The text block used to carry only
+    // the message line, which blinded clients that read content[] instead.
     const canonical = bounded._finalizeToolResult({ content: [{ type: 'text', text: JSON.stringify({
         ok: true, state: 'completed', message: 'Found two cells.', notebook_revision: 7,
         match_count: 2
     }) }], isError: false }, 'wolfbook_searchCells', 's');
-    assert.strictEqual(canonical.content[0].text, 'Found two cells.');
+    assert.deepStrictEqual(JSON.parse(canonical.content[0].text), canonical.structuredContent);
+    assert.strictEqual(canonical.structuredContent.message, 'Found two cells.');
+    assert.ok(!/\n\s/.test(canonical.content[0].text), 'compact, not pretty-printed');
     assert.strictEqual(canonical.structuredContent.data.match_count, 2);
     assert.strictEqual(canonical.structuredContent.notebookRevision, 7);
 

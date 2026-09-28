@@ -9,6 +9,7 @@
   <a href="https://github.com/vanbaalon/wolfbook/blob/main/docs/features.md">Features</a> ·
   <a href="https://github.com/vanbaalon/wolfbook/blob/main/README.md#wpaper-a-live-latex-writing-workspace">WPaper</a> ·
   <a href="https://github.com/vanbaalon/wolfbook/blob/main/docs/ai-integration.md">AI Integration</a> ·
+  <a href="https://github.com/vanbaalon/wolfbook/blob/main/docs/cli-accounts.md">CLI Accounts</a> ·
   <a href="https://github.com/vanbaalon/wolfbook/blob/main/docs/mcp-and-agent-tools.md">MCP & Agent Tools</a> ·
   <a href="https://github.com/vanbaalon/wolfbook/blob/main/docs/using_cline.md">Using Cline</a> ·
   <a href="https://github.com/vanbaalon/wolfbook/blob/main/docs/deepseek-copilot.md">DeepSeek + Copilot</a> ·
@@ -34,7 +35,7 @@ Wolfbook is a Mathematica-style notebook frontend for VS Code. Create, edit and 
 - Rich math output: **LaTeX / KaTeX**, **SVG / PNG graphics**,  **TikZ**
 - Interactive **3D graphics** and coordinate tooltips for 2D plots
 - **WPaper for LaTeX** — live compiled pages, source↔paper navigation and reviewable AI edits
-- **Live kernel access for AI agents** — Copilot, Claude Code, Codex, MCP-compatible tools
+- **Live kernel access for AI agents** — Copilot, Claude Code, Codex, **Claude Science**, and any other MCP client, set up automatically and safe by default
 - **Mid-evaluation abort**, **Dynamic[]** widgets, debugger and watch panel
 - Globally numbered kernels (`K1`, `K2`, …) with a picker that can bind a
   notebook to a kernel owned by another live VS Code window, or start a new
@@ -173,7 +174,21 @@ Wolfbook exposes your live kernel and notebook contents to AI agents via purpose
 - Drive the step-through debugger autonomously (`#wolfbookDebug`)
 - Query the kernel state — what symbols are defined, what are their values (`#wolfbookState`)
 
-The same tools are exposed as an **MCP (Model Context Protocol) server**, so any MCP-compatible AI agent — Claude Code, Codex, and others — can use them too. See [MCP & Agent Tools](docs/mcp-and-agent-tools.md) for details.
+The same tools are exposed as an **MCP (Model Context Protocol) server**, so any MCP-compatible agent can use your notebooks and live kernel too.
+
+| Agent | Setup |
+|---|---|
+| GitHub Copilot (Agent mode) | built in |
+| Claude Code, Claude Desktop, OpenAI Codex | automatic when Wolfbook starts |
+| Cline, Roo Code, Antigravity | automatic when they are installed |
+| **Claude Science** | Wolfbook offers to connect; you confirm once and restart Claude Science |
+| any other MCP client | the Wolfbook stdio bridge, or `http://127.0.0.1:27182/mcp` |
+
+- **Works in Claude Science.** Claude Science runs connectors in a sandbox that can't read your home folder or reach VS Code over the network. Wolfbook connects through a private socket instead, and makes the two sandbox changes it needs only after you confirm them. See [Using with Claude Science](docs/mcp-and-agent-tools.md#using-with-claude-science).
+- **Current MCP protocol.** Wolfbook uses MCP up to version 2025-11-25 and serves the current Streamable HTTP transport; the older SSE endpoint still works. Every tool is labelled as read-only, editing, destructive or code-running, so an agent app can let reading a notebook through without a prompt while still asking before a cell is deleted.
+- **Safe by default, with no setup.** Only programs holding your personal Wolfbook token can use the kernel. Your agents pick it up automatically. Web pages and other user accounts on the machine can't run anything. The first time a new agent connects you get one notice with a **Block** button, and **Wolfbook: Manage Agent Access** changes your mind later.
+
+See [MCP & Agent Tools](docs/mcp-and-agent-tools.md) for details.
 
 ### Presentations built in your notebook
 
@@ -242,7 +257,7 @@ Both addons are prebuilt for macOS (Apple Silicon and Intel) and Windows and bun
 |---|---|
 | [Getting Started](docs/getting-started.md) | Installation, first notebook, setup checklist |
 | [AI Integration](docs/ai-integration.md) | GitHub Copilot agent tools — full reference |
-| [MCP & Agent Tools](docs/mcp-and-agent-tools.md) | Using Wolfbook with Claude Code, Codex, and other MCP clients |
+| [MCP & Agent Tools](docs/mcp-and-agent-tools.md) | Using Wolfbook with Claude Code, Codex, Claude Science, and other MCP clients |
 | [WPaper and Overleaf](docs/wpaper-overleaf.md) | Overleaf Git setup, detection, tokens, merging and conflicts |
 | [Oberon Agent (experimental)](docs/oberon-agent.md) | The autonomous research agent: setup, providers, budgets, SkilXiv, privacy |
 | [Features](docs/features.md) | Notebook interface, kernel control, editor, debugger, Dynamic |

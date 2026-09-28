@@ -43,7 +43,7 @@ async function acquireKernelForAgent(ctrl, options = {}) {
         '```json', JSON.stringify(busy, null, 2), '```',
         '',
         busy.operation_id
-            ? `Use wolfbook_operationStatus or wolfbook_waitEvaluation with operation_id="${busy.operation_id}", or explicitly abort it.`
+            ? `Use wolfbook_operationStatus with operation_id="${busy.operation_id}" (wait_seconds waits for it), or explicitly abort it.`
             : 'Use wolfbook_kernelStatus to inspect it, wait, or explicitly abort it.',
     ].join('\n');
     const error = new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(text)]);

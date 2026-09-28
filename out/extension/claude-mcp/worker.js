@@ -133,8 +133,13 @@ class WorkerServer {
             this.activityMonitor.handle(req, res, new URL(req.url, 'http://127.0.0.1')); return;
         }
         if (req.headers.origin) { res.writeHead(403); res.end('Browser access is not allowed'); return; }
-        res.setHeader('Access-Control-Allow-Origin', '*');
+        const auth = require('./auth');
+        if (!auth.isLocalHost(req)) { res.writeHead(403); res.end('Host is not allowed'); return; }
         const url = new URL(req.url, `http://127.0.0.1:${this._port}`);
+        // /invoke runs tools: only Wolfbook's own processes (they hold the token). See auth.js.
+        if (this.requireAuth && url.pathname !== '/health' && !auth.isAuthorized(req)) {
+            auth.rejectUnauthorized(res); return;
+        }
 
         if (req.method === 'POST' && url.pathname === '/invoke') {
             this._handleInvoke(req, res);
@@ -349,6 +354,7 @@ class WorkerServer {
                 headers:  {
                     'Content-Type':   'application/json',
                     'Content-Length': Buffer.byteLength(body),
+                    ...require('./auth').authHeaders(),
                 },
                 timeout: 2000,
             }, res => { res.resume(); resolve(); });

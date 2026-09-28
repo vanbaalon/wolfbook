@@ -63,8 +63,8 @@ At the end of a task, do NOT write "What's the next step?" — call `wolfteam_ch
 | `wolfbook_kernelCrashLog` | Read kernel debug / crash logs |
 | `wolfbook_findPackage` | Find Wolfram packages on Paclet Server + GitHub |
 | `wolfbook_debugCell` | Step-through debugger: analyse, start, step, breakpoints, watch |
-| `wolfbook_fileOps` | Read / write / list workspace files (action="read"|"write"|"list") |
-| `wolfbook_runTerminal` | Run a shell command; returns stdout/stderr; default timeout 30 s |
+| `copilot_readFile` / `copilot_createFile` / `copilot_replaceString` / `copilot_listDirectory` | VS Code's own tools for non-notebook files |
+| `run_in_terminal` | VS Code's own terminal tool (asks the user first) |
 
 ### Interaction tools (Wolfteam only)
 | Tool | Use when |
@@ -74,7 +74,7 @@ At the end of a task, do NOT write "What's the next step?" — call `wolfteam_ch
 | `wolfteam_checkpoint` | Show step result to user and get go/no-go before continuing |
 
 ### Notebook safety when using file tools
-- Never edit `.wb` notebook files directly via `wolfbook_fileOps` write.
+- Never edit `.wb` notebook files directly with file tools.
 - Use notebook cell tools (`#wolfbookInsertCells`, `#wolfbookEdit`, `#wolfbookDelete`, `wolfbook_moveCell`) for notebook changes.
 - Reserve file tools for auxiliary project files (`.wl`, `.md`, `.tex`, `.csv`, etc.).
 
@@ -92,7 +92,7 @@ At the end of a task, do NOT write "What's the next step?" — call `wolfteam_ch
 ## Run success / output handling
 - After `#wolfbookRun` or `#wolfbookEval`: check whether the output is `$Failed`, contains `::` (message), or is empty before proceeding
 - If the five-minute MCP response window returns an operation ID, call
-  `wolfbook_waitEvaluation` to continue waiting for that same run or call
+  `wolfbook_operationStatus` with `wait_seconds` to keep waiting for that same run, or call
   `wolfbook_kernelControl` with action="abort" — never start a duplicate run
   while the original operation remains active.
 - After large computations, use `#wolfbookState` to confirm key symbols are defined
