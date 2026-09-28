@@ -6122,6 +6122,9 @@ pagesEl().addEventListener('mousedown', (ev) => {
         moved: false, last: 0, armed: false,
         downX: ev.clientX, downY: ev.clientY,
         page: n, pt, ox: ev.clientX - r.left, oy: ev.clientY - r.top,
+        // Sent with every pick of this drag: the extension anchors on it
+        // itself, so no pick arriving out of order can lose the start.
+        from: pt ? { page: n, xBp: pt.xBp, yTopBp: pt.yTopBp } : null,
     };
 });
 
@@ -6205,7 +6208,7 @@ window.addEventListener('mousemove', (ev) => {
         const dy = ev.clientY - dragSel.downY;
         if (dx * dx + dy * dy < DRAG_ARM_PX2) return;
         dragSel.armed = true;
-        sendClick(dragSel.page, dragSel.pt, dragSel.ox, dragSel.oy, { pick: true });
+        sendClick(dragSel.page, dragSel.pt, dragSel.ox, dragSel.oy, { pick: true, ...(dragSel.from ? { from: dragSel.from } : {}) });
     }
     const now = performance.now();
     if (now - dragSel.last < 60) return;          // one repaint per frame or two
@@ -6219,7 +6222,7 @@ window.addEventListener('mousemove', (ev) => {
     if (!pt) return;
     dragSel.last = now;
     dragSel.moved = true;
-    sendClick(n, pt, ev.clientX - r.left, ev.clientY - r.top, { pick: true, live: true });
+    sendClick(n, pt, ev.clientX - r.left, ev.clientY - r.top, { pick: true, live: true, ...(dragSel.from ? { from: dragSel.from } : {}) });
 });
 
 window.addEventListener('mouseup', (ev) => {
@@ -6247,6 +6250,7 @@ window.addEventListener('mouseup', (ev) => {
     if (!dragSel) return;
     const moved = dragSel.moved;
     const adjusting = dragSel.adjusting;
+    const from = dragSel.from;
     dragSel = null;
     // A press that never moved is a CLICK, and the click handler owns it —
     // except on a bracket, where a click means nothing and must not resolve a
@@ -6266,7 +6270,7 @@ window.addEventListener('mouseup', (ev) => {
     // The click event that follows a drag must not pick a third end.
     state.swallowClick = true;
     setTimeout(() => { state.swallowClick = false; }, 250);
-    sendClick(n, pt, ev.clientX - r.left, ev.clientY - r.top, { pick: true });
+    sendClick(n, pt, ev.clientX - r.left, ev.clientY - r.top, { pick: true, ...(from ? { from } : {}) });
 });
 
 /**

@@ -6344,6 +6344,21 @@ class TexViewer {
         const relative = path.relative(map.projectDir, hit.file).split(path.sep).join('/');
         const sourceText = map.source.files.get(relative)?.text;
         let firstPick = false;
+        // A DRAG NAMES ITS PRESS POINT IN EVERY PICK, and that point is the
+        // anchor — resolved here, in this request. Reserved by an earlier pick
+        // instead, it was lost whenever a later move superseded that pick in
+        // flight (they resolve asynchronously), and the selection started
+        // wherever the pointer was a moment later, or not at all.
+        if (m.pick && m.from && Number.isFinite(m.from.xBp) && Number.isFinite(m.from.yTopBp) && typeof sourceText === 'string') {
+            const fromHit = typeof map.renderToSourceViaWorker === 'function'
+                ? await map.renderToSourceViaWorker(m.from.page, m.from.xBp, m.from.yTopBp)
+                : map.renderToSource(m.from.page, m.from.xBp, m.from.yTopBp);
+            if (!current()) return;
+            const fl = fromHit?.exact && fromHit.file === hit.file ? fromHit.sourceRange : null;
+            if (fl?.start && fl?.end) this._pickAnchor = { file:hit.file, nativeMap:map, sourceText,
+                position:new vscode.Position(fl.start.line - 1, fl.start.column_utf16),
+                endPosition:new vscode.Position(fl.end.line - 1, fl.end.column_utf16) };
+        }
         // Reserve the first endpoint before opening an editor. Later pointer
         // events may supersede this request while the document is still opening,
         // but must retain the gesture's original source endpoint.

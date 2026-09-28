@@ -688,6 +688,25 @@ test('native live picking keeps its anchor and can shrink before mouse release',
     assert.equal(f.viewer._pickAnchor, null);
 });
 
+// Bug #40: a drag's anchor pick could be superseded in flight by the next move,
+// and the selection then started late or never. Every drag pick now carries
+// its press point, and the extension anchors on it in the same request.
+test('#40 a drag pick that names its press point selects from there even if every earlier pick was lost', async () => {
+    const f = pickFixture();
+    const at = f.map.renderToSource;
+    f.map.renderToSource = (page, x, y) => {
+        const h = at(page, x, y);
+        if (x !== 1) return h;
+        return { ...h, sourceRange: { start: { ...h.sourceRange.start, column_utf16: 0 }, end: { ...h.sourceRange.end, column_utf16: 1 } } };
+    };
+    await f.pick(6, { from: { page: 1, xBp: 1, yTopBp: 84 } });
+    assert.deepEqual(f.queries, [[0, 7]], 'one selection from the press point to the release point');
+    assert.equal(f.editor.selection.start.character, 0);
+    assert.equal(f.editor.selection.end.character, 7);
+    assert.equal(f.viewer._pickAnchor, null);
+    assert.ok(!f.posts.some(p => p.span?.pendingStart), 'no half-armed selection');
+});
+
 test('native picking restarts after a document revision instead of using a stale endpoint', async () => {
     const f = pickFixture(); await f.pick(0);
     f.doc.version++; await f.pick(6);

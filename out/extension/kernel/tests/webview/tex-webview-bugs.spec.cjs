@@ -691,4 +691,28 @@ tests.push({
     },
 });
 
+tests.push({
+    id: '#40',
+    name: 'a drag on the page sends its press point with every pick, so the selection starts where the button went down',
+    async run(t) {
+        await t.clear();
+        const a = t.word('velocity'), b = t.word('prose,');
+        const p0 = await t.toClient(a.page, a.x + a.w * 0.3, a.y + a.h / 2);
+        const p1 = await t.toClient(b.page, b.x + b.w * 0.7, b.y + b.h / 2);
+        await t.page.mouse.move(p0.x, p0.y);
+        await t.page.mouse.down();
+        for (let k = 1; k <= 6; k++) { await t.page.mouse.move(p0.x + (p1.x - p0.x) * k / 6, p0.y + (p1.y - p0.y) * k / 6); await t.sleep(70); }
+        await t.page.mouse.up();
+        await t.sleep(100);
+        const picks = (await t.posted('click')).filter(m => m.pick);
+        t.assert(picks.length >= 2, `the drag sent picks (${picks.length})`);
+        const k = await t.pxPerBp(a.page);
+        for (const m of picks) {
+            t.assert(m.from && m.from.page === a.page, `every pick names the press point (${JSON.stringify(m.from)})`);
+            t.near(m.from.xBp, a.x + a.w * 0.3, 1.5 / k + 0.5, 'at the press x');
+        }
+        t.assert(picks.at(-1).live !== true, 'the release sends the final pick');
+    },
+});
+
 module.exports = { fixtureTex, tests };
