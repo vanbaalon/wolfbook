@@ -1005,3 +1005,43 @@ test('#43 a live page near the card re-measures its block and moves it (one page
     assert.ok(a && a.live && a.editId === 7, 'a live anchor for the card');
     assert.equal(a.rects.length, 3, 'the block\'s three printed rows, the new one included');
 });
+
+// ── #44 the Pro red caret lagged behind the classic one ─────────────────────
+test('#44 a caret move in text is answered from the map in memory: no worker round trip, word and red caret at once', async () => {
+    const SP = 65536, root = path.join(os.tmpdir(), 'wpaper-fastcaret'), file = path.join(root, 'paper.tex');
+    const text = 'Line one\nAlpha beta gamma\n';
+    // "beta" is columns 6..10 on line 2; one glyph per letter.
+    const glyph = (id, col) => ({ item_id: id, preferred_source: { file: 'paper.tex', location: { start: { line: 2, column_utf16: col }, end: { line: 2, column_utf16: col + 1 }, accuracy: 'Exact' } },
+        mapped_origins: [{ source: { file: 'paper.tex', location: { start: { line: 2, column_utf16: col }, end: { line: 2, column_utf16: col + 1 }, accuracy: 'Exact' } } }],
+        box_path: [[1, { kind: 'Horizontal' }]],
+        item: { page: 1, kind: 'Glyph', glyph: { font: 1, code: 65 }, geometry: { position: { x: (10 + 5 * col) * SP, y: 40 * SP }, width: 5 * SP, height: 7 * SP, depth: 2 * SP } } });
+    const view = { generation: 1, sequence: 1, artifact: { page_count: 1, pdf_hash: 'h' },
+        pages: [{ page: 1, header: { magnification: 1000 }, hits: [...'Alpha beta gamma'].map((c, i) => c === ' ' ? null : glyph(i + 1, i)).filter(Boolean) }] };
+    let workerCalls = 0;
+    const source = { isCurrentView: v => v === view, forward: async () => { workerCalls++; return { hits: [] }; } };
+    const map = new NativeMap({ generation: { pdfHash: 'h', projectDir: root }, nativeView: view, nativeSource: source });
+    const st = { map, root };
+    const posts = [];
+    const doc = { uri: { fsPath: file }, version: 1, lineAt: n => ({ text: text.split('\n')[n] }) };
+    const at = { line: 1, character: 8 };            // inside "beta", after "be"
+    const editor = { document: doc, selection: { start: at, end: at, active: at } };
+    const viewer = { panel: {}, followCursor: true, root, _openedPdfHash: 'h', _nativeCursorRequest: 1,
+        coord: { stateFor: () => st }, _post: m => posts.push(m), _setTracePaused() {}, _mayScroll: () => true, _invertedAt: 0, _log() {} };
+    await TexViewer.prototype._syncNativeCursor.call(viewer, st, editor, {}, 1);
+    assert.equal(workerCalls, 0, 'no worker round trip');
+    const h = posts.find(p => p.type === 'highlight' && p.rects?.length);
+    assert.ok(h, 'a highlight');
+    assert.equal(h.rects.length, 4, 'the word "beta"');
+    assert.ok(h.caret && h.caret.at === 'inside' && h.caret.offset === 2, `the red caret two letters in (${JSON.stringify(h.caret)})`);
+    assert.ok(!posts.some(p => p.type === 'highlight' && !p.rects?.length), 'no blank frame before it');
+});
+
+test('#44 the editor echo of a mini-editor caret move does not answer it a second time', () => {
+    const viewer = { _cardEcho: { file: '/p/a.tex', line: 3, ch: 7, at: Date.now() }, _nativeCursorRequest: 5, panel: null };
+    const editor = { document: { uri: { fsPath: '/p/a.tex' } }, selection: { active: { line: 3, character: 7 } } };
+    TexViewer.prototype.syncFromEditor.call(viewer, editor, {});
+    assert.equal(viewer._nativeCursorRequest, 5, 'the echo neither supersedes the card\'s own sync nor starts another');
+    assert.equal(viewer._cardEcho, null);
+    TexViewer.prototype.syncFromEditor.call(viewer, editor, {});
+    assert.equal(viewer._nativeCursorRequest, 6, 'a later, real move is answered');
+});

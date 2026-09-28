@@ -3746,6 +3746,23 @@ class TexViewer {
             this._post({ type:'selection', span:null });
             this._post({ type:'highlight', rects:[] });
         };
+        // THE CARET, FROM MEMORY. A current map holds every glyph with its
+        // exact source columns: the word and the red caret are read off it
+        // with no round trip to the worker (three or more of them, one per
+        // character of the word, made a Pro caret move far slower than the
+        // classic one). Anything it cannot answer exactly goes the long way.
+        if (!ranged) {
+            const fast = TexViewer.prototype._nativeCaretFromMemory.call(this, map, doc, editor, position);
+            if (fast) {
+                this._setTracePaused(false);
+                this._post({ type:'selection', span:null });
+                this._post({ type:'highlight', rects: fast.rects, exact: true, caret: fast.caret,
+                    label: `line ${position.line + 1}`,
+                    reveal: !opts.preserveView && this._mayScroll() && Date.now() - this._invertedAt >= 1500,
+                    instant: !!opts.instant });
+                return;
+            }
+        }
         try {
             if (ranged) {
                 const relative = path.relative(map.projectDir, doc.uri.fsPath).split(path.sep).join('/');
@@ -3857,6 +3874,48 @@ class TexViewer {
         }
     }
 
+    /**
+     * The cursor's word and red caret from the maps in memory (the settled
+     * map; the live map for pages the live engine drew), or null when they
+     * cannot answer exactly — a map behind the text, a line with no exact
+     * glyphs, a caret outside anything printed.
+     */
+    _nativeCaretFromMemory(map, doc, editor, position) {
+        if (!map?.available || typeof map.glyphsForLine !== 'function') return null;
+        const file = doc.uri.fsPath, line = position.line + 1;
+        const live = this._liveMap, overlays = this._liveOverlays;
+        let entries = map.glyphsForLine(file, line);
+        if (overlays?.size) {
+            entries = entries.filter(e => !overlays.has(e.page));
+            if (live?.available) entries = entries.concat(live.glyphsForLine(file, line).filter(e => live.hasPage(e.page)));
+        }
+        const exact = entries.map(e => {
+            const loc = e?.hit?.preferred_source?.location;
+            return loc && loc.accuracy === 'Exact' && loc.start.line === line && loc.end.line === line && loc.end.column_utf16 > loc.start.column_utf16
+                ? { e, s: loc.start.column_utf16, t: loc.end.column_utf16 } : null;
+        }).filter(Boolean);
+        if (!exact.length) return null;
+        let text;
+        try { text = doc.lineAt(position.line).text; } catch (_) { return null; }
+        const active = editor.selection.active;
+        const col = active && active.line === position.line ? active.character : position.character;
+        const letter = c => !!c && /[\p{L}\p{N}]/u.test(c);
+        let a = col, b = col;
+        while (a > 0 && letter(text[a - 1])) a--;
+        while (b < text.length && letter(text[b])) b++;
+        let glyphs = b - a > 0 ? exact.filter(x => x.s >= a && x.t <= b) : [];
+        if (!glyphs.length) glyphs = exact.filter(x => x.s <= col && col < x.t);
+        if (!glyphs.length) glyphs = exact.filter(x => x.t === col);
+        if (!glyphs.length) return null;
+        const c = caretAt(exact.map(x => x.e), line, col, text);
+        if (!c) return null;
+        const inWord = letter(text[col]);
+        return {
+            rects: glyphs.map(({ e }) => ({ page: e.page, x: e.x, y: e.y, w: e.w, h: e.boxHeight })),
+            caret: { page: c.page, x: c.x, y: c.y, h: c.h, at: inWord ? (col === a ? 'before' : 'inside') : 'after', offset: col - a },
+        };
+    }
+
     /** Forward sync: highlight the object under the cursor. */
     /**
      * @param {object} editor
@@ -3867,6 +3926,16 @@ class TexViewer {
      *   place; only a gesture deserves the animation.
      */
     syncFromEditor(editor, opts = {}) {
+        // THE CARD'S OWN ECHO. A caret moved in the mini-editor is mirrored
+        // into the open editor, and that editor's selection event came back
+        // here a moment later — superseding the card's own sync already in
+        // flight, so every card caret move was answered twice, the second late.
+        const echo = this._cardEcho;
+        if (echo && !opts.fromCard) {
+            const a = editor?.selection?.active;
+            if (a && editor.document?.uri?.fsPath === echo.file && a.line === echo.line && a.character === echo.ch &&
+                Date.now() - echo.at < 1000) { this._cardEcho = null; return; }
+        }
         this._nativeCursorRequest = (this._nativeCursorRequest || 0) + 1;
         // The reader moved the editor's caret: the page's typing caret is
         // somewhere else now, and a stale one also hid the red caret.
@@ -8517,7 +8586,8 @@ class TexViewer {
         if (open && !opts.forceSync) {
             // Setting a selection does not scroll — revealRange would, and the
             // reader did not ask to be taken anywhere in the editor.
-            try { open.selection = sel; } catch (_) { /* fall through to the direct sync */ }
+            this._cardEcho = { file: s.file, line: active.line, ch: active.character, at: Date.now() };
+            try { open.selection = sel; } catch (_) { this._cardEcho = null; /* fall through to the direct sync */ }
             // The resulting VS Code event is a programmatic selection, not
             // the user's mini-editor gesture. It cannot release navigation
             // ownership, and may not fire at all for an unchanged selection.
@@ -8531,7 +8601,7 @@ class TexViewer {
         return this.syncFromEditor({
             document: doc,
             selection: { start: from, end: to, anchor, active, isEmpty: lo === hi },
-        }, { instant: !!opts.instant, preserveView: true, userCursorGesture: !opts.forceSync,
+        }, { instant: !!opts.instant, preserveView: true, userCursorGesture: !opts.forceSync, fromCard: true,
             nativeAdmission: () => current() && s.startOffset === blockStart && s.endOffset === blockEnd });
     }
 
