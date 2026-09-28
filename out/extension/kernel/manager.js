@@ -22,6 +22,7 @@ class KernelManager {
         this._factory = options.factory || null;
         this._labelAllocator = options.labelAllocator || null;
         this._labelReleaser = options.labelReleaser || null;
+        this._labelRenamer = options.labelRenamer || null;
         this._entries = new Map();
         this._bindings = new Map(Object.entries(context?.workspaceState?.get?.(BINDINGS_KEY, {}) || {}));
         this._savedPool = Array.isArray(context?.workspaceState?.get?.(POOL_KEY, []))
@@ -47,7 +48,7 @@ class KernelManager {
     _add(controller, options = {}) {
         const id = options.id || `k-${crypto.randomBytes(4).toString('hex')}`;
         if (this._entries.has(id)) return this._entries.get(id);
-        const label = this._labelAllocator?.(id, options.label) || options.label || `K${this._nextLabel++}`;
+        const label = (options.remote ? options.label : this._labelAllocator?.(id, options.label)) || options.label || `K${this._nextLabel++}`;
         const entry = {
             id, label, controller,
             arbiter: controller.arbiter, operations: controller.operations,
@@ -242,7 +243,12 @@ class KernelManager {
         if (entry.remote) throw new Error('Rename this kernel in its owning VS Code window.');
         const clean = String(label || '').replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 40);
         if (!clean) throw new Error('Kernel label cannot be empty.');
+        if ([...this._entries.values()].some(other => other.id !== entry.id && other.label.toLowerCase() === clean.toLowerCase())) {
+            throw new Error(`Kernel name “${clean}” is already in use.`);
+        }
+        this._labelRenamer?.(entry.id, clean);
         entry.label = clean;
+        if (entry.isDefault) this.context?.workspaceState?.update?.(DEFAULT_LABEL_KEY, clean)?.then?.(() => {}, () => {});
         const saved = this._savedPool.find(item => item.slotKey === entry.slotKey);
         if (saved) { saved.label = clean; this._persistPool().catch(() => {}); }
         entry.controller.kernelIdentity.label = clean;
@@ -278,7 +284,25 @@ class KernelManager {
     }
 
     annotateNotebook(notebook) { return this.describe(this.bindingFor(notebook), notebook); }
-    releaseLabels() { for (const entry of this._entries.values()) this._labelReleaser?.(entry.id); }
+    reconcileLabels() {
+        if (!this._labelAllocator) return;
+        let changed = false;
+        for (const entry of this._entries.values()) {
+            if (entry.remote) continue;
+            const label = this._labelAllocator(entry.id, entry.label);
+            if (!label || label === entry.label) continue;
+            entry.label = label;
+            entry.controller.kernelIdentity.label = label;
+            if (entry.controller._controller) entry.controller._controller.label = `Wolfram ${label}`;
+            if (entry.isDefault) this.context?.workspaceState?.update?.(DEFAULT_LABEL_KEY, label)?.then?.(() => {}, () => {});
+            const saved = this._savedPool.find(item => item.slotKey === entry.slotKey);
+            if (saved) saved.label = label;
+            changed = true;
+        }
+        if (changed) { this._persistPool().catch(() => {}); this._emit(); }
+    }
+
+    releaseLabels() { for (const entry of this._entries.values()) if (!entry.remote) this._labelReleaser?.(entry.id); }
     onDidChange(listener) { this._listeners.add(listener); return { dispose: () => this._listeners.delete(listener) }; }
     _emit() { for (const listener of this._listeners) { try { listener(); } catch (_) {} } }
     async _persist() { await this.context?.workspaceState?.update?.(BINDINGS_KEY, Object.fromEntries(this._bindings)); }

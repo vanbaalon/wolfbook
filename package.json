@@ -1882,7 +1882,7 @@
       },
       {
         "command": "wolfbook.agentAccounts.open",
-        "title": "Wolfbook: Open CLI with Repository Account",
+        "title": "Wolfbook: Open CLI with Workspace Account",
         "icon": "$(terminal)"
       },
       {
@@ -7289,7 +7289,7 @@
     "viewsWelcome": [
       {
         "view": "wolfbook.agentAccounts",
-        "contents": "Open a repository or workspace folder to manage Claude Code and Codex CLI accounts.\n[Open Folder](command:workbench.action.files.openFolder)"
+        "contents": "Open a workspace folder to manage Claude Code and Codex CLI accounts and model defaults.\n[Open Folder](command:workbench.action.files.openFolder)"
       }
     ]
   },

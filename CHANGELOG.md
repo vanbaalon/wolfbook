@@ -8,9 +8,12 @@ All notable changes to **Wolfbook** are documented here.
 
 ### Added
 
-- **Repository CLI accounts.** The new **CLI Accounts** view in Wolfbook Controls
-  manages named Claude Code and Codex CLI profiles, remembers each repository's
-  selection, and provides sign-in, account checks, and terminal launches.
+- **Unique kernel names across windows.** Remote kernel proxies no longer claim
+  or release their owner’s name reservations. Renaming checks the shared registry,
+  and name reservations are written atomically.
+- **Workspace CLI accounts and models.** The new **CLI Accounts** view in Wolfbook Controls
+  manages named Claude Code and Codex CLI profiles, remembers the main workspace
+  folder's account and main/subagent model defaults, and provides sign-in, account checks, and terminal launches.
   Profiles use separate CLI configuration directories outside repositories.
   See [CLI accounts](docs/cli-accounts.md) for setup and scope.
 - **Claude Science support.** Wolfbook can now be a connector in Claude

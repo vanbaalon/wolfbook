@@ -23,7 +23,7 @@ function profileDirectory(context, profile) {
     return path.join(context.globalStorageUri.fsPath, 'agent-accounts', profile.provider, profile.id);
 }
 
-function launchOptions(provider, directory, action = 'open') {
+function launchOptions(provider, directory, action = 'open', models = {}) {
     if (!PROVIDERS[provider] || !['open', 'login', 'status'].includes(action)) {
         throw new Error('Invalid account action.');
     }
@@ -42,6 +42,13 @@ function launchOptions(provider, directory, action = 'open') {
             for (const key of ['OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_ACCESS_TOKEN', 'OPENAI_BASE_URL']) env[key] = null;
             // Pin storage for every action, including login, regardless of repo config.
             args.push('-c', 'cli_auth_credentials_store="file"');
+        }
+    }
+    if (action === 'open') {
+        if (models.model) args.push('--model', models.model);
+        if (models.subagentModel) {
+            if (provider === 'claude') env.CLAUDE_CODE_SUBAGENT_MODEL = models.subagentModel;
+            else args.push('-c', `agents.default_subagent_model=${JSON.stringify(models.subagentModel)}`);
         }
     }
     if (action !== 'open') args.push(...(provider === 'claude'
@@ -76,47 +83,29 @@ function resolveExecutable(vscode, provider) {
 
 function register(context, vscode = require('vscode')) {
     const changed = new vscode.EventEmitter();
-    let gitApi;
-    let gitPromise;
     const profiles = provider => context.globalState.get(PROFILE_KEY, []).filter(p => p.provider === provider);
     const selected = (repo, provider) => profiles(provider).find(p => p.id === context.globalState.get(repositoryKey(repo, provider)));
+    const modelDefaults = (repo, provider) => context.globalState.get(`${repositoryKey(repo, provider)}.models`, {});
     const refresh = () => changed.fire();
 
-    async function repositories() {
-        if (!gitPromise) gitPromise = (async () => {
-            const git = vscode.extensions.getExtension('vscode.git');
-            if (!git) return;
-            try {
-                gitApi = (await git.activate()).getAPI(1);
-                context.subscriptions.push(gitApi.onDidOpenRepository(refresh), gitApi.onDidCloseRepository(refresh));
-            } catch (_) { /* workspace folder fallback when Git is disabled */ }
-        })();
-        await gitPromise;
-        const roots = (gitApi?.repositories || []).map(r => r.rootUri).filter(uri => uri.scheme === 'file');
-        for (const folder of vscode.workspace.workspaceFolders || []) {
-            if (folder.uri.scheme !== 'file') continue;
-            const root = folder.uri.fsPath;
-            if (!roots.some(uri => {
-                const rel = path.relative(root, uri.fsPath);
-                const inverse = path.relative(uri.fsPath, root);
-                return rel === '' || (!rel.startsWith(`..${path.sep}`) && rel !== '..' && !path.isAbsolute(rel))
-                    || (!inverse.startsWith(`..${path.sep}`) && inverse !== '..' && !path.isAbsolute(inverse));
-            })) roots.push(folder.uri);
-        }
-        return [...new Set(roots.map(uri => uri.fsPath))];
+    async function workspaceRoots() {
+        // Account/model scope is the window's main workspace folder, not a
+        // nested Git repository or the folder of the active editor.
+        const main = vscode.workspace.workspaceFolders?.[0]?.uri;
+        return main?.scheme === 'file' ? [main.fsPath] : [];
     }
 
     async function chooseTarget(node) {
-        const roots = await repositories();
+        const roots = await workspaceRoots();
         let repo = node?.repo;
         if (!roots.includes(repo)) {
             if (!roots.length) {
-                vscode.window.showInformationMessage('Open a repository or workspace folder to manage CLI accounts.');
+                vscode.window.showInformationMessage('Open a workspace folder to manage CLI accounts.');
                 return;
             }
             repo = roots.length === 1 ? roots[0] : (await vscode.window.showQuickPick(
                 roots.map(root => ({ label: path.basename(root), description: root, repo: root })),
-                { title: 'Choose repository' }))?.repo;
+                { title: 'Choose workspace folder' }))?.repo;
         }
         if (!repo) return;
         const provider = PROVIDERS[node?.provider] ? node.provider : (await vscode.window.showQuickPick(
@@ -130,7 +119,7 @@ function register(context, vscode = require('vscode')) {
         const executable = resolveExecutable(vscode, target.provider);
         const directory = profile ? profileDirectory(context, profile) : undefined;
         if (directory) await fs.promises.mkdir(directory, { recursive: true, mode: 0o700 });
-        const { env, args } = launchOptions(target.provider, directory, action);
+        const { env, args } = launchOptions(target.provider, directory, action, modelDefaults(target.repo, target.provider));
         // Launch the executable directly: no shell interpolation, startup scripts,
         // global environment edits, or injection of commands into existing terminals.
         const terminal = vscode.window.createTerminal({
@@ -146,9 +135,12 @@ function register(context, vscode = require('vscode')) {
         if (!target) return;
         const { repo, provider } = target;
         const current = selected(repo, provider);
+        const models = modelDefaults(repo, provider);
         const choice = await vscode.window.showQuickPick([
             { label: '$(terminal) Open CLI', action: 'open', description: current?.name || 'Default account' },
-            { label: '$(account) Switch account for this repository…', action: 'switch' },
+            { label: '$(account) Switch account for this workspace folder…', action: 'switch' },
+            { label: '$(settings-gear) Default model for this workspace folder…', action: 'model', description: models.model || 'CLI default' },
+            { label: '$(organization) Default subagent model for this workspace folder…', action: 'subagentModel', description: models.subagentModel || 'CLI default' },
             { label: '$(add) Add account profile…', action: 'add' },
             { label: '$(sign-in) Sign in to selected account', action: 'login' },
             { label: '$(info) Check selected account', action: 'status' },
@@ -159,6 +151,23 @@ function register(context, vscode = require('vscode')) {
         ], { title: `${PROVIDERS[provider]} — ${path.basename(repo)} — ${current?.name || 'Default'}`,
             placeHolder: 'Account selection applies to new CLI sessions opened through Wolfbook' });
         if (!choice) return;
+        if (['model', 'subagentModel'].includes(choice.action)) {
+            const value = await vscode.window.showInputBox({
+                title: `${PROVIDERS[provider]} — ${choice.action === 'model' ? 'Default model' : 'Default subagent model'} — ${path.basename(repo)}`,
+                prompt: 'Enter a model ID or supported alias. Leave blank to use the CLI’s own defaults. Applies to new Wolfbook CLI sessions.',
+                placeHolder: provider === 'claude' ? 'For example: opus, sonnet, haiku, or a full model ID' : 'Enter a Codex model ID supported by your account',
+                value: models[choice.action] || '',
+                validateInput: text => text.trim() && (/\s|[\u0000-\u001f\u007f]/.test(text.trim()) || text.trim().startsWith('-') || text.trim().length > 200)
+                    ? 'Use a model ID or alias without spaces (at most 200 characters).' : undefined,
+            });
+            if (value === undefined) return;
+            const updated = { ...modelDefaults(repo, provider) };
+            if (value.trim()) updated[choice.action] = value.trim();
+            else delete updated[choice.action];
+            await context.globalState.update(`${repositoryKey(repo, provider)}.models`, Object.keys(updated).length ? updated : undefined);
+            refresh();
+            return;
+        }
         if (['open', 'login', 'status'].includes(choice.action)) return launch(target, current, choice.action);
         if (choice.action === 'switch') {
             const picked = await vscode.window.showQuickPick([
@@ -174,7 +183,7 @@ function register(context, vscode = require('vscode')) {
         }
         if (choice.action === 'forget') {
             const answer = await vscode.window.showWarningMessage(
-                `Forget “${current.name}” for all repositories? Its saved CLI data is retained; repositories using it return to Default.`,
+                `Forget “${current.name}” for all workspace folders? Its saved CLI data is retained; workspace folders using it return to Default.`,
                 { modal: true }, 'Forget profile');
             if (!answer) return;
             await context.globalState.update(PROFILE_KEY, context.globalState.get(PROFILE_KEY, []).filter(p => p.id !== current.id));
@@ -212,7 +221,9 @@ function register(context, vscode = require('vscode')) {
             item.id = node.provider ? repositoryKey(node.repo, node.provider) : node.repo;
             item.tooltip = node.repo;
             if (node.provider) {
+                const models = modelDefaults(node.repo, node.provider);
                 item.description = selected(node.repo, node.provider)?.name || 'Default';
+                item.tooltip = `${node.repo}\nModel: ${models.model || 'CLI default'}\nSubagent model: ${models.subagentModel || 'CLI default'}`;
                 item.iconPath = new vscode.ThemeIcon('account');
                 item.command = { command: 'wolfbook.agentAccounts.manage', title: 'Manage account', arguments: [node] };
                 item.contextValue = 'wolfbookAgentAccount';
@@ -221,7 +232,7 @@ function register(context, vscode = require('vscode')) {
         },
         async getChildren(node) {
             return node ? (node.provider ? [] : Object.keys(PROVIDERS).map(provider => ({ repo: node.repo, provider })))
-                : (await repositories()).map(repo => ({ repo }));
+                : (await workspaceRoots()).map(repo => ({ repo }));
         },
     };
     const guarded = fn => async (...args) => {
@@ -244,7 +255,7 @@ function register(context, vscode = require('vscode')) {
     );
     accountItem.name = 'Wolfbook CLI Accounts';
     accountItem.text = '$(account)';
-    accountItem.tooltip = 'Manage Claude Code and Codex accounts for this repository';
+    accountItem.tooltip = 'Manage Claude Code and Codex accounts for this workspace folder';
     accountItem.command = 'wolfbook.agentAccounts.manage';
     accountItem.accessibilityInformation = { label: 'Manage Wolfbook CLI accounts', role: 'button' };
     context.subscriptions.push(accountItem);

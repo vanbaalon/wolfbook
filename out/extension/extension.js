@@ -740,7 +740,7 @@ async function activate(context) {
     // Setup Notebook client
     let nbKernelenabled = config.get("notebook.kernelEnabled", true);
     const { KernelManager } = require('./kernel/manager');
-    const { reserveKernelLabel, releaseKernelLabel } = require('./kernel/label-registry');
+    const { reserveKernelLabel, releaseKernelLabel, renameKernelLabel } = require('./kernel/label-registry');
     let kernelManager;
     let controller = new controller_1.WolframNotebookKernel(context, {
         controllerLabel: 'Wolfram K1',
@@ -753,6 +753,7 @@ async function activate(context) {
         maximum: config.get('kernels.maximum', 3),
         labelAllocator: reserveKernelLabel,
         labelReleaser: releaseKernelLabel,
+        labelRenamer: renameKernelLabel,
         factory: async () => {
             let isolated;
             isolated = new controller_1.WolframNotebookKernel(context, {
@@ -890,8 +891,9 @@ async function activate(context) {
         for (const owner of owners) {
             for (const kernel of (owner.kernels || [])) {
                 if (kernel.remote) continue;
+                const local = Number(owner.pid) === process.pid ? kernelManager.get(kernel.kernel_id) : null;
                 const notebooks = new Set([...(kernel.notebooks || []), ...(attached.get(kernel.kernel_id) || [])]);
-                kernels.push({ ...kernel, notebooks: [...notebooks], clientId: owner.clientId, ownerPid: owner.pid,
+                kernels.push({ ...kernel, kernel_label: local?.label || kernel.kernel_label, notebooks: [...notebooks], clientId: owner.clientId, ownerPid: owner.pid,
                     workerPort: owner.workerPort, generation: owner.generation });
             }
         }
@@ -968,6 +970,8 @@ async function activate(context) {
         _refreshKernelIdentity?.();
     };
     const _syncRemoteKernelControllers = () => {
+        try { kernelManager.reconcileLabels(); }
+        catch (error) { console.warn('[Wolfbook Kernels] Could not reconcile kernel names:', error.message); }
         const topology = _liveKernelTopology();
         const controllerLabel = kernel => {
             const count = (kernel.notebooks || []).length;
@@ -975,12 +979,6 @@ async function activate(context) {
         };
         for (const kernel of topology.filter(item => Number(item.ownerPid) === process.pid)) {
             const local = kernelManager.get(kernel.kernel_id);
-            if (local && local.label !== kernel.kernel_label) {
-                local.label = kernel.kernel_label;
-                local.controller.kernelIdentity.label = kernel.kernel_label;
-                local.controller._controller.label = `Wolfram ${kernel.kernel_label}`;
-                kernelManager._emit();
-            }
             if (local) local.controller._controller.label = controllerLabel(kernel);
         }
         const descriptors = topology.filter(kernel => Number(kernel.ownerPid) !== process.pid && kernel.workerPort);

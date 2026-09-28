@@ -55,13 +55,16 @@ const { register, repositoryKey, profileDirectory, launchOptions } = require('..
             },
         };
         register(context, vscode);
-        const manage = node => commands.get('wolfbook.agentAccounts.manage')(node);
-        const open = node => commands.get('wolfbook.agentAccounts.open')(node);
+        const setMain = node => { vscode.workspace.workspaceFolders = [{ uri: { scheme: 'file', fsPath: node.repo } }]; };
+        const manage = node => { setMain(node); return commands.get('wolfbook.agentAccounts.manage')(node); };
+        const open = node => { setMain(node); return commands.get('wolfbook.agentAccounts.open')(node); };
         const a = { repo: roots[0], provider: 'claude' };
         const b = { repo: roots[1], provider: 'claude' };
         const codex = { repo: roots[0], provider: 'codex' };
         const action = name => picks.push(items => items.find(item => item.action === name));
-        assert.deepStrictEqual((await tree.getChildren()).map(node => node.repo), roots, 'discovers nested repos');
+        assert.deepStrictEqual((await tree.getChildren()).map(node => node.repo), [tmp], 'uses main workspace folder, ignoring nested Git repos');
+        vscode.workspace.workspaceFolders.push({ uri: { scheme: 'file', fsPath: roots[1] } });
+        assert.deepStrictEqual((await tree.getChildren()).map(node => node.repo), [tmp], 'multi-root workspaces use their first folder');
         assert.strictEqual((await tree.getChildren({ repo: roots[0] })).length, 2);
 
         action('add'); inputs.push('Personal'); await manage(a);
@@ -96,9 +99,32 @@ const { register, repositoryKey, profileDirectory, launchOptions } = require('..
         assert.deepStrictEqual(terminals.at(-1).shellArgs, ['-c', 'cli_auth_credentials_store="file"', 'login', 'status']);
         assert.strictEqual(tree.getTreeItem(a).description, 'Personal');
 
+        action('model'); inputs.push('sonnet'); await manage(a);
+        action('subagentModel'); inputs.push('haiku'); await manage(a);
+        await open(a);
+        assert.deepStrictEqual(terminals.at(-1).shellArgs, ['--model', 'sonnet']);
+        assert.strictEqual(terminals.at(-1).env.CLAUDE_CODE_SUBAGENT_MODEL, 'haiku');
+        await open(b);
+        assert.deepStrictEqual(terminals.at(-1).shellArgs, [], 'same account in another workspace has its own models');
+        action('model'); inputs.push('custom-codex-main'); await manage(codex);
+        action('subagentModel'); inputs.push('custom-codex-child'); await manage(codex);
+        await open(codex);
+        assert.deepStrictEqual(terminals.at(-1).shellArgs, ['-c', 'cli_auth_credentials_store="file"', '--model', 'custom-codex-main', '-c', 'agents.default_subagent_model="custom-codex-child"']);
+        action('status'); await manage(codex);
+        assert.deepStrictEqual(terminals.at(-1).shellArgs, ['-c', 'cli_auth_credentials_store="file"', 'login', 'status'], 'models do not affect auth actions');
+        action('model'); await manage(a);
+        await open(a);
+        assert.deepStrictEqual(terminals.at(-1).shellArgs, ['--model', 'sonnet'], 'cancel preserves default');
+        action('model'); inputs.push(''); await manage(a);
+        action('subagentModel'); inputs.push(''); await manage(a);
+        await open(a);
+        assert.deepStrictEqual(terminals.at(-1).shellArgs, []);
+        assert.strictEqual(terminals.at(-1).env.CLAUDE_CODE_SUBAGENT_MODEL, undefined);
+
         // Recreate manager over persisted state as on extension reload.
         register(context, vscode);
         assert.strictEqual(tree.getTreeItem(codex).description, 'OpenAI Work');
+        assert.match(tree.getTreeItem(codex).tooltip, /Subagent model: custom-codex-child/, 'model defaults survive reload');
         action('rename'); inputs.push('Personal renamed'); await manage(a);
         assert.strictEqual(tree.getTreeItem(b).description, 'Personal renamed');
         action('forget'); await manage(a);
