@@ -3578,6 +3578,19 @@ class TexViewer {
                 this.status('comment saved beside the paper', 'ok');
                 return;
             }
+            if (m.action === 'addAt' && allowed.has(m.file) && Number.isInteger(m.line) && String(m.text || '').trim()) {
+                // From the mini-editor's comments pane: a comment on the block
+                // the card holds, without the page's pick-a-target flow.
+                let doc;
+                try { doc = await vscode.workspace.openTextDocument(vscode.Uri.file(m.file)); }
+                catch (_) { this.status('that file is no longer available', 'warn'); return; }
+                const obj = this._commentObject(doc, m.line, null);
+                const author = await this._readerCommentAuthor(m.file);
+                this.comments.add(m.file, obj, m.text, { author }, this._commentObjects(m.file));
+                this._pushComments();
+                this.status('comment saved beside the paper', 'ok');
+                return;
+            }
             if (m.action === 'update' && allowed.has(m.file)) {
                 if (String(m.text || '').trim()) this.comments.update(m.file, m.id, m.text);
                 else this.comments.delete(m.file, m.id);
@@ -8363,6 +8376,8 @@ class TexViewer {
             editId: s.id,
             label,
             file: path.basename(hit.file),
+            // The full path: the card's comments pane matches comments by it.
+            path: hit.file,
             startLine,
             endLine,
             text: s.native ? wireText(s.lastText) : s.lastText,

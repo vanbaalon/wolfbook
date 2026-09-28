@@ -617,4 +617,53 @@ const tests = [
     },
 ];
 
+tests.push({
+    id: 'card-comments',
+    name: 'the card opens its block\'s comments beside the text: the text keeps its width, the divider shares it out, a new comment posts addAt',
+    async run(t) {
+        await t.eval(() => { try { localStorage.removeItem('wpaper.card.comments'); } catch (_) {} });
+        await openParagraphCard(t, { path: '/p/fx.tex' });
+        const at = new Date().toISOString();
+        await t.post({ type: 'comments', generation: 1, items: [
+            { id: 'c1', cellId: 'x1', file: '/p/fx.tex', line: 8, endLine: 8, text: 'Is this sign right?', author: { name: 'Ada' }, createdAt: at },
+            { id: 'c2', cellId: 'x2', file: '/p/other.tex', line: 8, endLine: 8, text: 'another file', createdAt: at },
+            { id: 'c3', cellId: 'x3', file: '/p/fx.tex', line: 30, endLine: 31, text: 'another block', createdAt: at }] });
+        await t.waitFor(() => /1/.test(document.querySelector('.ec-commentsbtn')?.textContent || ''), null, { what: 'the comment count on the card' });
+        const before = await t.eval(() => ({ text: document.querySelector('.ec-editor').getBoundingClientRect().width,
+            card: document.querySelector('.editcard').getBoundingClientRect().width }));
+        await t.eval(() => document.querySelector('.ec-commentsbtn').click());
+        await t.waitFor(() => !!document.querySelector('.ec-comments'), null, { what: 'the comments pane' });
+        await t.sleep(60);
+        const after = await t.eval(() => ({ text: document.querySelector('.ec-editor').getBoundingClientRect().width,
+            card: document.querySelector('.editcard').getBoundingClientRect().width,
+            pane: document.querySelector('.ec-comments').getBoundingClientRect().width,
+            items: [...document.querySelectorAll('.ecc-text')].map(x => x.value) }));
+        t.near(after.text, before.text, 2, 'the text keeps its width when the pane opens');
+        t.near(after.card, before.card + after.pane + 6, 3, 'the card grows by the pane');
+        t.assert(JSON.stringify(after.items) === JSON.stringify(['Is this sign right?']), `only this block's comments (${JSON.stringify(after.items)})`);
+        // The divider shares the width out: dragging it left widens the pane, narrows the text, keeps the card.
+        const d = await t.eval(() => { const r = document.querySelector('.ec-divider').getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; });
+        await t.page.mouse.move(d.x, d.y); await t.page.mouse.down();
+        for (const k of [1, 2, 3, 4]) {
+            await t.page.mouse.move(d.x - 15 * k, d.y);
+        }
+        await t.page.mouse.up();
+        const dragged = await t.eval(() => ({ text: document.querySelector('.ec-editor').getBoundingClientRect().width,
+            card: document.querySelector('.editcard').getBoundingClientRect().width,
+            pane: document.querySelector('.ec-comments').getBoundingClientRect().width }));
+        t.near(dragged.pane, after.pane + 60, 3, 'the pane widens by the drag');
+        t.near(dragged.text, after.text - 60, 3, 'the text narrows by the drag');
+        t.near(dragged.card, after.card, 3, 'the card keeps its width');
+        if (process.env.WPAPER_WEBVIEW_SHOTS) await t.page.screenshot({ path: `${process.env.WPAPER_WEBVIEW_SHOTS}/card-comments.png` });
+        await t.clear();
+        await t.eval(() => { const ta = document.querySelector('.ecc-new textarea'); ta.focus(); ta.value = 'A new remark'; });
+        await t.page.keyboard.press('Meta+Enter');
+        const sent = await t.waitPosted('commentAction', m => m.action === 'addAt');
+        t.assert(sent.file === '/p/fx.tex' && sent.line === 7 && sent.text === 'A new remark', `addAt for the block (${JSON.stringify(sent)})`);
+        // Closing gives the text its width back.
+        await t.eval(() => document.querySelector('.ec-commentsbtn').click());
+        await t.waitFor(() => !document.querySelector('.ec-comments'), null, { what: 'the pane to close' });
+    },
+});
+
 module.exports = { fixtureTex, tests };

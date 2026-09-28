@@ -4037,6 +4037,9 @@ function renderComments(msg) {
     paintCommentMarkers();
     if (commentThreadOpen()) renderCommentThread();
     if (revealAfterDelete) revealActiveComment(true);
+    for (const card of document.querySelectorAll('.editcard')) {
+        if (card._commentsRefresh) card._commentsRefresh(); else card._commentsButtonPaint?.();
+    }
 }
 
 function openCommentThread(cellId, marker, reveal = true, direction = 0) {
@@ -6888,6 +6891,7 @@ function buildEditCard(e) {
         btn('›', 'Next block (⌥↓)', () => step(1)),
         btn('↗', 'Open this range in the editor', () =>
             vscode.postMessage({ type: 'editReveal', editId: e.id })),
+        cardCommentsButton(card, e),
         btn('save', 'Save the file (⌘S)', () => saveCurrent()),
         btn('✕', 'Close (Esc)', () => closeEditCard()));
     makeDraggable(card, head);
@@ -7173,8 +7177,170 @@ function buildEditCard(e) {
     const figureBar = pro ? buildFigureBar(card, ta, e) : null;
     const mathBar = !pro ? null
         : tableGrid || figureBar ? (wireMathKeys(card, ta), null) : buildMathBar(card, ta, e);
-    card.append(head, ...[mathBar, figureBar, tableGrid].filter(Boolean), box, hint);
+    // The text and, beside it when opened, the block's comments.
+    const body = document.createElement('div');
+    body.className = 'ec-body';
+    body.append(box);
+    card.append(head, ...[mathBar, figureBar, tableGrid].filter(Boolean), body, hint);
+    if (cardCommentsOpen()) openCardComments(card, e, false);
     return card;
+}
+
+// --- THE CARD'S COMMENTS PANE ---------------------------------------------------
+//
+// The comments on the block the card holds, beside its text: read, edit,
+// delete, add. Opening it widens the CARD, not narrows the text (the editor
+// keeps its width); the divider between them then shares the width out, and
+// the pane's width is remembered.
+
+const CARD_COMMENTS_KEY = 'wpaper.card.comments';
+const cardCommentsPrefs = () => {
+    try { return JSON.parse(localStorage.getItem(CARD_COMMENTS_KEY) || '{}') || {}; } catch (_) { return {}; }
+};
+const saveCardCommentsPrefs = (p) => {
+    try { localStorage.setItem(CARD_COMMENTS_KEY, JSON.stringify({ ...cardCommentsPrefs(), ...p })); } catch (_) { /* per-viewer */ }
+};
+function cardCommentsOpen() { return !!cardCommentsPrefs().open; }
+function cardCommentsWidth() { return Math.max(180, Math.min(560, Number(cardCommentsPrefs().width) || 280)); }
+
+/** Comments on the card's block: its file, overlapping its lines. */
+function cardComments(e) {
+    if (!e?.path) return [];
+    return (state.comments?.items || []).filter(it => it.file === e.path &&
+        Number(it.line) <= e.endLine && Number(it.endLine ?? it.line) >= e.startLine);
+}
+
+function cardCommentsButton(card, e) {
+    const b = document.createElement('button');
+    b.className = 'ec-commentsbtn';
+    b.title = 'Comments on this block (opens beside the text)';
+    const paint = () => {
+        const n = cardComments(e).length;
+        b.textContent = n ? `💬 ${n}` : '💬';
+        b.classList.toggle('on', !!card.querySelector('.ec-comments'));
+    };
+    card._commentsButtonPaint = paint;
+    paint();
+    b.addEventListener('click', () => {
+        if (card.querySelector('.ec-comments')) closeCardComments(card);
+        else openCardComments(card, e, true);
+    });
+    return b;
+}
+
+function openCardComments(card, e, focus) {
+    const body = card.querySelector('.ec-body');
+    if (!body || body.querySelector('.ec-comments')) return;
+    // The text keeps the width it has now; the card grows by the pane.
+    const box = body.querySelector('.ec-editor');
+    const textW = Math.round(box.getBoundingClientRect().width) || null;
+    if (textW && !e.textWidth) e.textWidth = textW;
+    const divider = document.createElement('div');
+    divider.className = 'ec-divider';
+    divider.title = 'Drag to share the width between the text and the comments';
+    const pane = document.createElement('div');
+    pane.className = 'ec-comments';
+    pane.style.width = `${cardCommentsWidth()}px`;
+    // Keys typed here are the pane's: the card's own handlers (stepping,
+    // aliases, Esc) stay with its text.
+    pane.addEventListener('keydown', ev => { if (ev.key !== 'Escape') ev.stopPropagation(); });
+    body.append(divider, pane);
+    divider.addEventListener('mousedown', ev => {
+        ev.preventDefault(); ev.stopPropagation();
+        const x0 = ev.clientX, t0 = e.textWidth || box.getBoundingClientRect().width, p0 = pane.getBoundingClientRect().width;
+        const move = mv => {
+            const dx = mv.clientX - x0;
+            const pw = Math.max(180, Math.min(560, p0 - dx));
+            const tw = Math.max(200, t0 + (p0 - pw));
+            e.textWidth = tw;
+            pane.style.width = `${pw}px`;
+            card.style.width = `${tw + pw + 6}px`;
+        };
+        const up = () => {
+            window.removeEventListener('mousemove', move, true);
+            window.removeEventListener('mouseup', up, true);
+            saveCardCommentsPrefs({ width: Math.round(pane.getBoundingClientRect().width) });
+        };
+        window.addEventListener('mousemove', move, true);
+        window.addEventListener('mouseup', up, true);
+    });
+    card._commentsRefresh = () => renderCardComments(card, e, pane);
+    renderCardComments(card, e, pane);
+    saveCardCommentsPrefs({ open: true });
+    card._commentsButtonPaint?.();
+    paintEditCard();
+    if (focus) pane.querySelector('.ecc-new textarea')?.focus({ preventScroll: true });
+}
+
+function closeCardComments(card) {
+    for (const el of card.querySelectorAll('.ec-divider, .ec-comments')) el.remove();
+    card._commentsRefresh = null;
+    if (state.edit) state.edit.textWidth = null;
+    saveCardCommentsPrefs({ open: false });
+    card._commentsButtonPaint?.();
+    paintEditCard();
+    card.querySelector('.ec-editor textarea')?.focus({ preventScroll: true });
+}
+
+function renderCardComments(card, e, pane) {
+    card._commentsButtonPaint?.();
+    const draft = pane.querySelector('.ecc-new textarea')?.value || '';
+    const focused = document.activeElement && pane.contains(document.activeElement) ? document.activeElement.dataset.comment || 'new' : null;
+    pane.textContent = '';
+    const head = document.createElement('div');
+    head.className = 'ecc-head';
+    head.textContent = 'Comments';
+    pane.append(head);
+    const items = cardComments(e);
+    if (!items.length) {
+        const none = document.createElement('div');
+        none.className = 'ecc-none';
+        none.textContent = e.path ? 'No comments on this block yet.' : 'Comments need a file on disk.';
+        pane.append(none);
+    }
+    for (const item of items) {
+        const row = document.createElement('div');
+        row.className = 'ecc-item';
+        const meta = document.createElement('div');
+        meta.className = 'ecc-meta';
+        const who = document.createElement('span');
+        who.textContent = `${commentAuthorName(item)} · ${commentAge(item.updatedAt || item.createdAt || item.time)}`;
+        const del = document.createElement('button');
+        del.className = 'ecc-del'; del.textContent = '✕'; del.title = 'Delete this comment';
+        del.addEventListener('click', () => requestCommentDelete(item));
+        meta.append(who, del);
+        const ta = document.createElement('textarea');
+        ta.className = 'ecc-text';
+        ta.dataset.comment = item.id;
+        ta.value = item.text || '';
+        ta.rows = Math.min(8, Math.max(2, (item.text || '').split('\n').length + 1));
+        ta.addEventListener('input', () => saveCommentSoon(item, ta));
+        ta.addEventListener('blur', () => saveCommentSoon(item, ta, true));
+        row.append(meta, ta);
+        pane.append(row);
+    }
+    const add = document.createElement('div');
+    add.className = 'ecc-new';
+    const ta = document.createElement('textarea');
+    ta.rows = 3;
+    ta.placeholder = 'Add a comment on this block… (⌘↵)';
+    ta.value = draft;
+    const send = document.createElement('button');
+    send.textContent = 'Comment';
+    const submit = () => {
+        const text = ta.value.trim();
+        if (!text || !e.path) return;
+        vscode.postMessage({ type: 'commentAction', action: 'addAt', file: e.path, line: e.startLine, text });
+        ta.value = '';
+    };
+    send.addEventListener('click', submit);
+    ta.addEventListener('keydown', ev => { if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); submit(); } });
+    add.append(ta, send);
+    pane.append(add);
+    if (focused) {
+        const again = focused === 'new' ? ta : pane.querySelector(`.ecc-text[data-comment="${CSS.escape(focused)}"]`);
+        again?.focus({ preventScroll: true });
+    }
 }
 
 // ===========================================================================
@@ -7633,9 +7799,22 @@ function paintEditCard(focus = false) {
     const mr = main ? main.getBoundingClientRect() : wr;
     const visLeft = Math.max(0, mr.left - wr.left);
     const visRight = Math.min(W, mr.right - wr.left);
-    const cw = Math.max(220, Math.min(W - 24, (visRight - visLeft) - 28, 640));
-    const lo = Math.max(0, visLeft + 14);
-    const hi = Math.max(lo, Math.min(W - cw, visRight - cw - 14));
+    let cw = Math.max(220, Math.min(W - 24, (visRight - visLeft) - 28, 640));
+    // With the comments pane open the card is the text's width plus the
+    // pane's; it moves left to stay on screen, and only when the view is too
+    // narrow for both does the text give up width.
+    const pane = card.querySelector?.('.ec-comments');
+    // …and it may use the visible margin beside the page, not the page alone.
+    const edgeL = pane ? mr.left - wr.left : visLeft, edgeR = pane ? mr.right - wr.left : visRight;
+    if (pane) {
+        const pw = pane.getBoundingClientRect().width;
+        const room = Math.max(220, (edgeR - edgeL) - 28);
+        const tw = Math.max(200, Math.min(e.textWidth || cw, room - pw - 6));
+        if (e.textWidth && tw < e.textWidth) e.textWidth = tw;
+        cw = tw + pw + 6;
+    }
+    const lo = pane ? edgeL + 14 : Math.max(0, visLeft + 14);
+    const hi = pane ? Math.max(lo, edgeR - cw - 14) : Math.max(lo, Math.min(W - cw, visRight - cw - 14));
     const x = Math.max(lo, Math.min(left == null ? 32 : left, hi));
     card.style.width = `${cw}px`;
     if (e.fixedGeometry) {
@@ -8865,7 +9044,7 @@ window.addEventListener('message', async (ev) => {
             closeEditCard(false);                  // one session at a time
             state.edit = {
                 id: msg.editId, text: msg.text || '', label: msg.label, native:!!msg.native,
-                file: msg.file, startLine: msg.startLine, endLine: msg.endLine,
+                file: msg.file, path: msg.path || null, startLine: msg.startLine, endLine: msg.endLine,
                 rects: msg.rects || [], page: Number(msg.page) ||
                     (msg.rects?.length ? msg.rects[msg.rects.length - 1].page : 1),
                 pos: keepPos || msg.pos || null,

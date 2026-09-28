@@ -1181,6 +1181,33 @@
   @keyframes ping { to { transform:scale(2.6); opacity:0; } }
 
   /* --- the mini-editor card (right-click a block) --- */
+  /* The mini-editor's text and, when opened, its comments pane beside it. */
+  .ec-body { display:flex; align-items:stretch; min-height:0; }
+  .ec-body > .ec-editor { flex:1 1 auto; min-width:0; }
+  .ec-divider { flex:0 0 6px; box-sizing:border-box; cursor:col-resize; background: var(--vscode-editorWidget-border, var(--vscode-panel-border, rgba(128,128,128,.3)));
+                background-clip:content-box; padding:0 2px; }
+  .ec-divider:hover { background-color: var(--vscode-focusBorder, #0078d4); }
+  .ec-comments { flex:0 0 auto; box-sizing:border-box; display:flex; flex-direction:column; gap:6px; padding:6px 8px; overflow:auto; max-height:60vh;
+                 font: 12px var(--vscode-font-family, sans-serif); }
+  .ecc-head { font-weight:600; opacity:.8; }
+  .ecc-none { opacity:.6; font-style:italic; }
+  .ecc-item { display:flex; flex-direction:column; gap:2px; }
+  .ecc-meta { display:flex; align-items:center; gap:6px; font-size:11px; opacity:.7; }
+  .ecc-meta span { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .ecc-del { border:none; background:none; color:inherit; cursor:pointer; padding:0 2px; opacity:.6; }
+  .ecc-del:hover { opacity:1; }
+  /* Ordinary text fields: not the card's own transparent overlay textarea
+     (.editcard textarea, below), whose rules would otherwise apply here too. */
+  .editcard .ec-comments textarea { position:static; display:block; width:100%; box-sizing:border-box; resize:vertical;
+                 overflow:auto; margin:0; white-space:pre-wrap; line-height:1.4;
+                 font: 12px var(--vscode-font-family, sans-serif); caret-color:auto;
+                 color: var(--vscode-input-foreground, var(--vscode-foreground)); background: var(--vscode-input-background, transparent);
+                 border:1px solid var(--vscode-input-border, rgba(128,128,128,.35)); border-radius:3px; padding:3px 5px; outline:none; }
+  .editcard .ec-comments textarea:focus { border-color: var(--vscode-focusBorder, #0078d4); }
+  .ecc-new { display:flex; flex-direction:column; gap:4px; margin-top:auto; }
+  .ecc-new button { align-self:flex-end; border:none; border-radius:3px; padding:2px 10px; cursor:pointer;
+                 color: var(--vscode-button-foreground, #fff); background: var(--vscode-button-background, #0078d4); }
+  .ec-commentsbtn.on { background: var(--vscode-toolbar-activeBackground, rgba(128,128,128,.3)); border-radius:3px; }
   .editcard { position:absolute; z-index:30; text-align:left;
           background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
           color: var(--vscode-editorWidget-foreground, var(--vscode-foreground));
