@@ -366,10 +366,16 @@
                     border:0; border-radius:4px; background:none; color:inherit; cursor:pointer; }
   #findbar button:hover { background:var(--vscode-toolbar-hoverBackground, rgba(128,128,128,.18)); }
   #findbar button:disabled { opacity:.4; cursor:default; }
+  /* A MARKER PEN, like the cursor's wash: the page is paper whatever the
+     editor theme, and a theme's find colours can be opaque — the current
+     match then covered the very word it found. Multiplied over the ink, the
+     text stays readable. */
   .find-hit { position:absolute; z-index:4; pointer-events:none; border-radius:2px;
-              background:var(--vscode-editor-findMatchHighlightBackground, rgba(234,92,0,.33)); }
-  .find-hit.current { background:var(--vscode-editor-findMatchBackground, rgba(255,150,50,.6));
-                      outline:1px solid var(--vscode-editor-findMatchBorder, rgba(230,120,0,.9)); }
+              background:rgba(255,196,0,.34); mix-blend-mode:multiply; }
+  .find-hit.current { background:rgba(255,140,0,.5);
+                      box-shadow:0 0 0 1.5px rgba(230,110,0,.85); }
+  .wb-dark-pages .find-hit { mix-blend-mode:normal; background:rgba(255,196,0,.26); }
+  .wb-dark-pages .find-hit.current { background:rgba(255,160,40,.4); }
   #tikzpanel .tz-head { display:flex; align-items:center; gap:6px; padding:6px 8px; border-bottom:1px solid var(--vscode-editorWidget-border, #454545); }
   #tikzpanel .tz-head strong { flex:1; }
   #tikzpanel .tz-coords { font-variant-numeric:tabular-nums; opacity:.75; }
@@ -1415,7 +1421,9 @@
   /* WLATEX PRO. The engine that makes the page follow the keys says so: a
      pill at the end of the toolbar with its state (live · ms, settling,
      settled, off), a panel of what it does, and a tag on pages it drew. */
-  #probadge { flex:none; height:20px; padding:1px 8px 1px 6px; gap:6px; border-radius:10px;
+  /* Compact: a dot for the state (live green, settling amber, settled blue)
+     and the PRO tag; the words are in the tooltip and the panel. */
+  #probadge { flex:none; height:20px; padding:1px 4px 1px 6px; gap:5px; border-radius:10px;
               border:1px solid color-mix(in srgb, #8b5cf6 55%, transparent);
               background:linear-gradient(90deg, color-mix(in srgb, #8b5cf6 18%, transparent), color-mix(in srgb, #0ea5e9 14%, transparent));
               font-size:10.5px; line-height:1; white-space:nowrap; font-variant-numeric:tabular-nums; }
@@ -1424,7 +1432,8 @@
   .pro-mark b { margin-left:3px; padding:1px 4px; border-radius:4px; font-size:9px; font-weight:700;
               letter-spacing:.06em; text-transform:uppercase; color:#fff;
               background:linear-gradient(90deg, #8b5cf6, #0ea5e9); }
-  .pro-state { opacity:.85; }
+  .pro-state { display:none; }
+  #probadge .pro-mark .pro-word { display:none; }
   .pro-dot { width:6px; height:6px; border-radius:50%; background:#a3a3a3; }
   #probadge[data-state="live"] .pro-dot { background:#22c55e; box-shadow:0 0 0 2px color-mix(in srgb, #22c55e 30%, transparent); }
   #probadge[data-state="settling"] .pro-dot { background:none; border:1px solid #f59e0b; border-top-color:transparent;
@@ -1546,7 +1555,7 @@
   <button id="sourceunsaved" hidden><span class="dirtytext">Unsaved source</span></button>
   <span id="tracelag" hidden><span class="lagtext">page behind</span></span>
   <span id="where"></span>
-  <button id="probadge" hidden aria-haspopup="dialog" aria-expanded="false" aria-controls="propanel"><span class="pro-dot"></span><span class="pro-mark">WLaTeX<b>Pro</b></span><span class="pro-state"></span></button>
+  <button id="probadge" hidden aria-haspopup="dialog" aria-expanded="false" aria-controls="propanel"><span class="pro-dot"></span><span class="pro-mark"><span class="pro-word">WLaTeX</span><b>Pro</b></span><span class="pro-state"></span></button>
 </header>
 <div id="propanel" role="dialog" aria-label="WLaTeX Pro" hidden>
   <div class="pro-head"><span class="pro-mark">WLaTeX<b>Pro</b></span><span class="pro-headstate"></span></div>

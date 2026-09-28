@@ -227,6 +227,7 @@ function setEngineBadge(msg) {
         settled: 'WLaTeX Pro: this PDF is WLaTeX\'s settled build; click any word to reach its source.',
         off: `WLaTeX Pro is off for this paper: ${engine.reason || 'it needs another engine'}.`,
     }[engine.state] + ' Click for details.';
+    badge.setAttribute('aria-label', `WLaTeX Pro: ${badge.querySelector('.pro-state').textContent}`);
     panel.querySelector('.pro-headstate').textContent = badge.querySelector('.pro-state').textContent;
     // The first time WLaTeX Pro is on: what it adds, once (the host remembers).
     const intro = el('prointro');
