@@ -114,42 +114,65 @@ class NativeMap extends RenderMap {
         if (!this.view || !this.source || !this.source.isCurrentView(this.view)) return;
         if (!this.live && o.generation?.pdfHash && o.generation.pdfHash !== this.view.artifact.pdf_hash)
             throw Error('Native map does not belong to the displayed PDF');
-        for (const page of this.view.pages) {
-            if (!(page.header.magnification > 0)) throw Error('Invalid native magnification');
-            this._headers.set(page.page, page.header);
-            const entries = [];
-            for (const hit of page.hits) {
-                const rect = rectangle(hit.item.geometry, page.header);
-                const preferred = hit.preferred_source;
-                const file = preferred ? path.resolve(this.projectDir, preferred.file) : null;
-                const boxes = hit.box_path.filter(([, box]) => box.kind === 'Horizontal');
-                const row = boxes.length ? boxes[boxes.length - 1][0] : `baseline:${rect.baseline}`;
-                const entry = { hit, ...rect, boxHeight: rect.h, h: rect.baseline - rect.y, page: page.page, file, fileId: file,
-                    line: preferred?.location.start.line || null, row,
-                    i: hit.item_id, fontId: hit.item.glyph?.font || 0,
-                    str: '', kind: !file ? 5 : hit.box_path.some(([,b]) => b.kind === 'EquationNumber') ? 3
-                        : hit.box_path.some(([,b]) => b.kind === 'Display') ? 2 : 0, lv: 0,
-                    emTop: rect.y, emBottom: rect.y + rect.h,
-                    d: rect.y + rect.h - rect.baseline };
-                entries.push(entry);
-                this._entries.push(entry);
-                this._byItem.set(entry.i, entry);
-                this._hasDisplaced ||= hit.mapped_origins.some(o => o.source.location.accuracy !== 'Exact');
-                const seen = new Set();
-                for (const origin of hit.mapped_origins || []) {
-                    const source = origin.source;
-                    const absolute = path.resolve(this.projectDir, source.file);
-                    for (const line of originLines(source.location)) {
-                        const key = `${absolute}\0${line}`;
-                        if (seen.has(key)) continue;
-                        seen.add(key);
-                        if (!this._lines.has(key)) this._lines.set(key, []);
-                        this._lines.get(key).push(entry);
-                    }
+        // THE INDEX IS BUILT PAGE BY PAGE. `NativeMap.build` does it in
+        // slices so a long paper never holds the extension host at once (a
+        // 56-page paper took ~190 ms in one piece, after every typing pause).
+        this._pendingPages = [...this.view.pages];
+        if (!o.deferIndex) this._indexPending(Infinity);
+    }
+
+    /** Index pending pages for at most `budgetMs`; true when all are done. */
+    _indexPending(budgetMs) {
+        const t0 = Date.now();
+        while (this._pendingPages?.length) {
+            this._indexPage(this._pendingPages.shift());
+            if (Date.now() - t0 >= budgetMs) break;
+        }
+        return !this._pendingPages?.length;
+    }
+
+    /** A map built in slices of the event loop (see the constructor). */
+    static async build(o = {}) {
+        const map = new NativeMap({ ...o, deferIndex: true });
+        while (!map._indexPending(12)) await new Promise(resolve => setImmediate(resolve));
+        return map;
+    }
+
+    _indexPage(page) {
+        if (!(page.header.magnification > 0)) throw Error('Invalid native magnification');
+        this._headers.set(page.page, page.header);
+        const entries = [];
+        for (const hit of page.hits) {
+            const rect = rectangle(hit.item.geometry, page.header);
+            const preferred = hit.preferred_source;
+            const file = preferred ? path.resolve(this.projectDir, preferred.file) : null;
+            const boxes = hit.box_path.filter(([, box]) => box.kind === 'Horizontal');
+            const row = boxes.length ? boxes[boxes.length - 1][0] : `baseline:${rect.baseline}`;
+            const entry = { hit, ...rect, boxHeight: rect.h, h: rect.baseline - rect.y, page: page.page, file, fileId: file,
+                line: preferred?.location.start.line || null, row,
+                i: hit.item_id, fontId: hit.item.glyph?.font || 0,
+                str: '', kind: !file ? 5 : hit.box_path.some(([,b]) => b.kind === 'EquationNumber') ? 3
+                    : hit.box_path.some(([,b]) => b.kind === 'Display') ? 2 : 0, lv: 0,
+                emTop: rect.y, emBottom: rect.y + rect.h,
+                d: rect.y + rect.h - rect.baseline };
+            entries.push(entry);
+            this._entries.push(entry);
+            this._byItem.set(entry.i, entry);
+            this._hasDisplaced ||= hit.mapped_origins.some(o => o.source.location.accuracy !== 'Exact');
+            const seen = new Set();
+            for (const origin of hit.mapped_origins || []) {
+                const source = origin.source;
+                const absolute = path.resolve(this.projectDir, source.file);
+                for (const line of originLines(source.location)) {
+                    const key = `${absolute}\0${line}`;
+                    if (seen.has(key)) continue;
+                    seen.add(key);
+                    if (!this._lines.has(key)) this._lines.set(key, []);
+                    this._lines.get(key).push(entry);
                 }
             }
-            this._pages.set(page.page, entries);
         }
+        this._pages.set(page.page, entries);
     }
     get available() { return !this._invalidated && !!this.source?.isCurrentView(this.view); }
     /** Whether this view materialized the page (views are windowed). */

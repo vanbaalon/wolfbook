@@ -61,6 +61,18 @@ function nodeDeps() {
  * The map for a generation: exact when the engine emitted one, SyncTeX-only
  * otherwise. One construction site, so nothing downstream has to know which.
  */
+/**
+ * makeMap, but a native map is indexed in slices of the event loop
+ * (NativeMap.build): a long paper's map no longer holds the extension host
+ * for a fifth of a second after every typing pause and every settle.
+ */
+async function makeMapAsync(o) {
+    const gen = o && o.generation;
+    if (gen && gen.nativeView && gen.nativeSource) return NativeMap.build({ ...o,
+        nativeView: gen.nativeView, nativeSource: gen.nativeSource, projectDir: gen.projectDir });
+    return makeMap(o);
+}
+
 function makeMap(o) {
     const gen = o && o.generation;
     if (gen && gen.nativeView && gen.nativeSource) return new NativeMap({ ...o,
@@ -444,8 +456,13 @@ class RenderCoordinator {
             // map when it lands; building one here would throw and retire
             // the lane on an ordinary keystroke.
             if (generation.pdfHash && view.artifact?.pdf_hash !== generation.pdfHash) return;
+            const map = await makeMapAsync({ generation: { ...generation, nativeView: view },
+                model:this._modelFor(st.root), pageSize:this._pageSize(generation) });
+            // Built across ticks: install it only if nothing replaced the lane,
+            // the generation or its view meanwhile.
+            if (st.nativeLane !== lane || st.generation !== generation || generation?.nativeSource !== lane.source) return;
             generation.nativeView = view;
-            st.map = makeMap({ generation, model:this._modelFor(st.root), pageSize:this._pageSize(generation) });
+            st.map = map;
             this._emitter.fire(st);
         } catch (error) {
             this.log(`  native mapping: ${error.message}`);
@@ -1165,6 +1182,14 @@ class RenderCoordinator {
             } else if (glyphPrimary && glyphPrimary.ok && glyphPrimary.glyphMapPath) {
                 st.glyphMapRefused = null;
             }
+            // A NATIVE MAP IS BUILT BEFORE ANYTHING IS ASSIGNED, in slices
+            // (makeMapAsync), so the generation and its map change together.
+            let prebuilt = null;
+            if (gen.nativeView && gen.nativeSource) {
+                try { prebuilt = await makeMapAsync({ generation: gen, model: this._modelFor(root), pageSize: this._pageSize(gen) }); }
+                catch (_) { prebuilt = null; /* makeMap below throws it again, as before */ }
+                if (ac.signal.aborted) { this.log('  cancelled'); return st; }
+            }
             const prevGen = st.generation;
             // prevMap and map may now SHARE one parsed SyncTeX doc. That is
             // safe because the doc is never mutated after construction — the
@@ -1178,7 +1203,7 @@ class RenderCoordinator {
             // not move (glyphMapHash): a rebuild that ships nothing new costs
             // no re-parse either.
             const prevGlyph = st.map && st.map.gm;
-            st.map = makeMap({
+            st.map = prebuilt || makeMap({
                 generation: gen,
                 model,
                 pageSize: this._pageSize(gen),

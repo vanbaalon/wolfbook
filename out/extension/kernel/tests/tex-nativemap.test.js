@@ -409,3 +409,20 @@ test('with no .bib record, a bibliography click lands in the .bbl the project sh
     assert.equal(hit.file, path.join(dir, 'paper.bbl'));
     assert.deepEqual([hit.line, hit.column], [4, 3]);
 });
+
+// Bug #34: the map for a long paper was indexed in one piece on the extension
+// host after every typing pause. NativeMap.build indexes it in slices of the
+// event loop; the result must be the same map.
+test('NativeMap.build indexes in slices and answers exactly as the one-piece constructor', async () => {
+    const { map, view, source } = fixture();
+    const pages = Array.from({ length: 40 }, (_, k) => ({ ...view.pages[0], page: k + 1,
+        hits: view.pages[0].hits.map(h => ({ ...h, item_id: h.item_id + 10 * k, item: { ...h.item, page: k + 1 } })) }));
+    const big = { ...view, artifact: { ...view.artifact, page_count: 40 }, pages };
+    const src = { isCurrentView: v => v === big };
+    const whole = new NativeMap({ generation: { pdfHash: 'paired', projectDir: root }, nativeView: big, nativeSource: src });
+    const sliced = await NativeMap.build({ generation: { pdfHash: 'paired', projectDir: root }, nativeView: big, nativeSource: src });
+    assert.deepEqual(sliced.materializedPages, whole.materializedPages);
+    assert.equal(sliced._entries.length, whole._entries.length);
+    assert.deepEqual(sliced.glyphsForLine(file, 4).map(e => [e.page, e.i]), whole.glyphsForLine(file, 4).map(e => [e.page, e.i]));
+    assert.ok(sliced.available && map.available);
+});
