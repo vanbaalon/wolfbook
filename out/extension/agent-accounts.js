@@ -127,7 +127,9 @@ function register(context, vscode = require('vscode')) {
         }
         if (!repo) return;
         const provider = PROVIDERS[node?.provider] ? node.provider : (await vscode.window.showQuickPick(
-            Object.entries(PROVIDERS).map(([id, label]) => ({ label, id })),
+            Object.entries(PROVIDERS).map(([id, label]) => ({
+                label, id, description: `Selected: ${selected(repo, id)?.name || 'Default account'}`,
+            })),
             { title: `CLI account for ${path.basename(repo)}` }))?.id;
         return provider ? { repo, provider } : undefined;
     }
