@@ -252,6 +252,83 @@ export const GREEK_PALETTE = [['alpha', 'α'], ['beta', 'β'], ['gamma', 'γ'], 
     ['Psi', 'Ψ'], ['Omega', 'Ω'], ['infty', '∞'], ['partial', '∂'], ['nabla', '∇']];
 
 /**
+ * The card's symbol palette, in groups as other maths editors keep them. An
+ * item is [template, label, title?]: the template is inserted as is, or — with
+ * `¦` in it — wrapped around the selection with the caret after it (a bracket
+ * pair, an accent, a letter style). Outside maths the whole thing goes in `$…$`.
+ * Commands from amssymb / amsmath say so in their titles.
+ */
+export const SYMBOL_GROUPS = [
+    { id: 'greek', label: 'αβ', title: 'Greek letters — or type Esc a Esc for α, Esc D Esc for Δ',
+        items: [...GREEK_PALETTE.filter(([n]) => !['infty', 'partial', 'nabla'].includes(n)),
+            ['iota', 'ι'], ['upsilon', 'υ'], ['vartheta', 'ϑ'], ['varrho', 'ϱ'], ['varsigma', 'ς'], ['varpi', 'ϖ'], ['Upsilon', 'Υ']]
+            .map(([n, g]) => [`\\${n}`, g]) },
+    { id: 'arrows', label: '→', title: 'Arrows', items: [
+        ['\\to', '→'], ['\\gets', '←'], ['\\leftrightarrow', '↔'], ['\\mapsto', '↦'], ['\\Rightarrow', '⇒'], ['\\Leftarrow', '⇐'],
+        ['\\Leftrightarrow', '⇔'], ['\\implies', '⟹', '\\implies (amsmath)'], ['\\iff', '⟺'], ['\\longrightarrow', '⟶'], ['\\longmapsto', '⟼'],
+        ['\\uparrow', '↑'], ['\\downarrow', '↓'], ['\\updownarrow', '↕'], ['\\nearrow', '↗'], ['\\searrow', '↘'], ['\\swarrow', '↙'], ['\\nwarrow', '↖'],
+        ['\\hookrightarrow', '↪'], ['\\rightharpoonup', '⇀'], ['\\rightleftharpoons', '⇌'], ['\\xrightarrow{¦}', 'x→', '\\xrightarrow{…} (amsmath): the selection over the arrow'],
+        ['\\xleftarrow{¦}', '←x', '\\xleftarrow{…} (amsmath)']] },
+    { id: 'brackets', label: '⟨⟩', title: 'Brackets — around the selection', items: [
+        ['\\left(¦\\right)', '( )'], ['\\left[¦\\right]', '[ ]'], ['\\left\\{¦\\right\\}', '{ }'], ['\\left\\langle ¦\\right\\rangle', '⟨ ⟩'],
+        ['\\left|¦\\right|', '| |'], ['\\left\\|¦\\right\\|', '‖ ‖'], ['\\lfloor ¦\\rfloor', '⌊ ⌋'], ['\\lceil ¦\\rceil', '⌈ ⌉'],
+        ['\\langle ¦|', '⟨ψ|', 'bra'], ['|¦\\rangle', '|ψ⟩', 'ket'], ['\\langle ¦\\rangle', '⟨ψ⟩', 'expectation value'],
+        ['\\bigl(¦\\bigr)', 'big( )', '\\bigl( … \\bigr)'], ['\\Bigl(¦\\Bigr)', 'Big( )', '\\Bigl( … \\Bigr)'],
+        ['\\overbrace{¦}', '⏞', '\\overbrace{…}'], ['\\underbrace{¦}', '⏟', '\\underbrace{…}']] },
+    { id: 'relations', label: '≤', title: 'Relations', items: [
+        ['\\leq', '≤'], ['\\geq', '≥'], ['\\neq', '≠'], ['\\approx', '≈'], ['\\sim', '∼'], ['\\simeq', '≃'], ['\\cong', '≅'], ['\\equiv', '≡'],
+        ['\\propto', '∝'], ['\\ll', '≪'], ['\\gg', '≫'], ['\\doteq', '≐'], ['\\prec', '≺'], ['\\succ', '≻'], ['\\in', '∈'], ['\\notin', '∉'],
+        ['\\ni', '∋'], ['\\subset', '⊂'], ['\\subseteq', '⊆'], ['\\supset', '⊃'], ['\\supseteq', '⊇'], ['\\perp', '⊥'], ['\\parallel', '∥'], ['\\mid', '∣']] },
+    { id: 'operators', label: '±', title: 'Operators', items: [
+        ['\\pm', '±'], ['\\mp', '∓'], ['\\times', '×'], ['\\div', '÷'], ['\\cdot', '·'], ['\\circ', '∘'], ['\\ast', '∗'], ['\\star', '⋆'],
+        ['\\otimes', '⊗'], ['\\oplus', '⊕'], ['\\odot', '⊙'], ['\\wedge', '∧'], ['\\vee', '∨'], ['\\cap', '∩'], ['\\cup', '∪'],
+        ['\\setminus', '∖'], ['\\dagger', '†'], ['\\ddagger', '‡']] },
+    { id: 'big', label: '∑', title: 'Big operators and named functions', items: [
+        ['\\sum', '∑'], ['\\prod', '∏'], ['\\coprod', '∐'], ['\\int', '∫'], ['\\iint', '∬', '\\iint (amsmath)'], ['\\iiint', '∭', '\\iiint (amsmath)'],
+        ['\\oint', '∮'], ['\\bigcup', '⋃'], ['\\bigcap', '⋂'], ['\\bigoplus', '⨁'], ['\\bigotimes', '⨂'],
+        ['\\lim', 'lim'], ['\\sup', 'sup'], ['\\inf', 'inf'], ['\\max', 'max'], ['\\min', 'min'], ['\\det', 'det'], ['\\log', 'log'],
+        ['\\exp', 'exp'], ['\\sin', 'sin'], ['\\cos', 'cos'], ['\\operatorname{¦}', 'op', '\\operatorname{…} (amsmath)']] },
+    { id: 'accents', label: 'â', title: 'Accents — on the selection', items: [
+        ['\\hat{¦}', 'â'], ['\\bar{¦}', 'ā'], ['\\tilde{¦}', 'ã'], ['\\dot{¦}', 'ȧ'], ['\\ddot{¦}', 'ä'], ['\\vec{¦}', 'a⃗'],
+        ['\\check{¦}', 'ǎ'], ['\\breve{¦}', 'ă'], ['\\widehat{¦}', 'âb', '\\widehat{…}'], ['\\widetilde{¦}', 'ãb', '\\widetilde{…}'],
+        ['\\overline{¦}', 'a̅b', '\\overline{…}'], ['\\underline{¦}', 'a̲b', '\\underline{…}']] },
+    { id: 'styles', label: '𝔸', title: 'Letter styles — on the selection', items: [
+        ['\\mathbb{¦}', '𝔸', '\\mathbb{…} (amssymb)'], ['\\mathcal{¦}', '𝒜', '\\mathcal{…}'], ['\\mathfrak{¦}', '𝔄', '\\mathfrak{…} (amssymb)'],
+        ['\\mathrm{¦}', 'A', '\\mathrm{…}'], ['\\mathbf{¦}', '𝐀', '\\mathbf{…}'], ['\\mathsf{¦}', '𝖠', '\\mathsf{…}'],
+        ['\\boldsymbol{¦}', '𝜶', '\\boldsymbol{…} (amsmath)'], ['\\text{¦}', 'text', '\\text{…} (amsmath)'],
+        ['\\mathbb{R}', 'ℝ', '\\mathbb{R} (amssymb)'], ['\\mathbb{C}', 'ℂ', '\\mathbb{C} (amssymb)'], ['\\mathbb{Z}', 'ℤ', '\\mathbb{Z} (amssymb)'],
+        ['\\mathbb{N}', 'ℕ', '\\mathbb{N} (amssymb)'], ['\\mathbb{Q}', 'ℚ', '\\mathbb{Q} (amssymb)']] },
+    { id: 'misc', label: '∀∞', title: 'Logic, sets and other symbols', items: [
+        ['\\forall', '∀'], ['\\exists', '∃'], ['\\nexists', '∄', '\\nexists (amssymb)'], ['\\neg', '¬'], ['\\emptyset', '∅'],
+        ['\\infty', '∞'], ['\\partial', '∂'], ['\\nabla', '∇'], ['\\hbar', 'ℏ'], ['\\ell', 'ℓ'], ['\\Re', 'ℜ'], ['\\Im', 'ℑ'],
+        ['\\aleph', 'ℵ'], ['\\wp', '℘'], ['\\angle', '∠'], ['\\triangle', '△'], ['\\prime', '′'],
+        ['\\ldots', '…'], ['\\cdots', '⋯'], ['\\vdots', '⋮'], ['\\ddots', '⋱']] },
+];
+
+/**
+ * The edit a palette item makes on `text` with the selection `start..end`:
+ * `{ start, end, insert, caret }`. `inMath` says whether `start` is in maths.
+ */
+export function symbolEdit(text, start, end, template, inMath) {
+    const sel = text.slice(start, end);
+    let body, caret;
+    if (template.includes('¦')) {
+        const [a, b] = template.split('¦');
+        body = a + sel + b;
+        caret = start + a.length + sel.length;
+    } else {
+        // A command word followed by a letter needs a space to stay one word.
+        const tail = /[A-Za-z]$/.test(template) && /^[A-Za-z]/.test(text.slice(end, end + 1)) ? ' ' : '';
+        body = template + tail;
+        caret = start + body.length;
+    }
+    if (inMath) return { start, end, insert: body, caret };
+    // Outside maths: the same inside $…$ — the caret stays where it was put,
+    // or after the closing $ when the item has no slot.
+    return { start, end, insert: `$${body}$`, caret: template.includes('¦') ? caret + 1 : caret + 2 };
+}
+
+/**
  * The edit an alias makes, from `from` (where Esc began it) to `to` (the
  * caret at the closing Esc): the command, spaced from a letter after it.
  * Null when the alias names nothing.

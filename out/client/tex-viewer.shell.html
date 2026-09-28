@@ -172,6 +172,9 @@
       background:transparent; color:inherit; font:13px/1 'Latin Modern Math','STIX Two Math','Cambria Math',serif; }
   .ec-math button:hover, .ec-greek button:hover { background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,.22)); }
   .ec-math .ec-greek-toggle { margin-left:auto; }
+  .ec-math .ec-symtab { min-width:22px; padding:0 3px; opacity:.8; }
+  .ec-math .ec-symtab.on { opacity:1; background: var(--vscode-toolbar-activeBackground, rgba(128,128,128,.3)); }
+  .ec-symbols button { font-size:12.5px; }
   /* Between Esc and Esc: an alias (Esc a Esc is α). */
   .editcard.aliasing .ec-editor { outline:1px dashed var(--vscode-focusBorder, #0078d4); outline-offset:-1px; }
   .editcard.aliasing .ec-head::after { content:'⋮ alias — Esc'; margin-left:6px; font-size:11px; opacity:.7; }

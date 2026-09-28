@@ -1815,7 +1815,7 @@ function rectToViewport(n, rect) {
 // all placed from the PDF page box, which an overlay does not change.
 
 import { createTxdlRenderer, linkLayer, pageToCss } from './txdl-canvas.js';
-import { mathKey, mathKeyFor, inMathAt, aliasEdit, GREEK_PALETTE } from './math-keys.js';
+import { mathKey, mathKeyFor, inMathAt, aliasEdit, SYMBOL_GROUPS, symbolEdit } from './math-keys.js';
 import * as texTable from './tex-table.js';
 import * as texFigure from './tex-figure.js';
 
@@ -6557,19 +6557,31 @@ function buildMathBar(card, ta, e) {
         return b;
     };
     const key = k => () => { const r = mathKey(ta.value, ta.selectionStart, ta.selectionEnd, k); if (r) applyCardEdit(ta, r); };
-    const greek = document.createElement('div');
-    greek.className = 'ec-greek';
-    greek.hidden = true;
-    for (const [name, glyph] of GREEK_PALETTE) {
-        greek.appendChild(act(glyph, `\\${name}`, () => {
-            const s = ta.selectionStart, t = ta.selectionEnd;
-            const tail = /^[A-Za-z]/.test(ta.value.slice(t, t + 1)) ? ' ' : '';
-            const body = `\\${name}${tail}`;
-            const math = inMathAt(ta.value, s);
-            applyCardEdit(ta, math ? { start: s, end: t, insert: body, caret: s + body.length }
-                : { start: s, end: t, insert: `$\\${name}$`, caret: s + name.length + 3 });
-        }));
-    }
+    // THE SYMBOL PALETTE, in groups as other maths editors keep them: one
+    // toggle per group at the right of the bar, one group's row open at a time.
+    const rows = SYMBOL_GROUPS.map(g => {
+        const row = document.createElement('div');
+        row.className = 'ec-greek ec-symbols';
+        row.dataset.group = g.id;
+        row.hidden = true;
+        for (const [tpl, glyph, title] of g.items) {
+            row.appendChild(act(glyph, title || tpl.replace('¦', '…'), () => {
+                applyCardEdit(ta, symbolEdit(ta.value, ta.selectionStart, ta.selectionEnd, tpl, inMathAt(ta.value, ta.selectionStart)));
+            }));
+        }
+        return row;
+    });
+    const tabs = SYMBOL_GROUPS.map((g, i) => act(g.label, g.title, () => {
+        const open = rows[i].hidden;
+        rows.forEach((r, j) => { r.hidden = !(open && j === i); });
+        tabs.forEach((t, j) => t.classList.toggle('on', open && j === i));
+        try { localStorage.setItem('wpaper.card.symbols', open ? g.id : ''); } catch (_) { /* per-viewer convenience */ }
+    }, `ec-symtab${i === 0 ? ' ec-greek-toggle' : ''}`));
+    try {
+        const last = localStorage.getItem('wpaper.card.symbols');
+        const i = SYMBOL_GROUPS.findIndex(g => g.id === last);
+        if (i >= 0) { rows[i].hidden = false; tabs[i].classList.add('on'); }
+    } catch (_) { /* per-viewer convenience */ }
     bar.append(
         act('x²', 'Superscript (⌃^ or ⌃6)', key('sup')),
         act('x₂', 'Subscript (⌃_ or ⌃-)', key('sub')),
@@ -6577,11 +6589,11 @@ function buildMathBar(card, ta, e) {
         act('√', 'Square root (⌃2)', key('sqrt')),
         act('⊞│', 'Matrix column (⌃,)', key('col')),
         act('⊞─', 'Matrix row (⌃Enter)', key('row')),
-        act('⤴', 'Out of the structure (⌃Space); Tab: the next empty slot', key('exit')),
-        act('αβ', 'Greek letters — or type Esc a Esc for α, Esc D Esc for Δ', () => { greek.hidden = !greek.hidden; }, 'ec-greek-toggle'));
+        act('⤴', 'Out of the structure (⌃Space — macOS may take it for switching input sources; Tab also goes to the next empty slot)', key('exit')),
+        ...tabs);
     const wrap = document.createElement('div');
     wrap.className = 'ec-mathwrap';
-    wrap.append(bar, greek);
+    wrap.append(bar, ...rows);
     return wrap;
 }
 
