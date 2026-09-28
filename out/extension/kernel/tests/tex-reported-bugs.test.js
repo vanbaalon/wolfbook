@@ -922,3 +922,38 @@ test('#37 ... else after the glyph printed before it', async () => {
     const h = f.posts.filter(p => p.type === 'highlight').at(-1);
     assert.deepEqual([h.caret.x, h.caret.at], [53, 'after']);
 });
+
+// ── #39 the viewer stuck on "starting…" ─────────────────────────────────────
+// VS Code could not read the panel's script (the extension was being updated
+// under a reloading window): no `ready`, and every PDF went nowhere.
+test('#39 a panel that never says ready is loaded again, twice at most, then the reader is told', async () => {
+    const saved = TexViewer.READY_TIMEOUT_MS;
+    TexViewer.READY_TIMEOUT_MS = 15;
+    const warnings = [];
+    const savedWarn = stub.window.showWarningMessage;
+    stub.window.showWarningMessage = (m) => { warnings.push(m); return Promise.resolve(undefined); };
+    try {
+        let loads = 0;
+        const panel = { visible: true, webview: { set html(_) { loads++; } } };
+        const viewer = Object.create(TexViewer.prototype);
+        Object.assign(viewer, { panel, _html: () => '<html>', _log() {} });
+        viewer._armReadyWatchdog(panel, 0);
+        await new Promise(r => setTimeout(r, 120));
+        assert.equal(loads, 2, 'reloaded twice');
+        assert.equal(warnings.length, 1, 'then the reader is told');
+        // A panel that answers is left alone.
+        loads = 0;
+        viewer._armReadyWatchdog(panel, 0);
+        viewer._webviewReady = true;
+        await new Promise(r => setTimeout(r, 60));
+        assert.equal(loads, 0, 'a ready panel is not reloaded');
+        // A hidden panel is waited for, not reloaded.
+        const hidden = { visible: false, webview: { set html(_) { loads++; } } };
+        viewer.panel = hidden;
+        viewer._armReadyWatchdog(hidden, 0);
+        await new Promise(r => setTimeout(r, 60));
+        assert.equal(loads, 0, 'a hidden panel is not reloaded');
+        viewer.panel = null;
+        clearTimeout(viewer._readyWatchdog);
+    } finally { TexViewer.READY_TIMEOUT_MS = saved; stub.window.showWarningMessage = savedWarn; }
+});

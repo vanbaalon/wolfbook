@@ -831,6 +831,7 @@ class TexViewer {
         // both are re-established rather than assumed.
         try { panel.webview.options = this._webviewOptions; } catch (_) { /* new panel: already set */ }
         panel.webview.html = this._html();
+        this._armReadyWatchdog(panel, 0);
         panel.onDidDispose(() => {
             this._flushCursorState();
             this._cancelViewerProbes('viewer closed');
@@ -3007,6 +3008,39 @@ class TexViewer {
         });
     }
 
+    /**
+     * THE PANEL MUST SAY `ready`. Its script posts it last, after loading; a
+     * script that never loaded (VS Code could not read the file — seen while
+     * the extension was being updated under a reloading window) left the
+     * panel on "starting…" for good, with every PDF sent into the void.
+     * Visible and silent for 8 s: load the page again, twice at most, then
+     * say so.
+     */
+    _armReadyWatchdog(panel, attempt) {
+        this._webviewReady = false;
+        clearTimeout(this._readyWatchdog);
+        this._readyWatchdog = setTimeout(() => {
+            if (this.panel !== panel || this._webviewReady) return;
+            // A hidden panel is not loaded until it is shown: wait for that.
+            if (!panel.visible) { this._armReadyWatchdog(panel, attempt); return; }
+            if (attempt >= 2) {
+                this._log('viewer did not start after two reloads');
+                vscode.window.showWarningMessage('WPaper: the page viewer did not start.', 'Reload Window')
+                    .then(choice => { if (choice) vscode.commands.executeCommand('workbench.action.reloadWindow'); });
+                return;
+            }
+            this._log(`viewer did not start (no "ready" in 8 s) — loading it again (${attempt + 1})`);
+            this.shownGeneration = null;
+            this.shownPdfHash = null;
+            this._openedGeneration = null;
+            this._openedPdfHash = null;
+            this.shownAnything = false;
+            try { panel.webview.html = this._html(); } catch (_) { return; }
+            this._armReadyWatchdog(panel, attempt + 1);
+        }, TexViewer.READY_TIMEOUT_MS ?? 8000);
+        if (this._readyWatchdog.unref) this._readyWatchdog.unref();
+    }
+
     /** Replace the webview document: this terminates the old pdf.js worker. */
     _reloadViewer(reason) {
         if (!this.panel || this._viewerReloading) return;
@@ -3033,7 +3067,7 @@ class TexViewer {
         this._text = null;
         this._objMaps.clear();
         this._traceStateKey = null;
-        try { this.panel.webview.html = this._html(); }
+        try { this.panel.webview.html = this._html(); this._armReadyWatchdog(this.panel, 0); }
         catch (e) {
             this._viewerReloading = false;
             clearTimeout(this._viewerReloadTimer);

@@ -47,6 +47,7 @@ Commit hashes: WPaper repo = `Extension Development`; WLaTeX repo = `wlatex/`.
 | 36 | 09-28 17:58 | WP | The range selection is drawn wrongly (screenshot) | "bug see range selection is indicated wrongly" | The selection brackets sit at the glyphs of the first and last selected source characters, not mid-selection (for example on the dot of `\dot Z`). Lines are grouped by map row. | e4b86e7; row grouping in progress at 18:00 |
 | 37 | 09-28 18:01 | WP | No red caret on some symbols (screenshot) | "no red carrent for some symbols" | The red caret is drawn for maths symbols (`\hat`, `{`, `^` …): before the glyph printed at the cursor, else after the preceding glyph. | e4b86e7 |
 | 38 | 09-28 | WP | Equation reference preview says "Preview unavailable" (screenshot) | "why sometimes preview not available? looks like a bug" | Hovering an equation reference shows the equation (found by its printed number when the label map has no bounds), titled "Equation (n)" | fix: tex-viewer.js equationBand; test: webview eq-preview |
+| 39 | 09-28 | WP | The viewer shows only "starting…" after startup (screenshot) | "there is some bug on startup - does not show anything in the viewer only" | A panel whose script never says `ready` (VS Code could not read it while the extension was being updated) is loaded again within 8 s, twice at most, then a warning offers Reload Window | fix: texViewer.js _armReadyWatchdog; test: tex-reported-bugs #39 |
 
 ## Notes
 - **Duplicates merged:**
