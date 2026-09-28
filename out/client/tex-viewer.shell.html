@@ -25,6 +25,7 @@
   .tool-icon.fill { fill:currentColor; stroke:none; }
   .tool-icon + .tlbl { margin-left:4px; }
   header .icon-only { padding:0 5px; }
+  header button[hidden] { display:none; }
   header button:hover { background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,.18)); }
   header button:focus-visible, label.follow:has(input:focus-visible),
   .comment-marker:focus-visible, #commentpanel button:focus-visible {
@@ -1548,7 +1549,7 @@
   <button id="outline" class="icon-only" title="Contents — the sections of this paper (⌘⌥O)" aria-label="Contents" aria-pressed="false"><svg class="tool-icon"><use href="#ti-outline"/></svg></button>
   <span id="commentstool"><button id="commentsbutton" title="Show comments" aria-pressed="false"><svg class="tool-icon"><use href="#ti-comment"/></svg><span class="tlbl">Comments</span><span id="commentscount" hidden>0</span></button><button id="commentsmenu" title="Choose a comment" aria-label="Choose a comment" aria-haspopup="menu" aria-expanded="false"><svg class="tool-icon"><use href="#ti-chevron-down"/></svg></button></span>
   <button id="addmma" class="icon-only" title="Insert a Mathematica computation — then click where it goes" aria-label="Insert Mathematica computation" aria-pressed="false"><svg class="tool-icon"><use href="#ti-compute"/></svg></button>
-  <button id="tikztool" class="icon-only" title="Edit TikZ pictures on the page — select, move, scale, rotate, add shapes" aria-label="Edit TikZ pictures" aria-pressed="false"><svg class="tool-icon"><use href="#ti-draw"/></svg></button>
+  <button id="tikztool" hidden class="icon-only" title="Edit TikZ pictures on the page — select, move, scale, rotate, add shapes" aria-label="Edit TikZ pictures" aria-pressed="false"><svg class="tool-icon"><use href="#ti-draw"/></svg></button>
   <button id="pagetheme" class="icon-only" title="Page appearance" aria-label="Page appearance" aria-pressed="false"><svg class="tool-icon"><use href="#ti-sun"/></svg></button>
   <button id="full" class="icon-only" title="Show WPaper only" aria-label="Show WPaper only"><svg class="tool-icon"><use href="#ti-layout-focus"/></svg></button>
   <button id="follow" class="follow" data-mode="scroll"

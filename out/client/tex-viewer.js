@@ -205,11 +205,25 @@ function proLiveMarks() {
     try { return localStorage.getItem(PRO_MARKS_KEY) !== 'off'; } catch (_) { return true; }
 }
 
+/**
+ * WLaTeX Pro is on for this paper: the lane is live, settling or settled.
+ * Everything Pro adds (page formatting, the maths/table/figure card, moving
+ * sections and figures, TikZ on the page, image drops) asks this first, so
+ * without Pro — not installed, a paper for another engine, or switched off
+ * from the badge — WPaper behaves as it did before Pro.
+ */
+function proActive() {
+    return !!state.engine && ['live', 'settling', 'settled'].includes(state.engine.state);
+}
+
 function setEngineBadge(msg) {
     const badge = el('probadge'), panel = el('propanel');
     if (!badge || !panel) return;
     state.engine = msg && msg.state ? msg : null;
     const engine = state.engine;
+    const tikzButton = el('tikztool');
+    if (tikzButton) tikzButton.hidden = !proActive();
+    try { if (!proActive() && tikz.on) tikzToggle(false); } catch (_) { /* before the TikZ tool is set up */ }
     badge.hidden = !engine;
     document.body.classList.toggle('pro-live-marks', !!engine && !['off', 'disabled'].includes(engine.state) && proLiveMarks());
     if (!engine) { closeProPanel(); return; }
@@ -1545,7 +1559,7 @@ function renderNav() {
         row.dataset.file = it.file || '';
         row.dataset.page = String(it.page || 0);
         // Drag a section onto another to move it there.
-        if (it.kind === 'section') {
+        if (it.kind === 'section' && proActive()) {
             row.draggable = true;
             row.dataset.key = it.key;
             row.title = 'Drag to move this section and everything in it';
@@ -1653,6 +1667,7 @@ el('navclose').addEventListener('click', () => setNav(false));
     list.addEventListener('dragstart', ev => {
         const row = ev.target.closest?.('.np-row[data-key]');
         if (!row) return;
+        if (!proActive()) { ev.preventDefault(); return; }
         dragged = row.dataset.key;
         ev.dataTransfer.effectAllowed = 'move';
         ev.dataTransfer.setData('text/plain', row.querySelector('.np-title')?.textContent || '');
@@ -5057,18 +5072,16 @@ const INK_KEYS = new Set(['Enter', 'Backspace', 'Delete', 'ArrowLeft', 'ArrowRig
 // Before every other key handler (capture): with a caret on the page, the keys are text.
 // ⌘⇧R / ⌘⇧C with no caret on the page: say what they need.
 window.addEventListener('keydown', (e) => {
-    if (state.ink || !(e.metaKey || e.ctrlKey) || !e.shiftKey || e.altKey || !['r', 'c'].includes(e.key.toLowerCase())) return;
+    if (state.ink || !proActive() || !(e.metaKey || e.ctrlKey) || !e.shiftKey || e.altKey || !['r', 'c'].includes(e.key.toLowerCase())) return;
     const t = e.target;
     if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.isContentEditable)) return;
-    const pro = !el('probadge')?.hidden && !['off', 'disabled'].includes(el('probadge')?.dataset.state);
-    status(pro ? 'Click in the text on the page first: references and citations go in at the caret'
-        : 'Inserting from the page needs WLaTeX Pro (wolfbook.tex.wlatexDirectory)', 'warn');
+    status('Click in the text on the page first: references and citations go in at the caret', 'warn');
     e.preventDefault();
 }, true);
 
 // ⌘B / ⌘I: on a selection, format it; at the ink caret, type in that format.
 window.addEventListener('keydown', (e) => {
-    if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
+    if (!proActive() || !(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
     const kind = { b: 'bold', i: 'italic' }[e.key.toLowerCase()];
     const t = e.target;
     if (!kind || (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.isContentEditable))) return;
@@ -5466,7 +5479,7 @@ function paintSelectionActions() {
 
     const bar = document.createElement('div');
     bar.className = 'selact';
-    for (const a of FORMAT_ACTIONS) {
+    for (const a of proActive() ? FORMAT_ACTIONS : []) {
         const b = document.createElement('button');
         b.type = 'button';
         b.dataset.action = a.id;
@@ -6204,12 +6217,14 @@ pagesEl().addEventListener('dblclick', (ev) => {
 // figure goes in at the seam under the drop. VS Code hands a webview files
 // dropped with Shift held (from Finder, or its own Explorer as a URI).
 pagesEl().addEventListener('dragover', (ev) => {
+    if (!proActive()) return;
     const types = [...(ev.dataTransfer?.types || [])];
     if (!(types.includes('Files') || types.includes('application/vnd.code.uri-list') || types.includes('text/uri-list'))) return;
     ev.preventDefault();
     ev.dataTransfer.dropEffect = 'copy';
 });
 pagesEl().addEventListener('drop', async (ev) => {
+    if (!proActive()) return;
     const wrap = ev.target.closest?.('.page');
     if (!wrap) return;
     const n = Number(wrap.dataset.page);
@@ -7124,9 +7139,13 @@ function buildEditCard(e) {
     hint.textContent = 'drag title · ←←/→→ previous/next · ⌘S save · ⌘⌥↵ commit · ⇧⌘⌥↵ push · Esc close';
 
     // A table's card has the grid; its cells' maths is typed in the source below.
-    const tableGrid = buildTableGrid(card, ta, e);
-    const figureBar = buildFigureBar(card, ta, e);
-    const mathBar = tableGrid || figureBar ? (wireMathKeys(card, ta), null) : buildMathBar(card, ta, e);
+    // WLaTeX Pro's card: the grid, the figure bar, the maths bar and its
+    // keys. Without Pro the card is the plain editor it always was.
+    const pro = proActive();
+    const tableGrid = pro ? buildTableGrid(card, ta, e) : null;
+    const figureBar = pro ? buildFigureBar(card, ta, e) : null;
+    const mathBar = !pro ? null
+        : tableGrid || figureBar ? (wireMathKeys(card, ta), null) : buildMathBar(card, ta, e);
     card.append(head, ...[mathBar, figureBar, tableGrid].filter(Boolean), box, hint);
     return card;
 }
@@ -10472,6 +10491,8 @@ el('findinput').addEventListener('keydown', e => {
 window.addEventListener('keydown', e => {
     const key = String(e.key || '').toLowerCase();
     if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
+    const t = e.target;
+    if (t && (t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
     if (key === 'f' && !e.shiftKey) { e.preventDefault(); e.stopPropagation(); findOpen(); }
     else if (key === 'g' && findS().open) { e.preventDefault(); e.stopPropagation(); findStep(e.shiftKey ? -1 : 1); }
 }, true);

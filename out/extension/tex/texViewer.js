@@ -1435,6 +1435,12 @@ class TexViewer {
     // caret follows the text as soon as the live page showing it has its
     // map. Maths, verbatim, pictures and tables keep the source card.
 
+    /** WLaTeX Pro is on for the paper on screen (its lane runs, not switched off). */
+    _proActive() {
+        const st = this.root && this.coord.roots?.get(this.root);
+        return !!st?.nativeLane && !this.coord.proDisabled;
+    }
+
     _inkEnabled(st) {
         return !!st?.nativeLane?.interactive &&
             vscode.workspace.getConfiguration('wolfbook.tex').get('inkTyping', true) !== false;
@@ -4976,9 +4982,11 @@ class TexViewer {
             case 'inspireSearch': this._inspireSearch(m); break;
             case 'inkKey': this._inkKey(m); break;
             case 'tablePackage': this._tablePackage(m).catch(() => {}); break;
-            case 'sectionMove': await this._sectionMove(m); break;
-            case 'figureMove': await this._figureMove(m); break;
-            case 'imageDrop': await this._imageDrop(m); break;
+            // WLaTeX Pro's source moves: without Pro the viewer never edits
+            // the paper on its own (the webview does not offer them either).
+            case 'sectionMove': if (this._proActive()) await this._sectionMove(m); break;
+            case 'figureMove': if (this._proActive()) await this._figureMove(m); break;
+            case 'imageDrop': if (this._proActive()) await this._imageDrop(m); break;
             case 'txdlFallback': this._liveOverlays?.delete(m.page); this._liveMapReady?.delete(m.page);
                 this._previewPages?.delete(m.page); break;
             case 'textLayerDone':
@@ -5017,7 +5025,10 @@ class TexViewer {
                 // alike. The order matters — the jump posts its selection into
                 // whatever card is open, so the card has to exist first.
                 const opened = await this._openEditSession(m);
-                if (opened && this._edit === opened) await this._jumpToSource(m);
+                // Without the native map the jump always runs, as it did
+                // before Pro: it moves the editor even where no card opened.
+                if (opened ? this._edit === opened : !this.coord.roots?.get(this.root)?.map?.native)
+                    await this._jumpToSource(m);
                 break;
             }
             case 'selectAdjust': this._adjustSelection(m); break;
@@ -5580,6 +5591,7 @@ class TexViewer {
         const { doc, range, sel } = t;
         const text = doc.getText(range);
 
+        if (PAGE_FORMATS.has(action) && !this._proActive()) return;
         if (PAGE_FORMATS.has(action)) {
             // One edit; the formatted text stays selected, so a second click
             // takes the format off again.
