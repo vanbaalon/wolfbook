@@ -86,7 +86,25 @@ function register(context, vscode = require('vscode')) {
     const profiles = provider => context.globalState.get(PROFILE_KEY, []).filter(p => p.provider === provider);
     const selected = (repo, provider) => profiles(provider).find(p => p.id === context.globalState.get(repositoryKey(repo, provider)));
     const modelDefaults = (repo, provider) => context.globalState.get(`${repositoryKey(repo, provider)}.models`, {});
-    const refresh = () => changed.fire();
+    const panel = require('./claude-panel-accounts').createBridge(context, vscode,
+        () => require('./claude-mcp/server').resolveNodeBinary());
+    let panelSync = Promise.resolve();
+    function syncPanel() {
+        panelSync = panelSync.catch(() => {}).then(async () => {
+            const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+            if (root?.scheme !== 'file' || !vscode.workspace.isTrusted) { panel.clear(); return false; }
+            const profile = selected(root.fsPath, 'claude');
+            const models = modelDefaults(root.fsPath, 'claude');
+            const { env } = launchOptions('claude', profile ? profileDirectory(context, profile) : undefined, 'open', models);
+            if (models.model) env.ANTHROPIC_MODEL = models.model;
+            return panel.sync(root.fsPath, env, !!profile || Object.keys(models).length > 0);
+        });
+        return panelSync;
+    }
+    const refresh = () => {
+        changed.fire();
+        syncPanel().catch(error => vscode.window.showErrorMessage(`Wolfbook Claude panel: ${error.message}`));
+    };
 
     async function workspaceRoots() {
         // Account/model scope is the window's main workspace folder, not a
@@ -137,6 +155,7 @@ function register(context, vscode = require('vscode')) {
         const current = selected(repo, provider);
         const models = modelDefaults(repo, provider);
         const choice = await vscode.window.showQuickPick([
+            ...(provider === 'claude' && panel.supported() ? [{ label: '$(comment-discussion) Open Claude panel with selected account', action: 'panel' }] : []),
             { label: '$(terminal) Open CLI', action: 'open', description: current?.name || 'Default account' },
             { label: '$(account) Switch account for this workspace folder…', action: 'switch' },
             { label: '$(settings-gear) Default model for this workspace folder…', action: 'model', description: models.model || 'CLI default' },
@@ -149,8 +168,15 @@ function register(context, vscode = require('vscode')) {
                 { label: '$(close) Forget selected profile…', action: 'forget' },
             ] : []),
         ], { title: `${PROVIDERS[provider]} — ${path.basename(repo)} — ${current?.name || 'Default'}`,
-            placeHolder: 'Account selection applies to new CLI sessions opened through Wolfbook' });
+            placeHolder: provider === 'claude' && panel.supported() ? 'Selection applies to new Claude panel and Wolfbook CLI sessions' : 'Selection applies to new CLI sessions opened through Wolfbook' });
         if (!choice) return;
+        if (choice.action === 'panel') {
+            await syncPanel();
+            // Start a fresh conversation: existing CLI processes retain their
+            // original environment and cannot safely change account mid-turn.
+            await vscode.commands.executeCommand('claude-vscode.primaryEditor.open');
+            return;
+        }
         if (['model', 'subagentModel'].includes(choice.action)) {
             const value = await vscode.window.showInputBox({
                 title: `${PROVIDERS[provider]} — ${choice.action === 'model' ? 'Default model' : 'Default subagent model'} — ${path.basename(repo)}`,
@@ -177,8 +203,10 @@ function register(context, vscode = require('vscode')) {
             if (!picked) return;
             await context.globalState.update(repositoryKey(repo, provider), picked.id);
             refresh();
-            const open = await vscode.window.showInformationMessage(`Selected ${picked.label}. Existing CLI sessions keep their current account.`, 'Open CLI');
-            if (open) await launch(target, selected(repo, provider), 'open');
+            const options = provider === 'claude' && panel.supported() ? ['Open Claude panel', 'Open CLI'] : ['Open CLI'];
+            const open = await vscode.window.showInformationMessage(`Selected ${picked.label}. Open a new conversation to use this account; existing sessions keep their account.`, ...options);
+            if (open === 'Open Claude panel') { await syncPanel(); await vscode.commands.executeCommand('claude-vscode.primaryEditor.open'); }
+            else if (open === 'Open CLI') await launch(target, selected(repo, provider), 'open');
             return;
         }
         if (choice.action === 'forget') {
@@ -260,6 +288,10 @@ function register(context, vscode = require('vscode')) {
     accountItem.accessibilityInformation = { label: 'Manage Wolfbook CLI accounts', role: 'button' };
     context.subscriptions.push(accountItem);
     accountItem.show();
+    if (vscode.workspace.onDidChangeConfiguration) context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(event => {
+        if (event.affectsConfiguration('claudeCode.claudeProcessWrapper')) refresh();
+    }));
+    refresh();
 }
 
 module.exports = { register, repositoryKey, profileDirectory, launchOptions, resolveExecutable };

@@ -8,6 +8,10 @@ All notable changes to **Wolfbook** are documented here.
 
 ### Added
 
+- **Claude panel accounts.** On macOS/Linux the selected workspace profile now
+  routes Claude Code extension launches through a per-window launcher. Use
+  **Open Claude panel with selected account** for a fresh conversation after
+  signing in; existing conversations keep their original account.
 - **Unique kernel names across windows.** Remote kernel proxies no longer claim
   or release their owner’s name reservations. Renaming checks the shared registry,
   and name reservations are written atomically.
