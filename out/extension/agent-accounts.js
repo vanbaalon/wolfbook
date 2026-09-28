@@ -89,11 +89,20 @@ function register(context, vscode = require('vscode')) {
     const panel = require('./claude-panel-accounts').createBridge(context, vscode,
         () => require('./claude-mcp/server').resolveNodeBinary());
     let panelSync = Promise.resolve();
+    let disposed = false;
+    context.subscriptions.push({ dispose() { disposed = true; } });
+    function prepareProfile(profile) {
+        if (profile?.provider !== 'claude') return;
+        const node = process.versions.electron ? require('./claude-mcp/server').resolveNodeBinary() : process.execPath;
+        require('./account-profile-mcp').ensureClaudeProfileMcp(profileDirectory(context, profile), node);
+    }
     function syncPanel() {
         panelSync = panelSync.catch(() => {}).then(async () => {
+            if (disposed) return false;
             const root = vscode.workspace.workspaceFolders?.[0]?.uri;
             if (root?.scheme !== 'file' || !vscode.workspace.isTrusted) { panel.clear(); return false; }
             const profile = selected(root.fsPath, 'claude');
+            prepareProfile(profile);
             const models = modelDefaults(root.fsPath, 'claude');
             const { env } = launchOptions('claude', profile ? profileDirectory(context, profile) : undefined, 'open', models);
             if (models.model) env.ANTHROPIC_MODEL = models.model;
@@ -139,6 +148,7 @@ function register(context, vscode = require('vscode')) {
         const executable = resolveExecutable(vscode, target.provider);
         const directory = profile ? profileDirectory(context, profile) : undefined;
         if (directory) await fs.promises.mkdir(directory, { recursive: true, mode: 0o700 });
+        prepareProfile(profile);
         const { env, args } = launchOptions(target.provider, directory, action, modelDefaults(target.repo, target.provider));
         // Launch the executable directly: no shell interpolation, startup scripts,
         // global environment edits, or injection of commands into existing terminals.

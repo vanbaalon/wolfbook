@@ -8,6 +8,9 @@ All notable changes to **Wolfbook** are documented here.
 
 ### Added
 
+- **Wolfbook tools in Claude account profiles.** Each isolated Claude account now
+  receives the Wolfbook MCP connection and skill without copying credentials or
+  replacing other MCP servers. Existing profiles are repaired when used.
 - **Claude panel accounts.** On macOS/Linux the selected workspace profile now
   routes Claude Code extension launches through a per-window launcher. Use
   **Open Claude panel with selected account** for a fresh conversation after

@@ -8,11 +8,12 @@ const { register, repositoryKey, profileDirectory, launchOptions } = require('..
 
 (async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'wolfbook-accounts-'));
+    let context;
     try {
         const roots = ['repo-a', 'repo-b'].map(name => path.join(tmp, name));
         roots.forEach(root => fs.mkdirSync(root));
         const data = new Map();
-        const context = {
+        context = {
             subscriptions: [], globalStorageUri: { fsPath: path.join(tmp, 'storage') },
             globalState: { get: (key, fallback) => data.has(key) ? data.get(key) : fallback,
                 update: async (key, value) => value === undefined ? data.delete(key) : data.set(key, value) },
@@ -163,5 +164,5 @@ const { register, repositoryKey, profileDirectory, launchOptions } = require('..
         assert.throws(() => launchOptions('claude', tmp, 'arbitrary'), /Invalid/);
         assert.strictEqual(launchOptions('claude', '/a path/with "quotes"/$shell').env.CLAUDE_CONFIG_DIR, '/a path/with "quotes"/$shell');
         console.log('Account profiles: repository selection, persistence, isolation, login/status, cancellation, removal, trust, and executable errors passed.');
-    } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+    } finally { context?.subscriptions.forEach(item => item.dispose()); fs.rmSync(tmp, { recursive: true, force: true }); }
 })().catch(error => { console.error(error); process.exitCode = 1; });
