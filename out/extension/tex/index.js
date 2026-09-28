@@ -1809,6 +1809,115 @@ async function offerReload(doc, diskText, output) {
         vscode.window.setStatusBarMessage(`$(pass) Exported ${path.basename(target.fsPath)}${synctexNote}`, 5000);
     });
 
+    // PREPARE FOR ARXIV (arxivPack.js, arxivCheck.js): the paper as one .zip
+    // — comments and draft mode gone, only the files it uses, the .bbl in
+    // place of the .bib, a 00README.json — built once as arXiv will build it
+    // before it is saved. The files on disk are not touched. Given
+    // `{ target }` (an agent, a test) it saves there without asking and
+    // answers with the report.
+    reg('wolfbook.tex.prepareArxiv', async (opts) => {
+        const quiet = !!(opts && typeof opts.target === 'string' && path.isAbsolute(opts.target));
+        let doc = vscode.window.activeTextEditor?.document;
+        if (!isTex(doc) && viewer.root) {
+            try { doc = await vscode.workspace.openTextDocument(vscode.Uri.file(viewer.root)); }
+            catch (_) { /* fall through to the warning */ }
+        }
+        if (!isTex(doc)) { vscode.window.showWarningMessage('Open a .tex file of the paper first.'); return; }
+        // The .bbl must be the settled build's, of the text as it is now.
+        let st = coord.stateFor(doc);
+        const g0 = st && st.generation;
+        if (!g0 || !g0.ok || st.sourceAhead || g0.rerunWanted || g0.passesLimited) {
+            st = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification,
+                title: 'WPaper: building the paper first' }, () => coord.build(doc, { authoritative: true, quiet: true }));
+        }
+        const root = coord.rootFor(doc);
+        const dir = path.dirname(root);
+        const main = path.basename(root);
+        const job = main.replace(/\.tex$/i, '');
+        const g = st && st.generation;
+        const outDir = g && g.outDir;
+        const within = (rel) => {
+            const full = path.resolve(dir, rel);
+            return full === dir || full.startsWith(dir + path.sep) ? full : null;
+        };
+        const openDoc = (full) => vscode.workspace.textDocuments.find(d => d.uri.fsPath === full);
+        const built = {};
+        for (const ext of ['bbl', 'ind', 'gls', 'nls']) {
+            for (const d of [outDir, dir].filter(Boolean)) {
+                try { built[ext] = fs.readFileSync(path.join(d, `${job}.${ext}`), 'utf8'); break; } catch (_) { /* next */ }
+            }
+        }
+        const inputs = {
+            main,
+            read: (rel) => {
+                const full = within(rel);
+                if (!full) return null;
+                const open = openDoc(full);
+                if (open) return open.getText();
+                try { return fs.readFileSync(full, 'utf8'); } catch (_) { return null; }
+            },
+            readBinary: (rel) => {
+                const full = within(rel);
+                if (!full) return null;
+                const open = openDoc(full);
+                if (open) return Buffer.from(open.getText(), 'utf8');
+                try { return fs.readFileSync(full); } catch (_) { return null; }
+            },
+            exists: (rel) => {
+                const full = within(rel);
+                if (!full) return false;
+                if (openDoc(full)) return true;
+                try { return fs.statSync(full).isFile(); } catch (_) { return false; }
+            },
+            built,
+        };
+        const { prepareAndCheck } = require('./arxivCheck');
+        const { zip, summary } = require('./arxivPack');
+        let done;
+        try {
+            done = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification,
+                title: 'WPaper: preparing for arXiv' },
+                (progress) => prepareAndCheck(inputs, { onStep: (m) => progress.report({ message: m }) }));
+        } catch (error) {
+            vscode.window.showErrorMessage(`Preparing for arXiv failed: ${error.message}`);
+            return;
+        }
+        const { result, check } = done;
+        const lines = summary(result.report);
+        if (check) lines.push(check.ok ? `test build: ${check.pages} pages with ${result.report.compiler}`
+            : `test build FAILED: ${check.error}${check.file ? ` (${check.file}:${check.line})` : ''}`);
+        output.appendLine(`--- arXiv package for ${main} ---`);
+        for (const l of lines) output.appendLine(`  ${l}`);
+        if (quiet && (result.report.errors.length || (check && !check.ok && !opts.force))) {
+            return { saved: null, report: result.report, check, lines };
+        }
+        if (result.report.errors.length) {
+            const pick = await vscode.window.showErrorMessage(`arXiv: ${result.report.errors[0]}`, 'Show details');
+            if (pick === 'Show details') output.show(true);
+            return;
+        }
+        if (check && !check.ok && !quiet) {
+            const pick = await vscode.window.showWarningMessage(
+                `The arXiv package does not build: ${check.error}${check.file ? ` (${check.file}:${check.line})` : ''}`,
+                'Save Anyway', 'Show details');
+            if (pick === 'Show details') { output.show(true); return; }
+            if (pick !== 'Save Anyway') return;
+        }
+        const target = quiet ? vscode.Uri.file(opts.target) : await vscode.window.showSaveDialog({
+            defaultUri: vscode.Uri.file(path.join(dir, `${job}-arxiv.zip`)),
+            filters: { 'Zip archive': ['zip'] }, saveLabel: 'Save for arXiv' });
+        if (!target) return;
+        await fs.promises.writeFile(target.fsPath, zip(result.files));
+        const r = result.report;
+        if (quiet) return { saved: target.fsPath, report: r, check, lines, files: result.files.map(f => f.name) };
+        const pick = await vscode.window.showInformationMessage(
+            `Ready for arXiv: ${result.files.length} files${check && check.ok ? `, builds to ${check.pages} pages` : ''}` +
+            `${r.comments ? `, ${r.comments} comment lines removed` : ''}${r.warnings.length ? ` — ${r.warnings.length} warning${r.warnings.length === 1 ? '' : 's'}` : ''}.`,
+            'Show in Finder', 'Show details');
+        if (pick === 'Show in Finder') vscode.commands.executeCommand('revealFileInOS', target);
+        else if (pick === 'Show details') output.show(true);
+    });
+
     // WLATEX IS LICENSED, WPAPER IS FREE. This checks a licence file with
     // the configured WLaTeX's own engine and installs it for this user;
     // the next build uses WLaTeX again.

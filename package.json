@@ -1709,6 +1709,11 @@
         "category": "Wolfbook"
       },
       {
+        "command": "wolfbook.tex.prepareArxiv",
+        "title": "WPaper: Prepare for arXiv…",
+        "category": "Wolfbook"
+      },
+      {
         "command": "wolfbook.tex.commitChanges",
         "title": "WPaper: Commit Changes",
         "category": "Wolfbook",
