@@ -1,6 +1,6 @@
 # Repository CLI accounts
 
-In **Wolfbook Controls → CLI Accounts**, click **Claude Code** or **Codex CLI** under a repository. The same manager is available from **Wolfbook: Manage CLI Accounts** in the Command Palette.
+Click the **account icon** on the right of the bottom status bar to open the configurator. You can also click **Claude Code** or **Codex CLI** under a repository in **Wolfbook Controls → CLI Accounts**, or run **Wolfbook: Manage CLI Accounts** from the Command Palette.
 
 1. Choose **Add account profile**, give it a name (for example, Personal or Work), and complete the CLI's browser sign-in in the terminal that opens.
 2. Choose **Check selected account** to verify which account the CLI is using. Profile names are labels you supply, not verified account identities.

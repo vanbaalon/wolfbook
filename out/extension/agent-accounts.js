@@ -239,6 +239,16 @@ function register(context, vscode = require('vscode')) {
             const target = await chooseTarget(node);
             if (target) await launch(target, selected(target.repo, target.provider), 'open');
         })));
+    const accountItem = vscode.window.createStatusBarItem(
+        'wolfbook-cli-accounts', vscode.StatusBarAlignment.Right, 97
+    );
+    accountItem.name = 'Wolfbook CLI Accounts';
+    accountItem.text = '$(account)';
+    accountItem.tooltip = 'Manage Claude Code and Codex accounts for this repository';
+    accountItem.command = 'wolfbook.agentAccounts.manage';
+    accountItem.accessibilityInformation = { label: 'Manage Wolfbook CLI accounts', role: 'button' };
+    context.subscriptions.push(accountItem);
+    accountItem.show();
 }
 
 module.exports = { register, repositoryKey, profileDirectory, launchOptions, resolveExecutable };

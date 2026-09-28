@@ -26,6 +26,7 @@ const { register, repositoryKey, profileDirectory, launchOptions } = require('..
             EventEmitter: class { constructor() { this.event = () => disposable(); } fire() {} dispose() {} },
             TreeItem: class { constructor(label, state) { this.label = label; this.collapsibleState = state; } },
             ThemeIcon: class {}, TreeItemCollapsibleState: { None: 0, Expanded: 2 },
+            StatusBarAlignment: { Right: 2 },
             workspace: { isTrusted: true,
                 workspaceFolders: [{ uri: { scheme: 'file', fsPath: tmp } }],
                 onDidChangeWorkspaceFolders: disposable,
@@ -39,6 +40,7 @@ const { register, repositoryKey, profileDirectory, launchOptions } = require('..
             } : undefined },
             commands: { registerCommand: (name, fn) => { commands.set(name, fn); return disposable(); } },
             window: {
+                createStatusBarItem: () => ({ show() {}, dispose() {} }),
                 registerTreeDataProvider: (id, provider) => { tree = provider; return disposable(); },
                 showQuickPick: async items => { const choose = picks.shift(); return choose ? choose(items) : undefined; },
                 showInputBox: async options => {
