@@ -619,7 +619,17 @@ class RenderCoordinator {
                 onPage: page => {
                     if (this._disposed || st.nativeLane !== lane) return;
                     this._interactiveEmitter.fire({ kind:'page', root, ...page });
-                    if (cur && page.changed !== false) this._previewShown(root, st, cur);
+                    // FRESH, not merely "changed": a build re-sends pages it calls
+                    // changed that are identical to what was delivered before
+                    // (it compares with its last COMPLETED build, and typing
+                    // cancels them all), so page 1 arrived at once in every build
+                    // and counted as shown long before the page being typed on.
+                    if (page.changed !== false) {
+                        const seen = (st.liveIdentity ||= new Map());
+                        const fresh = !page.identity || seen.get(page.page) !== page.identity;
+                        if (page.identity) seen.set(page.page, page.identity);
+                        if (cur && fresh) this._previewShown(root, st, cur);
+                    }
                 },
                 onPageMap: map => {
                     if (this._disposed || st.nativeLane !== lane) return;

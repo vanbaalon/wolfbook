@@ -1342,6 +1342,8 @@ class TexViewer {
             if (!event.txdl) return;
             // An unchanged page is not drawn; do not ship its display list.
             if (event.changed === false) return;
+            // The very page this overlay already shows: nothing to send.
+            if (event.identity && this._liveOverlays?.get(event.page) === event.identity && this.shownAnything) return;
             const msg = { type:'txdlPage', generation:event.generation, page:event.page,
                 changed:true, identity:event.identity || null,
                 txdl:event.txdl, fonts:event.fonts || null, pageSize:event.pageSize || null };

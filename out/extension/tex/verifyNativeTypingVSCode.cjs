@@ -60,6 +60,7 @@ exports.run = async function () {
         await until(() => viewer._openedPdfHash === st.generation.pdfHash, 'the PDF open in the viewer');
         report.pages = st.generation.pageCount;
         const lane = st.nativeLane;
+        const seenIdentity = new Map();
         // Every live build: when it started and when its first page reached the viewer.
         const builds = [];
         const interactiveBuild = lane.interactiveBuild.bind(lane);
@@ -68,11 +69,23 @@ exports.run = async function () {
             builds.push(build);
             const result = await interactiveBuild({ ...o, onPage: page => {
                 o.onPage?.(page);
-                if (build.firstPage == null && page.changed !== false && page.txdl) { build.firstPage = performance.now(); build.page = page.page; }
+                if (page.changed !== false) (build.changed ||= []).push([page.page, Math.round(performance.now() - build.start), page.sinceBuildMs, page.identity?.slice?.(0, 8) ?? null]);
+                // THE KEY'S PAGE: the first page whose content differs from what
+                // was last delivered for that page number (a build also re-sends
+                // pages it calls changed that are identical to the ones on screen).
+                const fresh = page.changed !== false && page.txdl && seenIdentity.get(page.page) !== page.identity;
+                if (page.changed !== false && page.identity) seenIdentity.set(page.page, page.identity);
+                if (build.firstPage == null && fresh) { build.firstPage = performance.now(); build.page = page.page;
+                    // Where the time went: the engine's own clock for this page, and the size of what crossed.
+                    build.engineMs = page.since_build_ms ?? page.sinceBuildMs ?? null;
+                    try { build.txdlBytes = JSON.stringify(page.txdl).length; build.ops = page.txdl.ops?.length ?? null; } catch (_) {} }
             } });
             build.end = performance.now();
             build.superseded = result == null;
             build.engine = result?.report ? { first_changed: result.report.first_changed_ms, total: result.report.total_ms } : null;
+            const rep = result?.report;
+            build.report = rep ? { restart_page: rep.restart_page, restart_run: rep.restart_run, page_count: rep.page_count,
+                recomputed: rep.pages_recomputed, reused: rep.pages_reused, stop: rep.stop } : (result ? Object.keys(result) : null);
             return result;
         };
         // Every page read of the maps (cold and live) while typing.
@@ -168,6 +181,15 @@ exports.run = async function () {
             over_50ms: lags.filter(l => l > 50).length, total_over_50ms: Math.round(lags.filter(l => l > 50).reduce((a, b) => a + b, 0)) };
         const engine = builds.filter(b => b.engine);
         report.engine_first_changed_ms = { p50: quantile(engine.map(b => b.engine.first_changed), 0.5), p90: quantile(engine.map(b => b.engine.first_changed), 0.9) };
+        const firsts = builds.filter(b => b.firstPage);
+        report.first_page_breakdown = {
+            engine_ms: { p50: quantile(firsts.map(b => b.engineMs).filter(Number.isFinite), 0.5), p90: quantile(firsts.map(b => b.engineMs).filter(Number.isFinite), 0.9) },
+            txdl_kb: { p50: quantile(firsts.map(b => (b.txdlBytes || 0) / 1024), 0.5), max: Math.max(0, ...firsts.map(b => (b.txdlBytes || 0) / 1024)) },
+            ops: { p50: quantile(firsts.map(b => b.ops || 0), 0.5) },
+            changed: builds.slice(0, 6).map(b => b.changed || []),
+            reports: builds.map(b => b.report),
+            sample: firsts.slice(0, 8).map(b => ({ page: b.page, build_to_page: Math.round(b.firstPage - b.start), engine: b.engineMs, kb: Math.round((b.txdlBytes || 0) / 1024) })),
+        };
         report.build_first_page_ms = { p50: quantile(builds.filter(b => b.firstPage).map(b => b.firstPage - b.start), 0.5),
             p90: quantile(builds.filter(b => b.firstPage).map(b => b.firstPage - b.start), 0.9) };
         report.result = shown.length === keys.length ? 'PASS' : 'FAIL';

@@ -43,6 +43,8 @@ function interactivePage(generation, event) {
         identity:event.identity?.page_hash ?? null,
         txdl:event.payload?.txdl ?? null, fonts:event.payload?.fonts ?? null,
         error:event.payload?.error ?? null,
+        // The engine's own clock: ms from the build's start to this page.
+        sinceBuildMs:Number.isFinite(event.since_build_ms) ? event.since_build_ms : null,
         pageSize:geometry && geometry.width_pt > 0 && geometry.height_pt > 0
             ? { widthBp:geometry.width_pt, heightBp:geometry.height_pt } : null };
 }
