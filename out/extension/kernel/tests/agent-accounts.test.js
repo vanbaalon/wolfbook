@@ -27,6 +27,7 @@ const { register, repositoryKey, profileDirectory, launchOptions } = require('..
             TreeItem: class { constructor(label, state) { this.label = label; this.collapsibleState = state; } },
             ThemeIcon: class {}, TreeItemCollapsibleState: { None: 0, Expanded: 2 },
             StatusBarAlignment: { Right: 2 },
+            QuickPickItemKind: { Separator: -1 },
             workspace: { isTrusted: true,
                 workspaceFolders: [{ uri: { scheme: 'file', fsPath: tmp } }],
                 onDidChangeWorkspaceFolders: disposable,
@@ -68,7 +69,14 @@ const { register, repositoryKey, profileDirectory, launchOptions } = require('..
         assert.strictEqual((await tree.getChildren({ repo: roots[0] })).length, 2);
 
         action('add'); inputs.push('Personal'); await manage(a);
-        const personal = data.get('agentAccounts.profiles')[0];
+        const personal = require('../../account-profile-store').createProfileStore(context).list()[0];
+        picks.push(items => {
+            const account = items.find(item => item.action === 'select' && item.id === personal.id);
+            assert(account, 'saved global account is visible directly in the action menu');
+            assert.strictEqual(account.description, 'Use in this folder');
+            return undefined;
+        });
+        await manage(b);
         assert.strictEqual(tree.getTreeItem(a).description, 'Personal');
         assert.strictEqual(tree.getTreeItem(b).description, 'Default');
         assert.strictEqual(tree.getTreeItem(codex).description, 'Default');

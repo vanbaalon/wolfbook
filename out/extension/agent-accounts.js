@@ -7,7 +7,6 @@ const os = require('os');
 const crypto = require('crypto');
 
 const PROVIDERS = { claude: 'Claude Code', codex: 'Codex CLI' };
-const PROFILE_KEY = 'agentAccounts.profiles';
 
 function repositoryKey(repo, provider) {
     let root = path.resolve(repo);
@@ -83,7 +82,8 @@ function resolveExecutable(vscode, provider) {
 
 function register(context, vscode = require('vscode')) {
     const changed = new vscode.EventEmitter();
-    const profiles = provider => context.globalState.get(PROFILE_KEY, []).filter(p => p.provider === provider);
+    const profileStore = require('./account-profile-store').createProfileStore(context);
+    const profiles = provider => profileStore.list().filter(p => p.provider === provider);
     const selected = (repo, provider) => profiles(provider).find(p => p.id === context.globalState.get(repositoryKey(repo, provider)));
     const modelDefaults = (repo, provider) => context.globalState.get(`${repositoryKey(repo, provider)}.models`, {});
     const panel = require('./claude-panel-accounts').createBridge(context, vscode,
@@ -157,6 +157,15 @@ function register(context, vscode = require('vscode')) {
         const current = selected(repo, provider);
         const models = modelDefaults(repo, provider);
         const choice = await vscode.window.showQuickPick([
+            { label: 'Saved accounts — all windows', kind: vscode.QuickPickItemKind.Separator },
+            { label: `${current ? '$(account)' : '$(check)'} Default account`, action: 'select', id: undefined,
+                description: current ? 'Use the CLI’s normal login' : 'Selected for this folder' },
+            ...profiles(provider).map(profile => ({
+                label: `${profile.id === current?.id ? '$(check)' : '$(account)'} ${profile.name}`,
+                action: 'select', id: profile.id,
+                description: profile.id === current?.id ? 'Selected for this folder' : 'Use in this folder',
+            })),
+            { label: 'Actions', kind: vscode.QuickPickItemKind.Separator },
             ...(provider === 'claude' && panel.supported() ? [{ label: '$(comment-discussion) Open Claude panel with selected account', action: 'panel' }] : []),
             { label: '$(terminal) Open CLI', action: 'open', description: current?.name || 'Default account' },
             { label: '$(account) Switch account for this workspace folder…', action: 'switch' },
@@ -197,8 +206,8 @@ function register(context, vscode = require('vscode')) {
             return;
         }
         if (['open', 'login', 'status'].includes(choice.action)) return launch(target, current, choice.action);
-        if (choice.action === 'switch') {
-            const picked = await vscode.window.showQuickPick([
+        if (choice.action === 'switch' || choice.action === 'select') {
+            const picked = choice.action === 'select' ? choice : await vscode.window.showQuickPick([
                 { label: 'Default account', description: 'Use the CLI’s normal environment and login', id: undefined },
                 ...profiles(provider).map(p => ({ label: p.name, id: p.id, description: p.id === current?.id ? 'Selected' : '' })),
             ], { title: `Select ${PROVIDERS[provider]} account for ${path.basename(repo)}` });
@@ -206,7 +215,7 @@ function register(context, vscode = require('vscode')) {
             await context.globalState.update(repositoryKey(repo, provider), picked.id);
             refresh();
             const options = provider === 'claude' && panel.supported() ? ['Open Claude panel', 'Open CLI'] : ['Open CLI'];
-            const open = await vscode.window.showInformationMessage(`Selected ${picked.label}. Open a new conversation to use this account; existing sessions keep their account.`, ...options);
+            const open = await vscode.window.showInformationMessage(`Selected ${profiles(provider).find(profile => profile.id === picked.id)?.name || 'Default account'}. Open a new conversation to use this account; existing sessions keep their account.`, ...options);
             if (open === 'Open Claude panel') { await syncPanel(); await vscode.commands.executeCommand('claude-vscode.primaryEditor.open'); }
             else if (open === 'Open CLI') await launch(target, selected(repo, provider), 'open');
             return;
@@ -216,7 +225,7 @@ function register(context, vscode = require('vscode')) {
                 `Forget “${current.name}” for all workspace folders? Its saved CLI data is retained; workspace folders using it return to Default.`,
                 { modal: true }, 'Forget profile');
             if (!answer) return;
-            await context.globalState.update(PROFILE_KEY, context.globalState.get(PROFILE_KEY, []).filter(p => p.id !== current.id));
+            profileStore.remove(current);
             refresh();
             return;
         }
@@ -229,13 +238,12 @@ function register(context, vscode = require('vscode')) {
                     && p.name.toLowerCase() === value.trim().toLowerCase()) ? 'That profile name already exists.' : undefined,
         });
         if (!name?.trim()) return;
-        const all = context.globalState.get(PROFILE_KEY, []);
         if (choice.action === 'rename') {
-            await context.globalState.update(PROFILE_KEY, all.map(p => p.id === current.id ? { ...p, name: name.trim() } : p));
+            profileStore.save({ ...current, name: name.trim() });
         } else {
             const profile = { id: crypto.randomUUID(), provider, name: name.trim() };
             await fs.promises.mkdir(profileDirectory(context, profile), { recursive: true, mode: 0o700 });
-            await context.globalState.update(PROFILE_KEY, [...all, profile]);
+            profileStore.save(profile);
             await context.globalState.update(repositoryKey(repo, provider), profile.id);
             refresh();
             await launch(target, profile, 'login');
@@ -272,6 +280,7 @@ function register(context, vscode = require('vscode')) {
         } catch (error) { vscode.window.showErrorMessage(`Wolfbook accounts: ${error.message}`); }
     };
     context.subscriptions.push(changed,
+        profileStore.watch(refresh),
         vscode.window.registerTreeDataProvider('wolfbook.agentAccounts', tree),
         vscode.workspace.onDidChangeWorkspaceFolders(refresh),
         vscode.commands.registerCommand('wolfbook.agentAccounts.manage', guarded(manage)),
