@@ -28,8 +28,8 @@
 //
 // Tests live in tex-webview-bugs.spec.cjs next to this file
 // ($WPAPER_WEBVIEW_SPEC overrides). $WPAPER_EXT_ROOT runs them against another
-// extension root's out/client (e.g. an older build, to see a test fail). Not part of
-// run-all.js (that runner is headless-only).
+// extension root's out/client (e.g. an older build, to see a test fail).
+// Not part of run-all.js (that runner is headless-only).
 
 const fs = require('fs');
 const os = require('os');
@@ -368,4 +368,4 @@ if (require.main === module) {
     main().catch(e => { console.error('harness error:', e && e.stack || e); process.exit(2); });
 }
 
-module.exports = { decodePng, buildFixture, hostHtml };
+module.exports = { decodePng, buildFixture, hostHtml, serve, loadPlaywright, chromePath, CLIENT };

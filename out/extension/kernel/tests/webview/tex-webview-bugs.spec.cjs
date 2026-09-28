@@ -259,6 +259,11 @@ const tests = [
             await t.open(2);
             await t.sleep(200);
             t.assert(await count(t, '.rband') === 0, 'a placement stamped for generation 1 is not painted over generation 2');
+            // …and one that arrives late, still measured against generation 1.
+            await t.post({ type: 'review', session: session(1, A) });
+            await t.sleep(250);
+            t.assert(await count(t, '.rband') === 0, 'a late placement for generation 1 is not painted over generation 2');
+            t.assert(await count(t, '.rh') === 1, 'while the change itself stays on the review list');
             await t.post({ type: 'review', session: session(2, B) });
             await t.waitFor(() => !!document.querySelector('.rband'), null, { what: 'the re-placed band' });
             const b = await band();
@@ -528,7 +533,6 @@ const tests = [
     {
         id: '#36',
         name: 'selection brackets sit at the exact first and last selected glyphs (not on the dot of \\dot Z)',
-        todo: 'the native path paints brackets at the first/last row rect in page order, ignoring span.start/end.exactEdge (tex-viewer.js paintSelection: `brackets` from parts[0] / parts[last])',
         async run(t) {
             // Selected source: "velocity $\dot{Z}$ of". The host sends the
             // glyph boxes sorted by (page, y, x): the dot of Ż is highest, so

@@ -21,10 +21,13 @@ function spawnCode(code, args, options = {}) {
     if (process.platform !== 'darwin' || process.env.WPAPER_TEST_VISIBLE === '1' || !app) return spawn(code, args, options);
     const profile = args[args.indexOf('--user-data-dir') + 1];
     const run = path.dirname(profile);
-    const env = Object.entries(options.env || {}).filter(([k, v]) => v !== undefined && process.env[k] !== v)
-        .flatMap(([k, v]) => ['--env', `${k}=${v}`]);
+    // `open` hands its environment to the app. Run from inside VS Code (a
+    // terminal, an agent), that carries ELECTRON_RUN_AS_NODE — the app then
+    // starts as plain Node — and VSCODE_IPC_HOOK, the reader's own instance.
+    const env = { ...process.env, ...(options.env || {}) };
+    for (const k of Object.keys(env)) if (k === 'ELECTRON_RUN_AS_NODE' || k.startsWith('VSCODE_') || env[k] === undefined) delete env[k];
     const child = new EventEmitter();
-    const opener = spawn('open', ['-g', '-j', '-n', ...env, '-a', app, '--args', ...args.filter(a => a !== '--wait')], { stdio: 'inherit' });
+    const opener = spawn('open', ['-g', '-j', '-n', '-a', app, '--args', ...args.filter(a => a !== '--wait')], { stdio: 'inherit', env });
     opener.once('error', e => child.emit('error', e));
     const reports = () => { try { return fs.readdirSync(run).filter(f => /^vscode-.*\.json$/.test(f)); } catch (_) { return []; } };
     const started = Date.now(), limitMs = Number(process.env.WPAPER_TEST_TIMEOUT_MS || 15 * 60 * 1000);

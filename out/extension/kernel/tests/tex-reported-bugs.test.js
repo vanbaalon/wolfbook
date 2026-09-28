@@ -14,7 +14,7 @@
 // wide vscode stub; it runs in a child process of this same file so its
 // prototype patches and timers cannot leak into the other tests.
 
-if (process.env.WPAPER_BUG11_CHILD) { require('node:process').exitCode = 0; runBug11Child(); return; }
+if (process.env.WPAPER_BUG11_CHILD) { runBug11Child(); return; }
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
@@ -279,7 +279,7 @@ test('#2 on the native map a click puts the cursor and the red caret at the clic
     await f.leftClick();
     assert.equal(f.editor.selection.start.character, 8);
     assert.equal(f.editor.selection.isEmpty, true, 'collapsed at the clicked letter');
-    const h = f.posts.find(p => p.type === 'highlight');
+    const h = f.posts.filter(p => p.type === 'highlight').at(-1);
     assert.deepEqual(h.caret, { page: 1, x: 100, y: 80, h: 9, at: 'before', offset: 0 }, 'the page caret before the clicked glyph');
 });
 
@@ -398,6 +398,106 @@ test('#12 the build log names the exit and "no log written" instead of "0 error(
     } finally { cfg.mapEngine = 'wlatex'; f.close(); }
 });
 
+// ── #11 "page behind editor" shows, but a change on disk never recompiles ───
+
+test('#11 an external write to a watched .tex of the open paper schedules a build', () => {
+    const res = spawnSync(process.execPath, [__filename], { encoding: 'utf8', timeout: 60000,
+        env: { ...process.env, WPAPER_BUG11_CHILD: '1' } });
+    const line = (res.stdout || '').split('\n').find(l => l.startsWith('BUG11 '));
+    assert.ok(line, `the child harness reported nothing:\n${res.stdout}\n${res.stderr}`);
+    const got = JSON.parse(line.slice(6));
+    assert.deepEqual(got.root, [got.files.root], 'a shell/agent/git write to the root .tex queues a rebuild');
+    assert.deepEqual(got.child, [got.files.child], 'so does a write to an \\input-ed file of the same paper');
+    assert.deepEqual(got.other, [], 'a paper the viewer is not showing is left alone');
+});
+
+/** Child process of #11: registerTexSupport against a wide stub, firing its file watcher. */
+function runBug11Child() {
+    const fs = require('node:fs'), os = require('node:os'), path = require('node:path'), Module = require('node:module');
+    const EXT = path.resolve(__dirname, '..', '..', '..', '..');
+    const DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'wpaper-bug11-'));
+    const ROOT = path.join(DIR, 'paper.tex'), CHILD = path.join(DIR, 'section.tex'), OTHER = path.join(DIR, 'other.tex');
+    fs.writeFileSync(ROOT, '\\documentclass{article}\n\\begin{document}\n\\input{section}\n\\end{document}\n');
+    fs.writeFileSync(CHILD, 'Hello.\n');
+    fs.writeFileSync(OTHER, '\\documentclass{article}\n\\begin{document}\nx\n\\end{document}\n');
+    const stub = require('./_stub-vscode.js').makeVscodeStub();
+    const noDispose = { dispose() {} };
+    const watchers = [];
+    const cls = () => class { constructor(...a) { this.args = a; } };
+    Object.assign(stub, {
+        Position: class { constructor(l, c) { this.line = l; this.character = c; } },
+        Range: class { constructor(a, b) { this.start = a; this.end = b; } },
+        Selection: class { constructor(a, b) { this.anchor = a; this.active = b; this.start = a; this.end = b; } },
+        ThemeColor: cls(), ThemeIcon: cls(), Diagnostic: cls(), CodeLens: cls(), Hover: cls(), FoldingRange: cls(),
+        DocumentLink: cls(), Location: cls(), RelativePattern: cls(), DocumentSymbol: cls(), CompletionItem: cls(), SnippetString: cls(),
+        MarkdownString: class { constructor(v) { this.value = v || ''; } appendMarkdown(v) { this.value += v; return this; } },
+        DiagnosticSeverity: { Error: 0, Warning: 1, Information: 2, Hint: 3 }, StatusBarAlignment: { Left: 1, Right: 2 },
+        DecorationRangeBehavior: { OpenOpen: 0, ClosedClosed: 1, OpenClosed: 2, ClosedOpen: 3 },
+        OverviewRulerLane: { Left: 1, Center: 2, Right: 4, Full: 7 },
+        TextEditorRevealType: { Default: 0, InCenter: 1, InCenterIfOutsideViewport: 2, AtTop: 3 },
+        CancellationTokenSource: class { constructor() { this.token = { isCancellationRequested: false, onCancellationRequested: () => noDispose }; } cancel() {} dispose() {} },
+        TextEdit: { replace: (r, t) => ({ range: r, newText: t }), insert: (p, t) => ({ position: p, newText: t }) },
+        WorkspaceEdit: class { replace() {} insert() {} delete() {} },
+        SymbolKind: {}, CompletionItemKind: {}, ProgressLocation: { Notification: 15, Window: 10 },
+        extensions: { getExtension: () => undefined, all: [] },
+        env: { clipboard: { readText: async () => '', writeText: async () => {} }, openExternal: async () => true },
+        commands: { registerCommand: () => noDispose, executeCommand: async () => undefined, getCommands: async () => [] },
+    });
+    const fill = obj => new Proxy(obj, { get(t, k) {
+        if (k in t) return t[k];
+        if (typeof k === 'string' && /^(register|on[A-Z]|create)/.test(k)) return () => noDispose;
+        return undefined;
+    } });
+    Object.assign(stub.window, { activeTextEditor: undefined, visibleTextEditors: [],
+        createStatusBarItem: () => ({ show() {}, hide() {}, dispose() {} }),
+        createTextEditorDecorationType: () => ({ dispose() {} }),
+        withProgress: async (_o, fn) => fn({ report() {} }, { isCancellationRequested: false }),
+        tabGroups: { all: [], activeTabGroup: undefined, onDidChangeTabs: () => noDispose, onDidChangeTabGroups: () => noDispose } });
+    Object.assign(stub.workspace, { textDocuments: [], workspaceFolders: [{ uri: { fsPath: DIR }, name: 'w', index: 0 }],
+        getConfiguration: () => ({ get: (_k, d) => d, update: async () => {}, has: () => false, inspect: () => undefined }),
+        openTextDocument: async () => ({ uri: { fsPath: ROOT }, getText: () => '', isDirty: false }), asRelativePath: p => p,
+        fs: { readFile: async () => Buffer.from(''), writeFile: async () => {}, stat: async () => ({}) },
+        createFileSystemWatcher: pattern => {
+            const w = { pattern, change: [], onDidChange: fn => { w.change.push(fn); return noDispose; },
+                onDidCreate: () => noDispose, onDidDelete: () => noDispose, dispose() {} };
+            watchers.push(w); return w;
+        } });
+    stub.languages = fill({ createDiagnosticCollection: () => ({ set() {}, delete() {}, clear() {}, dispose() {} }) });
+    stub.window = fill(stub.window);
+    stub.workspace = fill(stub.workspace);
+    const origLoad = Module._load;
+    Module._load = function (req, ...rest) { return req === 'vscode' ? stub : origLoad.call(this, req, ...rest); };
+    const renderUi = require(path.join(EXT, 'out/extension/tex/renderUi.js'));
+    const { TexViewer } = require(path.join(EXT, 'out/extension/tex/texViewer.js'));
+    const tex = require(path.join(EXT, 'out/extension/tex/index.js'));
+    Module._load = origLoad;
+    const scheduled = [];
+    renderUi.RenderCoordinator.prototype.scheduleLive = function (doc) { scheduled.push(doc.uri.fsPath); };
+    TexViewer.prototype.isOpen = () => true;
+    TexViewer.prototype.preserveViewerLayoutAfterExternalChange = () => true;
+    Object.defineProperty(TexViewer.prototype, 'root', { configurable: true, get: () => ROOT, set: () => {} });
+    const memento = { get: () => undefined, update: async () => {} };
+    tex.registerTexSupport({ subscriptions: [], extensionUri: { fsPath: EXT }, globalState: memento, workspaceState: memento,
+        secrets: { get: async () => undefined, store: async () => {} } }, {});
+    const watcher = watchers.find(w => String(w.pattern).includes('tex'));
+    const fire = async file => {
+        scheduled.length = 0;
+        fs.appendFileSync(file, '% written outside VS Code\n');
+        for (const fn of watcher.change) await fn({ fsPath: file, scheme: 'file', path: file });
+        await new Promise(r => setTimeout(r, 10));
+        return [...scheduled];
+    };
+    (async () => {
+        const out = { files: { root: ROOT, child: CHILD } };
+        out.root = await fire(ROOT);
+        out.child = await fire(CHILD);
+        out.other = await fire(OTHER);
+        console.log(`BUG11 ${JSON.stringify(out)}`);
+        try { fs.rmSync(DIR, { recursive: true, force: true }); } catch (_) { /* fine */ }
+        process.exit(0);
+    })().catch(e => { console.error(e); process.exit(1); });
+}
+
 // ── #13 search misses must still land close ────────────────────────────────
 
 /** A NativeMap over "ABC" typed at line 4, columns 0..2, ten points apart. */
@@ -441,7 +541,7 @@ test('#13 a cursor on text that prints nothing lights the nearest printed glyph,
     const f = nativeCursorFixture({ text: 'a\nb\nc\nABC\n', anchor: [3, 2] });
     f.map.forwardAt = async () => near;
     await f.run();
-    const h = f.posts.find(p => p.type === 'highlight');
+    const h = f.posts.filter(p => p.type === 'highlight').at(-1);
     assert.equal(h.exact, false);
     assert.match(h.label, /nearest printed text to line 4/);
 });
@@ -740,18 +840,33 @@ test('#33 when the card cannot open yet, the reason is shown', async () => {
 
 // ── #34 an unnecessary full recompile freezes the viewer and editor ─────────
 
-test('#34 settling after live-lane edits stays on WLaTeX: no latexmk full recompile', { todo: 'bug #34 not fixed (row is open): the idle convergence build after a native preview that wants a rerun still runs latexmk (renderUi: nativeUnsettled → wantNative=false)' }, async () => {
-    const f = coordinatorFixture();
-    const saved = stub.workspace.openTextDocument;
-    stub.workspace.openTextDocument = async () => f.doc;
-    try {
-        await f.coordinator.build(f.doc, { live: true, quiet: true });
-        assert.equal(f.state.generation.runner, 'wlatex');
-        const latexmk = conventional.calls;
-        // What _armAuthoritative fires once typing stops (the native build left a rerun).
-        await f.coordinator.buildAuthoritative(f.root, { was: f.state.generation });
-        assert.equal(conventional.calls, latexmk, 'no full latexmk recompile after live typing');
-    } finally { stub.workspace.openTextDocument = saved; f.close(); }
+// The "full recompile" is WLaTeX's own settle build (a separate process; the
+// user's logs show no latexmk). The freeze was this thread re-reading the
+// source map around it: once after the pause, again while the settle build
+// ran (thrown away when it landed). A re-read now waits for a running build,
+// and runs afterwards only if the map is still behind.
+test('#34 a source-map re-read waits while a build runs, and is skipped when the build left a current map', async () => {
+    const runs = [];
+    const map = { native: true, available: false, hasPage: () => true };
+    const st = { compiling: true, map, lastEditAt: 0, lastInkAt: 0 };
+    const coord = Object.create(RenderCoordinator.prototype);
+    coord._runNativeRefresh = async () => { runs.push(Date.now()); };
+    coord._nativeWindow = () => [1, 2];
+    const lane = { interactive: true };
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+    coord._scheduleNativeRefresh(st, lane, 0);
+    await sleep(150);
+    assert.equal(runs.length, 0, 'no map read while the build compiles');
+    // The build lands with a current map: nothing to read.
+    map.available = true; st.compiling = false;
+    await sleep(700);
+    assert.equal(runs.length, 0, 'the build installed a current map; the re-read is skipped');
+    // A build that left the map behind (failed / superseded): the read runs.
+    map.available = false;
+    coord._scheduleNativeRefresh(st, lane, 0);
+    await sleep(100);
+    assert.equal(runs.length, 1, 'the map is re-read once no build is running and it is still behind');
+    clearTimeout(st.nativeRefreshTimer);
 });
 
 // ── #36 the range selection is drawn wrongly ────────────────────────────────
@@ -792,7 +907,7 @@ test('#37 the red caret is drawn on maths symbols: before the glyph printed at t
         [line.indexOf('^'), { page: 1, x: 40, y: 96, w: 4, h: 6 }]]) {
         const f = nativeCursorFixture({ text: `x\n${line}\n`, anchor: [1, at], glyphs: { [`2:${at}`]: glyph } });
         await f.run();
-        const h = f.posts.find(p => p.type === 'highlight');
+        const h = f.posts.filter(p => p.type === 'highlight').at(-1);
         assert.ok(h.caret, `a caret at ${JSON.stringify(line[at])}`);
         assert.deepEqual([h.caret.x, h.caret.at], [glyph.x, 'before']);
     }
@@ -804,6 +919,6 @@ test('#37 ... else after the glyph printed before it', async () => {
     const paren = { page: 1, x: 50, y: 100, w: 3, h: 9 };
     const f = nativeCursorFixture({ text: `x\n${line}\n`, anchor: [1, at], glyphs: { [`2:${at}`]: paren, [`2:${at - 1}`]: paren } });
     await f.run();
-    const h = f.posts.find(p => p.type === 'highlight');
+    const h = f.posts.filter(p => p.type === 'highlight').at(-1);
     assert.deepEqual([h.caret.x, h.caret.at], [53, 'after']);
 });

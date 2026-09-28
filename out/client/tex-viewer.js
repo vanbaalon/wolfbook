@@ -5383,7 +5383,14 @@ async function paintSelection(span) {
     // separately let them disagree with the fill they bracket — the mark inside
     // the first word while the band began after it. Taking them from the
     // painted parts makes that impossible.
-    const brackets = [
+    // ON THE NATIVE LANE THE EXTENSION SENDS THE EXACT ENDS: the glyphs of
+    // the first and last selected characters. The painted parts are glyph
+    // boxes there, in page order, so their extremes were an accent above the
+    // line and a comma below it — the brackets landed mid-selection.
+    const brackets = span.native ? [
+        { side: 'start', page: from.page, x: startPx.x, y: startPx.y, h: startPx.h },
+        { side: 'end', page: to.page, x: endPx.x, y: endPx.y, h: endPx.h },
+    ] : [
         { side: 'start', page: parts[0].page, x: parts[0].x, y: parts[0].y, h: parts[0].h },
         { side: 'end',
             page: parts[parts.length - 1].page,
