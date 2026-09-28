@@ -8323,6 +8323,13 @@ class TexViewer {
 
         const { startLine, endLine, label } = this._blockAt(doc, lines, hit.file, line);
 
+        // A TIKZ PICTURE OPENS IN THE TIKZ EDITOR, with what was right-clicked
+        // selected — the drawing is what the reader pointed at, not its code.
+        if (this._proActive() && !m.textCard && /^\s*\\begin\{tikzpicture\}/.test(lines[startLine - 1] || '')) {
+            this._post({ type:'tikzOpenAt', page: m.page, xBp: m.xBp, yTopBp: m.yTopBp });
+            return;
+        }
+
         const startPos = new vscode.Position(startLine - 1, 0);
         const endPos = new vscode.Position(endLine - 1, (lines[endLine - 1] || '').length);
         const s = {

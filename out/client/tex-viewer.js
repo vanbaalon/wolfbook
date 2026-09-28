@@ -8676,6 +8676,7 @@ window.addEventListener('message', async (ev) => {
         case 'inspireResults': activePicker?.onInspire(msg); break;
         case 'txdlPage': await drawTxdlPage(msg); tikzPageChanged(Number(msg.page)); findPageChanged(); break;
         case 'tikzResolved': tikzResolved(msg); break;
+        case 'tikzOpenAt': tikzOpenAt(msg); break;
         case 'tikzEdited': tikzEdited(msg); break;
         case 'tikzPalette': tikzPaletteArrived(msg); break;
         case 'txdlBuilt': {
@@ -9359,6 +9360,32 @@ function tikzResolved(msg) {
         const it = [...model.items.values()].find(i => i.stmt.name === tikz.chain.name);
         if (it) tikz.chain.picture = it.picture;
     }
+    tikzPaint(page);
+    tikzInspector();
+    tikzPickPending(page);
+}
+
+/**
+ * A right-click on a picture (the extension's `tikzOpenAt`): the TikZ editor
+ * on, and what is under the pointer selected once the page's statements are
+ * known — which may take a display list and a resolve first.
+ */
+function tikzOpenAt(msg) {
+    const page = Number(msg.page);
+    const v = rectToViewport(page, { page, x: msg.xBp, y: msg.yTopBp, w: 0, h: 0 });
+    tikz.pickAt = v ? { page, x: v.x, y: v.y } : null;
+    if (el('status').textContent === 'opening the editor…') status('TikZ: opening the picture…', 'busy');
+    if (!tikz.on) tikzToggle(true); else tikzRefreshVisible();
+    tikzPickPending(page);
+}
+
+function tikzPickPending(page) {
+    const want = tikz.pickAt;
+    if (!want || want.page !== page || !tikz.pages.get(page)?.resolved) return;
+    tikz.pickAt = null;
+    const it = tikzPick(page, want.x, want.y);
+    if (it) tikz.selection = { page, keys: new Set([it.key]), primary: it.key };
+    if (el('status').textContent === 'TikZ: opening the picture…') status(it ? '' : 'TikZ: click a line, shape or label of the picture');
     tikzPaint(page);
     tikzInspector();
 }

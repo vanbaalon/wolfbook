@@ -147,8 +147,19 @@ exports.run = async function () {
                 mapped: Object.keys(reply?.paths || {}).length, statements: Object.values(reply?.pictures || {}).map(p => p.statements.length),
                 error: reply ? reply.error : 'no reply' };
         }
+        // 4. A right-click on a TikZ picture opens the TikZ editor there, not the text card.
+        {
+            const li = lines.findIndex(l => l.includes('{$u$}'));
+            const rects = li >= 0 ? await st.map.forwardAt(doc.uri.fsPath, li + 1, lines[li].indexOf('{$u$}') + 2) : null;
+            const r = rects && rects[0];
+            const t = Date.now();
+            if (r) await viewer._onMessage({ type: 'editHere', page: r.page, xBp: r.x + r.w / 2, yTopBp: r.y + r.h / 2, generation: viewer._openedGeneration });
+            const sent = posts.filter(p => p.at >= t).map(p => p.type);
+            report.tikz.rightClick = { at: r ? { page: r.page } : null, tikzOpenAt: sent.includes('tikzOpenAt'), textCard: sent.includes('editOpen') };
+        }
         report.result = report.table.round1.openMs != null && report.table.afterKey.openMs != null && report.tikz.deliveredMs != null
-            && Object.values(report.tikz.resolve).every(r => !r.paths || r.mapped === r.paths) ? 'PASS' : 'FAIL';
+            && Object.values(report.tikz.resolve).every(r => !r.paths || r.mapped === r.paths)
+            && report.tikz.rightClick.tikzOpenAt && !report.tikz.rightClick.textCard ? 'PASS' : 'FAIL';
     } catch (error) {
         report.result = 'FAIL';
         report.error = error.stack || error.message;
