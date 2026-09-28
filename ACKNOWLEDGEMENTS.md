@@ -46,3 +46,11 @@ Inspiration, with no code or data taken:
   wslide's Arrange panel, whose geometry the picture editor shares.
 - Super Dynkin conventions: V. G. Kac (1977); L. Frappat, A. Sciarrino,
   P. Sorba, *Dictionary on Lie Algebras and Superalgebras* (2000).
+
+## Prepare for arXiv
+
+- **arxiv_latex_cleaner** — Google Research (Apache 2.0): the approach to
+  cleaning a source for arXiv (comments removed but a line-ending `%` kept,
+  `comment` environments and `\iffalse` blocks dropped, unused files left
+  out). No code taken; `arxivPack.js` is written from arXiv's own rules
+  (info.arxiv.org/help/submit_tex.html and 00README.html).
