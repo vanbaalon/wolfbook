@@ -72,6 +72,7 @@ exports.run = async function () {
         };
         const move = async (label) => {
             for (const line of prose.slice(0, 3)) {
+                // Inside the second word: a caret between two of its letters.
                 const character = lines[line].indexOf(' ') + 2;
                 const at = new vscode.Position(line, character);
                 editor.selection = new vscode.Selection(at, at);
@@ -82,6 +83,7 @@ exports.run = async function () {
                     await until(() => (hit = posts.find(p => p.at >= since && p.type === 'highlight' && p.rects?.length)), 'a highlight', 3000);
                 } catch (_) { /* recorded below */ }
                 report.moves.push({ when: label, line: line + 1, highlighted: !!hit, reveal: hit ? !!hit.reveal : null,
+                    caret: hit ? !!hit.caret : null,
                     rects: hit ? hit.rects.length : 0, label: hit ? hit.label : (posts.filter(p => p.at >= since).map(p => p.label || p.type).join(' | ') || 'nothing posted'),
                     ...(hit ? {} : { state: diagnose() }) });
                 await sleep(300);
@@ -89,6 +91,13 @@ exports.run = async function () {
         };
         await sleep(1500);
         await move('first build');
+        // Every message across the webview after the edit, for diagnosis.
+        const traffic = [];
+        const t0 = Date.now();
+        subs.push(viewer.panel.webview.onDidReceiveMessage(m => traffic.push([Date.now() - t0, 'in', m && m.type, m && (m.type === 'pdfRangeRequest' ? `req ${m.request} ${m.begin}-${m.end} tok ${String(m.token).slice(0, 8)}` : (m.message || m.error || m.text || m.generation || ''))])));
+        const post2 = viewer._post.bind(viewer);
+        viewer._post = (m) => { traffic.push([Date.now() - t0, 'out', m && m.type, m && (m.type === 'pdfRange' ? `req ${m.request} ${m.error || (m.data ? m.data.length + 'b64' : '')}` : m.type === 'open' ? `gen ${m.generation} range ${JSON.stringify(m.pdfRange || null).slice(0, 80)}` : (m.generation || ''))]); return post2(m); };
+        report.traffic = traffic;
         // An edit: two characters typed into a prose line, then the build it starts.
         const target = prose[3] ?? prose[0];
         const gen0 = st.generation.generation;
@@ -106,7 +115,7 @@ exports.run = async function () {
         await sleep(4000);
         report.afterComment = diagnose();
         await move('after a comment edit');
-        const failed = report.moves.filter(m => !m.highlighted || !m.reveal);
+        const failed = report.moves.filter(m => !m.highlighted || !m.reveal || !m.caret);
         report.result = failed.length ? 'FAIL' : 'PASS';
     } catch (error) {
         report.result = 'FAIL';

@@ -211,13 +211,14 @@ function setEngineBadge(msg) {
     state.engine = msg && msg.state ? msg : null;
     const engine = state.engine;
     badge.hidden = !engine;
-    document.body.classList.toggle('pro-live-marks', !!engine && engine.state !== 'off' && proLiveMarks());
+    document.body.classList.toggle('pro-live-marks', !!engine && !['off', 'disabled'].includes(engine.state) && proLiveMarks());
     if (!engine) { closeProPanel(); return; }
     badge.dataset.state = engine.state;
     const ms = v => (Number.isFinite(v) ? `${Math.round(v)} ms` : null);
     const key = ms(engine.keyMs);
     badge.querySelector('.pro-state').textContent = {
-        live: key ? `live · ${key}` : 'live', settling: 'settling…', settled: 'settled', off: 'off' }[engine.state] || '';
+        live: key ? `live · ${key}` : 'live', settling: 'settling…', settled: 'settled', off: 'off',
+        disabled: 'switched off' }[engine.state] || '';
     const detail = [ms(engine.firstChangedMs) && `first changed page ${ms(engine.firstChangedMs)}`,
         engine.recomputed != null && `${engine.recomputed} page(s) recomputed, ${engine.reused ?? 0} reused`].filter(Boolean).join('; ');
     badge.title = {
@@ -226,7 +227,8 @@ function setEngineBadge(msg) {
         settling: 'WLaTeX Pro: the final PDF is being built.',
         settled: 'WLaTeX Pro: this PDF is WLaTeX\'s settled build; click any word to reach its source.',
         off: `WLaTeX Pro is off for this paper: ${engine.reason || 'it needs another engine'}.`,
-    }[engine.state] + ' Click for details.';
+        disabled: 'WLaTeX Pro is switched off: WPaper uses its ordinary compiler.',
+    }[engine.state] + (engine.state === 'disabled' ? ' Click to switch it on.' : ' Click to switch it off · right-click for details.');
     badge.setAttribute('aria-label', `WLaTeX Pro: ${badge.querySelector('.pro-state').textContent}`);
     panel.querySelector('.pro-headstate').textContent = badge.querySelector('.pro-state').textContent;
     // The first time WLaTeX Pro is on: what it adds, once (the host remembers).
@@ -254,7 +256,15 @@ function closeProPanel() {
     if (badge) badge.setAttribute('aria-expanded', 'false');
 }
 
+// A click switches WLaTeX Pro off and on (grey / colour); the panel of what
+// it does is a right-click away.
 el('probadge')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    closeProPanel();
+    vscode.postMessage({ type: 'proToggle' });
+});
+el('probadge')?.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
     e.stopPropagation();
     const panel = el('propanel');
     const open = panel.hidden;
@@ -268,7 +278,7 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !el('pro
 el('protrack')?.addEventListener('change', (e) => vscode.postMessage({ type: 'trackMine', on: !!e.target.checked }));
 el('promarks')?.addEventListener('change', (e) => {
     try { localStorage.setItem(PRO_MARKS_KEY, e.target.checked ? 'on' : 'off'); } catch (_) { /* per-viewer convenience */ }
-    document.body.classList.toggle('pro-live-marks', !!state.engine && state.engine.state !== 'off' && e.target.checked);
+    document.body.classList.toggle('pro-live-marks', !!state.engine && !['off', 'disabled'].includes(state.engine.state) && e.target.checked);
 });
 
 /** Pause correspondence while the source and painted PDF are different. */
@@ -414,6 +424,8 @@ function reusableNativePages(previous, next, rendered, scale, dpr) {
 }
 
 const pdfRanges = new globalThis.WPaperPdfRanges(message => vscode.postMessage(message));
+/** How long a ranged open may make no progress before it is reopened. */
+const OPEN_STALL_MS = 5000;
 
 async function openDocument(msg) {
     const navigationEpoch = state.navigationEpoch || 0;
@@ -484,7 +496,39 @@ async function openDocument(msg) {
         mark('bytes decoded');
         omark('decode');
         let anchor = scrollAnchor();
-        const nextDoc = await (rangeTransport ? Promise.race([task.promise,rangeTransport.failure]) : task.promise);
+        // A STALLED OPEN IS REOPENED. pdf.js has been seen to stop asking for
+        // bytes part-way through a ranged open (after the cross-reference
+        // table, with nothing outstanding) and then wait forever: the old
+        // page stays up and nothing that needs the new one works. With no
+        // request in flight and none for a while, this load is dropped and
+        // the extension sends the PDF again.
+        let stallTimer = null;
+        const stalled = rangeTransport ? new Promise((_, reject) => {
+            stallTimer = setInterval(() => {
+                if (rangeTransport.closed || rangeTransport.pending.size) return;
+                if (Date.now() - rangeTransport.lastActivity < OPEN_STALL_MS) return;
+                clearInterval(stallTimer);
+                const e = new Error('the PDF stopped loading'); e.stalled = true; reject(e);
+            }, 500);
+        }) : null;
+        let nextDoc;
+        try {
+            nextDoc = await (rangeTransport ? Promise.race([task.promise, rangeTransport.failure, stalled]) : task.promise);
+        } catch (error) {
+            if (error && error.stalled) {
+                rangeTransport.abort();
+                task.destroy().catch(() => {});
+                if (openSeq === state.openSeq) {
+                    state.openInFlight = false;
+                    status('reopening the PDF…');
+                    vscode.postMessage({ type: 'openStalled', generation: msg.generation });
+                }
+                return;
+            }
+            throw error;
+        } finally {
+            clearInterval(stallTimer);
+        }
         // Two quick compiles can parse out of order. Only the newest request
         // may become the document; otherwise an older PDF can finish last and
         // silently replace the page after the review already moved on.
@@ -5016,7 +5060,7 @@ window.addEventListener('keydown', (e) => {
     if (state.ink || !(e.metaKey || e.ctrlKey) || !e.shiftKey || e.altKey || !['r', 'c'].includes(e.key.toLowerCase())) return;
     const t = e.target;
     if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.isContentEditable)) return;
-    const pro = !el('probadge')?.hidden && el('probadge')?.dataset.state !== 'off';
+    const pro = !el('probadge')?.hidden && !['off', 'disabled'].includes(el('probadge')?.dataset.state);
     status(pro ? 'Click in the text on the page first: references and citations go in at the caret'
         : 'Inserting from the page needs WLaTeX Pro (wolfbook.tex.wlatexDirectory)', 'warn');
     e.preventDefault();

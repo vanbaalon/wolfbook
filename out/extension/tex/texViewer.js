@@ -80,6 +80,8 @@ const { CommentStore, sidecarFor, markdownFor } = require('./commentStore');
  */
 const TOUR_KEY = 'wolfbook.tex.tour';
 const PRO_INTRO_KEY = 'wolfbook.tex.proIntroSeen';
+/** WLaTeX Pro switched off from its badge (kept across sessions). */
+const PRO_DISABLED_KEY = 'wpaper.pro.disabled';
 const GROUP_KEY = 'wolfbook.tex.reviewGroup';
 const HINT_BUDGET = { chip: 3 };
 const hintsLeft = { ...HINT_BUDGET };
@@ -494,6 +496,8 @@ class TexViewer {
     constructor(context, coord, projection, deps = {}) {
         this.context = context;
         this.coord = coord;
+        // The badge's off switch outlives the session.
+        try { if (context?.globalState?.get(PRO_DISABLED_KEY)) coord.proDisabled = true; } catch (_) {}
         this.projection = projection;
         // Managed computations. Constructed even when this window has no kernel
         // resolver: a paper viewer that cannot compute must still open, fold,
@@ -1247,6 +1251,12 @@ class TexViewer {
      * last live preview's, as the status bar reports them.
      */
     _postEngine(st) {
+        // Switched off from the badge (proToggle): a grey badge that turns it
+        // back on, whatever this paper's last build was.
+        if (this.coord.proDisabled && vscode.workspace.getConfiguration('wolfbook.tex').get('mapEngine', 'auto') === 'wlatex') {
+            this._post({ type:'engine', state:'disabled', reason:null, choosable:false, interactive:false, intro:false });
+            return;
+        }
         const gen = st?.generation;
         const onLane = !!(st?.nativeLane || gen?.runner === 'wlatex');
         let state = null;
@@ -3010,6 +3020,11 @@ class TexViewer {
         this._scheduleSourceSave();
         const source = this._miniApplyingFile === doc.uri.fsPath ? 'mini-editor' : 'editor';
         const st = this.coord.roots && this.coord.roots.get(this.root);
+        // WITH WLATEX'S LIVE LANE THE PAGE KEEPS UP, so there is nothing to
+        // wait for: the native map answers a moved caret against the new text
+        // (revision-checked) and the live pages show it. Pausing here flashed
+        // "updating from editor…" and blanked the caret on every keystroke.
+        if (st?.map?.native && st.nativeLane && !this.coord.proDisabled) return true;
         this._setTracePaused(true, { source, compiling: !!(st && st.compiling) });
         return true;
     }
@@ -3659,7 +3674,44 @@ class TexViewer {
             // Text that prints nothing of its own lights the nearest printed
             // glyph instead (NativeMap._nearestPrinted), and says so.
             const near = rects.some(r => r.approximate);
-            this._post({ type:'highlight', rects, exact:!near,
+            // THE WORD, AND THE RED CARET IN IT — as the classic map draws
+            // them (_postAlignedGlyph): the wash says which word, the caret
+            // where in it. The native map is exact, so both are read off it:
+            // the word's glyphs, and the caret at the left edge of the letter
+            // after the cursor (the right edge of the one before it at the end
+            // of a word). A page the live engine drew answers from its map.
+            let caret = null;
+            // Best effort: without them the plain wash below still answers.
+            if (!near && rects.length) try {
+                const text = doc.lineAt(position.line).text;
+                const active = editor.selection.active;
+                const col = active && active.line === position.line ? active.character : position.character;
+                const letter = c => !!c && /[\p{L}\p{N}]/u.test(c);
+                const at = async (c) => {
+                    let r = await map.forwardAt(doc.uri.fsPath, position.line + 1, c).catch(() => null);
+                    if (live?.available && overlays?.size && r?.length && overlays.has(r[0].page))
+                        r = (await live.forwardAt(doc.uri.fsPath, position.line + 1, c).catch(() => null)) || r;
+                    return r && r.length && !r.some(x => x.approximate) ? r[0] : null;
+                };
+                let a = col, b = col;
+                while (a > 0 && letter(text[a - 1])) a--;
+                while (b < text.length && letter(text[b])) b++;
+                if (letter(text[col])) {
+                    const g = await at(col);
+                    if (g) caret = { page:g.page, x:g.x, y:g.y, h:g.h, at: col === a ? 'before' : 'inside', offset:col - a };
+                } else if (col > 0 && letter(text[col - 1])) {
+                    const g = await at(col - 1);
+                    if (g) caret = { page:g.page, x:g.x + g.w, y:g.y, h:g.h, at:'after', offset:col - a };
+                }
+                if (!current()) return;
+                if (b - a > 1) {
+                    const word = await map.forwardRange(doc.uri.fsPath, { line:position.line + 1, column_utf16:a },
+                        { line:position.line + 1, column_utf16:b }, { isCurrent:current }).catch(() => null);
+                    if (!current()) return;
+                    if (word && word.length && !(overlays?.size && word.some(r => overlays.has(r.page)))) rects = word;
+                }
+            } catch (_) { caret = null; }
+            this._post({ type:'highlight', rects, exact:!near, caret,
                 label: !rects.length ? 'no printed source at this cursor'
                     : near ? `nearest printed text to line ${position.line + 1}` : `line ${position.line + 1}`,
                 reveal: !opts.preserveView && this._mayScroll() && Date.now() - this._invertedAt >= 1500,
@@ -4205,6 +4257,20 @@ class TexViewer {
         const sel = this._lastSelection;
         if (!sel) return;
         const keep = m.end === 'start' ? sel.end : sel.start;
+        // THE NATIVE PICK KEEPS AN ANCHOR ONLY IF IT IS ITS OWN: same map, same
+        // source text, both ends. Without them the first drag step took the
+        // anchor for stale and restarted the selection under the pointer, so
+        // pulling one bracket dragged the other along with it.
+        if (sel.nativeMap) {
+            const map = sel.nativeMap;
+            const relative = path.relative(map.projectDir, sel.file).split(path.sep).join('/');
+            const sourceText = map.source?.files?.get(relative)?.text;
+            if (typeof sourceText === 'string') {
+                this._pickAnchor = { file: sel.file, position: keep, endPosition: keep,
+                    nativeMap: map, sourceText, label: 'selection' };
+                return;
+            }
+        }
         this._pickAnchor = { file: sel.file, position: keep, label: 'selection' };
     }
 
@@ -4799,6 +4865,37 @@ class TexViewer {
                 if (this._pdfRanges) this._post(this._pdfRanges.read(m));
                 break;
             case 'pdfRangeRelease': this._pdfRanges?.release(m.token); break;
+            case 'proToggle': {
+                // The badge turns WLaTeX Pro off and on, so both can be tried
+                // on the same paper: off is WPaper's ordinary compiler.
+                this.coord.proDisabled = !this.coord.proDisabled;
+                try { this.context?.globalState?.update(PRO_DISABLED_KEY, this.coord.proDisabled); } catch (_) {}
+                this._log(`WLaTeX Pro ${this.coord.proDisabled ? 'turned off' : 'turned on'} from the badge`);
+                const st = this.root && this.coord.roots.get(this.root);
+                this._postEngine(st);
+                if (this.root) {
+                    vscode.workspace.openTextDocument(vscode.Uri.file(this.root))
+                        .then(doc => this.coord.build(doc, { force: this.coord.proDisabled }))
+                        .then(() => this.refresh({ force: true }))
+                        .catch(error => this._log(`rebuild after the Pro switch: ${error.message}`));
+                }
+                break;
+            }
+            case 'openStalled': {
+                // The webview's pdf.js stopped loading this PDF: send it again,
+                // a few times at most for one generation.
+                const gen = String(m.generation);
+                this._openRetries ||= new Map();
+                const n = (this._openRetries.get(gen) || 0) + 1;
+                this._openRetries.set(gen, n);
+                if (this._openRetries.size > 20) this._openRetries.delete(this._openRetries.keys().next().value);
+                this._log(`viewer: the PDF of generation ${gen} stopped loading — sending it again (${n})`);
+                if (n > 2) break;
+                this.shownGeneration = null;
+                this.shownPdfHash = null;
+                this.refresh({ force: true }).catch(() => { /* the next build retries */ });
+                break;
+            }
             case 'timing': {
                 // The webview is the one place the extension cannot time from
                 // the outside, and a VS Code webview is not the headless
@@ -6240,20 +6337,17 @@ class TexViewer {
         this._rememberCursor(doc, placed);
         this._postEditSelection(doc, range, !m.takeMe, caret ? start : null, m.typingRequest);
         // WLaTeX Pro: exact prose takes a caret on the page itself.
-        if (hit.exact && !m.takeMe && !Number.isFinite(m.typingRequest)) {
-            // Prose takes a caret on the page; maths opens the card over the
-            // equation (its Mathematica keys, the page re-typesetting live),
-            // and a table the card with its grid, at the cell clicked.
-            if (!this._inkPlace?.(st, doc, start, map) && this._inkEnabled?.(st)) {
-                const at = doc.offsetAt(start);
-                if (mathAt(doc.getText(), at) || tableAt(doc.getText(), at))
-                    this._openEditSession?.({ ...m, sourceOffset: at })?.catch?.(() => {});
-            }
-        } else this._inkClear?.();
+        // Prose takes a caret on the page. An equation or a table opens its
+        // card on a RIGHT-click (editHere), as it always has: a left click
+        // only moves the cursor there.
+        if (hit.exact && !m.takeMe && !Number.isFinite(m.typingRequest)) this._inkPlace?.(st, doc, start, map);
+        else this._inkClear?.();
         const glyph = hit.glyph;
         this._post({ type:'selection', span:null });
+        // The clicked glyph, and the red caret before it (where the cursor went).
         this._post({ type:'highlight', exact:true, reveal:false,
-            rects:[{ page:glyph.page, x:glyph.x, y:glyph.y, w:glyph.w, h:glyph.boxHeight }] });
+            rects:[{ page:glyph.page, x:glyph.x, y:glyph.y, w:glyph.w, h:glyph.boxHeight }],
+            caret: caret ? { page:glyph.page, x:glyph.x, y:glyph.y, h:glyph.boxHeight, at:'before', offset:0 } : null });
         this._post({ type:'status', text:`→ line ${start.line + 1}, column ${start.character + 1}` +
             (hit.exact ? '' : ' · source moved'), kind:'ok' });
     }
@@ -8130,6 +8224,18 @@ class TexViewer {
         this._edit = s;
         this._ensureDocListener();
         this._rememberEditState();
+        // Where the click fell, in the document: the caller's, else the exact
+        // glyph's own source (a right-click on a symbol). The card opens with
+        // its caret there, not at the block's start.
+        let clickAt = Number.isFinite(m.sourceOffset) ? m.sourceOffset : null;
+        if (clickAt == null && hit.exact && hit.sourceRange?.start) {
+            try {
+                const p = hit.sourceRange.start;
+                clickAt = doc.offsetAt(new vscode.Position(p.line - 1, p.column_utf16));
+            } catch (_) { clickAt = null; }
+        }
+        const clickOffset = clickAt != null && clickAt >= s.startOffset && clickAt <= s.endOffset
+            ? (s.native ? wireOffset(s.lastText, clickAt - s.startOffset) : clickAt - s.startOffset) : null;
         const rects = this._editRects(st, hit.file, startLine, endLine);
         this._post({
             type: 'editOpen',
@@ -8141,8 +8247,7 @@ class TexViewer {
             endLine,
             text: s.native ? wireText(s.lastText) : s.lastText,
             // Where in the block the page was clicked (the table grid focuses that cell).
-            ...(Number.isFinite(m.sourceOffset) && m.sourceOffset >= s.startOffset && m.sourceOffset <= s.endOffset
-                ? { clickOffset: s.native ? wireOffset(s.lastText, m.sourceOffset - s.startOffset) : m.sourceOffset - s.startOffset } : {}),
+            ...(clickOffset != null ? { clickOffset, caretStart: clickOffset, caretEnd: clickOffset } : {}),
             // With no printed rows to hang off (a figure, an unmapped block),
             // the click point itself anchors the card.
             page: m.page,

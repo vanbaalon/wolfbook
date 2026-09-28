@@ -61,7 +61,10 @@
   .pp { opacity:.5; font-variant-numeric: tabular-nums; }
 
   /* --- pages --- */
-  #reader { flex:1 1 auto; min-height:0; display:flex; position:relative; overflow:hidden; }
+  /* Its own stacking context: the edge light (z-index 2000 below) stays over
+     the pages but under what floats outside them — the tour card, pickers
+     and dialogs no longer glow through. */
+  #reader { flex:1 1 auto; min-height:0; display:flex; position:relative; overflow:hidden; isolation:isolate; }
   /* A quiet edge light; overlay only, so pages and the mini-editor stay still. */
   #reader::after { content:""; position:absolute; inset:0; pointer-events:none;
     z-index:2000; opacity:0;
@@ -1440,6 +1443,7 @@
               animation:wpspin .75s linear infinite; }
   #probadge[data-state="settled"] .pro-dot { background:#0ea5e9; }
   #probadge[data-state="off"] { opacity:.6; filter:grayscale(.7); }
+  #probadge[data-state="disabled"] { opacity:.55; filter:grayscale(1); cursor:pointer; }
   header.tight #probadge .pro-state { display:none; }
   #propanel { position:absolute; right:8px; top:34px; z-index:40; width:300px; padding:10px 12px;
               background:var(--vscode-editorWidget-background, #f3f3f3);

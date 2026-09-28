@@ -9,13 +9,13 @@
             class Transport extends pdfjs.PDFDataRangeTransport {
                 constructor() {
                     super(length,new Uint8Array(),true);
-                    this.pending=new Map(); this.sequence=0; this.receivedBytes=0;
+                    this.pending=new Map(); this.sequence=0; this.receivedBytes=0; this.lastActivity=Date.now();
                     this.failure=new Promise((_,reject) => { this.reject=reject; });
                     this.failure.catch(() => {});
                 }
                 requestDataRange(begin,end) {
                     if (this.closed) return;
-                    const request=++this.sequence;
+                    const request=++this.sequence; this.lastActivity=Date.now();
                     const timer=setTimeout(() => this.fail(Error('PDF byte request timed out')),owner.timeoutMs);
                     this.pending.set(request,{ begin,end,timer });
                     owner.send({ type:'pdfRangeRequest',token,request,begin,end });
@@ -23,7 +23,7 @@
                 receive(message) {
                     const pending=this.pending.get(message.request);
                     if (!pending || this.closed) return;
-                    clearTimeout(pending.timer); this.pending.delete(message.request);
+                    clearTimeout(pending.timer); this.pending.delete(message.request); this.lastActivity=Date.now();
                     try {
                         if (message.error) throw Error(message.error);
                         const raw=atob(message.data);

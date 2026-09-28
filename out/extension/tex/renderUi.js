@@ -826,6 +826,9 @@ class RenderCoordinator {
         // approximate geometry until the source happened to change.
         const cfg0 = vscode.workspace.getConfiguration('wolfbook.tex');
         let mapEngine = cfg0.get('mapEngine', 'auto');
+        // WLaTeX Pro switched off from its badge: WPaper exactly as without
+        // WLaTeX (the ordinary map engine; no live pages, no page typing).
+        if (this.proDisabled && mapEngine === 'wlatex') mapEngine = 'auto';
         const nativeDirectory = cfg0.get('wlatexDirectory', '') || process.env.WLATEX_HOME || '';
         if (force) st.nativeRefusedSnapshot = null;
         // A SETTLED NATIVE BUILD IS AUTHORITATIVE. Saves and the convergence
@@ -902,7 +905,7 @@ class RenderCoordinator {
                 mapEngine = 'auto';
             }
         }
-        if (cfg0.get('mapEngine', 'auto') !== 'wlatex' && st.nativeLane) {
+        if ((cfg0.get('mapEngine', 'auto') !== 'wlatex' || this.proDisabled) && st.nativeLane) {
             await this._retireNativeLane(st, st.nativeLane);
             if (!preparing()) return st;
         }
