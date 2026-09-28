@@ -510,16 +510,16 @@ async function openDocument(msg) {
         mark('bytes decoded');
         omark('decode');
         let anchor = scrollAnchor();
-        // A STALLED OPEN IS REOPENED. pdf.js has been seen to stop asking for
-        // bytes part-way through a ranged open (after the cross-reference
-        // table, with nothing outstanding) and then wait forever: the old
-        // page stays up and nothing that needs the new one works. With no
-        // request in flight and none for a while, this load is dropped and
-        // the extension sends the PDF again.
+        // A STALLED OPEN IS REOPENED. pdf.js has been seen to stop part-way
+        // through a ranged open (after the cross-reference table) and wait
+        // forever: the old page stays up and nothing that needs the new one
+        // works. The extension answers a range in milliseconds, so a load
+        // with no request and no answer for a while — whether or not one is
+        // outstanding — is dropped and the extension sends the PDF again.
         let stallTimer = null;
         const stalled = rangeTransport ? new Promise((_, reject) => {
             stallTimer = setInterval(() => {
-                if (rangeTransport.closed || rangeTransport.pending.size) return;
+                if (rangeTransport.closed) return;
                 if (Date.now() - rangeTransport.lastActivity < OPEN_STALL_MS) return;
                 clearInterval(stallTimer);
                 const e = new Error('the PDF stopped loading'); e.stalled = true; reject(e);
@@ -6260,6 +6260,10 @@ pagesEl().addEventListener('contextmenu', (ev) => {
     const pt = fromViewport(n, ev.clientX - r.left, ev.clientY - r.top);
     if (!pt) return;
     ev.preventDefault();
+    // Said at once: the card follows, or the extension says why not.
+    const opening = 'opening the editor…';
+    status(opening, 'busy');
+    setTimeout(() => { if (el('status').textContent === opening) status(''); }, 6000);
     sendClick(n, pt, ev.clientX - r.left, ev.clientY - r.top, {}, 'editHere');
 });
 
@@ -8848,6 +8852,7 @@ window.addEventListener('message', async (ev) => {
                 ...(Number.isFinite(msg.clickOffset) ? { clickOffset: msg.clickOffset } : {}),
             };
             const page = editCardPage(state.edit);
+            if (el('status').textContent === 'opening the editor…') status('');
             await renderPage(page);
             // Restoration must not disturb the exact saved scroll position.
             // A newly requested card still reveals and focuses itself.
@@ -9298,6 +9303,8 @@ function tikzResolved(msg) {
     const model = tikz.pages.get(page);
     if (!model || model.key !== msg.key) return;
     if (msg.error) { status(`TikZ: ${msg.error}`, 'warn'); return; }
+    if (model.paths.length && !Object.keys(msg.paths || {}).length)
+        status('TikZ: the source of this page\'s pictures could not be read', 'warn');
     const geo = tikzGeo(page, model.txdl);
     if (!geo) return;
     for (const [special, p] of Object.entries(msg.pictures || {})) {

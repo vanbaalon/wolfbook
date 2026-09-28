@@ -82,7 +82,12 @@ exports.run = async function () {
                 try {
                     await until(() => (hit = posts.find(p => p.at >= since && p.type === 'highlight' && p.rects?.length)), 'a highlight', 3000);
                 } catch (_) { /* recorded below */ }
+                // How long the page took to answer, and what it was sent meanwhile
+                // (a clear before the answer is a visible blink).
+                const sent = posts.filter(p => p.at >= since && (!hit || p.at <= hit.at));
                 report.moves.push({ when: label, line: line + 1, highlighted: !!hit, reveal: hit ? !!hit.reveal : null,
+                    ms: hit ? hit.at - since : null,
+                    blank: sent.some(p => p !== hit && p.type === 'highlight' && !p.rects?.length),
                     caret: hit ? !!hit.caret : null,
                     rects: hit ? hit.rects.length : 0, label: hit ? hit.label : (posts.filter(p => p.at >= since).map(p => p.label || p.type).join(' | ') || 'nothing posted'),
                     ...(hit ? {} : { state: diagnose() }) });

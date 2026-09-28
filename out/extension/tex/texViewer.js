@@ -487,6 +487,26 @@ const LIVE_MAP_CLICK_WAIT_MS = 1500;
 // The live map holds the pages this near the reader (see _buildLiveMap).
 const LIVE_MAP_WINDOW = 3;
 
+/** Offset of the `\begin{tikzpicture}` whose picture contains `offset`, or null. */
+function enclosingPicture(text, offset) {
+    const BEGIN = '\\begin{tikzpicture}', END = '\\end{tikzpicture}';
+    if (text.startsWith(BEGIN, offset)) return offset;
+    let at = text.lastIndexOf(BEGIN, offset);
+    while (at >= 0) {
+        // The first \end after this \begin that is not a nested picture's.
+        let depth = 0, i = at;
+        for (;;) {
+            const b = text.indexOf(BEGIN, i + 1), e = text.indexOf(END, i + 1);
+            if (e < 0) return null;
+            if (b >= 0 && b < e) { depth++; i = b; continue; }
+            if (depth-- === 0) { if (e + END.length > offset) return at; break; }
+            i = e;
+        }
+        at = at > 0 ? text.lastIndexOf(BEGIN, at - 1) : -1;
+    }
+    return null;
+}
+
 class TexViewer {
     /**
      * @param {vscode.ExtensionContext} context
@@ -1506,7 +1526,10 @@ class TexViewer {
         }
         if (this._ink !== ink || doc.version !== ink.version) return;
         let caret = map && this._inkRect(map, doc, ink.offset);
-        if (!caret && st?.map?.available) { map = st.map; caret = this._inkRect(map, doc, ink.offset); }
+        // The settled PDF's map knows nothing of text typed since: while the
+        // page is behind, the caret waits where it is for the live page's map
+        // (its arrival follows again) rather than jumping to a wrong place.
+        if (!caret && st?.map?.available && !st.sourceAhead) { map = st.map; caret = this._inkRect(map, doc, ink.offset); }
         if (!caret) return;
         ink.caret = caret;
         this._inkMap = map;
@@ -2034,7 +2057,12 @@ class TexViewer {
             const parsed = new Map();
             for (const [i, special] of pictures.entries()) {
                 const found = await offsetOf(origins[specials.length + i]?.invocation);
-                const p = found && model.parsePicture(found.doc.getText(), found.offset);
+                // The engine names the command that drew the picture's first
+                // mark (a \draw, a \node inside it), not its \begin: parse
+                // from the picture that encloses it. Parsing from the command
+                // itself found no picture, and the tool had nothing to pick.
+                const text = found && found.doc.getText();
+                const p = found && model.parsePicture(text, enclosingPicture(text, found.offset) ?? found.offset);
                 if (!p) continue;
                 parsed.set(special, { p, file: found.doc.uri.fsPath, doc: found.doc });
                 reply.pictures[special] = { file: found.doc.uri.fsPath, begin: p.begin, scale: p.scale, unitX: p.unitX, unitY: p.unitY, feynman: !!p.feynman,
@@ -3026,11 +3054,6 @@ class TexViewer {
         this._scheduleSourceSave();
         const source = this._miniApplyingFile === doc.uri.fsPath ? 'mini-editor' : 'editor';
         const st = this.coord.roots && this.coord.roots.get(this.root);
-        // WITH WLATEX'S LIVE LANE THE PAGE KEEPS UP, so there is nothing to
-        // wait for: the native map answers a moved caret against the new text
-        // (revision-checked) and the live pages show it. Pausing here flashed
-        // "updating from editor…" and blanked the caret on every keystroke.
-        if (st?.map?.native && st.nativeLane && !this.coord.proDisabled) return true;
         this._setTracePaused(true, { source, compiling: !!(st && st.compiling) });
         return true;
     }
@@ -3128,7 +3151,13 @@ class TexViewer {
     }
 
     _setTracePaused(paused, { source, compiling } = {}) {
-        const next = !!paused;
+        // WITH WLATEX'S LIVE LANE THE PAGE KEEPS UP: the live pages show the
+        // new text, the native map answers against it (revision-checked), and
+        // the Pro badge says live / settling. The old "page behind the editor"
+        // pause only competed with it — flashing on every key, blanking the
+        // caret — so on that lane it never pauses.
+        const st = this.root && this.coord.roots?.get(this.root);
+        const next = !!paused && !(st?.map?.native && st.nativeLane && !this.coord.proDisabled);
         if (next && source) this._traceSource = source;
         if (!next) this._traceSource = null;
         this._tracePaused = next;
@@ -3637,33 +3666,40 @@ class TexViewer {
             editor.selection.end.line === end.line && editor.selection.end.character === end.character;
         if (!current()) return;
         this._lastSelection = null;
-        this._post({ type:'selection', span:null });
-        this._post({ type:'highlight', rects:[] });
+        // NOTHING IS CLEARED UNTIL THE ANSWER IS READY. Clearing first and
+        // painting after the map lookups made every caret move blink: the old
+        // wash vanished, then the new one faded in a few frames later.
+        const clear = () => {
+            this._post({ type:'selection', span:null });
+            this._post({ type:'highlight', rects:[] });
+        };
         try {
             if (ranged) {
                 const relative = path.relative(map.projectDir, doc.uri.fsPath).split(path.sep).join('/');
-                if (map.source.files.get(relative)?.text !== doc.getText()) return;
+                if (map.source.files.get(relative)?.text !== doc.getText()) { clear(); return; }
             }
             const forward = target => ranged ? target.forwardRange(doc.uri.fsPath,
                 { line:position.line + 1, column_utf16:position.character },
                 { line:end.line + 1, column_utf16:end.character }, { isCurrent:current })
                 : target.forwardAt(doc.uri.fsPath, position.line + 1, position.character);
-            let rects = await forward(map);
-            if (!current() || rects === null) return;
             // Pages the incremental engine drew over the PDF show other text
             // than the cold map describes: their rectangles come from the
-            // live map, every other page's from the cold one.
+            // live map, every other page's from the cold one. Both are asked
+            // at once.
             const live = this._liveMap, overlays = this._liveOverlays;
-            if (live?.available && overlays?.size) {
-                const liveRects = await forward(live).catch(() => null);
-                if (!current()) return;
+            const useLive = !!(live?.available && overlays?.size);
+            let [rects, liveRects] = await Promise.all([forward(map),
+                useLive ? forward(live).catch(() => null) : null]);
+            if (!current()) return;
+            if (rects === null) { clear(); return; }
+            if (useLive) {
                 rects = rects.filter(r => !overlays.has(r.page))
                     .concat((liveRects || []).filter(r => live.hasPage(r.page)))
                     .sort((a, b) => a.page - b.page || a.y - b.y || a.x - b.x);
             }
             this._setTracePaused(false);
             if (ranged) {
-                if (!rects.length) return;
+                if (!rects.length) { clear(); return; }
                 this._lastSelection = { file:doc.uri.fsPath, nativeMap:map, documentVersion:version,
                     start:new vscode.Position(position.line, position.character),
                     end:new vscode.Position(end.line, end.character) };
@@ -3702,21 +3738,19 @@ class TexViewer {
                 let a = col, b = col;
                 while (a > 0 && letter(text[a - 1])) a--;
                 while (b < text.length && letter(text[b])) b++;
-                if (letter(text[col])) {
-                    const g = await at(col);
-                    if (g) caret = { page:g.page, x:g.x, y:g.y, h:g.h, at: col === a ? 'before' : 'inside', offset:col - a };
-                } else if (col > 0 && letter(text[col - 1])) {
-                    const g = await at(col - 1);
-                    if (g) caret = { page:g.page, x:g.x + g.w, y:g.y, h:g.h, at:'after', offset:col - a };
-                }
+                // The caret's letter and the word, asked together.
+                const inWord = letter(text[col]), afterWord = !inWord && col > 0 && letter(text[col - 1]);
+                const [g, word] = await Promise.all([
+                    inWord ? at(col) : afterWord ? at(col - 1) : null,
+                    b - a > 1 ? map.forwardRange(doc.uri.fsPath, { line:position.line + 1, column_utf16:a },
+                        { line:position.line + 1, column_utf16:b }, { isCurrent:current }).catch(() => null) : null,
+                ]);
                 if (!current()) return;
-                if (b - a > 1) {
-                    const word = await map.forwardRange(doc.uri.fsPath, { line:position.line + 1, column_utf16:a },
-                        { line:position.line + 1, column_utf16:b }, { isCurrent:current }).catch(() => null);
-                    if (!current()) return;
-                    if (word && word.length && !(overlays?.size && word.some(r => overlays.has(r.page)))) rects = word;
-                }
+                if (g && inWord) caret = { page:g.page, x:g.x, y:g.y, h:g.h, at: col === a ? 'before' : 'inside', offset:col - a };
+                else if (g) caret = { page:g.page, x:g.x + g.w, y:g.y, h:g.h, at:'after', offset:col - a };
+                if (word && word.length && !(overlays?.size && word.some(r => overlays.has(r.page)))) rects = word;
             } catch (_) { caret = null; }
+            this._post({ type:'selection', span:null });
             this._post({ type:'highlight', rects, exact:!near, caret,
                 label: !rects.length ? 'no printed source at this cursor'
                     : near ? `nearest printed text to line ${position.line + 1}` : `line ${position.line + 1}`,
@@ -8194,15 +8228,33 @@ class TexViewer {
         const navigation = this._nativeInverseRequest;
         const caretRequest = this._miniCaretRequest;
         const st = root && this.coord.roots.get(root);
-        if (!st || !st.map || !st.map.available) return;
-        const map = st.map;
+        const say = (text) => { if (request === this._editOpenRequest) this._post({ type:'status', text, kind:'warn' }); };
+        // AS A LEFT CLICK DOES (_jumpToSource): a live page answers from its
+        // own map, and a settled map that typing invalidated is read again now.
+        // Without this a right-click in the seconds after a keystroke was
+        // dropped without a word, and the card seemed to take seconds to open.
+        let liveMap = null;
+        if (st?.nativeLane && m.overlay != null) {
+            if (!await this._ensureLiveMap(m.page, m.overlay)) { say('live page: its source map is still on the way — right-click again in a moment'); return; }
+            liveMap = this._liveMap;
+        } else if (st?.map?.native && !st.map.available && typeof this.coord.ensureNativeMap === 'function') {
+            await this.coord.ensureNativeMap(st);
+        }
+        if (request !== this._editOpenRequest) return;
+        if (!st || !st.map || !(liveMap || st.map).available) { say('The page is still updating — right-click again in a moment'); return; }
+        const map = liveMap || st.map;
         const current = () => this.panel && this.root === root && this.coord.roots.get(root) === st &&
-            st.map === map && map.available && this._edit === previous && request === this._editOpenRequest &&
+            (liveMap ? this._liveMap === map : st.map === map) && map.available && this._edit === previous &&
+            request === this._editOpenRequest &&
             navigation === this._nativeInverseRequest && caretRequest === this._miniCaretRequest &&
-            (map.native ? m.generation != null && String(m.generation) === String(this._openedGeneration) &&
+            (liveMap ? true
+                : map.native ? m.generation != null && String(m.generation) === String(this._openedGeneration) &&
                 this._openedPdfHash === map.view.artifact.pdf_hash : !this._tracePaused && !st.sourceAhead);
-        if (!current()) return;
-        const hit = this._resolvePoint(st, m);
+        if (!current()) {
+            if (map.native && request === this._editOpenRequest) say('The page just changed — right-click again');
+            return;
+        }
+        const hit = this._resolvePoint({ map }, m);
         if (map.native && !hit?.exact) {
             this._post({ type:'status', text:'This point has no unchanged source range; rebuild before opening an editor.', kind:'warn' });
             return;
@@ -8248,7 +8300,7 @@ class TexViewer {
         }
         const clickOffset = clickAt != null && clickAt >= s.startOffset && clickAt <= s.endOffset
             ? (s.native ? wireOffset(s.lastText, clickAt - s.startOffset) : clickAt - s.startOffset) : null;
-        const rects = this._editRects(st, hit.file, startLine, endLine);
+        const rects = this._editRects({ map }, hit.file, startLine, endLine);
         this._post({
             type: 'editOpen',
             native:s.native,

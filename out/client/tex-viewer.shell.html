@@ -1422,6 +1422,14 @@
   #tracelag.compiling::before { background:none; border:1px solid currentColor;
               border-top-color:transparent; animation:wpspin .75s linear infinite; }
   header.tight #tracelag .lagtext { display:none; }
+  /* Rebuilding: the spinner says it; the words were noise at every pause. */
+  #tracelag.compiling .lagtext { display:none; }
+  /* The toolbar's free space (the cursor's line readout moved to the footer). */
+  #hdrgap { flex:1 1 0; min-width:0; }
+  /* Where the cursor is, what was clicked: a footer note beside the status. */
+  footer #where { flex:0 1 auto; max-width:45%; margin:0; padding:0 8px;
+                  font-size:11px; color: var(--vscode-descriptionForeground, #999); }
+  footer #where:empty { display:none; }
   /* WLATEX PRO. The engine that makes the page follow the keys says so: a
      pill at the end of the toolbar with its state (live · ms, settling,
      settled, off), a panel of what it does, and a tag on pages it drew. */
@@ -1559,7 +1567,7 @@
          aria-label="Pin the current source highlight so it stays visible instead of fading"><input type="checkbox" id="pin"><svg class="tool-icon"><use href="#ti-pin"/></svg><span class="tlbl">pin</span></label>
   <button id="sourceunsaved" hidden><span class="dirtytext">Unsaved source</span></button>
   <span id="tracelag" hidden><span class="lagtext">page behind</span></span>
-  <span id="where"></span>
+  <span id="hdrgap"></span>
   <button id="probadge" hidden aria-haspopup="dialog" aria-expanded="false" aria-controls="propanel"><span class="pro-dot"></span><span class="pro-mark"><span class="pro-word">WLaTeX</span><b>Pro</b></span><span class="pro-state"></span></button>
 </header>
 <div id="propanel" role="dialog" aria-label="WLaTeX Pro" hidden>
@@ -1570,7 +1578,7 @@
     <li><span class="pro-k">Instant preview</span><span class="pro-d">The page follows every keystroke; new references resolve as you pause<span class="pro-v" id="pro-key"></span></span></li>
     <li><span class="pro-k">Type on the page</span><span class="pro-d">Click prose and type; ⌘B ⌘I and the selection bar format; Esc stops</span></li>
     <li><span class="pro-k">Cite and refer</span><span class="pro-d">⌘⇧R a reference, ⌘⇧C a citation — from the paper or from INSPIRE</span></li>
-    <li><span class="pro-k">Equations, tables, figures</span><span class="pro-d">Click one: Mathematica's keys in maths, a grid for tables, width and caption for figures</span></li>
+    <li><span class="pro-k">Equations, tables, figures</span><span class="pro-d">Right-click one: Mathematica's keys in maths, a grid for tables, width and caption for figures</span></li>
     <li><span class="pro-k">Exact search</span><span class="pro-d">Click any word for its source; the editor cursor shows on the page</span></li>
     <li><span class="pro-k">Native build</span><span class="pro-d">BibTeX, indexes and the final PDF, settled by WLaTeX</span></li>
   </ul>
@@ -1649,7 +1657,7 @@
   <div id="navlist"></div>
 </div>
 <div id="reviewpanel"><div id="rpgrip" title="Drag to resize"></div><div id="reviewlist"></div><div id="reviewdiff"></div></div>
-<footer><div id="status">starting…</div>
+<footer><div id="status">starting…</div><span id="where"></span>
   <div id="pagenow" title="Which page you are looking at, and how many there are">
     <span id="pagecur">–</span><span class="pp-sep">/</span><span id="pagecount">?</span>
   </div>

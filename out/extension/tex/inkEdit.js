@@ -139,8 +139,29 @@ function caretAt(entries, line, column, lineText = '') {
         // the caret starts the next word; otherwise it ends the last one.
         return /\s/.test(lineText.slice(before.e, column)) ? at(after.entry, after.entry.x) : at(before.entry, before.entry.x + before.entry.w);
     }
-    if (before) return at(before.entry, before.entry.x + before.entry.w);
+    if (before) {
+        // TRAILING SPACES PRINT NOTHING, but the caret after them is where the
+        // next word will start: one interword space (as this row sets it)
+        // past the last word, not glued to it.
+        const x = before.entry.x + before.entry.w;
+        const gap = lineText.slice(before.e, column);
+        if (gap && /^[ \t]+$/.test(gap)) return at(before.entry, x + spaceWidth(glyphs, before.entry, lineText));
+        return at(before.entry, x);
+    }
     return at(after.entry, after.entry.x);
+}
+
+/** The width of an interword space on `entry`'s row, measured where the source has one. */
+function spaceWidth(glyphs, entry, lineText) {
+    const row = glyphs.filter(g => g.entry.page === entry.page && g.entry.row === entry.row).sort((a, b) => a.s - b.s);
+    for (let i = 0; i + 1 < row.length; i++) {
+        const a = row[i], b = row[i + 1];
+        if (b.s > a.e && /^[ \t]+$/.test(lineText.slice(a.e, b.s))) {
+            const w = b.entry.x - (a.entry.x + a.entry.w);
+            if (w > 0) return w;
+        }
+    }
+    return Math.max(2, (entry.boxHeight || 10) * 0.33);
 }
 
 /** What a character typed on the page is in the source. */
