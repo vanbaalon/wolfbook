@@ -6538,7 +6538,7 @@ function makeDraggable(card, handle, session) {
             card.style.left = `${left}px`;
             card.style.top = `${top}px`;
             const e = sess.get();
-            if (e) { e.fixedGeometry = null; e.pos = { fx: left / W, fy: top / H }; }
+            if (e) { e.fixedGeometry = null; e.pos = { fx: left / W, fy: top / H }; e.userMoved = true; }
         };
         const up = () => {
             handle.removeEventListener('pointermove', move);
@@ -6555,7 +6555,7 @@ function makeDraggable(card, handle, session) {
     handle.addEventListener('dblclick', (ev) => {
         if (ev.target.closest('button')) return;
         const e = sess.get();
-        if (e) { e.pos = null; e.fixedGeometry = null; }
+        if (e) { e.pos = null; e.fixedGeometry = null; e.userMoved = false; }
         sess.repaint();
         if (e === state.edit) postEditView();
     });
@@ -7814,6 +7814,33 @@ function pinEditCard() {
     state.edit.pos = { fx: (parseFloat(card.style.left) || 0) / Math.max(1, wrap.clientWidth),
         fy: (parseFloat(card.style.top) || 0) / Math.max(1, wrap.clientHeight) };
     state.edit.fixedGeometry = { left: card.style.left, top: card.style.top, width: card.style.width };
+}
+
+/**
+ * THE CARD FOLLOWS ITS BLOCK'S BOTTOM. Typing that adds a line to the block
+ * printed it under the card, where the reader could not see it: the card now
+ * sits just below the block's new last row (and comes back up when the block
+ * shrinks). A card the reader dragged elsewhere stays, unless the block now
+ * reaches under it — then it is pushed down just enough.
+ */
+function followBlockBottom(e) {
+    const card = document.querySelector('.editcard');
+    const wrap = card?.parentElement;
+    if (!e?.fixedGeometry || !card || !wrap) return;
+    const page = Number(wrap.dataset.page);
+    let bottom = null;
+    for (const r of e.rects || []) {
+        if (r.page !== page) continue;
+        const v = rectToViewport(page, r);
+        if (v) bottom = Math.max(bottom ?? -Infinity, v.y + v.h);
+    }
+    if (bottom == null) return;
+    const want = bottom + 8;
+    const top = parseFloat(e.fixedGeometry.top) || 0;
+    if (e.userMoved && top >= want) return;
+    if (Math.abs(top - want) < 1) return;
+    e.fixedGeometry = { ...e.fixedGeometry, top: `${want}px` };
+    e.pos = { ...(e.pos || {}), fy: want / Math.max(1, wrap.clientHeight) };
 }
 
 function editCardPage(e) {
@@ -9289,6 +9316,7 @@ window.addEventListener('message', async (ev) => {
             if (state.edit && state.edit.id === msg.editId) {
                 pinEditCard();
                 state.edit.rects = msg.rects || state.edit.rects;
+                followBlockBottom(state.edit);
                 paintEditCard();
             }
             break;

@@ -1373,6 +1373,7 @@ class TexViewer {
             if (event.ready) ready.set(event.page, event.identity || null); else ready.delete(event.page);
             this._scheduleLiveMap(event.lane);
             if (this._ink && event.ready && Math.abs(event.page - this._ink.caret.page) <= 1) this._inkFollow();
+            if (this._edit && event.ready) this._editFollowLive(event.lane);
             return;
         }
         if (event.kind !== 'built') return;
@@ -8430,6 +8431,7 @@ class TexViewer {
         const clickOffset = clickAt != null && clickAt >= s.startOffset && clickAt <= s.endOffset
             ? (s.native ? wireOffset(s.lastText, clickAt - s.startOffset) : clickAt - s.startOffset) : null;
         const rects = this._editRects({ map }, hit.file, startLine, endLine);
+        this._editRectsLast = rects;
         this._post({
             type: 'editOpen',
             native:s.native,
@@ -8735,6 +8737,39 @@ class TexViewer {
     }
 
     /** After a recompile the block has new geometry — move the card to it. */
+    /**
+     * The card's block, re-measured on the LIVE page as the reader types (a
+     * line the typing adds must not print under the card). One page's map,
+     * read after the page arrived — never the whole live map — and coalesced.
+     */
+    _editFollowLive(lane) {
+        clearTimeout(this._editFollowTimer);
+        this._editFollowTimer = setTimeout(() => { this._editFollowLiveNow(lane).catch(() => {}); }, 40);
+    }
+
+    async _editFollowLiveNow(lane) {
+        const s = this._edit;
+        if (!s || this._mma === s || typeof lane?.liveView !== 'function') return;
+        const near = new Set((this._editRectsLast || []).map(r => r.page));
+        const pages = [...(this._liveMapReady || new Map())]
+            .filter(([p, id]) => this._liveOverlays?.get(p) === id && (!near.size || [...near].some(n => Math.abs(n - p) <= 1)))
+            .map(([p]) => p).sort((a, b) => a - b);
+        if (!pages.length) return;
+        const view = await lane.liveView(pages).catch(() => null);
+        if (!view || this._edit !== s) return;
+        const { NativeMap } = require('./nativeMap');
+        let map;
+        try { map = new NativeMap({ nativeView: view, nativeSource: lane.source, projectDir: lane.projectDir }); }
+        catch (_) { return; }
+        const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(s.file));
+        if (this._edit !== s) return;
+        const a = doc.positionAt(s.startOffset), b = doc.positionAt(s.endOffset);
+        const rects = this._editRects({ map }, s.file, a.line + 1, b.line + 1);
+        if (!rects.length) return;
+        this._editRectsLast = rects;
+        this._post({ type: 'editAnchor', editId: s.id, rects, live: true });
+    }
+
     async _postEditAnchor() {
         const s = this._edit;
         const st = this.root && this.coord.roots.get(this.root);
@@ -8754,7 +8789,7 @@ class TexViewer {
             const a = doc.positionAt(s.startOffset);
             const b = doc.positionAt(s.endOffset);
             const rects = this._editRects(st, s.file, a.line + 1, b.line + 1);
-            if (rects.length) this._post({ type: 'editAnchor', editId: s.id, rects });
+            if (rects.length) { this._editRectsLast = rects; this._post({ type: 'editAnchor', editId: s.id, rects }); }
         } catch (_) { /* keep the old anchor */ }
     }
 

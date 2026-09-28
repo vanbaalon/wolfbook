@@ -979,3 +979,29 @@ test('#41 a folded section keeps its place while the map is behind, so its chip 
     assert.equal(again.page, 2, 'at the place it last had');
     assert.equal(again.x, 72);
 });
+
+// ── #43 the card follows its block while typing adds lines ──────────────────
+test('#43 a live page near the card re-measures its block and moves it (one page read, not the whole map)', async () => {
+    const SP = 65536, file = path.join(os.tmpdir(), 'wpaper-follow', 'paper.tex');
+    const text = 'x\nFirst line of the block\nsecond line\n';
+    const hit = (id, line, y) => ({ item_id: id, preferred_source: { file: 'paper.tex', location: { start: { line, column_utf16: 0 }, end: { line, column_utf16: 1 }, accuracy: 'Exact' } },
+        mapped_origins: [{ source: { file: 'paper.tex', location: { start: { line, column_utf16: 0 }, end: { line, column_utf16: 1 }, accuracy: 'Exact' } } }],
+        box_path: [[id, { kind: 'Horizontal' }]],
+        item: { page: 3, kind: 'Glyph', glyph: { font: 1, code: 65 }, geometry: { position: { x: 10 * SP, y: y * SP }, width: 8 * SP, height: 7 * SP, depth: 2 * SP } } });
+    // The live page: the block (lines 2–3) now prints a third row.
+    const view = { live: true, pages: [{ page: 3, header: { magnification: 1000 }, hits: [hit(1, 2, 20), hit(2, 3, 32), hit(3, 3, 44)] }] };
+    const reads = [];
+    const lane = { projectDir: path.dirname(file), source: { isCurrentView: v => v === view }, liveView: async pages => { reads.push(pages); return view; } };
+    const posts = [];
+    const viewer = Object.create(TexViewer.prototype);
+    Object.assign(viewer, { _post: m => posts.push(m), _liveMapReady: new Map([[3, 'h3'], [9, 'h9']]), _liveOverlays: new Map([[3, 'h3'], [9, 'h9']]),
+        _editRectsLast: [{ page: 3, x: 10, y: 20, w: 8, h: 9 }],
+        _edit: { id: 7, file, startOffset: 2, endOffset: text.length - 1 } });
+    const saved = stub.workspace.openTextDocument;
+    stub.workspace.openTextDocument = async () => ({ positionAt: off => { const before = text.slice(0, off).split('\n'); return { line: before.length - 1, character: before.at(-1).length }; } });
+    try { await viewer._editFollowLiveNow(lane); } finally { stub.workspace.openTextDocument = saved; }
+    assert.deepEqual(reads, [[3]], 'only the page near the card is read');
+    const a = posts.find(p => p.type === 'editAnchor');
+    assert.ok(a && a.live && a.editId === 7, 'a live anchor for the card');
+    assert.equal(a.rects.length, 3, 'the block\'s three printed rows, the new one included');
+});

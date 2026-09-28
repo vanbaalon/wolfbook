@@ -736,4 +736,29 @@ tests.push({
     },
 });
 
+tests.push({
+    id: '#43',
+    name: 'typing that adds a line to the block moves the card down so the new line shows (and back up when it goes)',
+    async run(t) {
+        await openParagraphCard(t);
+        const rows = paraRows(t);
+        const cardTop = () => t.eval(() => document.querySelector('.editcard').getBoundingClientRect().top);
+        const rowBottom = async (r) => (await t.toClient(r.page, r.x, r.y + r.h)).y;
+        const top0 = await cardTop();
+        t.assert(top0 >= await rowBottom(rows[1]) - 1, 'the card opens under the block');
+        // The live page grew the paragraph by a row.
+        const extra = { ...rows[1], y: rows[1].y + (rows[1].y - rows[0].y) };
+        await t.post({ type: 'editAnchor', editId: 11, rects: [...rows, extra], live: true });
+        await t.sleep(80);
+        const top1 = await cardTop();
+        t.assert(top1 >= await rowBottom(extra) - 1, `the card moved below the new line (card ${top1}, line bottom ${await rowBottom(extra)})`);
+        // …and back when the line goes.
+        await t.post({ type: 'editAnchor', editId: 11, rects: rows, live: true });
+        await t.sleep(80);
+        t.near(await cardTop(), top0, 2, 'back under the block');
+        // The textarea kept focus through both moves.
+        t.assert(await t.eval(() => document.activeElement?.closest?.('.editcard') != null), 'the card keeps focus');
+    },
+});
+
 module.exports = { fixtureTex, tests };
