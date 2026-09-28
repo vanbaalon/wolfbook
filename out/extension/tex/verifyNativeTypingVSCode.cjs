@@ -78,6 +78,7 @@ exports.run = async function () {
                 if (build.firstPage == null && fresh) { build.firstPage = performance.now(); build.page = page.page;
                     // Where the time went: the engine's own clock for this page, and the size of what crossed.
                     build.engineMs = page.since_build_ms ?? page.sinceBuildMs ?? null;
+                    build.timing = page.timing || null;
                     try { build.txdlBytes = JSON.stringify(page.txdl).length; build.ops = page.txdl.ops?.length ?? null; } catch (_) {} }
             } });
             build.end = performance.now();
@@ -188,7 +189,8 @@ exports.run = async function () {
             ops: { p50: quantile(firsts.map(b => b.ops || 0), 0.5) },
             changed: builds.slice(0, 6).map(b => b.changed || []),
             reports: builds.map(b => b.report),
-            sample: firsts.slice(0, 8).map(b => ({ page: b.page, build_to_page: Math.round(b.firstPage - b.start), engine: b.engineMs, kb: Math.round((b.txdlBytes || 0) / 1024) })),
+            sample: firsts.slice(0, 8).map(b => ({ page: b.page, build_to_page: Math.round(b.firstPage - b.start), engine: b.engineMs, kb: Math.round((b.txdlBytes || 0) / 1024),
+                timing: b.timing ? Object.fromEntries(Object.entries(b.timing).filter(([k]) => k !== 't0').map(([k, v]) => [k, Math.round(v)])) : null })),
         };
         report.build_first_page_ms = { p50: quantile(builds.filter(b => b.firstPage).map(b => b.firstPage - b.start), 0.5),
             p90: quantile(builds.filter(b => b.firstPage).map(b => b.firstPage - b.start), 0.9) };

@@ -511,14 +511,17 @@ class NativeBuildLane {
             if (!this.interactive) return null;
         }
         let handle = null, generation = null, fedAuxiliary = {};
+        const timing = process.env.WPAPER_BUILD_TIMING ? { t0: performance.now() } : null;
         try {
             const texts = this._interactiveOverlays(o);
+            if (timing) timing.overlays = performance.now() - timing.t0;
             const viewport = [...new Set((o.nativePages || [])
                 .filter(page => Number.isInteger(page) && page >= 1))].sort((a, b) => a - b);
             generation = ++this.buildNumber;
             const auxiliary = this._auxiliaryTexts();
             this._liveAuxiliary = auxiliaryDigest(auxiliary);
             fedAuxiliary = auxiliary;
+            if (timing) timing.auxiliary = performance.now() - timing.t0;
             handle = this.session.build({ main:this.root, root:this.projectDir,
                 overlays:Object.fromEntries(texts), auxiliary,
                 generation, lane:'interactive', viewport });
@@ -530,7 +533,9 @@ class NativeBuildLane {
         o.signal?.addEventListener('abort', abort, { once:true });
         let built = null, failed = null, superseded = false;
         try {
+            if (timing) timing.submitted = performance.now() - timing.t0;
             for await (const event of handle.events()) {
+                if (timing && timing[event.event] == null) timing[event.event] = performance.now() - timing.t0;
                 if (event.event === 'page_finalized') {
                     // A KEYSTROKE DOES NOT INVALIDATE A PAGE. The reader is
                     // still typing — that is why this ran — and a page from a
@@ -541,7 +546,7 @@ class NativeBuildLane {
                     // the drawing here.
                     if (this.closed || o.signal?.aborted) continue;
                     if (typeof o.onPage !== 'function') continue;
-                    try { o.onPage(interactivePage(generation, event)); }
+                    try { o.onPage({ ...interactivePage(generation, event), ...(timing ? { timing: { ...timing, page: performance.now() - timing.t0 } } : {}) }); }
                     catch (_) { /* a viewer that cannot draw never fails a build */ }
                 } else if (event.event === 'page_map_ready' || event.event === 'page_map_failed') {
                     // The page's own source map reached the worker (or could
