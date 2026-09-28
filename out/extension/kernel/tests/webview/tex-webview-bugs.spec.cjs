@@ -715,4 +715,25 @@ tests.push({
     },
 });
 
+tests.push({
+    id: '#41',
+    name: 'a folded section under a heading that runs to the margin gets its chip under the heading, readable, not a sliver at the edge',
+    async run(t) {
+        const w = t.word('prose,');
+        // A heading row that ends 20 bp before the page's right edge (595 bp wide).
+        await t.post({ type: 'sections', generation: 1, pageWidth: 612, items: [{ key: 's1', kind: 'section', foldable: true,
+            collapsed: true, hidden: 25, page: 1, line: 3, x: 90, y: w.y, w: 500, h: w.h, title: 'Long' }] });
+        const box = await t.waitFor(() => {
+            const b = document.querySelector('.wpa .secfold');
+            if (!b) return null;
+            const r = b.getBoundingClientRect(), p = document.querySelector('.page[data-page="1"]').getBoundingClientRect();
+            return { w: r.width, top: r.top - p.top, left: r.left - p.left, text: b.textContent, scrollW: b.scrollWidth, clientW: b.clientWidth };
+        }, null, { what: 'the fold chip' });
+        const k = await t.pxPerBp(1);
+        t.assert(box.top > (w.y + w.h) * k, `under the heading row (top ${box.top}, row bottom ${(w.y + w.h) * k})`);
+        t.near(box.left, 90 * k, 6, 'at the heading row\'s left');
+        t.assert(box.scrollW <= box.clientW + 1, `the whole "${box.text}" is shown, not cut (scroll ${box.scrollW} > ${box.clientW})`);
+    },
+});
+
 module.exports = { fixtureTex, tests };

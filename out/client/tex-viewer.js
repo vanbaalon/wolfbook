@@ -4516,8 +4516,14 @@ function paintSections() {
         // equation, whose first row is a line of maths — the tag landed in the
         // middle of the formula. The extension sends `anchorX` for those,
         // already in the label badges' margin column.
-        const ax = Number.isFinite(it.anchorX) ? it.anchorX : it.x + it.w + 6;
-        const v = rectToViewport(it.page, { page: it.page, x: ax, y: it.y, w: 1, h: it.h || 9 });
+        let ax = Number.isFinite(it.anchorX) ? it.anchorX : it.x + it.w + 6;
+        let ay = it.y;
+        // NO ROOM BESIDE A LONG HEADING: under its last row instead. Beside
+        // it, a title that runs to the margin left the cluster a sliver at
+        // the page's edge, "▸ 25 lines hidden" folded into a thin column.
+        const pageW = S.pageWidth || 595;
+        if (!Number.isFinite(it.anchorX) && pageW - ax < 110) { ax = it.x; ay = it.y + (it.h || 9) + 2; }
+        const v = rectToViewport(it.page, { page: it.page, x: ax, y: ay, w: 1, h: it.h || 9 });
         if (!v) continue;
 
         // ONE CLUSTER PER ANCHOR, so the fold and the tag stack side by side
@@ -4528,7 +4534,7 @@ function paintSections() {
         box.style.left = v.x + 'px';
         box.style.top = v.y + 'px';
         const maxW = Math.max(40,
-            (Number.isFinite(it.anchorMaxW) ? it.anchorMaxW : (S.pageWidth || 595) - (it.x + it.w + 8))
+            (Number.isFinite(it.anchorMaxW) ? it.anchorMaxW : pageW - ax - 8)
             * state.scale);
         box.style.maxWidth = maxW + 'px';
 

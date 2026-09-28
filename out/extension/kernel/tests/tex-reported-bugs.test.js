@@ -957,3 +957,25 @@ test('#39 a panel that never says ready is loaded again, twice at most, then the
         clearTimeout(viewer._readyWatchdog);
     } finally { TexViewer.READY_TIMEOUT_MS = saved; stub.window.showWarningMessage = savedWarn; }
 });
+
+// ── #41 folding: the count took the whole rebuild to appear ─────────────────
+test('#41 a folded section keeps its place while the map is behind, so its chip and count show at once', () => {
+    const file = '/p/paper.tex';
+    const text = ['\\documentclass{article}', '\\begin{document}', '\\section{Intro}', 'Body line.', '\\end{document}'].join('\n');
+    const map = { available: true, lineRows: (f, line) => (map.available && line === 3 ? [{ page: 2, x: 72, y: 100, w: 60, h: 10 }] : []),
+        rangeRows: () => [] };
+    const st = { map };
+    const viewer = Object.create(TexViewer.prototype);
+    Object.assign(viewer, {
+        _projectModels: () => new Map([[file, { objects: [{ kind: 'section-heading', cmd: 'section', level: 1, title: 'Intro',
+            stableKey: 'intro', sourceRange: { startLine: 3, endLine: 3 } }] }]]),
+        _textOf: () => text,
+    });
+    const first = viewer._sectionControls(st).find(i => i.key === 'intro');
+    assert.equal(first.page, 2);
+    map.available = false;          // an edit (the fold itself) invalidated the map
+    const again = viewer._sectionControls(st).find(i => i.key === 'intro');
+    assert.ok(again, 'the section is still offered');
+    assert.equal(again.page, 2, 'at the place it last had');
+    assert.equal(again.x, 72);
+});

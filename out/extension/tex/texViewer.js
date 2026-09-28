@@ -7658,7 +7658,13 @@ class TexViewer {
      * prose or pasting it.
      */
     _sectionControls(st) {
-        if (!st || !st.map || !st.map.available) return [];
+        if (!st || !st.map) return [];
+        // WHILE THE MAP IS BEHIND (every edit, a fold included, invalidates it
+        // until the next read or build), a heading keeps the place it last had:
+        // folding a section showed nothing — no "N lines hidden" — for as long
+        // as the rebuild took, 20 s on a long paper. A fold does not move its
+        // heading.
+        const geo = (this._sectionGeo ||= new Map());
         const out = [];
         const models = this._projectModels(st);
         for (const [file, model] of models) {
@@ -7704,13 +7710,16 @@ class TexViewer {
                     try { rows = st.map.rangeRows(file, h.sourceRange.startLine, to) || []; }
                     catch (_) { rows = []; }
                 }
-                const row = rows.length ? rows[rows.length - 1] : null;
                 // Fold controls sit at the END of a wrapped heading, but
                 // section membership begins at its FIRST printed row.
                 let startRows = [];
                 try { startRows = st.map.lineRows(file, h.sourceRange.startLine) || []; } catch (_) { /* use collected rows */ }
-                const firstRow = startRows[0] || rows[0] || null;
                 const skey = h.stableKey || `${file}:${h.sourceRange.startLine}`;
+                const placeKey = `${file}:${h.sourceRange.startLine}`;
+                let row = rows.length ? rows[rows.length - 1] : null;
+                let firstRow = startRows[0] || rows[0] || null;
+                if (row && st.map.available) geo.set(placeKey, { row, firstRow });
+                else if (!row && geo.has(placeKey)) ({ row, firstRow } = geo.get(placeKey));
                 out.push({
                     key: skey,
                     kind: 'section',
