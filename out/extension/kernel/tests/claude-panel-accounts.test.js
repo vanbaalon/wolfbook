@@ -13,6 +13,7 @@ const { selectRoute, applyEnvironment } = require('../../claude-panel-launcher')
     const context = { globalStorageUri: { fsPath: tmp }, subscriptions: [] };
     let setting = '';
     let updates = 0;
+    const originalConfigDirectory = process.env.CLAUDE_CONFIG_DIR;
     const vscode = {
         ConfigurationTarget: { Global: 1 },
         extensions: { getExtension: () => ({}) },
@@ -40,6 +41,7 @@ const { selectRoute, applyEnvironment } = require('../../claude-panel-launcher')
         assert.strictEqual(await bridge.sync(tmp, {}, false), false, 'do not install for untouched default accounts');
         const profile = path.join(tmp, 'personal');
         await bridge.sync(tmp, { CLAUDE_CONFIG_DIR: profile, ANTHROPIC_API_KEY: null }, true);
+        assert.strictEqual(process.env.CLAUDE_CONFIG_DIR, profile, 'native history reader follows selected profile');
         assert.strictEqual(updates, 1);
         const fixture = path.join(tmp, 'echo.js');
         fs.writeFileSync(fixture, 'console.log(JSON.stringify({dir:process.env.CLAUDE_CONFIG_DIR,key:process.env.ANTHROPIC_API_KEY,args:process.argv.slice(2)}));');
@@ -52,9 +54,11 @@ const { selectRoute, applyEnvironment } = require('../../claude-panel-launcher')
         };
         assert.deepStrictEqual(probe(), { dir: profile, args: ['spaces and $dollars', '"quoted"'] });
         await bridge.sync(tmp, { CLAUDE_CONFIG_DIR: '/second-profile' }, true);
+        assert.strictEqual(process.env.CLAUDE_CONFIG_DIR, '/second-profile', 'history directory switches without reloading');
         assert.strictEqual(updates, 1, 'profile switch updates only this host route');
         assert.strictEqual(probe().dir, '/second-profile');
         await bridge.sync(tmp, {}, false);
+        assert.strictEqual(process.env.CLAUDE_CONFIG_DIR, originalConfigDirectory, 'Default restores host history directory');
         assert.strictEqual(probe().dir, '/default', 'Default restores usual configuration');
         assert.strictEqual(probe().key, 'test-only');
         const config = path.join(tmp, 'claude-panel', 'config.json');
@@ -66,9 +70,19 @@ const { selectRoute, applyEnvironment } = require('../../claude-panel-launcher')
         fs.writeFileSync(path.join(tmp, 'claude-panel', `host-${process.pid}.json`), '{bad');
         const bad = spawnSync(setting, [process.execPath, fixture], { cwd: tmp, encoding: 'utf8' });
         assert.notStrictEqual(bad.status, 0, 'corrupt route must fail instead of silently using default credentials');
+        await bridge.sync(tmp, { CLAUDE_CONFIG_DIR: profile }, true);
+        bridge.clear();
+        assert.strictEqual(process.env.CLAUDE_CONFIG_DIR, originalConfigDirectory, 'disposing restores original host environment');
+        process.env.CLAUDE_CONFIG_DIR = '/inherited-custom-home';
+        const inherited = createBridge(context, vscode, () => process.execPath);
+        await inherited.sync(tmp, { CLAUDE_CONFIG_DIR: profile }, true);
+        await inherited.sync(tmp, {}, false);
+        assert.strictEqual(process.env.CLAUDE_CONFIG_DIR, '/inherited-custom-home', 'Default preserves inherited custom home');
         console.log('Claude panel bridge: per-host routing, real launcher argv/environment, switches, Default, existing wrapper, corrupt routes passed.');
     } finally {
         context.subscriptions.forEach(item => item.dispose());
+        if (originalConfigDirectory === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+        else process.env.CLAUDE_CONFIG_DIR = originalConfigDirectory;
         fs.rmSync(tmp, { recursive: true, force: true });
     }
 })().catch(error => { console.error(error); process.exitCode = 1; });

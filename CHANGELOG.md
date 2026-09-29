@@ -6,6 +6,12 @@ All notable changes to **Wolfbook** are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Claude account session history.** The native Claude panel now reads local
+  history from the selected account profile in that window, matching new Claude
+  processes. Returning to Default restores the original history directory.
+
 ### Added
 
 - **Wolfbook tools in Claude and Codex account profiles.** Each isolated account now

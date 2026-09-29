@@ -17,8 +17,30 @@ function createBridge(context, vscode, resolveNode) {
     const launcher = path.join(directory, 'launch.sh');
     const routeFile = path.join(directory, `host-${process.pid}.json`);
     const configFile = path.join(directory, 'config.json');
+    // The native Claude extension reads local transcripts in this extension
+    // host, outside our subprocess wrapper. Keep its history root aligned with
+    // the route. Each VS Code window has its own host process/environment.
+    const originalConfigDirectory = process.env.CLAUDE_CONFIG_DIR;
+    let appliedConfigDirectory;
+    let ownsConfigDirectory = false;
+    function restoreConfigDirectory() {
+        if (ownsConfigDirectory && process.env.CLAUDE_CONFIG_DIR === appliedConfigDirectory) {
+            if (originalConfigDirectory === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+            else process.env.CLAUDE_CONFIG_DIR = originalConfigDirectory;
+        }
+        ownsConfigDirectory = false;
+    }
+    function syncConfigDirectory(env) {
+        if (!env.CLAUDE_CONFIG_DIR) { restoreConfigDirectory(); return; }
+        process.env.CLAUDE_CONFIG_DIR = env.CLAUDE_CONFIG_DIR;
+        appliedConfigDirectory = env.CLAUDE_CONFIG_DIR;
+        ownsConfigDirectory = true;
+    }
     const supported = () => process.platform !== 'win32' && !!vscode.extensions.getExtension('anthropic.claude-code');
-    const clear = () => { try { fs.unlinkSync(routeFile); } catch (_) {} };
+    const clear = () => {
+        restoreConfigDirectory();
+        try { fs.unlinkSync(routeFile); } catch (_) {}
+    };
 
     async function sync(root, env, enabled) {
         if (!supported() || !vscode.workspace.isTrusted) return false;
@@ -37,6 +59,7 @@ function createBridge(context, vscode, resolveNode) {
         if (previous !== launcher || !fs.existsSync(configFile)) {
             atomicWrite(configFile, JSON.stringify({ previousWrapper: previous === launcher ? '' : previous }));
         }
+        syncConfigDirectory(env);
         if (previous !== launcher) await setting.update('claudeProcessWrapper', launcher, vscode.ConfigurationTarget.Global);
         return true;
     }
