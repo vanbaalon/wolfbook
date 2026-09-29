@@ -554,6 +554,8 @@ async function showSettingsUI(notebook) {
     const items = [
         { label: 'Background Color', kind: vscode.QuickPickItemKind.Separator },
         ...colorItems,
+        { label: 'Local theme', kind: vscode.QuickPickItemKind.Separator },
+        { label: '$(symbol-color) Local theme…', description: 'VS Code window colours for this workspace folder', value: '__local_theme__' },
         { label: 'Background Image', kind: vscode.QuickPickItemKind.Separator },
         ...imageItems,
         { label: 'Kernel', kind: vscode.QuickPickItemKind.Separator },
@@ -603,8 +605,8 @@ async function showSettingsUI(notebook) {
     }
 
     const pick = await vscode.window.showQuickPick(items, {
-        placeHolder:        'Choose a background setting',
-        title:              'Notebook Background Settings',
+        placeHolder:        'Choose a notebook or local window setting',
+        title:              'Notebook & Local Theme Settings',
         ignoreFocusOut:     true,
         matchOnDescription: true,
     });
@@ -612,7 +614,9 @@ async function showSettingsUI(notebook) {
     if (!pick || pick.kind === vscode.QuickPickItemKind.Separator) return;
 
     // ── Handle selection ──────────────────────────────────────────────────
-    if (pick.value === '') {
+    if (pick.value === '__local_theme__') {
+        await require('./local-theme').show(vscode);
+    } else if (pick.value === '') {
         await updateNotebookSettings(notebook, { backgroundColor: '' });
         vscode.window.showInformationMessage('Background color reset to default');
 

@@ -14,6 +14,10 @@ All notable changes to **Wolfbook** are documented here.
 
 ### Added
 
+- **Local window theme.** Notebook colour settings now include a workspace-only
+  VS Code window colour picker with presets, a custom accent, and reset.
+  Notebook backgrounds and unrelated colour settings are preserved.
+
 - **Codex folder history.** A status-bar history button lists conversations from
   the main workspace folder and its subfolders, newest first, and opens them in
   Codex. Other folders and background subagent sessions are excluded.
