@@ -1889,6 +1889,11 @@
         "command": "wolfbook.agentAccounts.refresh",
         "title": "Wolfbook: Refresh CLI Accounts",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "wolfbook.codexHistory",
+        "title": "Wolfbook: Codex History for Workspace Folder",
+        "icon": "$(history)"
       }
     ],
     "menus": {

@@ -14,6 +14,10 @@ All notable changes to **Wolfbook** are documented here.
 
 ### Added
 
+- **Codex folder history.** A status-bar history button lists conversations from
+  the main workspace folder and its subfolders, newest first, and opens them in
+  Codex. Other folders and background subagent sessions are excluded.
+
 - **Wolfbook tools in Claude and Codex account profiles.** Each isolated account now
   receives the Wolfbook MCP connection and skill without copying credentials or
   replacing other MCP servers. Existing profiles are repaired when used.

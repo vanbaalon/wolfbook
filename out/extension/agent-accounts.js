@@ -316,6 +316,7 @@ function register(context, vscode = require('vscode')) {
     if (vscode.workspace.onDidChangeConfiguration) context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(event => {
         if (event.affectsConfiguration('claudeCode.claudeProcessWrapper')) refresh();
     }));
+    require('./codex-history').register(context, vscode, () => resolveExecutable(vscode, 'codex'));
     refresh();
 }
 
