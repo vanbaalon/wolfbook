@@ -9,6 +9,10 @@ const { register, repositoryKey, profileDirectory, launchOptions } = require('..
 (async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'wolfbook-accounts-'));
     let context;
+    const mcp = require('../../account-profile-mcp');
+    const originalCodexSetup = mcp.ensureCodexProfileMcp;
+    const codexSetups = [];
+    mcp.ensureCodexProfileMcp = async (...args) => { codexSetups.push(args); };
     try {
         const roots = ['repo-a', 'repo-b'].map(name => path.join(tmp, name));
         roots.forEach(root => fs.mkdirSync(root));
@@ -104,8 +108,13 @@ const { register, repositoryKey, profileDirectory, launchOptions } = require('..
         assert.deepStrictEqual(codexLaunch.shellArgs, ['-c', 'cli_auth_credentials_store="file"', 'login']);
         assert.strictEqual(codexLaunch.env.OPENAI_API_KEY, null);
         assert.notStrictEqual(codexLaunch.env.CODEX_HOME, terminals[0].env.CLAUDE_CONFIG_DIR);
+        assert.strictEqual(codexSetups.at(-1)[0], codexLaunch.env.CODEX_HOME, 'provisions selected Codex home before launch');
         action('status'); await manage(codex);
         assert.deepStrictEqual(terminals.at(-1).shellArgs, ['-c', 'cli_auth_credentials_store="file"', 'login', 'status']);
+        action('switch'); picks.push(items => items.find(item => item.id));
+        const setupCount = codexSetups.length;
+        await manage(codex);
+        assert.strictEqual(codexSetups.length, setupCount + 1, 'switch provisions MCP even without launching');
         assert.strictEqual(tree.getTreeItem(a).description, 'Personal');
 
         action('model'); inputs.push('sonnet'); await manage(a);
@@ -164,5 +173,5 @@ const { register, repositoryKey, profileDirectory, launchOptions } = require('..
         assert.throws(() => launchOptions('claude', tmp, 'arbitrary'), /Invalid/);
         assert.strictEqual(launchOptions('claude', '/a path/with "quotes"/$shell').env.CLAUDE_CONFIG_DIR, '/a path/with "quotes"/$shell');
         console.log('Account profiles: repository selection, persistence, isolation, login/status, cancellation, removal, trust, and executable errors passed.');
-    } finally { context?.subscriptions.forEach(item => item.dispose()); fs.rmSync(tmp, { recursive: true, force: true }); }
+    } finally { mcp.ensureCodexProfileMcp = originalCodexSetup; context?.subscriptions.forEach(item => item.dispose()); fs.rmSync(tmp, { recursive: true, force: true }); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

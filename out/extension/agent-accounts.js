@@ -91,10 +91,13 @@ function register(context, vscode = require('vscode')) {
     let panelSync = Promise.resolve();
     let disposed = false;
     context.subscriptions.push({ dispose() { disposed = true; } });
-    function prepareProfile(profile) {
-        if (profile?.provider !== 'claude') return;
+    async function prepareProfile(profile) {
+        if (!profile) return;
+        if (!vscode.workspace.isTrusted) throw new Error('Trust this workspace before configuring an account session.');
         const node = process.versions.electron ? require('./claude-mcp/server').resolveNodeBinary() : process.execPath;
-        require('./account-profile-mcp').ensureClaudeProfileMcp(profileDirectory(context, profile), node);
+        const mcp = require('./account-profile-mcp');
+        if (profile.provider === 'claude') mcp.ensureClaudeProfileMcp(profileDirectory(context, profile), node);
+        else await mcp.ensureCodexProfileMcp(profileDirectory(context, profile), node, resolveExecutable(vscode, 'codex'));
     }
     function syncPanel() {
         panelSync = panelSync.catch(() => {}).then(async () => {
@@ -102,7 +105,7 @@ function register(context, vscode = require('vscode')) {
             const root = vscode.workspace.workspaceFolders?.[0]?.uri;
             if (root?.scheme !== 'file' || !vscode.workspace.isTrusted) { panel.clear(); return false; }
             const profile = selected(root.fsPath, 'claude');
-            prepareProfile(profile);
+            await prepareProfile(profile);
             const models = modelDefaults(root.fsPath, 'claude');
             const { env } = launchOptions('claude', profile ? profileDirectory(context, profile) : undefined, 'open', models);
             if (models.model) env.ANTHROPIC_MODEL = models.model;
@@ -148,7 +151,7 @@ function register(context, vscode = require('vscode')) {
         const executable = resolveExecutable(vscode, target.provider);
         const directory = profile ? profileDirectory(context, profile) : undefined;
         if (directory) await fs.promises.mkdir(directory, { recursive: true, mode: 0o700 });
-        prepareProfile(profile);
+        await prepareProfile(profile);
         const { env, args } = launchOptions(target.provider, directory, action, modelDefaults(target.repo, target.provider));
         // Launch the executable directly: no shell interpolation, startup scripts,
         // global environment edits, or injection of commands into existing terminals.
@@ -222,6 +225,7 @@ function register(context, vscode = require('vscode')) {
                 ...profiles(provider).map(p => ({ label: p.name, id: p.id, description: p.id === current?.id ? 'Selected' : '' })),
             ], { title: `Select ${PROVIDERS[provider]} account for ${path.basename(repo)}` });
             if (!picked) return;
+            await prepareProfile(profiles(provider).find(profile => profile.id === picked.id));
             await context.globalState.update(repositoryKey(repo, provider), picked.id);
             refresh();
             const options = provider === 'claude' && panel.supported() ? ['Open Claude panel', 'Open CLI'] : ['Open CLI'];

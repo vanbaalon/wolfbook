@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const { atomicWrite } = require('./claude-panel-accounts');
+const execFile = require('util').promisify(require('child_process').execFile);
 
 function ensureClaudeProfileMcp(directory, nodeBin, extensionDirectory = __dirname) {
     fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -20,7 +21,29 @@ function ensureClaudeProfileMcp(directory, nodeBin, extensionDirectory = __dirna
         config.mcpServers = { ...config.mcpServers, wolfbook: entry };
         atomicWrite(file, JSON.stringify(config, null, 2) + '\n');
     }
-    // Claude's skill discovery moves with CLAUDE_CONFIG_DIR too.
+    installSkill(directory, extensionDirectory);
+    return file;
+}
+
+async function ensureCodexProfileMcp(directory, nodeBin, executable, extensionDirectory = __dirname) {
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const args = [path.join(extensionDirectory, 'claude-mcp', 'stdio-bridge.js'), '--profile=full'];
+    const options = { cwd: directory, env: { ...process.env, CODEX_HOME: directory }, timeout: 15000,
+        maxBuffer: 1024 * 1024, windowsHide: true };
+    let current;
+    try { current = JSON.parse((await execFile(executable, ['mcp', 'get', 'wolfbook', '--json'], options)).stdout); }
+    catch (_) { /* Missing registration is repaired by the CLI's config writer below. */ }
+    if (current?.enabled !== true || current?.transport?.type !== 'stdio'
+        || current.transport.command !== nodeBin || JSON.stringify(current.transport.args) !== JSON.stringify(args)) {
+        try { await execFile(executable, ['mcp', 'add', 'wolfbook', '--', nodeBin, ...args], options); }
+        catch (_) { throw new Error('Cannot configure Wolfbook MCP for this Codex account. Check the Codex executable and the profile’s config.toml.'); }
+    }
+    installSkill(directory, extensionDirectory);
+    return path.join(directory, 'config.toml');
+}
+
+function installSkill(directory, extensionDirectory) {
+    // Both CLIs discover skills beneath their selected configuration home.
     const source = path.join(extensionDirectory, 'claude-mcp', 'wolfbook-skill');
     const target = path.join(directory, 'skills', 'wolfbook');
     function copy(dir, dest) {
@@ -35,7 +58,6 @@ function ensureClaudeProfileMcp(directory, nodeBin, extensionDirectory = __dirna
         }
     }
     copy(source, target);
-    return file;
 }
 
-module.exports = { ensureClaudeProfileMcp };
+module.exports = { ensureClaudeProfileMcp, ensureCodexProfileMcp };
