@@ -191,6 +191,27 @@ async function main() {
         w.compileForReview();
         assert.equal(rebuilt, 1, 'not over a Compile already running');
     }
+    // The change was placed on an older build, but the page on screen already
+    // has it: the build returns at once with nothing newer. The focus must not
+    // wait for a newer PDF forever — it is re-placed on the page shown.
+    {
+        const w = Object.create(TexViewer.prototype);
+        const st = { generation: { generation: 5 }, files: [] };
+        let placed = 0, replayed = 0;
+        w.root = '/paper.tex'; w._openedGeneration = 5; w.status = () => {};
+        w.coord = { roots: new Map([['/paper.tex', st]]), liveOverlay: () => null, isCurrent: () => true,
+            build: async () => st };
+        stub.workspace.openTextDocument = async () => ({ uri: { fsPath: '/paper.tex' } });
+        w.refresh = async () => {}; w._post = () => {};
+        w._review = { refreshPlacement: () => { placed++; } };
+        w._replayReviewFocus = () => { replayed++; };
+        w._reviewFocus = { id: 'h1', generation: null, pending: true };
+        assert.equal(w.reviewPageBehind(4), true, 'placed on generation 4, generation 5 is shown');
+        await w.compileForReview();
+        assert.equal(w._reviewFocus.after, undefined, 'no longer waiting for a newer PDF');
+        assert.equal(placed, 1, 'the review is re-placed on the page shown');
+        assert.equal(replayed, 1);
+    }
     // An agent's change: the waited-for build, one per burst, and one more
     // for a change that lands while it runs.
     {

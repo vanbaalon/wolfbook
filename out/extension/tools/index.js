@@ -955,7 +955,7 @@ class EvaluateExpressionTool {
             const _wrapForm = (varName) => _buildOutputFormWrapper(outputForm, varName);
             const _mlCheck = _buildExpectCheck(options.input?.expect);
             const mkWrapped = (expr, wlSec, checkWL) =>
-                `Block[{$wbR$, $wbA$}, $wbR$ = ${_memoryLimitWrap(options.input, `TimeConstrained[(${expr}), ${wlSec}, "$WBTIMEOUT$"]`)}; If[MemberQ[{"$WBTIMEOUT$", "$WBMEMORY$"}, $wbR$], $wbR$, ${
+                `Block[{$wbR$, $wbA$}, $wbR$ = ${_memoryLimitWrap(options.input, `TimeConstrained[(${expr}), ${wlSec}, "$WBTIMEOUT$"]`)}; If[$wbR$ === "$WBTIMEOUT$" || $wbR$ === "$WBMEMORY$", $wbR$, ${
                     checkWL
                         ? `($wbA$ = Quiet[Check[If[TrueQ[${checkWL}], "PASS", "FAIL"], "ERROR"]]; "$WBA$" <> $wbA$ <> "$WBSEP$" <> (${_wrapForm('$wbR$')}))`
                         : _wrapForm('$wbR$')
@@ -1074,7 +1074,7 @@ class EvaluateExpressionTool {
         // over $wbR$ and rides back as a "$WBA$PASS/FAIL/ERROR$WBSEP$" prefix.
         const _expectCheck = _buildExpectCheck(options.input?.expect);
         const wrappedExpr =
-            `Block[{$wbR$, $wbA$}, $wbR$ = ${_memoryLimitWrap(options.input, `TimeConstrained[(${expression}), ${wlTimeout}, "$WBTIMEOUT$"]`)}; If[MemberQ[{"$WBTIMEOUT$", "$WBMEMORY$"}, $wbR$], $wbR$, ${
+            `Block[{$wbR$, $wbA$}, $wbR$ = ${_memoryLimitWrap(options.input, `TimeConstrained[(${expression}), ${wlTimeout}, "$WBTIMEOUT$"]`)}; If[$wbR$ === "$WBTIMEOUT$" || $wbR$ === "$WBMEMORY$", $wbR$, ${
                 _expectCheck
                     ? `($wbA$ = Quiet[Check[If[TrueQ[${_expectCheck}], "PASS", "FAIL"], "ERROR"]]; "$WBA$" <> $wbA$ <> "$WBSEP$" <> (${_wrapFormSingle('$wbR$')}))`
                     : _wrapFormSingle('$wbR$')
@@ -3385,7 +3385,11 @@ class KernelControlTool {
                     message: `The kernel is running a different operation (${abortResult.active?.operation_id || 'unknown'}), so nothing was aborted. Omit operation_id to abort whatever is running.`,
                     kernel: before, active: abortResult.active });
             }
-            return abortOutcomeResult(controller, abortResult, before, options.input?.operation_id);
+            // No operation_id: settle the operation that held the kernel, or an
+            // async runCell range (which watches its registry entry) goes on
+            // dispatching after "aborted".
+            return abortOutcomeResult(controller, abortResult, before,
+                options.input?.operation_id || before.lease?.operation_id || null);
         } catch (err) {
             return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(`Abort failed: ${err.message}`)]);
         }

@@ -3014,8 +3014,22 @@ class TexViewer {
     compileForReview() {
         // The focus goes to the change on a NEWER PDF only: placements on the
         // page shown now (they keep arriving while the compile runs) lack it.
-        if (this._reviewFocus?.pending) this._reviewFocus.after = this._openedGeneration ?? -1;
-        return this.compileWaited('compiling the paper for this change…');
+        const shown = this._openedGeneration;
+        if (this._reviewFocus?.pending) this._reviewFocus.after = shown ?? -1;
+        const work = this.compileWaited('compiling the paper for this change…');
+        if (!work) return work;   // the reader's own Compile brings the newer PDF
+        return Promise.resolve(work).then(() => {
+            // NOTHING NEWER CAME: the page shown was already current (the change
+            // had only been placed on an older build), so the build returned at
+            // once. Waiting for a newer PDF would wait forever — re-place on the
+            // one on screen instead.
+            const f = this._reviewFocus;
+            if (!f?.pending || f.after == null || String(this._openedGeneration) !== String(shown)) return;
+            if (this.reviewPageBehind(this._openedGeneration)) return;
+            delete f.after;
+            try { this._review?.refreshPlacement?.(); } catch (_) { /* the list still works */ }
+            this._replayReviewFocus();
+        });
     }
 
     /**
