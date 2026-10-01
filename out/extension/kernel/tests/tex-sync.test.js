@@ -4552,6 +4552,23 @@ test('A PAPER WITH NO LAYOUT OF ITS OWN KEEPS THE ONE ON SCREEN', async () => {
     assert.strictEqual(asked, 'all');
 });
 
+test('A BUFFER REVERT IN VIEWER-ONLY IS NOT THE READER ASKING FOR THE EDITOR', async () => {
+    const v = placeViewer({});
+    const calls = [];
+    v._layoutMode = 'viewer';
+    v.panel.viewColumn = 1;
+    v.panel.reveal = (c, pf) => calls.push(`reveal:${c}:${pf}`);
+    let during = null;
+    const out = await v.keepViewerLayout(async () => { during = v.isViewerLayout(); return 7; });
+    assert.strictEqual(out, 7);
+    assert.strictEqual(during, false, 'the .tex shown for the revert cannot trigger the split');
+    assert.deepStrictEqual(calls, ['reveal:1:false'], 'and WPaper is brought back to front');
+    assert.strictEqual(v._layoutMode, 'viewer');
+    v._layoutMode = 'all'; calls.length = 0;
+    await v.keepViewerLayout(async () => {});
+    assert.deepStrictEqual(calls, [], 'with the editor beside WPaper nothing is moved');
+});
+
 test('AN EXTERNAL FILE RELOAD CANNOT LEAVE WPAPER HIDDEN IN VIEWER MODE', async () => {
     const v = placeViewer({});
     v._layoutMode = 'viewer';

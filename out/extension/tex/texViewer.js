@@ -2166,7 +2166,11 @@ class TexViewer {
         if (!m || typeof m.file !== 'string' || !this._isInsideProject(m.file)) return;
         const doc = await this._tikzDocument(m.file);
         const range = new vscode.Range(doc.positionAt(m.start), doc.positionAt(m.end ?? m.start));
-        const editor = await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.One, preserveFocus: true, preview: false });
+        // Viewer-only: select in an editor that is already visible, never open one over WPaper.
+        const editor = this.viewerOnly
+            ? (vscode.window.visibleTextEditors || []).find(e => e.document && e.document.uri.fsPath === doc.uri.fsPath)
+            : await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.One, preserveFocus: true, preview: false });
+        if (!editor) return;
         editor.selection = new vscode.Selection(range.start, range.end);
         editor.revealRange(range, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
     }
@@ -3859,6 +3863,9 @@ class TexViewer {
                     return;
                 }
                 const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(item.file));
+                // "Go to the source": leave viewer-only on purpose first, rather
+                // than open the .tex over WPaper and let the layout bounce.
+                if (this.viewerOnly) await this.setLayoutMode('all');
                 const editor = await vscode.window.showTextDocument(doc, {
                     viewColumn: vscode.ViewColumn.One, preserveFocus: false, preview: false,
                 });
@@ -5500,6 +5507,7 @@ class TexViewer {
                     const rel = path.relative(path.dirname(this.root), m.file);
                     if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) break;
                     const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(m.file));
+                    if (this.viewerOnly) await this.setLayoutMode('all');
                     const editor = await vscode.window.showTextDocument(doc, {
                         viewColumn: vscode.ViewColumn.One, preserveFocus: false, preview: false,
                     });
@@ -10409,6 +10417,24 @@ class TexViewer {
         // Beside the ACTIVE group, which is now the source.
         try { panel.reveal(vscode.ViewColumn.Beside, true); } catch (_) { return; }
         await this._lockGroup().catch(() => { /* older builds simply do not */ });
+    }
+
+    /** WPaper alone (viewer-only): passive reveals must not open an editor over it. */
+    get viewerOnly() { return !!this.panel && this._layoutMode === 'viewer'; }
+
+    /**
+     * Run `work` — which has to show a source editor briefly (a buffer revert
+     * needs it active) — without that counting as the reader asking for the
+     * editor: viewer-only stays viewer-only and WPaper comes back to front.
+     */
+    async keepViewerLayout(work) {
+        if (!this.viewerOnly) return work();
+        this._layoutBusy = true;
+        try { return await work(); } finally {
+            this._layoutBusy = false;
+            this._layoutQuietUntil = Date.now() + 400;
+            try { this.panel?.reveal(this.panel.viewColumn, false); } catch (_) { /* disposed */ }
+        }
     }
 
     /** Is WPaper alone in the reading layout (and not mid-transition)? */

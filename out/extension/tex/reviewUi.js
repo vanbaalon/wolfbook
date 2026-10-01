@@ -367,8 +367,13 @@ class ReviewUi {
     async _rebaseBuffer(doc, text) {
         const file = doc.uri.fsPath;
         try {
-            await vscode.window.showTextDocument(doc, { preview: false });
-            await vscode.commands.executeCommand('workbench.action.files.revert');
+            // The revert needs the buffer active; in viewer-only that must not
+            // read as the reader asking for the editor.
+            const revert = async () => {
+                await vscode.window.showTextDocument(doc, { preview: false });
+                await vscode.commands.executeCommand('workbench.action.files.revert');
+            };
+            await (this.viewer && this.viewer.keepViewerLayout ? this.viewer.keepViewerLayout(revert) : revert());
         } catch (e) {
             this.output.appendLine(`review: could not reload ${path.basename(file)}: ${e.message}`);
             return false;
@@ -795,11 +800,15 @@ class ReviewUi {
         try {
             const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
             const line = Math.max(0, Math.min(h.ourRange.startLine - 1, doc.lineCount - 1));
-            const editor = (vscode.window.visibleTextEditors || [])
-                .find(e => e.document && e.document.uri.fsPath === file) ||
-                await vscode.window.showTextDocument(doc, {
+            // Viewer-only (WPaper alone): the page is where the change is
+            // shown. Opening the .tex would cover WPaper until the layout put
+            // it back — reveal only in an editor that is already visible.
+            const visible = (vscode.window.visibleTextEditors || [])
+                .find(e => e.document && e.document.uri.fsPath === file);
+            const editor = visible || (this.viewer && this.viewer.viewerOnly ? null
+                : await vscode.window.showTextDocument(doc, {
                     viewColumn: vscode.ViewColumn.One, preserveFocus: true, preview: false,
-                });
+                }));
             // THE SELECTION IS THE READER'S. Reveal, never select.
             if (editor) {
                 editor.revealRange(new vscode.Range(line, 0, line, 0),

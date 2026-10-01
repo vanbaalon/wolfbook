@@ -254,6 +254,29 @@ test('FOCUSING A CHANGE NEVER TOUCHES THE SELECTION', async () => {
     assert.ok(posted.some(p => p && p.focus === id), 'and the page was told which change');
 });
 
+test('VIEWER-ONLY: GOING TO A CHANGE NEVER OPENS THE EDITOR OVER WPAPER', async () => {
+    const { ui, viewer, posted } = makeUi();
+    viewer.viewerOnly = true;
+    let shown = 0;
+    const oldShow = stub.window.showTextDocument;
+    const visible = Object.getOwnPropertyDescriptor(stub.window, 'visibleTextEditors');
+    stub.window.showTextDocument = async () => { shown++; return editor; };
+    Object.defineProperty(stub.window, 'visibleTextEditors', { get: () => [], configurable: true });
+    try {
+        await ui.noteAgentChange({ file: FILE, baseText: BASE });
+        const id = ui.sessionFor(FILE).hunks[0].id;
+        await ui.show(FILE, id);
+        assert.strictEqual(shown, 0, 'no editor opened: it would cover WPaper until the layout bounced back');
+        assert.ok(posted.some(p => p && p.focus === id), 'the page still goes to the change');
+        viewer.viewerOnly = false;
+        await ui.show(FILE, id);
+        assert.strictEqual(shown, 1, 'with the editor beside WPaper it is revealed as before');
+    } finally {
+        stub.window.showTextDocument = oldShow;
+        Object.defineProperty(stub.window, 'visibleTextEditors', visible);
+    }
+});
+
 test('GOING TO A CHANGE THE PAGE LACKS COMPILES FIRST, as the Compile button does', async () => {
     const { ui, viewer, posted } = makeUi();
     let behind = true, compiles = 0;

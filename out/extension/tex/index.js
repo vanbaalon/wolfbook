@@ -1402,7 +1402,7 @@ function registerTexSupport(context, deps = {}) {
  * destroys the other, so this is a modal — the one interruption in this feature
  * that is justified, because the alternative is silent data loss.
  */
-async function offerReload(doc, diskText, output) {
+async function offerReload(doc, diskText, output, viewer = null) {
     const name = path.basename(doc.uri.fsPath);
     const RELOAD = 'Reload from disk';
     const KEEP = 'Keep my edits';
@@ -1417,8 +1417,11 @@ async function offerReload(doc, diskText, output) {
         RELOAD, COMPARE, KEEP);
 
     if (pick === RELOAD) {
-        await vscode.window.showTextDocument(doc, { preview: false });
-        await vscode.commands.executeCommand('workbench.action.files.revert');
+        const revert = async () => {
+            await vscode.window.showTextDocument(doc, { preview: false });
+            await vscode.commands.executeCommand('workbench.action.files.revert');
+        };
+        await (viewer?.keepViewerLayout ? viewer.keepViewerLayout(revert) : revert());
         if (output) output.appendLine(`${name}: reloaded from disk on request`);
         return 'reloaded';
     }
@@ -1614,7 +1617,7 @@ async function offerReload(doc, diskText, output) {
                 paintRender();
                 return;
             }
-            await offerReload(doc, diskText, output);
+            await offerReload(doc, diskText, output, viewer);
         };
         const onGone = (uri) => { diskWatch.forget(uri.fsPath); coord.invalidate(uri.fsPath); };
         const wire = (w) => {
@@ -2170,7 +2173,7 @@ async function offerReload(doc, diskText, output) {
         const merged = before ? await review.mergeExternalChange({
             file: fsPath, doc, base: before, ours: doc.getText(), theirs: diskText, source: 'disk',
         }) : null;
-        if (!merged) { await offerReload(doc, diskText, output); return; }
+        if (!merged) { await offerReload(doc, diskText, output, viewer); return; }
         rememberText(fsPath, diskText);
         diskWatch.accept(fsPath, diskText);
         paintRender();
