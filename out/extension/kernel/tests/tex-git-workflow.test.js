@@ -343,12 +343,129 @@ test('the commands and default editor shortcuts are shipped', () => {
     assert.ok(overleaf.icon && /overleaf/.test(overleaf.icon.light), 'the editor action has its leaf icon');
     assert.ok(fs.existsSync(path.join(ext, overleaf.icon.light)), 'the light leaf icon is shipped');
     assert.ok(fs.existsSync(path.join(ext, overleaf.icon.dark)), 'the dark leaf icon is shipped');
+    // The leaf in the editor's title bar is the Overleaf control (tex/overleafMenu.js),
+    // which offers the Git setup among the ways to stay in step.
+    const control = pkg.contributes.commands.find(x => x.command === 'wolfbook.tex.overleafMenu');
+    assert.ok(control && /overleaf/.test(control.icon.light), 'the control has the leaf icon');
     assert.ok(pkg.contributes.menus['editor/title'].some(x =>
-        x.command === 'wolfbook.tex.configureOverleaf' && /\.tex/.test(x.when)));
+        x.command === 'wolfbook.tex.overleafMenu' && /\.tex/.test(x.when)));
 });
 
 function ok(stdout = '') { return { code: 0, stdout, stderr: '' }; }
 function bad(stderr = '') { return { code: 1, stdout: '', stderr }; }
+
+// --- Overleaf auto-sync, against real Git ---------------------------------
+//
+// A local bare repository stands in for git.overleaf.com: the remote keeps
+// its Overleaf URL (so it is recognised as one) and Git's url.insteadOf
+// sends it to the bare repository.
+function overleafFixture() {
+    const { execFileSync } = require('child_process');
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'wpaper-autosync-'));
+    const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    const bare = path.join(base, 'overleaf.git');
+    const config = path.join(base, 'gitconfig');
+    fs.writeFileSync(config, `[url "file://${bare}"]\n\tinsteadOf = https://git.overleaf.com/proj\n` +
+        '[user]\n\tname = Test\n\temail = t@example.org\n[init]\n\tdefaultBranch = master\n');
+    process.env.GIT_CONFIG_GLOBAL = config;
+    git(base, 'init', '--bare', '-b', 'master', bare);
+    const seed = path.join(base, 'seed');
+    git(base, 'clone', bare, seed);
+    fs.writeFileSync(path.join(seed, 'main.tex'), 'Line one.\nLine two.\nLine three.\n');
+    git(seed, 'add', '.'); git(seed, 'commit', '-m', 'first'); git(seed, 'push', 'origin', 'HEAD:master');
+    const mine = path.join(base, 'mine');
+    git(base, 'clone', '--origin', 'overleaf', 'https://git.overleaf.com/proj', mine);
+    const secrets = new Map();
+    const context = { secrets: { get: async k => secrets.get(k), store: async (k, v) => { secrets.set(k, v); } } };
+    // Real Git, except that `remote get-url` (which applies insteadOf) says
+    // what is configured, as it would for a real Overleaf remote.
+    const { spawnSync } = require('child_process');
+    const exec = async (cwd, args, opts = {}) => {
+        if (args[0] === 'remote' && args[1] === 'get-url')
+            args = ['config', '--get', `remote.${args[2]}.url`];
+        const r = spawnSync('git', args, { cwd, encoding: 'utf8', env: { ...process.env, ...(opts.env || {}) } });
+        return { code: r.status, stdout: r.stdout || '', stderr: r.stderr || '' };
+    };
+    const flow = new GitWorkflow(fakeVscode(mine), context, { exec });
+    const top = git(mine, 'rev-parse', '--show-toplevel').trim();
+    const token = () => secrets.set(flow._secretKey(top, 'overleaf'), 'tok');
+    const collaborator = (text) => {
+        git(seed, 'pull', '--no-rebase', 'origin', 'master');
+        fs.writeFileSync(path.join(seed, 'main.tex'), text);
+        git(seed, 'commit', '-am', 'collaborator'); git(seed, 'push', 'origin', 'HEAD:master');
+    };
+    const remoteText = () => git(base, '--git-dir', bare, 'show', 'master:main.tex');
+    return { base, mine, flow, token, collaborator, remoteText, git, file: path.join(mine, 'main.tex') };
+}
+
+test('Overleaf auto-sync needs a token and does nothing without one', async () => {
+    const f = overleafFixture();
+    fs.writeFileSync(f.file, 'Line one, edited.\nLine two.\nLine three.\n');
+    const r = await f.flow.autoSync(f.file);
+    assert.strictEqual(r.status, 'no-token');
+    assert.ok(/edited/.test(f.git(f.mine, 'status', '--porcelain')) || f.git(f.mine, 'status', '--porcelain').includes('main.tex'),
+        'nothing was committed');
+});
+
+test('Overleaf auto-sync commits, merges a collaborator and pushes, without a dialog', async () => {
+    const f = overleafFixture(); f.token();
+    fs.writeFileSync(f.file, 'Line one, mine.\nLine two.\nLine three.\n');
+    let r = await f.flow.autoSync(f.file);
+    assert.strictEqual(r.status, 'synced'); assert.ok(r.committed); assert.strictEqual(r.pushed, true);
+    assert.ok(f.remoteText().includes('Line one, mine.'), 'Overleaf has my edit');
+    assert.ok(/Committed automatically by WPaper/.test(f.git(f.mine, 'log', '-1', '--format=%B')));
+    // A collaborator changes another line; mine keeps changing too.
+    f.collaborator('Line one, mine.\nLine two.\nLine three, theirs.\n');
+    fs.writeFileSync(f.file, 'Line one, mine again.\nLine two.\nLine three.\n');
+    r = await f.flow.autoSync(f.file);
+    assert.strictEqual(r.status, 'synced'); assert.strictEqual(r.pulled, true); assert.strictEqual(r.pushed, true);
+    assert.strictEqual(fs.readFileSync(f.file, 'utf8'), 'Line one, mine again.\nLine two.\nLine three, theirs.\n');
+    assert.strictEqual(f.remoteText(), 'Line one, mine again.\nLine two.\nLine three, theirs.\n');
+    r = await f.flow.autoSync(f.file);
+    assert.strictEqual(r.status, 'nothing');
+});
+
+test('an overlapping change stops Overleaf auto-sync with the files clean and nothing lost', async () => {
+    const f = overleafFixture(); f.token();
+    f.collaborator('Line one, THEIRS.\nLine two.\nLine three.\n');
+    fs.writeFileSync(f.file, 'Line one, MINE.\nLine two.\nLine three.\n');
+    const r = await f.flow.autoSync(f.file);
+    assert.strictEqual(r.status, 'conflict'); assert.deepStrictEqual(r.files, ['main.tex']);
+    assert.ok(r.committed, 'my change is committed locally');
+    assert.strictEqual(fs.readFileSync(f.file, 'utf8'), 'Line one, MINE.\nLine two.\nLine three.\n', 'no conflict markers in the file');
+    assert.throws(() => f.git(f.mine, 'rev-parse', '-q', '--verify', 'MERGE_HEAD'), 'no merge left open');
+    assert.ok(f.remoteText().includes('THEIRS'), 'the collaborator\'s version stays on Overleaf');
+});
+
+test('the auto-sync scheduler waits for a pause and the interval, and pauses on a conflict', async () => {
+    const { OverleafAutoSync } = require('../../tex/overleafSync');
+    let now = 1e6; const calls = [];
+    const warnings = [];
+    const vscode = {
+        workspace: { getConfiguration: () => ({ get: (k, d) => d }) },
+        window: { createStatusBarItem: () => ({ show() {}, hide() {}, dispose() {} }),
+            showInformationMessage: async () => undefined, showWarningMessage: async (m) => { warnings.push(m); } },
+        StatusBarAlignment: { Left: 1 },
+    };
+    let answer = { status: 'synced', committed: 'abc', pushed: true };
+    const git = { autoSync: async file => { calls.push(file); return answer; } };
+    const sync = new OverleafAutoSync({ vscode, git, target: () => '/p/main.tex', now: () => now });
+    sync.noteEdit();
+    assert.strictEqual(await sync.tick(), null, 'not while typing');
+    now += 25000;
+    assert.strictEqual((await sync.tick()).status, 'synced');
+    now += 60000;
+    assert.strictEqual(await sync.tick(), null, 'not before the interval');
+    now += 5 * 60000;
+    answer = { status: 'conflict', files: ['main.tex'], repo: '/p', remote: 'overleaf' };
+    assert.strictEqual((await sync.tick()).status, 'conflict');
+    assert.strictEqual(warnings.length, 1);
+    now += 10 * 60000;
+    assert.strictEqual(await sync.tick(), null, 'paused after a conflict');
+    answer = { status: 'synced' };
+    assert.strictEqual((await sync.run('/p/main.tex', { manual: true })).status, 'synced', 'a manual sync resumes it');
+    assert.strictEqual(calls.length, 3);
+});
 
 function fakeVscode(root, windowOverrides = {}) {
     return {

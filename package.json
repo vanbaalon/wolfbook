@@ -1138,6 +1138,24 @@
           "maximum": 2000,
           "description": "With the WLaTeX engine: how long a burst of keystrokes is merged before the incremental engine redraws the page (a newer request abandons an older one at its next page)."
         },
+        "wolfbook.tex.overleafSync": {
+          "type": "string",
+          "enum": ["git", "live", "off"],
+          "enumDescriptions": [
+            "Overleaf's Git integration: every few minutes, while you pause, WPaper commits your changes, merges collaborators' and pushes. Needs the project's Git remote and an Overleaf Git authentication token (a paid Overleaf plan). Overleaf's tracked changes and comments on lines a push changes can be lost or displaced.",
+            "Real-time editing, as a collaborator in the Overleaf editor: the paper's folder is linked to an Overleaf project and edited in place, signed in with your browser's Overleaf session cookie. NOT supported by Overleaf: its terms forbid access other than through its supported interfaces, so this can break at any time and use of it is at your own risk (and your account's). Off unless you choose it.",
+            "No Overleaf synchronisation: commit and push yourself."
+          ],
+          "default": "git",
+          "description": "How a paper that lives on Overleaf is kept in step with it."
+        },
+        "wolfbook.tex.overleafSyncMinutes": {
+          "type": "number",
+          "default": 5,
+          "minimum": 1,
+          "maximum": 120,
+          "description": "Overleaf auto-sync (Git): how often, in minutes, your changes are committed and pushed and collaborators' merged in. Overleaf rate-limits frequent Git polling."
+        },
         "wolfbook.tex.nativeSettleDelayMs": {
           "type": "number",
           "default": 2500,
@@ -1762,6 +1780,32 @@
         "category": "Wolfbook"
       },
       {
+        "command": "wolfbook.tex.overleafSyncNow",
+        "title": "WPaper: Sync with Overleaf Now"
+      },
+      {
+        "command": "wolfbook.tex.overleafLive",
+        "title": "WPaper: Link This Paper to Overleaf, in Real Time (not supported by Overleaf)…"
+      },
+      {
+        "command": "wolfbook.tex.overleafMenu",
+        "title": "WPaper: Overleaf…",
+        "category": "Wolfbook",
+        "icon": {
+          "light": "./icons/overleaf-off-light.svg",
+          "dark": "./icons/overleaf-off-dark.svg"
+        }
+      },
+      {
+        "command": "wolfbook.tex.overleafMenuConnected",
+        "title": "WPaper: Overleaf — connected (the status bar and WPaper's leaf say to which project and file)…",
+        "category": "Wolfbook",
+        "icon": {
+          "light": "./icons/overleaf-light.svg",
+          "dark": "./icons/overleaf-dark.svg"
+        }
+      },
+      {
         "command": "wolfbook.tex.configureOverleaf",
         "title": "WPaper: Configure Overleaf Git Sync",
         "category": "Wolfbook",
@@ -1948,6 +1992,10 @@
       ],
       "commandPalette": [
         {
+          "command": "wolfbook.tex.overleafMenuConnected",
+          "when": "false"
+        },
+        {
           "command": "wolfbook.OpenNotebook",
           "when": "false"
         },
@@ -2130,8 +2178,13 @@
           "group": "navigation@1"
         },
         {
-          "command": "wolfbook.tex.configureOverleaf",
-          "when": "resourceExtname == .tex",
+          "command": "wolfbook.tex.overleafMenu",
+          "when": "resourceExtname == .tex && !wolfbook.overleafConnected",
+          "group": "navigation@2"
+        },
+        {
+          "command": "wolfbook.tex.overleafMenuConnected",
+          "when": "resourceExtname == .tex && wolfbook.overleafConnected",
           "group": "navigation@2"
         }
       ],

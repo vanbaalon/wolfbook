@@ -5112,6 +5112,7 @@ class TexViewer {
             case 'ready':
                 this._webviewReady = true;
                 this._postTheme();
+                this.postOverleafState?.();
                 this._postSourceDirty(true);
                 this._scheduleSourceSave();
                 this._post({ type: 'hints', left: { ...hintsLeft } });

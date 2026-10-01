@@ -42,6 +42,9 @@ const {
 } = require('./auxLabels');
 const { readClipboardImage } = require('./texClipboard');
 const { decideFollow } = require('./viewerFollow');
+const { OverleafAutoSync } = require('./overleafSync');
+const { OverleafLive } = require('./overleafLive');
+const { overleafMenu } = require('./overleafMenu');
 
 const TEX_SELECTOR = [
     { language: 'latex', scheme: 'file' },
@@ -1186,6 +1189,43 @@ function registerTexSupport(context, deps = {}) {
         withGitTarget(file => gitWorkflow.choosePushMode(file)));
     reg('wolfbook.tex.configureOverleaf', () =>
         withGitTarget(file => gitWorkflow.configureOverleaf(file)));
+    // Overleaf auto-sync (tex/overleafSync.js): the default for a paper with
+    // an Overleaf Git remote and a token; every few minutes, while idle.
+    const overleafSync = new OverleafAutoSync({ vscode, git: gitWorkflow, target: gitTarget,
+        log: line => output.appendLine(line) });
+    overleafSync.start();
+    context.subscriptions.push({ dispose: () => overleafSync.dispose() });
+    reg('wolfbook.tex.overleafSyncNow', () =>
+        withGitTarget(file => overleafSync.run(file, { manual: true })));
+    // Real-time Overleaf editing through Overleaf Workshop (tex/overleafLive.js):
+    // opt-in, its risks accepted first.
+    const overleafLive = new OverleafLive({ vscode, context, target: gitTarget,
+        log: line => output.appendLine(line) });
+    context.subscriptions.push(overleafLive);
+    const onConfig = vscode.workspace.onDidChangeConfiguration?.(e => {
+        if (e.affectsConfiguration('wolfbook.tex.overleafSync')) overleafLive.configurationChanged().catch(() => {});
+    });
+    const onEditor = vscode.window.onDidChangeActiveTextEditor?.(() => overleafLive.refresh());
+    for (const d of [onConfig, onEditor]) if (d) context.subscriptions.push(d);
+    overleafLive.refresh();
+    reg('wolfbook.tex.overleafLive', () => overleafLive.start());
+    reg('wolfbook.tex.overleafMenu', () => overleafMenu({ vscode, sync: overleafSync, live: overleafLive, git: gitWorkflow, target: gitTarget }));
+    reg('wolfbook.tex.overleafMenuConnected', () => overleafMenu({ vscode, sync: overleafSync, live: overleafLive, git: gitWorkflow, target: gitTarget }));
+    // THE LEAF IS GREEN WHEN THE PAPER IS IN STEP WITH OVERLEAF: in the
+    // editor's title bar (a context key picks the green command) and on
+    // WPaper's toolbar, whose tooltip names the project and the file there.
+    const paintOverleaf = () => {
+        const file = gitTarget();
+        const i = overleafLive.mode() === 'live' ? overleafLive.info(file) : overleafSync.info(file);
+        vscode.commands.executeCommand('setContext', 'wolfbook.overleafConnected', !!i.connected).then(undefined, () => {});
+        viewer.overleafState = i;
+        viewer.postOverleafState?.();
+    };
+    overleafLive.onPaint = paintOverleaf;
+    overleafSync.onPaint = paintOverleaf;
+    const onEditorPaint = vscode.window.onDidChangeActiveTextEditor?.(() => paintOverleaf());
+    if (onEditorPaint) context.subscriptions.push(onEditorPaint);
+    paintOverleaf();
 
     // WHAT THE AGENT CHANGED, WAITING FOR A VERDICT (tex/reviewUi.js). The
     // review owns the status bar item, the editor decorations, the CodeLens and
@@ -1724,6 +1764,7 @@ async function offerReload(doc, diskText, output) {
         }),
         vscode.workspace.onDidChangeTextDocument((e) => {
             if (!isTex(e.document)) return;
+            if (e.contentChanges?.length) overleafSync.noteEdit();
             // Keep translating line positions for gutters and diagnostics;
             // the page tracer itself pauses below until the new PDF arrives.
             coord.noteChange(e);

@@ -696,6 +696,99 @@ class GitWorkflow {
         return false;
     }
 
+    /**
+     * OVERLEAF AUTO-SYNC: commit what changed, merge what collaborators
+     * pushed, push — with no dialog. The scheduler (overleafSync.js) calls it
+     * every few minutes while typing has paused, only for a repository with
+     * an Overleaf remote and a token already in Secret Storage.
+     *
+     * It never leaves the tree mid-merge under the reader: a merge that
+     * conflicts is aborted (their commits and ours stay as they were) and
+     * reported, for the reader to resolve with the ordinary push, which
+     * leaves the conflict sections open. It never prompts for a token either.
+     *
+     * @returns {Promise<{status:string, repo?:string, remote?:string, detail?:string,
+     *   files?:string[], committed?:string|null, pulled?:boolean, pushed?:boolean}>}
+     *   status: synced | nothing | no-repo | no-remote | no-token | no-identity |
+     *   detached | merging | conflict | auth | failed
+     */
+    async autoSync(file) {
+        const repo = await this._repo(file, false);
+        if (!repo) return { status: 'no-repo' };
+        const found = await this._findOverleafRemote(repo);
+        if (!found) return { status: 'no-remote', repo };
+        const remote = found.name;
+        const token = this.context.secrets && await this.context.secrets.get(this._secretKey(repo, remote));
+        if (!token) return { status: 'no-token', repo, remote };
+        const merging = await this._run(repo, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']);
+        if (merging.code === 0) return { status: 'merging', repo, remote };
+        const name = await this._run(repo, ['config', '--get', 'user.name']);
+        const email = await this._run(repo, ['config', '--get', 'user.email']);
+        if (!(name.code === 0 && name.stdout.trim() && email.code === 0 && email.stdout.trim()))
+            return { status: 'no-identity', repo, remote };
+        const branch = await this._run(repo, ['branch', '--show-current']);
+        if (branch.code !== 0 || !branch.stdout.trim()) return { status: 'detached', repo, remote };
+        const fail = (what, result) => ({ status: /authentication|could not read (?:username|password)|terminal prompts disabled|\b40[13]\b/i
+            .test(`${result.stderr || ''}\n${result.stdout || ''}`) ? 'auth' : 'failed', repo, remote,
+            detail: `${what}: ${String(result.stderr || result.stdout || '').trim().slice(0, 600)}` });
+        const env = await this._overleafEnv(repo, remote);
+        const remoteRun = args => this._run(repo, args, { env });
+
+        // 1. Commit what the reader wrote (saved first: WPaper saves on its own).
+        await this._saveRepoDocuments(repo);
+        let committed = null;
+        const status = await this._run(repo, ['status', '--porcelain=v1', '-z']);
+        if (status.code !== 0) return fail('git status', status);
+        if (status.stdout) {
+            const staged = await this._run(repo, ['add', '-A', '--', '.']);
+            if (staged.code !== 0) return fail('git add', staged);
+            const names = await this._run(repo, ['diff', '--cached', '--name-only', '-z', '--diff-filter=ACMRD']);
+            const changedPaths = names.stdout.split('\0').filter(Boolean);
+            if (changedPaths.length) {
+                const summary = await this._summary(repo, changedPaths);
+                const made = await this._run(repo, ['commit', '-m', summary.subject,
+                    '-m', `${summary.body}\n\nCommitted automatically by WPaper (Overleaf auto-sync).`]);
+                if (made.code !== 0) return fail('git commit', made);
+                const rev = await this._run(repo, ['rev-parse', '--short', 'HEAD']);
+                committed = rev.stdout.trim() || 'HEAD';
+            }
+        }
+
+        // 2. Bring in collaborators' changes (Overleaf's branch is master).
+        const target = 'master';
+        const advertised = await remoteRun(['ls-remote', '--heads', remote, `refs/heads/${target}`]);
+        if (advertised.code !== 0) return fail(`reach ${remote}`, advertised);
+        let pulled = false;
+        if (advertised.stdout.trim()) {
+            const fetched = await remoteRun(['fetch', '--no-tags', remote, `refs/heads/${target}`]);
+            if (fetched.code !== 0) return fail(`fetch from ${remote}`, fetched);
+            const contained = await this._run(repo, ['merge-base', '--is-ancestor', 'FETCH_HEAD', 'HEAD']);
+            if (contained.code !== 0) {
+                const merged = await this._run(repo, ['merge', '--no-edit', '--allow-unrelated-histories', 'FETCH_HEAD']);
+                if (merged.code !== 0) {
+                    const unresolved = await this._run(repo, ['diff', '--name-only', '--diff-filter=U', '-z']);
+                    const files = unresolved.stdout.split('\0').filter(Boolean);
+                    await this._run(repo, ['merge', '--abort']);
+                    return files.length ? { status: 'conflict', repo, remote, files, committed }
+                        : fail(`merge from ${remote}`, merged);
+                }
+                pulled = true;
+            }
+        }
+
+        // 3. Push, if there is anything of ours the remote lacks.
+        const ahead = advertised.stdout.trim()
+            ? await this._run(repo, ['rev-list', '--count', 'FETCH_HEAD..HEAD'])
+            : { code: 0, stdout: '1' };
+        let pushed = false;
+        if (ahead.code === 0 && Number(ahead.stdout.trim()) > 0) {
+            const done = await remoteRun(['push', remote, `HEAD:${target}`]);
+            if (done.code !== 0) return fail(`push to ${remote}`, done);
+            pushed = true;
+        }
+        return { status: committed || pulled || pushed ? 'synced' : 'nothing', repo, remote, committed, pulled, pushed };
+    }
+
     async push(file, opts = {}) {
         const repo = opts.repo || await this._repo(file, true);
         if (!repo) return false;
