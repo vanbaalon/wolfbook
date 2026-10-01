@@ -25,10 +25,19 @@ Type wolfbook in the Extensions panel and install it.
 Enable updates as we will be pushing updates on regular basis.
 To open the Extension panel press `Ctrl+Shift+X` or `Cmd+Shift+X`.
 
-### 4. Install GitHub Copilot (optional highly recommended)
+### 4. Install Node.js (for AI agents)
 
-Search "GitHub Copilot" in the Extensions panel and install it. A free tier is available. GitHub Education accounts get more generous limits — apply at [education.github.com](https://education.github.com) if you are a student or academic.
+Wolfbook connects AI agents through a small Node.js program. Install the **LTS** version from [nodejs.org](https://nodejs.org) (or `brew install node` on macOS, `winget install OpenJS.NodeJS.LTS` on Windows), then quit and reopen VS Code.
 
+### 5. Install an AI agent (optional, highly recommended)
+
+Install **Claude Code for VS Code** (publisher Anthropic) or **Codex – OpenAI's coding agent** (publisher OpenAI) from the Extensions panel and sign in. Wolfbook registers itself with both automatically when it starts. If an agent does not see the Wolfbook tools, run **Wolfbook: Configure Claude and Codex Agents** from the Command Palette and start a new conversation. Step-by-step instructions: [AI agents: Claude Code and Codex](../README.md#ai-agents-claude-code-and-codex).
+
+### 6. Install TeX (only for WPaper)
+
+To see the live compiled page of a `.tex` paper, install a TeX distribution with `latexmk`: [MacTeX](https://tug.org/mactex/) on macOS, [MiKTeX](https://miktex.org) or [TeX Live](https://tug.org/texlive/) on Windows ([details](wpaper-windows-setup.md)), TeX Live on Linux. Notebooks do not need TeX.
+
+> An illustrated version of this guide, with a short tutorial and example prompts, is in the [Wolfbook Quick Start (PDF)](Wolfbook-Quick-Start.pdf).
 
 ## Your First Notebook
 
@@ -70,8 +79,6 @@ Expected output: an inline SVG plot.
 | Format (WL formatter) | `Opt+Shift+F` | `Alt+Shift+F` |
 | Evaluate selection | `Cmd+Shift+E` | `Ctrl+Shift+E` |
 | Add selection to Watch | `Cmd+Shift+W` | `Ctrl+Shift+W` |
-| Force inline AI suggestion | `Opt+\` | `Alt+\` |
-| Inline fix / chat | `Cmd+I` | `Ctrl+I` |
 | Split editor | `Cmd+\` | `Ctrl+\` |
 | Start debug session | `Cmd+Shift+D` | `Ctrl+Shift+D` |
 | Step over | `F10` | `F10` |
@@ -121,7 +128,6 @@ If the kernel was not detected you can click on the settings on the bar on top o
 
 ## Next Steps
 
-- [AI Integration](ai-integration.md) — use GitHub Copilot in Agent mode with your notebook
 - [Features](features.md) — debugger, Dynamic widgets, Watch panel, output formats
 - [Best Practices](best-practices.md) — how to structure your work for reliable results
-- [MCP & Agent Tools](mcp-and-agent-tools.md) — using Wolfbook with Claude Code and other agents
+- [MCP & Agent Tools](mcp-and-agent-tools.md) — using Wolfbook with Claude Code, Codex and other agents

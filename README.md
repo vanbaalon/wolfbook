@@ -8,11 +8,11 @@
   <a href="https://github.com/vanbaalon/wolfbook/blob/main/docs/getting-started.md">Get Started</a> ·
   <a href="https://github.com/vanbaalon/wolfbook/blob/main/docs/features.md">Features</a> ·
   <a href="https://github.com/vanbaalon/wolfbook/blob/main/README.md#wpaper-a-live-latex-writing-workspace">WPaper</a> ·
-  <a href="https://github.com/vanbaalon/wolfbook/blob/main/docs/ai-integration.md">AI Integration</a> ·
+  <a href="https://github.com/vanbaalon/wolfbook/blob/main/README.md#ai-agents-claude-code-and-codex">AI Agents</a> ·
+  <a href="https://github.com/vanbaalon/wolfbook/blob/main/docs/Wolfbook-Quick-Start.pdf">Quick Start (PDF)</a> ·
   <a href="https://github.com/vanbaalon/wolfbook/blob/main/docs/cli-accounts.md">CLI Accounts</a> ·
   <a href="https://github.com/vanbaalon/wolfbook/blob/main/docs/mcp-and-agent-tools.md">MCP & Agent Tools</a> ·
   <a href="https://github.com/vanbaalon/wolfbook/blob/main/docs/using_cline.md">Using Cline</a> ·
-  <a href="https://github.com/vanbaalon/wolfbook/blob/main/docs/deepseek-copilot.md">DeepSeek + Copilot</a> ·
   <a href="https://github.com/vanbaalon/wolfbook/blob/main/docs/presentations.md">Presentations (.wslide)</a> ·
   <a href="https://github.com/vanbaalon/wolfbook/blob/main/docs/oberon-agent.md">Oberon Agent 🧪</a> ·
   <a href="https://github.com/vanbaalon/wolfbook/blob/main/docs/best-practices.md">Best Practices</a> ·
@@ -35,7 +35,7 @@ Wolfbook is a Mathematica-style notebook frontend for VS Code. Create, edit and 
 - Rich math output: **LaTeX / KaTeX**, **SVG / PNG graphics**,  **TikZ**
 - Interactive **3D graphics** and coordinate tooltips for 2D plots
 - **WPaper for LaTeX** — live compiled pages, source↔paper navigation and reviewable AI edits
-- **Live kernel access for AI agents** — Copilot, Claude Code, Codex, **Claude Science**, and any other MCP client, set up automatically and safe by default
+- **Live kernel access for AI agents** — Claude Code, Codex, **Claude Science**, and any other MCP client, set up automatically and safe by default
 - **Mid-evaluation abort**, **Dynamic[]** widgets, debugger and watch panel
 - Globally numbered kernels (`K1`, `K2`, …) with a picker that can bind a
   notebook to a kernel owned by another live VS Code window, or start a new
@@ -58,7 +58,7 @@ Wolfbook is a Mathematica-style notebook frontend for VS Code. Create, edit and 
 | Inline SVG / PNG / TikZ graphics | ✓ | static | basic |
 | Mid-evaluation abort | ✓ | — | — |
 | Dynamic[] widgets | ✓ | — | — |
-| AI agents can evaluate cells (MCP / Copilot) | ✓ | — | — |
+| AI agents can evaluate cells (MCP) | ✓ | — | — |
 | Plain-text notebook format (Git-friendly) | ✓ | ✓ | ✓ |
 | Open source | ✓ | ✓ | ✓ |
 
@@ -117,9 +117,24 @@ WPaper deliberately does not register another LaTeX grammar or replace your exis
 
 Use **Ctrl/Cmd+Alt+Enter** to commit the current repository from either the LaTeX editor or WPaper mini-editor. WPaper proposes an editable message naming the changed section titles and equations added or removed. On first use, choose whether successful commits should always be pushed or kept local for the separate **Ctrl/Cmd+Shift+Alt+Enter** push shortcut. If the folder has no repository, author identity, remote, or upstream yet, WPaper offers to configure each missing piece locally when it is needed.
 
-WPaper fetches and three-way merges remote changes before pushing, keeping every non-conflicting local and collaborator edit and surfacing only genuine overlaps for review. For Overleaf, click the leaf icon in a `.tex` editor or run **WPaper: Configure Overleaf Git Sync**. WPaper detects an existing Overleaf Git remote (whatever it is named), reports that synchronization is configured, and offers to sync or remove it. Otherwise it can safely configure the remote from a pasted Overleaf Git command and authentication token. See [WPaper and Overleaf](docs/wpaper-overleaf.md).
+WPaper fetches and three-way merges remote changes before pushing, keeping every non-conflicting local and collaborator edit and surfacing only genuine overlaps for review. For Overleaf, click the leaf icon in a `.tex` editor or in WPaper's toolbar (or run **WPaper: Overleaf…**) and choose how the paper stays in step:
 
-The compiled view checks for `latexmk`, the selected TeX engine, and missing document packages before reporting a build failure. On Windows, see [WPaper setup on Windows](docs/wpaper-windows-setup.md) for MiKTeX and TeX Live installation steps.
+- **Git, every few minutes** (the default, needs an Overleaf Git token): your saved changes are committed, collaborators' merged and the result pushed, whenever you pause.
+- **Real time** (off by default, not supported by Overleaf): link the paper's folder to an Overleaf project, sign in with your browser's `overleaf_session2` cookie, and what you type appears in Overleaf as you type it. Collaborators' edits appear in your editor.
+
+See [WPaper and Overleaf](docs/wpaper-overleaf.md) for the step-by-step instructions, including where to find the cookie, and for the risks of real-time editing.
+
+#### WPaper requirements
+
+The outline, folding, diagnostics and agent editing tools work without TeX. The live compiled page needs a TeX distribution with `latexmk` and your chosen engine (`pdflatex` by default, `xelatex` or `lualatex`) on VS Code's `PATH`:
+
+- **macOS:** [MacTeX](https://tug.org/mactex/) (full), or `brew install --cask mactex-no-gui`
+- **Windows:** [MiKTeX](https://miktex.org) (install the `latexmk` package) or [TeX Live](https://tug.org/texlive/) — see [WPaper setup on Windows](docs/wpaper-windows-setup.md)
+- **Linux:** TeX Live from your distribution, e.g. `sudo apt install texlive-latex-extra latexmk`
+
+When `lualatex` is installed, WPaper uses it for an exact map from every printed symbol back to its source line; otherwise it falls back to SyncTeX. Restart VS Code after installing TeX.
+
+The compiled view checks for `latexmk`, the selected TeX engine, and missing document packages before reporting a build failure.
 
 ### A proper notebook in VS Code
 
@@ -165,21 +180,29 @@ on disk is left exactly as it was.
 
 ### AI that actually knows your notebook
 
-Wolfbook exposes your live kernel and notebook contents to AI agents via purpose-built tools. GitHub Copilot in Agent mode can, for example:
+Wolfbook gives AI agents direct access to your live kernel and notebooks through a built-in **MCP (Model Context Protocol) server**. An agent can:
 
-- Read all cells and their outputs (`#wolfbookContext`)
-- Evaluate any expression in the live kernel (`#wolfbookEval`)
-- Look up Wolfram documentation without a browser (`#wolfbookLookup`)
-- Insert, edit, and delete cells (`#wolfbookInsert`, `#wolfbookEdit`, `#wolfbookDelete`)
-- Drive the step-through debugger autonomously (`#wolfbookDebug`)
-- Query the kernel state — what symbols are defined, what are their values (`#wolfbookState`)
+- read every cell and output of your notebook
+- evaluate Wolfram Language in the running kernel and check its own results
+- insert, edit, run and delete cells
+- look up Wolfram documentation
+- drive the step-through debugger
+- edit papers in WPaper and build `.wslide` slide decks
 
-The same tools are exposed as an **MCP (Model Context Protocol) server**, so any MCP-compatible agent can use your notebooks and live kernel too.
+We recommend the **Claude Code** or **Codex** extension for VS Code. Both work in a panel next to your notebook, and Wolfbook connects them automatically. Setup takes about five minutes: see [AI agents: Claude Code and Codex](#ai-agents-claude-code-and-codex) below.
+
+<p align="center">
+  <img src="docs/quickstart/05-claude-code.png" alt="Claude Code in VS Code adding and running cells in a Wolfbook notebook" width="760"/>
+  <br/>
+  <em>Claude Code adds a plot and a root-finding cell to the notebook, runs them in the live kernel and reports the result.</em>
+</p>
+
+Other MCP clients work too:
 
 | Agent | Setup |
 |---|---|
-| GitHub Copilot (Agent mode) | built in |
-| Claude Code, Claude Desktop, OpenAI Codex | automatic when Wolfbook starts |
+| **Claude Code**, **Codex** (VS Code extensions or terminal) | automatic when Wolfbook starts |
+| Claude Desktop | automatic when Wolfbook starts |
 | Cline, Roo Code, Antigravity | automatic when they are installed |
 | **Claude Science** | Wolfbook offers to connect; you confirm once and restart Claude Science |
 | any other MCP client | the Wolfbook stdio bridge, or `http://127.0.0.1:27182/mcp` |
@@ -217,25 +240,80 @@ Oberon is **opt-in and off until you configure an API key**; with none set, it n
 
 ## Quick Start
 
+New to VS Code? The illustrated **[Wolfbook Quick Start (PDF)](docs/Wolfbook-Quick-Start.pdf)** walks through every step with screenshots, then gives a short tutorial with example prompts for notebooks, WPaper and slides.
+
 **1. Install prerequisites**
 
-- [VS Code](https://code.visualstudio.com) 1.95+ / [Antigravity](https://antigravity.ai)
+- [VS Code](https://code.visualstudio.com) 1.95+ (or [Antigravity](https://antigravity.ai))
 - [Wolfram Engine](https://wolfram.com/engine) (free, non-commercial) or Mathematica
 - Activate Wolfram Engine at [wolfram.com/engine/free-license](https://wolfram.com/engine/free-license) — requires internet once
+- [Node.js](https://nodejs.org) (the LTS version) — needed for connecting AI agents
+- *For WPaper only:* a TeX distribution with `latexmk` — see [WPaper requirements](#wpaper-requirements)
 
 **2. Install Wolfbook**
 
-Wolfbook can be found in the VS Code Marketplace or on GitHub in the [Releases](https://github.com/vanbaalon/wolfbook/releases) section. Or on Antigravity's marketplace or [open-vsx.org](https://open-vsx.org/).
+Open the Extensions panel (`⇧⌘X` / `Ctrl+Shift+X`), search for **Wolfbook** and click **Install**. Wolfbook is also on [open-vsx.org](https://open-vsx.org/), Antigravity's marketplace, and in the GitHub [Releases](https://github.com/vanbaalon/wolfbook/releases).
 
 **3. Create your first notebook**
 
 Create an empty file `test.wb` and open it in VS Code. The kernel starts automatically on first cell execution.
 
-**4. Enable AI (optional but recommended)**
+**4. Connect an AI agent (optional but recommended)**
 
-Install GitHub Copilot from the Extensions panel (free tier available; GitHub Education gives generous limits). Open the Copilot Chat panel (`⌃⌘I`), switch to **Agent** mode, and start asking. From our experience Claude Code in Agent mode gives the best result.
+Install Claude Code or Codex as described in the next section. Wolfbook connects them for you.
 
 → Full setup guide: [Getting Started](docs/getting-started.md)
+
+---
+
+## AI agents: Claude Code and Codex
+
+You need Wolfbook installed, **Node.js** installed, and an account for the agent you choose:
+
+| Agent | VS Code extension | Account |
+|---|---|---|
+| **Claude Code** (Anthropic) | *Claude Code for VS Code*, publisher Anthropic (`anthropic.claude-code`) | a Claude Pro, Max, Team or Enterprise plan, or an Anthropic Console account (pay as you go) |
+| **Codex** (OpenAI) | *Codex – OpenAI's coding agent*, publisher OpenAI (`openai.chatgpt`) | a ChatGPT plan that includes Codex (Plus, Pro, Business, Edu or Enterprise) |
+
+You can install one or both. They share the same Wolfbook connection.
+
+**1. Install Node.js.** Wolfbook connects agents through a small Node.js program. Download the **LTS** installer from [nodejs.org](https://nodejs.org), or use a package manager: `brew install node` (macOS), `winget install OpenJS.NodeJS.LTS` (Windows). Then **quit and reopen VS Code** so it sees Node. Wolfbook warns you on startup if it cannot find Node.
+
+**2. Install the agent extension.** Open the Extensions panel (`⇧⌘X` / `Ctrl+Shift+X`), search for **Claude Code** or **Codex**, check the publisher is Anthropic or OpenAI, and click **Install**.
+
+<p align="center">
+  <img src="docs/quickstart/02-install-claude-code.png" alt="Installing Claude Code for VS Code from the Extensions panel" width="640"/>
+</p>
+
+**3. Sign in.** Click the Claude (✳) or Codex icon in the editor title bar, top right, to open the agent panel, and follow its sign-in prompt. Claude Code signs in with your Claude account; Codex with your ChatGPT account.
+
+**4. Check the connection.** When Wolfbook starts it registers itself with both agents: `~/.claude.json` for Claude Code and `~/.codex/config.toml` for Codex. It also installs a `wolfbook` skill that tells the agent how to use its tools. Nothing to configure. To check, open a notebook and ask the agent:
+
+```text
+Which Wolfbook tools do you have? Evaluate 2+2 in the notebook kernel.
+```
+
+In a terminal, `claude mcp list` or `codex mcp list` should show `wolfbook`.
+
+If the agent does not see Wolfbook, open the Command Palette (`⇧⌘P` / `Ctrl+Shift+P`), run **Wolfbook: Configure Claude and Codex Agents**, and then start a new agent conversation. If it still fails, check that `node --version` works in a terminal and restart VS Code.
+
+<p align="center">
+  <img src="docs/quickstart/11-configure-agents.png" alt="The Wolfbook: Configure Claude and Codex Agents command in the Command Palette" width="640"/>
+</p>
+
+**5. Ask.** Keep the notebook open and type a request in the agent panel, for example:
+
+```text
+Add a cell that plots BesselJ[n, x] for n = 0, 1, 2 with a legend, run it,
+and find the first positive zero of BesselJ[0, x] numerically.
+```
+
+```text
+Read my notebook and explain what each section computes.
+Check the numbers in the last output against a series expansion.
+```
+
+The same connection works for the **Claude Code** and **Codex** command-line tools in a terminal. More prompts, including WPaper and slides, are in the [Quick Start PDF](docs/Wolfbook-Quick-Start.pdf) and [Best Practices](docs/best-practices.md).
 
 ---
 
@@ -256,13 +334,12 @@ Both addons are prebuilt for macOS (Apple Silicon and Intel) and Windows and bun
 | Document | What it covers |
 |---|---|
 | [Getting Started](docs/getting-started.md) | Installation, first notebook, setup checklist |
-| [AI Integration](docs/ai-integration.md) | GitHub Copilot agent tools — full reference |
+| [Quick Start (PDF)](docs/Wolfbook-Quick-Start.pdf) | Illustrated setup and tutorial: notebooks, Claude Code / Codex, WPaper, slides |
 | [MCP & Agent Tools](docs/mcp-and-agent-tools.md) | Using Wolfbook with Claude Code, Codex, Claude Science, and other MCP clients |
-| [WPaper and Overleaf](docs/wpaper-overleaf.md) | Overleaf Git setup, detection, tokens, merging and conflicts |
+| [WPaper and Overleaf](docs/wpaper-overleaf.md) | Keeping a paper in step with Overleaf: Git auto-sync (tokens, merging, conflicts) and real-time editing (linking a paper, the session cookie, risks) |
 | [Oberon Agent (experimental)](docs/oberon-agent.md) | The autonomous research agent: setup, providers, budgets, SkilXiv, privacy |
 | [Features](docs/features.md) | Notebook interface, kernel control, editor, debugger, Dynamic |
 | [Presentations (.wslide)](docs/presentations.md) | The AI-native slide format |
-| [DeepSeek + Copilot](docs/deepseek-copilot.md) | Using DeepSeek models with VS Code Copilot |
 | [Best Practices](docs/best-practices.md) | How to work effectively with the agent |
 | [Building from Source](docs/building.md) | Compile the native addons, package the extension |
 | [WB Functions](docs/wb-functions.md) | Custom WL functions: WBVersion, WBDirectory, WBPrint, WBInclude, WBExport, WBPrompt |

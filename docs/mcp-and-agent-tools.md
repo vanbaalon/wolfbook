@@ -5,7 +5,7 @@
 > **Also new:** Wolfbook now ships an experimental in-extension research agent — see [Oberon](oberon-agent.md).
 
 
-Wolfbook exposes its kernel and notebook tools as an **MCP (Model Context Protocol) server**. This means any MCP-compatible AI agent can read your notebook, evaluate expressions, and manipulate cells — not just GitHub Copilot.
+Wolfbook exposes its kernel and notebook tools as an **MCP (Model Context Protocol) server**. This means any MCP-compatible AI agent — Claude Code, Codex, Claude Science and others — can read your notebook, evaluate expressions, and manipulate cells.
 
 ---
 
@@ -13,7 +13,7 @@ Wolfbook exposes its kernel and notebook tools as an **MCP (Model Context Protoc
 
 MCP (Model Context Protocol) is an open standard for connecting AI agents to external tools and data sources. An MCP server exposes a set of named tools; any MCP client (Claude Code, OpenAI Codex, Cursor, and others) can discover and call those tools.
 
-Wolfbook acts as an MCP server, exposing the same tools that GitHub Copilot uses in Agent mode. This means:
+Wolfbook acts as an MCP server. This means:
 
 - **Claude Code** (Anthropic's terminal agent) can evaluate Wolfram Language, read your notebook, and insert cells
 - **OpenAI Codex** and other compatible agents can do the same
@@ -23,7 +23,7 @@ Wolfbook acts as an MCP server, exposing the same tools that GitHub Copilot uses
 
 ## Available MCP Tools
 
-### Notebook tools (also used by GitHub Copilot)
+### Notebook tools
 
 | Tool | What it does |
 |---|---|
@@ -238,9 +238,7 @@ Notes:
 
 ---
 
-GitHub Copilot in Agent mode uses the same MCP tools. See [AI Integration](ai-integration.md) for the full Copilot-specific guide.
-
-The key difference: Copilot is accessed via the VS Code chat panel (`⌃⌘I`), while Claude Code and Codex are accessed via the terminal or their own interfaces. Every MCP client also receives a server-level instruction telling it to prefer Wolfbook over launching a separate `wolframscript` or `WolframKernel` process for ordinary VS Code work.
+Every MCP client also receives a server-level instruction telling it to prefer Wolfbook over launching a separate `wolframscript` or `WolframKernel` process for ordinary VS Code work.
 
 ---
 

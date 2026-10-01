@@ -1,0 +1,332 @@
+% Wolfbook Quick Start — build from this folder:
+%   latexmk -pdf -outdir=build Wolfbook-Quick-Start.tex && cp build/Wolfbook-Quick-Start.pdf ../
+% Screenshots in this folder are real captures of Wolfbook 2.10.1 (September 2026).
+\documentclass[11pt,a4paper]{article}
+\usepackage[a4paper,margin=2cm,top=2.2cm,bottom=2.2cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[scaled=0.95]{helvet}
+\renewcommand{\familydefault}{\sfdefault}
+\usepackage[varqu]{inconsolata}
+\usepackage{graphicx}
+\usepackage[dvipsnames,table]{xcolor}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage[most]{tcolorbox}
+\usepackage[hidelinks]{hyperref}
+\usepackage{microtype}
+
+\graphicspath{{./}}
+
+\definecolor{wbblue}{HTML}{1F5FAD}
+\definecolor{wbred}{HTML}{E0322B}
+\definecolor{wbgrey}{HTML}{5F6368}
+\definecolor{promptbg}{HTML}{F4F6FA}
+\definecolor{tipbg}{HTML}{FFF7E6}
+\definecolor{tipframe}{HTML}{E8A33D}
+
+\hypersetup{colorlinks=true,linkcolor=wbblue,urlcolor=wbblue}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.55em}
+\setlist{itemsep=0.2em,topsep=0.3em}
+
+\titleformat{\section}{\Large\bfseries\color{wbblue}}{\thesection}{0.6em}{}
+\titleformat{\subsection}{\large\bfseries}{\thesubsection}{0.6em}{}
+\titlespacing*{\section}{0pt}{1.2em}{0.5em}
+\titlespacing*{\subsection}{0pt}{0.9em}{0.3em}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\color{wbgrey}Wolfbook Quick Start}
+\fancyhead[R]{\small\color{wbgrey}\thepage}
+\renewcommand{\headrulewidth}{0.3pt}
+
+% A prompt the reader can type into Claude Code or Codex.
+\newtcolorbox{prompt}{enhanced,breakable,colback=promptbg,colframe=wbblue!55,
+  boxrule=0.5pt,arc=2pt,left=8pt,right=8pt,top=5pt,bottom=5pt,
+  fontupper=\ttfamily\small,before skip=0.5em,after skip=0.6em}
+% A tip or warning.
+\newtcolorbox{tip}[1][Tip]{enhanced,breakable,colback=tipbg,colframe=tipframe,
+  boxrule=0.5pt,arc=2pt,left=8pt,right=8pt,top=5pt,bottom=5pt,
+  title={\small\bfseries #1},coltitle=black,colbacktitle=tipframe!35,
+  before skip=0.6em,after skip=0.6em}
+
+\newcommand{\shot}[3][\linewidth]{%
+  \begin{center}
+  \includegraphics[width=#1]{#2}\\[0.3em]
+  \parbox{0.92\linewidth}{\centering\small\color{wbgrey}#3}
+  \end{center}}
+\newcommand{\kbd}[1]{\tcbox[on line,boxsep=0pt,left=3pt,right=3pt,top=1.5pt,bottom=1.5pt,
+  colback=white,colframe=black!35,boxrule=0.4pt,arc=2pt]{\footnotesize\ttfamily #1}}
+\newcommand{\cmd}[1]{\textbf{#1}}
+
+\begin{document}
+
+% ------------------------------------------------------------------ title
+\thispagestyle{empty}
+\begin{center}
+\vspace*{1.2cm}
+\includegraphics[width=3.2cm]{wolfbook_logo_transparent.png}\\[0.8em]
+{\fontsize{30}{36}\selectfont\bfseries Wolfbook Quick Start}\\[0.6em]
+{\Large\color{wbgrey} Mathematica-style notebooks, live LaTeX papers and\\ AI agents in VS Code}\\[1.4em]
+{\small\color{wbgrey} Version 2.10 \quad·\quad \url{https://github.com/vanbaalon/wolfbook}}
+\end{center}
+\vspace{1.4em}
+
+This guide takes you from a fresh computer to a working setup in about twenty minutes. Every screenshot comes from a real VS Code session. You will:
+
+\begin{enumerate}[leftmargin=1.6em]
+  \item install Wolfbook and run your first notebook;
+  \item connect an AI agent, \textbf{Claude Code} or \textbf{Codex}, to the notebook's live Wolfram kernel;
+  \item work through a short tutorial: calculations with the agent, a paper in \textbf{WPaper}, and a slide deck.
+\end{enumerate}
+
+\section*{What you need}
+\renewcommand{\arraystretch}{1.35}
+\begin{tabularx}{\linewidth}{@{}>{\bfseries}p{3.6cm}X>{\small}p{3.2cm}@{}}
+\toprule
+Item & Where to get it & Needed for \\
+\midrule
+VS Code 1.95+ & \url{https://code.visualstudio.com} & everything \\
+Wolfram Engine\newline or Mathematica & Wolfram Engine is free for personal use: \url{https://wolfram.com/engine}. Activate it once at \url{https://wolfram.com/engine/free-license} (needs internet). & running notebooks \\
+Node.js (LTS) & \url{https://nodejs.org}, or \texttt{brew install node} (macOS), \texttt{winget install OpenJS.NodeJS.LTS} (Windows) & connecting AI agents \\
+An agent account & \textbf{Claude Code}: a Claude Pro, Max, Team or Enterprise plan, or an Anthropic Console account. \textbf{Codex}: a ChatGPT Plus, Pro, Business, Edu or Enterprise plan. & AI agents \\
+A TeX distribution & MacTeX (macOS), MiKTeX or TeX Live (Windows), TeX Live (Linux). Must include \texttt{latexmk}. & WPaper only \\
+\bottomrule
+\end{tabularx}
+
+\begin{tip}[After installing Node.js or TeX]
+Quit VS Code completely and open it again, so it picks up the new programs.
+\end{tip}
+
+\newpage
+% ------------------------------------------------------------------ 1
+\section{Install Wolfbook}
+
+\begin{enumerate}[leftmargin=1.6em]
+  \item Open VS Code and click the \textbf{Extensions} icon in the left bar, or press \kbd{Cmd+Shift+X} (macOS) / \kbd{Ctrl+Shift+X} (Windows, Linux).
+  \item Type \texttt{wolfbook} in the search box.
+  \item Click \textbf{Install} on \emph{Wolfbook — Mathematica \& Wolfram Language Notebooks}.
+\end{enumerate}
+
+\shot[0.8\linewidth]{01-install-wolfbook.png}{Search for \texttt{wolfbook} in the Extensions panel and click Install.}
+
+Wolfbook finds your Wolfram Engine or Mathematica automatically. If it can't, open a notebook, click \cmd{Settings} in the notebook toolbar and choose the kernel path.
+
+% ------------------------------------------------------------------ 2
+\section{Your first notebook}
+
+\begin{enumerate}[leftmargin=1.6em]
+  \item Choose \cmd{File $\to$ Open Folder…} and open a folder for your work.
+  \item Create a new file called \texttt{tutorial.wb} (\cmd{File $\to$ New File…}) and open it. You see an empty notebook with \cmd{+ Code} and \cmd{+ Markdown} buttons.
+  \item Click \cmd{+ Code}, type a line of Wolfram Language and press \kbd{Shift+Enter}. The kernel starts on the first evaluation, which takes a few seconds.
+\end{enumerate}
+
+Try these, one per cell:
+
+\begin{prompt}
+Integrate[Sin[x]\^{}2, \{x, 0, Pi\}]\\
+Plot[\{BesselJ[0, x], BesselJ[1, x]\}, \{x, 0, 15\}]\\
+Series[Exp[x] Sin[x], \{x, 0, 6\}]\\
+Solve[x\^{}2 - 3 x + 1 == 0, x]
+\end{prompt}
+
+\shot[0.6\linewidth]{04-first-notebook.png}{Results are typeset as mathematics and plots appear inline. The small buttons on the right of each output (\texttt{WL}, \texttt{SVG}, \texttt{LaTeX}, \dots) switch its format.}
+
+\subsection*{Keys worth knowing}
+\begin{tabularx}{\linewidth}{@{}X l l@{}}
+\toprule
+Action & macOS & Windows / Linux \\
+\midrule
+Evaluate cell and move on & \kbd{Shift+Return} & \kbd{Shift+Enter} \\
+Abort a running evaluation & \kbd{Cmd+.} & \kbd{Ctrl+.} \\
+Restart the kernel & \kbd{Cmd+Shift+R} & \kbd{Ctrl+Shift+R} \\
+Evaluate the selected text & \kbd{Cmd+Shift+E} & \kbd{Ctrl+Shift+E} \\
+Command Palette (every command) & \kbd{Cmd+Shift+P} & \kbd{Ctrl+Shift+P} \\
+Greek letters & \multicolumn{2}{l}{type \texttt{\textbackslash[Alpha]}, or \kbd{Esc} \texttt{a} \kbd{Esc}} \\
+\bottomrule
+\end{tabularx}
+
+\begin{tip}[Leaving a cell]
+In VS Code, \kbd{Esc} is used for symbol entry. To leave a cell, press \kbd{Down} past its last line or \kbd{Up} past its first. Outside a cell, \kbd{B} adds a cell below, \kbd{A} above, and \kbd{D} \kbd{D} deletes one.
+\end{tip}
+
+\newpage
+% ------------------------------------------------------------------ 3
+\section{Connect an AI agent}
+
+Wolfbook includes a server that lets AI agents use your notebook: read cells, run Wolfram code in the live kernel, add and edit cells, look up documentation, edit papers and build slides. The \textbf{Claude Code} and \textbf{Codex} extensions for VS Code use it with no configuration. You can install either one, or both.
+
+\subsection{Install Node.js}
+If you skipped it earlier, install Node.js now (see \emph{What you need}) and restart VS Code. Wolfbook uses Node.js to connect agents and shows a warning at startup if it can't find it.
+
+\subsection{Install the agent extension}
+In the Extensions panel, search for \texttt{Claude Code} or \texttt{Codex}. Check the publisher before you click \textbf{Install}: \textbf{Anthropic} for \emph{Claude Code for VS Code}, \textbf{OpenAI} for \emph{Codex – OpenAI's coding agent}. The search also lists third-party look-alikes.
+
+\shot[0.7\linewidth]{02-install-claude-code.png}{Claude Code for VS Code, published by Anthropic.}
+\shot[0.7\linewidth]{03-install-codex.png}{Codex – OpenAI's coding agent, published by OpenAI.}
+
+\subsection{Open the agent and sign in}
+Both extensions add an icon to the top-right of the editor: the Claude asterisk for Claude Code and the OpenAI knot for Codex. Click it to open the agent panel, then follow its sign-in prompt. Claude Code uses your Claude account and Codex uses your ChatGPT account.
+
+\subsection{Check the connection}
+When Wolfbook starts, it registers itself with both agents and installs a \texttt{wolfbook} skill that teaches them its tools. To check it worked, open \texttt{tutorial.wb} and ask the agent:
+
+\begin{prompt}
+Which Wolfbook tools do you have? Evaluate 2+2 in the notebook kernel.
+\end{prompt}
+
+If the agent says it has no Wolfbook tools:
+\begin{enumerate}[leftmargin=1.6em]
+  \item Open the Command Palette (\kbd{Cmd+Shift+P} / \kbd{Ctrl+Shift+P}), type \texttt{Wolfbook: Configure} and run \cmd{Wolfbook: Configure Claude and Codex Agents}.
+  \item Start a \emph{new} conversation in the agent panel.
+  \item Still nothing? Check that \texttt{node -{}-version} works in a terminal, then quit and reopen VS Code.
+\end{enumerate}
+
+\shot[0.75\linewidth]{11-configure-agents.png}{Fallback: re-register Wolfbook with Claude Code and Codex.}
+
+\begin{tip}[Who can use your kernel]
+Only programs holding your personal Wolfbook token can run code, and your agents receive it automatically. The first time a new agent connects, Wolfbook shows a notice with a \textbf{Block} button. \cmd{Wolfbook: Manage Agent Access} changes this later.
+\end{tip}
+
+\newpage
+% ------------------------------------------------------------------ 4
+\section{Tutorial: calculating with an agent}
+
+Keep the notebook open and put the agent panel beside it. Describe what you want in plain language. The agent reads the notebook, writes cells, runs them in \emph{your} kernel, and checks the output before it answers.
+
+\begin{prompt}
+Add a cell to tutorial.wb that plots BesselJ[n, x] for n = 0, 1, 2 with a legend, run it, and then find the first positive zero of BesselJ[0, x] numerically.
+\end{prompt}
+
+\shot{05-claude-code.png}{Claude Code read the notebook, inserted a plot cell and a \texttt{FindRoot} cell, ran both, and compared the zero with the built-in \texttt{BesselJZero}.}
+
+Codex works the same way:
+
+\begin{prompt}
+Using Wolfbook, add a cell at the end of tutorial.wb that computes N[Zeta[3], 30] and run it. Then tell me the result.
+\end{prompt}
+
+\shot[0.8\linewidth]{06-codex.png}{Codex added and ran the cell, then saved the notebook.}
+
+\subsection*{More prompts to try}
+\begin{prompt}
+Read my notebook and explain what each section computes.
+\end{prompt}
+\begin{prompt}
+The last cell is slow. Find out where the time goes and suggest a faster version. Don't change my cells; add the new version below.
+\end{prompt}
+\begin{prompt}
+Check the result of cell 3 independently: expand it as a series and compare numerically at x = 0.3.
+\end{prompt}
+\begin{prompt}
+This cell produces a message. Look up the function in the documentation and fix the call.
+\end{prompt}
+
+\begin{tip}[Getting good results]
+\begin{itemize}[leftmargin=1.2em]
+  \item Name the notebook and the cell you mean (\emph{``cell 5 of tutorial.wb''}).
+  \item Ask the agent to \emph{check} results, for example numerically, with a limit, or against a known value. It can run the check in the kernel.
+  \item Ask it to add new cells instead of overwriting yours while you explore.
+  \item Press \kbd{Cmd+.} / \kbd{Ctrl+.} to abort a runaway evaluation. The agent notices.
+\end{itemize}
+\end{tip}
+
+\newpage
+% ------------------------------------------------------------------ 5
+\section{Tutorial: writing a paper with WPaper}
+
+WPaper shows the compiled paper next to your \texttt{.tex} source and keeps the two in step. Click a word on the page to jump to its source, and move through the source to follow it on the page. AI edits appear as changes you can keep or undo one by one.
+
+\subsection{Requirements}
+The outline, diagnostics and agent tools work without TeX. The live page needs a TeX distribution with \texttt{latexmk}:
+\begin{itemize}[leftmargin=1.6em]
+  \item \textbf{macOS:} MacTeX, \url{https://tug.org/mactex/} (or \texttt{brew install --cask mactex-no-gui});
+  \item \textbf{Windows:} MiKTeX, \url{https://miktex.org} (then install the \texttt{latexmk} package in MiKTeX Console), or TeX Live;
+  \item \textbf{Linux:} TeX Live from your distribution, e.g.\ \texttt{sudo apt install texlive-latex-extra latexmk}.
+\end{itemize}
+If \texttt{lualatex} is installed, WPaper uses it to map every printed symbol exactly to its source; otherwise it uses SyncTeX. Restart VS Code after installing TeX.
+
+\subsection{Open WPaper}
+Open any \texttt{.tex} file and click the \textbf{wolf icon} in the editor title bar, or press \kbd{Ctrl+Option+W} / \kbd{Ctrl+Alt+W}. The first time, WPaper offers a guided tour; you can run it again later with \cmd{WPaper: Show Me Around}.
+
+\shot{07-wpaper.png}{The source on the left, the live compiled page on the right. The page rebuilds from the unsaved text whenever you pause typing.}
+
+\subsection{Let the agent edit, then review}
+\begin{prompt}
+In paper.tex, add a short subsection "Zero-point energy" at the end of the Spectrum section: one sentence and one displayed equation for E\_0, referencing eq:E. Keep it brief.
+\end{prompt}
+
+\shot{08-wpaper-review.png}{WPaper lists the agent's change and highlights it on the compiled page. Click \textbf{Keep} or \textbf{Undo} for each change, or \textbf{Keep all}.}
+
+More prompts:
+\begin{prompt}
+Check every \textbackslash ref and \textbackslash eqref in paper.tex and list any that point to a missing label.
+\end{prompt}
+\begin{prompt}
+Verify equation (2) with Wolfbook: derive the spectrum from the Hamiltonian in the kernel and tell me if the paper is right.
+\end{prompt}
+\begin{prompt}
+Tighten the introduction to half its length without changing any equation.
+\end{prompt}
+
+\newpage
+% ------------------------------------------------------------------ 6
+\section{Tutorial: slides from your notebook}
+
+A \texttt{.wslide} file is a slide deck that opens in Wolfbook's slide editor. Slides can hold LaTeX and live Wolfram blocks. Agents build and edit decks with Wolfbook's slide tools.
+
+\begin{enumerate}[leftmargin=1.6em]
+  \item Create an empty file called \texttt{talk.wslide} and open it. It opens as an empty deck in the slide editor.
+  \item Ask the agent to fill it:
+\end{enumerate}
+
+\begin{prompt}
+talk.wslide is open. Add three slides summarising tutorial.wb: a title slide, a slide with the Bessel function plot, and a slide giving the first zero of J0 as an equation. Then save it.
+\end{prompt}
+
+\begin{tip}[Create the file first]
+The agent adds slides to a deck that is already open. It can't create the \texttt{.wslide} file itself, so create and open it first.
+\end{tip}
+
+\shot[0.85\linewidth]{09-wslide-claude.png}{Claude Code built the deck with the slide tools. The plot is a live Wolfram block, so it re-renders from the kernel.}
+
+\shot[0.85\linewidth]{10-wslide-editor.png}{The slide editor. Use \textbf{Present} to show the deck, and \textbf{Export HTML} or \textbf{Export PDF} to share it. Select a block and press \kbd{Cmd+K} to ask for a change in place.}
+
+More prompts:
+\begin{prompt}
+Make the title slide use a dark background and add my name and institution.
+\end{prompt}
+\begin{prompt}
+Split slide 3 into two slides and add speaker notes to each.
+\end{prompt}
+
+% ------------------------------------------------------------------ 7
+\section{If something goes wrong}
+
+\begin{tabularx}{\linewidth}{@{}>{\raggedright\arraybackslash}p{4.6cm}X@{}}
+\toprule
+Problem & What to do \\
+\midrule
+The kernel does not start & Activate Wolfram Engine once (\url{https://wolfram.com/engine/free-license}). In the notebook toolbar open \cmd{Settings} and choose the kernel path. The \emph{Wolfbook Kernel Diagnostics} output panel names the cause. \\
+The agent has no Wolfbook tools & Run \cmd{Wolfbook: Configure Claude and Codex Agents}, then start a new agent conversation. Check that \texttt{node -{}-version} works in a terminal. \\
+An evaluation hangs & Press \kbd{Cmd+.} / \kbd{Ctrl+.} to abort. \cmd{Restart} in the toolbar starts a clean kernel. \\
+WPaper shows no page & Install TeX with \texttt{latexmk} and restart VS Code. The \emph{WPaper} output panel lists anything missing. \\
+\bottomrule
+\end{tabularx}
+
+\vspace{1em}
+\textbf{More help:} \href{https://github.com/vanbaalon/wolfbook/blob/main/docs/getting-started.md}{Getting Started} ·
+\href{https://github.com/vanbaalon/wolfbook/blob/main/docs/mcp-and-agent-tools.md}{MCP \& Agent Tools} ·
+\href{https://github.com/vanbaalon/wolfbook/blob/main/docs/best-practices.md}{Best Practices} ·
+\href{https://github.com/vanbaalon/wolfbook/blob/main/docs/presentations.md}{Presentations}.\\
+Report problems at \url{https://github.com/vanbaalon/wolfbook/issues}.
+
+\vfill
+{\footnotesize\color{wbgrey} Wolfbook is an independent open-source project (Apache 2.0), not affiliated with or endorsed by Wolfram Research. ``Wolfram'', ``Mathematica'' and ``Wolfram Language'' are trademarks of Wolfram Research Inc. Claude Code is a product of Anthropic; Codex is a product of OpenAI.}
+
+\end{document}
