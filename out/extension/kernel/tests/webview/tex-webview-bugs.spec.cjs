@@ -36,6 +36,10 @@ gamma & delta \\ \hline
   E = \frac{m c^2}{\sqrt{1 - v^2}}
 \end{equation}
 Seen again in \eqref{eq:x}, here.
+Compare \cite{cc}.
+\begin{thebibliography}{9}
+\bibitem{cc} A. Author, \emph{A title}, \href{https://arxiv.org/abs/2001.07259}{2001.07259}.
+\end{thebibliography}
 \end{document}
 `;
 
@@ -311,6 +315,87 @@ const tests = [
         },
     },
     {
+        id: 'fragment-paint',
+        name: 'a paragraph fragment is painted over the page shown: the old line cleared, the fragment drawn, the column below moved',
+        async run(t) {
+            // The fixture line that holds "velocity" plays the typed paragraph;
+            // the fragment is one black rule where the line's right half was.
+            const w = t.word('velocity');
+            const sp = bp => Math.round((bp * 72.27 / 72 - 72.27) * 65536);
+            const top = w.y - 2, bottom = w.y1 + 2;
+            const shift = 14;                                   // bp: the paragraph "grew" by a line
+            const placement = { page: w.page, identity: null, dx: sp(w.x + 120) - 0, dy: sp(bottom - 3), lines: 2, old_lines: 1,
+                clip: [sp(0), sp(0), sp(600), sp(780)], clear: [sp(0), sp(top), sp(600), sp(bottom)],
+                below: [sp(0), sp(bottom), sp(600), sp(780)], shift: Math.round(shift * 72.27 / 72 * 65536) };
+            // A rule 60 bp wide and 6 bp tall, its bottom edge at the fragment's origin line.
+            const txdl = { fonts: [], ops: [{ op: 'rule', x: 0, y: 0, w: Math.round(60 * 72.27 / 72 * 65536), h: Math.round(6 * 72.27 / 72 * 65536) }] };
+            const k = await t.pxPerBp(w.page);
+            const at = async (xBp, yBp, wBp, hBp) => { const c = await t.toClient(w.page, xBp, yBp); return { x: c.x, y: c.y, width: wBp * k, height: hBp * k }; };
+            const dark = px => { let n = 0; for (let i = 0; i < px.data.length; i += 4) if (0.299 * px.data[i] + 0.587 * px.data[i + 1] + 0.114 * px.data[i + 2] < 90) n++; return n; };
+            const wordBox = await at(w.x, w.y, w.w, w.y1 - w.y);
+            const belowBox = await at(40, bottom + 1, 500, 12);
+            const belowBefore = dark(await t.pixels(belowBox));
+            t.assert(dark(await t.pixels(wordBox)) > 20, 'the word is inked before the fragment');
+            await t.post({ type: 'txdlFragment', generation: 99, page: w.page, index: 0, placement, txdl, fonts: null });
+            await t.waitFor(() => !!document.querySelector('canvas.txdl-fragment'), null, { what: 'the fragment canvas' });
+            await t.sleep(100);
+            t.assert(dark(await t.pixels(wordBox)) === 0, 'the old line is cleared');
+            const rule = await at(w.x + 120 + 5, bottom - 3 - 5, 50, 4);
+            t.assert(dark(await t.pixels(rule)) > 0.8 * rule.width * rule.height, 'the fragment is drawn where it was placed');
+            // What was below the line is now one line (14 bp) lower.
+            const moved = dark(await t.pixels(await at(40, bottom + 1 + shift, 500, 12)));
+            t.assert(Math.abs(moved - belowBefore) <= Math.max(10, 0.1 * belowBefore), `the band below moved down (${belowBefore} dark px before, ${moved} after moving)`);
+            // The settled PDF replaces it (as the page itself would).
+            await t.open(100);
+            const gone = await t.eval(() => !document.querySelector('canvas.txdl-fragment'));
+            t.assert(gone, 'the fragment is gone once the PDF replaces it');
+            t.assert(dark(await t.pixels(wordBox)) > 20, 'and the page shows its own ink again');
+        },
+    },
+    {
+        id: 'adopt-in-place',
+        name: 'a rebuild of the same paper that is not live (a save, a Compile) is swapped in under the page: the page never blanks',
+        async run(t) {
+            await t.eval(() => {
+                const w = window;
+                w.__wrap = document.querySelector('#pages .page[data-page="1"]');
+                w.__blankFrames = 0;
+                w.__sampling = true;
+                const tick = () => {
+                    if (!w.__sampling) return;
+                    const c = document.querySelector('#pages .page[data-page="1"] canvas:not(.txdl-overlay)');
+                    if (!c || !(c.width > 1)) w.__blankFrames++;
+                    requestAnimationFrame(tick);
+                };
+                requestAnimationFrame(tick);
+            });
+            await t.open(2);
+            const r = await t.eval(() => {
+                window.__sampling = false;
+                return { blank: window.__blankFrames, same: window.__wrap === document.querySelector('#pages .page[data-page="1"]') };
+            });
+            t.assert(r.blank === 0, `no frame showed page 1 without a picture (${r.blank} did)`);
+            t.assert(r.same, 'the page box was kept, not rebuilt from placeholders');
+        },
+    },
+    {
+        id: 'fragment-during-open',
+        name: 'a paragraph fragment that arrives while a PDF opens is drawn once it has opened, not dropped',
+        async run(t) {
+            const w = t.word('velocity');
+            const sp = bp => Math.round((bp * 72.27 / 72 - 72.27) * 65536);
+            const top = w.y - 2, bottom = w.y1 + 2;
+            const placement = { page: w.page, identity: null, dx: sp(w.x + 120), dy: sp(bottom - 3), lines: 1, old_lines: 1,
+                clip: [sp(0), sp(0), sp(600), sp(780)], clear: [sp(0), sp(top), sp(600), sp(bottom)],
+                below: [sp(0), sp(bottom), sp(600), sp(780)], shift: 0 };
+            const txdl = { fonts: [], ops: [{ op: 'rule', x: 0, y: 0, w: Math.round(60 * 72.27 / 72 * 65536), h: Math.round(6 * 72.27 / 72 * 65536) }] };
+            await t.post({ type: 'open', base: `${t.origin}/pdfjs`, pdfBase64: t.fixture.base64, generation: 3, pages: t.fixture.pages.length });
+            await t.post({ type: 'txdlFragment', generation: 99, page: w.page, index: 0, placement, txdl, fonts: null });
+            await t.waitFor(() => window.__all.some(m => m.type === 'opened' && m.generation === 3), null, { what: 'the PDF to open' });
+            await t.waitFor(() => !!document.querySelector('canvas.txdl-fragment'), null, { what: 'the fragment, drawn after the open' });
+        },
+    },
+    {
         id: '#21',
         name: 'find hits are a translucent multiplied wash; the glyph under the current hit stays visible',
         async run(t) {
@@ -560,6 +645,132 @@ const tests = [
         },
     },
     {
+        id: 'native-bands',
+        name: 'a native selection is one band per printed line, the line\'s full height, touching the next line: not each glyph\'s own ink',
+        async run(t) {
+            // Glyph boxes of two printed lines, of different heights as the
+            // host sends them (a capital, an x-height letter, a dot above).
+            const words = t.fixture.pages[0].words;
+            const v = t.word('velocity');
+            const first = words.filter(w => Math.abs(w.y - v.y) < 1 && w.x >= v.x);
+            const nextY = Math.min(...words.filter(w => w.y > v.y + v.h * 0.8).map(w => w.y));
+            const second = words.filter(w => Math.abs(w.y - nextY) < 1).slice(0, 4);
+            t.assert(first.length >= 2 && second.length >= 2, 'two printed lines of words in the fixture');
+            const rows = [];
+            for (const [i, w] of [...first, ...second].entries()) {
+                const h = w.y1 - w.y;
+                if (i % 3 === 0) rows.push({ page: 1, x: w.x, y: w.y, w: w.x1 - w.x, h });
+                else if (i % 3 === 1) rows.push({ page: 1, x: w.x, y: w.y + h * 0.35, w: w.x1 - w.x, h: h * 0.55 });
+                else rows.push({ page: 1, x: w.x, y: w.y + h * 0.1, w: (w.x1 - w.x) / 2, h: h * 0.7 },
+                    { page: 1, x: w.x + 1, y: w.y - 1, w: 2, h: 1.5 });
+            }
+            const last = second[second.length - 1];
+            await t.post({ type: 'selection', span: { native: true, rows,
+                start: { exactEdge: { page: 1, x: v.x, y: v.y + 2, h: 4 } },
+                end: { exactEdge: { page: 1, x: last.x1, y: last.y + 2, h: 4 } }, lines: 2 }, reveal: false });
+            await t.waitFor(() => document.querySelectorAll('.selbrk').length === 2, null, { what: 'the selection' });
+            const r = await t.eval(() => ({
+                fills: [...document.querySelectorAll('.selfill')].map(e => ({ y: parseFloat(e.style.top), h: parseFloat(e.style.height) }))
+                    .sort((a, b) => a.y - b.y),
+                brk: [...document.querySelectorAll('.selbrk')].map(e => ({ y: parseFloat(e.style.top), h: parseFloat(e.style.height) })),
+            }));
+            t.assert(r.fills.length === 2, `one band per printed line (${r.fills.length} bands)`);
+            t.near(r.fills[0].y + r.fills[0].h, r.fills[1].y, 0.5, 'the first band reaches down to the second: no gap');
+            const k = await t.pxPerBp();
+            t.assert(r.fills[1].h >= (last.y1 - last.y) * k - 1, `the second band is the line's full height (${r.fills[1].h.toFixed(1)} px)`);
+            for (const b of r.brk) t.assert(r.fills.some(f => Math.abs(f.y - b.y) < 0.5 && Math.abs(f.h - b.h) < 0.5),
+                'each bracket is as tall as its line\'s band');
+        },
+    },
+    {
+        id: 'native-bands-fast',
+        name: 'a native selection of a few hundred glyphs is drawn within a frame (a drag repaints it at every step)',
+        async run(t) {
+            const words = t.fixture.pages[0].words;
+            const rows = [];
+            for (const w of words) {
+                const n = Math.max(1, w.text.length), cw = (w.x1 - w.x) / n;
+                for (let i = 0; i < n; i++) rows.push({ page: 1, x: w.x + i * cw, y: w.y, w: cw, h: w.y1 - w.y });
+            }
+            const a = words[0], b = words[words.length - 1];
+            const ms = await t.eval(async ([rows, a, b]) => {
+                const times = [];
+                for (let k = 0; k < 8; k++) {
+                    const cut = rows.slice(0, Math.floor(rows.length * (k + 3) / 10));
+                    const last = cut[cut.length - 1];
+                    const before = document.querySelector('.selbrk.end')?.dataset.selPaint || '';
+                    const t0 = performance.now();
+                    window.postMessage({ type: 'selection', reveal: false, span: { native: true, rows: cut,
+                        start: { exactEdge: { page: 1, x: a.x, y: a.y, h: a.y1 - a.y } },
+                        end: { exactEdge: { page: 1, x: last.x + last.w, y: last.y, h: last.h } }, lines: 3 } }, '*');
+                    await new Promise(resolve => {
+                        const check = () => {
+                            const end = document.querySelector('.selbrk.end');
+                            const ends = document.querySelectorAll('.selbrk.end');
+                            if (ends.length === 1 && end.dataset.selPaint !== before) resolve();
+                            else setTimeout(check, 0);
+                        };
+                        check();
+                    });
+                    times.push(performance.now() - t0);
+                    await new Promise(r => requestAnimationFrame(() => r()));
+                }
+                return times;
+            }, [rows, a, b]);
+            ms.sort((x, y) => x - y);
+            const median = ms[Math.floor(ms.length / 2)];
+            console.log(`      ${rows.length} glyphs: median ${median.toFixed(1)} ms, max ${ms[ms.length - 1].toFixed(1)} ms`);
+            t.assert(median < 16, `drawn within a frame (median ${median.toFixed(1)} ms)`);
+        },
+    },
+    {
+        id: 'overleaf-button',
+        name: 'the toolbar has the Overleaf control; a click asks the extension for it',
+        async run(t) {
+            await t.clear();
+            await t.page.click('#overleaf');
+            await t.waitPosted('overleafMenu');
+            // Connected: green, and the tooltip names the project and the file there.
+            const grey = await t.eval(() => getComputedStyle(document.getElementById('overleaf')).color);
+            await t.post({ type: 'overleafState', connected: true, title: 'Connected to Overleaf in real time: “Fishnets” — main.tex' });
+            await t.sleep(50);
+            const on = await t.eval(() => { const b = document.getElementById('overleaf'); return { color: getComputedStyle(b).color, title: b.title, cls: b.className }; });
+            t.assert(/connected/.test(on.cls) && on.color !== grey, `the leaf turns green (${grey} → ${on.color})`);
+            t.assert(on.title === 'Connected to Overleaf in real time: “Fishnets” — main.tex', on.title);
+            await t.post({ type: 'overleafState', connected: false, title: 'Overleaf — how this paper stays in step with it' });
+            await t.sleep(50);
+            t.assert(await t.eval(() => !document.getElementById('overleaf').classList.contains('connected')), 'and back when not');
+        },
+    },
+    {
+        id: 'toolbar-fits',
+        name: 'the toolbar never squeezes its controls into each other: it drops words first, measured, at any width',
+        async run(t) {
+            await proOn(t);
+            const size = t.page.viewportSize();
+            const report = [];
+            try {
+                for (const w of [1300, 1000, 900, 800, 700, 600, 520, 380]) {
+                    await t.page.setViewportSize({ width: w, height: size.height });
+                    await t.sleep(120);
+                    const r = await t.eval(() => {
+                        const head = document.querySelector('header');
+                        const shown = [...head.children].filter(c => c.id !== 'hdrgap' && c.getClientRects().length && getComputedStyle(c).display !== 'none');
+                        const boxes = shown.map(c => ({ id: c.id || c.className, r: c.getBoundingClientRect(), squeezed: c.scrollWidth > c.clientWidth + 1 }));
+                        const overlaps = [];
+                        for (let i = 1; i < boxes.length; i++) if (Math.abs(boxes[i].r.top - boxes[i - 1].r.top) < 4 && boxes[i].r.left < boxes[i - 1].r.right - 1) overlaps.push(`${boxes[i - 1].id}/${boxes[i].id}`);
+                        return { cls: head.className, overlaps, squeezed: boxes.filter(b => b.squeezed).map(b => b.id),
+                            cut: head.scrollWidth > head.clientWidth + 1 };
+                    });
+                    report.push(`${w}: ${r.cls || 'wide'}`);
+                    t.assert(!r.overlaps.length && !r.squeezed.length && !r.cut,
+                        `at ${w}px (${r.cls || 'wide'}): overlapping ${r.overlaps.join(', ') || '-'}; squeezed ${r.squeezed.join(', ') || '-'}; cut ${r.cut}`);
+                }
+            } finally { await t.page.setViewportSize(size); await t.sleep(80); }
+            t.assert(/wide/.test(report[0]) && /wrap/.test(report.at(-1)), report.join(' · '));
+        },
+    },
+    {
         id: 'pro-switch',
         name: 'clicking the Pro badge posts proToggle; the disabled state greys it; right-click shows the panel',
         async run(t) {
@@ -572,11 +783,11 @@ const tests = [
             await t.sleep(100);
             const s = await t.eval(() => { const b = document.getElementById('probadge'); const cs = getComputedStyle(b);
                 return { filter: cs.filter, opacity: Number(cs.opacity), title: b.title, shown: !b.hidden,
-                    marks: document.body.classList.contains('pro-live-marks'), tikz: document.getElementById('tikztool').hidden }; });
+                    tikz: document.getElementById('tikztool').hidden }; });
             t.assert(s.shown, 'the badge stays so it can be switched back on');
             t.assert(/grayscale\(1\)/.test(s.filter) && s.opacity < 0.7, `switched off it is grey (${s.filter}, opacity ${s.opacity})`);
             t.assert(/Click to switch it on/.test(s.title), `its tooltip says how to switch it on (${s.title})`);
-            t.assert(!s.marks && s.tikz, 'Pro-only page marks and the TikZ button are gone');
+            t.assert(s.tikz, 'the Pro-only TikZ button is gone');
             await t.clear();
             await t.page.click('#probadge');
             await t.waitPosted('proToggle');
@@ -758,6 +969,128 @@ tests.push({
         t.near(await cardTop(), top0, 2, 'back under the block');
         // The textarea kept focus through both moves.
         t.assert(await t.eval(() => document.activeElement?.closest?.('.editcard') != null), 'the card keeps focus');
+    },
+});
+
+tests.push({
+    id: 'card-comments-remembered',
+    name: 'with the comments pane remembered open, the next right-click still opens the card (it used to recurse until the stack ran out)',
+    async run(t) {
+        await t.eval(() => { localStorage.setItem('wpaper.card.comments', JSON.stringify({ open: true, width: 280 })); });
+        const rows = paraRows(t);
+        await t.post({ type: 'comments', generation: 1, items: [
+            { id: 'c1', cellId: 'x1', file: '/p/fx.tex', line: 8, endLine: 8, text: 'Added from the card', author: { name: 'Ada' },
+                createdAt: new Date().toISOString(), rects: rows, unplaced: false }] });
+        await openParagraphCard(t, { path: '/p/fx.tex' });
+        if (!(await t.eval(() => document.getElementById('commentsbutton').getAttribute('aria-pressed') === 'true')))
+            await t.page.click('#commentsbutton');
+        await t.waitFor(() => document.querySelectorAll('.comment-marker').length > 0, null, { what: 'the comment marked beside its paragraph' });
+        const r = await t.eval(() => ({ card: !!document.querySelector('.editcard'), cards: document.querySelectorAll('.editcard').length,
+            pane: !!document.querySelector('.editcard .ec-comments'),
+            items: [...document.querySelectorAll('.ecc-text')].map(x => x.value) }));
+        t.assert(r.card && r.cards === 1, `one card opened (${r.cards})`);
+        t.assert(r.pane, 'with its comments pane open, as remembered');
+        t.assert(JSON.stringify(r.items) === JSON.stringify(['Added from the card']), `the block's comment is in it (${JSON.stringify(r.items)})`);
+        await t.eval(() => localStorage.removeItem('wpaper.card.comments'));
+    },
+});
+
+tests.push({
+    id: 'preview-links',
+    name: 'a reference preview keeps the links printed in it: the crop reports them, and the card makes them clickable',
+    async run(t) {
+        // The line "Seen again in (1), here." holds the \eqref link.
+        const w = t.word('Seen');
+        const rect = { page: 1, x: w.x - 2, y: w.y - 2, w: 300, h: (w.y1 - w.y) + 4 };
+        await t.clear();
+        await t.post({ type: 'crop', id: 'k1', rects: [rect], scale: 2, links: true });
+        const got = await t.waitPosted('cropped');
+        t.assert(Array.isArray(got.links) && got.links.length >= 1, `the crop reports the link (${JSON.stringify(got.links)})`);
+        const l = got.links[0];
+        t.assert(l.dest && l.fx >= 0 && l.fx + l.fw <= 1.001 && l.fy >= 0 && l.fy + l.fh <= 1.001, 'placed inside the crop, as fractions of it');
+        // Hovering the reference in the text opens the preview; its link areas are anchors over the picture.
+        const r = await t.eval(() => {
+            const a = document.querySelector('.pdflink:not(.ext)');
+            if (!a) return null;
+            const b = a.getBoundingClientRect();
+            return { x: b.left + b.width / 2, y: b.top + b.height / 2 };
+        });
+        t.assert(!!r, 'the page has an internal link to hover');
+        // Hovering the citation: its preview's arXiv link is clickable where it is printed.
+        await t.clear();
+        const cite = await t.eval(() => {
+            const a = [...document.querySelectorAll('.pdflink:not(.ext)')].find(x => /^cite/.test(String(x._dest)));
+            if (!a) return null;
+            const b = a.getBoundingClientRect();
+            return { x: b.left + b.width / 2, y: b.top + b.height / 2 };
+        });
+        t.assert(!!cite, 'the citation is a link on the page');
+        await t.page.mouse.move(cite.x, cite.y);
+        await t.waitFor(() => !!document.querySelector('.destination-preview .destination-preview-link'), null, { what: 'the preview with its link' });
+        const href = await t.eval(() => document.querySelector('.destination-preview .destination-preview-link').getAttribute('href'));
+        t.assert(href === 'https://arxiv.org/abs/2001.07259', `the arXiv link is on the preview (${href})`);
+        const box = await t.eval(() => { const b = document.querySelector('.destination-preview .destination-preview-link').getBoundingClientRect(); return { x: b.left + b.width / 2, y: b.top + b.height / 2 }; });
+        await t.page.mouse.move(box.x, box.y);
+        await t.page.mouse.click(box.x, box.y);
+        const opened = await t.waitPosted('openExternal');
+        t.assert(opened.url === 'https://arxiv.org/abs/2001.07259', 'a click opens it in the browser');
+    },
+});
+
+tests.push({
+    id: 'card-comment-quote',
+    name: 'text selected in the card is quoted in the new comment when the card\'s comments are open; another selection replaces the quote, what was written stays',
+    async run(t) {
+        await t.eval(() => { try { localStorage.removeItem('wpaper.card.comments'); } catch (_) {} });
+        await openParagraphCard(t, { path: '/p/fx.tex' });
+        await t.eval(() => document.querySelector('.ec-commentsbtn').click());
+        await t.waitFor(() => !!document.querySelector('.ec-comments .ecc-new textarea'), null, { what: 'the comments pane' });
+        const select = (word) => t.eval((w) => {
+            const ta = document.querySelector('.ec-editor textarea');
+            const i = ta.value.indexOf(w);
+            ta.setSelectionRange(i, i + w.length);
+            ta.dispatchEvent(new Event('select'));
+            return document.querySelector('.ecc-new textarea')?.value ?? null;
+        }, word);
+        const first = await select('velocity');
+        t.assert(first === '> velocity\n\n', JSON.stringify(first));
+        await t.eval(() => { const b = document.querySelector('.ecc-new textarea'); b.value += 'Is this the right symbol?'; });
+        const second = await select('paragraph');
+        t.assert(second === '> paragraph\n\nIs this the right symbol?', JSON.stringify(second));
+        // With the comments closed, a selection quotes nothing.
+        await t.eval(() => document.querySelector('.ec-commentsbtn').click());
+        await t.waitFor(() => !document.querySelector('.ec-comments'), null, { what: 'the pane closed' });
+        await select('velocity');
+        await t.eval(() => { try { localStorage.removeItem('wpaper.card.comments'); } catch (_) {} });
+    },
+});
+
+tests.push({
+    id: 'step-card',
+    name: 'stepping the card to the next block opens it under that block at once, not where the last card was',
+    async run(t) {
+        await openParagraphCard(t);
+        // A re-anchor (the live page re-measured) pins the card where it is.
+        await t.post({ type: 'editAnchor', editId: 11, rects: paraRows(t), live: true });
+        await t.sleep(80);
+        // The next block: the equation, further down the page.
+        const e = t.word('E');
+        const rect = { page: 1, x: e.x, y: e.y, w: 200, h: e.y1 - e.y + 10 };
+        const samples = await t.eval(async (m) => {
+            window.postMessage(m, '*');
+            const tops = [];
+            for (let i = 0; i < 20; i++) {
+                await new Promise(r => requestAnimationFrame(() => r()));
+                const c = document.querySelector('.editcard');
+                if (c && c.dataset.edit === '12') tops.push(c.getBoundingClientRect().top);
+            }
+            return tops;
+        }, { type: 'editOpen', editId: 12, label: 'equation', file: 'fx.tex', startLine: 20, endLine: 22,
+            text: 'E = mc^2', rects: [rect], stepped: true });
+        t.assert(samples.length > 0, 'the stepped card opened');
+        const under = (await t.toClient(1, rect.x, rect.y + rect.h)).y;
+        t.assert(samples[0] >= under - 1, `the first frame shows it under the new block (card ${samples[0]}, block bottom ${under})`);
+        t.near(Math.min(...samples), Math.max(...samples), 1, 'and it does not jump');
     },
 });
 

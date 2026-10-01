@@ -355,6 +355,16 @@ test('a click next to ink lands on the nearest sourced glyph of its line; far fr
     assert.equal(map.renderToSource(1, second.x + second.w + 80, second.y + 2).flag, 'unmapped');
 });
 
+test('for a right-click, the nearest exactly sourced glyph however far (a margin, between paragraphs)', () => {
+    const { map } = fixture();
+    const [first, second] = map.glyphsForLine(file, 4);
+    const margin = map.nearestExact(1, second.x + second.w + 200, second.y + 2);
+    assert.equal(margin.exact, true);
+    assert.equal(margin.line, 4); assert.equal(margin.column, 1, 'the end of the line level with the click');
+    const above = map.nearestExact(1, first.x + first.w / 2, first.y - 40);
+    assert.equal(above.line, 4); assert.equal(above.column, 0);
+});
+
 test('a click on text a preamble macro defined lands on its call in the body', () => {
     const text = ['\\documentclass{article}', '\\DeclareMathOperator{\\Gr}{Gr}', '\\begin{document}', 'See $\\Gr(k,n)$ here.', '\\emph{typed}', '\\end{document}'].join('\n');
     const at = (line, column) => ({ file: 'paper.tex', location: { compiled_revision: 0, current_revision: 1,

@@ -1435,6 +1435,11 @@
   .pinwrap .tool-icon { opacity:.55; pointer-events:none; }
   #pin:checked ~ .tool-icon { opacity:1; color: var(--vscode-charts-orange, #d18616); }
   header.tight  #zoom { display:none; }
+  header.tiny { gap:3px; padding:5px 6px; }
+  header.wrap { flex-wrap:wrap; row-gap:4px; }
+  header.measuring { flex-wrap:nowrap !important; }
+  header.measuring > * { flex-shrink:0 !important; }
+  header.measuring > #hdrgap, header.measuring > #where { flex-shrink:1 !important; }
   button.follow[data-mode="off"]    { opacity:.6; }
   button.follow[data-mode="mark"]   { color: var(--vscode-charts-blue, #4e94ce); }
   button.follow[data-mode="scroll"] { color: var(--vscode-charts-green, #6cab5b); }
@@ -1516,11 +1521,6 @@
   .pro-d { opacity:.85; }
   .pro-v { margin-left:4px; font-variant-numeric:tabular-nums; color:#22c55e; }
   .pro-opt { display:flex; align-items:center; gap:6px; opacity:.85; font-size:11px; }
-  body.pro-live-marks .page:has(> canvas.txdl-overlay)::after {
-              content:'WLaTeX Pro · live'; position:absolute; top:6px; right:6px; z-index:3;
-              padding:2px 6px; border-radius:8px; font:600 9px/1.2 var(--vscode-font-family, -apple-system, system-ui, sans-serif);
-              letter-spacing:.02em; color:#fff; background:linear-gradient(90deg, #8b5cf6, #0ea5e9);
-              opacity:.82; pointer-events:none; }
   /* SAVED-ON-DISK IS NOT THE SAME AS UP-TO-DATE ON SCREEN. A live compile can
      catch the page up while the editor buffer is still unsaved, so this has
      its own persistent, clickable badge rather than borrowing `tracelag`. */
@@ -1539,6 +1539,12 @@
   @media (prefers-reduced-motion: reduce) {
     #tracelag.compiling::before { animation:none; opacity:.6; }
   }
+/* WPaper's leaf is green while the paper is in step with Overleaf. */
+#overleaf.connected { color: #1e8a4c; }
+body.wb-dark #overleaf.connected { color: #73d69a; }
+/* The links printed in a reference preview, clickable where they are. */
+.destination-preview-link { cursor: pointer; border-radius: 2px; }
+.destination-preview-link:hover { background: rgba(40, 110, 255, .14); outline: 1px solid rgba(40, 110, 255, .45); }
 </style>
 <!-- One hand-drawn, optical-weight icon family.  Symbols keep the toolbar
      crisp at every display scale and avoid platform-dependent emoji art. -->
@@ -1548,6 +1554,7 @@
     <symbol id="ti-minus" viewBox="0 0 16 16"><path d="M3.5 8h9"/></symbol>
     <symbol id="ti-plus" viewBox="0 0 16 16"><path d="M8 3.5v9M3.5 8h9"/></symbol>
     <symbol id="ti-fit" viewBox="0 0 16 16"><path d="M2.5 8h11M5 5.5 2.5 8 5 10.5M11 5.5 13.5 8 11 10.5"/></symbol>
+    <symbol id="ti-overleaf" viewBox="0 0 24 24"><path fill="currentColor" stroke="none" d="M12.1 2.2c5.8.5 9.1 3.5 9.6 8.8-3.4 1-6.4.6-8.8-1.1-1.5-1.1-2.6-2.5-3.2-4.2C8.1 7.2 7.1 9 6.8 11.1a5.5 5.5 0 1 1-2 .5c.4-3.5 2-6.4 4.8-8.6l1.2 1.5c.2-.8.7-1.6 1.3-2.3ZM6.3 13.5a3.4 3.4 0 1 0 0 6.8 3.4 3.4 0 0 0 0-6.8Zm6.1-8.9c.5 1.5 1.3 2.7 2.5 3.5 1.2.9 2.7 1.3 4.5 1.1-.7-2.5-3-4.2-7-4.6Z"/></symbol>
     <symbol id="ti-compare" viewBox="0 0 16 16"><path d="M2.5 5h9M9.5 2.8 11.8 5 9.5 7.2M13.5 11h-9M6.5 8.8 4.2 11l2.3 2.2"/></symbol>
     <symbol id="ti-tag" viewBox="0 0 16 16"><path d="M2.4 3.2v4.5l5.9 5.9 5.3-5.3-5.9-5.9H3.2a.8.8 0 0 0-.8.8Z"/><circle cx="5.4" cy="5.4" r=".8"/></symbol>
     <symbol id="ti-outline" viewBox="0 0 16 16"><path d="M5.5 4h8M5.5 8h8M5.5 12h8"/><circle cx="2.7" cy="4" r=".65"/><circle cx="2.7" cy="8" r=".65"/><circle cx="2.7" cy="12" r=".65"/></symbol>
@@ -1581,6 +1588,7 @@
     <button id="zoomout" class="icon-only" title="Zoom out (⌘−)" aria-label="Zoom out"><svg class="tool-icon"><use href="#ti-minus"/></svg></button><span id="zoom">125%</span><button id="zoomin" class="icon-only" title="Zoom in (⌘+)" aria-label="Zoom in"><svg class="tool-icon"><use href="#ti-plus"/></svg></button>
   </span>
   <button id="fit" title="Fit page width (⌘0) · double-click to keep fitted while resizing" aria-pressed="false"><svg class="tool-icon"><use href="#ti-fit"/></svg><span class="tlbl">Fit</span></button>
+  <button id="overleaf" class="icon-only" title="Overleaf — how this paper stays in step with it" aria-label="Overleaf"><svg class="tool-icon"><use href="#ti-overleaf"/></svg></button>
   <button id="compare" class="icon-only" title="Compare with another version of this paper" aria-label="Compare versions"><svg class="tool-icon"><use href="#ti-compare"/></svg></button>
   <button id="labels" class="icon-only" title="Show every label (or just hold Shift)" aria-label="Show labels" aria-pressed="false"><svg class="tool-icon"><use href="#ti-tag"/></svg></button>
   <button id="findtool" class="icon-only" title="Find in the paper (⌘F)" aria-label="Find in the paper" aria-pressed="false"><svg class="tool-icon"><use href="#ti-search"/></svg></button>
@@ -1612,7 +1620,6 @@
     <li><span class="pro-k">Exact search</span><span class="pro-d">Click any word for its source; the editor cursor shows on the page</span></li>
     <li><span class="pro-k">Native build</span><span class="pro-d">BibTeX, indexes and the final PDF, settled by WLaTeX</span></li>
   </ul>
-  <label class="pro-opt"><input type="checkbox" id="promarks"> Tag pages drawn live</label>
   <label class="pro-opt" title="Each change you make on the page shows in the review, to keep or undo — as an agent's changes do"><input type="checkbox" id="protrack"> Track my changes</label>
 </div>
 <div id="prointro" role="dialog" aria-label="WLaTeX Pro is on" hidden>

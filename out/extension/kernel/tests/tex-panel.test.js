@@ -527,7 +527,7 @@ test('compile edge glow follows real compile state and does not intercept or mov
     assert.match(html, /compile-edge-glow 3\.6s ease-in-out infinite/);
     assert.match(html, /prefers-reduced-motion: reduce\)\s*\{\s*#reader\.is-compiling::after\s*\{ animation:none;/);
     const host = fs.readFileSync(path.join(EXT, 'out/extension/tex/texViewer.js'), 'utf8');
-    assert.match(host, /type: 'compileState', compiling: !!\(st && st\.compiling\)/);
+    assert.match(host, /type: 'compileState', compiling: !!\(st && st\.compiling && !st\.backgroundCompiling\)/);
 });
 
 test('paused click, right-click and double-click request recovery instead of silently disappearing', () => {

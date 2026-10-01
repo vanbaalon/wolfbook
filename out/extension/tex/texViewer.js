@@ -1365,6 +1365,20 @@ class TexViewer {
             (this._txdlLatest ||= new Map()).set(event.page, msg);
             return;
         }
+        if (event.kind === 'fragment') {
+            // THE TYPED PARAGRAPH, AHEAD OF ITS PAGE. Drawn over what the page
+            // shows now (the live overlay, else the PDF canvas), moved into
+            // place; the page that follows replaces it. Nothing to draw on
+            // before the first PDF or overlay, and nothing without a place.
+            if (!event.txdl || !event.placement || !this.shownAnything) return;
+            this._post({ type:'txdlFragment', generation:event.generation, page:event.placement.page,
+                index:event.index, placement:event.placement, txdl:event.txdl, fonts:event.fonts || null });
+            // What the page shows now is the page with the paragraph in it:
+            // its map (published under this identity) is the one a caret or
+            // card on the page follows (#43, #44) until the page comes.
+            if (event.mapIdentity) (this._liveOverlays ||= new Map()).set(event.placement.page, event.mapIdentity);
+            return;
+        }
         if (event.kind === 'pageMap') {
             // THE LIVE PAGE'S OWN SOURCE MAP. A click on an overlay is answered
             // from it (see _jumpToLiveSource), never from the cold map, whose
@@ -2282,7 +2296,22 @@ class TexViewer {
     async refresh({ force = false } = {}) {
         if (!this.panel || !this.root) return;
         const st = this.coord.roots.get(this.root);
-        this._post({ type: 'compileState', compiling: !!(st && st.compiling) });
+        // A MAP READ AGAIN RE-PLACES WHAT HANGS ON IT. Typing invalidates the
+        // WLaTeX map until it is re-read after a pause; a comment added (or
+        // Shift pressed) meanwhile found no rows, and with no new PDF nothing
+        // placed it again: "location changed" for good, and no label chips.
+        if (st?.map && st.map.available && st.map !== this._placedMap) {
+            const first = this._placedMap === undefined;
+            this._placedMap = st.map;
+            if (!first) {
+                this._pushComments(30);
+                if (this._labelsWanted) this._postLabels().catch(() => { /* best effort */ });
+                this._postSections().catch(() => { /* best effort */ });
+            }
+        }
+        // The edge glows for a build the reader waits for, never for the full
+        // build running behind the live lane (renderUi build()).
+        this._post({ type: 'compileState', compiling: !!(st && st.compiling && !st.backgroundCompiling) });
         this._postNativeMapState(st);
         this._postEngine(st);
         if (st && st.sourceAhead) {
@@ -2915,6 +2944,7 @@ class TexViewer {
                 this._reviewFocus.id === h.id) {
                 this._reviewFocus = {
                     ...h, generation: payload.generation, pending: true,
+                    ...(this._reviewFocus.after != null ? { after: this._reviewFocus.after } : {}),
                 };
             }
         }
@@ -2934,6 +2964,81 @@ class TexViewer {
         this._post({ type: 'reviewOpen' });
     }
 
+    /**
+     * AN AGENT'S CHANGE IS SHOWN ON A PAGE THAT HAS IT. True when the PDF on
+     * screen was not built from the text as it is now (the agent wrote the
+     * file since), or is another build than the change was placed on.
+     */
+    reviewPageBehind(generation = null) {
+        const st = this.root && this.coord.roots && this.coord.roots.get(this.root);
+        if (!st || !st.generation) return false;
+        if (generation == null || this._openedGeneration == null ||
+            String(generation) !== String(this._openedGeneration)) return true;
+        try {
+            const { snapshotSources } = require('./compileService');
+            const snapshot = snapshotSources(st.files, this.coord.liveOverlay(this.root));
+            return !this.coord.isCurrent(st, snapshot);
+        } catch (_) { return !!st.sourceAhead; }
+    }
+
+    /**
+     * Stepping to such a change runs a full build the reader waits for (the
+     * Compile button's glow and priority, not cancelled by typing); the
+     * focus, kept pending, goes to the change once that PDF is open
+     * (showReview replays it). One at a time.
+     */
+    compileForReview() {
+        // The focus goes to the change on a NEWER PDF only: placements on the
+        // page shown now (they keep arriving while the compile runs) lack it.
+        if (this._reviewFocus?.pending) this._reviewFocus.after = this._openedGeneration ?? -1;
+        return this.compileWaited('compiling the paper for this change…');
+    }
+
+    /**
+     * AN AGENT CHANGED THE PAPER: the full build the reader waits for, as if
+     * they had pressed Compile — the blue glow says the paper is changing
+     * under them, typing does not cancel it. A burst of writes is one build
+     * (debounced), and a change landing during it asks for one more.
+     */
+    compileForAgent(file) {
+        if (!this.panel || !this.root) return;
+        try { if (file && this.coord.rootFor({ uri: { fsPath: file } }) !== this.root) return; } catch (_) { return; }
+        clearTimeout(this._agentCompileTimer);
+        this._agentCompileTimer = setTimeout(() => {
+            Promise.resolve(this.compileWaited('the agent changed the paper — compiling…', { again: true })).catch(() => {});
+        }, 400);
+    }
+
+    /**
+     * WLaTeX's own full build (not the Compile button's latexmk), one at a
+     * time, with the Compile button's glow and priority (`priority`): the
+     * review is placed on its exact map. A request while one runs runs once
+     * more after it.
+     */
+    compileWaited(message, { again = false } = {}) {
+        // `again`: the text changed (an agent's write), so a build already
+        // running may lack it and one more follows. A reader stepping through
+        // changes meanwhile needs no second one.
+        if (this._reviewCompile) { if (again) this._compileAgain = message; return this._reviewCompile; }
+        // Never over a Compile the reader started: it brings the page up to date.
+        const st = this.root && this.coord.roots && this.coord.roots.get(this.root);
+        if (st?.forcedCompiling) return null;
+        this.status(message, 'busy');
+        this._reviewCompile = (async () => {
+            const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(this.root));
+            const st2 = await this.coord.build(doc, { priority: true });
+            if (st2 && st2.lastError) this._post({ type: 'status', text: `compile failed: ${st2.lastError}`, kind: 'err' });
+            await this.refresh({ force: true });
+        })().catch(error => this._post({ type: 'status', text: `could not compile: ${error.message}`, kind: 'err' }))
+            .finally(() => {
+                this._reviewCompile = null;
+                const again = this._compileAgain;
+                this._compileAgain = null;
+                if (again) this.compileWaited(again, { again: true });
+            });
+        return this._reviewCompile;
+    }
+
     /** Scroll the page to a change and mark it there. */
     focusReviewHunk(h, generation = null) {
         if (!h) return false;
@@ -2949,7 +3054,8 @@ class TexViewer {
         const h = this._reviewFocus;
         if (!h || !h.pending) return false;
         if (h.generation == null || this._openedGeneration == null ||
-            String(h.generation) !== String(this._openedGeneration)) {
+            String(h.generation) !== String(this._openedGeneration) ||
+            (h.after != null && Number(h.generation) <= Number(h.after))) {
             this._reviewWaiting = true;
             this.status('updating the page for this change…', 'busy');
             return false;
@@ -3527,8 +3633,15 @@ class TexViewer {
     /** Send one document-ordered, reconciled view of all comment sidecars. */
     _pushComments(delay = 0) {
         clearTimeout(this._commentPushTimer);
-        const run = () => {
+        const run = async () => {
             if (!this.panel || !this.root) return;
+            // Placed on a map that describes the text as it is: a stale one
+            // (typing since) is read again first.
+            const st0 = this.coord.roots && this.coord.roots.get(this.root);
+            if (st0?.map?.native && !st0.map.available && typeof this.coord.ensureNativeMap === 'function') {
+                try { await this.coord.ensureNativeMap(st0); } catch (_) { /* placed when the map returns (refresh) */ }
+                if (!this.panel || !this.root) return;
+            }
             const files = this._commentFiles();
             for (const file of files) {
                 try { this._importReviewComments(file); } catch (_) { /* migration is best effort */ }
@@ -3550,13 +3663,18 @@ class TexViewer {
                 }
                 return { ...item, rects, unplaced: !item.detached && !rects.length };
             });
+            // Stamped with the generation ON SCREEN, which the viewer checks
+            // before drawing markers: a build whose PDF had the same ink was
+            // never shipped, so the viewer kept the older generation and drew
+            // no comment beside its paragraph at all.
             this._post({
-                type: 'comments', items, errors: result.errors, generation,
+                type: 'comments', items, errors: result.errors,
+                generation: this.shownGeneration ?? generation,
                 view: this._viewState && this._viewState.comments || null,
             });
         };
-        if (delay > 0) this._commentPushTimer = setTimeout(run, delay);
-        else run();
+        if (delay > 0) this._commentPushTimer = setTimeout(() => { run().catch(() => {}); }, delay);
+        else run().catch(() => {});
     }
 
     /** The review surface and the ordinary reader share one comment store. */
@@ -5057,7 +5175,12 @@ class TexViewer {
                     : 'Updating the PDF before editing this position…', 'warn');
                 break;
             }
-            case 'click': await this._jumpToSource(m); break;
+            case 'click':
+                if (m.pick && m.live) { await this._livePick(m); break; }
+                // The release (or any other click) wins over drag steps still queued.
+                this._livePickNext = null;
+                await this._jumpToSource(m);
+                break;
             case 'fullscreen': await this.setFullScreen(m.value); break; // old webviews
             case 'layoutCycle': await this.cycleLayoutMode(); break;
             case 'layoutMode': await this.setLayoutMode(m.mode); break;
@@ -5226,13 +5349,25 @@ class TexViewer {
                 // symbol under the pointer, in the card and in the editor
                 // alike. The order matters — the jump posts its selection into
                 // whatever card is open, so the card has to exist first.
-                const opened = await this._openEditSession(m);
+                // A right-click that opens nothing says why: an error in here
+                // used to vanish with the message, and the card simply did not
+                // come.
+                let opened;
+                try { opened = await this._openEditSession(m); }
+                catch (error) {
+                    this._log(`mini-editor: ${error.stack || error.message}`);
+                    this._post({ type: 'status', text: `could not open the editor: ${error.message}`, kind: 'err' });
+                    break;
+                }
                 // Without the native map the jump always runs, as it did
                 // before Pro: it moves the editor even where no card opened.
-                if (opened ? this._edit === opened : !this.coord.roots?.get(this.root)?.map?.native)
+                // A card opened on the block NEAREST a right-click outside the
+                // text has no symbol under the pointer to jump to.
+                if (opened ? this._edit === opened && !opened.nearest : !this.coord.roots?.get(this.root)?.map?.native)
                     await this._jumpToSource(m);
                 break;
             }
+            case 'overleafMenu': await vscode.commands.executeCommand('wolfbook.tex.overleafMenu'); break;
             case 'selectAdjust': this._adjustSelection(m); break;
             case 'labelsWanted':
                 // Somebody is holding Shift. From here on a new generation
@@ -5609,6 +5744,16 @@ class TexViewer {
      * which is the right one for a figure or a table, whose interiors print no
      * characters at all — takes over.
      */
+    /** What a right-click nowhere on text opens: the nearest printed source. */
+    _nearestEditable(map, m) {
+        try {
+            if (map.native) return map.nearestExact?.(m.page, m.xBp, m.yTopBp) || null;
+            const row = map.lineAtPoint(m.page, m.xBp, m.yTopBp, { anyDistance: true });
+            return row?.file ? { flag: map._baseFlag(), file: row.file, line: row.line,
+                object: map.objectAtLine(row.file, row.line) || undefined } : null;
+        } catch (_) { return null; }
+    }
+
     _resolvePoint(st, m) {
         if (st.map.native) return st.map.renderToSource(m.page, m.xBp, m.yTopBp);
         const row = st.map.lineAtPoint(m.page, m.xBp, m.yTopBp);
@@ -6381,10 +6526,21 @@ class TexViewer {
         if (!m.pick) this._pickAnchor = null;
         // The worker resolves overlapping ink by paint order; the local
         // containment answer is the fallback while it is unavailable.
-        const hit = typeof map.renderToSourceViaWorker === 'function'
+        let hit = typeof map.renderToSourceViaWorker === 'function'
             ? await map.renderToSourceViaWorker(m.page, m.xBp, m.yTopBp)
             : map.renderToSource(m.page, m.xBp, m.yTopBp);
         if (!current()) return;
+        // A SELECTION END SNAPS TO THE NEAREST CHARACTER, as a text selection
+        // does: a drag passing through the gap between two lines, past a
+        // line's end or between two glyphs found no exact source, and the
+        // pick was refused — the anchor dropped with it, so the selection
+        // vanished and restarted under the pointer (the other bracket seemed
+        // to move).
+        if (m.pick && (!hit?.file || hit.flag === FLAG.UNMAPPED || !hit.exact || hit.approximate)) {
+            const near = typeof map.nearestExact === 'function' ? map.nearestExact(m.page, m.xBp, m.yTopBp) : null;
+            if (near) hit = near;
+            else if (m.live) return;       // nothing near: keep what is shown
+        }
         if ((!hit?.file || hit.flag === FLAG.UNMAPPED) && !m.pick && !m.commentTarget && !Number.isFinite(m.typingRequest) && !m.live && !map.live) {
             // A click on a picture: its figure's card (the caption below finds it).
             const fig = this._inkEnabled?.(st) && this._figureUnder(map, m);
@@ -6440,8 +6596,11 @@ class TexViewer {
                 Number.isInteger(p.column_utf16) && p.column_utf16 >= 0 &&
                 p.column_utf16 <= lines[p.line - 1].length;
             if (!validSeed(location?.start) || !validSeed(location?.end)) return;
+            // Same source text is the same anchor, whichever map answers: a
+            // live page's own map, the settled one (a bracket dragged across
+            // a page the live engine drew).
             const anchor = this._pickAnchor;
-            if (!anchor || anchor.file !== hit.file || anchor.nativeMap !== map || anchor.sourceText !== sourceText) {
+            if (!anchor || anchor.file !== hit.file || anchor.sourceText !== sourceText) {
                 this._pickAnchor = { file:hit.file, nativeMap:map, sourceText,
                     position:new vscode.Position(location.start.line - 1, location.start.column_utf16),
                     endPosition:new vscode.Position(location.end.line - 1, location.end.column_utf16) };
@@ -6518,7 +6677,7 @@ class TexViewer {
         }
         if (m.pick) {
             let anchor = this._pickAnchor;
-            if (!anchor || anchor.file !== hit.file || anchor.nativeMap !== map ||
+            if (!anchor || anchor.file !== hit.file ||
                 anchor.sourceText !== sourceText ||
                 anchor.documentVersion != null && anchor.documentVersion !== version) {
                 anchor = this._pickAnchor = { file:hit.file, position:start, endPosition:end,
@@ -6579,6 +6738,26 @@ class TexViewer {
             caret: caret ? { page:glyph.page, x:glyph.x, y:glyph.y, h:glyph.boxHeight, at:'before', offset:0 } : null });
         this._post({ type:'status', text:`→ line ${start.line + 1}, column ${start.character + 1}` +
             (hit.exact ? '' : ' · source moved'), kind:'ok' });
+    }
+
+    /**
+     * DRAG STEPS ARE ANSWERED ONE AT A TIME. The page posts one every 60 ms,
+     * and each used to supersede the one before it; resolving a point and
+     * then the range takes longer than that, so no step ever painted, and
+     * the selection showed nothing until the button was let go. A step that
+     * arrives while one is being answered waits, and only the newest waiting
+     * one is kept.
+     */
+    async _livePick(m) {
+        if (this._livePickBusy) { this._livePickNext = m; return; }
+        this._livePickBusy = true;
+        try { await this._jumpToSource(m); }
+        finally {
+            this._livePickBusy = false;
+            const next = this._livePickNext;
+            this._livePickNext = null;
+            if (next) await this._livePick(next);
+        }
     }
 
     async _jumpToSource(m) {
@@ -7982,6 +8161,11 @@ class TexViewer {
         if (!this.panel || !this.root) return;
         const st = this.coord.roots.get(this.root);
         if (!st) return;
+        // Shift pressed after typing: the chips need the map of the text as it is.
+        if (st.map?.native && !st.map.available && typeof this.coord.ensureNativeMap === 'function') {
+            try { await this.coord.ensureNativeMap(st); } catch (_) { /* re-posted when the map returns (refresh) */ }
+            if (!this.panel || !this.root) return;
+        }
         const items = this._labelChips(st).concat(this._mmaChips(st));
         this._post({
             type: 'labels',
@@ -8171,6 +8355,24 @@ class TexViewer {
     }
 
     /** The rows a line range printed — the card's anchor on the page. */
+    /**
+     * A block's rows ON THE PAGES AS SHOWN: a page the live engine drew over
+     * the PDF from that page's own map, the others from the settled one.
+     * Measured on the PDF alone, a card stepped onto a block of a live page
+     * opened where the block printed before the typing, and jumped once the
+     * live anchor came (_editFollowLive).
+     */
+    _editRectsShown(st, file, startLine, endLine) {
+        const cold = this._editRects(st, file, startLine, endLine);
+        const live = this._liveMap, overlays = this._liveOverlays;
+        if (!live?.available || !overlays?.size) return cold;
+        let fresh = [];
+        try { fresh = this._editRects({ map: live }, file, startLine, endLine); } catch (_) { fresh = []; }
+        return cold.filter(r => !overlays.has(r.page))
+            .concat(fresh.filter(r => overlays.has(r.page) && live.hasPage(r.page)))
+            .sort((a, b) => a.page - b.page || a.y - b.y || a.x - b.x);
+    }
+
     _editRects(st, file, startLine, endLine) {
         const rects = [];
         if (endLine - startLine <= 60) {
@@ -8390,7 +8592,8 @@ class TexViewer {
         this._edit = s;
         this._ensureDocListener();
         this._rememberEditState();
-        let rects = this._editRects(st, file, block.startLine, block.endLine);
+        let rects = this._editRectsShown(st, file, block.startLine, block.endLine);
+        this._editRectsLast = rects;
         if (!rects.length) {
             // No measurable rows (a figure, an unmapped block): anchor on the
             // PAGE at least, or the card would jump the reader back to page 1.
@@ -8443,10 +8646,21 @@ class TexViewer {
                 : map.native ? m.generation != null && String(m.generation) === String(this._openedGeneration) &&
                 this._openedPdfHash === map.view.artifact.pdf_hash : !this._tracePaused && !st.sourceAhead);
         if (!current()) {
-            if (map.native && request === this._editOpenRequest) say('The page just changed — right-click again');
+            if (request === this._editOpenRequest)
+                say(map.native ? 'The page just changed — right-click again'
+                    : 'The page is behind your typing — right-click again once it has caught up');
             return;
         }
-        const hit = this._resolvePoint({ map }, m);
+        let hit = this._resolvePoint({ map }, m);
+        // A RIGHT-CLICK OUTSIDE THE TEXT (a margin, the gap between two
+        // paragraphs, beside a display) opens the block nearest to it, rather
+        // than nothing. The caret then goes where that block starts to print.
+        const usable = h => !!h && h.flag !== FLAG.UNMAPPED && !!h.file && (!map.native || !!h.exact);
+        let nearest = false;
+        if (!usable(hit)) {
+            const alt = this._nearestEditable(map, m);
+            if (usable(alt)) { hit = alt; nearest = true; }
+        }
         if (map.native && !hit?.exact) {
             this._post({ type:'status', text:'This point has no unchanged source range; rebuild before opening an editor.', kind:'warn' });
             return;
@@ -8456,10 +8670,13 @@ class TexViewer {
             return;
         }
         const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(hit.file));
-        if (!current()) return;
+        if (!current()) { say('The page just changed — right-click again'); return; }
         if (map.native) {
             const relative = path.relative(map.projectDir, hit.file).split(path.sep).join('/');
-            if (map.source.files.get(relative)?.text !== doc.getText()) return;
+            if (map.source.files.get(relative)?.text !== doc.getText()) {
+                say('The page is catching up with your typing — right-click again in a moment');
+                return;
+            }
         }
         const lines = doc.getText().split(/\r?\n/);
         const line = Math.max(1, Math.min(hit.line, lines.length));
@@ -8483,6 +8700,7 @@ class TexViewer {
             endOffset: doc.offsetAt(endPos),
             lastText: doc.getText(new vscode.Range(startPos, endPos)),
             label,
+            ...(nearest ? { nearest: true } : {}),
         };
         this._edit = s;
         this._ensureDocListener();
@@ -8490,8 +8708,8 @@ class TexViewer {
         // Where the click fell, in the document: the caller's, else the exact
         // glyph's own source (a right-click on a symbol). The card opens with
         // its caret there, not at the block's start.
-        let clickAt = Number.isFinite(m.sourceOffset) ? m.sourceOffset : null;
-        if (clickAt == null && hit.exact && hit.sourceRange?.start) {
+        let clickAt = Number.isFinite(m.sourceOffset) && !nearest ? m.sourceOffset : null;
+        if (clickAt == null && !nearest && hit.exact && hit.sourceRange?.start) {
             try {
                 const p = hit.sourceRange.start;
                 clickAt = doc.offsetAt(new vscode.Position(p.line - 1, p.column_utf16));
@@ -8858,7 +9076,7 @@ class TexViewer {
             }
             const a = doc.positionAt(s.startOffset);
             const b = doc.positionAt(s.endOffset);
-            const rects = this._editRects(st, s.file, a.line + 1, b.line + 1);
+            const rects = this._editRectsShown(st, s.file, a.line + 1, b.line + 1);
             if (rects.length) { this._editRectsLast = rects; this._post({ type: 'editAnchor', editId: s.id, rects }); }
         } catch (_) { /* keep the old anchor */ }
     }

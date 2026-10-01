@@ -550,6 +550,7 @@ function openFixture() {
     f.doc.getText = range => range ? text.slice(range.start.character, range.end.character) : text;
     f.viewer._editSeq = 0;
     f.viewer._resolvePoint = TexViewer.prototype._resolvePoint;
+    f.viewer._nearestEditable = TexViewer.prototype._nearestEditable;
     f.viewer._blockAt = () => ({ startLine:1, endLine:1, label:'paragraph' });
     f.viewer._ensureDocListener = () => {};
     f.viewer._rememberEditState = () => {};
@@ -565,6 +566,32 @@ test('an exact current native glyph opens a card while source is ahead', async (
     assert.equal(session.lastText, 'Alpha Alpha');
     assert.equal(f.posts.at(-1).type, 'editOpen');
     assert.equal(f.posts.at(-1).typingRequest, 9);
+});
+
+test('a stepped card is measured on the pages as shown: a live page from its own map', () => {
+    const cold = { lineRows: () => [{ page:3, x:1, y:700, w:5, h:9 }, { page:4, x:1, y:60, w:5, h:9 }] };
+    const live = { available:true, hasPage: p => p === 4,
+        lineRows: () => [{ page:3, x:1, y:500, w:5, h:9 }, { page:4, x:1, y:90, w:5, h:9 }] };
+    const viewer = { _liveMap:live, _liveOverlays:new Map([[4, 'id']]),
+        _editRects:TexViewer.prototype._editRects };
+    const rects = TexViewer.prototype._editRectsShown.call(viewer, { map:cold }, 'a.tex', 1, 1);
+    assert.deepEqual(rects.map(r => [r.page, r.y]), [[3, 700], [4, 90]],
+        'the PDF page from the settled map, the live page from its own');
+    viewer._liveOverlays = new Map();
+    assert.deepEqual(TexViewer.prototype._editRectsShown.call(viewer, { map:cold }, 'a.tex', 1, 1).map(r => r.y), [700, 60]);
+});
+
+test('a right-click outside the text opens the block nearest to it', async () => {
+    const f = openFixture(); const asked = [];
+    const glyph = f.map.renderToSource(1, 102, 84);
+    f.map.renderToSource = () => ({ flag:'unmapped', reason:'no native source box contains this point' });
+    f.map.nearestExact = (page, x, y) => { asked.push([page, x, y]); return glyph; };
+    const session = await f.open({ xBp:560, yTopBp:84, sourceOffset:3 });
+    assert.deepEqual(asked, [[1, 560, 84]]);
+    assert.equal(session, f.viewer._edit);
+    const open = f.posts.at(-1);
+    assert.equal(open.type, 'editOpen');
+    assert.equal(open.clickOffset, undefined, 'no caret at a point that is not in the block');
 });
 
 test('native card opening refuses displaced, stale and mismatched-source points', async () => {
@@ -624,26 +651,32 @@ test('native source ranges publish only admitted rectangles and retain source ac
     assert.equal(f.viewer._lastSelection.end.character, 2);
 });
 
-test('native selection painting preserves glyph gaps and never searches PDF text rows', async () => {
+test('native selection painting is one band per printed line, touching the next, and never searches PDF text rows', async () => {
     const vm = require('node:vm');
     const js = fs.readFileSync(path.resolve(__dirname, '../../../client/tex-viewer.js'), 'utf8');
     const painted = [];
     const context = vm.createContext({ state:{ rendered:new Set([1]), edit:true },
-        document:{ querySelectorAll:() => [], createElement:() => ({ style:{} }) },
+        document:{ querySelectorAll:() => [], createElement:() => ({ style:{}, dataset:{} }) },
         pagesEl:() => ({ querySelector:() => ({ appendChild:node => painted.push(node) }) }),
         renderPage:async () => {}, rectToViewport:(page, rect) => rect, markToPx:mark => mark,
         textItems:() => { throw Error('native selection must not infer text rows'); },
         paintSelectionActions() {} });
-    const start = js.indexOf('async function paintSelection(');
-    vm.runInContext(js.slice(start, js.indexOf('\n}\n', start) + 2), context);
+    for (const name of ['function nativeBands(', 'async function paintSelection(', 'async function paintSelectionNow(']) {
+        const start = js.indexOf(name);
+        vm.runInContext(js.slice(start, js.indexOf('\n}\n', start) + 2), context);
+    }
     await context.paintSelection({ native:true, reveal:false,
-        rows:[{ page:1, x:10, y:10, w:5, h:8 }, { page:1, x:50, y:20, w:5, h:8 }],
-        start:{ exactEdge:{ page:1, x:10, y:10, h:8 } },
-        end:{ exactEdge:{ page:1, x:55, y:20, h:8 } } });
+        // Line 1: a capital, an x-height letter and a dot above; line 2 one glyph.
+        rows:[{ page:1, x:10, y:10, w:5, h:10 }, { page:1, x:16, y:13, w:5, h:7 }, { page:1, x:17, y:9, w:2, h:1.5 },
+            { page:1, x:50, y:24, w:5, h:10 }],
+        start:{ exactEdge:{ page:1, x:10, y:10, h:10 } },
+        end:{ exactEdge:{ page:1, x:55, y:24, h:10 } } });
     const fills = painted.filter(node => node.className === 'selfill');
-    assert.equal(fills.length, 2);
-    assert.equal(fills[0].style.width, '5px'); assert.equal(fills[0].style.height, '8px');
-    assert.equal(fills[1].style.left, '50px');
+    assert.equal(fills.length, 2, 'one band per printed line, not per glyph');
+    assert.equal(fills[0].style.left, '10px'); assert.equal(fills[0].style.width, '11px');
+    assert.equal(fills[0].style.top, '9px', 'from the line\'s highest symbol');
+    assert.equal(fills[0].style.height, '15px', 'down to the next line: no gap');
+    assert.equal(fills[1].style.left, '50px'); assert.equal(fills[1].style.height, '10px');
 });
 
 function pickFixture() {
@@ -686,6 +719,43 @@ test('native live picking keeps its anchor and can shrink before mouse release',
     await f.pick(2, { live:false });
     assert.deepEqual(f.queries, [[0,7], [0,3]]);
     assert.equal(f.viewer._pickAnchor, null);
+});
+
+test('a drag step in whitespace snaps to the nearest character and keeps the anchor', async () => {
+    const f = pickFixture(); await f.pick(0);
+    const glyph = f.map.renderToSource(1, 102, 84);
+    const near = { ...glyph, sourceRange:{ start:{ line:1, column_utf16:4 }, end:{ line:1, column_utf16:5 } } };
+    f.map.renderToSource = () => ({ flag:'unmapped' });
+    f.map.nearestExact = () => near;
+    await f.pick(9, { live:true });
+    assert.ok(f.viewer._pickAnchor, 'the anchor survives a step between lines');
+    assert.deepEqual(f.queries, [[0,5]], 'the selection runs to the nearest character');
+    assert.ok(!f.posts.some(p => p.type === 'selection' && p.span === null), 'the selection is never erased mid-drag');
+    f.map.nearestExact = () => null;
+    const posted = f.posts.length;
+    await f.pick(9, { live:true });
+    assert.equal(f.posts.length, posted, 'with nothing near, what is shown stays');
+});
+
+test('a bracket drag keeps the other end when a live page\'s map answers', async () => {
+    const f = pickFixture(); await f.pick(0);
+    // The anchor was taken on the settled map; the step lands on a live page.
+    f.viewer._pickAnchor.nativeMap = { other:true };
+    await f.pick(6, { live:true });
+    assert.deepEqual(f.queries, [[0,7]], 'from the kept end, not restarted under the pointer');
+});
+
+test('drag steps are answered one at a time: none is lost to the next, the newest waiting one is kept', async () => {
+    const answered = []; const releases = [];
+    const viewer = { _jumpToSource: m => new Promise(resolve => { answered.push(m.n); releases.push(resolve); }),
+        _livePick: TexViewer.prototype._livePick };
+    const first = viewer._livePick({ n:1 });
+    viewer._livePick({ n:2 }); viewer._livePick({ n:3 });
+    assert.deepEqual(answered, [1], 'the others wait for the first to paint');
+    releases[0](); await Promise.resolve(); await Promise.resolve();
+    assert.deepEqual(answered, [1, 3], 'then the newest');
+    releases[1](); await first;
+    assert.deepEqual(answered, [1, 3]);
 });
 
 // Bug #40: a drag's anchor pick could be superseded in flight by the next move,
@@ -1470,4 +1540,93 @@ test('a keystroke with no preview build running starts one at once; a burst whil
         assert.equal(started.length, 3, 'idle again: at once');
         finish();
     } finally { f.close(); }
+});
+
+// ── Paragraph-first live preview ────────────────────────────────────────────
+// The engine sends the paragraph being typed ahead of its page (a
+// `paragraph_fragment`), placed on the page shown. See WLaTeX
+// docs/paragraph-preview-plan.md.
+
+test('a placed paragraph fragment reaches the panel and counts as the build shown (#42); an unplaced one does not', async () => {
+    const f = fixture();
+    try {
+        const { coordinator, state } = f;
+        const root = state.root;
+        const fired = [];
+        coordinator.onDidInteractive(e => fired.push(e));
+        const fragment = { generation: 3, page: 4, index: 0, txdl: { ops: [] }, fonts: {},
+            placement: { page: 4, identity: 'h4', dx: 1, dy: 2, clip: [0, 0, 10, 10], clear: [0, 1, 10, 2], below: [0, 2, 10, 10], shift: 0, lines: 3, old_lines: 3 } };
+        for (const [placement, shown] of [[null, false], [fragment.placement, true]]) {
+            const lane = { close: async () => {}, invalidate() {}, interactiveBuild: async o => { o.onFragment({ ...fragment, placement }); return null; } };
+            state.nativeLane = lane;
+            const cur = { shown: false, pending: false };
+            await coordinator._runInteractive(state, lane, root, {}, cur);
+            assert.equal(cur.shown, shown, placement ? 'a placed fragment is the build shown' : 'nothing drawn, nothing shown');
+        }
+        assert.deepEqual(fired.map(e => [e.kind, e.page, !!e.placement]), [['fragment', 4, false], ['fragment', 4, true]]);
+    } finally { f.close(); }
+});
+
+test('the webview paints a fragment over the page shown: old paragraph cleared, the band below moved, the fragment at its offset', async () => {
+    const vm = require('node:vm');
+    const { pathToFileURL } = require('node:url');
+    const js = fs.readFileSync(path.resolve(__dirname, '../../../client/tex-viewer.js'), 'utf8');
+    const txdlCanvas = await import(pathToFileURL(path.resolve(__dirname, '../../../client/txdl-canvas.js')).href);
+    const fn = name => { const start = js.indexOf(`function ${name}(`); return js.slice(js.lastIndexOf('\n', start) + 1, js.indexOf('\n}\n', start) + 2); };
+    const SP = 65536;
+    // A canvas whose context records its calls.
+    const canvases = [];
+    const canvas = () => {
+        const calls = [];
+        const ctx = new Proxy({ calls }, { get: (t, k) => k in t ? t[k] : (...a) => calls.push([k, ...a]), set: (t, k, v) => { calls.push([`${String(k)}=`, v]); return true; } });
+        const c = { width: 0, height: 0, style: {}, ctx, removed: false, className: '', isConnected: true,
+            getContext: () => ctx, remove() { c.removed = true; } };
+        canvases.push(c);
+        return c;
+    };
+    const pdf = canvas();
+    pdf.width = 1200; pdf.height = 1600;
+    const wrap = { inserted: [], querySelector: sel => sel === 'canvas:not(.txdl-overlay)' ? pdf : null,
+        insertBefore(el) { this.inserted.push(el); } };
+    const state = { openInFlight: false, openSeq: 5, txdl: { pages: new Map() } };
+    const renderer = txdlCanvas.createTxdlRenderer({ requestOutlines: async () => ({}) });
+    const context = vm.createContext({
+        state, window: { devicePixelRatio: 2 }, PT_PER_BP: 72.27 / 72,
+        document: { createElement: () => canvas() },
+        pagesEl: () => ({ querySelector: () => wrap }),
+        txdlPageBox: () => ({ width: 600, height: 800, widthBp: 300 * 72 / 72.27, heightBp: 400 * 72 / 72.27 }),
+        visiblePages: () => [4], txdlShouldDefer: () => false, txdlRendererInstance: () => renderer,
+    });
+    vm.runInContext(['fragmentGeometry', 'removeTxdlFragment', 'clearTxdlFragments', 'drawTxdlFragment'].map(fn).join('\n'), context);
+    // 2 CSS px per pt at dpr 2: 4 device px per pt; the page origin one inch in.
+    const placement = { page: 4, identity: null, dx: 10 * SP, dy: 100 * SP, clip: [0, 0, 200 * SP, 300 * SP],
+        clear: [0, 80 * SP, 200 * SP, 120 * SP], below: [0, 120 * SP, 200 * SP, 300 * SP], shift: 12 * SP, lines: 4, old_lines: 3 };
+    const txdl = { fonts: [], ops: [{ op: 'rule', x: 0, y: 5 * SP, width: 50 * SP, height: 5 * SP }] };
+    const g = context.fragmentGeometry(placement, 2, 2);
+    const at = pt => (72.27 + pt) * 4;
+    assert.deepEqual([g.clear.y, g.clear.h, g.below.y, g.shift], [at(80), 220 * 4, at(120), 48]);
+    await context.drawTxdlFragment({ page: 4, placement, txdl });
+    const [base, overlay] = [canvases[1], canvases[2]];
+    assert.deepEqual(wrap.inserted, [overlay], 'a canvas of its own, over the PDF');
+    assert.ok(base.ctx.calls.some(c => c[0] === 'drawImage' && c[1] === pdf), 'the base is the page as shown');
+    const names = overlay.ctx.calls.map(c => c[0]);
+    const steps = ['drawImage', 'clip', 'fillRect', 'drawImage', 'translate'].map((n, i, all) => names.indexOf(n, i && names.indexOf(all[i - 1]) + 1));
+    assert.ok(steps.every((s, i) => s >= 0 && (i === 0 || s > steps[i - 1])), `base, clip, clear, band, fragment in order: ${names.join(' ')}`);
+    const band = overlay.ctx.calls.filter(c => c[0] === 'drawImage')[1];
+    assert.equal(band[1], base);
+    assert.equal(band[7], at(120) + 48, 'the band below moves down by one line (12 pt)');
+    const offset = overlay.ctx.calls.find(c => c[0] === 'translate');
+    assert.deepEqual(offset.slice(1), [20, 200], 'the fragment moved by dx, dy in CSS px (under the dpr scale)');
+    // The next keystroke's fragment repaints from the same base, not over the last one.
+    await context.drawTxdlFragment({ page: 4, placement: { ...placement, shift: 0 }, txdl });
+    assert.equal(canvases.length, 3, 'the same canvas and base');
+    assert.equal(overlay.ctx.calls.filter(c => c[0] === 'drawImage' && c[1] === base && c.length === 4).length, 2);
+    // An overlay of another page than the one measured stays as it is.
+    state.txdl.pages.set(4, { canvas: pdf, identity: 'other' });
+    const before = overlay.ctx.calls.length;
+    await context.drawTxdlFragment({ page: 4, placement: { ...placement, identity: 'h4' }, txdl });
+    assert.equal(overlay.ctx.calls.length, before);
+    // The page itself replaces it.
+    context.removeTxdlFragment(4);
+    assert.equal(overlay.removed, true);
 });

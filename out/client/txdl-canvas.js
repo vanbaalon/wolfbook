@@ -359,6 +359,9 @@ export function createTxdlRenderer(options = {}) {
   const imageKey = (op) => `${op.file}#${op.page == null ? 1 : op.page}`;
   // digest -> Set of gids currently being fetched, so prefetch never asks twice.
   const inFlight = new Map();
+  // The request each in-flight glyph is waiting on, so a second prefetch of
+  // the same glyph waits for it instead of returning before it is cached.
+  const pending = new Map();
 
   const key = (digest, gid) => `${digest}/${gid}`;
 
@@ -402,7 +405,11 @@ export function createTxdlRenderer(options = {}) {
       const ask = [];
       for (const gid of gids) {
         if (outlines.has(key(digest, gid))) continue;
-        if (busy.has(gid)) continue;
+        if (busy.has(gid)) {
+          const other = pending.get(key(digest, gid));
+          if (other) jobs.push(other);
+          continue;
+        }
         busy.add(gid);
         ask.push(gid);
       }
@@ -411,7 +418,7 @@ export function createTxdlRenderer(options = {}) {
         continue;
       }
       result.requested += ask.length;
-      jobs.push(
+      const job =
         Promise.resolve()
           .then(() => requestOutlines(digest, ask))
           .then((answer) => {
@@ -427,10 +434,14 @@ export function createTxdlRenderer(options = {}) {
             result.errors.push({ font: digest, gids: ask, error });
           })
           .then(() => {
-            for (const gid of ask) busy.delete(gid);
+            for (const gid of ask) {
+              busy.delete(gid);
+              pending.delete(key(digest, gid));
+            }
             if (busy.size === 0) inFlight.delete(digest);
-          }),
-      );
+          });
+      for (const gid of ask) pending.set(key(digest, gid), job);
+      jobs.push(job);
     }
     if (requestImage) {
       for (const op of (page && page.ops) || []) {
@@ -498,8 +509,14 @@ export function createTxdlRenderer(options = {}) {
       }
     };
 
+    // `offset` ([dx, dy] in sp) moves the whole list, as when a paragraph
+    // fragment is put where its paragraph sits on a page.
+    const offset = Array.isArray(opts.offset) && opts.offset.length === 2 ? opts.offset : null;
+    const offX = offset ? css.len(Number(offset[0]) || 0) : 0;
+    const offY = offset ? css.len(Number(offset[1]) || 0) : 0;
     ctx.save();
     if (dpr !== 1) ctx.scale(dpr, dpr);
+    if (offX || offY) ctx.translate(offX, offY);
     if (background) {
       useFill(background);
       ctx.fillRect(0, 0, css.width, css.height);
@@ -774,7 +791,7 @@ export function createTxdlRenderer(options = {}) {
             const oy = css.originY;
             const ce = ox - (a * ox + c * oy) + s * e;
             const cf = oy - (b * ox + d * oy) + s * f;
-            ctx.setTransform(dpr * a, dpr * b, dpr * c, dpr * d, dpr * ce, dpr * cf);
+            ctx.setTransform(dpr * a, dpr * b, dpr * c, dpr * d, dpr * (ce + offX), dpr * (cf + offY));
           } else {
             const ox = css.x(op.x);
             const oy = css.y(op.y);

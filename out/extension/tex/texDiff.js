@@ -96,7 +96,17 @@ function diffLines(aLines, bLines, opts = {}) {
     for (const k of bKeys) counts.set(k, (counts.get(k) || 0) + 1);
 
     const MISMATCH = -4;      // never pair two different lines
-    const { srcToRen } = align(aKeys, bKeys, {
+    // ONLY THE MIDDLE IS ALIGNED. Lines the two sides share at the start and
+    // at the end pair one to one (as git's diff takes them); the alignment is
+    // quadratic in what is left, and an agent's edit of a long paper leaves
+    // a few lines, where aligning all nineteen thousand of them held the
+    // extension host for most of a second on every change.
+    let head = 0;
+    while (head < aKeys.length && head < bKeys.length && aKeys[head] === bKeys[head]) head++;
+    let tail = 0;
+    while (tail < aKeys.length - head && tail < bKeys.length - head &&
+        aKeys[aKeys.length - 1 - tail] === bKeys[bKeys.length - 1 - tail]) tail++;
+    const middle = align(aKeys.slice(head, aKeys.length - tail), bKeys.slice(head, bKeys.length - tail), {
         gap: opts.gap ?? -1,
         // A gap is cheap relative to a rare match, so the alignment will happily
         // skip a run of common lines to reach a unique anchor.
@@ -105,6 +115,13 @@ function diffLines(aLines, bLines, opts = {}) {
         // "near enough" — a changed line is a hunk, not a fuzzy pairing.
         pair: (a, b) => a === b,
     });
+    const srcToRen = new Array(aKeys.length);
+    for (let i = 0; i < head; i++) srcToRen[i] = i;
+    for (let i = 0; i < middle.srcToRen.length; i++) {
+        const to = middle.srcToRen[i];
+        srcToRen[head + i] = to >= 0 ? head + to : -1;
+    }
+    for (let i = 0; i < tail; i++) srcToRen[aKeys.length - tail + i] = bKeys.length - tail + i;
 
     // Walk the pairing into runs of unmatched lines on either side.
     const hunks = [];

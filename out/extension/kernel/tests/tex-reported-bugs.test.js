@@ -1045,3 +1045,22 @@ test('#44 the editor echo of a mini-editor caret move does not answer it a secon
     TexViewer.prototype.syncFromEditor.call(viewer, editor, {});
     assert.equal(viewer._nativeCursorRequest, 6, 'a later, real move is answered');
 });
+
+// ── Paragraph-first preview: the typed paragraph before its page ─────────────
+test('a placed paragraph fragment goes to the webview for the page it was placed on; nothing without a place or a page on screen', () => {
+    const posts = [];
+    const viewer = Object.create(TexViewer.prototype);
+    Object.assign(viewer, { panel: {}, root: '/p/paper.tex', shownAnything: true, _post: m => posts.push(m) });
+    const placement = { page: 5, identity: 'h5', dx: 0, dy: 0, clip: [0, 0, 1, 1], clear: [0, 0, 1, 1], below: [0, 1, 1, 1], shift: 0 };
+    const event = { kind: 'fragment', root: '/p/paper.tex', generation: 9, page: 4, index: 0, txdl: { ops: [] }, fonts: {}, placement };
+    viewer._onInteractive(event);
+    viewer._onInteractive({ ...event, placement: null });
+    viewer._onInteractive({ ...event, txdl: null });
+    viewer.shownAnything = false;
+    viewer._onInteractive(event);
+    assert.deepEqual(posts.map(p => [p.type, p.page, p.generation]), [['txdlFragment', 5, 9]], 'drawn where it was placed');
+    // With a map of the page with the paragraph in it, that is what the page shows.
+    viewer.shownAnything = true;
+    viewer._onInteractive({ ...event, mapIdentity: 'fragment:3:5:0' });
+    assert.equal(viewer._liveOverlays.get(5), 'fragment:3:5:0', 'the caret and card follow the fragment\'s map');
+});

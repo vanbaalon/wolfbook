@@ -1152,6 +1152,11 @@ function registerTexSupport(context, deps = {}) {
     context.subscriptions.push(status.item);
 
     const viewer = new TexViewer(context, coord, projection, deps);
+    // An agent's edit through the paper tools (a WorkspaceEdit, no disk event):
+    // the same waited-for build as its disk writes get.
+    context.subscriptions.push(require('./reviewBus').onAgentEdit(ev => {
+        if (ev && ev.phase !== 'begin') viewer.compileForAgent?.(ev.file);
+    }));
     const gitWorkflow = new GitWorkflow(vscode, context);
 
     // COMMIT FROM WHERE THE READER IS. With focus in the source editor the
@@ -1489,6 +1494,7 @@ async function offerReload(doc, diskText, output) {
                 const before = lastSeen.get(fsPath) ?? review._observed?.get(fsPath);
                 if (/\.tex$/i.test(fsPath) && typeof before === 'string' && diskText != null && before !== diskText) {
                     await review.noteAgentChange({ file: fsPath, baseText: before, source: 'disk' });
+                    viewer.compileForAgent?.(fsPath);
                 }
                 if (diskText != null) rememberText(fsPath, diskText);
                 diskWatch.accept(fsPath, diskText);
@@ -1537,6 +1543,7 @@ async function offerReload(doc, diskText, output) {
                 // agreeing to the one before it.
                 if (verdict !== VERDICT.DELETED && typeof before === 'string' && typeof diskText === 'string' && before !== diskText) {
                     await review.noteAgentChange({ file: fsPath, baseText: before, source: 'disk' });
+                    viewer.compileForAgent?.(fsPath);
                 }
                 return;
             }

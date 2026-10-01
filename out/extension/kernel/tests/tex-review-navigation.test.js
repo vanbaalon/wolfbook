@@ -113,7 +113,7 @@ async function main() {
         const nodes = [], page = { appendChild: n => nodes.push(n) };
         const context = vm.createContext({
             state: { rendered: new Map([[10, {}]]) },
-            document: { querySelectorAll: () => [], createElement: () => ({ style: {} }) },
+            document: { querySelectorAll: () => [], createElement: () => ({ style: {}, dataset: {} }) },
             pagesEl: () => ({ querySelector: () => page }), renderPage: async () => {},
             paintSelectionActions() {},
             textItems: async () => pdfItems.map(([str,x,y,w,h]) => ({str,x:x*zoom,y:y*zoom,w:w*zoom,h:h*zoom})),
@@ -139,7 +139,7 @@ async function main() {
         ];
         const context = vm.createContext({
             state:{rendered:new Map([[1,{}]])},
-            document:{querySelectorAll:()=>[],createElement:()=>({style:{}})},
+            document:{querySelectorAll:()=>[],createElement:()=>({style:{},dataset:{}})},
             pagesEl:()=>({querySelector:()=>page}),renderPage:async()=>{},paintSelectionActions(){},
             textItems:async()=>items.map(r=>({...r,x:r.x*zoom,y:r.y*zoom,w:r.w*zoom,h:r.h*zoom})),
             markToPx:m=>({x:m.x*zoom,y:m.y*zoom,h:m.h*zoom}),
@@ -166,6 +166,53 @@ async function main() {
     vm.runInContext(index.slice(index.indexOf("    reg('wolfbook.tex.copyFilePath'"),
         index.indexOf("    reg('wolfbook.tex.openViewer'")), copyContext);
     await copy(); assert.equal(copied, '/paper/current.tex', 'copy uses viewer source, not an unrelated active editor');
+    // Going to an agent's change on a page built without it: the Compile
+    // button's build, once; the focus waits for its PDF.
+    {
+        const w = Object.create(TexViewer.prototype);
+        const st = { generation: { sourceSnapshotHash: 'old', generation: 4 }, files: [] };
+        let current = false, rebuilt = 0, release;
+        w.root = '/paper.tex'; w._openedGeneration = 4; w.status = () => {};
+        w.coord = { roots: new Map([['/paper.tex', st]]), liveOverlay: () => null, isCurrent: () => current };
+        stub.workspace.openTextDocument = async () => ({ uri: { fsPath: '/paper.tex' } });
+        w.refresh = async () => {};
+        w._post = () => {};
+        w.coord.build = (_doc, o) => { rebuilt++; assert.equal(o.priority, true, 'a build the reader waits for, on the paper\'s own lane'); assert.ok(!o.force, 'not latexmk'); return new Promise(r => { release = r; }); };
+        assert.equal(w.reviewPageBehind(4), true, 'the text moved on since the page was built');
+        current = true;
+        assert.equal(w.reviewPageBehind(4), false, 'the page has the change');
+        assert.equal(w.reviewPageBehind(3), true, 'the change was placed on another build');
+        const first = w.compileForReview();
+        w.compileForReview();
+        await new Promise(r => setImmediate(r));
+        assert.equal(rebuilt, 1, 'one compile, however often the reader steps meanwhile');
+        release(); await first;
+        st.forcedCompiling = true;
+        w.compileForReview();
+        assert.equal(rebuilt, 1, 'not over a Compile already running');
+    }
+    // An agent's change: the waited-for build, one per burst, and one more
+    // for a change that lands while it runs.
+    {
+        const w = Object.create(TexViewer.prototype);
+        const statuses = []; let builds = 0; const releases = [];
+        w.root = '/paper.tex'; w.panel = {}; w.status = t => statuses.push(t); w._post = () => {}; w.refresh = async () => {};
+        w.coord = { rootFor: () => '/paper.tex', build: (_d, o) => { builds++; assert.equal(o.priority, true); return new Promise(r => releases.push(r)); } };
+        w.compileForAgent('/paper.tex'); w.compileForAgent('/sections/a.tex'); w.compileForAgent('/paper.tex');
+        await new Promise(r => setTimeout(r, 450));
+        assert.equal(builds, 1, 'a burst of writes is one build');
+        assert.ok(statuses.some(t => /agent changed the paper/.test(t)), 'and the reader is told why the page glows');
+        w.compileForAgent('/paper.tex');
+        await new Promise(r => setTimeout(r, 450));
+        assert.equal(builds, 1, 'not two at once');
+        releases[0](); await new Promise(r => setTimeout(r, 20));
+        assert.equal(builds, 2, 'the change that landed meanwhile gets its build after');
+        releases[1](); await new Promise(r => setTimeout(r, 20));
+        w.coord.rootFor = () => '/other.tex';
+        w.compileForAgent('/other/x.tex');
+        await new Promise(r => setTimeout(r, 450));
+        assert.equal(builds, 2, 'another paper\'s change does not compile this one');
+    }
     console.log('Review navigation, real PDF selection geometry, and copy-path menu: OK');
 }
 main().catch(e => { console.error(e); process.exitCode = 1; });

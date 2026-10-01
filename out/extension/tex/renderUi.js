@@ -527,7 +527,10 @@ class RenderCoordinator {
                 // A key held for this build that ended without a page.
                 if (next.pending) { next.pending = false; this._schedulePreview(root, st); }
             });
-        }, busy.has(root) && !now ? throttle : 0));
+        // A build that has drawn its paragraph fragment has nothing left to
+        // coalesce for: the next key's build reaches its own fragment in a
+        // few ms, and the engine drops the running one within a slice.
+        }, busy.has(root) && !now && !cur?.fragmentShown ? throttle : 0));
         return true;
     }
 
@@ -629,6 +632,20 @@ class RenderCoordinator {
                         const fresh = !page.identity || seen.get(page.page) !== page.identity;
                         if (page.identity) seen.set(page.page, page.identity);
                         if (cur && fresh) this._previewShown(root, st, cur);
+                    }
+                },
+                // THE TYPED PARAGRAPH FIRST. A fragment is the paragraph being
+                // typed, set as the page will set it and placed on the page
+                // shown; it reaches the screen tens of ms before the page. A
+                // placed fragment is the build's "shown" moment (#42): the
+                // next key may supersede this build, and its page comes when
+                // the typing pauses.
+                onFragment: fragment => {
+                    if (this._disposed || st.nativeLane !== lane) return;
+                    this._interactiveEmitter.fire({ kind:'fragment', root, ...fragment });
+                    if (cur && fragment.placement && fragment.txdl) {
+                        cur.fragmentShown = true;
+                        this._previewShown(root, st, cur);
                     }
                 },
                 onPageMap: map => {
@@ -804,6 +821,21 @@ class RenderCoordinator {
         if (!st) return;
         st.sourceAhead = true;
         st.lastEditAt = Date.now();
+        // A KEY KILLS THE BACKGROUND FULL BUILD. Its text is gone; the live
+        // lane takes the key, and the next pause starts a full build of the
+        // new text. A forced Compile is left to finish. A save's change
+        // event (no content changes: only the dirty flag moved) is no key.
+        if (st.running && st.backgroundCompiling && !st.forcedCompiling && e.contentChanges?.length) {
+            const running = st.running;
+            st.running = null;
+            st.runningSnapshot = null;
+            st.compiling = false;
+            st.liveCompiling = false;
+            st.backgroundCompiling = false;
+            running.abort();
+            this.log(`background build of ${path.basename(this.rootFor(e.document))} dropped: typing`);
+            this._emitter.fire(st);
+        }
         if (st.nativeLane) {
             const lane = st.nativeLane;
             if (st.map?.native) st.map.noteEdit();
@@ -863,7 +895,14 @@ class RenderCoordinator {
      * Only one compile per root at a time; a second request cancels the first,
      * which is cheap (45-80 ms process-group kill, measured).
      */
-    async build(doc, { force = false, live = false, authoritative = false, quiet = false } = {}) {
+    /**
+     * `priority`: a build the reader waits for, as a Compile is (the glow,
+     * nothing but another Compile aborts it), but on the paper's own lane —
+     * WLaTeX's full build with its exact map, where `force` runs latexmk.
+     * Going to an agent's change asks for one (TexViewer.compileForReview).
+     */
+    async build(doc, { force = false, live = false, authoritative = false, quiet = false, priority = false } = {}) {
+        const waited = force || priority;
         if (this._disposed) return;
         const root = this.rootFor(doc);
         // A deliberate save/Compile supersedes the debounce which preceded it.
@@ -1045,21 +1084,50 @@ class RenderCoordinator {
         // pending — the newest text wins — and a deliberate build (a save, the
         // Compile button, the convergence pass) still takes precedence and
         // aborts, because the reader asked for it now.
+        //
+        // THE COMPILE BUTTON HAS TOP PRIORITY. A forced build is what the
+        // reader asked for and waits for: nothing but another Compile aborts
+        // it. A live settle or a save arriving meanwhile goes round once it
+        // lands (the save's text, when it is the one being compiled, needs
+        // nothing more).
+        //
+        // A SAVE OF THE TEXT BEING BUILT LETS THAT BUILD LAND. The viewer
+        // auto-saves 3 s after the last key, half a second into the 2.5 s
+        // pause's full build of those very buffers: aborting it to start the
+        // same build over threw the work away and showed nothing for twice
+        // as long.
         if (st.running) {
+            if (st.forcedCompiling && !waited) {
+                if (live || st.runningSnapshot !== snapshot) st.liveQueued = true;
+                this.log(`${live ? 'live rebuild' : 'build'} of ${path.basename(root)} waits for the Compile already running`);
+                return st;
+            }
             if (live && st.liveCompiling) {
                 st.liveQueued = true;
                 this.log(`live rebuild of ${path.basename(root)} queued behind the one already running`);
+                return st;
+            }
+            if (!live && !force && st.backgroundCompiling && st.runningSnapshot === snapshot) {
+                this.log(`save of ${path.basename(root)}: the build already running has this text`);
                 return st;
             }
             st.running.abort();
         }
         const ac = new AbortController();
         st.running = ac;
+        st.runningSnapshot = snapshot;
         st.compiling = true;
         // A live rebuild is background work: the previous PDF stays on screen
         // and the panel shows a quiet marker, rather than the blocking
         // "compiling…" banner a deliberate Compile deserves.
         st.liveCompiling = live;
+        st.forcedCompiling = waited;
+        // BACKGROUND FULL BUILDS ARE INVISIBLE. With WLaTeX Pro the live lane
+        // already shows what is typed, so the full build after a pause (and a
+        // save's, and the convergence pass) runs behind it with no glow, and
+        // the next key kills it (noteChange). Only the Compile button, or a
+        // paper with nothing on screen yet, glows.
+        st.backgroundCompiling = !waited && mapEngine === 'wlatex' && !!st.generation;
         this._emitter.fire(st);
 
         const t0 = Date.now();
@@ -1320,7 +1388,10 @@ class RenderCoordinator {
             if (st.running === ac) {
                 st.compiling = false;
                 st.liveCompiling = false;
+                st.forcedCompiling = false;
+                st.backgroundCompiling = false;
                 st.running = null;
+                st.runningSnapshot = null;
             }
             if (!this._disposed) this._emitter.fire(st);
         }

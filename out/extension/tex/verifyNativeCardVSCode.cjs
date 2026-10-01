@@ -50,7 +50,9 @@ exports.run = async function () {
         await sleep(1500);
         const posts = [];
         const post = viewer._post.bind(viewer);
-        viewer._post = (m) => { posts.push({ at: Date.now(), type: m && m.type, page: m && m.page, text: m && m.text, forTikz: m && m.forTikz }); return post(m); };
+        viewer._post = (m) => { posts.push({ at: Date.now(), type: m && m.type, page: m && m.page, text: m && m.text, forTikz: m && m.forTikz,
+            ...(m && m.type === 'comments' ? { items: (m.items || []).map(i => ({ text: i.text, line: i.line, rects: (i.rects || []).length, unplaced: i.unplaced })) } : {}),
+            ...(m && m.type === 'labels' ? { labels: (m.items || []).length } : {}) }); return post(m); };
         // Where the time goes: the steps of opening a card, timed.
         const timings = [];
         for (const name of ['_resolvePoint', '_modelFor', '_blockAt', '_editRects', '_jumpToSource', '_openEditSession']) {
@@ -71,6 +73,76 @@ exports.run = async function () {
             const r = rects[0];
             return { line, page: r.page, xBp: r.x + r.w / 2, yTopBp: r.y + r.h / 2 };
         };
+        // 0. A right-click on prose, and one in the margin beside it: each opens a card.
+        {
+            const prose = lines.findIndex((l, i) => i > lines.findIndex(x => x.includes('\\begin{document}')) + 20 && /^[A-Za-z][a-z]+ [a-z]+ [a-z]+ [a-z]+/.test(l)) + 1;
+            const rects = await st.map.forwardAt(doc.uri.fsPath, prose, 3);
+            const r = rects && rects[0];
+            report.prose = { line: prose };
+            for (const [name, x] of [['on', r && r.x + r.w / 2], ['margin', 8]]) {
+                if (!r) break;
+                const t0 = Date.now();
+                await viewer._onMessage({ type: 'editHere', page: r.page, xBp: x, yTopBp: r.y + r.h / 2, generation: viewer._openedGeneration });
+                const opened = posts.find(p => p.at >= t0 && p.type === 'editOpen');
+                report.prose[name] = { opened: !!opened, said: posts.filter(p => p.at >= t0 && p.type === 'status').map(p => p.text) };
+                if (name === 'on' && opened) {
+                    // A comment added from the card's pane: it is placed beside its paragraph.
+                    const c0 = Date.now();
+                    await viewer._onMessage({ type: 'commentAction', action: 'addAt', file: doc.uri.fsPath, line: viewer._edit ? doc.positionAt(viewer._edit.startOffset).line + 1 : prose, text: 'Added from the card' });
+                    await sleep(800);
+                    const sent = posts.filter(p => p.at >= c0 && p.type === 'comments').at(-1);
+                    report.prose.comment = sent ? sent.items.find(i => i.text === 'Added from the card') || 'missing' : 'no comments message';
+                }
+                await viewer._onMessage({ type: 'editClose', editId: viewer._edit?.id });
+                await sleep(300);
+            }
+        }
+        // 0b. The same right-click just after a keystroke on another page.
+        {
+            const editor = vscode.window.visibleTextEditors.find(e => e.document === doc);
+            // On the same page, a few lines on: that page is then drawn live.
+            const far = lines.findIndex((l, i) => i > report.prose.line + 2 && /^[A-Za-z][a-z]+ [a-z]+ [a-z]+/.test(l));
+            const rects = await st.map.forwardAt(doc.uri.fsPath, report.prose.line, 3);
+            const r = rects && rects[0];
+            if (far > 0 && r) {
+                await editor.edit(b => b.insert(new vscode.Position(far, lines[far].length), ' x'));
+                for (const wait of [300, 1500]) {
+                    await sleep(wait);
+                    const t0 = Date.now();
+                    // As the page sends it: a page the live engine drew names its overlay.
+                    const overlay = viewer._liveOverlays?.get(r.page);
+                    await viewer._onMessage({ type: 'editHere', page: r.page, xBp: r.x + r.w / 2, yTopBp: r.y + r.h / 2, generation: viewer._openedGeneration,
+                        ...(overlay != null ? { overlay } : {}) });
+                    const opened = posts.find(p => p.at >= t0 && p.type === 'editOpen');
+                    report.prose[`afterKey${wait}overlay`] = overlay != null;
+                    report.prose[`afterKey${wait}`] = { opened: !!opened, said: posts.filter(p => p.at >= t0 && p.type === 'status').map(p => p.text),
+                        mapAvailable: st.map.available, sourceAhead: st.sourceAhead };
+                    await viewer._onMessage({ type: 'editClose', editId: viewer._edit?.id });
+                }
+            }
+        }
+        // 0c. Right after a keystroke (the map stale): a comment added from the
+        // editor is placed, and Shift shows the label chips.
+        {
+            const editor = vscode.window.visibleTextEditors.find(e => e.document === doc);
+            const far = lines.findIndex((l, i) => i > report.prose.line + 2 && /^[A-Za-z][a-z]+ [a-z]+ [a-z]+/.test(l));
+            await editor.edit(b => b.insert(new vscode.Position(far, lines[far].length), ' y'));
+            await sleep(100);
+            report.mapStaleAtComment = !st.map.available;
+            const c0 = Date.now();
+            await viewer._onMessage({ type: 'commentAction', action: 'addAt', file: doc.uri.fsPath, line: far + 1, text: 'After a key' });
+            await sleep(2500);
+            const sent = posts.filter(p => p.at >= c0 && p.type === 'comments').at(-1);
+            report.commentAfterKey = sent ? sent.items.find(i => i.text === 'After a key') || 'missing' : 'no comments message';
+            await editor.edit(b => b.insert(new vscode.Position(far, lines[far].length + 2), 'z'));
+            await sleep(100);
+            const l0 = Date.now();
+            await viewer._onMessage({ type: 'labelsWanted', value: true });
+            await sleep(2500);
+            const labels = posts.filter(p => p.at >= l0 && p.type === 'labels').at(-1);
+            report.labelsAfterKey = labels ? labels.labels : 'no labels message';
+        }
+        if (!/\\begin\{tabular\}/.test(doc.getText())) { report.result = report.prose?.on?.opened && report.prose?.margin?.opened && report.commentAfterKey?.rects > 0 && report.labelsAfterKey > 0 && report.prose?.afterKey300?.opened !== false && report.prose?.afterKey1500?.opened !== false ? 'PASS' : 'FAIL'; return; }
         // 1. A right-click on a table cell (the webview sends editHere).
         const cell = await at(/\\begin\{tabular\}/, 2);
         report.table = { at: cell };

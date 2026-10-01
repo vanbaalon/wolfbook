@@ -62,6 +62,7 @@ for (const m of ['../../tex/renderUi', '../../tex/collapse']) {
 }
 const { RenderCoordinator } = require('../../tex/renderUi');
 const { MARK, MARK_END, PREFIX } = require('../../tex/collapse');
+const { snapshotSources } = require('../../tex/compileService');
 Module._load = origLoad;
 
 // --- a paper on disk --------------------------------------------------------
@@ -281,6 +282,62 @@ test('but a SAVE still takes precedence and aborts it', async () => {
     try { await c.build(docFor(ROOT), { authoritative: true }); } catch (_) { /* the stub stops it */ }
     assert.strictEqual(aborted, 1, 'the live build was aborted for it');
     assert.strictEqual(st.liveQueued, false, 'and nothing was queued');
+});
+
+test('THE COMPILE BUTTON HAS TOP PRIORITY: a live rebuild or a save waits for it', async () => {
+    write(ROOT, PLAIN);
+    docs.length = 0;
+    const c = coordForBuild();
+    const st = c.roots.get(ROOT);
+    let aborted = 0;
+    st.running = { abort: () => { aborted++; } };
+    st.compiling = true;
+    st.forcedCompiling = true;
+    st.runningSnapshot = 'older text';
+    await c.build(docFor(ROOT), { live: true });
+    await c.build(docFor(ROOT), { authoritative: true });
+    assert.strictEqual(aborted, 0, 'the Compile the reader waits for runs to the end');
+    assert.strictEqual(st.liveQueued, true, 'the newer text goes round once it lands');
+});
+
+test('A SAVE OF THE TEXT A BACKGROUND BUILD IS COMPILING LETS IT LAND', async () => {
+    // The viewer auto-saves 3 s after the last key, half a second into the
+    // full build the 2.5 s pause started of those very buffers.
+    write(ROOT, PLAIN);
+    docs.length = 0;
+    const c = coordForBuild();
+    const st = c.roots.get(ROOT);
+    let aborted = 0;
+    st.running = { abort: () => { aborted++; throw new Error('stop here'); } };
+    st.compiling = true;
+    st.liveCompiling = true;
+    st.backgroundCompiling = true;
+    st.runningSnapshot = snapshotSources(st.files, c.liveOverlay(ROOT));
+    await c.build(docFor(ROOT), { authoritative: true });
+    assert.strictEqual(aborted, 0, 'the running build already has the saved text');
+    st.runningSnapshot = 'older text';
+    try { await c.build(docFor(ROOT), { authoritative: true }); } catch (_) { /* the stub stops it */ }
+    assert.strictEqual(aborted, 1, 'a save of newer text still replaces it');
+});
+
+test('A KEY KILLS THE BACKGROUND FULL BUILD, not a forced Compile', () => {
+    const c = coord([ROOT]);
+    c.rootOf.set(ROOT, ROOT);
+    const st = c.roots.get(ROOT);
+    let aborted = 0;
+    const key = () => c.noteChange({ document: { uri: { fsPath: ROOT } },
+        contentChanges: [{ range: { start: { line: 3 }, end: { line: 3 } }, text: 'x' }] });
+    Object.assign(st, { running: { abort: () => { aborted++; } }, compiling: true, forcedCompiling: true,
+        backgroundCompiling: false });
+    key();
+    assert.strictEqual(aborted, 0, 'the Compile is left to finish');
+    Object.assign(st, { forcedCompiling: false, backgroundCompiling: true, liveCompiling: true });
+    c.noteChange({ document: { uri: { fsPath: ROOT } }, contentChanges: [] });
+    assert.strictEqual(aborted, 0, 'a save (the dirty flag moved, no text changed) is no key');
+    key();
+    assert.strictEqual(aborted, 1, 'the full build of text now gone is killed');
+    assert.strictEqual(st.running, null);
+    assert.strictEqual(st.compiling, false, 'so the live settle after the next pause starts at once');
 });
 
 test('a deliberate compile cancels the older live deadline', async () => {

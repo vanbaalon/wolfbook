@@ -236,8 +236,41 @@ class NativeMap extends RenderMap {
         if (!current()) return null;
         const absolute = path.resolve(file);
         const relative = path.relative(this.projectDir, absolute).split(path.sep).join('/');
+        const index = this._rangeIndex(absolute, relative);
+        if (!index) return null;
+        const { text, starts } = index;
+        const at = index.at;
+        const a = at(start), b = at(end);
+        if (a === null || b === null || a > b) throw Error('Invalid native source selection');
+        if (a === b) return [];
+        const chosen = new Set(), uncertain = [];
+        // Origins sorted by their start: those starting at or after `b` are
+        // past the range (an empty origin at `b` is too: a <= left < b).
+        const items = index.items;
+        let top = 0, bottom = items.length;
+        while (top < bottom) { const mid = (top + bottom) >> 1; if (items[mid].left < b) top = mid + 1; else bottom = mid; }
+        for (let k = 0; k < top; k++) {
+            const { id, left, right, exact } = items[k];
+            const lo = Math.max(a, left), hi = Math.min(b, right);
+            if (left === right ? !(a <= left && left < b) : lo >= hi) continue;
+            if (exact && left < right) chosen.add(id);
+            else uncertain.push({ id, lo, hi });
+        }
+        return this._forwardRangeSweep(relative, text, starts, a, b, chosen, uncertain, current);
+    }
+
+    /**
+     * One file's glyph origins as source offsets, sorted by start: built once
+     * per map and file. forwardRange walked every glyph of the document and
+     * resolved every origin's path for each call — 27 ms of each 30 ms drag
+     * step on a 50-page paper, for a selection that needs no recompile.
+     */
+    _rangeIndex(absolute, relative) {
+        const cache = (this._rangeIndexes ||= new Map());
         const text = this.source.files?.get(relative)?.text;
         if (typeof text !== 'string') return null;
+        const known = cache.get(relative);
+        if (known && known.text === text && known.entries === this._entries.length) return known.invalid ? null : known;
         const lines = text.split('\n'), starts = [];
         let offset = 0;
         for (const line of lines) { starts.push(offset); offset += line.length + 1; }
@@ -250,19 +283,24 @@ class NativeMap extends RenderMap {
             if (n > 0 && /[\uD800-\uDBFF]/.test(text[n - 1]) && /[\uDC00-\uDFFF]/.test(text[n] || '')) return null;
             return n;
         };
-        const a = at(start), b = at(end);
-        if (a === null || b === null || a > b) throw Error('Invalid native source selection');
-        if (a === b) return [];
-        const chosen = new Set(), uncertain = [];
+        const items = [];
+        const resolved = new Map();
+        let invalid = false;
         for (const entry of this._entries) for (const origin of entry.hit.mapped_origins) {
-            if (path.resolve(this.projectDir, origin.source.file) !== absolute) continue;
+            let file = resolved.get(origin.source.file);
+            if (file === undefined) resolved.set(origin.source.file, file = path.resolve(this.projectDir, origin.source.file));
+            if (file !== absolute) continue;
             const loc = origin.source.location, left = at(loc.start), right = at(loc.end);
-            if (left === null || right === null) return null;
-            const lo = Math.max(a, left), hi = Math.min(b, right);
-            if (left === right ? !(a <= left && left < b) : lo >= hi) continue;
-            if (loc.accuracy === 'Exact' && left < right) chosen.add(entry.i);
-            else uncertain.push({ id:entry.i, lo, hi });
+            if (left === null || right === null) { invalid = true; continue; }
+            items.push({ id:entry.i, left, right, exact:loc.accuracy === 'Exact' });
         }
+        items.sort((x, y) => x.left - y.left);
+        const index = { text, starts, at, items, invalid, entries:this._entries.length };
+        cache.set(relative, index);
+        return invalid ? null : index;
+    }
+
+    async _forwardRangeSweep(relative, text, starts, a, b, chosen, uncertain, current) {
         // Sweep uncertain intervals in source order. Every point answer admits
         // all candidate items it contains, and later intervals skip the prefix
         // already queried. This avoids retaining a set of hits per character or
@@ -315,6 +353,28 @@ class NativeMap extends RenderMap {
         if (!hit) return this._generatedAt(page, x, y) || this._nearestAt(page, x, y) ||
             { flag: FLAG.UNMAPPED, reason: 'no native source box contains this point' };
         return this._sourceOf(hit, page, x, y);
+    }
+
+    /**
+     * The exact source of the typed glyph nearest a point, however far: a
+     * right-click in a margin or between paragraphs opens the block nearest
+     * to it. Nearest by distance, a line's height counting as much as four
+     * of width, so a click level with a line takes that line.
+     */
+    nearestExact(page, x, y) {
+        if (!this.available) return null;
+        const ranked = [];
+        for (const e of this._pages.get(page) || []) {
+            if (!e.file) continue;
+            const dx = Math.max(0, e.x - x, x - (e.x + e.w)), dy = Math.max(0, e.y - y, y - (e.y + e.boxHeight));
+            ranked.push({ e, cost: dx + 4 * dy });
+        }
+        ranked.sort((a, b) => a.cost - b.cost);
+        for (const { e } of ranked.slice(0, 24)) {
+            const hit = this.renderToSource(page, e.x + e.w / 2, e.y + e.boxHeight / 2);
+            if (hit?.exact && hit.file && !hit.approximate) return hit;
+        }
+        return null;
     }
 
     /**

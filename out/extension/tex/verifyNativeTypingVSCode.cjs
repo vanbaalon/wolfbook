@@ -67,7 +67,17 @@ exports.run = async function () {
         lane.interactiveBuild = async o => {
             const build = { start: performance.now(), firstPage: null, page: null };
             builds.push(build);
-            const result = await interactiveBuild({ ...o, onPage: page => {
+            const result = await interactiveBuild({ ...o, onFragment: fragment => {
+                o.onFragment?.(fragment);
+                // THE KEY'S PARAGRAPH: the first placed fragment, drawn over
+                // the page at once (the page itself follows at the pause).
+                if (build.firstFragment == null && fragment.placement && fragment.txdl) {
+                    build.firstFragment = performance.now();
+                    build.fragmentEngineMs = fragment.sinceBuildMs;
+                    build.fragmentTiming = fragment.timing || null;
+                }
+                build.fragments = (build.fragments || 0) + 1;
+            }, onPage: page => {
                 o.onPage?.(page);
                 if (page.changed !== false) (build.changed ||= []).push([page.page, Math.round(performance.now() - build.start), page.sinceBuildMs, page.identity?.slice?.(0, 8) ?? null]);
                 // THE KEY'S PAGE: the first page whose content differs from what
@@ -154,6 +164,25 @@ exports.run = async function () {
             return shown.length ? Math.min(...shown) - k.t0 : null;
         });
         const shown = latency.filter(v => v != null);
+        // Key -> its paragraph on screen: the first placed fragment of a build
+        // that started after the key (the page, when no fragment came first).
+        const fragmentLatency = keys.map(k => {
+            const at = builds.filter(b => b.start >= k.t0 && (b.firstFragment != null || b.firstPage != null))
+                .map(b => Math.min(b.firstFragment ?? Infinity, b.firstPage ?? Infinity));
+            return at.length ? Math.min(...at) - k.t0 : null;
+        }).filter(v => v != null);
+        report.key_to_fragment_ms = { p50: quantile(fragmentLatency, 0.5), p90: quantile(fragmentLatency, 0.9), max: Math.max(...fragmentLatency) };
+        // Split like the page: key -> the build that shows it starts, that
+        // build's start -> its fragment (and the SDK's own stage times).
+        const fragmentWaits = keys.map(k => { const b = builds.filter(b => b.start >= k.t0 && b.firstFragment != null).sort((x, y) => x.firstFragment - y.firstFragment)[0];
+            return b ? { wait: b.start - k.t0, build: b.firstFragment - b.start, timing: b.fragmentTiming } : null; }).filter(Boolean);
+        report.key_to_fragment_build_start_ms = { p50: quantile(fragmentWaits.map(w => w.wait), 0.5), p90: quantile(fragmentWaits.map(w => w.wait), 0.9) };
+        report.fragment_build_to_fragment_ms = { p50: quantile(fragmentWaits.map(w => w.build), 0.5), p90: quantile(fragmentWaits.map(w => w.build), 0.9) };
+        report.fragment_timing_sample = fragmentWaits.slice(0, 6).map(w => w.timing && Object.fromEntries(Object.entries(w.timing).filter(([k]) => k !== 't0').map(([k, v]) => [k, Math.round(v)])));
+        report.fragments = builds.reduce((n, b) => n + (b.fragments || 0), 0);
+        report.builds_with_fragment = builds.filter(b => b.firstFragment != null).length;
+        report.fragment_engine_ms = { p50: quantile(builds.map(b => b.fragmentEngineMs).filter(Number.isFinite), 0.5),
+            p90: quantile(builds.map(b => b.fragmentEngineMs).filter(Number.isFinite), 0.9) };
         // Split: key -> the build that shows it starts, and that build's start -> its first page.
         const waits = keys.map(k => { const b = builds.filter(b => b.start >= k.t0 && b.firstPage != null).sort((x, y) => x.firstPage - y.firstPage)[0];
             return b ? { wait: b.start - k.t0, build: b.firstPage - b.start } : null; }).filter(Boolean);

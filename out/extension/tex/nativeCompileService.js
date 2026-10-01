@@ -49,6 +49,23 @@ function interactivePage(generation, event) {
             ? { widthBp:geometry.width_pt, heightBp:geometry.height_pt } : null };
 }
 
+// A paragraph fragment as the viewer wants it: the typed paragraph's display
+// list and where it goes on the page shown (`placement`, in the page's DVI
+// scaled points: dx/dy added to the fragment's coordinates, the column clip,
+// the old paragraph to clear, the band below it and how far that band moves).
+// A preview only; the page that follows replaces it.
+function interactiveFragment(generation, event) {
+    return { generation, page:event.page, index:event.fragment_index ?? 0,
+        placement:event.placement ?? null, source:event.source ?? null,
+        txdl:event.payload?.txdl ?? null, fonts:event.payload?.fonts ?? null,
+        error:event.payload?.error ?? null,
+        map:event.map ?? null, mapFiles:event.map_files ?? null,
+        // The page shown with the paragraph in it has its own live map
+        // (`page_map_ready` with this identity follows).
+        mapIdentity:event.page_map_identity ?? null,
+        sinceBuildMs:Number.isFinite(event.since_build_ms) ? event.since_build_ms : null };
+}
+
 // A preview that did not run. Shaped like a failed generation so a caller can
 // log it and move on; it is never a reason to retire the native lane, because
 // the cold build that follows is untouched by it.
@@ -547,6 +564,12 @@ class NativeBuildLane {
                     if (this.closed || o.signal?.aborted) continue;
                     if (typeof o.onPage !== 'function') continue;
                     try { o.onPage({ ...interactivePage(generation, event), ...(timing ? { timing: { ...timing, page: performance.now() - timing.t0 } } : {}) }); }
+                    catch (_) { /* a viewer that cannot draw never fails a build */ }
+                } else if (event.event === 'paragraph_fragment') {
+                    // The typed paragraph ahead of its page: drawn at once over
+                    // the page shown. Same staleness rule as pages.
+                    if (this.closed || o.signal?.aborted || typeof o.onFragment !== 'function') continue;
+                    try { o.onFragment({ ...interactiveFragment(generation, event), ...(timing ? { timing: { ...timing, fragment: performance.now() - timing.t0 } } : {}) }); }
                     catch (_) { /* a viewer that cannot draw never fails a build */ }
                 } else if (event.event === 'page_map_ready' || event.event === 'page_map_failed') {
                     // The page's own source map reached the worker (or could

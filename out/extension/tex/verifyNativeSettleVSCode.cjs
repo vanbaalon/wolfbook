@@ -84,9 +84,9 @@ exports.run = async function () {
         timed(coord, 'build'); timed(coord, '_modelFor'); timed(coord, '_runNativeRefresh'); timed(coord, '_runInteractive');
         timed(viewer, 'refresh', 'viewer.refresh'); timed(viewer, '_postSections'); timed(viewer, '_postLabels'); timed(viewer, '_syncNativeCursor');
         const log = coord.log?.bind(coord);
-        if (log) coord.log = (m) => { if (/compile|ok ·|superseded|render map|identical|sent generation/.test(m)) note(String(m).trim().slice(0, 90)); return log(m); };
+        if (log) coord.log = (m) => { if (/compile|ok ·|superseded|render map|identical|sent generation|dropped: typing|waits for the Compile|already running has/.test(m)) note(String(m).trim().slice(0, 90)); return log(m); };
         const post = viewer._post.bind(viewer);
-        viewer._post = m => { if (m && ['open', 'txdlBuilt', 'engine', 'compileState'].includes(m.type)) note(`post ${m.type}`); return post(m); };
+        viewer._post = m => { if (m && ['open', 'txdlBuilt', 'engine', 'compileState'].includes(m.type)) note(`post ${m.type}${m.type === 'compileState' ? ` ${!!m.compiling}` : m.type === 'open' ? ` live=${!!m.live}` : ''}`); return post(m); };
         // Event-loop stalls.
         const stalls = []; let tick = performance.now();
         const lagTimer = setInterval(() => { const now = performance.now(); if (now - tick > 40) { stalls.push({ at: Math.round(tick - T0), ms: Math.round(now - tick) }); note(`STALL ${Math.round(now - tick)} ms`); } tick = now; }, 5);
@@ -102,7 +102,28 @@ exports.run = async function () {
         note('pause'); const gen0 = st.generation.generation;
         await until(() => coord.stateFor(doc).generation.generation > gen0 && !coord.stateFor(doc).compiling, 'the settle', 60000).catch(() => note('no settle within 60 s'));
         note('settled'); await new Promise(r => setTimeout(r, 3000));
+        // A key during the pause's full build kills it; the next pause builds again.
         note('typing 2'); await type(' again');
+        await until(() => st.compiling && st.backgroundCompiling, 'the second settle to start', 30000);
+        note('key during the settle'); await type('s');
+        report.killedByKey = timeline.some(l => /dropped: typing/.test(l));
+        const killsBefore = timeline.filter(l => /dropped: typing/.test(l)).length;
+        const gen1 = st.generation.generation;
+        await until(() => st.generation.generation > gen1 && !st.compiling, 'the settle after the key', 60000);
+        note('settled again'); await new Promise(r => setTimeout(r, 4000));
+        // Killed only by the one key: the auto-save 3 s after it lets the build land.
+        report.killsWithoutKey = timeline.filter(l => /dropped: typing/.test(l)).length - killsBefore;
+        report.glowBeforeCompile = timeline.some(l => /compileState true/.test(l));
+        // The Compile button: it glows, and typing does not cancel it.
+        const mark = timeline.length;
+        note('Compile'); const forced = coord.build(doc, { force: true });
+        await until(() => st.compiling && st.forcedCompiling, 'the Compile to start', 10000);
+        note('typing during the Compile'); await type(' more');
+        await forced;
+        note('Compile done');
+        const during = timeline.slice(mark);
+        report.compileGlowed = during.some(l => /compileState true/.test(l));
+        report.compileSuperseded = during.some(l => /superseded/.test(l) && !/queued/.test(l));
         await new Promise(r => setTimeout(r, 9000));
         clearInterval(lagTimer);
         if (profiler) {
@@ -112,7 +133,14 @@ exports.run = async function () {
         }
         report.stalls = { count: stalls.length, total_ms: stalls.reduce((a, s) => a + s.ms, 0), max_ms: Math.max(0, ...stalls.map(s => s.ms)) };
         report.timeline = timeline;
-        report.result = 'PASS';
+        const wrong = [];
+        if (!report.killedByKey) wrong.push('a key did not kill the background build');
+        if (report.killsWithoutKey) wrong.push('a background build was killed with no key typed (the auto-save?)');
+        if (report.glowBeforeCompile) wrong.push('typing or a background build glowed');
+        if (!report.compileGlowed) wrong.push('the Compile did not glow');
+        if (report.compileSuperseded) wrong.push('the Compile was superseded');
+        report.problems = wrong;
+        report.result = wrong.length ? 'FAIL' : 'PASS';
     } catch (error) {
         report.result = 'FAIL';
         report.error = error.stack || error.message;

@@ -782,7 +782,16 @@ class ReviewUi {
         this.focused.set(file, id);
         this.paint(file);
         this.push(file);
-        if (this.viewer && this.viewer.focusReviewHunk) this.viewer.focusReviewHunk(h, s.generation);
+        if (this.viewer && this.viewer.focusReviewHunk) {
+            // The page lacks the change (the agent wrote the file after it
+            // was built): the full compile first, then the focus, which
+            // waits for that PDF (TexViewer.compileForReview).
+            const behind = this.viewer.reviewPageBehind && this.viewer.reviewPageBehind(s.generation);
+            // Behind: no generation, so the focus waits for the placement
+            // on the new PDF instead of going to the old page now.
+            this.viewer.focusReviewHunk(h, behind ? null : s.generation);
+            if (behind && this.viewer.compileForReview) this.viewer.compileForReview();
+        }
         try {
             const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
             const line = Math.max(0, Math.min(h.ourRange.startLine - 1, doc.lineCount - 1));

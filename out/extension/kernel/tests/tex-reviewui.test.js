@@ -254,6 +254,21 @@ test('FOCUSING A CHANGE NEVER TOUCHES THE SELECTION', async () => {
     assert.ok(posted.some(p => p && p.focus === id), 'and the page was told which change');
 });
 
+test('GOING TO A CHANGE THE PAGE LACKS COMPILES FIRST, as the Compile button does', async () => {
+    const { ui, viewer, posted } = makeUi();
+    let behind = true, compiles = 0;
+    viewer.reviewPageBehind = () => behind;
+    viewer.compileForReview = () => { compiles++; };
+    await ui.noteAgentChange({ file: FILE, baseText: BASE });
+    const id = ui.sessionFor(FILE).hunks[0].id;
+    await ui.show(FILE, id);
+    assert.strictEqual(compiles, 1, 'the agent wrote the file after the page was built: compile');
+    assert.ok(posted.some(p => p && p.focus === id), 'the focus is handed over, to wait for the new PDF');
+    behind = false;
+    await ui.show(FILE, id);
+    assert.strictEqual(compiles, 1, 'a page that has the change is not compiled again');
+});
+
 test('DECIDING ONE CHANGE MOVES TO THE NEXT', async () => {
     // Reviewing is a WORKLIST. Deciding a change and then having to point at
     // the next one is a click nobody needs, and it is the click that makes a

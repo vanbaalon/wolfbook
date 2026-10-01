@@ -197,13 +197,7 @@ function setCompileState(msg) {
 // engine is doing: `live · 18 ms` (the page shows the text being typed, that
 // long after the key), `settling…` (the final PDF is being built), `settled`
 // (the PDF is WLaTeX's own), or `off` with the reason (a paper written for
-// another engine). Its panel lists what Pro does; pages the engine drew
-// while typing carry a small tag unless the reader turns tags off.
-
-const PRO_MARKS_KEY = 'wpaper.pro.liveMarks';
-function proLiveMarks() {
-    try { return localStorage.getItem(PRO_MARKS_KEY) !== 'off'; } catch (_) { return true; }
-}
+// another engine). Its panel lists what Pro does.
 
 /**
  * WLaTeX Pro is on for this paper: the lane is live, settling or settled.
@@ -225,7 +219,6 @@ function setEngineBadge(msg) {
     if (tikzButton) tikzButton.hidden = !proActive();
     try { if (!proActive() && tikz.on) tikzToggle(false); } catch (_) { /* before the TikZ tool is set up */ }
     badge.hidden = !engine;
-    document.body.classList.toggle('pro-live-marks', !!engine && !['off', 'disabled'].includes(engine.state) && proLiveMarks());
     if (!engine) { closeProPanel(); return; }
     badge.dataset.state = engine.state;
     const ms = v => (Number.isFinite(v) ? `${Math.round(v)} ms` : null);
@@ -259,7 +252,6 @@ function setEngineBadge(msg) {
     el('prochoose').hidden = !(engine.state === 'off' && engine.choosable);
     const last = el('pro-key');
     if (last) last.textContent = key ? `last: ${key}` : '';
-    el('promarks').checked = proLiveMarks();
     const track = el('protrack');
     if (track) track.checked = !!engine.trackMine;
 }
@@ -290,10 +282,6 @@ el('prochoose')?.addEventListener('click', () => { vscode.postMessage({ type: 'c
 document.addEventListener('click', closeProPanel);
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !el('propanel')?.hidden) closeProPanel(); });
 el('protrack')?.addEventListener('change', (e) => vscode.postMessage({ type: 'trackMine', on: !!e.target.checked }));
-el('promarks')?.addEventListener('change', (e) => {
-    try { localStorage.setItem(PRO_MARKS_KEY, e.target.checked ? 'on' : 'off'); } catch (_) { /* per-viewer convenience */ }
-    document.body.classList.toggle('pro-live-marks', !!state.engine && !['off', 'disabled'].includes(state.engine.state) && e.target.checked);
-});
 
 /** Pause correspondence while the source and painted PDF are different. */
 function setTraceState(msg) {
@@ -598,8 +586,15 @@ async function openDocument(msg) {
             && pagesEl().children.length === state.doc.numPages;
         if (liveFirstPages) state.scale = first.scale;
         for (const wrap of pagesEl().querySelectorAll('.page[data-live-first="true"]')) delete wrap.dataset.liveFirst;
-        const samePagination = editingInPlace || liveFirstPages || (msg.live && state.pageCount === state.doc.numPages
-            && pagesEl().children.length === state.doc.numPages);
+        // EVERY REBUILD OF THE SAME PAPER IS ADOPTED IN PLACE. The new pages
+        // are painted under what is shown (the old PDF, the live previews)
+        // and swapped in, so the viewer never blanks. It used to take this
+        // path only for a live rebuild of an unchanged page count: a save's
+        // PDF (not live, nothing unsaved) or a page added by the full build
+        // after a pause emptied the viewer to placeholders and repainted it.
+        const samePaper = !!prev && !restoreSession;
+        const samePagination = editingInPlace || liveFirstPages || samePaper;
+        const recount = samePaper && !editingInPlace && pagesEl().children.length !== state.doc.numPages;
         state.pageCount = state.doc.numPages;
         state.generation = msg.generation;
         state.nativeMapAvailable = false;
@@ -630,6 +625,7 @@ async function openDocument(msg) {
         if (txdlRenderer) txdlRenderer.clearImages();
         let placeholders = null;
         if (editingInPlace) await buildPagePlaceholders(true);
+        else if (recount) fitPagePlaceholders();
         if (!samePagination) {
             pagesEl().innerHTML = '';
             placeholders = buildPagePlaceholders();
@@ -687,7 +683,8 @@ async function openDocument(msg) {
         } else {
             // A RECOMPILE MUST NOT SEND THE READER BACK TO PAGE ONE.
             //
-            // `samePagination` is only true for a LIVE rebuild, so every
+            // (Only a paper opened afresh comes here now; see samePaper.)
+            // `samePagination` was only true for a LIVE rebuild, so every
             // compile-on-save fell through to `renderAround(1)` and threw the
             // scroll position away — you saved, and the paper jumped to the
             // top. The anchor is a (page, fraction), which is exactly the form
@@ -1068,6 +1065,45 @@ function buildPagePlaceholders(preserve = false) {
     });
 }
 
+/**
+ * The same paper rebuilt with another page count keeps the pages both have:
+ * the missing ones get placeholders sized like the last, and the ones past
+ * the new end go — unless a live preview is still drawn there, which then
+ * stays until the new PDF's pages are painted and the previews retired
+ * (dropEmptyLiveExtraPages).
+ */
+function fitPagePlaceholders() {
+    const count = state.pageCount;
+    let last = null;
+    for (const wrap of [...pagesEl().children]) {
+        const page = Number(wrap.dataset.page);
+        if (page <= count) {
+            delete wrap.dataset.liveExtra;
+            last = wrap;
+        } else if (wrap.querySelector('canvas.txdl-overlay')) {
+            for (const c of wrap.querySelectorAll('canvas:not(.txdl-overlay)')) c.remove();
+            wrap.dataset.liveExtra = 'true';
+        } else {
+            wrap.remove();
+        }
+    }
+    const have = new Set([...pagesEl().children].map(w => Number(w.dataset.page)));
+    const frag = document.createDocumentFragment();
+    for (let n = 1; n <= count; n++) {
+        if (have.has(n)) continue;
+        const wrap = document.createElement('div');
+        wrap.className = 'page';
+        wrap.dataset.page = String(n);
+        if (last) { wrap.style.width = last.style.width; wrap.style.height = last.style.height; }
+        const num = document.createElement('div');
+        num.className = 'pagenum';
+        num.textContent = String(n);
+        wrap.appendChild(num);
+        frag.appendChild(wrap);
+    }
+    if (last) last.after(frag); else pagesEl().appendChild(frag);
+}
+
 let observer = null;
 function observeVisible() {
     if (observer) observer.disconnect();
@@ -1169,7 +1205,9 @@ async function renderPage(n) {
             && state.liveErrors.some(e => e.page === n)) paintLiveErrors(state.liveErrors);
         paintBookmarks();
         // A zoom empties every wrapper, so an interactive preview drawn before
-        // it has to be placed again against the new geometry.
+        // it has to be placed again against the new geometry. A paragraph
+        // fragment is not: the next keystroke or the page brings it back.
+        removeTxdlFragment(n);
         redrawTxdlOverlay(n);
         if (state.ink?.page === n) paintInkCaret();
     })().finally(() => { if (state.pending.get(n) === job) state.pending.delete(n); });
@@ -1359,7 +1397,7 @@ async function destinationPreview(dest) {
         const height = Math.max(...rects.map(r => r.y + r.h)) - Math.min(...rects.map(r => r.y));
         const scale = Math.min(2, 1800 / Math.max(1, width + 8, height + 8));
         if (!unresolvedEquation) {
-            try { shot = await cropFragment({ id: 'destination', rects, scale, pad: 4 }); } catch (_) {}
+            try { shot = await cropFragment({ id: 'destination', rects, scale, pad: 4, links: true }); } catch (_) {}
         }
         if (state.doc !== doc || state.generation !== generation) return null;
         const kindName = { 'display-equation': 'Equation', figure: 'Figure', table: 'Table', tabular: 'Table', 'section-heading': 'Section' }[target?.kind];
@@ -1491,7 +1529,33 @@ function showDestinationCard(preview, anchor) {
     if (preview.shot?.dataUrl) {
         const img = document.createElement('img'); img.src = preview.shot.dataUrl;
         img.style.width = `${naturalW * fit}px`; img.style.height = `${naturalH * fit}px`;
-        img.alt = preview.title; card.appendChild(img);
+        img.alt = preview.title;
+        // THE LINKS IN IT WORK: an arXiv number, a journal's DOI, a reference
+        // to another entry — each clickable where it is printed.
+        const links = preview.shot.links || [];
+        if (links.length) {
+            const frame = document.createElement('div');
+            frame.className = 'destination-preview-shot';
+            frame.style.position = 'relative';
+            frame.style.width = img.style.width; frame.style.height = img.style.height;
+            frame.appendChild(img);
+            for (const l of links) {
+                const a = document.createElement('a');
+                a.className = 'destination-preview-link';
+                Object.assign(a.style, { position: 'absolute', left: `${l.fx * 100}%`, top: `${l.fy * 100}%`,
+                    width: `${l.fw * 100}%`, height: `${l.fh * 100}%` });
+                if (l.url) { a.href = l.url; a.title = l.url; }
+                else { a.href = '#'; a.title = 'Go to the reference'; a._dest = l.dest; }
+                a.addEventListener('click', (ev) => {
+                    ev.preventDefault(); ev.stopPropagation();
+                    hidePdfLinkPreview(anchor);
+                    if (l.url) vscode.postMessage({ type: 'openExternal', url: l.url });
+                    else followPdfLink(a).catch(() => {});
+                });
+                frame.appendChild(a);
+            }
+            card.appendChild(frame);
+        } else card.appendChild(img);
     } else {
         const note = document.createElement('small');
         note.textContent = 'Preview unavailable'; card.appendChild(note);
@@ -1965,6 +2029,8 @@ function txdlFellBack(page) {
 /** Every preview overlay goes; the PDF canvases underneath are untouched. */
 function clearTxdlOverlays() {
     state.txdlPending = null;
+    state.txdlFragmentDeferred = null;
+    clearTxdlFragments();
     for (const c of document.querySelectorAll('canvas.txdl-overlay')) c.remove();
     const pages = state.txdl ? [...state.txdl.pages.keys()] : [];
     if (state.txdl) { state.txdl.pages.clear(); state.txdl.generation = null; }
@@ -2100,7 +2166,13 @@ function trimLiveFirstPages(count) {
 function flushTxdlDeferred() {
     const deferred = state.txdlDeferred;
     state.txdlDeferred = null;
-    for (const msg of (deferred || new Map()).values()) drawTxdlPage(msg, { duringOpen: true }).catch(() => {});
+    const fragments = state.txdlFragmentDeferred;
+    state.txdlFragmentDeferred = null;
+    const drawn = [...(deferred || new Map()).values()].map(msg => drawTxdlPage(msg, { duringOpen: true }).catch(() => {}));
+    // Paragraphs typed while the PDF opened, over the pages drawn above.
+    if (fragments?.size) Promise.all(drawn).then(() => {
+        for (const msg of fragments.values()) drawTxdlFragment(msg, { duringOpen: true }).catch(() => {});
+    });
     // Pages that came into view while the PDF opened waited for it.
     const visible = visiblePages();
     for (const page of [...(state.txdlPending || new Map()).keys()])
@@ -2109,6 +2181,7 @@ function flushTxdlDeferred() {
 
 /** Overlays drawn under an earlier PDF open go; newer ones stay. */
 function clearTxdlOverlaysBefore(openSeq) {
+    clearTxdlFragments(openSeq);
     for (const [page, pending] of [...(state.txdlPending || [])])
         if (pending.openSeq < openSeq) state.txdlPending.delete(page);
     const t = state.txdl;
@@ -2123,6 +2196,7 @@ function clearTxdlOverlaysBefore(openSeq) {
 }
 
 function removeTxdlOverlay(page) {
+    removeTxdlFragment(page);
     const t = txdlState();
     const entry = t.pages.get(page);
     if (!entry) return;
@@ -2164,7 +2238,12 @@ async function drawTxdlPage(msg, { duringOpen = false, force = false } = {}) {
     if (!Number.isInteger(page) || page < 1) return;
     // A page arriving while a PDF opens is drawn once that PDF's visible
     // pages are painted, so the open cannot clear it or draw under it.
-    if (state.openInFlight && !duringOpen) { (state.txdlDeferred ||= new Map()).set(page, msg); return; }
+    if (state.openInFlight && !duringOpen) {
+        (state.txdlDeferred ||= new Map()).set(page, msg);
+        // The page is newer than a fragment typed on it before.
+        state.txdlFragmentDeferred?.delete(page);
+        return;
+    }
     const t = txdlState();
     t.generation = msg.generation;
     if (msg.changed === false) return;
@@ -2229,6 +2308,8 @@ async function drawTxdlPage(msg, { duringOpen = false, force = false } = {}) {
     const entry = { canvas, txdl, pageSize: msg.pageSize || null, generation: msg.generation,
         identity: msg.identity || null, openSeq: state.openSeq };
     removeTxdlOverlay(page);
+    // The page itself replaces the paragraph drawn ahead of it.
+    removeTxdlFragment(page);
     t.pages.set(page, entry);
     // ABOVE THE PDF CANVAS, BELOW EVERYTHING ELSE. Highlights, chips, links
     // and cards are later siblings and therefore keep painting on top.
@@ -2263,6 +2344,132 @@ async function drawTxdlPage(msg, { duringOpen = false, force = false } = {}) {
 const TXDL_DRAW_MARGIN = 2;
 /** Overlay canvases kept at most; the farthest from view are dropped first. */
 const TXDL_MAX_OVERLAYS = 24;
+
+// --- paragraph fragments ------------------------------------------------------
+// While the reader types, the engine sends the paragraph being typed ahead of
+// its page: a display list set exactly as the page will set it, and where it
+// goes on the page shown now (`placement`, DVI scaled points). It is painted
+// on a canvas of its own over that page — the live overlay, else the PDF —
+// in one frame: the old paragraph cleared, the rest of the column moved by as
+// many lines as the paragraph gained or lost, the fragment drawn. The page
+// itself replaces it when it arrives, which is at the pause in typing.
+
+/**
+ * Device-px geometry of a fragment's placement on a canvas of `scale` CSS px
+ * per TeX pt at `dpr`: the column clip, the area cleared (from the old
+ * paragraph's top to the column's foot), the band below the old paragraph
+ * and how far it moves.
+ */
+function fragmentGeometry(placement, scale, dpr) {
+    const k = (scale * dpr) / 65536;
+    const origin = 72.27 * scale * dpr;
+    const rect = ([x0, y0, x1, y1]) => ({ x: origin + x0 * k, y: origin + y0 * k,
+        w: Math.max(0, (x1 - x0) * k), h: Math.max(0, (y1 - y0) * k) });
+    const [cx0, , cx1, cy1] = placement.clip;
+    return {
+        clip: rect(placement.clip),
+        clear: rect([cx0, placement.clear[1], cx1, cy1]),
+        below: rect(placement.below),
+        // Whole device pixels: moved by a fraction, the band's text would be
+        // resampled and blur until the page comes.
+        shift: Math.round(placement.shift * k),
+    };
+}
+
+function removeTxdlFragment(page) {
+    const f = state.txdlFragments?.get(page);
+    if (!f) return;
+    f.canvas.remove();
+    state.txdlFragments.delete(page);
+}
+
+function clearTxdlFragments(before = Infinity) {
+    for (const [page, f] of [...(state.txdlFragments || [])])
+        if (f.openSeq < before) removeTxdlFragment(page);
+}
+
+/** Paint `msg`'s fragment on its page, over what the page shows now. */
+async function drawTxdlFragment(msg, { duringOpen = false } = {}) {
+    const page = Number(msg.page);
+    const placement = msg.placement;
+    const txdl = msg.txdl;
+    if (!Number.isInteger(page) || page < 1 || !placement || !txdl) return;
+    // Typed while a PDF opens: drawn once its pages are (flushTxdlDeferred),
+    // not dropped — the key would otherwise show nothing until the next.
+    if (state.openInFlight && !duringOpen) { (state.txdlFragmentDeferred ||= new Map()).set(page, msg); return; }
+    if (Array.isArray(txdl.unsupported) && txdl.unsupported.length) return;
+    if (txdlShouldDefer(page, visiblePages())) return;
+    const wrap = pagesEl().querySelector(`.page[data-page="${page}"]`);
+    if (!wrap) return;
+    const box = txdlPageBox(page);
+    if (!box || !(box.widthBp > 0 && box.heightBp > 0)) return;
+    const widthPt = box.widthBp * PT_PER_BP, heightPt = box.heightBp * PT_PER_BP;
+    const scale = box.width / widthPt;
+    const dpr = window.devicePixelRatio || 1;
+    // What the page shows: its live overlay when it has one (only if that is
+    // the page the placement was measured on), else the PDF canvas.
+    const overlay = state.txdl?.pages.get(page);
+    const under = overlay && overlay.canvas.isConnected ? overlay.canvas : wrap.querySelector('canvas:not(.txdl-overlay)');
+    if (!under) return;
+    if (overlay && overlay.identity && placement.identity && overlay.identity !== placement.identity) return;
+    const fragments = (state.txdlFragments ||= new Map());
+    let f = fragments.get(page);
+    const width = Math.max(1, Math.floor(box.width * dpr)), height = Math.max(1, Math.floor(box.height * dpr));
+    if (f && (f.under !== under || f.canvas.width !== width || f.canvas.height !== height)) { removeTxdlFragment(page); f = null; }
+    if (!f) {
+        // The page as it was before any fragment: every fragment of this
+        // paragraph is measured against it, not against the one before.
+        const base = document.createElement('canvas');
+        base.width = width;
+        base.height = height;
+        const bctx = base.getContext('2d', { alpha: false });
+        if (!bctx) return;
+        bctx.fillStyle = '#fff';
+        bctx.fillRect(0, 0, width, height);
+        bctx.drawImage(under, 0, 0, width, height);
+        const canvas = document.createElement('canvas');
+        canvas.className = 'txdl-overlay txdl-fragment';
+        canvas.width = width;
+        canvas.height = height;
+        Object.assign(canvas.style, { width: `${Math.floor(box.width)}px`, height: `${Math.floor(box.height)}px`,
+            position: 'absolute', left: '0', top: '0', pointerEvents: 'none' });
+        wrap.insertBefore(canvas, under.nextSibling);
+        f = { canvas, base, under, openSeq: state.openSeq, msg: null };
+        fragments.set(page, f);
+    }
+    f.msg = msg;
+    const ctx = f.canvas.getContext('2d', { alpha: false });
+    if (!ctx) return;
+    const renderer = txdlRendererInstance();
+    const g = fragmentGeometry(placement, scale, dpr);
+    const paint = () => {
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.drawImage(f.base, 0, 0);
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(g.clip.x, g.clip.y, g.clip.w, g.clip.h);
+        ctx.clip();
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(g.clear.x, g.clear.y, g.clear.w, g.clear.h);
+        const h = Math.min(g.below.h, height - g.below.y);
+        if (h > 0 && g.below.w > 0)
+            ctx.drawImage(f.base, g.below.x, g.below.y, g.below.w, h, g.below.x, g.below.y + g.shift, g.below.w, h);
+        let result = null;
+        try { result = renderer.render(txdl, ctx, { scale, dpr, background: null,
+            mediaSize: [widthPt, heightPt], offset: [placement.dx, placement.dy] }); }
+        catch (_) { /* nothing drawn */ }
+        ctx.restore();
+        return result;
+    };
+    let result = paint();
+    if (result && result.pending > 0) {
+        try { await renderer.prefetch(txdl); } catch (_) { removeTxdlFragment(page); return; }
+        if (state.txdlFragments?.get(page) !== f || f.msg !== msg) return;
+        result = paint();
+    }
+    // A hole in the paragraph is worse than a page a moment old.
+    if (!result || result.fallback || result.pending > 0 || result.skipped > 0) removeTxdlFragment(page);
+}
 
 /** Whether a live page is far enough from the visible ones to wait. */
 function txdlShouldDefer(page, visible) {
@@ -5272,9 +5479,81 @@ function inkRows(items) {
     return rows.filter(r => r.w > 0);
 }
 
+/**
+ * THE NATIVE LANE'S BANDS, one per printed line, as the conventional lane's.
+ *
+ * The extension sends the selected GLYPHS' boxes, each its own letter's ink:
+ * painted as they came, the band rose over a capital, dipped under an x, and
+ * left a pale gap between lines. Glyphs whose heights overlap by half form a
+ * line; accents and scripts that formed a small row of their own join the
+ * line they touch; each line spans its highest symbol to its lowest, and
+ * reaches down to the next line unless the gap is a real break. `rects` are
+ * one page's, in viewport pixels (the desktop's selectionRows,
+ * src/selection-overlay.tsx, without its text-layer rows: see the caller).
+ */
+function nativeBands(rects) {
+    const rows = [];
+    const overlaps = (w, r) => Math.min(w.y + w.h, r.y + r.h) - Math.max(w.y, r.y) >= 0.5 * Math.min(w.h, r.h) - 0.5;
+    const join = (into, r) => {
+        const x1 = Math.max(into.x + into.w, r.x + r.w), y1 = Math.max(into.y + into.h, r.y + r.h);
+        into.x = Math.min(into.x, r.x); into.y = Math.min(into.y, r.y);
+        into.w = x1 - into.x; into.h = y1 - into.y;
+    };
+    for (const r of [...rects].filter(r => r.w > 0 && r.h > 0).sort((a, b) => a.y + a.h / 2 - (b.y + b.h / 2) || a.x - b.x)) {
+        const row = rows.find(w => overlaps(w, r));
+        if (row) join(row, r); else rows.push({ page: r.page, x: r.x, y: r.y, w: r.w, h: r.h });
+    }
+    const typical = rows.map(r => r.h).sort((a, b) => a - b)[Math.floor(rows.length / 2)] || 0;
+    for (let merged = true; merged;) {
+        merged = false;
+        for (const r of rows) {
+            if (r.h >= 0.7 * typical) continue;
+            const into = rows.filter(w => w !== r && w.h > r.h)
+                .map(w => ({ w, shared: Math.min(w.y + w.h, r.y + r.h) - Math.max(w.y, r.y) }))
+                .filter(c => c.shared > -1).sort((a, b) => b.shared - a.shared)[0]?.w;
+            if (!into) continue;
+            join(into, r);
+            rows.splice(rows.indexOf(r), 1);
+            merged = true;
+            break;
+        }
+    }
+    rows.sort((a, b) => a.y - b.y || a.x - b.x);
+    for (const row of rows) {
+        let top = row.y, bottom = row.y + row.h;
+        const minimum = Math.max(row.h, 9);
+        if (bottom - top < minimum) { const pad = (minimum - (bottom - top)) / 2; top -= pad; bottom += pad; }
+        row.y = top;
+        row.h = bottom - top;
+    }
+    const line = rows.map(r => r.h).sort((a, b) => a - b)[Math.floor(rows.length / 2)] || 0;
+    for (let i = 0; i + 1 < rows.length; i++) {
+        const b = rows[i], next = rows[i + 1];
+        if (next.y > b.y && next.y - (b.y + b.h) < Math.max(line, b.h) * 2.2) b.h = Math.max(b.h, next.y - b.y);
+    }
+    return rows;
+}
+
+/**
+ * THE NEW SHAPE IS DRAWN BEFORE THE OLD ONE GOES. The old bands used to be
+ * removed first and the new ones added after the awaits in between, so a
+ * drag (a repaint per pointer move) could show a frame with no selection at
+ * all. Each paint tags what it draws; the newest paint removes everything
+ * else once its own is in, and a paint overtaken by a newer one removes its own.
+ */
 async function paintSelection(span) {
+    const token = String((state.selPaint = (state.selPaint || 0) + 1));
+    try { await paintSelectionNow(span, token); }
+    finally {
+        const latest = String(state.selPaint) === token;
+        for (const el of document.querySelectorAll('.selfill, .selbrk'))
+            if (latest ? el.dataset.selPaint !== token : el.dataset.selPaint === token) el.remove();
+    }
+}
+
+async function paintSelectionNow(span, token) {
     const navigationEpoch = state.navigationEpoch || 0;
-    for (const el of document.querySelectorAll('.selfill, .selbrk, .selact')) el.remove();
+    for (const el of document.querySelectorAll('.selact')) el.remove();
     state.selection = span || null;
     // A PENDING START HAS NO ROWS BY DEFINITION — it is one end of a selection
     // that does not exist yet — so the emptiness test must not swallow it.
@@ -5353,7 +5632,7 @@ async function paintSelection(span) {
             const v = wrap && rectToViewport(from.page, { page: from.page, x: from.x, y: from.y, w: 0.5, h: from.h });
             if (wrap && v) {
                 const el = document.createElement('div');
-                el.className = 'selbrk start pending';
+                el.className = 'selbrk start pending'; el.dataset.selPaint = token;
                 el.style.left = `${v.x}px`; el.style.top = `${v.y}px`;
                 el.style.height = `${v.h}px`;
                 wrap.appendChild(el);
@@ -5383,10 +5662,17 @@ async function paintSelection(span) {
     const parts = [];
     const rowsSeen = [];
     if (span.native) {
+        const byPage = new Map();
         for (const r of span.rows) {
             const rect = rectToViewport(r.page, r);
-            if (rect) rowsSeen.push({ page:r.page, ...rect });
+            if (!rect) continue;
+            if (!byPage.has(r.page)) byPage.set(r.page, []);
+            byPage.get(r.page).push({ page: r.page, ...rect });
         }
+        // From the glyphs alone: a page the live engine drew over the PDF
+        // prints other text than the PDF's text layer holds.
+        for (const [page, rects] of [...byPage].sort((a, b) => a[0] - b[0]))
+            for (const b of nativeBands(rects)) rowsSeen.push({ ...b, page });
     } else {
     for (let p = Math.min(from.page, to.page); p <= Math.max(from.page, to.page); p++) {
         const wrap = pagesEl().querySelector(`.page[data-page="${p}"]`);
@@ -5445,7 +5731,7 @@ async function paintSelection(span) {
         const wrap = pagesEl().querySelector(`.page[data-page="${p.page}"]`);
         if (!wrap || !state.rendered.has(p.page) || !(p.w > 0)) continue;
         const el = document.createElement('div');
-        el.className = 'selfill';
+        el.className = 'selfill'; el.dataset.selPaint = token;
         el.style.left = `${p.x}px`; el.style.top = `${p.y}px`;
         el.style.width = `${p.w}px`; el.style.height = `${p.h}px`;
         wrap.appendChild(el);
@@ -5459,9 +5745,15 @@ async function paintSelection(span) {
     // the first and last selected characters. The painted parts are glyph
     // boxes there, in page order, so their extremes were an accent above the
     // line and a comma below it — the brackets landed mid-selection.
+    // Each is as tall as the band of its line, not its own glyph.
+    const bandOf = (page, px) => parts.find(b => b.page === page && px.y + px.h / 2 >= b.y - 1 && px.y + px.h / 2 <= b.y + b.h + 1);
+    const nativeBracket = (side, page, px) => {
+        const band = bandOf(page, px);
+        return { side, page, x: px.x, y: band ? band.y : px.y, h: band ? band.h : px.h };
+    };
     const brackets = span.native ? [
-        { side: 'start', page: from.page, x: startPx.x, y: startPx.y, h: startPx.h },
-        { side: 'end', page: to.page, x: endPx.x, y: endPx.y, h: endPx.h },
+        nativeBracket('start', from.page, startPx),
+        nativeBracket('end', to.page, endPx),
     ] : [
         { side: 'start', page: parts[0].page, x: parts[0].x, y: parts[0].y, h: parts[0].h },
         { side: 'end',
@@ -5474,7 +5766,7 @@ async function paintSelection(span) {
         const wrap = pagesEl().querySelector(`.page[data-page="${b.page}"]`);
         if (!wrap || !state.rendered.has(b.page)) continue;
         const el = document.createElement('div');
-        el.className = `selbrk ${b.side}`;
+        el.className = `selbrk ${b.side}`; el.dataset.selPaint = token;
         el.style.left = `${b.x}px`; el.style.top = `${b.y}px`;
         el.style.height = `${b.h}px`;
         wrap.appendChild(el);
@@ -6217,7 +6509,9 @@ window.addEventListener('mousemove', (ev) => {
         sendClick(dragSel.page, dragSel.pt, dragSel.ox, dragSel.oy, { pick: true, ...(dragSel.from ? { from: dragSel.from } : {}) });
     }
     const now = performance.now();
-    if (now - dragSel.last < 60) return;          // one repaint per frame or two
+    // One step per frame: the extension answers them one at a time (the
+    // newest waiting one wins), in about 3 ms on a native page.
+    if (now - dragSel.last < 16) return;
     const wrap = document.elementFromPoint(ev.clientX, ev.clientY);
     const page = wrap && wrap.closest ? wrap.closest('.page') : null;
     if (!page) return;
@@ -7339,9 +7633,34 @@ function openCardComments(card, e, focus) {
     });
     card._commentsRefresh = () => renderCardComments(card, e, pane);
     renderCardComments(card, e, pane);
+    // WHAT IS SELECTED IN THE TEXT IS QUOTED IN THE NEW COMMENT, so a
+    // comment (to a collaborator, or to the agent) says what it is about.
+    // Selecting something else replaces the quote; what was written below
+    // it stays.
+    const text = card.querySelector('.ec-editor textarea');
+    if (text && !text._quotesComments) {
+        text._quotesComments = true;
+        const quote = () => {
+            if (!card.querySelector('.ec-comments')) return;
+            const picked = text.value.slice(text.selectionStart, text.selectionEnd).trim();
+            if (!picked) return;
+            const box = card.querySelector('.ec-comments .ecc-new textarea');
+            if (!box) return;
+            const q = `${picked.slice(0, 800).split('\n').map(l => `> ${l}`).join('\n')}${picked.length > 800 ? '\n> …' : ''}\n\n`;
+            const prev = card._quote || '';
+            const rest = prev && box.value.startsWith(prev) ? box.value.slice(prev.length) : box.value;
+            box.value = q + rest;
+            card._quote = q;
+        };
+        for (const ev of ['select', 'mouseup', 'keyup']) text.addEventListener(ev, quote);
+    }
     saveCardCommentsPrefs({ open: true });
     card._commentsButtonPaint?.();
-    paintEditCard();
+    // Re-placed only once it is on the page. A card being built (the pane
+    // remembered open) is not yet, and paintEditCard would build another —
+    // which opened the pane again, and so on until the stack ran out: no
+    // card opened at all once the pane had been used.
+    if (card.isConnected) paintEditCard();
     if (focus) pane.querySelector('.ecc-new textarea')?.focus({ preventScroll: true });
 }
 
@@ -8292,10 +8611,23 @@ el('ednundo').addEventListener('click', () => {
 function fitToolbar(width) {
     const head = document.querySelector('header');
     if (!head) return;
-    const w = Number.isFinite(width) ? width : head.clientWidth;
-    if (!(w > 0)) return;
-    head.classList.toggle('narrow', w < 760);
-    head.classList.toggle('tight', w < 620);
+    if (Number.isFinite(width)) {
+        head.classList.toggle('narrow', width < 760);
+        head.classList.toggle('tight', width < 620);
+        return;
+    }
+    if (!(head.clientWidth > 0)) return;
+    // MEASURED, NOT GUESSED. A fixed width went stale with every control
+    // added to the bar (Overleaf, Comments, Pro…): the buttons were squeezed
+    // into each other long before 760px. Each step is taken only while the
+    // controls at their natural width overflow the bar; `measuring` stops
+    // them shrinking, so overflow shows as scrollWidth past the bar's width.
+    head.classList.add('measuring');
+    // Last of all, `wrap`: a second row rather than a control lost.
+    head.classList.remove('narrow', 'tight', 'tiny', 'wrap');
+    const over = () => head.scrollWidth > head.clientWidth + 1;
+    for (const step of ['narrow', 'tight', 'tiny', 'wrap']) if (over()) head.classList.add(step); else break;
+    head.classList.remove('measuring');
 }
 
 const FOLLOW_MODES = ['off', 'mark', 'scroll'];
@@ -8321,6 +8653,12 @@ function setFollowMode(mode, tell = true) {
 try {
     new ResizeObserver(() => fitToolbar()).observe(document.querySelector('header'));
 } catch (_) { window.addEventListener('resize', () => fitToolbar()); }
+// A control shown or relabelled (Pro's badge, TikZ, the comment count) changes
+// what has to fit without changing the bar's size.
+try {
+    new MutationObserver(() => fitToolbar()).observe(document.querySelector('header'),
+        { subtree: true, childList: true, characterData: true, attributeFilter: ['hidden'] });
+} catch (_) { /* the resize path still fits it */ }
 // Build the follow control through the SAME function that later updates it,
 // rather than leaving the markup's own text standing until the first click.
 // Two spellings of one control drift, and the narrow-bar rules only know about
@@ -8944,9 +9282,26 @@ async function cropFragment(msg) {
     ctx.fillRect(0, 0, w, h);
     const clipped = vp.clone({ offsetX: -sx, offsetY: -sy });
     await p.render({ canvasContext: ctx, viewport: clipped, canvas }).promise;
-    void base;
+    // The page's links inside the crop, as fractions of it: a preview is a
+    // picture, and its URLs and references are made clickable over it.
+    let links = [];
+    if (msg.links) {
+        try {
+            for (const a of await p.getAnnotations({ intent: 'display' })) {
+                if (a.subtype !== 'Link' || !Array.isArray(a.rect) || !(a.url || a.dest)) continue;
+                const [ax0, ay0, ax1, ay1] = base.convertToViewportRectangle(a.rect);
+                const lx0 = Math.max(x0, Math.min(ax0, ax1)), lx1 = Math.min(x1, Math.max(ax0, ax1));
+                const ly0 = Math.max(y0, Math.min(ay0, ay1)), ly1 = Math.min(y1, Math.max(ay0, ay1));
+                if (!(lx1 - lx0 > 0.5 && ly1 - ly0 > 0.5)) continue;
+                links.push({ fx: (lx0 - x0) / (x1 - x0), fy: (ly0 - y0) / (y1 - y0),
+                    fw: (lx1 - lx0) / (x1 - x0), fh: (ly1 - ly0) / (y1 - y0),
+                    ...(a.url ? { url: a.url } : { dest: a.dest }) });
+            }
+        } catch (_) { links = []; }
+    }
     return {
         id: msg.id,
+        links,
         dataUrl: canvas.toDataURL('image/png'),
         // The size the fragment should be SHOWN at: its own bp size, so an
         // equation appears the size it prints rather than the size we happened
@@ -8973,6 +9328,15 @@ window.addEventListener('message', async (ev) => {
         case 'picker': openPicker(msg); break;
         case 'inspireResults': activePicker?.onInspire(msg); break;
         case 'txdlPage': await drawTxdlPage(msg); tikzPageChanged(Number(msg.page)); findPageChanged(); break;
+        case 'txdlFragment': await drawTxdlFragment(msg); break;
+        case 'overleafState': {
+            const b = el('overleaf');
+            if (b) {
+                b.classList.toggle('connected', !!msg.connected);
+                if (msg.title) { b.title = msg.title; b.setAttribute('aria-label', msg.title); }
+            }
+            break;
+        }
         case 'tikzResolved': tikzResolved(msg); break;
         case 'tikzOpenAt': tikzOpenAt(msg); break;
         case 'tikzEdited': tikzEdited(msg); break;
@@ -8981,6 +9345,7 @@ window.addEventListener('message', async (ev) => {
             const count = Number(msg.pageCount);
             if (Number.isInteger(count) && count >= 0 && state.txdl) {
                 for (const page of [...state.txdl.pages.keys()]) if (page > count) removeTxdlOverlay(page);
+                for (const page of [...(state.txdlFragments || new Map()).keys()]) if (page > count) removeTxdlFragment(page);
                 for (const page of [...(state.txdlPending || new Map()).keys()]) if (page > count) state.txdlPending.delete(page);
                 dropEmptyLiveExtraPages(count);
             }
@@ -9140,7 +9505,11 @@ window.addEventListener('message', async (ev) => {
             // block to block — the whole point of moving it was to choose where
             // to look. A right-click, which says "edit this one, here", pins it
             // back under the block it names.
-            const keepPos = msg.stepped && state.edit ? state.edit.pos : null;
+            // Only a place the reader chose: `pos` is also written whenever the
+            // card is re-anchored (pinEditCard), and a step then opened the
+            // next block at the old card's spot — on another page when the
+            // block ended there — until its anchor arrived and it jumped.
+            const keepPos = msg.stepped && state.edit?.userMoved ? state.edit.pos : null;
             closeEditCard(false);                  // one session at a time
             state.edit = {
                 id: msg.editId, text: msg.text || '', label: msg.label, native:!!msg.native,
@@ -9148,6 +9517,7 @@ window.addEventListener('message', async (ev) => {
                 rects: msg.rects || [], page: Number(msg.page) ||
                     (msg.rects?.length ? msg.rects[msg.rects.length - 1].page : 1),
                 pos: keepPos || msg.pos || null,
+                ...(keepPos ? { userMoved: true } : {}),
                 caretStart: Number.isFinite(msg.caretStart) ? msg.caretStart : 0,
                 caretEnd: Number.isFinite(msg.caretEnd) ? msg.caretEnd
                     : (Number.isFinite(msg.caretStart) ? msg.caretStart : 0),
@@ -10811,6 +11181,8 @@ function findPageRendered(n) {
 }
 
 el('findtool').addEventListener('click', () => (findS().open ? findClose() : findOpen()));
+// The Overleaf control (tex/overleafMenu.js), as the editor title bar's icon.
+el('overleaf').addEventListener('click', () => vscode.postMessage({ type: 'overleafMenu' }));
 el('findclose').addEventListener('click', findClose);
 el('findnext').addEventListener('click', () => findStep(1));
 el('findprev').addEventListener('click', () => findStep(-1));

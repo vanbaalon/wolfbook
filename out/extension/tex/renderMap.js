@@ -605,7 +605,8 @@ class RenderMap {
     /** The object a line belongs to, exactly or nearest — see `_objectAt`. */
     objectAtLine(file, line) { return this._objectAt(file, line); }
 
-    lineAtPoint(page, xBp, yTopBp) {
+    /** `anyDistance`: the nearest row however far (a right-click in a margin). */
+    lineAtPoint(page, xBp, yTopBp, { anyDistance = false } = {}) {
         if (!this.doc) return null;
         const pg = this.doc.pages.get(page);
         if (!pg) return null;
@@ -615,7 +616,7 @@ class RenderMap {
         const pageSp = this.pageSizeSp;
         // How far outside a row's own band a point may sit and still be that
         // row's. Beyond one and a half lines it is genuinely somewhere else.
-        const reach = lead * 1.5;
+        const reach = anyDistance ? Infinity : lead * 1.5;
 
         let best = null;
         for (const b of pg.boxes) {
@@ -647,6 +648,34 @@ class RenderMap {
         };
     }
 
+    /**
+     * The text records of one source line, by (file tag, line), indexed once
+     * per map. `lineRows` used to walk every record of every page per call,
+     * and the section and equation chips ask for hundreds of lines after each
+     * compile: 1.2 s of extension host frozen on a 50-page paper.
+     */
+    _lineBoxes(tag, line) {
+        if (!this._lineIndex) {
+            const index = new Map();
+            const pageSp = this.pageSizeSp;
+            for (const page of this.doc.pages.values()) {
+                for (const b of page.boxes) {
+                    if (b.type !== 'char' && b.type !== 'math' && b.type !== 'kern') continue;
+                    if (!saneBox(b, pageSp)) continue;
+                    // The repaired attribution, or a row starts one word late —
+                    // see `_rowRepairs`. That missing first word is what made a
+                    // repeated word resolve to the occurrence before the one clicked.
+                    const key = `${this._boxTag(b)}|${this._boxLine(b)}`;
+                    let list = index.get(key);
+                    if (!list) index.set(key, list = []);
+                    list.push(b);
+                }
+            }
+            this._lineIndex = index;
+        }
+        return this._lineIndex.get(`${tag}|${line}`) || [];
+    }
+
     lineRows(file, line) {
         if (!this.doc) return [];
         const tag = this._tag(file);
@@ -655,21 +684,13 @@ class RenderMap {
         const pageSp = this.pageSizeSp;
 
         const byRow = new Map();
-        for (const page of this.doc.pages.values()) {
-            for (const b of page.boxes) {
-                if (b.type !== 'char' && b.type !== 'math' && b.type !== 'kern') continue;
-                if (!saneBox(b, pageSp)) continue;
-                // The repaired attribution, or a row starts one word late — see
-                // `_rowRepairs`. That missing first word is what made a repeated
-                // word resolve to the occurrence before the one clicked.
-                if (this._boxTag(b) !== tag || this._boxLine(b) !== g.line) continue;
-                // Baselines are exact, so a plain key groups a row reliably.
-                const key = `${b.page}|${b.v}`;
-                if (!byRow.has(key)) byRow.set(key, { page: b.page, v: b.v, xs: [] });
-                const row = byRow.get(key);
-                row.xs.push(b.h);
-                if (b.W > 0) row.xs.push(b.h + b.W);
-            }
+        for (const b of this._lineBoxes(tag, g.line)) {
+            // Baselines are exact, so a plain key groups a row reliably.
+            const key = `${b.page}|${b.v}`;
+            if (!byRow.has(key)) byRow.set(key, { page: b.page, v: b.v, xs: [] });
+            const row = byRow.get(key);
+            row.xs.push(b.h);
+            if (b.W > 0) row.xs.push(b.h + b.W);
         }
         const lead = this._leadingSp();
 

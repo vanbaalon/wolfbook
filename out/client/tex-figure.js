@@ -23,21 +23,32 @@ function readGroup(s, i, open = '{', close = '}') {
  * \textwidth / \columnwidth when it is one), the caption (`{ start, end, text }`
  * of its argument), and the placement ([htbp]).
  */
+/**
+ * `s` with every comment (an unescaped `%` to the end of its line) blanked
+ * to spaces: searched instead of `s`, it finds what TeX reads, at the same
+ * offsets. A figure often keeps its old `\\includegraphics` commented out
+ * above the one in use.
+ */
+function uncommented(s) {
+    return s.replace(/(^|[^\\])((?:\\\\)*)%[^\n]*/g, (m, before, slashes) => before + slashes + ' '.repeat(m.length - before.length - slashes.length));
+}
+
 function figureParts(fig) {
     const out = { graphics: null, caption: null, placement: null };
-    const place = /^\\begin\s*\{[^}]*\}\s*(\[[^\]]*\])/.exec(fig);
+    const live = uncommented(fig);
+    const place = /^\\begin\s*\{[^}]*\}\s*(\[[^\]]*\])/.exec(live);
     if (place) out.placement = place[1];
-    const g = /\\includegraphics\s*(\[([^\]]*)\])?\s*\{([^}]*)\}/.exec(fig);
+    const g = /\\includegraphics\s*(\[([^\]]*)\])?\s*\{([^}]*)\}/.exec(live);
     if (g) {
         const options = g[2] || '';
         const w = /(?:^|,)\s*width\s*=\s*([\d.]*)\s*\\(linewidth|textwidth|columnwidth|hsize)/.exec(options);
         out.graphics = { start: g.index, end: g.index + g[0].length, options, file: g[3],
             width: w ? (w[1] === '' ? 1 : Number(w[1])) : null, unit: w ? w[2] : null };
     }
-    const c = /\\caption\s*(\[[^\]]*\])?/.exec(fig);
+    const c = /\\caption\s*(\[[^\]]*\])?/.exec(live);
     if (c) {
-        const arg = readGroup(fig, c.index + c[0].length);
-        if (arg) out.caption = { start: arg.start + 1, end: arg.end - 1, text: arg.body };
+        const arg = readGroup(live, c.index + c[0].length);
+        if (arg) out.caption = { start: arg.start + 1, end: arg.end - 1, text: fig.slice(arg.start + 1, arg.end - 1) };
     }
     return out;
 }
@@ -60,7 +71,7 @@ function setCaption(fig, caption) {
     const p = figureParts(fig);
     if (p.caption) return fig.slice(0, p.caption.start) + caption + fig.slice(p.caption.end);
     const at = p.graphics ? p.graphics.end : fig.search(/\\end\s*\{/);
-    const indent = /\n([ \t]*)\\includegraphics/.exec(fig)?.[1] ?? '  ';
+    const indent = /\n([ \t]*)\\includegraphics/.exec(uncommented(fig))?.[1] ?? '  ';
     return fig.slice(0, at) + `\n${indent}\\caption{${caption}}` + fig.slice(at);
 }
 
