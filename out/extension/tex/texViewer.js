@@ -739,6 +739,7 @@ class TexViewer {
         const switching = this.root !== root;
         if (switching) {
             this._reviewNavigation = null;
+            this._splitSource = null;  // the source viewer-only replaced was the OLD paper's
             this._clearSourceSaveTimer();
             this._flushCursorState();
             this._viewState = this._viewFor(root);
@@ -2826,6 +2827,13 @@ class TexViewer {
             const want = `WPaper · ${name}`;
             if (this.panel.title !== want) this.panel.title = want;
         } catch (_) { /* a title is not worth an exception */ }
+    }
+
+    /** Paint WPaper's Overleaf leaf from `overleafState` (set by tex/index.js). */
+    postOverleafState() {
+        const i = this.overleafState;
+        if (!i || !this.panel) return;
+        this._post({ type: 'overleafState', connected: !!i.connected, title: i.title || '' });
     }
 
     /** Is the Page view actually on screen? Live rebuilds are for it alone. */
@@ -10168,16 +10176,20 @@ class TexViewer {
     async _restoreSessionChrome() {
         const saved = this._viewState || this._viewFor(this.root) || {};
         // `viewerAgents` was the retired middle member of the old three-state
-        // cycle. Migrate it to the ordinary editor + viewer layout.
-        const mode = saved.layoutMode === 'viewer' || saved.fullscreen === true
-            ? 'viewer' : 'all';
+        // cycle. Migrate it to the ordinary editor + viewer layout. A paper
+        // with no layout of its own yet keeps the one on screen.
+        const chosen = saved.layoutMode != null || saved.fullscreen != null;
+        const mode = !chosen ? (this._layoutMode === 'viewer' ? 'viewer' : 'all')
+            : saved.layoutMode === 'viewer' || saved.fullscreen === true ? 'viewer' : 'all';
         if (this._restoringPanel) {
             try {
                 await this._queueLayout(() => this._reconcileRestoredLayout(mode));
             } finally { this._restoringPanel = false; }
             return;
         }
-        await this.setLayoutMode(mode, { remember: false });
+        // reapply: a paper switched to while viewer-only has just had its .tex
+        // opened over WPaper; fold it away again rather than no-op.
+        await this.setLayoutMode(mode, { remember: false, reapply: true });
     }
 
     /**
@@ -10393,6 +10405,12 @@ class TexViewer {
 
     /** The reader opened a .tex while WPaper was alone: return to the split. */
     revealSourceFromViewer(editor) {
+        // ANOTHER PAPER'S .TEX IS A SWITCH, NOT A REQUEST FOR THE EDITOR.
+        // Follow it with its own remembered layout (viewer-only stays
+        // viewer-only) and leave this paper's choice untouched.
+        let root = null;
+        try { root = editor && editor.document ? this.coord.rootFor(editor.document) : null; } catch (_) { root = null; }
+        if (root && this.root && root !== this.root) return this.autoRestore(editor.document);
         return this._queueLayout(async () => {
             if (this._layoutMode !== 'viewer') return;
             await this._setLayoutModeNow('all', { editor });
@@ -10444,7 +10462,7 @@ class TexViewer {
         return this._queueLayout(() => this._setLayoutModeNow(want, opts));
     }
 
-    async _setLayoutModeNow(want, { remember = true, preserveOuter = false, editor = null } = {}) {
+    async _setLayoutModeNow(want, { remember = true, preserveOuter = false, editor = null, reapply = false } = {}) {
         if (!this.panel) return;
         const target = want === 'viewer' ? 'viewer' : 'all';
         if (this._fsSettling) {
@@ -10455,6 +10473,13 @@ class TexViewer {
             this._layoutMode = 'viewer';
             this._layoutOuterActions = (Array.isArray(this._fsActions) ? this._fsActions : [])
                 .filter(x => x !== 'workbench.action.toggleMaximizeEditorGroup');
+        }
+        if (target === this._layoutMode && reapply && target === 'viewer') {
+            this._layoutBusy = true;
+            try { await this._enterViewerGeometry(); } finally {
+                this._layoutBusy = false;
+                this._layoutQuietUntil = Date.now() + 400;
+            }
         }
         if (target === this._layoutMode) {
             if (remember) this._rememberLayout(target);

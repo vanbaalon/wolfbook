@@ -4310,11 +4310,11 @@ test('THE TWO-STATE LAYOUT IS PER PAPER, AND OLD AGENT LAYOUTS MIGRATE', async (
     let asked = null;
     v2.setLayoutMode = async (mode, opts) => { asked = { mode, opts }; };
     await v2._restoreSessionChrome();
-    assert.deepStrictEqual(asked, { mode: 'viewer', opts: { remember: false } });
+    assert.deepStrictEqual(asked, { mode: 'viewer', opts: { remember: false, reapply: true } });
 
     v2._viewState = { layoutMode: 'viewerAgents', fullscreen: false };
     await v2._restoreSessionChrome();
-    assert.deepStrictEqual(asked, { mode: 'all', opts: { remember: false } },
+    assert.deepStrictEqual(asked, { mode: 'all', opts: { remember: false, reapply: true } },
         'the removed third state becomes editor + viewer on restore');
 });
 
@@ -4481,6 +4481,75 @@ test('A RELOAD FROM A LEGACY MAXIMIZED LAYOUT RESETS GROUP SIZES, THEN RE-APPLIE
         if (old.get) stub.commands.getCommands = old.get; else delete stub.commands.getCommands;
         stub.window.tabGroups = old.tg;
     }
+});
+
+test('WPAPER\'S OVERLEAF LEAF IS PAINTED FROM THE SYNC STATE', async () => {
+    const v = placeViewer({});
+    v.overleafState = { connected: true, title: 'Connected to Overleaf in real time: “P” — main.tex' };
+    v.postOverleafState();
+    assert.deepStrictEqual(v.posted.pop(), { type: 'overleafState', connected: true,
+        title: 'Connected to Overleaf in real time: “P” — main.tex' });
+    await v._onMessage({ type: 'ready' });
+    assert.ok(v.posted.some(p => p.type === 'overleafState'), 'and re-sent when the webview (re)loads');
+});
+
+test('SWITCHING BETWEEN TWO VIEWER-ONLY PAPERS STAYS VIEWER-ONLY', async () => {
+    const mem = {};
+    const v = placeViewer(mem);
+    const calls = [];
+    const wb = fakeWorkbench(v, calls);
+    const OTHER = '/papers/other.tex';
+    v.coord.rootFor = (d) => (d.uri.fsPath === OTHER ? OTHER : FILE);
+    const old = { exec: stub.commands.executeCommand, get: stub.commands.getCommands, tg: stub.window.tabGroups };
+    stub.window.tabGroups = wb.tabGroups;
+    stub.commands.getCommands = async () => [];
+    stub.commands.executeCommand = async () => {};
+    try {
+        await v.setLayoutMode('viewer');
+        v._rememberState(OTHER, { layoutMode: 'viewer', fullscreen: true });
+        v._layoutQuietUntil = 0;
+
+        // The reader opens the other paper's .tex: it lands over WPaper.
+        const otherTab = { input: { uri: { fsPath: OTHER } }, isDirty: false };
+        const g1 = wb.groups[0];
+        g1.tabs.push(otherTab); g1.activeTab = otherTab; g1.isActive = true;
+        let followed = null;
+        const realSet = v._setLayoutModeNow.bind(v);
+        const layouts = [];
+        v._setLayoutModeNow = async (...a) => { layouts.push(a[0]); return realSet(...a); };
+        v.autoRestore = async (d) => { followed = d.uri.fsPath; };
+        await v.revealSourceFromViewer({ document: { uri: { fsPath: OTHER } }, viewColumn: 1 });
+        assert.strictEqual(followed, OTHER, 'WPaper follows the other paper');
+        assert.deepStrictEqual(layouts, [], 'without splitting first');
+        assert.strictEqual(v._viewFor(FILE).layoutMode, 'viewer', 'the first paper keeps viewer-only');
+
+        // open() then switches root and restores THAT paper's layout.
+        v.root = OTHER;
+        v._viewState = v._viewFor(OTHER);
+        calls.length = 0;
+        await v._restoreSessionChrome();
+        assert.strictEqual(v._layoutMode, 'viewer');
+        assert.ok(calls.includes(`closeTab:${OTHER}`),
+            'the .tex that was just opened folds behind WPaper again: ' + JSON.stringify(calls));
+        assert.ok(!calls.some(c => c.startsWith('reveal:-2')), 'and WPaper never moves beside it');
+    } finally {
+        stub.commands.executeCommand = old.exec;
+        if (old.get) stub.commands.getCommands = old.get; else delete stub.commands.getCommands;
+        stub.window.tabGroups = old.tg;
+    }
+});
+
+test('A PAPER WITH NO LAYOUT OF ITS OWN KEEPS THE ONE ON SCREEN', async () => {
+    const v = placeViewer({});
+    let asked = null;
+    v.setLayoutMode = async (mode) => { asked = mode; };
+    v._layoutMode = 'viewer';
+    v._viewState = { page: 3 };
+    await v._restoreSessionChrome();
+    assert.strictEqual(asked, 'viewer');
+    v._layoutMode = 'all';
+    await v._restoreSessionChrome();
+    assert.strictEqual(asked, 'all');
 });
 
 test('AN EXTERNAL FILE RELOAD CANNOT LEAVE WPAPER HIDDEN IN VIEWER MODE', async () => {
