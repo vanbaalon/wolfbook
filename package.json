@@ -2941,7 +2941,7 @@
         "name": "wolfbook_evaluateExpression",
         "displayName": "Wolfbook: Evaluate Expression",
         "toolReferenceName": "wolfbookEval",
-        "modelDescription": "Evaluate Wolfram Language in the notebook's live kernel (shared definitions, nothing added to the notebook) and return InputForm text — use this, not wolframscript. Separate statements with \";\": newline-separated lines without it are multiplied (Times). Or pass multiLine:true to run each line separately. expect:{…} checks the result in the same round trip.",
+        "modelDescription": "Evaluate Wolfram Language in the notebook's live kernel (shared definitions, nothing added to the notebook) and return InputForm text — use this, not wolframscript. Separate statements with \";\": newline-separated lines without it are multiplied (Times). Or pass multiLine:true to run each line separately. expect:{…} checks the result in the same round trip; memoryLimitMB stops a blow-up kernel-side.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
@@ -2961,6 +2961,11 @@
                 "async"
               ],
               "description": "Return immediately with an operation ID when async; otherwise wait up to timeoutSeconds (default)."
+            },
+            "memoryLimitMB": {
+              "type": "number",
+              "minimum": 1,
+              "description": "Stop the evaluation kernel-side (MemoryConstrained) if it needs more than this many MB; the kernel keeps its state."
             },
             "caption": {
               "type": "string",
@@ -3191,7 +3196,7 @@
         "name": "wolfbook_editCell",
         "displayName": "Wolfbook: Edit Cell",
         "toolReferenceName": "wolfbookEdit",
-        "modelDescription": "Replace a cell's source by CellId (preferred) or number, or several with cells[]; evaluate:true re-runs it. The expected_* fields reject the edit if the cell changed since you read it. Source is used verbatim.",
+        "modelDescription": "Replace a cell's source by CellId (preferred) or number (content = full new source, or old_string + new_string = find and replace), or several with cells[]; evaluate:true re-runs it. The expected_* fields reject the edit if the cell changed since you read it. Source is used verbatim.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
@@ -3207,6 +3212,18 @@
             "content": {
               "type": "string",
               "description": "Single-cell mode: new source text for the cell."
+            },
+            "old_string": {
+              "type": "string",
+              "description": "Single-cell mode, instead of content: exact text to find in the cell; must occur once unless replace_all."
+            },
+            "new_string": {
+              "type": "string",
+              "description": "Replacement for old_string."
+            },
+            "replace_all": {
+              "type": "boolean",
+              "description": "Replace every occurrence of old_string (default false: it must be unique)."
             },
             "content_encoding": {
               "type": "string",

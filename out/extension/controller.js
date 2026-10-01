@@ -2086,7 +2086,11 @@ class WolframNotebookKernel {
     // Used by AI tools to claim priority over user-initiated evaluations.
     // Returns a promise that resolves when the kernel is idle.
     async abortAndWait(timeoutMs = 10000, options = {}) {
-        if (this.executionQueue.queueLength() === 0 && !this._evalDispatched && !this.isAborting) {
+        // A direct link evaluation (wolfbook_evaluateExpression, sub-evaluations)
+        // occupies the kernel without any cell being dispatched. Ignoring it here
+        // made every agent abort a silent no-op while the kernel stayed busy.
+        const directBusy = () => Number(this._directEvaluationCount || 0) > 0;
+        if (this.executionQueue.queueLength() === 0 && !this._evalDispatched && !this.isAborting && !directBusy()) {
             scrollLog('[abortAndWait] queue empty, not dispatched, not aborting — already idle');
             return; // already idle
         }
@@ -2106,11 +2110,21 @@ class WolframNotebookKernel {
         // We MUST wait for isAborting to become false — otherwise the next
         // execute() call hits the `if (this.isAborting) return;` guard.
         const deadline = Date.now() + timeoutMs;
+        // abortEvaluation() retries the abort only for a running CELL. A direct
+        // evaluation has nobody to retry for it, so re-send the WSTP abort here
+        // (a kernel deep in Together/Series can miss the first one).
+        const resendAt = [2000, 5000].map(ms => Date.now() + ms);
         await new Promise(resolve => {
             const poll = () => {
                 const isIdle = this.executionQueue.queueLength() === 0
                             && !this._evalDispatched
-                            && !this.isAborting;
+                            && !this.isAborting
+                            && !directBusy();
+                if (!isIdle && directBusy() && resendAt.length && Date.now() >= resendAt[0]) {
+                    resendAt.shift();
+                    scrollLog('[abortAndWait] direct evaluation still running — re-sending abort');
+                    try { this.session?.abort?.(); } catch (_) {}
+                }
                 if (isIdle || Date.now() >= deadline) {
                     if (!isIdle) scrollLog('[abortAndWait] timed out — forcing idle state');
                     resolve();

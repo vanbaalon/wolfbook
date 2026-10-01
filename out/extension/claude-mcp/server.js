@@ -24,12 +24,20 @@ const { runWithActivityContext } = require('../monitor/activity');
 const { ensurePrivateSocketDir, socketAlive } = require('./local-socket');
 const { toolAnnotations } = require('./tool-annotations');
 const auth = require('./auth');
+const { checkToolArguments, unknownParameterMessage } = require('./param-check');
 
 const DEFAULT_PORT  = 27182;
 const PORT_RANGE    = 20;  // try DEFAULT_PORT … DEFAULT_PORT+PORT_RANGE if busy
 const OPERATION_WAIT_MS  = 300000;  // return control to the model every 5 minutes
 const OPERATION_FAST_WAIT_MS = 2000; // complete quick calls inline; return a handle for slow work
 const OPERATION_LEASE_MS = 600000;  // forget transport waiter if the model is silent
+// A call that states how long it is willing to wait (evaluateExpression
+// timeoutSeconds, operationStatus wait_seconds) is held inline that long instead
+// of the 2 s fast window — but never past the client's own request timeout.
+// Codex and Claude Desktop give up on a tool call after 60 s; Claude Code waits.
+const OPERATION_EXPLICIT_WAIT_MAX_MS = 55000;
+const OPERATION_EXPLICIT_WAIT_LONG_MS = OPERATION_WAIT_MS;
+const LONG_WAIT_CLIENTS = /^claude[-_ ]?code/i;
 
 const MCP_PROFILES = new Set(['auto', 'economy', 'notebook', 'slides', 'paper', 'full']);
 
@@ -208,6 +216,7 @@ class WolframMCPServer {
         // instead of erroring on every call (marked 'adopted-target' in the footer).
         this._sessionClientNames = new Map();  // sessionId → clientInfo.name
         this._lastTargetByClient = new Map();  // clientInfo.name → { target, ts }
+        this._sessionLastActive = new Map(); // sessionId → ts of its last tools/call
         this._operations = new Map(); // operationId → managed long-running call
         this._requestOperations = new Map(); // SSE session/request id → operationId
         this._operationWaitMs = operationOptions.waitMs || OPERATION_WAIT_MS;
@@ -685,6 +694,7 @@ class WolframMCPServer {
         this._sessionTransport.delete(sessionId);
         this._sessionExposure.delete(sessionId);
         this._sessionTargets.delete(sessionId);  // release any target claim
+        this._sessionLastActive.delete(sessionId);
         this._sessionClientNames.delete(sessionId);
     }
 
@@ -730,7 +740,26 @@ class WolframMCPServer {
         // wolfbook_tools {action:"call"} is the same request as calling the tool
         // directly — rewrite it first so routing, operation tracking, bounding
         // and the envelope are all exactly those of a direct call.
-        if (msg.method === 'tools/call') msg.params = this._unwrapToolsCall(msg.params || {});
+        if (msg.method === 'tools/call') {
+            msg.params = this._unwrapToolsCall(msg.params || {});
+            this._sessionLastActive.set(sessionId, Date.now());
+        }
+
+        // Unknown parameters are refused, never silently ignored: a tool that
+        // drops one answers a different question and still says ok:true.
+        if (msg.method === 'tools/call' && msg.params?.name) {
+            const schema = this._schemas.find(t => t.name === msg.params.name)?.inputSchema || null;
+            if (!this._knownParamNames) {
+                this._knownParamNames = new Set(this._schemas.flatMap(t => Object.keys(t.inputSchema?.properties || {})));
+            }
+            const checked = checkToolArguments(msg.params.name, msg.params.arguments, schema, this._knownParamNames);
+            if (checked.unknown.length) {
+                return { jsonrpc: '2.0', id: msg.id, result: this._toolErrorResult(
+                    new Error(unknownParameterMessage(msg.params.name, checked.unknown, checked.valid)), msg.params.name) };
+            }
+            // Always the checked copy: it carries renames AND schema-typed values.
+            if (checked.args !== msg.params.arguments) msg.params = { ...msg.params, arguments: checked.args };
+        }
 
         const clientName = this._sessionClientNames.get(sessionId);
         if (msg.method === 'tools/call' && clientName && this._isClientBlocked?.(clientName)) {
@@ -1261,14 +1290,7 @@ class WolframMCPServer {
                 let sessionTarget = this._sessionTargets.get(sessionId) || null;
                 let explicitNotebookResolvedLocal = false;
                 if (!sessionTarget && !targetClientId) {
-                    // Reconnected client (same clientInfo.name): adopt its last
-                    // declared target (≤60 min old) instead of erroring.
-                    const clientName = this._sessionClientNames.get(sessionId);
-                    const last = clientName ? this._lastTargetByClient.get(clientName) : null;
-                    if (last && Date.now() - last.ts < 3600000) {
-                        sessionTarget = { ...last.target, _adopted: true };
-                        this._sessionTargets.set(sessionId, sessionTarget);
-                    }
+                    sessionTarget = this._adoptLastTarget(sessionId);
                 }
                 // An explicitly named notebook outranks sticky session state.
                 // This lets one agent safely work across notebooks without a
@@ -1488,10 +1510,17 @@ class WolframMCPServer {
         // Use one UUID at both transport and execution layers. This means the
         // handle returned at the five-minute boundary remains discoverable in
         // the per-window registry even after this transport waiter is gone.
+        const inline = this._inlineWaitFor(params, sessionId);
+        // operationStatus must answer about the QUERIED id inside the inline
+        // window — otherwise the status call itself outlives it and comes back
+        // as a fresh handle of its own (it used to, every time).
+        const clampedWait = params?.name === 'wolfbook_operationStatus' && Number(params?.arguments?.wait_seconds) > 0
+            ? { wait_seconds: Math.max(0, Math.min(Number(params.arguments.wait_seconds), Math.floor((inline.waitMs - 2000) / 1000))) }
+            : {};
         const dispatchedParams = {
             ...params,
             arguments: {
-                ...(params?.arguments || {}), _operationId: operationId,
+                ...(params?.arguments || {}), _operationId: operationId, ...clampedWait,
                 _activityContext: activityContext,
                 ...(this._canonicalProjection && params?.name === 'wolfbook_getNotebookContext' &&
                     params?.arguments?.brief !== true && !['brief', 'summary'].includes(params?.arguments?.action)
@@ -1554,7 +1583,7 @@ class WolframMCPServer {
         operation.promise.catch(() => {});
         this._operations.set(operationId, operation);
 
-        const settled = await this._waitForOperation(operation, this._operationFastWaitMs);
+        const settled = await this._waitForOperation(operation, inline.waitMs);
         if (settled) {
             this._forgetOperation(operationId);
             if (operation.status === 'rejected') throw operation.error;
@@ -1562,7 +1591,49 @@ class WolframMCPServer {
         }
 
         this._renewOperationLease(operation);
-        return this._operationStillRunningResult(operation);
+        return this._operationStillRunningResult(operation, inline.note);
+    }
+
+    /** Reconnected client (same clientInfo.name): adopt its last declared
+     *  target (≤60 min old) instead of erroring. Only a RECONNECT adopts — the
+     *  session that set the target must have ended. clientInfo.name is per
+     *  product, not per agent (every Claude Code session is "claude-code"), so a
+     *  second live session in another workspace used to inherit the first one's
+     *  notebook and kernel without being told. */
+    _adoptLastTarget(sessionId) {
+        const clientName = this._sessionClientNames.get(sessionId);
+        const last = clientName ? this._lastTargetByClient.get(clientName) : null;
+        if (!last || Date.now() - last.ts >= 3600000) return null;
+        if (last.sessionId && last.sessionId !== sessionId && this._sessionConnectedAt.has(last.sessionId)) return null;
+        const target = { ...last.target, _adopted: true };
+        this._sessionTargets.set(sessionId, target);
+        last.sessionId = sessionId;   // one reconnect adopts it, not every newcomer
+        return target;
+    }
+
+    /** How long to hold a tools/call inline before answering with a handle.
+     *  Returns { waitMs, cap, note } — note is set when the request asked for
+     *  longer than this client can be kept waiting. */
+    _inlineWaitFor(params, sessionId) {
+        const args = params?.arguments || {};
+        const clientName = this._sessionClientNames.get(sessionId) || '';
+        const cap = LONG_WAIT_CLIENTS.test(clientName)
+            ? OPERATION_EXPLICIT_WAIT_LONG_MS : OPERATION_EXPLICIT_WAIT_MAX_MS;
+        let requestedMs = 0;
+        if (params?.name === 'wolfbook_evaluateExpression' && args.wait_mode !== 'async') {
+            // +2 s: the tool's own TimeConstrained answer must beat the handle.
+            requestedMs = (Number(args.timeoutSeconds) || 30) * 1000 + 2000;
+        } else if (params?.name === 'wolfbook_operationStatus' && Number(args.wait_seconds) > 0) {
+            requestedMs = Math.min(300, Number(args.wait_seconds)) * 1000 + 2000;
+        }
+        if (requestedMs <= this._operationFastWaitMs) return { waitMs: this._operationFastWaitMs, cap, note: null };
+        const waitMs = Math.min(requestedMs, cap);
+        const note = requestedMs > cap
+            ? `The inline wait is capped at ${Math.round(cap / 1000)} s for this MCP client ` +
+              `(${clientName || 'unknown client'}) so the call returns before the client's own request timeout; ` +
+              'the evaluation itself keeps its full timeoutSeconds.'
+            : null;
+        return { waitMs, cap, note };
     }
 
     _boundResult(result, toolName, kernelId = null, sessionId = null) {
@@ -1751,10 +1822,12 @@ class WolframMCPServer {
         });
     }
 
-    _operationStillRunningResult(operation) {
+    _operationStillRunningResult(operation, note = null) {
+        const elapsed = Math.max(1, Math.round((Date.now() - (operation.startedAt || Date.now())) / 1000));
         return {
             content: [{ type: 'text', text:
-                `Operation is still running after ${Math.max(1, Math.round(this._operationFastWaitMs / 1000))} seconds. It has not been aborted.\n\n` +
+                `Operation is still running after ${elapsed} seconds. It has not been aborted.\n\n` +
+                (note ? `${note}\n\n` : '') +
                 `Operation ID: ${operation.id}\n\n` +
                 'Choose one:\n' +
                 `- Continue: call wolfbook_operationStatus with operation_id="${operation.id}" and wait_seconds=300.\n` +
@@ -1851,7 +1924,7 @@ class WolframMCPServer {
         const target = { clientId: resolvedClientId, notebook, kernelId: binding?.kernel_id || null, ts: Date.now() };
         this._sessionTargets.set(sessionId, target);
         const clientName = this._sessionClientNames.get(sessionId);
-        if (clientName) this._lastTargetByClient.set(clientName, { target, ts: Date.now() });
+        if (clientName) this._lastTargetByClient.set(clientName, { target, ts: Date.now(), sessionId });
         this._recordSessionTarget(sessionId, target, 'new-notebook');
         return target;
     }
@@ -1897,7 +1970,7 @@ class WolframMCPServer {
                         evicted.push(sid);
                     } else {
                         const who = sid === 'copilot' ? 'Copilot (in-editor agent)' : `another MCP session (${sid.slice(0, 8)}…)`;
-                        const age = t.ts ? ` [locked ${Math.round((Date.now() - t.ts) / 60000)} min ago]` : '';
+                        const age = this._lockAgeLabel(sid, t);
                         return {
                             content: [{ type: 'text', text:
                                 `Cannot claim "${targetNb}" — it is already targeted by ${who}${age}.\n` +
@@ -1925,7 +1998,7 @@ class WolframMCPServer {
         const targetRecord = { clientId: resolvedClientId, notebook: targetNb, kernelId, ts: Date.now() };
         this._sessionTargets.set(sessionId, targetRecord);
         const clientName = this._sessionClientNames.get(sessionId);
-        if (clientName) this._lastTargetByClient.set(clientName, { target: targetRecord, ts: Date.now() });
+        if (clientName) this._lastTargetByClient.set(clientName, { target: targetRecord, ts: Date.now(), sessionId });
         this._recordSessionTarget(sessionId, targetRecord, 'explicit');
         const switchedNotebook = targetNb && (
             !previousTarget ||
@@ -2268,6 +2341,16 @@ class WolframMCPServer {
     }
 
     /** Format the client list as human-readable text for wolfbook_list_clients. */
+    /** " [locked N min ago]" alone read as "stale" for a session that is
+     *  working right now — say when its owner last called a tool too. */
+    _lockAgeLabel(sid, t) {
+        if (!t?.ts) return '';
+        const mins = ts => Math.round((Date.now() - ts) / 60000);
+        const last = this._sessionLastActive.get(sid);
+        return ` [target set ${mins(t.ts)} min ago` +
+            (last ? ` · last active ${mins(last) < 1 ? 'just now' : `${mins(last)} min ago`}` : '') + ']';
+    }
+
     _buildClientListText() {
         const list = this._buildClientList();
         if (list.length === 0) return 'No clients registered yet.';
@@ -2305,7 +2388,7 @@ class WolframMCPServer {
             for (const [sid, t] of this._sessionTargets) {
                 const who   = sid === 'copilot' ? 'Copilot' : `session ${sid.slice(0, 6)}…`;
                 const label = [t.notebook, t.clientId].filter(Boolean).join(' @ ');
-                const age   = t.ts ? ` [locked ${Math.round((Date.now() - t.ts) / 60000)} min ago]` : '';
+                const age   = this._lockAgeLabel(sid, t);
                 targetLines.push(`  ${who} → ${label}${age}`);
             }
             lines.push(`\n**Active targets:**\n${targetLines.join('\n')}`);

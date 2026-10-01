@@ -12,6 +12,7 @@ const {
     acquireKernelForAgent, releaseKernelForAgent, trackedKernelEvaluate,
 } = require('./shared');
 const { readCommittedOutputs } = require('./cell-pipeline');
+const { findShadowedBuiltins } = require('../syntax/shadow-lint');
 const wsfit = require('./wslide-fit');
 
 // =============================================================================
@@ -3188,6 +3189,7 @@ class ValidateSyntaxTool {
 
         const codeErrors  = [];
         const katexErrors = [];
+        const lintWarnings = [];
         let codeChecked   = 0;
         let mdChecked     = 0;
 
@@ -3214,6 +3216,7 @@ class ValidateSyntaxTool {
             const src = cell.document.getText().trim();
             if (!src) continue;
             codeChecked++;
+            for (const w of findShadowedBuiltins(src)) lintWarnings.push(`  Cell ${n} (${cellId}): ${w.message}`);
 
             if (hasKernel) {
                 // SyntaxQ returns True/False; if False, SyntaxLength gives last valid position
@@ -3287,6 +3290,10 @@ class ValidateSyntaxTool {
             }
         }
 
+        if (lintWarnings.length) {
+            lines.push(`\u26A0 ${lintWarnings.length} built-in shadowed by a local variable (valid syntax, wrong meaning):`);
+            lines.push(...lintWarnings);
+        }
         return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(lines.join('\n'))]);
     }
 }

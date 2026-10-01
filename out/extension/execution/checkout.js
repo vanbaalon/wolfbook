@@ -10,6 +10,7 @@ const _output = require('../output/renderer');
 const { splitIntoSubexpressions } = require('../utils/wl-parse');
 const runningLines = require('./running-lines');
 const notebookContext = require('../kernel/notebook-context');
+const { findShadowedBuiltins } = require('../syntax/shadow-lint');
 
 function _operationOutputPreview(cell) {
     const parts = [];
@@ -128,6 +129,23 @@ async function checkoutExecutionQueue(self) {
     self.diagnosticCollection.delete(currentExecution.execution.cell.document.uri);
     self.clearSyntaxErrorDecorations(currentExecution.execution.cell);
     self.clearRuntimeMsgDecoration(currentExecution.execution.cell);
+
+    // A local variable named like a built-in (Module[{N = 7}, N[x, 3]]) raises
+    // no kernel message — the call just becomes 7[x, 3]. Say so, to the user
+    // (squiggle) and to an agent watching the operation (progress entry).
+    try {
+        const _shadowed = findShadowedBuiltins(code);
+        if (_shadowed.length) {
+            const _doc = currentExecution.execution.cell.document;
+            self.diagnosticCollection.set(_doc.uri, _shadowed.map(w => {
+                const d = new vscode.Diagnostic(new vscode.Range(_doc.positionAt(w.offset), _doc.positionAt(w.offset + w.length)),
+                    w.message, vscode.DiagnosticSeverity.Warning);
+                d.source = 'Wolfbook lint';
+                return d;
+            }));
+            if (_cellOperationId) for (const w of _shadowed) self.operations?.appendProgress(_cellOperationId, 'message', `Wolfbook lint: ${w.message}`);
+        }
+    } catch (_) { /* a lint must never block evaluation */ }
 
     // Capture previous outputs BEFORE start() — VS Code clears them internally
     // when execution starts, causing a height-0 flash. We deep-snapshot the raw
@@ -1442,7 +1460,9 @@ async function checkoutExecutionQueue(self) {
             }
             const _combinedDiag = new vscode.Diagnostic(_firstMsgRange, diagMsg, vscode.DiagnosticSeverity.Error);
             _combinedDiag.source = 'Wolfram Kernel';
-            self.diagnosticCollection.set(currentExecution.execution.cell.document.uri, [_combinedDiag]);
+            const _lintDiags = (self.diagnosticCollection.get(currentExecution.execution.cell.document.uri) || [])
+                .filter(d => d.source === 'Wolfbook lint');
+            self.diagnosticCollection.set(currentExecution.execution.cell.document.uri, [..._lintDiags, _combinedDiag]);
         }
         // Append a hidden consolidated error output: wolfram-html sentinel first so our
         // renderer claims the output (user sees nothing) but VS Code still detects the

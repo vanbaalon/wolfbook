@@ -70,6 +70,10 @@ const {
     resolveNotebookEditor, resolveNotebookDocument, noEditorMsg,
     acquireKernelForAgent, releaseKernelForAgent, trackedKernelEvaluate,
 } = require('./shared');
+
+// How long an async start waits for the kernel lease before answering
+// "started": a busy refusal arrives well inside it.
+const ASYNC_BUSY_GRACE_MS = 750;
 const trackedEvaluate = trackedKernelEvaluate;
 const kernelScopedInput = options => ({ ...(options?.input || {}), _kernelOnly: true });
 
@@ -851,6 +855,28 @@ function _captureFullTextResult(controller, operationId, value, label) {
     op.fullResultTruncated = combined.length > op.fullResult.length;
 }
 
+// Server-side MemoryConstrained around an agent expression. A blow-up (Together
+// on ~10^6 leaves) is then stopped by the kernel itself, which a WSTP abort
+// cannot always achieve. Returns the WL wrapper text, or null when no limit.
+function _memoryLimitWrap(input, innerWL) {
+    const mb = Number(input?.memoryLimitMB);
+    if (!(mb > 0)) return innerWL;
+    return `MemoryConstrained[${innerWL}, ${Math.round(mb * 1048576)}, "$WBMEMORY$"]`;
+}
+const _MEMORY_LIMIT_MSG = mb => `Stopped: the evaluation exceeded memoryLimitMB=${mb} (MemoryConstrained) — kernel is still alive and its state is intact.`;
+const _SCRATCH_KERNEL_HINT = 'For a computation that may hang, run it on a scratch kernel so the main one keeps its state: ' +
+    'wolfbook_kernelManager action="create" (acknowledge_resource_cost:true), pass that kernel_id here, then action="stop".';
+
+// Wait (bounded) for a direct evaluation to leave the link after an abort, so
+// the reply says what actually happened rather than what was hoped for.
+async function _awaitDirectIdle(controller, ms) {
+    const deadline = Date.now() + ms;
+    while (Number(controller._directEvaluationCount || 0) > 0 && Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 100));
+    }
+    return Number(controller._directEvaluationCount || 0) === 0;
+}
+
 class EvaluateExpressionTool {
     constructor(getController) {
         // getController() returns the live WolframNotebookKernel instance
@@ -929,7 +955,7 @@ class EvaluateExpressionTool {
             const _wrapForm = (varName) => _buildOutputFormWrapper(outputForm, varName);
             const _mlCheck = _buildExpectCheck(options.input?.expect);
             const mkWrapped = (expr, wlSec, checkWL) =>
-                `Block[{$wbR$, $wbA$}, $wbR$ = TimeConstrained[(${expr}), ${wlSec}, "$WBTIMEOUT$"]; If[$wbR$ === "$WBTIMEOUT$", "$WBTIMEOUT$", ${
+                `Block[{$wbR$, $wbA$}, $wbR$ = ${_memoryLimitWrap(options.input, `TimeConstrained[(${expr}), ${wlSec}, "$WBTIMEOUT$"]`)}; If[MemberQ[{"$WBTIMEOUT$", "$WBMEMORY$"}, $wbR$], $wbR$, ${
                     checkWL
                         ? `($wbA$ = Quiet[Check[If[TrueQ[${checkWL}], "PASS", "FAIL"], "ERROR"]]; "$WBA$" <> $wbA$ <> "$WBSEP$" <> (${_wrapForm('$wbR$')}))`
                         : _wrapForm('$wbR$')
@@ -969,6 +995,9 @@ class EvaluateExpressionTool {
                     } else if (result?.result?.type === 'abort') {
                         parts.push(`${label}= (aborted)`);
                         break;
+                    } else if (result?.result?.type === 'string' && result.result.value === '$WBMEMORY$') {
+                        parts.push(`${label}: ${_MEMORY_LIMIT_MSG(options.input.memoryLimitMB)}`);
+                        break;
                     } else if (result?.result?.type === 'string' && result.result.value === '$WBTIMEOUT$') {
                         // Report the REQUEST budget, not the per-statement remainder
                         // (a "timed out after 7s" on a 30 s request read as a bug).
@@ -1007,10 +1036,15 @@ class EvaluateExpressionTool {
                     }
                 } catch (err) {
                     if (err.message === 'timeout') {
+                        let stopped = true;
                         if (!controller._evalDispatched) {
                             try { controller.session.abort?.(); } catch (_) {}
+                            stopped = await _awaitDirectIdle(controller, 3000);
+                            if (!stopped) { try { controller.session.abort?.(); } catch (_) {} stopped = await _awaitDirectIdle(controller, 5000); }
                         }
-                        parts.push(`${label}: timed out — kernel interrupted. Retry with a higher timeoutSeconds.`);
+                        parts.push(stopped
+                            ? `${label}: timed out — kernel interrupted and idle again. Retry with a higher timeoutSeconds.`
+                            : `${label}: timed out; two aborts were sent but the kernel is STILL computing. Wait (wolfbook_kernelStatus) or restart. ${_SCRATCH_KERNEL_HINT}`);
                     } else if (isKernelConnectionError(err.message)) {
                         parts.push(`${label}: ${KERNEL_CRASH_MSG}`);
                     } else {
@@ -1040,7 +1074,7 @@ class EvaluateExpressionTool {
         // over $wbR$ and rides back as a "$WBA$PASS/FAIL/ERROR$WBSEP$" prefix.
         const _expectCheck = _buildExpectCheck(options.input?.expect);
         const wrappedExpr =
-            `Block[{$wbR$, $wbA$}, $wbR$ = TimeConstrained[(${expression}), ${wlTimeout}, "$WBTIMEOUT$"]; If[$wbR$ === "$WBTIMEOUT$", "$WBTIMEOUT$", ${
+            `Block[{$wbR$, $wbA$}, $wbR$ = ${_memoryLimitWrap(options.input, `TimeConstrained[(${expression}), ${wlTimeout}, "$WBTIMEOUT$"]`)}; If[MemberQ[{"$WBTIMEOUT$", "$WBMEMORY$"}, $wbR$], $wbR$, ${
                 _expectCheck
                     ? `($wbA$ = Quiet[Check[If[TrueQ[${_expectCheck}], "PASS", "FAIL"], "ERROR"]]; "$WBA$" <> $wbA$ <> "$WBSEP$" <> (${_wrapFormSingle('$wbR$')}))`
                     : _wrapFormSingle('$wbR$')
@@ -1079,7 +1113,9 @@ class EvaluateExpressionTool {
                 const clean = result.messages.map(m => cleanWrapperFromMsg(m));
                 output += summariseMsgs(clean).join('\n') + '\n';
             }
-            if (result?.result?.type === 'string' && result.result.value === '$WBTIMEOUT$') {
+            if (result?.result?.type === 'string' && result.result.value === '$WBMEMORY$') {
+                output += _MEMORY_LIMIT_MSG(options.input.memoryLimitMB);
+            } else if (result?.result?.type === 'string' && result.result.value === '$WBTIMEOUT$') {
                 // WL-level timeout — kernel aborted cleanly, WSTP link is intact.
                 // Report the REQUESTED timeout; the internal WL budget is 1 s
                 // shorter to leave room for a clean abort (saying "after 2s" on a
@@ -1141,12 +1177,22 @@ class EvaluateExpressionTool {
                 // If a notebook cell didn't start executing during our wait, the kernel is
                 // still running our expression. Abort it so the stale result packet doesn't
                 // corrupt the next evaluation on the WSTP link.
+                // TimeConstrained did not fire in time (the kernel is inside code
+                // that never checks for it), so abort — and then LOOK before
+                // claiming it worked. It used to say "interrupted" unconditionally.
+                let stopped = true;
                 if (!controller._evalDispatched) {
                     try { controller.session.abort?.(); } catch (_) {}
+                    stopped = await _awaitDirectIdle(controller, 3000);
+                    if (!stopped) { try { controller.session.abort?.(); } catch (_) {} stopped = await _awaitDirectIdle(controller, 5000); }
                 }
-                const timeoutMsg =
-                    `Evaluation timed out after ${timeoutSec}s — the kernel has been interrupted.\n` +
-                    `If the computation is expected to take longer, retry with a higher timeoutSeconds value.`;
+                const timeoutMsg = stopped
+                    ? `Evaluation timed out after ${timeoutSec}s — the kernel was interrupted and is idle again.\n` +
+                      `If the computation is expected to take longer, retry with a higher timeoutSeconds value. ${_SCRATCH_KERNEL_HINT}`
+                    : `Evaluation timed out after ${timeoutSec}s; two aborts were sent but the kernel is STILL computing ` +
+                      `(it is in code that does not check for aborts). It stays busy until that finishes. ` +
+                      `Wait and check wolfbook_kernelStatus, or wolfbook_kernelControl action="restart" (loses kernel state). ` +
+                      `Next time pass memoryLimitMB, or: ${_SCRATCH_KERNEL_HINT}`;
                 appendEvalLog(expression, timeoutMsg);
                 return new vscode.LanguageModelToolResult([
                     new vscode.LanguageModelTextPart(timeoutMsg)
@@ -1159,7 +1205,10 @@ class EvaluateExpressionTool {
             ]);
         }
         } finally {
-            controller.arbiter?.release(lease, 'completed');
+            // releaseKernelForAgent keeps the lease until the link is really
+            // idle — an immediate release after a timed-out abort left a busy
+            // kernel that no operation described.
+            releaseKernelForAgent(controller, lease, 'completed');
         }
     }
 }
@@ -1549,6 +1598,7 @@ class InsertCellsTool {
             state: evaluationOutcome.state === 'failed' ? 'completed-with-warning' : 'completed',
             message: `Inserted ${cells.length} cell(s); evaluation ${evaluationOutcome.state}.`,
             notebook: notebook.uri.fsPath, notebook_revision: Number(notebook.version || 0),
+            notebook_dirty: !!notebook.isDirty,
             edit: { state: 'committed', action: 'insert', first_cell: firstNew, last_cell: lastNew,
                 cell_ids: cells.map((_, i) => getCellToolId(notebook.cellAt(insertIdx + i))) },
             evaluation: evaluationOutcome,
@@ -1820,7 +1870,8 @@ class EditCellTool {
         const n       = options.input?.cellId || options.input?.cellNumber;
         const content = String(options.input?.content || '');
         const preview = content.length > 100 ? content.slice(0, 100) + '…' : content;
-        const evaluate = !!options.input?.evaluate;
+        // === true, not !!: the string "false" is truthy (field report feedbac10).
+        const evaluate = options.input?.evaluate === true || options.input?.evaluate === 'true';
         const verb = evaluate ? 'Edit & evaluate' : 'Edit';
         return { invocationMessage: `${verb} cell ${n}:\n\`\`\`\n${preview}\n\`\`\`` };
     }
@@ -2031,17 +2082,34 @@ class EditCellTool {
         // Preserve parsed tool content verbatim by default. Explicit "auto"
         // remains available for old clients that send double-escaped payloads.
         // Accept 'newContent' as an alias for 'content' (common model mistake).
+        const oldContent = cell.document.getText();
+        const hasContent = options.input?.content != null || options.input?.newContent != null;
+        const hasFind = options.input?.old_string != null;
+        const _refuse = (code, message) => jsonToolResult({ ok: false, state: 'rejected', code, message,
+            notebook: notebook.uri.fsPath, edit: { state: 'not-applied', cell_id: cellId, cell_number: cellNumber } });
+        if (hasContent && hasFind) return _refuse('conflicting-parameters', 'Pass either content (full replacement) or old_string/new_string (find and replace), not both. Nothing was changed.');
+        if (!hasContent && !hasFind) return _refuse('missing-content', 'Pass content (the full new source) or old_string + new_string (find and replace). Nothing was changed.');
+        let requested;
+        if (hasFind) {
+            const find = String(options.input.old_string);
+            if (options.input?.new_string == null) return _refuse('missing-new-string', 'old_string needs new_string. Nothing was changed.');
+            if (!find) return _refuse('empty-old-string', 'old_string is empty. Nothing was changed.');
+            const count = oldContent.split(find).length - 1;
+            if (count === 0) return _refuse('old-string-not-found', `old_string was not found in Cell ${cellNumber}. Nothing was changed. Read the cell (wolfbook_getNotebookContext cell_ids:["${cellId}"]) and retry with its exact text.`);
+            if (count > 1 && options.input?.replace_all !== true) return _refuse('old-string-ambiguous', `old_string occurs ${count} times in Cell ${cellNumber}. Nothing was changed. Add surrounding text to make it unique, or pass replace_all:true.`);
+            requested = oldContent.split(find).join(String(options.input.new_string));
+        }
         let newContent;
         try {
-            newContent = prepareCellContent({
-                content: options.input?.content ?? options.input?.newContent ?? cell.document.getText(),
+            newContent = hasFind ? requested : prepareCellContent({
+                content: options.input?.content ?? options.input?.newContent,
                 kind: cell.kind === vscode.NotebookCellKind.Markup ? 'markdown' : 'code',
                 encoding: options.input?.content_encoding,
             }).text;
         } catch (err) {
             return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(err.message)]);
         }
-        const oldContent = cell.document.getText();
+        const unchanged = oldContent === newContent;
 
         // Build a compact diff summary for the agent
         const _diffSummary = (() => {
@@ -2081,7 +2149,8 @@ class EditCellTool {
         appendEventLog(`\u270F\uFE0F EDIT CELL ${cellNumber}`,
             newContent.trim().length > 200 ? newContent.trim().slice(0, 200) + '\u2026' : newContent.trim() || '*(empty)*');
 
-        const evaluate = !!options.input?.evaluate;
+        // === true, not !!: the string "false" is truthy (field report feedbac10).
+        const evaluate = options.input?.evaluate === true || options.input?.evaluate === 'true';
         if (evaluate && cell.kind !== vscode.NotebookCellKind.Markup && newContent.trim()) {
             const controller = this._getController?.({ ...(options?.input || {}), notebook: notebook.uri.fsPath });
             if (!controller || !controller.session || controller.kernelStatusString !== 'resolved') {
@@ -2147,8 +2216,17 @@ class EditCellTool {
         }
 
         _restoreViewport(_vpSnapshot);
+        if (unchanged) {
+            return jsonToolResult({ ok: true, state: 'completed-with-warning', code: 'no-change',
+                message: `Cell ${cellNumber} already had this source — nothing changed.`,
+                notebook: notebook.uri.fsPath, notebook_revision: Number(notebook.version || 0),
+                edit: { state: 'unchanged', cell_id: cellId, cell_number: cellNumber },
+                evaluation: { state: 'not-requested' },
+                warnings: ['The new source is identical to the current source.'] });
+        }
         return jsonToolResult({ ok: true, state: 'completed', message: `Edited Cell ${cellNumber}.`,
             notebook: notebook.uri.fsPath, notebook_revision: Number(notebook.version || 0),
+            notebook_dirty: !!notebook.isDirty,
             edit: { state: 'committed', cell_id: cellId, cell_number: cellNumber },
             evaluation: { state: 'not-requested' },
             details: editedMsg + _katexWarnings(cell.kind === vscode.NotebookCellKind.Markup ? newContent : null) });
@@ -2230,8 +2308,19 @@ class RunCellTool {
             const _ctrl = this._getController?.({ ...(options?.input || {}), notebook: notebook.uri.fsPath });
             const useSilent = _ctrl && typeof _ctrl.execute === 'function' && _ctrl.kernelStatusString === 'resolved';
 
+            // An async range outlives its MCP request, so its token is never
+            // cancelled: kernelControl abort only marks the OPERATION aborted.
+            // Without this check the loop went on dispatching the next cells
+            // after "aborted — link idle", and the kernel was busy again.
+            const _opId = options.input?._operationId;
+            const _opEnded = () => {
+                const st = _opId ? _ctrl?.operations?.get?.(_opId)?.state : null;
+                return st && st !== 'pending' && st !== 'running' ? st : null;
+            };
             for (let n = startCell; n <= endCell; n++) {
                 if (token.isCancellationRequested) { stopped = `cancelled at Cell ${n}`; break; }
+                const _ended = _opEnded();
+                if (_ended) { stopped = `operation ${_ended} — Cell ${n} and later were not run`; break; }
                 const idx  = n - 1;
                 const cell = notebook.cellAt(idx);
                 if (cell.kind === vscode.NotebookCellKind.Markup) continue;
@@ -2707,6 +2796,9 @@ class KernelStatusTool {
             busy: !!controller?._evalDispatched,
             queueDepth: controller?.executionQueue?.queueLength?.() || 0,
         };
+        // The physical link, independent of the operation registry/lease.
+        const busyState = kernelBusyState(controller);
+        status.link = { busy: busyState.link_busy, ...busyState.link };
         return new vscode.LanguageModelToolResult([
             new vscode.LanguageModelTextPart(JSON.stringify(status, null, 2))
         ]);
@@ -3008,6 +3100,53 @@ class EvaluationJournalTool {
     }
 }
 
+// Link state and registry state, reported separately: the operation registry
+// can say "running" for a call whose kernel work is over, and the link can be
+// busy with work no registry entry describes (a direct evaluation).
+function kernelBusyState(controller) {
+    const status = controller?.arbiter?.status?.(controller) || {};
+    const direct = Number(controller?._directEvaluationCount || 0);
+    const link = {
+        cell_dispatched: !!controller?._evalDispatched,
+        direct_evaluations: direct,
+        queue_depth: Number(controller?.executionQueue?.queueLength?.() || 0),
+        aborting: !!(controller?.isAborting || controller?._abortPending),
+    };
+    const linkBusy = link.cell_dispatched || direct > 0 || link.queue_depth > 0 || link.aborting;
+    const active = status.activeOperation || null;
+    return {
+        busy: linkBusy || !!active,
+        link_busy: linkBusy,
+        link,
+        lease: active ? { operation_id: active.operationId, caption: active.caption,
+            started_at: active.startedAt ? new Date(active.startedAt).toISOString() : null,
+            elapsed_ms: active.elapsedMs ?? null } : null,
+        lifecycle: status.lifecycle || null,
+    };
+}
+
+// After an abort: settle only what the kernel has actually stopped, and say
+// plainly when it has not.
+function abortOutcomeResult(controller, abortResult, before, operationId) {
+    const after = kernelBusyState(controller);
+    const sentAt = abortResult?.requestedAt ? new Date(abortResult.requestedAt).toISOString() : new Date().toISOString();
+    const waited = abortResult?.acknowledgedAt && abortResult?.requestedAt
+        ? Math.round((abortResult.acknowledgedAt - abortResult.requestedAt) / 1000) : null;
+    if (!after.link_busy) {
+        if (operationId) controller.operations?.abort?.(operationId, {
+            requestedBy: 'mcp', reason: 'explicit abort', ts: Date.now() });
+        return jsonToolResult({ ok: true, state: 'completed', code: 'aborted',
+            message: `Aborted: the kernel link is idle again${waited != null ? ` (${waited} s after the abort)` : ''}.`,
+            abort_sent_at: sentAt, kernel_before: before, kernel: after });
+    }
+    return jsonToolResult({ ok: false, state: 'running', code: 'abort-not-acknowledged',
+        message: `Abort sent at ${sentAt}, but the kernel is still busy ${waited != null ? `${waited} s later` : 'afterwards'} ` +
+            '(the computation is in a region that does not check for aborts). The operation is NOT marked aborted. ' +
+            'Wait and check wolfbook_kernelStatus, abort again, or wolfbook_kernelControl action="restart" (loses kernel state).',
+        abort_sent_at: sentAt, kernel_before: before, kernel: after,
+        nextActions: ['wait', 'abort', 'restart'] });
+}
+
 class CancelOperationTool {
     constructor(getController) { this._getController = getController; }
 
@@ -3047,20 +3186,32 @@ class CancelOperationTool {
                 arbiterResult = { aborted: false, error: err.message };
             } finally {
                 // Even a queued-but-undispatched operation, an operation mismatch,
-                // or a kernel-side abort exception must settle in the registry.
-                controller.operations.abort(id, { requestedBy: 'mcp', reason, mode, ts: Date.now() });
+                // or a kernel-side abort exception must settle in the registry —
+                // EXCEPT the operation the kernel is still executing: marking that
+                // "aborted" while the link stays busy is exactly the lie the
+                // registry must not tell. Its own evaluator settles it on return.
+                const stillExecuting = arbiterResult?.uncertain &&
+                    controller.arbiter?.status?.(controller)?.activeOperation?.operationId === id;
+                if (!stillExecuting) controller.operations.abort(id, { requestedBy: 'mcp', reason, mode, ts: Date.now() });
             }
         }
         let note = mode === 'discard-result'
             ? 'Result discarded; the kernel may still be computing.'
             : 'Operation cancelled and registry settled.';
-        if (arbiterResult?.uncertain) note = 'Kernel abort is uncertain; poll wolfbook_status.';
+        if (arbiterResult?.uncertain) {
+            const sentAt = arbiterResult.requestedAt ? new Date(arbiterResult.requestedAt).toISOString() : 'now';
+            const waited = arbiterResult.acknowledgedAt && arbiterResult.requestedAt
+                ? Math.round((arbiterResult.acknowledgedAt - arbiterResult.requestedAt) / 1000) : '?';
+            note = `Abort sent at ${sentAt}; the kernel is still busy ${waited} s later, so the operation is NOT marked aborted. ` +
+                'Wait, abort again, or wolfbook_kernelControl action="restart" (loses kernel state).';
+        }
         if (arbiterResult?.reason === 'operation-mismatch') note = 'Kernel is running a different operation; this operation will never run.';
         const registryState = controller.operations?.get?.(id)?.state || null;
         return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(JSON.stringify({
             operation_id: id, mode,
             kernel_id: controller.kernelIdentity?.kernel_id || op.kernelId || null,
-            arbiter: arbiterResult, registry_state: registryState, note
+            arbiter: arbiterResult, registry_state: registryState,
+            kernel: mode === 'abort' ? kernelBusyState(controller) : undefined, note
         }, null, 2))]);
     }
 }
@@ -3114,6 +3265,11 @@ class KernelControlTool {
         }
         if (!controller) {
             return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart('No kernel controller available.')]);
+        }
+        if (!['abort', 'interrupt', 'restart', 'checkpoint', 'restore'].includes(action)) {
+            // Everything unrecognised used to fall through to abort.
+            return jsonToolResult({ ok: false, state: 'rejected', code: 'unknown-action',
+                message: `Unknown action "${action}". Valid: abort, restart, checkpoint, restore. Nothing was done.` });
         }
 
         // --- checkpoint: DumpSave all Global` definitions to a temp .mx file ---
@@ -3211,22 +3367,25 @@ class KernelControlTool {
                 return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(`Restart failed: ${err.message}${cpNote}`)]);
             }
         }
-        // action === 'abort'
-        if (!controller._evalDispatched && !controller.isAborting) {
-            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart('No evaluation is currently running.')]);
+        // action === 'abort' (also 'interrupt' — the same WSTP abort)
+        const before = kernelBusyState(controller);
+        if (!before.busy) {
+            return jsonToolResult({ ok: true, state: 'completed', code: 'nothing-running',
+                message: 'No evaluation is running: the link is idle and no operation holds the kernel.',
+                kernel: before });
         }
         try {
-            await controller.arbiter.abort(controller, {
+            const abortResult = await controller.arbiter.abort(controller, {
                 operationId: options.input?.operation_id,
                 requestedBy: 'mcp',
                 reason: options.input?.reason || 'explicit wolfbook_kernelControl abort'
             });
-            if (options.input?.operation_id) {
-                controller.operations?.abort(options.input.operation_id, {
-                    requestedBy: 'mcp', reason: options.input?.reason || 'explicit abort', ts: Date.now()
-                });
+            if (abortResult?.reason === 'operation-mismatch') {
+                return jsonToolResult({ ok: false, state: 'rejected', code: 'operation-mismatch',
+                    message: `The kernel is running a different operation (${abortResult.active?.operation_id || 'unknown'}), so nothing was aborted. Omit operation_id to abort whatever is running.`,
+                    kernel: before, active: abortResult.active });
             }
-            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart('Abort signal sent to kernel.')]);
+            return abortOutcomeResult(controller, abortResult, before, options.input?.operation_id);
         } catch (err) {
             return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(`Abort failed: ${err.message}`)]);
         }
@@ -5168,7 +5327,8 @@ function registerTools(context, getController, debugCtrl, getAskPanel) {
                 if (operation && options?.input?.wait_mode === 'async') {
                     let backgroundResult;
                     let backgroundOk = true;
-                    Promise.resolve().then(() => invokeWithMutationIntent()).then(result => {
+                    const background = Promise.resolve().then(() => invokeWithMutationIntent());
+                    background.then(result => {
                         backgroundResult = result;
                         settleOperationResult(result);
                     }).catch(err => {
@@ -5186,6 +5346,15 @@ function registerTools(context, getController, debugCtrl, getAskPanel) {
                             }
                         } catch (_) {}
                     });
+                    // A busy kernel is refused at lease acquisition, before anything
+                    // is dispatched. Say so HERE — "started asynchronously" followed by
+                    // an operation that had already failed "kernel busy; request not
+                    // started" was only discoverable through operationStatus.
+                    const early = await Promise.race([
+                        background.then(r => r, () => null),
+                        new Promise(resolve => setTimeout(() => resolve(null), ASYNC_BUSY_GRACE_MS)),
+                    ]);
+                    if (early?.__wolfbookBusy) return early;
                     return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(
                         `Operation started asynchronously.\n\nOperation ID: ${operation.id}\n\n` +
                         `Kernel ID: ${controller.kernelIdentity?.kernel_id || 'unknown'}\n\n` +

@@ -1,6 +1,7 @@
 'use strict';
 
 const util = require('util');
+const { findShadowedBuiltins } = require('../syntax/shadow-lint');
 
 /** Decode only outputs committed to the VS Code notebook cell. */
 function readCommittedOutputs(cell) {
@@ -190,7 +191,18 @@ async function runCellViaPipeline(ctrl, editor, idx, options = {}) {
         cancelled: !!token.isCancellationRequested,
         provenance,
         ...committed,
+        ..._lintNote(cell, committed),
     };
+}
+
+// The kernel stays silent when a local variable shadows a built-in, so every
+// run tool's reply carries the warning next to the (baffling) output.
+function _lintNote(cell, committed) {
+    let found = [];
+    try { found = findShadowedBuiltins(cell.document.getText()); } catch (_) { return {}; }
+    if (!found.length) return {};
+    const note = found.map(w => `⚠ Wolfbook lint: ${w.message}`).join('\n');
+    return { lintWarnings: found.map(w => w.message), plain: committed.plain ? `${committed.plain}\n${note}` : note };
 }
 
 module.exports = { readCommittedOutputs, runCellViaPipeline, classifyEvidence, waitForCompletion };
