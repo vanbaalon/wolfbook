@@ -358,6 +358,28 @@ test('never out of step: an edit made while connecting is sent, a drifted mirror
     link.disconnect();
 });
 
+test('an emoji (stored by Overleaf as U+FFFD) is not drift: no heal loop, keystrokes stay ordinary edits', async () => {
+    const text = 'One.\nTwo.\n';
+    const paper = project({ 'main.tex': text });
+    const server = new FakeOverleaf({ 'main.tex': text });
+    const v = fakeVscode({ answers: { input: () => 'good' } });
+    const doc = v.makeDoc(path.join(paper, 'main.tex'), text);
+    const logs = [];
+    const link = new OverleafLink({ vscode: v.vscode, context: v.context, deps: server.deps(), log: l => logs.push(l) });
+    await link.link(path.join(paper, 'main.tex'));
+    await settle(30);
+    v.type(doc, 0, '\u{1F600} ');
+    await settle(30);
+    assert.strictEqual(server.text('main.tex'), doc.text.replace(/[\uD800-\uDFFF]/g, '\uFFFD'));
+    v.type(doc, doc.text.indexOf('Two'), 'x');
+    await settle(30);
+    for (let k = 0; k < 3; k++) link.checkInStep('periodic check');
+    await settle(30);
+    assert.ok(!logs.some(l => /had drifted/.test(l)), 'never healed: ' + logs.join('\n'));
+    assert.strictEqual(server.text('main.tex'), doc.text.replace(/[\uD800-\uDFFF]/g, '\uFFFD'));
+    link.disconnect();
+});
+
 test('Overleaf\'s hash check: an update from a text Overleaf does not have is refused and said, not applied', async () => {
     const paper = project({ 'main.tex': 'abc\n' });
     const server = new FakeOverleaf({ 'main.tex': 'abc\n' });

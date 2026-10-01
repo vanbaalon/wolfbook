@@ -74,16 +74,17 @@ async function overleafMenu({ vscode, sync, live, git, target }) {
     if (!pick || !pick.action) return;
     const setMode = async m => {
         if (m === 'live') {
-            if (!(await live.acceptRisks())) return;
+            if (!(await live.acceptRisks())) return false;
         }
         await cfg.update('overleafSync', m, vscode.ConfigurationTarget.Global);
         live.refresh();
+        return true;
     };
     switch (pick.action) {
     case 'sync': if (file) await sync.run(file, { manual: true }); break;
     case 'mode:git': await setMode('git'); break;
     case 'mode:off': await setMode('off'); break;
-    case 'mode:live': await setMode('live'); if (!connectedHere) await live.start(); break;
+    case 'mode:live': if (await setMode('live') && !connectedHere) await live.start(); break;
     case 'configure': if (file) await git.configureOverleaf(file); break;
     case 'token':
         if (repo && remote && await git._promptOverleafToken(repo, remote.name) && file) await sync.run(file, { manual: true });

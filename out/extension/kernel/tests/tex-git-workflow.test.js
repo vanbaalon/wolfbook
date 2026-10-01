@@ -467,6 +467,37 @@ test('the auto-sync scheduler waits for a pause and the interval, and pauses on 
     assert.strictEqual(calls.length, 3);
 });
 
+test('auto-sync: the retry after "Add token" runs, an unanswered toast blocks nothing, pauses are per repo', async () => {
+    const { OverleafAutoSync } = require('../../tex/overleafSync');
+    let now = 1e6; const calls = [];
+    let release = null;
+    const vscode = {
+        workspace: { getConfiguration: () => ({ get: (k, d) => d }) },
+        window: { createStatusBarItem: () => ({ show() {}, hide() {}, dispose() {} }),
+            // The first token toast answers "Add token"; the conflict toast is never answered.
+            showInformationMessage: async (m, ...items) => (items.includes('Add token') ? 'Add token' : undefined),
+            showWarningMessage: () => new Promise(r => { release = r; }) },
+        StatusBarAlignment: { Left: 1 },
+    };
+    let token = false;
+    const git = {
+        _repo: async file => (file.startsWith('/p/') ? '/p' : null),
+        _promptOverleafToken: async () => { token = true; return true; },
+        autoSync: async file => { calls.push(file);
+            return token ? { status: 'conflict', files: ['main.tex'], repo: '/p', remote: 'overleaf' }
+                : { status: 'no-token', repo: '/p', remote: 'overleaf' }; },
+    };
+    const sync = new OverleafAutoSync({ vscode, git, target: () => '/p/main.tex', now: () => now });
+    now += 25000;
+    assert.strictEqual((await sync.tick()).status, 'no-token');
+    await new Promise(r => setTimeout(r, 10));
+    assert.deepStrictEqual(calls, ['/p/main.tex', '/p/main.tex'], 'the retry after adding the token ran');
+    assert.strictEqual(sync.running, false, 'the unanswered conflict toast does not hold the run');
+    assert.strictEqual((await sync.run('/p/sec1.tex', { due: 0 })), null,
+        'a conflict pauses the REPOSITORY, not just the file it was found from');
+    release?.();
+});
+
 function fakeVscode(root, windowOverrides = {}) {
     return {
         Uri: { file: fsPath => ({ fsPath }), parse: value => ({ value }) },

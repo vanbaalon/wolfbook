@@ -34,6 +34,10 @@ const { apply, transformX } = require('./overleafOt');
 const { prepareArxiv } = require('./arxivPack');
 const crypto = require('crypto');
 
+// Overleaf stores each UTF-16 surrogate half (an emoji, 𝔸) as U+FFFD — see
+// OverleafClient.local. Text is compared in that form.
+const asOverleaf = (t) => (typeof t === 'string' ? t.replace(/[\uD800-\uDFFF]/g, '\uFFFD') : t);
+
 /** Git's blob hash, the one Overleaf gives its files. */
 const blobHash = bytes => crypto.createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
 const TEXT_FILE = /\.(tex|bib|sty|cls|bst|bbx|cbx|txt|md|dat|csv|tikz|pgf)$/i;
@@ -716,7 +720,7 @@ class OverleafLink {
         // and an op computed on it would land at wrong offsets (or fail and
         // be lost). Then Overleaf is brought to the editor's text instead.
         const theirs = this.client?.byPath(p)?.ot.text;
-        if (!list.length && theirs !== undefined && theirs !== before) { this.heal(p, text, 'before an edit'); this.scheduleSave(p); return; }
+        if (!list.length && theirs !== undefined && theirs !== asOverleaf(before)) { this.heal(p, text, 'before an edit'); this.scheduleSave(p); return; }
         try {
             // Collaborators' edits the client has and the editor has not yet:
             // ours goes past them, and they past ours.
@@ -741,8 +745,12 @@ class OverleafLink {
         const doc = this.client?.byPath(p);
         if (!doc || (this.unapplied.get(p) || []).length) return false;
         const theirs = doc.ot.text;
-        if (theirs === text) { this.mirrors.set(p, text); return true; }
-        const s = span(theirs, text);
+        // Compared as Overleaf stores it: an emoji the editor keeps is two
+        // U+FFFD there, which is no drift (and healing it changed nothing,
+        // every 15 s, forever). Same length, so offsets are unaffected.
+        const want = asOverleaf(text);
+        if (theirs === want) { this.mirrors.set(p, text); return true; }
+        const s = span(theirs, want);
         const op = [...(s.to > s.from ? [{ p: s.from, d: theirs.slice(s.from, s.to) }] : []), ...(s.text ? [{ p: s.from, i: s.text }] : [])];
         try { this.client.local(p, op); }
         catch (error) { this.log(`overleaf live: ${p}: could not resynchronise: ${error.message}`); return false; }
@@ -763,7 +771,7 @@ class OverleafLink {
             if (!doc || doc.ot.inflight || doc.ot.pending.length || (this.unapplied.get(p) || []).length || this.pumping.has(p)) continue;
             const mine = this.localText(p);
             if (mine === null) continue;
-            if (mine !== doc.ot.text) this.heal(p, mine, why);
+            if (asOverleaf(mine) !== doc.ot.text) this.heal(p, mine, why);
         }
     }
 

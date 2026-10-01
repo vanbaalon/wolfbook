@@ -87,25 +87,34 @@ class OverleafAutoSync {
     async run(file, { due = 0, manual = false } = {}) {
         if (this.running) return null;
         this.running = true;
+        let result;
+        let repoKey;
         try {
-            const repoKey = file;
+            // Pause and schedule are per REPOSITORY — autoSync works on the
+            // whole repo, so keying by the file in view re-ran a paused
+            // conflict for every other file of the paper.
+            try { repoKey = (await this.git._repo?.(file, false)) || file; } catch (_) { repoKey = file; }
             const last = this.lastRun.get(repoKey) || 0;
             if (!manual && (this.paused.has(repoKey) || this.now() - last < due)) return null;
             if (manual) this.paused.delete(repoKey);
             this.lastRun.set(repoKey, this.now());
             this._show('$(sync~spin) Overleaf', 'Syncing with Overleaf…');
-            const result = await this.git.autoSync(file);
+            result = await this.git.autoSync(file);
             this.log(`overleaf auto-sync: ${result.status}${result.detail ? ` — ${result.detail}` : ''}`);
             if (result.repo) this.last.set(result.repo, { ...result, at: this.now() });
             try { this.onPaint?.(); } catch (_) { /* a courtesy */ }
-            await this._report(file, result, manual);
-            return result;
         } finally {
             this.running = false;
         }
+        // Reported AFTER the run is over: a notification left unanswered must
+        // not hold `running` (it stopped every later sync), and the retry
+        // after "Add token" must not find a run still in progress.
+        this._report(file, result, manual, repoKey).catch(error => this.log(`overleaf auto-sync: ${error.message}`));
+        return result;
     }
 
-    async _report(key, r, manual) {
+    async _report(file, r, manual, repoKey = file) {
+        const key = file;
         const at = new Date(this.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
         const w = this.vscode.window;
         switch (r.status) {
@@ -135,7 +144,7 @@ class OverleafAutoSync {
             return;
         }
         case 'conflict': {
-            this.paused.set(key, 'conflict');
+            this.paused.set(repoKey, 'conflict');
             this._show('$(warning) Overleaf', 'Auto-sync paused: your changes and a collaborator’s overlap — click to sync now');
             const resolve = 'Merge and resolve now';
             const pick = await w.showWarningMessage(
@@ -145,21 +154,21 @@ class OverleafAutoSync {
             return;
         }
         case 'auth':
-            this.paused.set(key, 'auth');
+            this.paused.set(repoKey, 'auth');
             this._show('$(key) Overleaf', 'Overleaf refused the Git token — click to retry');
             if ((await w.showWarningMessage('Overleaf refused the Git authentication token; auto-sync paused.', 'Replace token')) === 'Replace token' &&
                 await this.git._promptOverleafToken(r.repo, r.remote)) this.run(key, { manual: true });
             return;
         case 'merging':
-            this.paused.set(key, 'merging');
+            this.paused.set(repoKey, 'merging');
             this._show('$(warning) Overleaf', 'Auto-sync waits: finish the merge in progress, then click');
             return;
         case 'no-identity':
-            this.paused.set(key, 'identity');
+            this.paused.set(repoKey, 'identity');
             this._show('$(warning) Overleaf', 'Auto-sync needs a Git author name and email (commit once with “WPaper: Commit Changes”)');
             return;
         case 'detached':
-            this.paused.set(key, 'detached');
+            this.paused.set(repoKey, 'detached');
             this._show('$(warning) Overleaf', 'Auto-sync waits: check out a branch');
             return;
         default:
