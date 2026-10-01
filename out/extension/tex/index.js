@@ -1699,12 +1699,15 @@ async function offerReload(doc, diskText, output) {
             const ed = vscode.window.activeTextEditor;
             if (!ed) return;
             if (isTex(ed.document)) viewer.autoRestore(ed.document).catch(() => {});
-            else if (viewer.isOpen()) viewer.autoHide().catch(() => {});
+            else if (viewer.isOpen() && viewer._layoutMode !== 'viewer') viewer.autoHide().catch(() => {});
             return;
         }
         if (d.action === 'none') return;
         if (d.action === 'hide') {
             if (!viewer.isOpen()) return;
+            // WPaper alone has no source neighbour; a file beside it in some
+            // other group is not a reason to put the paper away.
+            if (viewer._layoutMode === 'viewer') return;
             output.appendLine(`page view: hiding — ${d.reason}`);
             viewer.autoHide().catch(() => {});
             return;
@@ -1750,8 +1753,13 @@ async function offerReload(doc, diskText, output) {
 
     context.subscriptions.push(
         coord.onDidChange(paintRender),
-        vscode.window.onDidChangeActiveTextEditor(() => {
+        vscode.window.onDidChangeActiveTextEditor((ed) => {
             paintRender();
+            // Opening a .tex while WPaper is alone returns to editor + viewer:
+            // the .tex in the first group, WPaper back in the locked second.
+            if (ed && isTex(ed.document) && viewer.isViewerLayout?.()) {
+                viewer.revealSourceFromViewer(ed).catch(() => { /* layout is best effort */ });
+            }
             followSoon();
         }),
         vscode.window.onDidChangeTextEditorSelection((e) => {

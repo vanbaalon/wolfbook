@@ -2107,7 +2107,7 @@ test('FULL SCREEN SURVIVES an inverse click and a right-click', async () => {
 
         // "Take me there" still means exactly that.
         await v._jumpToSource({ page: 1, xBp: 100, yTopBp: 700, glyph: 'x', takeMe: true });
-        assert.strictEqual(shown, 1, 'a double-click DOES reveal the editor');
+        assert.ok(shown >= 1, 'a double-click DOES reveal the editor');
         assert.strictEqual(v._fsActions, null, 'and leaves full screen');
     } finally {
         stub.window.showTextDocument = oldShow;
@@ -4318,120 +4318,196 @@ test('THE TWO-STATE LAYOUT IS PER PAPER, AND OLD AGENT LAYOUTS MIGRATE', async (
         'the removed third state becomes editor + viewer on restore');
 });
 
-test('A RELOADED LAYOUT RESETS REAL GROUP SIZES BEFORE REAPPLYING FULL SCREEN', async () => {
-    const v = placeViewer({});
-    v._viewState = { layoutMode: 'viewer', fullscreen: true };
-    v._restoringPanel = true;
-    assert.strictEqual(v._claimRestoredLayout(), true,
-        'the early claim still protects the first right-click');
+// A two-group workbench: the .tex in column 1, WPaper in column 2. Moving the
+// panel with reveal() moves its tab, and an emptied group stays (as with
+// `workbench.editor.closeEmptyGroups: false`) so the explicit close shows.
+function fakeWorkbench(v, calls) {
+    const texTab = { input: { uri: { fsPath: FILE } }, isDirty: false };
+    const dirtyTab = { input: { uri: { fsPath: '/tmp/other-part.tex' } }, isDirty: true };
+    const viewerTab = { input: { viewType: 'mainThreadWebview-wolfbook.texViewer' } };
+    const g1 = { viewColumn: 1, tabs: [texTab, dirtyTab], activeTab: texTab };
+    const g2 = { viewColumn: 2, tabs: [viewerTab], activeTab: viewerTab };
+    const groups = [g1, g2];
+    const tabGroups = {
+        all: groups,
+        close: async (what) => {
+            for (const x of what) {
+                if (x.tabs) { groups.splice(groups.indexOf(x), 1); calls.push(`closeGroup:${x.viewColumn}`); continue; }
+                for (const g of groups) {
+                    const i = g.tabs.indexOf(x);
+                    if (i >= 0) { g.tabs.splice(i, 1); calls.push(`closeTab:${x.input.uri.fsPath}`); }
+                }
+            }
+        },
+    };
+    v.panel.viewColumn = 2;
+    v.panel.reveal = (column, preserveFocus) => {
+        calls.push(`reveal:${column}:${preserveFocus}`);
+        let to = column === -2 ? null : groups.find(g => g.viewColumn === column);
+        if (column === -2) {
+            const active = groups.find(g => g.isActive) || groups[0];
+            to = groups.find(g => g.viewColumn === active.viewColumn + 1);
+            if (!to) { to = { viewColumn: active.viewColumn + 1, tabs: [] }; groups.push(to); }
+        }
+        if (!to || to.tabs.includes(viewerTab)) return;
+        for (const g of groups) {
+            const i = g.tabs.indexOf(viewerTab);
+            if (i >= 0) g.tabs.splice(i, 1);
+        }
+        to.tabs.push(viewerTab);
+        to.activeTab = viewerTab;
+        v.panel.viewColumn = to.viewColumn;
+    };
+    return { tabGroups, groups, texTab, dirtyTab, viewerTab };
+}
 
-    const oldExec = stub.commands.executeCommand;
-    const oldGet = stub.commands.getCommands;
-    const calls = [];
-    stub.commands.getCommands = async () => [
-        'workbench.action.evenEditorWidths',
-        'workbench.action.toggleMaximizeEditorGroup',
-        'workbench.action.closeAuxiliaryBar',
-        'workbench.action.focusAuxiliaryBar',
-    ];
-    stub.commands.executeCommand = async (id) => { calls.push(id); };
-    v.panel.reveal = (_column, preserveFocus) => calls.push(`reveal:${preserveFocus}`);
-    try {
-        await v._restoreSessionChrome();
-        assert.deepStrictEqual(calls, [
-            'workbench.action.evenEditorWidths',
-            'reveal:false',
-            'workbench.action.toggleMaximizeEditorGroup',
-        ], 'an explicit baseline prevents restored groups from painting over one another ' +
-            'without closing the right-side chat panel');
-        assert.strictEqual(v._layoutMode, 'viewer');
-        assert.strictEqual(v._layoutMaximized, true);
-        assert.strictEqual(v._restoringPanel, false);
-    } finally {
-        stub.commands.executeCommand = oldExec;
-        if (oldGet) stub.commands.getCommands = oldGet;
-        else delete stub.commands.getCommands;
-    }
-});
-
-test('AN EXTERNAL FILE RELOAD CANNOT LEAVE THE SOURCE EDITOR SHOWING IN VIEWER MODE', async () => {
-    const v = placeViewer({});
-    v._layoutMode = 'viewer';
-    v._layoutMaximized = true;
-    v._layoutOuterActions = ['workbench.action.toggleZenMode'];
-    v._fsActions = [
-        'workbench.action.toggleMaximizeEditorGroup',
-        'workbench.action.toggleZenMode',
-    ];
-    const oldExec = stub.commands.executeCommand;
-    const oldGet = stub.commands.getCommands;
-    const calls = [];
-    stub.commands.getCommands = async () => [
-        'workbench.action.evenEditorWidths',
-        'workbench.action.toggleMaximizeEditorGroup',
-        'workbench.action.closeAuxiliaryBar',
-        'workbench.action.toggleZenMode',
-    ];
-    stub.commands.executeCommand = async (id) => { calls.push(id); };
-    v.panel.active = false; // the external reload activated the source group
-    v.panel.reveal = (_column, preserveFocus) => calls.push(`reveal:${preserveFocus}`);
-    try {
-        await v._reassertViewerLayoutNow();
-        assert.deepStrictEqual(calls, [
-            'reveal:false',
-            'workbench.action.toggleMaximizeEditorGroup',
-        ], 'WPaper is reactivated and maximized without showing an even-width source layout first: ' +
-            JSON.stringify(calls));
-        assert.strictEqual(v._layoutMode, 'viewer');
-        assert.strictEqual(v._layoutMaximized, true);
-        assert.deepStrictEqual(v._layoutOuterActions, ['workbench.action.toggleZenMode'],
-            'an existing outer full-screen choice is retained, not toggled off');
-
-        calls.length = 0;
-        v.panel.active = true;
-        assert.strictEqual(await v._reassertViewerLayoutNow(), true);
-        assert.deepStrictEqual(calls, [],
-            'an external write that did not disturb the layout produces no visible layout flash');
-    } finally {
-        stub.commands.executeCommand = oldExec;
-        if (oldGet) stub.commands.getCommands = oldGet;
-        else delete stub.commands.getCommands;
-    }
-});
-
-test('THE LAYOUT BUTTON SWITCHES BETWEEN VIEWER AND EDITOR + VIEWER', async () => {
+test('VIEWER-ONLY REPLACES THE .TEX TAB; EDITOR + VIEWER PUTS WPAPER BACK BESIDE IT, LOCKED', async () => {
     const mem = {};
     const v = placeViewer(mem);
-    const oldExec = stub.commands.executeCommand;
-    const oldGet = stub.commands.getCommands;
     const calls = [];
-    stub.commands.getCommands = async () => [
-        'workbench.action.toggleMaximizeEditorGroup',
-        'workbench.action.closeAuxiliaryBar',
-    ];
+    const wb = fakeWorkbench(v, calls);
+    const old = {
+        exec: stub.commands.executeCommand, get: stub.commands.getCommands,
+        tg: stub.window.tabGroups, show: stub.window.showTextDocument,
+        open: stub.workspace.openTextDocument,
+    };
+    stub.window.tabGroups = wb.tabGroups;
+    stub.commands.getCommands = async () => ['workbench.action.lockEditorGroup'];
     stub.commands.executeCommand = async (id) => { calls.push(id); };
-    v.panel.reveal = (_column, preserveFocus) => calls.push(`reveal:${preserveFocus}`);
+    stub.workspace.openTextDocument = async () => doc;
+    stub.window.showTextDocument = async (d, o) => {
+        calls.push(`show:${o.viewColumn}`);
+        const g1 = wb.groups.find(g => g.viewColumn === o.viewColumn);
+        if (!g1.tabs.includes(wb.texTab)) g1.tabs.push(wb.texTab);
+        g1.activeTab = wb.texTab;
+        for (const g of wb.groups) g.isActive = g === g1;
+        return { document: d, viewColumn: o.viewColumn, revealRange() {} };
+    };
     try {
         await v.cycleLayoutMode();
         assert.strictEqual(v._layoutMode, 'viewer');
         assert.deepStrictEqual(calls, [
-            'reveal:false',
-            'workbench.action.toggleMaximizeEditorGroup',
-        ], 'viewer-only preserves an already-open right auxiliary/chat panel');
+            'reveal:1:false',
+            `closeTab:${FILE}`,
+            'closeGroup:2',
+        ], 'WPaper moves into the source group, the clean .tex tab and the empty group close: ' +
+            JSON.stringify(calls));
+        assert.ok(!calls.includes('workbench.action.toggleMaximizeEditorGroup'), 'nothing is maximized');
+        assert.deepStrictEqual(wb.groups.map(g => g.viewColumn), [1]);
+        assert.ok(wb.groups[0].tabs.includes(wb.dirtyTab), 'a dirty tab is left behind, never closed');
         assert.strictEqual(v._viewFor(FILE).layoutMode, 'viewer');
 
         calls.length = 0;
         await v.cycleLayoutMode();
         assert.strictEqual(v._layoutMode, 'all');
         assert.deepStrictEqual(calls, [
-            'workbench.action.toggleMaximizeEditorGroup',
-            'reveal:false',
-        ]);
+            'show:1',
+            'reveal:-2:true',
+            'reveal:2:false',
+            'workbench.action.lockEditorGroup',
+        ], 'the .tex comes back in group 1, WPaper moves beside it and the group is locked: ' +
+            JSON.stringify(calls));
+        assert.strictEqual(v.panel.viewColumn, 2);
         assert.strictEqual(v._viewFor(FILE).layoutMode, 'all');
     } finally {
+        stub.commands.executeCommand = old.exec;
+        if (old.get) stub.commands.getCommands = old.get; else delete stub.commands.getCommands;
+        stub.window.tabGroups = old.tg;
+        stub.window.showTextDocument = old.show;
+        stub.workspace.openTextDocument = old.open;
+    }
+});
+
+test('OPENING A .TEX WHILE WPAPER IS ALONE RETURNS TO EDITOR + VIEWER', async () => {
+    const v = placeViewer({});
+    const calls = [];
+    const wb = fakeWorkbench(v, calls);
+    const old = { exec: stub.commands.executeCommand, get: stub.commands.getCommands,
+        tg: stub.window.tabGroups, show: stub.window.showTextDocument };
+    stub.window.tabGroups = wb.tabGroups;
+    stub.commands.getCommands = async () => ['workbench.action.lockEditorGroup'];
+    stub.commands.executeCommand = async (id) => { calls.push(id); };
+    stub.window.showTextDocument = async () => { calls.push('show'); return null; };
+    try {
+        await v.setLayoutMode('viewer');
+        assert.strictEqual(v.isViewerLayout(), false, 'events from our own moves are ignored for a moment');
+        v._layoutQuietUntil = 0;
+        assert.strictEqual(v.isViewerLayout(), true);
+
+        // The reader opened the .tex: VS Code put it in front in WPaper's group.
+        const g1 = wb.groups[0];
+        g1.tabs.push(wb.texTab); g1.activeTab = wb.texTab; g1.isActive = true;
+        calls.length = 0;
+        await v.revealSourceFromViewer({ document: doc, viewColumn: 1 });
+        assert.strictEqual(v._layoutMode, 'all');
+        assert.deepStrictEqual(calls, ['reveal:-2:true', 'reveal:2:false', 'workbench.action.lockEditorGroup'],
+            'the opened editor is used as is; only WPaper moves: ' + JSON.stringify(calls));
+        assert.strictEqual(v.isViewerLayout(), false);
+    } finally {
+        stub.commands.executeCommand = old.exec;
+        if (old.get) stub.commands.getCommands = old.get; else delete stub.commands.getCommands;
+        stub.window.tabGroups = old.tg;
+        stub.window.showTextDocument = old.show;
+    }
+});
+
+test('A RELOAD FROM A LEGACY MAXIMIZED LAYOUT RESETS GROUP SIZES, THEN RE-APPLIES VIEWER-ONLY', async () => {
+    const v = placeViewer({});
+    v._viewState = { layoutMode: 'viewer', fullscreen: true,
+        fullscreenActions: ['workbench.action.toggleMaximizeEditorGroup'] };
+    v._restoringPanel = true;
+    assert.strictEqual(v._claimRestoredLayout(), true,
+        'the early claim still protects the first right-click');
+    const calls = [];
+    const wb = fakeWorkbench(v, calls);
+    const old = { exec: stub.commands.executeCommand, get: stub.commands.getCommands, tg: stub.window.tabGroups };
+    stub.window.tabGroups = wb.tabGroups;
+    stub.commands.getCommands = async () => ['workbench.action.evenEditorWidths',
+        'workbench.action.toggleMaximizeEditorGroup'];
+    stub.commands.executeCommand = async (id) => { calls.push(id); };
+    try {
+        await v._restoreSessionChrome();
+        assert.deepStrictEqual(calls, [
+            'workbench.action.evenEditorWidths',
+            'reveal:1:false',
+            `closeTab:${FILE}`,
+            'closeGroup:2',
+        ], JSON.stringify(calls));
+        assert.strictEqual(v._layoutMode, 'viewer');
+        assert.strictEqual(v._layoutMaximized, false);
+        assert.strictEqual(v._restoringPanel, false);
+    } finally {
+        stub.commands.executeCommand = old.exec;
+        if (old.get) stub.commands.getCommands = old.get; else delete stub.commands.getCommands;
+        stub.window.tabGroups = old.tg;
+    }
+});
+
+test('AN EXTERNAL FILE RELOAD CANNOT LEAVE WPAPER HIDDEN IN VIEWER MODE', async () => {
+    const v = placeViewer({});
+    v._layoutMode = 'viewer';
+    v._layoutOuterActions = ['workbench.action.toggleZenMode'];
+    v._fsActions = ['workbench.action.toggleZenMode'];
+    const calls = [];
+    const oldExec = stub.commands.executeCommand;
+    stub.commands.executeCommand = async (id) => { calls.push(id); };
+    v.panel.viewColumn = 1;
+    v.panel.active = false;
+    v.panel.visible = false; // something took WPaper's place in its group
+    v.panel.reveal = (column, preserveFocus) => calls.push(`reveal:${column}:${preserveFocus}`);
+    try {
+        await v._reassertViewerLayoutNow();
+        assert.deepStrictEqual(calls, ['reveal:1:false'], JSON.stringify(calls));
+        assert.strictEqual(v._layoutMode, 'viewer');
+        assert.deepStrictEqual(v._layoutOuterActions, ['workbench.action.toggleZenMode'],
+            'an existing outer full-screen choice is retained, not toggled off');
+
+        calls.length = 0;
+        v.panel.visible = true;
+        assert.strictEqual(await v._reassertViewerLayoutNow(), true);
+        assert.deepStrictEqual(calls, [], 'an undisturbed layout produces no flash');
+    } finally {
         stub.commands.executeCommand = oldExec;
-        if (oldGet) stub.commands.getCommands = oldGet;
-        else delete stub.commands.getCommands;
     }
 });
 

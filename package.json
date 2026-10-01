@@ -1209,7 +1209,7 @@
             "zen"
           ],
           "enumDescriptions": [
-            "Maximise WPaper within the VS Code window for the viewer-only step.",
+            "Viewer-only: WPaper replaces the .tex tab and the second editor group closes; nothing else changes.",
             "Also put the VS Code window into operating-system full screen for the viewer-only step.",
             "Use Zen Mode for the viewer-only step, hiding the status bar and tabs too."
           ],

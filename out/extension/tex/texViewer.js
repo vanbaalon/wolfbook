@@ -580,6 +580,9 @@ class TexViewer {
         this._layoutQueue = null;  // serialises quick repeated toolbar clicks
         this._layoutGuardTimer = null; // coalesces VS Code's external-file reload burst
         this._restoringPanel = false; // restored chrome still needs reconciling with VS Code
+        this._layoutBusy = false;  // our own group moves are in flight
+        this._layoutQuietUntil = 0; // ignore editor events from those moves until then
+        this._splitSource = null;  // {file, anchor, active}: the .tex viewer-only replaced
         this._autoHidden = null;   // closed by us because no .tex was active
         this._viewState = null;    // the persisted reading/editing session for this paper
         this._webviewReady = false;
@@ -713,7 +716,9 @@ class TexViewer {
     async open(doc, { reveal = true } = {}) {
         const root = this.coord.rootFor(doc);
         if (this.panel) {
-            if (reveal) this.panel.reveal(vscode.ViewColumn.Beside, true);
+            // Viewer-only keeps WPaper where it is: Beside would split it off again.
+            if (reveal) this.panel.reveal(this._layoutMode === 'viewer'
+                ? this.panel.viewColumn : vscode.ViewColumn.Beside, true);
         } else {
             this._wire(vscode.window.createWebviewPanel(
                 VIEW_TYPE, 'WPaper',
@@ -845,9 +850,14 @@ class TexViewer {
             this._viewerReloading = false;
             // Closing the panel must not leave the window maximised or the
             // agent side bar hidden with nothing in the focused editor area.
-            if (this._fsActions) {
+            if (this._fsActions || this._layoutMode === 'viewer') {
                 const undo = [...(this._layoutOuterActions || [])].reverse();
                 const restoreGroups = !!this._layoutMaximized;
+                // Viewer-only had replaced the source tab: closing WPaper by
+                // hand must give the reader their .tex back, not an empty group.
+                const source = this._autoHidden ? null
+                    : (this._splitSource && this._splitSource.file) || this.root;
+                const column = panel.viewColumn || vscode.ViewColumn.One;
                 this._fsActions = null;
                 this._layoutMode = 'all';
                 this._layoutMaximized = false;
@@ -859,6 +869,12 @@ class TexViewer {
                     if (restoreGroups) {
                         try { await vscode.commands.executeCommand('workbench.action.toggleMaximizeEditorGroup'); }
                         catch (_) { /* best effort */ }
+                    }
+                    if (source && fs.existsSync(source)) {
+                        try {
+                            const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(source));
+                            await vscode.window.showTextDocument(doc, { viewColumn: column, preview: false });
+                        } catch (_) { /* best effort */ }
                     }
                 })().finally(() => { this._fsSettling = null; });
             }
@@ -10165,41 +10181,42 @@ class TexViewer {
     }
 
     /**
-     * Make the workbench's real group geometry agree with restored WPaper
+     * Make the workbench's real group arrangement agree with restored WPaper
      * state.
      *
-     * Recent VS Code builds can restore a maximized-group context key before
-     * their editor grid has finished restoring. Merely claiming that state
-     * leaves the source group and WPaper group occupying the same title-bar
-     * pixels until another layout action — the overlapping tabs seen after a
-     * reload. `evenEditorWidths` is an explicit operation, unlike a toggle:
-     * it establishes a known unmaximized baseline whether the old group was
-     * maximized or not. The saved member of WPaper's two-state toggle is then
-     * applied from that baseline.
+     * Builds before 2026-09-30 implemented viewer-only as a MAXIMIZED second
+     * group. VS Code restores that maximize before its grid has settled, which
+     * left two groups painting into the same title-bar pixels. Such a legacy
+     * state is reset with the explicit `evenEditorWidths` (not a toggle, so it
+     * cannot reverse anything) before the current geometry is applied. Both
+     * geometry operations are idempotent: re-applying the layout the reload
+     * already restored moves nothing.
      */
     async _reconcileRestoredLayout(mode) {
         if (!this.panel) return;
         const target = mode === 'viewer' ? 'viewer' : 'all';
+        const saved = this._viewState || this._viewFor(this.root) || {};
         const available = await this._availableLayoutCommands();
-        const restoredOuter = target === 'viewer' ? [...(this._layoutOuterActions || [])] : [];
-        const normalized = await this._runLayoutCommand('workbench.action.evenEditorWidths', available);
-        if (!normalized) {
-            // Older hosts have no explicit reset. Keep the claimed state so a
-            // toggle cannot accidentally reverse a correctly restored layout.
-            await this._setLayoutModeNow(target, { remember: false });
-            return;
-        }
-
-        this._layoutMode = 'all';
+        const legacyMax = this._layoutMaximized || (Array.isArray(saved.fullscreenActions) &&
+            saved.fullscreenActions.includes('workbench.action.toggleMaximizeEditorGroup'));
+        if (legacyMax) await this._runLayoutCommand('workbench.action.evenEditorWidths', available);
         this._layoutMaximized = false;
-        this._layoutOuterActions = restoredOuter;
-        this._fsActions = null;
-        if (target === 'all') {
-            try { this.panel.reveal(this.panel.viewColumn, false); } catch (_) { /* disposed meanwhile */ }
-            this._postLayout('all');
+        const outer = target === 'viewer' ? [...(this._layoutOuterActions || [])] : [];
+        if (target === 'viewer') {
+            this._layoutMode = 'all';
+            this._fsActions = null;
+            this._layoutOuterActions = outer;
+            await this._setLayoutModeNow('viewer', { remember: false, preserveOuter: true });
             return;
         }
-        await this._setLayoutModeNow(target, { remember: false, preserveOuter: true });
+        this._layoutMode = 'all';
+        this._fsActions = null;
+        this._layoutOuterActions = [];
+        // Already split: a .tex of this paper is showing in another group.
+        if (this._sourceGroup()) { this._postLayout('all'); return; }
+        this._layoutMode = 'viewer';
+        this._fsActions = [];
+        await this._setLayoutModeNow('all', { remember: false });
     }
 
     /** Extra chrome used only by the WPaper-only member of the cycle. */
@@ -10211,9 +10228,10 @@ class TexViewer {
     }
 
     /**
-     * VS Code restores maximized groups and Secondary Side Bar visibility on a
-     * window reload. Reclaim that state without firing a toggle which would
-     * immediately reverse the layout VS Code just restored.
+     * VS Code restores the editor groups on a window reload — in viewer-only
+     * mode that is WPaper alone in the source group. Claim that state at once
+     * so the first right-click does not open a source editor before
+     * `_reconcileRestoredLayout` runs.
      */
     _claimRestoredLayout() {
         const saved = this._viewState || this._viewFor(this.root) || {};
@@ -10226,9 +10244,9 @@ class TexViewer {
                 ? saved.fullscreenActions.filter(x => x !== 'workbench.action.toggleMaximizeEditorGroup')
                 : [];
         this._layoutMode = mode;
-        this._layoutMaximized = true;
+        this._layoutMaximized = false;
         this._layoutOuterActions = stored.filter(x => typeof x === 'string' && x);
-        this._fsActions = ['workbench.action.toggleMaximizeEditorGroup', ...this._layoutOuterActions];
+        this._fsActions = [...this._layoutOuterActions];
         return true;
     }
 
@@ -10264,15 +10282,129 @@ class TexViewer {
         this._post({ type: 'fullscreen', value: mode !== 'all', mode });
     }
 
+    // --- group geometry ------------------------------------------------------
+
+    _tabGroups() {
+        const tg = vscode.window.tabGroups;
+        return tg && Array.isArray(tg.all) ? tg.all : [];
+    }
+
+    _tabFsPath(tab) {
+        const input = tab && tab.input;
+        const uri = input && (input.uri || input.modified);
+        return uri && typeof uri.fsPath === 'string' ? uri.fsPath : null;
+    }
+
+    _isPaperTex(fsPath) {
+        if (!fsPath || !/\.tex$/i.test(fsPath)) return false;
+        if (!this.root || fsPath === this.root) return true;
+        try { return this.coord.rootFor({ uri: { fsPath } }) === this.root; }
+        catch (_) { return false; }
+    }
+
+    _viewerGroup() {
+        return this._tabGroups().find(g => (g.tabs || []).some(t =>
+            t.input && typeof t.input.viewType === 'string' && t.input.viewType.includes(VIEW_TYPE))) || null;
+    }
+
+    /** A group other than WPaper's that has a .tex of this paper in FRONT. */
+    _sourceGroup() {
+        const vg = this._viewerGroup();
+        return this._tabGroups().find(g => g !== vg &&
+            this._isPaperTex(this._tabFsPath(g.activeTab))) || null;
+    }
+
+    /** Remember which source the reader was in, to bring it back later. */
+    _captureSource() {
+        const pick = (ed) => ed && ed.document && this._isPaperTex(ed.document.uri.fsPath) ? ed : null;
+        const ed = pick(vscode.window.activeTextEditor) ||
+            (vscode.window.visibleTextEditors || []).map(pick).find(Boolean);
+        if (!ed) return;
+        const s = ed.selection;
+        this._splitSource = {
+            file: ed.document.uri.fsPath,
+            anchor: s ? { line: s.anchor.line, character: s.anchor.character } : null,
+            active: s ? { line: s.active.line, character: s.active.character } : null,
+        };
+    }
+
+    _settleLayout(ms = 60) { return new Promise(r => setTimeout(r, ms)); }
+
     /**
-     * Keep an external file reload from exposing the source editor.
-     *
-     * VS Code can unmaximize an editor group while it reloads a clean text
-     * buffer from disk. Our state still correctly says `viewer`, so simply
-     * calling setLayoutMode('viewer') is a no-op. If the reload activated the
-     * source group, reactivate and maximize WPaper; if it left WPaper active,
-     * touch nothing. Delayed and coalesced because the file watcher and
-     * TextDocument reload arrive as one short event burst.
+     * Viewer-only: WPaper takes the source group's place, the paper's .tex
+     * tabs there close and the (now empty) second group goes with them.
+     * Dirty tabs are left behind WPaper; closing them would prompt.
+     */
+    async _enterViewerGeometry() {
+        const panel = this.panel;
+        this._captureSource();
+        const src = this._sourceGroup();
+        const col = src && typeof src.viewColumn === 'number' ? src.viewColumn
+            : (panel.viewColumn || vscode.ViewColumn.One);
+        try { panel.reveal(col, false); } catch (_) { return; }
+        const tg = vscode.window.tabGroups;
+        if (!tg || typeof tg.close !== 'function') return;
+        await this._settleLayout();
+        if (!this.panel) return;
+        const vg = this._viewerGroup();
+        const clean = vg ? (vg.tabs || []).filter(t =>
+            !t.isDirty && this._isPaperTex(this._tabFsPath(t))) : [];
+        if (clean.length) { try { await tg.close(clean, true); } catch (_) { /* best effort */ } }
+        const empty = this._tabGroups().filter(g => g !== vg && !(g.tabs || []).length);
+        if (empty.length) { try { await tg.close(empty, true); } catch (_) { /* best effort */ } }
+    }
+
+    /**
+     * Editor + viewer: the .tex in the first group, WPaper back in a locked
+     * group beside it. `editor` is a .tex the reader just opened, if any.
+     */
+    async _enterSplitGeometry(editor) {
+        const panel = this.panel;
+        let ed = editor && editor.document ? editor : null;
+        if (!ed) {
+            const want = this._splitSource ||
+                (this._viewState && this._viewState.cursor) || { file: this.root };
+            const file = want && typeof want.file === 'string' && fs.existsSync(want.file) ? want.file : this.root;
+            if (!file) return;
+            try {
+                const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
+                ed = await vscode.window.showTextDocument(doc, {
+                    viewColumn: panel.viewColumn || vscode.ViewColumn.One, preserveFocus: false, preview: false,
+                });
+                if (ed && want.anchor && want.active && want.file === file) {
+                    ed.selection = new vscode.Selection(
+                        new vscode.Position(want.anchor.line, want.anchor.character),
+                        new vscode.Position(want.active.line, want.active.character));
+                    ed.revealRange(ed.selection, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+                }
+            } catch (_) { /* still move the paper beside whatever is there */ }
+        }
+        if (!this.panel) return;
+        // Beside the ACTIVE group, which is now the source.
+        try { panel.reveal(vscode.ViewColumn.Beside, true); } catch (_) { return; }
+        await this._lockGroup().catch(() => { /* older builds simply do not */ });
+    }
+
+    /** Is WPaper alone in the reading layout (and not mid-transition)? */
+    isViewerLayout() {
+        return !!this.panel && this._layoutMode === 'viewer' && !this._layoutBusy &&
+            Date.now() >= (this._layoutQuietUntil || 0);
+    }
+
+    /** The reader opened a .tex while WPaper was alone: return to the split. */
+    revealSourceFromViewer(editor) {
+        return this._queueLayout(async () => {
+            if (this._layoutMode !== 'viewer') return;
+            await this._setLayoutModeNow('all', { editor });
+        });
+    }
+
+    /**
+     * Keep an external file reload from hiding WPaper in viewer-only mode.
+     * The paper's clean .tex tabs are closed in that mode, so a reload rarely
+     * has anything to activate; when something did take WPaper's place in
+     * its group, bring it back to the front. Coalesced: the watcher and the
+     * TextDocument reload arrive as one short burst.
      */
     preserveViewerLayoutAfterExternalChange(delayMs = 180) {
         if (!this.panel || !(this._layoutMode === 'viewer' || this._fsActions)) return false;
@@ -10286,43 +10418,18 @@ class TexViewer {
 
     async _reassertViewerLayoutNow() {
         if (!this.panel || !(this._layoutMode === 'viewer' || this._fsActions)) return false;
-        // The common case: VS Code reloaded the buffer without disturbing the
-        // active maximized webview. Do absolutely nothing, avoiding even a
-        // one-frame flash of the source group.
-        if (this.panel.active === true) return true;
-        const available = await this._availableLayoutCommands();
-        const outer = [...(this._layoutOuterActions || [])];
-        if (this.panel.active !== false) {
-            // Older host/test doubles do not expose WebviewPanel.active.
-            // Establish a known baseline there rather than guessing which way
-            // a toggle will go.
-            const normalized = await this._runLayoutCommand('workbench.action.evenEditorWidths', available);
-            if (!normalized) {
-                try { this.panel.reveal(this.panel.viewColumn, false); } catch (_) { /* disposed */ }
-                return false;
-            }
-        }
-        // `active === false` is the measured external-reload failure: VS Code
-        // activated the reloaded source group and in doing so cancelled the
-        // maximize. Go straight back to WPaper and maximize it, without first
-        // revealing an even-width source layout.
-        this._layoutMode = 'all';
-        this._layoutMaximized = false;
-        this._layoutOuterActions = outer;
-        this._fsActions = null;
-        await this._setLayoutModeNow('viewer', { remember: false, preserveOuter: true });
-        return this._layoutMode === 'viewer' && this._layoutMaximized;
+        if (this.panel.active === true || this.panel.visible === true) return true;
+        try { this.panel.reveal(this.panel.viewColumn, false); } catch (_) { return false; }
+        return true;
     }
 
     /**
      * Set one of two explicit layouts:
-     *   viewer — maximized WPaper
-     *   all    — source editor beside WPaper
+     *   viewer — WPaper alone, in the source group's place
+     *   all    — source editor in the first group, WPaper locked beside it
      *
      * The Secondary Side Bar is independent workspace chrome, not a third
-     * reading layout. Leave it exactly as the reader had it: maximizing an
-     * editor group can hide the source editor without also dismissing Codex,
-     * Claude or Chat on the far right.
+     * reading layout; it is left exactly as the reader had it.
      */
     _queueLayout(change) {
         const before = this._layoutQueue || Promise.resolve();
@@ -10337,7 +10444,7 @@ class TexViewer {
         return this._queueLayout(() => this._setLayoutModeNow(want, opts));
     }
 
-    async _setLayoutModeNow(want, { remember = true, preserveOuter = false } = {}) {
+    async _setLayoutModeNow(want, { remember = true, preserveOuter = false, editor = null } = {}) {
         if (!this.panel) return;
         const target = want === 'viewer' ? 'viewer' : 'all';
         if (this._fsSettling) {
@@ -10346,8 +10453,7 @@ class TexViewer {
         // Tests and pre-cycle callers may have populated the old sentinel only.
         if (this._fsActions && this._layoutMode === 'all') {
             this._layoutMode = 'viewer';
-            this._layoutMaximized = true;
-            this._layoutOuterActions = this._fsActions
+            this._layoutOuterActions = (Array.isArray(this._fsActions) ? this._fsActions : [])
                 .filter(x => x !== 'workbench.action.toggleMaximizeEditorGroup');
         }
         if (target === this._layoutMode) {
@@ -10355,44 +10461,40 @@ class TexViewer {
             this._postLayout(target);
             return;
         }
-        const panel = this.panel;
         const available = await this._availableLayoutCommands();
-
-        // Leave OS fullscreen/Zen before showing the source editor.
-        if (target !== 'viewer' && this._layoutOuterActions.length) {
-            for (const c of [...this._layoutOuterActions].reverse()) {
-                await this._runLayoutCommand(c, available);
+        this._layoutBusy = true;
+        try {
+            // Leave OS fullscreen/Zen before showing the source editor.
+            if (target !== 'viewer' && this._layoutOuterActions.length) {
+                for (const c of [...this._layoutOuterActions].reverse()) {
+                    await this._runLayoutCommand(c, available);
+                }
+                this._layoutOuterActions = [];
             }
-            this._layoutOuterActions = [];
-        }
-
-        if (target === 'all') {
+            // A legacy maximize restored from an older build.
             if (this._layoutMaximized) {
                 await this._runLayoutCommand('workbench.action.toggleMaximizeEditorGroup', available);
                 this._layoutMaximized = false;
             }
-            try { panel.reveal(panel.viewColumn, false); } catch (_) { /* disposed meanwhile */ }
-        } else {
-            if (!this._layoutMaximized) {
-                // Maximize acts on the active group, so WPaper must own focus.
-                try { panel.reveal(panel.viewColumn, false); } catch (_) { /* continue */ }
-                this._layoutMaximized = await this._runLayoutCommand(
-                    'workbench.action.toggleMaximizeEditorGroup', available);
-                if (!this._layoutMaximized) {
-                    this._post({ type: 'status', text: 'this VS Code build cannot maximize WPaper', kind: 'warn' });
+            if (target === 'all') {
+                await this._enterSplitGeometry(editor);
+            } else {
+                await this._enterViewerGeometry();
+                if (!preserveOuter) {
+                    const done = [];
+                    for (const c of this._outerFullScreenCommands()) {
+                        if (await this._runLayoutCommand(c, available)) done.push(c);
+                    }
+                    this._layoutOuterActions = done;
                 }
             }
-            if (!preserveOuter) {
-                const done = [];
-                for (const c of this._outerFullScreenCommands()) {
-                    if (await this._runLayoutCommand(c, available)) done.push(c);
-                }
-                this._layoutOuterActions = done;
-            }
+        } finally {
+            this._layoutBusy = false;
+            // Tab/editor events from our own moves arrive after we return.
+            this._layoutQuietUntil = Date.now() + 400;
         }
         this._layoutMode = target;
-        this._fsActions = target === 'all' ? null
-            : ['workbench.action.toggleMaximizeEditorGroup', ...this._layoutOuterActions];
+        this._fsActions = target === 'all' ? null : [...this._layoutOuterActions];
         if (remember) this._rememberLayout(target);
         this._postLayout(target);
     }
