@@ -4569,6 +4569,82 @@ test('A BUFFER REVERT IN VIEWER-ONLY IS NOT THE READER ASKING FOR THE EDITOR', a
     assert.deepStrictEqual(calls, [], 'with the editor beside WPaper nothing is moved');
 });
 
+// _wire subscribes to these; the shared stub does not provide them all.
+function wireStubs() {
+    const none = () => ({ dispose() {} });
+    const saved = { theme: stub.window.onDidChangeActiveColorTheme, cfg: stub.workspace.onDidChangeConfiguration,
+        text: stub.workspace.onDidChangeTextDocument };
+    stub.window.onDidChangeActiveColorTheme = none;
+    stub.workspace.onDidChangeConfiguration = none;
+    stub.workspace.onDidChangeTextDocument = none;
+    return () => { stub.window.onDidChangeActiveColorTheme = saved.theme;
+        stub.workspace.onDidChangeConfiguration = saved.cfg; stub.workspace.onDidChangeTextDocument = saved.text; };
+}
+
+test('A WPAPER CLOSED IN VIEWER-ONLY IS RELEASED, NOT KEPT AS A DEAD PANEL', async () => {
+    // Every property of a disposed WebviewPanel throws "Webview is disposed".
+    // The dispose handler read panel.viewColumn, threw, and never cleared
+    // this.panel — every later paper switch then failed with that toast.
+    const v = placeViewer({});
+    v._html = () => '';
+    v._armReadyWatchdog = () => {};
+    const handlers = {};
+    let disposed = false;
+    const guard = (x) => { if (disposed) throw new Error('Webview is disposed'); return x; };
+    const panel = {
+        get viewColumn() { return guard(1); },
+        get webview() { return guard({ options: {}, html: '', postMessage: async () => true, onDidReceiveMessage: () => ({ dispose() {} }) }); },
+        onDidDispose: (f) => { handlers.dispose = f; return { dispose() {} }; },
+        onDidChangeViewState: (f) => { handlers.view = f; return { dispose() {} }; },
+        reveal() {}, dispose() {},
+    };
+    const oldShow = stub.window.showTextDocument;
+    const oldOpen = stub.workspace.openTextDocument;
+    const shownIn = [];
+    stub.window.showTextDocument = async (_d, o) => { shownIn.push(o.viewColumn); return null; };
+    stub.workspace.openTextDocument = async () => doc;
+    const unstub = wireStubs();
+    try {
+        v._wire(panel);
+        v._layoutMode = 'viewer';
+        v._fsActions = [];
+        v._splitSource = { file: __filename };
+        disposed = true;
+        handlers.dispose();
+        assert.strictEqual(v.panel, null, 'the dead panel is released');
+        assert.strictEqual(v._layoutMode, 'all');
+        await v._fsSettling;
+        assert.deepStrictEqual(shownIn, [1], 'the .tex comes back in the column WPaper had');
+
+        // A dead panel left behind by anything else is replaced, not used.
+        v.panel = panel;
+        assert.doesNotThrow(() => { try { void v.panel.viewColumn; } catch (_) { v.panel = null; } });
+    } finally {
+        unstub();
+        stub.window.showTextDocument = oldShow;
+        stub.workspace.openTextDocument = oldOpen;
+    }
+});
+
+test('AN OLD PANEL\'S LATE DISPOSE DOES NOT TEAR DOWN ITS REPLACEMENT', async () => {
+    const v = placeViewer({});
+    v._html = () => '';
+    v._armReadyWatchdog = () => {};
+    const mk = () => { const h = {}; return { h, p: {
+        viewColumn: 2, webview: { options: {}, html: '', postMessage: async () => true, onDidReceiveMessage: () => ({ dispose() {} }) },
+        onDidDispose: (f) => { h.dispose = f; return { dispose() {} }; },
+        onDidChangeViewState: () => ({ dispose() {} }), reveal() {}, dispose() {} } }; };
+    const a = mk(); const b = mk();
+    const unstub = wireStubs();
+    try {
+        v._wire(a.p);
+        v.panel = null;              // auto-hide releases it first
+        v._wire(b.p);                // auto-restore wires the next one
+        a.h.dispose();               // ...and only then does the old dispose arrive
+        assert.strictEqual(v.panel, b.p, 'the live panel survives');
+    } finally { unstub(); }
+});
+
 test('AN EXTERNAL FILE RELOAD CANNOT LEAVE WPAPER HIDDEN IN VIEWER MODE', async () => {
     const v = placeViewer({});
     v._layoutMode = 'viewer';

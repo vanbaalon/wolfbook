@@ -715,6 +715,8 @@ class TexViewer {
     /** Open (or focus) the viewer for whatever .tex is active. */
     async open(doc, { reveal = true } = {}) {
         const root = this.coord.rootFor(doc);
+        // Never act on a dead panel: if one was left behind, start afresh.
+        if (this.panel) { try { void this.panel.viewColumn; } catch (_) { this.panel = null; } }
         if (this.panel) {
             // Viewer-only keeps WPaper where it is: Beside would split it off again.
             if (reveal) this.panel.reveal(this._layoutMode === 'viewer'
@@ -838,7 +840,16 @@ class TexViewer {
         try { panel.webview.options = this._webviewOptions; } catch (_) { /* new panel: already set */ }
         panel.webview.html = this._html();
         this._armReadyWatchdog(panel, 0);
+        // A disposed panel throws on every property read ("Webview is
+        // disposed"), so its column is remembered while it is alive.
+        try { this._panelColumn = panel.viewColumn; } catch (_) { /* not shown yet */ }
+        panel.onDidChangeViewState?.((e) => {
+            try { if (e.webviewPanel.viewColumn) this._panelColumn = e.webviewPanel.viewColumn; } catch (_) { /* disposed */ }
+        });
         panel.onDidDispose(() => {
+            // An older panel's dispose can arrive after a new one was wired
+            // (auto-hide, then auto-restore): it must not tear the new one down.
+            if (this.panel && this.panel !== panel) return;
             this._flushCursorState();
             this._cancelViewerProbes('viewer closed');
             for (const done of this._viewCaptures.values()) { try { done(false); } catch (_) {} }
@@ -858,7 +869,7 @@ class TexViewer {
                 // hand must give the reader their .tex back, not an empty group.
                 const source = this._autoHidden ? null
                     : (this._splitSource && this._splitSource.file) || this.root;
-                const column = panel.viewColumn || vscode.ViewColumn.One;
+                const column = this._panelColumn || vscode.ViewColumn.One;
                 this._fsActions = null;
                 this._layoutMode = 'all';
                 this._layoutMaximized = false;
@@ -10371,10 +10382,12 @@ class TexViewer {
      */
     async _enterViewerGeometry() {
         const panel = this.panel;
+        let own;
+        try { own = panel.viewColumn; } catch (_) { return; }   // disposed meanwhile
         this._captureSource();
         const src = this._sourceGroup();
         const col = src && typeof src.viewColumn === 'number' ? src.viewColumn
-            : (panel.viewColumn || vscode.ViewColumn.One);
+            : (own || vscode.ViewColumn.One);
         try { panel.reveal(col, false); } catch (_) { return; }
         const tg = vscode.window.tabGroups;
         if (!tg || typeof tg.close !== 'function') return;
@@ -10394,6 +10407,7 @@ class TexViewer {
      */
     async _enterSplitGeometry(editor) {
         const panel = this.panel;
+        try { void panel.viewColumn; } catch (_) { return; }   // disposed meanwhile
         let ed = editor && editor.document ? editor : null;
         if (!ed) {
             const want = this._splitSource ||
