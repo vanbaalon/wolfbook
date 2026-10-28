@@ -4,6 +4,10 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const Module = require('node:module');
+// Function excerpts use LF delimiters; Git checkouts on Windows may use CRLF.
+function readViewerSource() {
+    return fs.readFileSync(path.resolve(__dirname, '../../../client/tex-viewer.js'), 'utf8').replace(/\r\n/g, '\n');
+}
 const { makeVscodeStub } = require('./_stub-vscode');
 const stub = makeVscodeStub();
 stub.workspace.textDocuments = [];
@@ -902,7 +906,7 @@ test('native inverse rejects queued clicks from a different PDF generation', asy
 
 test('native client sends generation-bound clicks without text-layer guesses while paused', async () => {
     const vm = require('node:vm');
-    const js = fs.readFileSync(path.resolve(__dirname, '../../../client/tex-viewer.js'), 'utf8');
+    const js = readViewerSource();
     const sent = [];
     const context = vm.createContext({ sourceFocusEpoch:0, state:{ tracePaused:true, nativeMapAvailable:true, generation:7 },
         vscode:{ postMessage:m => sent.push(m) }, pendingPaperTyping:null, paperTargetSeq:0,
@@ -924,7 +928,7 @@ test('native client sends generation-bound clicks without text-layer guesses whi
 
 test('native-map client availability only accepts the displayed generation', () => {
     const vm = require('node:vm');
-    const js = fs.readFileSync(path.resolve(__dirname, '../../../client/tex-viewer.js'), 'utf8');
+    const js = readViewerSource();
     const start = js.indexOf("case 'nativeMapState':");
     const handler = 'switch(msg.type){' + js.slice(start, js.indexOf("case 'traceState':", start)) + '}';
     const context = vm.createContext({ state:{ generation:7, nativeMapAvailable:false },
@@ -1127,7 +1131,7 @@ test('a newer source never loses its live overlay to the settled-preview recover
 
 test('preview retirement cannot erase newer ink queued behind an older visible overlay',()=>{
     const vm=require('node:vm');
-    const src=fs.readFileSync(path.join(__dirname,'../../../client/tex-viewer.js'),'utf8');
+    const src=readViewerSource();
     const handler=src.slice(src.indexOf("case 'retireLivePreview':"),src.indexOf("case 'nativeMapState':"));
     const state={generation:1,txdl:{pages:new Map([[44,{identity:'old'}]])},
         txdlPending:new Map([[44,{msg:{identity:'new'}}]])};
@@ -1243,7 +1247,7 @@ test('an unchanged finalized page still replaces a paragraph fragment and its ma
 });
 
 test('right-click names the visible fragment rather than the live page underneath',async()=>{
-    const js=fs.readFileSync(path.resolve(__dirname,'../../../client/tex-viewer.js'),'utf8');
+    const js=readViewerSource();
     const from=js.indexOf('function sendClick('),body=js.slice(from,js.indexOf('\n}',from)+2);
     const posted=[],fragment={canvas:{isConnected:true},msg:{mapIdentity:'fragment-map',generation:9,index:2}};
     const context=require('vm').createContext({
@@ -1412,7 +1416,7 @@ test('native source ranges publish only admitted rectangles and retain source ac
 
 test('native selection painting is one band per printed line, touching the next, and never searches PDF text rows', async () => {
     const vm = require('node:vm');
-    const js = fs.readFileSync(path.resolve(__dirname, '../../../client/tex-viewer.js'), 'utf8');
+    const js = readViewerSource();
     const painted = [];
     const context = vm.createContext({ state:{ rendered:new Set([1]), edit:true },
         document:{ querySelectorAll:() => [], createElement:() => ({ style:{}, dataset:{} }) },
@@ -1790,7 +1794,7 @@ test('configured compiler timeout reaches native builds and their conventional f
 
 test('native mini-input operations preserve the actual insertion position in repeated text', () => {
     const vm = require('node:vm');
-    const js = fs.readFileSync(path.resolve(__dirname, '../../../client/tex-viewer.js'), 'utf8');
+    const js = readViewerSource();
     const start = js.indexOf('function miniInputOperation(');
     const context = vm.createContext({});
     vm.runInContext(js.slice(start, js.indexOf('\n}\n',start) + 2), context);
@@ -1810,7 +1814,7 @@ test('native mini-input operations preserve the actual insertion position in rep
 
 test('typing and deleting in either mini-editor sends text and caret immediately', () => {
     const vm = require('node:vm');
-    const js = fs.readFileSync(path.resolve(__dirname, '../../../client/tex-viewer.js'), 'utf8');
+    const js = readViewerSource();
     const start = js.indexOf("ta.addEventListener('input', () => {", js.indexOf('function buildEditCard('));
     const end = js.indexOf('\n    });', start) + '\n    });'.length;
     for (const native of [false, true]) for (const value of ['abcd', 'ab']) {
@@ -1936,7 +1940,7 @@ test('native card writes are rejected if their session closes during document op
 
 test('native conflict UI preserves the newest local draft against queued source updates', () => {
     const vm = require('node:vm');
-    const js = fs.readFileSync(path.resolve(__dirname, '../../../client/tex-viewer.js'), 'utf8');
+    const js = readViewerSource();
     const conflict = js.slice(js.indexOf("case 'editConflict':"), js.indexOf("case 'editOpen':"));
     const update = js.slice(js.indexOf("case 'editUpdate':"), js.indexOf("case 'mmaOpen':"));
     const textarea = { value:'External source' }, label = {};
@@ -1956,7 +1960,7 @@ test('native conflict UI preserves the newest local draft against queued source 
 
 test('native canvas reuse requires matching page identities, scale and display density', () => {
     const vm = require('node:vm');
-    const js = fs.readFileSync(path.resolve(__dirname, '../../../client/tex-viewer.js'), 'utf8');
+    const js = readViewerSource();
     const start = js.indexOf('function reusableNativePages(');
     const context = vm.createContext({});
     vm.runInContext(js.slice(start, js.indexOf('\n}\n',start) + 2), context);
@@ -2023,7 +2027,7 @@ test('both modes use textarea offsets for CRLF card edits and bidirectional sele
 
 function textSweepFixture() {
     const vm=require('node:vm');
-    const js=fs.readFileSync(path.resolve(__dirname,'../../../client/tex-viewer.js'),'utf8');
+    const js=readViewerSource();
     const code=js.slice(js.indexOf('const nativeTextPages = new Map();'),js.indexOf('const wordKey ='));
     const posts=[], reads=[];
     const makeDoc=label => ({ getPage:async page => {
@@ -2129,7 +2133,7 @@ test('removing native pages evicts their text instead of reusing it if the page 
 test('live overlay pages carry their own hyperlinks and destinations', async () => {
     const vm = require('node:vm');
     const { pathToFileURL } = require('node:url');
-    const js = fs.readFileSync(path.resolve(__dirname, '../../../client/tex-viewer.js'), 'utf8');
+    const js = readViewerSource();
     const txdlCanvas = await import(pathToFileURL(path.resolve(__dirname, '../../../client/txdl-canvas.js')).href);
     const fn = name => { const start = js.indexOf(`function ${name}(`); return js.slice(start, js.indexOf('\n}\n', start) + 2); };
     const sp = pt => Math.round(pt * 65536);
@@ -2200,7 +2204,7 @@ test('exported SyncTeX names project inputs by absolute path and is gzipped', ()
 
 test('legacy live error messages cannot overwrite annotations covering failed and conventional builds', () => {
     const vm = require('node:vm');
-    const js = fs.readFileSync(path.resolve(__dirname, '../../../client/tex-viewer.js'), 'utf8');
+    const js = readViewerSource();
     const start = js.indexOf('function paintLiveErrors(');
     const updates = [];
     const context = vm.createContext({ state:{ errorAnnotationsOwned:true },
@@ -2219,7 +2223,7 @@ test('legacy live error messages cannot overwrite annotations covering failed an
 
 test('live overlays are drawn near the viewport only, and their number is bounded', () => {
     const vm = require('node:vm');
-    const js = fs.readFileSync(path.resolve(__dirname, '../../../client/tex-viewer.js'), 'utf8');
+    const js = readViewerSource();
     const fn = name => { const start = js.indexOf(`function ${name}(`); return js.slice(start, js.indexOf('\n}\n', start) + 2); };
     const constant = name => { const start = js.indexOf(`const ${name} =`); return js.slice(start, js.indexOf(';', start) + 1); };
     const context = vm.createContext({});
@@ -2240,7 +2244,7 @@ test('live overlays are drawn near the viewport only, and their number is bounde
 
 test('a change of screen density redraws the pages at the same scale', () => {
     const vm = require('node:vm');
-    const js = fs.readFileSync(path.resolve(__dirname, '../../../client/tex-viewer.js'), 'utf8');
+    const js = readViewerSource();
     const start = js.indexOf('(function watchDensity() {');
     const source = js.slice(start, js.indexOf('})();', start) + 5);
     const queries = [], calls = [];
@@ -2330,7 +2334,7 @@ test('the TikZ editor resolves paths to statements, edits them as one undo step,
 test('TikZ drags become moves, snapped scales and 15° rotations', async () => {
     const vm = require('node:vm');
     const { pathToFileURL } = require('node:url');
-    const js = fs.readFileSync(path.resolve(__dirname, '../../../client/tex-viewer.js'), 'utf8');
+    const js = readViewerSource();
     const start = js.indexOf('function tikzDragTransform(');
     const tikzGeom = await import(pathToFileURL(path.resolve(__dirname, '../../../client/tikz-geom.mjs')).href);
     const context = vm.createContext({ tikz: { snap: true, selection: null, pages: new Map() }, tikzGeom, TIKZ_GUIDE_PX: 7 });
@@ -2405,7 +2409,7 @@ test('a placed paragraph fragment reaches the panel and counts as the build show
 test('the webview paints a fragment over the page shown: old paragraph cleared, the band below moved, the fragment at its offset', async () => {
     const vm = require('node:vm');
     const { pathToFileURL } = require('node:url');
-    const js = fs.readFileSync(path.resolve(__dirname, '../../../client/tex-viewer.js'), 'utf8');
+    const js = readViewerSource();
     const txdlCanvas = await import(pathToFileURL(path.resolve(__dirname, '../../../client/txdl-canvas.js')).href);
     const fn = name => { const start = js.indexOf(`function ${name}(`); return js.slice(js.lastIndexOf('\n', start) + 1, js.indexOf('\n}\n', start) + 2); };
     const SP = 65536;
@@ -2535,7 +2539,7 @@ test('successful conventional compilation clears a stale native preview error', 
 
 test('the preview badge distinguishes worker recovery from a source error', () => {
     const vm = require('node:vm');
-    const source = fs.readFileSync(path.join(__dirname, '../../../client/tex-viewer.js'), 'utf8');
+    const source = readViewerSource();
     const paint = source.slice(source.indexOf('function paintPreviewFallbackBadge()'), source.indexOf('function closeProPanel()'));
     for (const producer of [true, false]) {
         const label = {}, head = {replaceChildren() {}}, reason = {};
@@ -2661,7 +2665,7 @@ test('missing runtime stays silent before a paper-engine compatibility warning c
 
 test('hiding unavailable Pro also dismisses an already open introduction', () => {
     const vm=require('node:vm');
-    const source=fs.readFileSync(path.join(__dirname,'../../../client/tex-viewer.js'),'utf8');
+    const source=readViewerSource();
     const code=source.slice(source.indexOf('function setEngineBadge('),source.indexOf('function paintPreviewFallbackBadge('));
     const badge={hidden:false},panel={hidden:false},intro={hidden:false};
     const state={engine:{state:'disabled'}};
