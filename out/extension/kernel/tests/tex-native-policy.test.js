@@ -2360,8 +2360,14 @@ test('a keystroke with no preview build running starts one at once; a burst whil
         let finish = null, cur = null;
         coordinator._runInteractive = (st, lane, r, opts, c) => { started.push(Date.now()); cur = c; return new Promise(resolve => { finish = resolve; }); };
         const tick = ms => new Promise(resolve => setTimeout(resolve, ms));
+        // A loaded runner can delay setImmediate plus its following timer past
+        // 5 ms. Observe the build starting, not the host's scheduling latency.
+        const waitForStart = async count => {
+            const deadline = Date.now() + 2000;
+            while (started.length < count && Date.now() < deadline) await tick(5);
+        };
         assert.equal(coordinator._schedulePreview(root, state), true);
-        await tick(5);
+        await waitForStart(1);
         assert.equal(started.length, 1, 'idle: the build starts at once, not after the throttle');
         for (let i = 0; i < 20; i++) { coordinator._schedulePreview(root, state); await tick(1); }
         assert.equal(started.length, 1, 'while it runs, keystrokes wait');
@@ -2370,12 +2376,12 @@ test('a keystroke with no preview build running starts one at once; a burst whil
         assert.equal(started.length, 1, 'no key cancels a build before its first page');
         // …which starts the burst's one build as soon as its page is on screen.
         coordinator._previewShown(root, state, cur);
-        await tick(5);
+        await waitForStart(2);
         assert.equal(started.length, 2, 'the burst becomes one build once the first page is shown');
         finish(); await tick(5);
         finish(); await tick(5);
         coordinator._schedulePreview(root, state);
-        await tick(5);
+        await waitForStart(3);
         assert.equal(started.length, 3, 'idle again: at once');
         finish();
     } finally { f.close(); }
